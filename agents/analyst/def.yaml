@@ -1,0 +1,10 @@
+name: analyst
+description: System Analyst — создаёт продуктовую спецификацию
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  proposal: '{feature}/proposal.md'
+  spec: '{feature}/specs/product/spec.md'

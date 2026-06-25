@@ -1,0 +1,9 @@
+name: reviewer
+description: Reviewer — проверяет код на соответствие спецификации
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  specs: '{feature}/specs/'
+outputs:
+  review: '{feature}/review.md'

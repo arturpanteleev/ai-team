@@ -1,0 +1,9 @@
+name: coder
+description: Coder — пишет код по техническому дизайну
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  design: '{feature}/design.md'
+  tasks: '{feature}/tasks.md'
+outputs: {}

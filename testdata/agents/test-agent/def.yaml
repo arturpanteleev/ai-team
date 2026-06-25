@@ -1,0 +1,9 @@
+name: test-agent
+description: Test agent for unit tests
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  report: reviews/{feature}/test-report.md

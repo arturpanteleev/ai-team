@@ -1,0 +1,21 @@
+# Go
+go.sum
+*.exe
+*.test
+*.out
+/tmp/
+
+# OpenSpec
+openspec/changes/*/.openspec.yaml
+
+# ai-team target artifacts
+.ai-team/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

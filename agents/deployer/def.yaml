@@ -1,0 +1,10 @@
+name: deployer
+description: Deployer — коммитит и создаёт PR
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  review: '{feature}/review.md'
+  test-report: '{feature}/test-report.md'
+  proposal: '{feature}/proposal.md'
+outputs: {}

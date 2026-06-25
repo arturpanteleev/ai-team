@@ -1,0 +1,38 @@
+package agent
+
+import (
+	"testing"
+)
+
+func TestRegistry_Load(t *testing.T) {
+	r := NewRegistry("../../testdata/agents")
+	a, err := r.Load("test-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Name != "test-agent" {
+		t.Errorf("expected test-agent, got %s", a.Name)
+	}
+	if a.RuntimeType != "agentcli" {
+		t.Errorf("expected agentcli, got %s", a.RuntimeType)
+	}
+	if a.Prompt == "" {
+		t.Error("expected prompt to be loaded")
+	}
+}
+
+func TestRegistry_Load_NotFound(t *testing.T) {
+	r := NewRegistry("../../testdata/agents")
+	_, err := r.Load("nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent agent")
+	}
+}
+
+func TestRegistry_DefaultPipeline(t *testing.T) {
+	r := NewRegistry("../../testdata/agents")
+	p := r.DefaultPipeline()
+	if len(p) != 6 {
+		t.Errorf("expected 6 agents, got %d", len(p))
+	}
+}

@@ -1,0 +1,10 @@
+name: tester
+description: Tester — пишет и запускает тесты
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  specs: '{feature}/specs/'
+  review: '{feature}/review.md'
+outputs:
+  test-report: '{feature}/test-report.md'

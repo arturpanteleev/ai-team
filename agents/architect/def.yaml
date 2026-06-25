@@ -1,0 +1,10 @@
+name: architect
+description: Архитектор — создаёт технический дизайн
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+inputs:
+  specs: '{feature}/specs/'
+outputs:
+  design: '{feature}/design.md'
+  tasks: '{feature}/tasks.md'

@@ -1,5 +1,4 @@
 # Go
-go.sum
 *.exe
 *.test
 *.out

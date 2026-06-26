@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"io/fs"
 )
 
 const version = "0.1.0"
@@ -114,6 +116,14 @@ func cmdInit() {
 	fmt.Printf("✓ .ai-team/ инициализирован в %s\n", target)
 }
 
+func agentsFS() fs.FS {
+	s, err := fs.Sub(agentdata.Agents, "agents")
+	if err != nil {
+		return agentdata.Agents
+	}
+	return s
+}
+
 func cmdRun() {
 	runFlags := flag.NewFlagSet("run", flag.ExitOnError)
 	feature := runFlags.String("feature", "", "Имя фичи")
@@ -150,8 +160,7 @@ func cmdRun() {
 	taskFile := filepath.Join(taskDir, "task.md")
 	os.WriteFile(taskFile, []byte(*taskDesc), 0644)
 
-	agentsDir := findAgentsDir()
-	reg := agent.NewRegistry(agentsDir)
+	reg := agent.NewFS(agentsFS())
 	rt, _ := runtime.NewRuntime("agentcli")
 	p := pipeline.New(cfg.Pipeline, rt, reg)
 
@@ -199,8 +208,7 @@ func cmdEval() {
 			ArtifactRoot: filepath.Join(*target, ".ai-team", "artifacts"),
 		}
 
-		agentsDir := findAgentsDir()
-		reg := agent.NewRegistry(agentsDir)
+		reg := agent.NewFS(agentsFS())
 		rt, _ := runtime.NewRuntime("agentcli")
 		p := pipeline.New(cfg.Pipeline, rt, reg)
 
@@ -226,26 +234,11 @@ func cmdEval() {
 }
 
 func cmdList() {
-	agentsDir := findAgentsDir()
-	reg := agent.NewRegistry(agentsDir)
+	reg := agent.NewFS(agentsFS())
 
 	fmt.Printf("%-20s %-15s %-10s %s\n", "Имя", "Runtime", "CLI", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
 	for _, a := range reg.List() {
 		fmt.Printf("%-20s %-15s %-10s %s\n", a.Name, a.RuntimeType, a.CLI, a.Description)
 	}
-}
-
-func findAgentsDir() string {
-	candidates := []string{
-		"agents",
-		"../../agents",
-		filepath.Join(os.Getenv("HOME"), ".ai-team", "agents"),
-	}
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
-			return c
-		}
-	}
-	return "agents"
 }

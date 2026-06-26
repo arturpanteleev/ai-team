@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -9,14 +10,25 @@ import (
 )
 
 type Registry struct {
-	agentsDir string
-	agents    map[string]*Agent
+	fsys   fs.FS
+	agents map[string]*Agent
 }
 
 func NewRegistry(agentsDir string) *Registry {
+	absDir, err := filepath.Abs(agentsDir)
+	if err != nil {
+		absDir = agentsDir
+	}
 	return &Registry{
-		agentsDir: agentsDir,
-		agents:    make(map[string]*Agent),
+		fsys:   os.DirFS(absDir),
+		agents: make(map[string]*Agent),
+	}
+}
+
+func NewFS(fsys fs.FS) *Registry {
+	return &Registry{
+		fsys:   fsys,
+		agents: make(map[string]*Agent),
 	}
 }
 
@@ -25,20 +37,20 @@ func (r *Registry) Load(name string) (*Agent, error) {
 		return a, nil
 	}
 
-	defPath := filepath.Join(r.agentsDir, name, "def.yaml")
-	data, err := os.ReadFile(defPath)
+	defData, err := fs.ReadFile(r.fsys, filepath.Join(name, "def.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("агент %s не найден: %w", name, err)
 	}
 
 	var a Agent
-	if err := yaml.Unmarshal(data, &a); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга %s: %w", defPath, err)
+	if err := yaml.Unmarshal(defData, &a); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга %s/def.yaml: %w", name, err)
 	}
 
-	promptPath := filepath.Join(r.agentsDir, name, a.PromptFile)
-	if promptData, err := os.ReadFile(promptPath); err == nil {
-		a.Prompt = string(promptData)
+	if a.PromptFile != "" {
+		if promptData, err := fs.ReadFile(r.fsys, filepath.Join(name, a.PromptFile)); err == nil {
+			a.Prompt = string(promptData)
+		}
 	}
 
 	r.agents[name] = &a
@@ -47,7 +59,7 @@ func (r *Registry) Load(name string) (*Agent, error) {
 
 func (r *Registry) List() []*Agent {
 	var result []*Agent
-	entries, err := os.ReadDir(r.agentsDir)
+	entries, err := fs.ReadDir(r.fsys, ".")
 	if err != nil {
 		return result
 	}

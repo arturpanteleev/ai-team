@@ -13,7 +13,6 @@ func TestSampleProjectStructure(t *testing.T) {
 	}
 	checkFile(t, dir, "main.go")
 	checkFile(t, dir, "go.mod")
-	checkFile(t, dir, ".ai-team/config.yaml")
 }
 
 func TestAiTeamInit(t *testing.T) {

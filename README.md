@@ -1,5 +1,7 @@
 # ai-team
 
+[![CI](https://github.com/arturpanteleev/ai-team/actions/workflows/ci.yaml/badge.svg)](https://github.com/arturpanteleev/ai-team/actions/workflows/ci.yaml)
+
 CLI-инструмент для запуска пайплайна AI-агентов в любом проекте.
 
 ## Установка

@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewPipeline(t *testing.T) {
-	r := agent.NewRegistry("../../testdata/pipeline-test/agents")
+	r := agent.NewRegistry("../../e2etest/pipeline-test/agents")
 	rt, _ := runtime.NewRuntime("agentcli")
 	p := New([]string{"mock-agent"}, rt, r)
 
@@ -19,7 +19,7 @@ func TestNewPipeline(t *testing.T) {
 }
 
 func TestRun_CancelledContext(t *testing.T) {
-	r := agent.NewRegistry("../../testdata/pipeline-test/agents")
+	r := agent.NewRegistry("../../e2etest/pipeline-test/agents")
 	rt, _ := runtime.NewRuntime("agentcli")
 	p := New([]string{"mock-agent"}, rt, r)
 

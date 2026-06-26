@@ -10,7 +10,7 @@
   - `agent/` — Agent struct + Registry
   - `pipeline/` — оркестрация
 - `agents/{name}/` — встроенные агенты (def.yaml + prompt.md)
-- `testdata/` — тестовые проекты
+- `e2etest/` — тестовые проекты и E2E-тесты
 - `openspec/` — OpenSpec change history
 
 ## Разработка через OpenSpec

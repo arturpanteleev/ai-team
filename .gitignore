@@ -1,9 +1,11 @@
 # Go
-go.sum
 *.exe
 *.test
 *.out
+*.test
 /tmp/
+/bin/
+ai-team
 
 # OpenSpec
 openspec/changes/*/.openspec.yaml

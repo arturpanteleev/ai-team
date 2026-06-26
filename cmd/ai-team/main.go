@@ -10,6 +10,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
@@ -29,6 +30,8 @@ func main() {
 		cmdRun()
 	case "list":
 		cmdList()
+	case "eval":
+		cmdEval()
 	case "version":
 		fmt.Println(version)
 	default:
@@ -45,12 +48,20 @@ func printUsage() {
   ai-team init              Инициализировать .ai-team/ в текущем проекте
   ai-team run               Запустить пайплайн агентов
   ai-team list              Список доступных агентов
+  ai-team eval              Оценить качество артефакта или агента
   ai-team version           Версия
 
 Флаги run:
   --feature <name>          Имя фичи
   --task <description>      Описание задачи
-  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)`)
+  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+
+Флаги eval:
+  --agent <name>            Имя агента для оценки
+  --artifact <path>         Путь к артефакту для оценки
+  --feature <name>          Запустить пайплайн и оценить артефакты
+  --task <description>      Описание задачи для пайплайна
+  --target <path>           Путь к проекту (по умолчанию текущая директория)`)
 }
 
 func cmdInit() {
@@ -151,6 +162,67 @@ func cmdRun() {
 	}
 
 	fmt.Println("\n✓ Пайплайн выполнен")
+}
+
+func cmdEval() {
+	evalFlags := flag.NewFlagSet("eval", flag.ExitOnError)
+	agentName := evalFlags.String("agent", "", "Имя агента для оценки")
+	artifactPath := evalFlags.String("artifact", "", "Путь к артефакту для оценки")
+	feature := evalFlags.String("feature", "", "Запустить пайплайн и оценить")
+	taskDesc := evalFlags.String("task", "", "Описание задачи")
+	target := evalFlags.String("target", ".", "Путь к проекту")
+
+	evalFlags.Parse(os.Args[2:])
+
+	ctx := context.Background()
+
+	if *artifactPath != "" && *agentName != "" {
+		if err := eval.RunAndPrint(ctx, *agentName, *artifactPath, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "Ошибка оценки: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *feature != "" && *taskDesc != "" {
+		cfgPath := filepath.Join(*target, ".ai-team", "config.yaml")
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Ошибка загрузки конфига: %v\n", err)
+			os.Exit(1)
+		}
+
+		task := &runtime.Task{
+			Feature:      *feature,
+			TaskDesc:     *taskDesc,
+			TargetDir:    *target,
+			ArtifactRoot: filepath.Join(*target, ".ai-team", "artifacts"),
+		}
+
+		agentsDir := findAgentsDir()
+		reg := agent.NewRegistry(agentsDir)
+		rt, _ := runtime.NewRuntime("agentcli")
+		p := pipeline.New(cfg.Pipeline, rt, reg)
+
+		if err := p.Run(ctx, task); err != nil {
+			fmt.Fprintf(os.Stderr, "Пайплайн упал: %v\n", err)
+			os.Exit(1)
+		}
+
+		for _, name := range cfg.Pipeline {
+			artifactCandidate := filepath.Join(*target, *feature, name+".md")
+			if _, err := os.Stat(artifactCandidate); err == nil {
+				fmt.Printf("\n--- Оценка агента: %s ---\n", name)
+				if err := eval.RunAndPrint(ctx, name, artifactCandidate, nil); err != nil {
+					fmt.Fprintf(os.Stderr, "Ошибка оценки %s: %v\n", name, err)
+				}
+			}
+		}
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "Укажите --artifact + --agent или --feature + --task")
+	os.Exit(1)
 }
 
 func cmdList() {

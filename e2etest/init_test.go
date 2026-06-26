@@ -1,4 +1,4 @@
-package testdata
+package e2etest
 
 import (
 	"os"
@@ -39,10 +39,4 @@ func TestAiTeamInit(t *testing.T) {
 	}
 }
 
-func checkFile(t *testing.T, dir, path string) {
-	t.Helper()
-	fullPath := filepath.Join(dir, path)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		t.Errorf("expected %s to exist", path)
-	}
-}
+

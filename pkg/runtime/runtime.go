@@ -8,7 +8,7 @@ import (
 var ErrNotImplemented = errors.New("LLM runtime: not implemented yet")
 
 type Runtime interface {
-	Execute(ctx context.Context, agent *Agent, task *Task) error
+	Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error
 }
 
 type Agent struct {

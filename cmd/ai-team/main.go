@@ -161,8 +161,7 @@ func cmdRun() {
 	os.WriteFile(taskFile, []byte(*taskDesc), 0644)
 
 	reg := agent.NewFS(agentsFS())
-	rt, _ := runtime.NewRuntime("agentcli")
-	p := pipeline.New(cfg.Pipeline, rt, reg)
+	p := pipeline.New(cfg.Pipeline, reg)
 
 	ctx := context.Background()
 	if err := p.Run(ctx, task); err != nil {
@@ -209,8 +208,7 @@ func cmdEval() {
 		}
 
 		reg := agent.NewFS(agentsFS())
-		rt, _ := runtime.NewRuntime("agentcli")
-		p := pipeline.New(cfg.Pipeline, rt, reg)
+		p := pipeline.New(cfg.Pipeline, reg)
 
 		if err := p.Run(ctx, task); err != nil {
 			fmt.Fprintf(os.Stderr, "Пайплайн упал: %v\n", err)

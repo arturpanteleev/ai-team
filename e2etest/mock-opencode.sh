@@ -44,8 +44,6 @@ PROMPT=$(cat "$PROMPT_FILE")
 AGENT=$(echo "$PROMPT" | head -1 | sed 's/^# //')
 # extract feature
 FEATURE=$(echo "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | tail -n +2 | head -1 | xargs)
-# extract output paths from "## Ожидаемые результаты"
-OUTPUT_LINES=$(echo "$PROMPT" | sed -n '/^## Ожидаемые результаты/,/^## /p' | grep '→' || true)
 
 echo "MOCK: agent=$AGENT feature=$FEATURE mode=$MODE" >&2
 
@@ -57,40 +55,41 @@ create_output() {
   echo "MOCK:   created $path" >&2
 }
 
+ARTIFACT_ROOT=".ai-team/artifacts"
+
 # create outputs based on agent
 if [[ "$AGENT" == "analyst" ]]; then
   if [[ "$MODE" == "normal" ]]; then
-    create_output "$FEATURE/proposal.md" "# Proposal for $FEATURE\n\n## Goal\n$FEATURE"
-    create_output "$FEATURE/specs/product/spec.md" "# Product spec for $FEATURE\n\n## Requirements\n- feature $FEATURE"
+    create_output "$ARTIFACT_ROOT/$FEATURE/proposal.md" "# Proposal for $FEATURE\n\n## Goal\n$FEATURE"
+    create_output "$ARTIFACT_ROOT/$FEATURE/specs/product/spec.md" "# Product spec for $FEATURE\n\n## Requirements\n- feature $FEATURE"
   fi
 
 elif [[ "$AGENT" == "architect" ]]; then
   if [[ "$MODE" == "normal" ]]; then
-    create_output "$FEATURE/design.md" "# Design for $FEATURE\n\n## Architecture\nSimple"
-    create_output "$FEATURE/tasks.md" "# Tasks for $FEATURE\n\n- [ ] implement"
+    create_output "$ARTIFACT_ROOT/$FEATURE/design.md" "# Design for $FEATURE\n\n## Architecture\nSimple"
+    create_output "$ARTIFACT_ROOT/$FEATURE/tasks.md" "# Tasks for $FEATURE\n\n- [ ] implement"
   fi
 
 elif [[ "$AGENT" == "coder" ]]; then
-  # coder creates code files - nothing to mock for artifact check
   :
 
 elif [[ "$AGENT" == "reviewer" ]]; then
   if [[ "$MODE" == "normal" ]]; then
-    create_output "$FEATURE/review.md" "# Review for $FEATURE\n\n**Verdict:** APPROVED\n\n## Comments\n- Looks good"
+    create_output "$ARTIFACT_ROOT/$FEATURE/review.md" "# Review for $FEATURE\n\n**Verdict:** APPROVED\n\n## Comments\n- Looks good"
   elif [[ "$MODE" == "rejected" ]]; then
-    create_output "$FEATURE/review.md" "# Review for $FEATURE\n\n**Verdict:** CHANGES_REQUESTED\n\n## Issues\n- Needs fixes"
+    create_output "$ARTIFACT_ROOT/$FEATURE/review.md" "# Review for $FEATURE\n\n**Verdict:** CHANGES_REQUESTED\n\n## Issues\n- Needs fixes"
   fi
 
 elif [[ "$AGENT" == "tester" ]]; then
   if [[ "$MODE" == "normal" ]]; then
-    create_output "$FEATURE/test-report.md" "# Test Report for $FEATURE\n\n**Result:** PASS\n\n## Tests\n- all green"
+    create_output "$ARTIFACT_ROOT/$FEATURE/test-report.md" "# Test Report for $FEATURE\n\n**Result:** PASS\n\n## Tests\n- all green"
   elif [[ "$MODE" == "fail" ]]; then
-    create_output "$FEATURE/test-report.md" "# Test Report for $FEATURE\n\n**Result:** FAIL\n\n## Failures\n- test 1 failed"
+    create_output "$ARTIFACT_ROOT/$FEATURE/test-report.md" "# Test Report for $FEATURE\n\n**Result:** FAIL\n\n## Tests\n- test 1 failed"
   fi
 
 elif [[ "$AGENT" == "deployer" ]]; then
-  review_file="$FEATURE/review.md"
-  test_report_file="$FEATURE/test-report.md"
+  review_file="$ARTIFACT_ROOT/$FEATURE/review.md"
+  test_report_file="$ARTIFACT_ROOT/$FEATURE/test-report.md"
 
   if [[ -f "$review_file" ]]; then
     if ! grep -qi "APPROVED" "$review_file"; then

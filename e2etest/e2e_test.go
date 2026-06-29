@@ -48,16 +48,6 @@ func runAI(t *testing.T, binPath, dir string, envs []string, args ...string) err
 	return cmd.Run()
 }
 
-func linkAgents(t *testing.T, dir string) {
-	t.Helper()
-	projectRoot := findModuleRoot()
-	agentsSrc := filepath.Join(projectRoot, "agents")
-	agentsDst := filepath.Join(dir, "agents")
-	if err := os.Symlink(agentsSrc, agentsDst); err != nil {
-		t.Fatalf("symlink agents: %v", err)
-	}
-}
-
 func setupMock(t *testing.T, dir string) string {
 	t.Helper()
 	projectRoot := findModuleRoot()
@@ -73,6 +63,10 @@ func setupMock(t *testing.T, dir string) string {
 	return fmt.Sprintf("PATH=%s%c%s", mockDir, os.PathListSeparator, os.Getenv("PATH"))
 }
 
+func artifactsDir(dir, feature string, parts ...string) string {
+	return filepath.Join(append([]string{dir, ".ai-team", "artifacts", feature}, parts...)...)
+}
+
 func TestE2E_SuccessfulPipeline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
@@ -80,7 +74,6 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 
 	dir := t.TempDir()
 	bin := buildBinary(t)
-	linkAgents(t, dir)
 	pathEnv := setupMock(t, dir)
 
 	if err := runAI(t, bin, dir, []string{pathEnv}, "init"); err != nil {
@@ -88,20 +81,19 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 	}
 
 	checkDir(t, dir, ".ai-team")
-	checkDir(t, dir, ".ai-team", "artifacts", "product")
-	checkDir(t, dir, ".ai-team", "artifacts", "reviews")
-	checkDir(t, dir, ".ai-team", "artifacts", "tasks")
+	checkDir(t, dir, ".ai-team", "artifacts")
 
 	if err := runAI(t, bin, dir, []string{pathEnv}, "run", "--feature", "e2e-test", "--task", "E2E test task"); err != nil {
 		t.Fatalf("ai-team run failed: %v", err)
 	}
 
-	checkFile(t, dir, filepath.Join("e2e-test", "proposal.md"))
-	checkFile(t, dir, filepath.Join("e2e-test", "specs", "product", "spec.md"))
-	checkFile(t, dir, filepath.Join("e2e-test", "design.md"))
-	checkFile(t, dir, filepath.Join("e2e-test", "tasks.md"))
-	checkFile(t, dir, filepath.Join("e2e-test", "review.md"))
-	checkFile(t, dir, filepath.Join("e2e-test", "test-report.md"))
+	feature := "e2e-test"
+	checkFile(t, artifactsDir(dir, feature, "proposal.md"))
+	checkFile(t, artifactsDir(dir, feature, "specs", "product", "spec.md"))
+	checkFile(t, artifactsDir(dir, feature, "design.md"))
+	checkFile(t, artifactsDir(dir, feature, "tasks.md"))
+	checkFile(t, artifactsDir(dir, feature, "review.md"))
+	checkFile(t, artifactsDir(dir, feature, "test-report.md"))
 }
 
 func TestE2E_RejectedReviewStopsPipeline(t *testing.T) {
@@ -111,7 +103,6 @@ func TestE2E_RejectedReviewStopsPipeline(t *testing.T) {
 
 	dir := t.TempDir()
 	bin := buildBinary(t)
-	linkAgents(t, dir)
 	pathEnv := setupMock(t, dir)
 
 	if err := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=rejected"}, "init"); err != nil {
@@ -128,7 +119,6 @@ func TestE2E_RejectedReviewStopsPipeline(t *testing.T) {
 func TestE2E_InitCreatesStructure(t *testing.T) {
 	dir := t.TempDir()
 	bin := buildBinary(t)
-	linkAgents(t, dir)
 	pathEnv := setupMock(t, dir)
 
 	if err := runAI(t, bin, dir, []string{pathEnv}, "init"); err != nil {
@@ -158,10 +148,9 @@ func checkDir(t *testing.T, parts ...string) {
 	}
 }
 
-func checkFile(t *testing.T, base, rel string) {
+func checkFile(t *testing.T, path string) {
 	t.Helper()
-	fullPath := filepath.Join(base, rel)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		t.Errorf("expected %s to exist", rel)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Errorf("expected %s to exist", path)
 	}
 }

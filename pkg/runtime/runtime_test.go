@@ -43,20 +43,20 @@ func TestNewRuntime(t *testing.T) {
 
 func TestLLMRuntime_ReturnsNotImplemented(t *testing.T) {
 	r := &LLMRuntime{}
-	err := r.Execute(context.Background(), &Agent{}, &Task{})
+	err := r.Execute(context.Background(), &Agent{}, &Task{}, nil)
 	if err != ErrNotImplemented {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}
 }
 
 func TestReplaceVars(t *testing.T) {
-	result := replaceVars("tasks/{feature}/task.md", "auth")
+	result := ReplaceVars("tasks/{feature}/task.md", "auth")
 	expected := "tasks/auth/task.md"
 	if result != expected {
 		t.Errorf("expected %s, got %s", expected, result)
 	}
 
-	result = replaceVars("no-vars", "auth")
+	result = ReplaceVars("no-vars", "auth")
 	if result != "no-vars" {
 		t.Errorf("expected no-vars, got %s", result)
 	}
@@ -74,12 +74,16 @@ func TestBuildPrompt(t *testing.T) {
 		Inputs: map[string]string{"task": "input.md"},
 	}
 	task := &Task{
-		Feature:   "test-feature",
-		TaskDesc:  "Test task",
-		TargetDir: dir,
+		Feature:      "test-feature",
+		TaskDesc:     "Test task",
+		ArtifactRoot: dir,
 	}
 
-	prompt, err := r.buildPrompt(agent, task)
+	inputs := []Artifact{
+		{Name: "task", Path: inputFile},
+	}
+
+	prompt, err := r.buildPrompt(agent, task, inputs)
 	if err != nil {
 		t.Fatal(err)
 	}

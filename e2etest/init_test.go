@@ -11,8 +11,8 @@ func TestSampleProjectStructure(t *testing.T) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Fatal("sample project not found")
 	}
-	checkFile(t, dir, "main.go")
-	checkFile(t, dir, "go.mod")
+	checkFile(t, filepath.Join(dir, "main.go"))
+	checkFile(t, filepath.Join(dir, "go.mod"))
 }
 
 func TestAiTeamInit(t *testing.T) {
@@ -37,5 +37,3 @@ func TestAiTeamInit(t *testing.T) {
 		t.Error("config should exist")
 	}
 }
-
-

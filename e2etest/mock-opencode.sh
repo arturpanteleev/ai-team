@@ -2,17 +2,23 @@
 set -euo pipefail
 
 MOCK_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODE_FILE=""
 MODE=""
+
+PROMPT=""
+if [[ "${1:-}" == "run" && -n "${2:-}" ]]; then
+  PROMPT="$2"
+  shift 2
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --message-file)
       PROMPT_FILE="$2"
+      PROMPT=$(cat "$PROMPT_FILE")
       shift 2
       ;;
     --mode)
-      MODE_FILE="$2"
+      MODE="$2"
       shift 2
       ;;
     *)
@@ -21,24 +27,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${PROMPT_FILE:-}" ]]; then
-  echo "MOCK: --message-file is required" >&2
+if [[ -z "${PROMPT:-}" ]]; then
+  echo "MOCK: no prompt provided" >&2
   exit 1
 fi
 
-if [[ ! -f "$PROMPT_FILE" ]]; then
-  echo "MOCK: prompt file not found: $PROMPT_FILE" >&2
-  exit 1
-fi
-
-# override from --mode or env
-if [[ -n "$MODE_FILE" ]]; then
-  MODE="$MODE_FILE"
-fi
 MODE="${MODE:-${MOCK_MODE:-normal}}"
-
-# read prompt
-PROMPT=$(cat "$PROMPT_FILE")
 
 # extract agent name (first line: # name)
 AGENT=$(echo "$PROMPT" | head -1 | sed 's/^# //')

@@ -25,23 +25,12 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		return fmt.Errorf("ошибка сборки промпта: %w", err)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "ai-team-*")
-	if err != nil {
-		return fmt.Errorf("ошибка создания temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	promptFile := filepath.Join(tmpDir, "prompt.md")
-	if err := os.WriteFile(promptFile, []byte(prompt), 0644); err != nil {
-		return fmt.Errorf("ошибка записи промпта: %w", err)
-	}
-
 	targetDir := task.TargetDir
 	if targetDir == "" {
 		targetDir = "."
 	}
 
-	cmd := exec.CommandContext(ctx, cli, "--resume", "--message-file", promptFile)
+	cmd := exec.CommandContext(ctx, cli, "run", prompt)
 	cmd.Dir = targetDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

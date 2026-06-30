@@ -111,7 +111,6 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 
 	for i := 0; i < len(agentNames); i++ {
 		name := agentNames[i]
-
 		select {
 		case <-ctx.Done():
 			lastErr = ctx.Err()
@@ -154,6 +153,11 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 
 		if agentCfg != nil && agentCfg.CLI != "" {
 			a.CLI = agentCfg.CLI
+		}
+		if agentCfg != nil && agentCfg.Model != "" {
+			if a.CLI == "" {
+				a.CLI = p.cfg.CLI
+			}
 		}
 
 		var inputs []runtime.Artifact

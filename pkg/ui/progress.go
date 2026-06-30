@@ -7,10 +7,10 @@ import (
 )
 
 type ProgressBar struct {
-	feature  string
-	total    int
-	current  int
-	barWidth int
+	feature   string
+	total     int
+	current   int
+	barWidth  int
 }
 
 func NewProgressBar(feature string, total int) *ProgressBar {
@@ -32,6 +32,12 @@ func (pb *ProgressBar) AdvanceTo(index int, agent string) {
 	pb.render(agent)
 }
 
+func (pb *ProgressBar) Clear() {
+	if IsTerminal() {
+		fmt.Print("\033[2K\r")
+	}
+}
+
 func (pb *ProgressBar) render(agent string) {
 	if !IsTerminal() {
 		return
@@ -42,6 +48,7 @@ func (pb *ProgressBar) render(agent string) {
 		filled = pb.barWidth
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.barWidth-filled)
+
 	line := fmt.Sprintf("%s[ai-team]%s %s | %s%s (%d/%d) %s",
 		ColorBold, ColorReset,
 		Colorize(pb.feature, ColorCyan),
@@ -52,12 +59,6 @@ func (pb *ProgressBar) render(agent string) {
 	fmt.Print("\033[s\033[K" + line + "\033[u")
 }
 
-func (pb *ProgressBar) Clear() {
-	if IsTerminal() {
-		fmt.Print("\033[2K\r")
-	}
-}
-
 func (pb *ProgressBar) Done() {
 	pb.current = pb.total
 	if IsTerminal() {
@@ -65,7 +66,6 @@ func (pb *ProgressBar) Done() {
 		fmt.Println()
 	}
 }
-
 func (pb *ProgressBar) BarText(agent string) string {
 	if !IsTerminal() {
 		return ""

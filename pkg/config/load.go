@@ -20,8 +20,16 @@ func Load(path string) (*Config, error) {
 
 func Default() *Config {
 	return &Config{
-		Pipeline: []string{"analyst", "architect", "coder", "reviewer", "tester", "deployer"},
-		CLI:      "opencode",
-		Model:    "auto",
+		PipelineAgents: []AgentConfig{
+			{Name: "analyst"},
+			{Name: "architect"},
+			{Name: "coder"},
+			{Name: "reviewer"},
+			{Name: "tester"},
+			{Name: "deployer"},
+		},
+		CLI:   "opencode",
+		Model: "auto",
+		Effort: "medium",
 	}
 }

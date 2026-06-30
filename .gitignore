@@ -5,7 +5,7 @@
 *.test
 /tmp/
 /bin/
-ai-team
+/ai-team
 
 # OpenSpec
 openspec/changes/*/.openspec.yaml

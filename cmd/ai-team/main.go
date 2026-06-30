@@ -14,6 +14,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"io/fs"
 )
 
@@ -78,6 +79,7 @@ func cmdInit() {
 		filepath.Join(target, ".ai-team", "artifacts", "tech"),
 		filepath.Join(target, ".ai-team", "artifacts", "reviews"),
 		filepath.Join(target, ".ai-team", "artifacts", "tasks"),
+		filepath.Join(target, ".ai-team", "reports"),
 	}
 	for _, d := range artifactsDirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -89,8 +91,8 @@ func cmdInit() {
 	cfg := config.Default()
 	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		data := []byte(fmt.Sprintf("pipeline: [%s]\ncli: %s\nmodel: %s\n",
-			strings.Join(cfg.Pipeline, ", "), cfg.CLI, cfg.Model))
+		data := []byte(fmt.Sprintf("pipeline: [%s]\ncli: %s\nmodel: %s\neffort: %s\n",
+			strings.Join(cfg.AgentNames(), ", "), cfg.CLI, cfg.Model, cfg.Effort))
 		if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Ошибка создания конфига: %v\n", err)
 			os.Exit(1)
@@ -129,6 +131,7 @@ func cmdRun() {
 	feature := runFlags.String("feature", "", "Имя фичи")
 	taskDesc := runFlags.String("task", "", "Описание задачи")
 	target := runFlags.String("target", ".", "Путь к целевому проекту")
+	retryFrom := runFlags.String("retry-from", "", "Перезапустить с указанного агента")
 
 	runFlags.Parse(os.Args[2:])
 
@@ -148,28 +151,24 @@ func cmdRun() {
 		os.Exit(1)
 	}
 
-	task := &runtime.Task{
-		Feature:      *feature,
-		TaskDesc:     *taskDesc,
-		TargetDir:    *target,
-		ArtifactRoot: filepath.Join(*target, ".ai-team", "artifacts"),
-	}
-
-	taskDir := filepath.Join(task.ArtifactRoot, "tasks", *feature)
-	os.MkdirAll(taskDir, 0755)
-	taskFile := filepath.Join(taskDir, "task.md")
-	os.WriteFile(taskFile, []byte(*taskDesc), 0644)
+	os.MkdirAll(filepath.Join(*target, ".ai-team", "artifacts", "tasks", *feature), 0755)
+	os.WriteFile(filepath.Join(*target, ".ai-team", "artifacts", "tasks", *feature, "task.md"), []byte(*taskDesc), 0644)
 
 	reg := agent.NewFS(agentsFS())
-	p := pipeline.New(cfg.Pipeline, reg)
+	p := pipeline.New(cfg, reg)
 
 	ctx := context.Background()
-	if err := p.Run(ctx, task); err != nil {
-		fmt.Fprintf(os.Stderr, "Пайплайн упал: %v\n", err)
+	if err := p.Run(ctx, pipeline.RunConfig{
+		Feature:   *feature,
+		TaskDesc:  *taskDesc,
+		TargetDir: *target,
+		RetryFrom: *retryFrom,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "%s Пайплайн упал: %v\n", ui.Colorize("✗", ui.ColorRed), err)
 		os.Exit(1)
 	}
 
-	fmt.Println("\n✓ Пайплайн выполнен")
+	fmt.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
 }
 
 func cmdEval() {
@@ -200,27 +199,24 @@ func cmdEval() {
 			os.Exit(1)
 		}
 
-		task := &runtime.Task{
-			Feature:      *feature,
-			TaskDesc:     *taskDesc,
-			TargetDir:    *target,
-			ArtifactRoot: filepath.Join(*target, ".ai-team", "artifacts"),
-		}
-
 		reg := agent.NewFS(agentsFS())
-		p := pipeline.New(cfg.Pipeline, reg)
+		p := pipeline.New(cfg, reg)
 
-		if err := p.Run(ctx, task); err != nil {
+		if err := p.Run(ctx, pipeline.RunConfig{
+			Feature:   *feature,
+			TaskDesc:  *taskDesc,
+			TargetDir: *target,
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "Пайплайн упал: %v\n", err)
 			os.Exit(1)
 		}
 
-		for _, name := range cfg.Pipeline {
+		for _, name := range cfg.AgentNames() {
 			artifactCandidate := filepath.Join(*target, *feature, name+".md")
 			if _, err := os.Stat(artifactCandidate); err == nil {
 				fmt.Printf("\n--- Оценка агента: %s ---\n", name)
 				if err := eval.RunAndPrint(ctx, name, artifactCandidate, nil); err != nil {
-					fmt.Fprintf(os.Stderr, "Ошибка оценки %s: %v\n", name, err)
+					fmt.Errorf("Ошибка оценки %s: %v\n", name, err)
 				}
 			}
 		}

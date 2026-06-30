@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -106,7 +107,11 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 			ui.Colorize(runCfg.RetryFrom, ui.ColorYellow))
 	}
 
-	for i, name := range agentNames {
+	retryCounts := make(map[string]int)
+
+	for i := 0; i < len(agentNames); i++ {
+		name := agentNames[i]
+
 		select {
 		case <-ctx.Done():
 			lastErr = ctx.Err()
@@ -149,11 +154,6 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 
 		if agentCfg != nil && agentCfg.CLI != "" {
 			a.CLI = agentCfg.CLI
-		}
-		if agentCfg != nil && agentCfg.Model != "" {
-			if a.CLI == "" {
-				a.CLI = p.cfg.CLI
-			}
 		}
 
 		var inputs []runtime.Artifact
@@ -268,6 +268,19 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 			break
 		}
 
+		// Git Diff Guard: если у агента нет outputs, проверяем git diff
+		if len(a.Outputs) == 0 && isCoderLike(name) && hasGitDir(runCfg.TargetDir) {
+			if !hasGitChanges(runCfg.TargetDir) {
+				r.Err = fmt.Errorf("агент %s не создал изменений в коде", name)
+				r.Status = "failed"
+				r.Duration = time.Since(stageStart)
+				results = append(results, r)
+				_ = p.notifier.Notify(ctx, r)
+				lastErr = r.Err
+				break
+			}
+		}
+
 		r.Status = "passed"
 		r.Duration = time.Since(stageStart)
 		results = append(results, r)
@@ -278,6 +291,69 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 
 		if err := report.GenerateStageReport(p.reportsDir, runCfg.Feature, name, r, task.ArtifactRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "  %s report error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		}
+
+		// Workflow Transition: by_confirm
+		if agentCfg != nil && agentCfg.Transition == "by_confirm" {
+			if i+1 < len(agentNames) {
+				nextAgent := agentNames[i+1]
+				if isTerminalStdin() {
+					for {
+						ans := promptContinue(name, nextAgent)
+						switch ans {
+						case "y", "":
+							goto afterTransition
+						case "n":
+							lastErr = fmt.Errorf("пайплайн остановлен пользователем после %s", name)
+							p.printSummary(runCfg.Feature, results)
+							ps.Finalize()
+							return lastErr
+						case "diff":
+							diffCmd := exec.Command("git", "--no-pager", "diff")
+							diffCmd.Dir = runCfg.TargetDir
+							out, _ := diffCmd.Output()
+							fmt.Println(string(out))
+						case "summary":
+							s := readStageSummary(task.ArtifactRoot, runCfg.Feature, name)
+							fmt.Println(s)
+						default:
+							fmt.Printf("  неизвестный ответ: %s (ожидалось Y/n/diff/summary)\n", ans)
+						}
+					}
+				}
+			}
+		}
+	afterTransition:
+
+		// Loopback on REJECTED: проверяем вердикт reviewer-подобного агента
+		if agentCfg != nil && agentCfg.MaxRetries > 0 && isReviewerLike(name) {
+			verdict := readVerdictFromDir(task.ArtifactRoot, runCfg.Feature, name)
+			if verdict == "REJECTED" || verdict == "CHANGES_REQUESTED" {
+				retriesDone := retryCounts[name]
+				if retriesDone < agentCfg.MaxRetries {
+					coderIndex := findAgentIndex(agentNames, "coder")
+					if coderIndex >= 0 && coderIndex < i {
+						if isTerminalStdin() {
+							ans := promptRetry(name, retriesDone, agentCfg.MaxRetries)
+							if ans == "y" || ans == "" {
+								retryCounts[name] = retriesDone + 1
+								// Откатываем results до coder-а
+								results = results[:coderIndex]
+								// Возвращаемся к coder-у
+								i = coderIndex - 1
+								continue
+							} else if ans == "diff" {
+								diffCmd := exec.Command("git", "--no-pager", "diff")
+								diffCmd.Dir = runCfg.TargetDir
+								out, _ := diffCmd.Output()
+								fmt.Println(string(out))
+								i--
+								continue
+							}
+						}
+					}
+				}
+			}
 		}
 
 		ps.DoneAgent(name)

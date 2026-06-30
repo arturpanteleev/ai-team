@@ -99,4 +99,39 @@ func TestAgentConfigFallback(t *testing.T) {
 	if ac2.Effort != "medium" {
 		t.Errorf("expected medium effort fallback, got %s", ac2.Effort)
 	}
+
+	ac3 := cfg.AgentConfig("analyst")
+	if ac3.Transition != "auto" {
+		t.Errorf("expected auto transition fallback, got %s", ac3.Transition)
+	}
+}
+
+func TestLoadNewFormatWithTransitions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+pipeline:
+  - name: coder
+    transition: by_confirm
+    max_retries: 2
+  - name: reviewer
+    transition: auto
+    max_retries: 2
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.PipelineAgents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(cfg.PipelineAgents))
+	}
+	if cfg.PipelineAgents[0].Transition != "by_confirm" {
+		t.Errorf("expected by_confirm transition, got %s", cfg.PipelineAgents[0].Transition)
+	}
+	if cfg.PipelineAgents[0].MaxRetries != 2 {
+		t.Errorf("expected max_retries=2, got %d", cfg.PipelineAgents[0].MaxRetries)
+	}
 }

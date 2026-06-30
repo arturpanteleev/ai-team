@@ -7,10 +7,12 @@ import (
 )
 
 type AgentConfig struct {
-	Name   string `yaml:"name"`
-	Model  string `yaml:"model"`
-	Effort string `yaml:"effort"`
-	CLI    string `yaml:"cli"`
+	Name       string `yaml:"name"`
+	Model      string `yaml:"model"`
+	Effort     string `yaml:"effort"`
+	CLI        string `yaml:"cli"`
+	Transition string `yaml:"transition"`
+	MaxRetries int    `yaml:"max_retries"`
 }
 
 type Config struct {
@@ -91,6 +93,9 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 			}
 			if cfg.CLI == "" {
 				cfg.CLI = c.CLI
+			}
+			if cfg.Transition == "" {
+				cfg.Transition = "auto"
 			}
 			return &cfg
 		}

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 type ProgressBar struct {
@@ -48,13 +49,14 @@ func (pb *ProgressBar) render(agent string) {
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.barWidth-filled)
 
-	fmt.Printf("\r%s[ai-team]%s %s | %s%s (%d/%d) %s",
+	line := fmt.Sprintf("%s[ai-team]%s %s | %s%s (%d/%d) %s",
 		ColorBold, ColorReset,
 		Colorize(pb.feature, ColorCyan),
 		Colorize(agent, ColorYellow), ColorReset,
 		pb.current, pb.total,
 		bar,
 	)
+	fmt.Print("\033[s\033[K" + line + "\033[u")
 }
 
 func (pb *ProgressBar) Done() {
@@ -63,4 +65,51 @@ func (pb *ProgressBar) Done() {
 		pb.render("")
 		fmt.Println()
 	}
+}
+func (pb *ProgressBar) BarText(agent string) string {
+	if !IsTerminal() {
+		return ""
+	}
+	ratio := float64(pb.current) / float64(pb.total)
+	filled := int(ratio * float64(pb.barWidth))
+	if filled > pb.barWidth {
+		filled = pb.barWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.barWidth-filled)
+	return fmt.Sprintf("%s[ai-team]%s %s | %s%s (%d/%d) %s",
+		ColorBold, ColorReset,
+		Colorize(pb.feature, ColorCyan),
+		Colorize(agent, ColorYellow), ColorReset,
+		pb.current, pb.total,
+		bar,
+	)
+}
+
+type StatusWriter struct {
+	mu       sync.Mutex
+	barText  string
+}
+
+func NewStatusWriter() *StatusWriter {
+	return &StatusWriter{}
+}
+
+func (w *StatusWriter) SetBar(text string) {
+	w.mu.Lock()
+	w.barText = text
+	w.mu.Unlock()
+}
+
+func (w *StatusWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	n, err := fmt.Print(string(p))
+	if err != nil {
+		return n, err
+	}
+	if IsTerminal() && w.barText != "" {
+		fmt.Print("\033[s\033[K" + w.barText + "\033[u")
+	}
+	return n, nil
 }

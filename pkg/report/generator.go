@@ -28,6 +28,7 @@ type stageData struct {
 	StageIndex  int
 	TotalStages int
 	Error       string
+	Summary     string
 	Inputs      []artifactData
 	Outputs     []artifactData
 }
@@ -63,6 +64,7 @@ type finalStageData struct {
 	Duration     string
 	InputCount   int
 	OutputCount  int
+	Summary      string
 }
 
 func GenerateStageReport(reportsDir, feature, agent string, result notifier.StageResult, artifactsRoot string) error {
@@ -85,6 +87,8 @@ func GenerateStageReport(reportsDir, feature, agent string, result notifier.Stag
 	if result.Err != nil {
 		data.Error = result.Err.Error()
 	}
+
+	data.Summary = readStageSummary(artifactsRoot, feature, agent)
 
 	relFromReports := func(artifactRoot, fullPath string) string {
 		rel := strings.TrimPrefix(fullPath, artifactRoot)
@@ -156,6 +160,8 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 		inputCount := len(s.Inputs)
 		outputCount := len(s.Outputs)
 
+		summary := readStageSummary(artifactsRoot, feature, s.Name)
+
 		data.Stages = append(data.Stages, finalStageData{
 			Name:         s.Name,
 			Agent:        s.Name,
@@ -166,6 +172,7 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 			Duration:     s.Duration.Round(time.Second).String(),
 			InputCount:   inputCount,
 			OutputCount:  outputCount,
+			Summary:      summary,
 		})
 	}
 
@@ -210,4 +217,17 @@ func statusEmoji(ok bool) string {
 		return "✓"
 	}
 	return "✗"
+}
+
+func readStageSummary(artifactsRoot, feature, agent string) string {
+	path := filepath.Join(artifactsRoot, ".stage-summary", agent+".md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := string(data)
+	if len(s) > 200 {
+		s = s[:200] + "..."
+	}
+	return s
 }

@@ -34,6 +34,10 @@ func ColoredStatus(success bool) string {
 	return Colorize("✗", ColorRed)
 }
 
+func ColoredStatusBlocked() string {
+	return Colorize("⊘", ColorYellow)
+}
+
 func FormatTime(duration interface{}) string {
 	switch d := duration.(type) {
 	case float64:

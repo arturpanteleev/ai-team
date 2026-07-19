@@ -81,6 +81,11 @@ elif [[ "$AGENT" == "tester" ]]; then
     create_output "$ARTIFACT_ROOT/$FEATURE/test-report.md" "# Test Report for $FEATURE\n\n**Result:** FAIL\n\n## Tests\n- test 1 failed"
   fi
 
+elif [[ "$AGENT" == "verifier" ]]; then
+  if [[ "$MODE" == "normal" ]]; then
+    create_output "$ARTIFACT_ROOT/$FEATURE/verification.md" "# Verification Report for $FEATURE\n\n## Общий вердикт: APPROVED\n\n## Acceptance Criteria\n- ✅ All criteria passed\n\n## Self-review\n- No issues found\n\n## DoD Checklist\n- [x] Acceptance Criteria выполнены\n- [x] Реализация соответствует решению\n\n## Известные ограничения\n- None"
+  fi
+
 elif [[ "$AGENT" == "deployer" ]]; then
   review_file="$ARTIFACT_ROOT/$FEATURE/review.md"
   test_report_file="$ARTIFACT_ROOT/$FEATURE/test-report.md"

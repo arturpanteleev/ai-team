@@ -226,6 +226,11 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 			Outputs:     a.Outputs,
 		}
 
+		if agentCfg != nil {
+			runtimeAgent.GateAfter = agentCfg.GateAfter
+			runtimeAgent.GateBefore = agentCfg.GateBefore
+		}
+
 		if err := rt.Execute(ctx, runtimeAgent, task, inputs); err != nil {
 			r.Err = fmt.Errorf("агент %s упал: %w", name, err)
 			r.Status = "failed"
@@ -297,6 +302,19 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 			fmt.Fprintf(os.Stderr, "  %s report error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
 		}
 
+		// Gate After: проверяем gate_after для текущего агента
+		if agentCfg != nil && agentCfg.GateAfter {
+			showGateSummary(name, r, totalStages)
+			if isTerminalStdin() {
+				if !promptGate(name) {
+					lastErr = fmt.Errorf("пайплайн остановлен пользователем на gate после %s", name)
+					p.printSummary(runCfg.Feature, results)
+					ps.Finalize()
+					return lastErr
+				}
+			}
+		}
+
 		// Workflow Transition: by_confirm
 		if agentCfg != nil && agentCfg.Transition == "by_confirm" {
 			if i+1 < len(agentNames) {
@@ -328,6 +346,30 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 			}
 		}
 	afterTransition:
+
+		// Gate Before: проверяем gate_before для следующего агента
+		if i+1 < len(agentNames) {
+			nextName := agentNames[i+1]
+			nextCfg := p.cfg.AgentConfig(nextName)
+			if nextCfg != nil && nextCfg.GateBefore {
+				fmt.Printf("\n%s %s\n",
+					ui.Colorize("Gate:", ui.ColorBold),
+					ui.Colorize("перед "+nextName, ui.ColorYellow))
+				fmt.Printf("  %s\n", ui.Colorize("Все проверки пройдены. Продолжить?", ui.ColorCyan))
+				if isTerminalStdin() {
+					fmt.Print("> ")
+					var input string
+					fmt.Scanln(&input)
+					input = strings.TrimSpace(input)
+					if input != "" && strings.ToLower(input) != "y" {
+						lastErr = fmt.Errorf("пайплайн остановлен пользователем перед %s", nextName)
+						p.printSummary(runCfg.Feature, results)
+						ps.Finalize()
+						return lastErr
+					}
+				}
+			}
+		}
 
 		// Loopback on REJECTED: проверяем вердикт reviewer-подобного агента
 		if agentCfg != nil && agentCfg.MaxRetries > 0 && isReviewerLike(name) {
@@ -412,11 +454,19 @@ func (p *Pipeline) printSummary(feature string, results []notifier.StageResult) 
 	fmt.Fprintf(w, "───\t───\t\t───\n")
 
 	for _, r := range results {
-		status := ui.ColoredStatus(r.Err == nil)
+		var status string
+		switch r.Status {
+		case "blocked":
+			status = ui.ColoredStatusBlocked()
+		default:
+			status = ui.ColoredStatus(r.Err == nil)
+		}
 
 		var resultStr string
 		if r.Err != nil {
 			resultStr = ui.Colorize(shortenError(r.Err), ui.ColorRed)
+		} else if r.Status == "blocked" {
+			resultStr = ui.Colorize("BLOCKED: "+r.Blocker, ui.ColorYellow)
 		} else {
 			var labels []string
 			for _, out := range r.Outputs {

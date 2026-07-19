@@ -13,6 +13,8 @@ type AgentConfig struct {
 	CLI        string `yaml:"cli"`
 	Transition string `yaml:"transition"`
 	MaxRetries int    `yaml:"max_retries"`
+	GateAfter  bool   `yaml:"gate_after"`
+	GateBefore bool   `yaml:"gate_before"`
 }
 
 type Config struct {
@@ -101,4 +103,12 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 		}
 	}
 	return nil
+}
+
+func (ac *AgentConfig) HasGateAfter() bool {
+	return ac.GateAfter
+}
+
+func (ac *AgentConfig) HasGateBefore() bool {
+	return ac.GateBefore
 }

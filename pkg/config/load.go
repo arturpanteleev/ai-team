@@ -21,12 +21,13 @@ func Load(path string) (*Config, error) {
 func Default() *Config {
 	return &Config{
 		PipelineAgents: []AgentConfig{
-			{Name: "analyst"},
-			{Name: "architect"},
+			{Name: "analyst", GateAfter: true},
+			{Name: "architect", GateAfter: true},
 			{Name: "coder"},
 			{Name: "reviewer"},
 			{Name: "tester"},
-			{Name: "deployer"},
+			{Name: "verifier"},
+			{Name: "deployer", GateBefore: true},
 		},
 		CLI:   "opencode",
 		Model: "auto",

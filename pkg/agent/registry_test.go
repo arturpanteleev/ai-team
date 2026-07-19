@@ -32,7 +32,7 @@ func TestRegistry_Load_NotFound(t *testing.T) {
 func TestRegistry_DefaultPipeline(t *testing.T) {
 	r := NewRegistry("../../e2etest/agents")
 	p := r.DefaultPipeline()
-	if len(p) != 6 {
-		t.Errorf("expected 6 agents, got %d", len(p))
+	if len(p) != 7 {
+		t.Errorf("expected 7 agents, got %d", len(p))
 	}
 }

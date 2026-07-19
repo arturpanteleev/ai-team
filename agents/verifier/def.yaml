@@ -1,0 +1,10 @@
+name: verifier
+description: Unified verification pass
+runtime: agentcli
+inputs:
+  proposal: '{feature}/proposal.md'
+  specs: '{feature}/specs/'
+  review: '{feature}/review.md'
+  test-report: '{feature}/test-report.md'
+outputs:
+  verification: '{feature}/verification.md'

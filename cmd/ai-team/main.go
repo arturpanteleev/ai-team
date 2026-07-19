@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
+	"github.com/arturpanteleev/ai-team/pkg/web"
 	"io/fs"
 )
 
@@ -35,6 +36,8 @@ func main() {
 		cmdList()
 	case "eval":
 		cmdEval()
+	case "web":
+		cmdWeb()
 	case "version":
 		fmt.Println(version)
 	default:
@@ -234,5 +237,32 @@ func cmdList() {
 	fmt.Println(strings.Repeat("-", 80))
 	for _, a := range reg.List() {
 		fmt.Printf("%-20s %-15s %-10s %s\n", a.Name, a.RuntimeType, a.CLI, a.Description)
+	}
+}
+
+func cmdWeb() {
+	fs := flag.NewFlagSet("web", flag.ExitOnError)
+	port := fs.String("port", "8080", "Port for web server")
+	dbPath := fs.String("db", ".ai-team/web.db", "Path to SQLite database")
+	distDir := fs.String("dist", "web/dist", "Path to frontend dist directory")
+	fs.Parse(os.Args[2:])
+
+	// Ensure directory exists
+	dir := filepath.Dir(*dbPath)
+	if dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+
+	srv, err := web.NewServer(*dbPath, *distDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Ошибка запуска web сервера: %v\n", err)
+		os.Exit(1)
+	}
+	defer srv.Close()
+
+	fmt.Printf("Web UI available at http://localhost:%s\n", *port)
+	if err := srv.ListenAndServe(":" + *port); err != nil {
+		fmt.Fprintf(os.Stderr, "Ошибка сервера: %v\n", err)
+		os.Exit(1)
 	}
 }

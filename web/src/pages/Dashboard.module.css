@@ -1,0 +1,63 @@
+.container {
+  padding: 24px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin: 0;
+}
+
+.filters {
+  display: flex;
+  gap: 8px;
+}
+
+.filterBtn {
+  padding: 4px 12px;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.filterBtn:hover {
+  border-color: #3b82f6;
+  color: #e2e8f0;
+}
+
+.filterBtn.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+}
+
+.pipelines {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty {
+  text-align: center;
+  padding: 48px;
+  color: #64748b;
+}
+
+.loading {
+  text-align: center;
+  padding: 48px;
+  color: #94a3b8;
+}

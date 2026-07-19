@@ -11,8 +11,8 @@ func TestDefault(t *testing.T) {
 	if cfg.CLI != "opencode" {
 		t.Errorf("expected opencode, got %s", cfg.CLI)
 	}
-	if len(cfg.PipelineAgents) != 6 {
-		t.Errorf("expected 6 agents, got %d", len(cfg.PipelineAgents))
+	if len(cfg.PipelineAgents) != 7 {
+		t.Errorf("expected 7 agents, got %d", len(cfg.PipelineAgents))
 	}
 }
 
@@ -98,5 +98,120 @@ func TestAgentConfigFallback(t *testing.T) {
 	ac2 := cfg.AgentConfig("coder")
 	if ac2.Effort != "medium" {
 		t.Errorf("expected medium effort fallback, got %s", ac2.Effort)
+	}
+
+	ac3 := cfg.AgentConfig("analyst")
+	if ac3.Transition != "auto" {
+		t.Errorf("expected auto transition fallback, got %s", ac3.Transition)
+	}
+}
+
+func TestLoadNewFormatWithTransitions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+pipeline:
+  - name: coder
+    transition: by_confirm
+    max_retries: 2
+  - name: reviewer
+    transition: auto
+    max_retries: 2
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.PipelineAgents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(cfg.PipelineAgents))
+	}
+	if cfg.PipelineAgents[0].Transition != "by_confirm" {
+		t.Errorf("expected by_confirm transition, got %s", cfg.PipelineAgents[0].Transition)
+	}
+	if cfg.PipelineAgents[0].MaxRetries != 2 {
+		t.Errorf("expected max_retries=2, got %d", cfg.PipelineAgents[0].MaxRetries)
+	}
+}
+
+func TestLoadNewFormatWithGates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+pipeline:
+  - name: analyst
+    gate_after: true
+  - name: architect
+    gate_after: true
+  - name: coder
+  - name: deployer
+    gate_before: true
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.PipelineAgents) != 4 {
+		t.Fatalf("expected 4 agents, got %d", len(cfg.PipelineAgents))
+	}
+	if !cfg.PipelineAgents[0].GateAfter {
+		t.Errorf("expected gate_after=true for analyst")
+	}
+	if !cfg.PipelineAgents[1].GateAfter {
+		t.Errorf("expected gate_after=true for architect")
+	}
+	if cfg.PipelineAgents[2].GateAfter {
+		t.Errorf("expected gate_after=false for coder")
+	}
+	if !cfg.PipelineAgents[3].GateBefore {
+		t.Errorf("expected gate_before=true for deployer")
+	}
+}
+
+func TestAgentConfigHasGateMethods(t *testing.T) {
+	cfg := &Config{
+		PipelineAgents: []AgentConfig{
+			{Name: "analyst", GateAfter: true},
+			{Name: "coder"},
+			{Name: "deployer", GateBefore: true},
+		},
+		CLI:   "opencode",
+		Model: "auto",
+	}
+
+	ac := cfg.AgentConfig("analyst")
+	if !ac.HasGateAfter() {
+		t.Errorf("expected HasGateAfter()=true for analyst")
+	}
+	if ac.HasGateBefore() {
+		t.Errorf("expected HasGateBefore()=false for analyst")
+	}
+
+	ac2 := cfg.AgentConfig("coder")
+	if ac2.HasGateAfter() {
+		t.Errorf("expected HasGateAfter()=false for coder")
+	}
+
+	ac3 := cfg.AgentConfig("deployer")
+	if !ac3.HasGateBefore() {
+		t.Errorf("expected HasGateBefore()=true for deployer")
+	}
+}
+
+func TestDefaultWithGates(t *testing.T) {
+	cfg := Default()
+	if !cfg.PipelineAgents[0].GateAfter {
+		t.Errorf("expected default analyst to have gate_after=true")
+	}
+	if !cfg.PipelineAgents[1].GateAfter {
+		t.Errorf("expected default architect to have gate_after=true")
+	}
+	if !cfg.PipelineAgents[6].GateBefore {
+		t.Errorf("expected default deployer to have gate_before=true")
 	}
 }

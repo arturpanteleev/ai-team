@@ -38,7 +38,7 @@ a:hover{text-decoration:underline;}
 </div>
 <h2>Stages</h2>
 <table>
-<tr><th>#</th><th>Agent</th><th>Status</th><th>Duration</th><th>Inputs</th><th>Outputs</th></tr>
+<tr><th>#</th><th>Agent</th><th>Status</th><th>Duration</th><th>Inputs</th><th>Outputs</th><th>Summary</th></tr>
 {{range .Stages}}
 <tr>
 <td>{{.StageIndex}}</td>
@@ -47,6 +47,7 @@ a:hover{text-decoration:underline;}
 <td>{{.Duration}}</td>
 <td>{{.InputCount}}</td>
 <td>{{.OutputCount}}</td>
+<td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{if .Summary}}{{.Summary}}{{else}}—{{end}}</td>
 </tr>
 {{end}}
 </table>

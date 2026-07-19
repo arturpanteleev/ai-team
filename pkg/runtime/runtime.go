@@ -19,6 +19,8 @@ type Agent struct {
 	Prompt      string
 	Inputs      map[string]string
 	Outputs     map[string]string
+	GateAfter   bool
+	GateBefore  bool
 }
 
 type Task struct {

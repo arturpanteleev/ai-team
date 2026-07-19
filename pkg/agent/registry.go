@@ -75,5 +75,5 @@ func (r *Registry) List() []*Agent {
 }
 
 func (r *Registry) DefaultPipeline() []string {
-	return []string{"analyst", "architect", "coder", "reviewer", "tester", "deployer"}
+	return []string{"analyst", "architect", "coder", "reviewer", "tester", "verifier", "deployer"}
 }

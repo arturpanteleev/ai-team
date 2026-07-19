@@ -7,10 +7,14 @@ import (
 )
 
 type AgentConfig struct {
-	Name   string `yaml:"name"`
-	Model  string `yaml:"model"`
-	Effort string `yaml:"effort"`
-	CLI    string `yaml:"cli"`
+	Name       string `yaml:"name"`
+	Model      string `yaml:"model"`
+	Effort     string `yaml:"effort"`
+	CLI        string `yaml:"cli"`
+	Transition string `yaml:"transition"`
+	MaxRetries int    `yaml:"max_retries"`
+	GateAfter  bool   `yaml:"gate_after"`
+	GateBefore bool   `yaml:"gate_before"`
 }
 
 type Config struct {
@@ -92,8 +96,19 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 			if cfg.CLI == "" {
 				cfg.CLI = c.CLI
 			}
+			if cfg.Transition == "" {
+				cfg.Transition = "auto"
+			}
 			return &cfg
 		}
 	}
 	return nil
+}
+
+func (ac *AgentConfig) HasGateAfter() bool {
+	return ac.GateAfter
+}
+
+func (ac *AgentConfig) HasGateBefore() bool {
+	return ac.GateBefore
 }

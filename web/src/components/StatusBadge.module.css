@@ -1,0 +1,38 @@
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.running {
+  background: #3b82f6;
+  color: white;
+}
+
+.completed {
+  background: #22c55e;
+  color: white;
+}
+
+.failed {
+  background: #ef4444;
+  color: white;
+}
+
+.blocked {
+  background: #f59e0b;
+  color: black;
+}
+
+.pending {
+  background: #6b7280;
+  color: white;
+}
+
+.skipped {
+  background: #9ca3af;
+  color: white;
+}

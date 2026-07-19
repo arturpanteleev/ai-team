@@ -36,6 +36,10 @@ tr:last-child td{border-bottom:none;}
 {{if .Error}}
 <div class="error"><strong>Error:</strong> {{.Error}}</div>
 {{end}}
+{{if .Summary}}
+<h2>Summary</h2>
+<div style="background:#fff;padding:12px;border-radius:6px;border-left:4px solid #1565c0;margin:15px 0;font-family:'SFMono-Regular',Consolas,monospace;font-size:13px;white-space:pre-wrap;">{{.Summary}}</div>
+{{end}}
 <h2>Inputs</h2>
 <table>
 <tr><th>Name</th><th>Path</th><th>Size</th></tr>

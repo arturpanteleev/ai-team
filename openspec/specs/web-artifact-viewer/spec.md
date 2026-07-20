@@ -5,24 +5,25 @@ Artifact viewer — просмотр markdown артефактов с ренде
 ## Requirements
 
 ### Requirement: Artifact viewer
-Frontend ДОЛЖЕН отображать содержимое артефактов.
+Frontend MUST отображать содержимое артефактов.
 
 #### Scenario: Markdown рендеринг
 - **КОГДА** пользователь открывает артефакт `.md`
-- **ТОГДА** Artifact Viewer ДОЛЖЕН отрендерить markdown как HTML
+- **ТОГДА** Artifact Viewer MUST отрендерить markdown как HTML
 - **И** сохранить форматирование (заголовки, списки, код, таблицы)
 
 #### Scenario: Raw view
 - **КОГДА** пользователь нажимает "Raw"
-- **ТОГДА** Artifact Viewer ДОЛЖЕН показать исходный markdown текст
+- **ТОГДА** Artifact Viewer MUST показать исходный markdown текст
 
 #### Scenario: Навигация назад
 - **КОГДА** пользователь нажимает "Back"
-- **ТОГДА** frontend ДОЛЖЕН вернуться на страницу pipeline detail
+- **ТОГДА** frontend MUST вернуться на страницу pipeline detail
 
 ### Requirement: Маршрутизация
-Frontend ДОЛЖЕН поддерживать прямой доступ к артефактам.
+Frontend MUST поддерживать прямой доступ к артефактам.
 
 #### Scenario: Прямая ссылка
-- **КОГДА** пользователь открывает `/artifacts/:path`
-- **ТОГДА** Artifact Viewer ДОЛЖЕН загрузить и отобразить артефакт
+- **КОГДА** пользователь открывает `/artifacts/:runID/:path`
+- **ТОГДА** Artifact Viewer MUST загрузить артефакт из immutable directory указанного run
+- **И** MUST NOT подменять его одноимённым live artifact текущей фичи

@@ -1,47 +1,31 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: AgentCLI Runtime
-Система ДОЛЖНА реализовать `AgentCLIRuntime`, который делегирует выполнение AI-агентскому CLI.
+Явный adapter для свежих non-interactive OpenCode sessions без переполнения argv.
 
-#### Сценарий: Выполнение через opencode
-- **КОГДА** AgentCLIRuntime запускается
-- **ТОГДА** система ДОЛЖНА собрать промпт из system prompt агента + содержимого входных артефактов
-- **И** записать промпт во временный `.md` файл
-- **И** запустить `opencode --continue --message-file <tempfile>` в директории целевого проекта
-- **И** дождаться завершения
+## Requirements
 
-#### Сценарий: Артефакты читаются из ArtifactRoot
-- **КОГДА** runtime собирает промпт
-- **ТОГДА** он читает содержимое входных артефактов из `ArtifactPath` (полный путь к файлу)
-- **И** вшивает содержимое в промпт
-- **И** ЕСЛИ артефакт — директория (например, `specs/`), runtime ДОЛЖЕН добавить в промпт путь к директории как референс
+### Requirement: OpenCode adapter
+AgentCLI runtime MUST запускать документированный `opencode run`, прикрепляя полный prompt через временный файл mode 0600 и короткий message argument.
 
-#### Сценарий: Пути выходов используют ArtifactRoot
-- **КОГДА** runtime формирует секцию "Ожидаемые результаты"
-- **ТОГДА** пути выходов ДОЛЖНЫ быть полными, относительно `.ai-team/artifacts/{feature}/`
-- **И** агент (opencode) создаёт файлы по этим путям
+#### Scenario: Большой prompt
+- **КОГДА** prompt превышает практический ARG_MAX
+- **ТОГДА** его содержимое MUST NOT передаваться как command-line argument
+- **И** temporary prompt file MUST быть удалён после процесса
 
-### Требование: Проверка наличия OpenCode
-Система ДОЛЖНА проверять, доступен ли настроенный CLI, перед выполнением.
+#### Scenario: Fresh session
+- **КОГДА** этап запускается
+- **ТОГДА** adapter MUST NOT использовать `--continue`, `--resume` или случайную предыдущую session
 
-#### Сценарий: CLI не найден
-- **КОГДА** настроенный CLI (например, `opencode`) не найден в PATH
-- **ТОГДА** система ДОЛЖНА вернуть понятную ошибку: "opencode: команда не найдена. Установите с https://opencode.ai"
+### Requirement: Explicit adapters
+Неизвестный CLI binary MUST быть отклонён, пока для него не реализован явный adapter.
 
-### Требование: Настраиваемый CLI-бинарник
-Система ДОЛЖНА поддерживать разные AI-агентские CLI через конфиг.
+#### Scenario: Config cli=claude без adapter
+- **КОГДА** runtime пытается запустить CLI с неизвестной схемой аргументов
+- **ТОГДА** он MUST вернуть понятную ошибку вместо guessed OpenCode arguments
 
-#### Сценарий: Переключение на claude
-- **КОГДА** в `.ai-team/config.yaml` указано `cli: claude`
-- **ТОГДА** runtime ДОЛЖЕН запускать `claude --continue --message-file <tempfile>` вместо `opencode`
+### Requirement: Prompt contract
+Prompt MUST включать role instructions, feature, task, input file content, directory references, exact output paths и controller-owned service requirements.
 
-### Требование: Структура промпта
-Файл промпта ДОЛЖЕН включать: system prompt агента, контекст артефактов и явные инструкции по выводу.
-
-#### Сценарий: Формат промпта
-- **КОГДА** создаётся файл промпта
-- **ТОГДА** он ДОЛЖЕН содержать:
-  - Описание роли агента из prompt.md
-  - Содержимое входных файлов (встроено в промпт)
-  - Ссылки на входные директории (путь)
-  - Чёткие ожидания по результату: какие файлы создать и куда (полный путь от корня проекта)
+#### Scenario: Verdict-bearing agent
+- **КОГДА** definition объявляет required verdict
+- **ТОГДА** service section MUST содержать единственный канонический marker contract

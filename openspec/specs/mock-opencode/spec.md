@@ -1,25 +1,35 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: Mock opencode
-Система ДОЛЖНА предоставить скрипт-заглушку для opencode.
+Детерминированный OpenCode CLI fixture для end-to-end проверки controller behavior.
 
-#### Сценарий: Mock создаёт файлы
-- **КОГДА** mock-opdecode получает `--message-file prompt.md`
-- **ТОГДА** парсит prompt.md на предмет того, какой агент запущен
-- **И** создаёт output-артефакты (пустые/шаблонные) по путям из промпта
+## Requirements
 
-#### Сценарий: Mock для Analyst
-- **КОГДА** в prompt.md есть "analyst" или "System Analyst"
-- **ТОГДА** mock ДОЛЖЕН создать proposal.md + specs/product/spec.md
+### Requirement: OpenCode invocation fixture
+Mock MUST принимать `opencode run`, model option и прикреплённый prompt через `--file`.
 
-#### Сценарий: Mock для Deployer
-- **КОГДА** в prompt.md есть "deployer" или "Deployer"
-- **ТОГДА** mock ДОЛЖЕН прочитать review.md и test-report.md
-- **И** если review не APPROVED или test-report не PASS — выйти с кодом 1
+#### Scenario: Prompt file
+- **КОГДА** runtime вызывает `opencode run --file <path> <short-message>`
+- **ТОГДА** mock MUST прочитать agent, feature и output contracts из прикреплённого файла
 
-### Требование: Путь к mock
-Mock ДОЛЖЕН лежать в `testdata/mock-opencode.sh`.
+### Requirement: Scoped failure modes
+Mock MUST поддерживать normal, rejected, fail и blocked так, чтобы каждый негативный mode влиял только на назначенный этап.
 
-#### Сценарий: Обнаружение по PATH
-- **КОГДА** `testdata/` добавлен в PATH
-- **ТОГДА** команда `opencode` ДОЛЖНА вызывать mock вместо реального opencode
+#### Scenario: Rejected review
+- **КОГДА** mode=rejected
+- **ТОГДА** analyst, architect и coder MUST завершиться нормально
+- **И** только reviewer MUST вернуть CHANGES_REQUESTED
+
+#### Scenario: Tester failure
+- **КОГДА** mode=fail
+- **ТОГДА** только tester MUST вернуть FAIL
+
+#### Scenario: Blocked analyst
+- **КОГДА** mode=blocked
+- **ТОГДА** analyst MUST создать свежий status marker и MUST NOT создавать обычные outputs
+
+### Requirement: Delivery не мокается LLM
+Mock OpenCode MUST NOT выполнять commit, push или PR; delivery MUST тестироваться controller executor fixture с локальным git remote и mock `gh`.
+
+#### Scenario: Successful E2E delivery
+- **КОГДА** full E2E достигает delivery
+- **ТОГДА** exact run-attributed file MUST быть единственным файлом delivery commit

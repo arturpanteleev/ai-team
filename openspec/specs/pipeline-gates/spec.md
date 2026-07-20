@@ -1,83 +1,32 @@
 ## Purpose
 
-Gate-точки в пайплайне — интерактивные паузы для подтверждения пользователя перед продолжением.
+Единые fail-closed checkpoint policies для интерактивных и автоматизированных запусков.
 
 ## Requirements
 
-### Requirement: Gate-точка после агента
-Pipeline ДОЛЖЕН останавливаться после указанного агента и запрашивать подтверждение пользователя.
+### Requirement: Единая checkpoint policy
+Schema version 3 MUST поддерживать `checkpoint_before` и `checkpoint_after` со значениями `auto_continue`, `interactive`, `require_explicit`.
 
-#### Scenario: Gate after analyst
-- **КОГДА** конфиг содержит `gate_after: analyst`
-- **И** агент analyst завершился успешно
-- **ТОГДА** pipeline ДОЛЖЕН показать резюме этапа (артефакты, статус)
-- **И** вывести приглашение: `Gate: после analyst. Продолжить? [Y/n]`
-- **И** ожидать ввод пользователя
-- **И** ЕСЛИ ввод `Y` или пустая строка — продолжить к следующему агенту
-- **И** ЕСЛИ ввод `n` — завершить pipeline досрочно
+#### Scenario: Checkpoint после этапа
+- **КОГДА** `checkpoint_after: require_explicit` назначен успешно завершённому этапу
+- **ТОГДА** pipeline MUST показать статус, вердикт, длительность и артефакты
+- **И** MUST получить интерактивное подтверждение либо `--approve-gates`
 
-#### Scenario: Gate after architect
-- **КОГДА** конфиг содержит `gate_after: architect`
-- **И** агент architect завершился успешно
-- **ТОГДА** pipeline ДОЛЖЕН показать резюме этапа (design.md, tasks.md)
-- **И** вывести приглашение: `Gate: после architect. Продолжить? [Y/n]`
-- **И** ожидать ввод пользователя
+#### Scenario: Checkpoint перед этапом
+- **КОГДА** `checkpoint_before: interactive` назначен следующему этапу
+- **ТОГДА** pipeline MUST показать сводку актуальных попыток перед запросом
 
-### Requirement: Gate-точка перед агентом
-Pipeline ДОЛЖЕН останавливаться перед указанным агентом и запрашивать подтверждение пользователя.
+### Requirement: Неинтерактивный fail-closed режим
+Checkpoint, требующий решения, MUST NOT автоматически подтверждаться при отсутствии terminal stdin.
 
-#### Scenario: Gate before deployer
-- **КОГДА** конфиг содержит `gate_before: deployer`
-- **И** все предыдущие агенты завершились успешно
-- **ТОГДА** pipeline ДОЛЖЕН показать сводку по всем выполненным этапам
-- **И** вывести приглашение: `Gate: перед deployer. Все проверки пройдены. Продолжить? [Y/n]`
-- **И** ожидать ввод пользователя
-- **И** ЕСЛИ ввод `Y` — выполнить deployer
-- **И** ЕСЛИ ввод `n` — завершить pipeline без деплоя
+#### Scenario: CI без разрешения
+- **КОГДА** checkpoint достигнут в non-interactive процессе без `--approve-gates`
+- **ТОГДА** run MUST завершиться со статусом stopped и exit code 3
 
-### Requirement: Показ резюме фазы при gate
-Gate-точка ДОЛЖНА показывать резюме выполненной фазы перед запросом подтверждения.
+### Requirement: Отдельное delivery approval
+Обычный checkpoint approval MUST NOT разрешать commit, push или PR. Delivery
+MUST требовать approval точного SHA-256 canonical plan.
 
-#### Scenario: Резюме после analyst
-- **КОГДА** gate_after: analyst срабатывает
-- **ТОГДА** pipeline ДОЛЖЕН показать: имя агента, статус, длительность, список созданных артефактов
-- **И** для каждого артефакта: имя, путь, размер
-
-#### Scenario: Сводка перед deployer
-- **КОГДА** gate_before: deployer срабатывает
-- **ТОГДА** pipeline ДОЛЖЕН показать сводку по всем выполненным этапам: количество успешных, количество с ошибками, общее время
-
-### Requirement: Неинтерактивный режим для gate
-Если stdin не является терминалом, gate-точки ДОЛЖНЫ выполняться без остановки.
-
-#### Scenario: CI/pipe режим
-- **КОГДА** `ai-team run` запущен с перенаправленным stdin (pipe)
-- **И** pipeline содержит gate-точки
-- **ТОГДА** gate-точки ДОЛЖНЫ выполняться без остановки
-- **И** pipeline ДОЛЖЕН продолжить к следующему агенту автоматически
-
-### Requirement: Конфигурация gate-точек
-Gate-точки конфигурируются через `config.yaml` в поле `pipeline`.
-
-#### Scenario: Gate after в конфиге
-- **КОГДА** config.yaml содержит:
-  ```yaml
-  pipeline:
-    - name: analyst
-      gate_after: true
-  ```
-- **ТОГДА** pipeline ДОЛЖЕН остановиться после analyst и запросить подтверждение
-
-#### Scenario: Gate before в конфиге
-- **КОГДА** config.yaml содержит:
-  ```yaml
-  pipeline:
-    - name: deployer
-      gate_before: true
-  ```
-- **ТОГДА** pipeline ДОЛЖЕН остановиться перед deployer и запросить подтверждение
-
-#### Scenario: Обратная совместимость
-- **КОГДА** config.yaml содержит `pipeline: [analyst, architect, coder]` (массив строк)
-- **ТОГДА** gate-точки НЕ ДОЛЖНЫ добавляться автоматически
-- **И** pipeline ДОЛЖЕН работать как раньше (без gate)
+#### Scenario: Gates подтверждены, delivery нет
+- **КОГДА** передан `--approve-gates`, но не передан совпадающий `--approve-plan`
+- **ТОГДА** delivery MUST остановиться после публикации плана и до внешних side effects

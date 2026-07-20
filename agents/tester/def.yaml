@@ -3,8 +3,23 @@ description: Tester — пишет и запускает тесты
 runtime: agentcli
 cli: opencode
 prompt_file: prompt.md
+mutation: tests
+allowed_paths:
+  - '**/*_test.go'
+  - '**/testdata/**'
+  - 'test/**'
+  - 'tests/**'
+  - 'e2e/**'
+  - 'e2etest/**'
+  - '**/*.test.*'
+  - '**/*.spec.*'
+verdict:
+  required: true
+  marker: Result
+  values: [PASS, FAIL]
 inputs:
-  specs: '{feature}/specs/'
+  specs: '{feature}/specs'
   review: '{feature}/review.md'
+  reviewed-candidate: '{feature}/.control/review-candidate.json'
 outputs:
   test-report: '{feature}/test-report.md'

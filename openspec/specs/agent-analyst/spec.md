@@ -1,46 +1,49 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: System Analyst создаёт продуктовую спецификацию
-Агент Analyst ДОЛЖЕН прочитать описание задачи и создать детальную продуктовую спецификацию.
+Спецификация определяет нормативное поведение capability `agent-analyst`.
 
-#### Сценарий: Analyst создаёт артефакты
+## Requirements
+### Requirement: System Analyst создаёт продуктовую спецификацию
+Агент Analyst MUST прочитать описание задачи и создать детальную продуктовую спецификацию.
+
+#### Scenario: Analyst создаёт артефакты
 - **КОГДА** Analyst запускается
-- **ТОГДА** он ДОЛЖЕН прочитать `.ai-team/artifacts/tasks/{feature}/task.md`
+- **ТОГДА** он MUST прочитать `.ai-team/artifacts/tasks/{feature}/task.md`
 - **И** создать `.ai-team/artifacts/{feature}/proposal.md`
 - **И** создать `.ai-team/artifacts/{feature}/specs/`
 - **И** создать `.ai-team/artifacts/{feature}/specs/product/spec.md`
 
-### Требование: Содержимое продуктовой спецификации
-Продуктовая спецификация ДОЛЖНА содержать пользовательские истории, критерии приёмки и все пользовательские сценарии.
+### Requirement: Содержимое продуктовой спецификации
+Продуктовая спецификация MUST содержать пользовательские истории, критерии приёмки и все пользовательские сценарии.
 
-#### Сценарий: Секции спецификации
+#### Scenario: Секции спецификации
 - **КОГДА** Analyst создаёт specs
-- **ТОГДА** spec ДОЛЖЕН включать:
+- **ТОГДА** spec MUST включать:
   - Пользовательские истории с персонами
   - Критерии приёмки (тестируемые)
   - Happy path, крайние случаи, сценарии ошибок
   - Бизнес-правила и ограничения
   - Тестовые сценарии для QA
 
-### Требование: Analyst использует AgentCLI runtime
-Агент Analyst ДОЛЖЕН использовать `agentcli` runtime.
+### Requirement: Analyst использует AgentCLI runtime
+Агент Analyst MUST использовать `agentcli` runtime.
 
-#### Сценарий: Настройка runtime
+#### Scenario: Настройка runtime
 - **КОГДА** Analyst загружается
-- **ТОГДА** def.yaml ДОЛЖЕН содержать `runtime: agentcli` и `cli: opencode`
+- **ТОГДА** def.yaml MUST содержать `runtime: agentcli` и `cli: opencode`
 
-### Требование: Промпт analyst
-Промпт analyst ДОЛЖЕН содержать требования к структуре proposal.md и spec.md.
+### Requirement: Промпт analyst
+Промпт analyst MUST содержать требования к структуре proposal.md и spec.md.
 
-#### Сценарий: Структура proposal.md
+#### Scenario: Структура proposal.md
 - **КОГДА** analyst создаёт proposal.md
-- **ТОГДА** proposal.md ДОЛЖЕН содержать: бизнес-проблему, scope и out-of-scope, зафиксированные продуктовые требования, спорные моменты, Acceptance Criteria
+- **ТОГДА** proposal.md MUST содержать: бизнес-проблему, scope и out-of-scope, зафиксированные продуктовые требования, спорные моменты, Acceptance Criteria
 
-#### Сценарий: Структура AC
+#### Scenario: Структура AC
 - **КОГДА** analyst создаёт Acceptance Criteria
-- **ТОГДА** AC ДОЛЖНЫ описывать наблюдаемое поведение системы
-- **И** включать: успешные сценарии, ошибки и невалидные данные, значимые edge cases, поведение, которое не должно измениться
+- **ТОГДА** AC MUST описывать наблюдаемое поведение системы
+- **И** включать: успешные сценарии, ошибки и невалидные данные, значимые edge cases, поведение, которое MUST NOT измениться
 
-#### Сценарий: Формат spec.md
+#### Scenario: Формат spec.md
 - **КОГДА** analyst создаёт spec.md
-- **ТОГДА** spec.md ДОЛЖЕН быть в формате OpenSpec (markdown с заголовками ## ADDED Requirements)
+- **ТОГДА** spec.md MUST быть в формате OpenSpec (markdown с заголовками ## ADDED Requirements)

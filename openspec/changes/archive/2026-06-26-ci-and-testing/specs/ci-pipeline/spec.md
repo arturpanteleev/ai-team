@@ -1,21 +1,21 @@
 ## ДОБАВЛЕННЫЕ Требования
 
-### Требование: GitHub Actions workflow
-Система ДОЛЖНА иметь GitHub Actions workflow для автоматической проверки.
+### Requirement: GitHub Actions workflow
+Система MUST иметь GitHub Actions workflow для автоматической проверки.
 
-#### Сценарий: Запуск на push
+#### Scenario: Запуск на push
 - **КОГДА** происходит push в main
-- **ТОГДА** workflow ДОЛЖЕН запустить `go build ./cmd/ai-team`
+- **ТОГДА** workflow MUST запустить `go build ./cmd/ai-team`
 - **И** запустить `go test ./...`
 - **И** запустить `go vet ./...`
 
-#### Сценарий: Запуск на pull request
+#### Scenario: Запуск на pull request
 - **КОГДА** создаётся PR в main
-- **ТОГДА** workflow ДОЛЖЕН запустить те же шаги
+- **ТОГДА** workflow MUST запустить те же шаги
 
-### Требование: Badge
-Репозиторий ДОЛЖЕН иметь CI-badge в README.
+### Requirement: Badge
+Репозиторий MUST иметь CI-badge в README.
 
-#### Сценарий: Badge в шапке
+#### Scenario: Badge в шапке
 - **КОГДА** пользователь открывает README
-- **ТОГДА** в начале файла ДОЛЖЕН быть badge с статусом CI
+- **ТОГДА** в начале файла MUST быть badge с статусом CI

@@ -3,6 +3,7 @@ description: System Analyst — создаёт продуктовую специ
 runtime: agentcli
 cli: opencode
 prompt_file: prompt.md
+mutation: none
 inputs:
   task: tasks/{feature}/task.md
 outputs:

@@ -24,22 +24,36 @@ export function StageRow({ stage, artifacts }: StageRowProps) {
       >
         <span className={styles.agent}>{stage.agent_name}</span>
         <StatusBadge status={stage.status} />
+        {stage.verdict && <span className={styles.verdict}>{stage.verdict}</span>}
         <div className={styles.meta}>
           <span className={styles.duration}>{duration}</span>
         </div>
       </div>
-      {expanded && artifacts.length > 0 && (
+      {expanded && (
         <div className={styles.artifacts}>
-          <h4>Артефакты</h4>
-          {artifacts.map((a) => (
-            <Link
-              key={a.path}
-              className={styles.artifactLink}
-              to={`/artifacts/${encodeURIComponent(a.path)}`}
-            >
-              {a.name}
-            </Link>
-          ))}
+          <div className={styles.stateGrid}>
+            <span>Attempt</span><code>{stage.attempt_id}</code>
+            <span>Stage index</span><code>{stage.stage_index}</code>
+            <span>Execution</span><code>{stage.execution || '—'}</code>
+            <span>Decision</span><code>{stage.decision || '—'}</code>
+            <span>Outcome</span><code>{stage.outcome || '—'}</code>
+          </div>
+          {artifacts.length > 0 ? (
+            <>
+              <h4>Артефакты</h4>
+              {artifacts.map((a) => (
+                <Link
+                  key={a.path}
+                  className={styles.artifactLink}
+                  to={`/artifacts/${encodeURIComponent(a.run_id)}/${a.path.split('/').map(encodeURIComponent).join('/')}`}
+                >
+                  {a.name}
+                </Link>
+              ))}
+            </>
+          ) : (
+            <span className={styles.empty}>Нет опубликованных артефактов</span>
+          )}
         </div>
       )}
       {stage.error && <div className={styles.error}>{stage.error}</div>}

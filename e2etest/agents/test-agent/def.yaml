@@ -1,6 +1,7 @@
 name: test-agent
 description: Test agent for unit tests
 runtime: agentcli
+mutation: none
 cli: opencode
 prompt_file: prompt.md
 inputs:

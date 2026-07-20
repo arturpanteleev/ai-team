@@ -59,6 +59,25 @@
   text-transform: uppercase;
 }
 
+.stateGrid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin-bottom: 12px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.stateGrid code {
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .artifactLink {
   display: block;
   padding: 4px 0;
@@ -69,4 +88,10 @@
 
 .artifactLink:hover {
   text-decoration: underline;
+}
+.verdict {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.03em;
 }

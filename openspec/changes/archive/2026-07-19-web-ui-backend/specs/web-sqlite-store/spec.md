@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: SQLite schema для pipeline runs
-Система ДОЛЖНА хранить информацию о pipeline runs в SQLite.
+Система MUST хранить информацию о pipeline runs в SQLite.
 
 #### Scenario: Таблица pipeline_runs
 - **КОГДА** pipeline запускается
-- **ТОГДА** запись ДОЛЖНА быть создана в таблице `pipeline_runs` с полями:
+- **ТОГДА** запись MUST быть создана в таблице `pipeline_runs` с полями:
   - `id` (INTEGER PRIMARY KEY)
   - `feature` (TEXT)
   - `status` (TEXT: running/completed/failed/blocked)
@@ -15,7 +15,7 @@
 
 #### Scenario: Таблица stages
 - **КОГДА** агент завершается
-- **ТОГДА** запись ДОЛЖНА быть создана в таблице `stages` с полями:
+- **ТОГДА** запись MUST быть создана в таблице `stages` с полями:
   - `id` (INTEGER PRIMARY KEY)
   - `pipeline_run_id` (INTEGER FK)
   - `agent_name` (TEXT)
@@ -28,12 +28,12 @@
   - `outputs_json` (TEXT — JSON артефактов)
 
 ### Requirement: Автоматические миграции
-SQLite schema ДОЛЖНА автоматически применяться при запуске сервера.
+SQLite schema MUST автоматически применяться при запуске сервера.
 
 #### Scenario: Первый запуск
 - **КОГДА** SQLite файл не существует
-- **ТОГДА** система ДОЛЖНА создать файл и применить schema
+- **ТОГДА** система MUST создать файл и применить schema
 
 #### Scenario: Обновление schema
 - **КОГДА** schema изменилась
-- **ТОГДА** система ДОЛЖНА применить миграции без потери данных
+- **ТОГДА** система MUST применить миграции без потери данных

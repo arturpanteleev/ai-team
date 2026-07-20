@@ -3,8 +3,9 @@ description: Архитектор — создаёт технический ди
 runtime: agentcli
 cli: opencode
 prompt_file: prompt.md
+mutation: none
 inputs:
-  specs: '{feature}/specs/'
+  specs: '{feature}/specs'
 outputs:
   design: '{feature}/design.md'
   tasks: '{feature}/tasks.md'

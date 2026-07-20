@@ -14,6 +14,8 @@ th{background:#1a1a2e;color:#fff;font-weight:600;}
 tr:last-child td{border-bottom:none;}
 .status-ok{color:#2e7d32;font-weight:700;}
 .status-err{color:#c62828;font-weight:700;}
+.status-blocked{color:#e65100;font-weight:700;}
+.status-warning{color:#b26a00;font-weight:700;}
 a{color:#1565c0;text-decoration:none;}
 a:hover{text-decoration:underline;}
 .meta{color:#666;font-size:14px;margin:10px 0;}
@@ -26,6 +28,7 @@ a:hover{text-decoration:underline;}
 <body>
 <h1>{{.Feature}} — Pipeline Report</h1>
 <div class="meta">
+{{if .RunID}}<strong>Run ID:</strong> <span style="font-family:monospace">{{.RunID}}</span><br>{{end}}
 <strong>Started:</strong> {{.StartTime}}<br>
 <strong>Finished:</strong> {{.EndTime}}<br>
 <strong>Overall:</strong> <span class="status-{{.OverallStatusClass}}">{{.OverallStatusEmoji}} {{.OverallStatus}}</span>
@@ -34,16 +37,23 @@ a:hover{text-decoration:underline;}
 <div class="summary-item"><div class="summary-label">Stages</div><div class="summary-value">{{.TotalStages}}</div></div>
 <div class="summary-item"><div class="summary-label">Passed</div><div class="summary-value status-ok">{{.Passed}}</div></div>
 <div class="summary-item"><div class="summary-label">Failed</div><div class="summary-value status-err">{{.Failed}}</div></div>
+{{if .Blocked}}<div class="summary-item"><div class="summary-label">Blocked</div><div class="summary-value status-blocked">{{.Blocked}}</div></div>{{end}}
+{{if .Stopped}}<div class="summary-item"><div class="summary-label">Stopped / skipped</div><div class="summary-value status-warning">{{.Stopped}}</div></div>{{end}}
+{{if .Warnings}}<div class="summary-item"><div class="summary-label">Warnings</div><div class="summary-value status-warning">{{.Warnings}}</div></div>{{end}}
+{{if .Invalidated}}<div class="summary-item"><div class="summary-label">Invalidated</div><div class="summary-value status-warning">{{.Invalidated}}</div></div>{{end}}
 <div class="summary-item"><div class="summary-label">Duration</div><div class="summary-value">{{.TotalDuration}}</div></div>
 </div>
 <h2>Stages</h2>
 <table>
-<tr><th>#</th><th>Agent</th><th>Status</th><th>Duration</th><th>Inputs</th><th>Outputs</th><th>Summary</th></tr>
+<tr><th>#</th><th>Attempt</th><th>Agent</th><th>Status / outcome</th><th>Verdict</th><th>Checks</th><th>Duration</th><th>Inputs</th><th>Outputs</th><th>Summary</th></tr>
 {{range .Stages}}
 <tr>
 <td>{{.StageIndex}}</td>
-<td><a href="{{.Agent}}/index.html"><strong>{{.Name}}</strong></a></td>
-<td><span class="status-{{.StatusClass}}">{{.StatusEmoji}} {{.Status}}</span></td>
+<td style="font-family:monospace;font-size:11px">{{.AttemptID}}</td>
+<td><a href="{{.ReportPath}}"><strong>{{.Name}}</strong></a></td>
+<td><span class="status-{{.StatusClass}}">{{.StatusEmoji}} {{.Status}}</span><br><small>{{.Outcome}}</small></td>
+<td>{{if .Verdict}}{{.Verdict}}{{else}}—{{end}}</td>
+<td>{{.CheckCount}}</td>
 <td>{{.Duration}}</td>
 <td>{{.InputCount}}</td>
 <td>{{.OutputCount}}</td>

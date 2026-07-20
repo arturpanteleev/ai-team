@@ -1,71 +1,63 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: Точка входа CLI
-Система ДОЛЖНА предоставлять единый CLI-бинарник `ai-team` с подкомандами.
+Единый безопасный CLI для инициализации, запуска, оценки и наблюдения workflow.
 
-#### Сценарий: Вывод справки
-- **КОГДА** пользователь запускает `ai-team --help` или `ai-team -h`
-- **ТОГДА** система ДОЛЖНА вывести информацию об использовании со списком всех доступных команд
+## Requirements
 
-#### Сценарий: Неизвестная команда
-- **КОГДА** пользователь запускает `ai-team <неизвестная-команда>`
-- **ТОГДА** система ДОЛЖНА вывести сообщение об ошибке и завершиться с ненулевым кодом
+### Requirement: CLI commands and exit codes
+CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `version`, `help`; run MUST возвращать 0 для success, 1 для failure/rejection, 2 для BLOCKED и 3 для stopped.
 
-### Требование: ai-team init
-Система ДОЛЖНА инициализировать `.ai-team/` в текущей директории.
+#### Scenario: Unknown command
+- **КОГДА** передана неизвестная команда
+- **ТОГДА** CLI MUST вывести usage и завершиться ненулевым кодом
 
-#### Сценарий: Init создаёт структуру директорий
-- **КОГДА** пользователь запускает `ai-team init`
-- **ТОГДА** система ДОЛЖНА создать `.ai-team/config.yaml` с конфигом по умолчанию
-- **И** создать `.ai-team/artifacts/product/`, `.ai-team/artifacts/tech/`, `.ai-team/artifacts/reviews/`
-- **И** создать `.ai-team/artifacts/tasks/`
+### Requirement: Init
+`ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и logs directories, а в git repository MUST обеспечить ignore `.ai-team/`.
 
-#### Сценарий: Init проверяет OpenCode
-- **КОГДА** пользователь запускает `ai-team init`
-- **ТОГДА** система ДОЛЖНА проверить, доступен ли `opencode` в PATH
-- **И** вывести предупреждение, если не найден
+#### Scenario: Поддерживаемый typed stack
+- **КОГДА** target содержит `go.mod`
+- **ТОГДА** init MUST записать required `go-test-json` check и required `go vet` check в config
 
-### Требование: ai-team run
-Система ДОЛЖНА выполнять пайплайн агентов для фичи.
+#### Scenario: Stack без typed adapter
+- **КОГДА** target содержит Rust, Python или Node manifest, но controller не имеет parser adapter этого stack
+- **ТОГДА** init MUST NOT выдавать произвольную command за test evidence
+- **И** MUST предупредить, что delivery запрещён до настройки typed required test check
 
-#### Сценарий: Запуск с флагом feature
-- **КОГДА** пользователь запускает `ai-team run --feature "add-auth" --task "Реализовать JWT авторизацию"`
-- **ТОГДА** система ДОЛЖНА создать `.ai-team/artifacts/tasks/add-auth/task.md` с описанием задачи
-- **И** выполнить пайплайн: Analyst → Architect → Coder → Reviewer → Tester → Deployer
-- **И** все артефакты (proposal, spec, design, review, test-report) сохраняются в `.ai-team/artifacts/add-auth/`
-- **И** отчёты сохраняются в `.ai-team/reports/add-auth/`
+#### Scenario: Неизвестный stack
+- **КОГДА** verification profile не определён
+- **ТОГДА** init MUST предупредить, что delivery запрещён до настройки required unit/integration/e2e check
 
-#### Сценарий: Проверка входов и выходов
-- **КОГДА** пайплайн выполняется
-- **ТОГДА** перед каждым агентом система проверяет наличие его входных артефактов (stat)
-- **И** после каждого агента проверяет наличие его выходных артефактов
-- **И** ЕСЛИ выход не создан → пайплайн останавливается с ошибкой
-- **И** ЕСЛИ вход не найден → пайплайн останавливается с ошибкой
+### Requirement: Run identity and validation
+`run` MUST валидировать feature и config до создания filesystem paths, получить workspace lock, создать immutable run_id и выполнить настроенный pipeline.
 
-#### Сценарий: Остановка при ошибке агента
-- **КОГДА** любой агент в пайплайне завершается с ошибкой
-- **ТОГДА** система ДОЛЖНА остановить выполнение
-- **И** вывести сообщение об ошибке с именем упавшего агента и причиной
-- **И** сгенерировать HTML-отчёт с указанием упавшего этапа
+#### Scenario: Feature traversal
+- **КОГДА** feature содержит slash, backslash или `..`
+- **ТОГДА** CLI и direct pipeline API MUST отклонить запрос до записи файлов
 
-### Требование: Флаг --retry-from для run
-Команда `run` ДОЛЖНА поддерживать флаг `--retry-from` для перезапуска пайплайна с указанного агента.
+### Requirement: Explicit approvals
+Non-interactive run MUST требовать `--approve-gates` для checkpoints. Внешние
+delivery effects MUST требовать `--approve-plan <sha256>`, точно совпадающий с
+SHA-256 опубликованного canonical plan.
 
-#### Сценарий: Retry-from с флагом
-- **КОГДА** пользователь запускает `ai-team run --feature "add-auth" --retry-from coder`
-- **ТОГДА** пайплайн ДОЛЖЕН запуститься с агента `coder`, пропустив analyst и architect
-- **И** артефакты предыдущих этапов НЕ ДОЛЖНЫ перезаписываться
+#### Scenario: Только gates разрешены
+- **КОГДА** передан только `--approve-gates`
+- **ТОГДА** pipeline MUST остановиться перед commit/push/PR с exit code 3
+- **И** MUST вывести canonical plan и его SHA-256
 
-### Требование: ai-team list
-Система ДОЛЖНА выводить список всех доступных встроенных агентов.
+#### Scenario: Разрешён другой plan
+- **КОГДА** `--approve-plan` не совпадает с текущим canonical plan
+- **ТОГДА** pipeline MUST NOT выполнять commit, push или PR
 
-#### Сценарий: Список агентов
-- **КОГДА** пользователь запускает `ai-team list`
-- **ТОГДА** система ДОЛЖНА вывести таблицу с именем агента, описанием и типом runtime
+### Requirement: Layered agent list
+`list` MUST объединять project, plugin, user и built-in registry layers и показывать источник победившего определения.
 
-### Требование: ai-team version
-Система ДОЛЖНА выводить текущую версию.
+#### Scenario: Invalid project override
+- **КОГДА** project agent definition невалидна
+- **ТОГДА** registry MUST вернуть ошибку вместо fallback к built-in agent
 
-#### Сценарий: Вывод версии
-- **КОГДА** пользователь запускает `ai-team version`
-- **ТОГДА** система ДОЛЖНА вывести semver-строку версии
+### Requirement: Eval evidence
+`eval` MUST поддерживать `--samples` от 1 до 20 и сохранять JSON evidence; LLM quality result MUST быть advisory.
+
+#### Scenario: Несколько samples
+- **КОГДА** пользователь передаёт `--samples 3`
+- **ТОГДА** результат MUST содержать individual samples, median, mean и standard deviation

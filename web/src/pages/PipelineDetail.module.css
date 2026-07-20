@@ -30,9 +30,15 @@
 
 .meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   font-size: 14px;
   color: #94a3b8;
+}
+
+.identifier {
+  font-family: monospace;
+  overflow-wrap: anywhere;
 }
 
 .stages {

@@ -2,28 +2,23 @@ package notifier
 
 import (
 	"context"
-	"time"
 
-	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const (
-	StatusPassed  = "passed"
-	StatusFailed  = "failed"
-	StatusBlocked = "blocked"
+	StatusPassed      = workflow.StatusPassed
+	StatusFailed      = workflow.StatusFailed
+	StatusBlocked     = workflow.StatusBlocked
+	StatusRejected    = workflow.StatusRejected
+	StatusCanceled    = workflow.StatusCanceled
+	StatusWarning     = workflow.StatusWarning
+	StatusSkipped     = workflow.StatusSkipped
+	StatusInvalidated = workflow.StatusInvalidated
 )
 
-type StageResult struct {
-	Name         string
-	Status       string
-	Err          error
-	Blocker      string
-	Duration     time.Duration
-	StageIndex   int
-	TotalStages  int
-	Inputs       []runtime.Artifact
-	Outputs      []runtime.Artifact
-}
+// StageResult remains an alias for source compatibility; ownership is workflow.
+type StageResult = workflow.StageResult
 
 type Notifier interface {
 	Notify(ctx context.Context, stage StageResult) error

@@ -1,25 +1,25 @@
 ## ДОБАВЛЕННЫЕ Требования
 
-### Требование: Mock opencode
-Система ДОЛЖНА предоставить скрипт-заглушку для opencode.
+### Requirement: Mock opencode
+Система MUST предоставить скрипт-заглушку для opencode.
 
-#### Сценарий: Mock создаёт файлы
+#### Scenario: Mock создаёт файлы
 - **КОГДА** mock-opdecode получает `--message-file prompt.md`
 - **ТОГДА** парсит prompt.md на предмет того, какой агент запущен
 - **И** создаёт output-артефакты (пустые/шаблонные) по путям из промпта
 
-#### Сценарий: Mock для Analyst
+#### Scenario: Mock для Analyst
 - **КОГДА** в prompt.md есть "analyst" или "System Analyst"
-- **ТОГДА** mock ДОЛЖЕН создать proposal.md + specs/product/spec.md
+- **ТОГДА** mock MUST создать proposal.md + specs/product/spec.md
 
-#### Сценарий: Mock для Deployer
+#### Scenario: Mock для Deployer
 - **КОГДА** в prompt.md есть "deployer" или "Deployer"
-- **ТОГДА** mock ДОЛЖЕН прочитать review.md и test-report.md
+- **ТОГДА** mock MUST прочитать review.md и test-report.md
 - **И** если review не APPROVED или test-report не PASS — выйти с кодом 1
 
-### Требование: Путь к mock
-Mock ДОЛЖЕН лежать в `testdata/mock-opencode.sh`.
+### Requirement: Путь к mock
+Mock MUST лежать в `testdata/mock-opencode.sh`.
 
-#### Сценарий: Обнаружение по PATH
+#### Scenario: Обнаружение по PATH
 - **КОГДА** `testdata/` добавлен в PATH
-- **ТОГДА** команда `opencode` ДОЛЖНА вызывать mock вместо реального opencode
+- **ТОГДА** команда `opencode` MUST вызывать mock вместо реального opencode

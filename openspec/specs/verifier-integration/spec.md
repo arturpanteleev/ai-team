@@ -5,23 +5,23 @@
 ## Requirements
 
 ### Requirement: Def.yaml для verifier
-Агент verifier ДОЛЖЕН иметь `def.yaml` с определением inputs/outputs.
+Агент verifier MUST иметь `def.yaml` с определением inputs/outputs.
 
 #### Scenario: Структура def.yaml
 - **КОГДА** создаётся `agents/verifier/def.yaml`
-- **ТОГДА** def.yaml ДОЛЖЕН содержать:
+- **ТОГДА** def.yaml MUST содержать:
   - `name: verifier`
   - `description: Unified verification pass`
   - `runtime: agentcli`
-  - `inputs`: proposal, specs, review, test-report
+  - `inputs`: proposal, specs, review, test-report, controller candidate evidence
   - `outputs`: verification
 
 ### Requirement: Prompt для verifier
-Агент verifier ДОЛЖЕН иметь `prompt.md` с инструкциями verification pass.
+Агент verifier MUST иметь `prompt.md` с инструкциями verification pass.
 
 #### Scenario: Структура промпта
 - **КОГДА** создаётся `agents/verifier/prompt.md`
-- **ТОГДА** промпт ДОЛЖЕН содержать:
+- **ТОГДА** промпт MUST содержать:
   - роль: "Ты — Verifier. Твоя задача — unified verification pass."
   - инструкции по проверке AC
   - инструкции по self-review
@@ -29,8 +29,8 @@
   - требование на русский язык для verification.md
 
 ### Requirement: Интеграция в registry
-Verifier ДОЛЖЕН быть добавлен в `Registry.DefaultPipeline()`.
+Verifier MUST быть добавлен в `Registry.DefaultPipeline()`.
 
 #### Scenario: Default pipeline
 - **КОГДА** registry загружает default pipeline
-- **ТОГДА** pipeline ДОЛЖЕН содержать: analyst → architect → coder → reviewer → tester → verifier → deployer
+- **ТОГДА** pipeline MUST содержать: analyst → architect → coder → reviewer → tester → verifier → deployer

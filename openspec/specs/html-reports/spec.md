@@ -1,40 +1,37 @@
-## ADDED Requirements
+## Purpose
 
-### Requirement: Stage HTML report
-Система ДОЛЖНА генерировать HTML-отчёт после завершения каждого агента.
+Run/attempt-aware HTML reports без ложного зелёного статуса.
 
-#### Scenario: Report создаётся после каждого этапа
-- **КОГДА** агент завершает выполнение (успешно или с ошибкой)
-- **ТОГДА** система ДОЛЖНА создать `.ai-team/reports/{feature}/{agent}/index.html`
-- **И** отчёт ДОЛЖЕН содержать: имя агента, статус (✓/✗), время начала и завершения, список входных артефактов (с ссылками на .md), список выходных артефактов (с ссылками на .md), описание ошибки (если есть)
+## Requirements
 
-### Requirement: Итоговый сводный отчёт
-Система ДОЛЖНА генерировать итоговый HTML-отчёт со сводкой по всем этапам.
+### Requirement: Stage attempt report
+После каждой попытки система MUST создать stage report с run_id, attempt_id, status, execution, decision, outcome, verdict, duration, error, artifacts, deterministic checks, mutations и delivery results.
 
-#### Scenario: Final report после пайплайна
-- **КОГДА** пайплайн завершается (успешно или с ошибкой)
-- **ТОГДА** система ДОЛЖНА создать `.ai-team/reports/{feature}/index.html`
-- **И** отчёт ДОЛЖЕН содержать: таблицу со всеми этапами (имя, статус, входы, выходы), навигацию по этапам (ссылки на /{agent}/index.html), общий статус пайплайна, время выполнения
+#### Scenario: Required check упал
+- **КОГДА** LLM verdict положителен, но required check завершился ненулевым exit code
+- **ТОГДА** отчёт MUST показывать failed outcome, command, exit code и reason
 
-### Requirement: Ссылки на md-артефакты в отчётах
-HTML-отчёты ДОЛЖНЫ ссылаться на соответствующие .md файлы артефактов.
+#### Scenario: Attempt invalidated
+- **КОГДА** loopback заменил попытку
+- **ТОГДА** итоговый отчёт MUST показывать её как Invalidated, а не Passed или Failed
 
-#### Scenario: Ссылка на proposal.md в отчёте analyst
-- **КОГДА** отчёт analyst содержит ссылку на proposal
-- **ТОГДА** ссылка ДОЛЖНА вести на `.ai-team/artifacts/{feature}/proposal.md`
-- **И** ссылка ДОЛЖНА быть относительной (чтобы отчёты работали без сервера)
+### Requirement: Final report
+При любом terminal outcome система MUST сформировать итоговый отчёт со всеми попытками и overall status.
 
+#### Scenario: Stopped delivery approval
+- **КОГДА** delivery plan создан, но approval отсутствует
+- **ТОГДА** final report MUST показывать run stopped и delivery attempt skipped
 
-### Requirement: Stage summary в HTML
-HTML-шаблон stage.html ДОЛЖЕН отображать summary из `.stage-summary/{agent}.md`.
+### Requirement: Immutable publication
+После генерации controller MUST скопировать report tree в immutable run directory.
 
-#### Scenario: Summary в stage-отчёте
-- **КОГДА** открывается stage.html для агента
-- **ТОГДА** страница ДОЛЖНА содержать секцию Summary с текстом из .stage-summary файла
+#### Scenario: Более новый run той же фичи
+- **КОГДА** live report перезаписан новым run
+- **ТОГДА** immutable report старого run MUST сохранить прежнее содержимое
 
-### Requirement: Summary в итоговом отчёте
-HTML-шаблон final.html ДОЛЖЕН включать summary для каждого этапа.
+### Requirement: Stage summary
+Report MAY показывать свежий `.stage-summary/{agent}.md`, но stale summary из предыдущей попытки MUST быть удалён до запуска этапа.
 
-#### Scenario: Колонка summary в итоговой таблице
-- **КОГДА** открывается final.html
-- **ТОГДА** таблица этапов ДОЛЖНА содержать колонку Summary
+#### Scenario: Summary не создан
+- **КОГДА** текущая попытка не публикует summary
+- **ТОГДА** отчёт MUST NOT переиспользовать старый summary

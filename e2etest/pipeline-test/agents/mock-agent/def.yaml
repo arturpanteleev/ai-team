@@ -1,6 +1,7 @@
 name: mock-agent
 description: Mock agent for pipeline tests
 runtime: agentcli
+mutation: none
 cli: opencode
 prompt_file: prompt.md
 inputs: {}

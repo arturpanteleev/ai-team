@@ -1,75 +1,38 @@
-## ADDED Requirements
+## Purpose
 
-### Requirement: Ролевая конфигурация в config.yaml
-`config.yaml` ДОЛЖЕН поддерживать переопределение model, effort, cli на уровне каждого агента в пайплайне.
+Версионированная, строгая конфигурация ролей, checkpoints и детерминированных проверок.
 
-#### Scenario: Парсинг нового формата pipeline
-- **КОГДА** `config.yaml` содержит `pipeline` как массив объектов с полем `name`
-- **ТОГДА** каждый элемент ДОЛЖЕН парситься как структура `AgentConfig` с полями: `name` (обязательно), `model`, `effort`, `cli`
-- **И** если поля `model`, `effort`, `cli` не заданы — ДОЛЖНЫ использоваться глобальные значения
+## Requirements
 
-#### Scenario: Обратная совместимость старого формата
-- **КОГДА** `config.yaml` содержит `pipeline` как массив строк (например `[analyst, coder]`)
-- **ТОГДА** каждая строка ДОЛЖНА интерпретироваться как имя агента
-- **И** model/effort/cli для каждого агента ДОЛЖНЫ браться из глобальных полей конфига
+### Requirement: Strict schema
+Config loader MUST отклонять неизвестные и дублирующиеся поля, дополнительные YAML documents, повторяющиеся этапы и неизвестные ссылки loopback.
 
-### Requirement: Передача ролевой конфигурации в пайплайн
-Система ДОЛЖНА передавать индивидуальные настройки (model, effort, cli) при запуске каждого агента.
+#### Scenario: Опечатка поля
+- **КОГДА** config содержит `gate_afer`
+- **ТОГДА** загрузка MUST завершиться ошибкой до создания run
 
-#### Scenario: Запуск агента с индивидуальной моделью
-- **КОГДА** конфиг coder-а указывает `model: claude-opus-4-20250514`
-- **ТОГДА** пайплайн ДОЛЖЕН запустить coder с указанной моделью
-- **И** это НЕ ДОЛЖНО влиять на модель других агентов
+### Requirement: Ролевые overrides
+Каждый pipeline item MUST поддерживать `name`, `model`, `effort`, `cli`, `timeout`, `max_retries`, `loopback_to`, `on_negative_verdict`, checkpoint fields и `checks`.
 
-### Requirement: Effort per agent
-Система ДОЛЖНА поддерживать три уровня effort: `low`, `medium`, `high`.
+#### Scenario: Global fallback
+- **КОГДА** model, effort или cli не задан на этапе
+- **ТОГДА** MUST использоваться соответствующее глобальное значение
 
-#### Scenario: Передача effort агенту
-- **КОГДА** конфиг агента указывает `effort: high`
-- **ТОГДА** пайплайн ДОЛЖЕН передать `effort=high` в CLI аргументы агента
-- **И** если effort не указан — ДОЛЖНО использоваться глобальное значение или `medium` по умолчанию
+#### Scenario: Effort
+- **КОГДА** effort равен low, medium или high
+- **ТОГДА** runtime MUST передать это значение в служебные требования prompt
+- **И** неизвестное значение MUST быть отклонено
 
+### Requirement: Deterministic checks config
+Каждый check MUST задавать уникальное имя, class, argv-массив command, policy required или optional, а также MAY задавать timeout и confined working_dir.
 
-### Requirement: Поле transition в AgentConfig
-Конфиг ДОЛЖЕН поддерживать поле `transition` для каждого агента.
+#### Scenario: Shell-строка вместо argv
+- **КОГДА** command не является непустым YAML-массивом
+- **ТОГДА** config MUST быть отклонён
 
-#### Scenario: transition задан
-- **КОГДА** конфиг агента содержит `transition: by_confirm`
-- **ТОГДА** система ДОЛЖНА использовать это значение при выборе поведения
+### Requirement: Обратная совместимость
+Отсутствующий `schema_version` MUST интерпретироваться как legacy version 1; новые конфиги MUST сериализоваться с текущей schema version.
 
-### Requirement: Поле max_retries в AgentConfig
-Конфиг ДОЛЖЕН поддерживать поле `max_retries` для каждого агента.
-
-#### Scenario: max_retries задан
-- **КОГДА** конфиг агента содержит `max_retries: 2`
-- **ТОГДА** система ДОЛЖНА разрешить до 2 ретраев для этого агента
-
-### Requirement: Поле gate_after в AgentConfig
-Конфиг ДОЛЖЕН поддерживать поле `gate_after` для каждого агента.
-
-#### Scenario: gate_after задан
-- **КОГДА** конфиг агента содержит `gate_after: true`
-- **ТОГДА** pipeline ДОЛЖЕН остановиться после этого агента и запросить подтверждение
-
-#### Scenario: gate_after не задан
-- **КОГДА** конфиг агента не содержит `gate_after`
-- **ТОГДА** pipeline ДОЛЖЕН работать без gate после этого агента
-
-### Requirement: Поле gate_before в AgentConfig
-Конфиг ДОЛЖЕН поддерживать поле `gate_before` для каждого агента.
-
-#### Scenario: gate_before задан
-- **КОГДА** конфиг агента содержит `gate_before: true`
-- **ТОГДА** pipeline ДОЛЖЕН остановиться перед этим агентом и запросить подтверждение
-
-#### Scenario: gate_before не задан
-- **КОГДА** конфиг агента не содержит `gate_before`
-- **ТОГДА** pipeline ДОЛЖЕН работать без gate перед этим агентом
-
-### Requirement: Обратная совместимость формата pipeline с gate
-Существующие конфиги с массивом строк ДОЛЖНЫ продолжать работать без gate-точек.
-
-#### Scenario: Старый формат
-- **КОГДА** config.yaml содержит `pipeline: [analyst, architect, coder]`
-- **ТОГДА** gate_after и gate_before ДОЛЖНЫ быть false по умолчанию
-- **И** pipeline ДОЛЖЕН работать как раньше
+#### Scenario: Pipeline как массив строк
+- **КОГДА** legacy config содержит `pipeline: [analyst, coder]`
+- **ТОГДА** строки MUST быть нормализованы в AgentConfig с глобальными fallback values

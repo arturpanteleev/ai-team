@@ -20,11 +20,15 @@ func NewPipelineStatus(project, feature string, total int) *PipelineStatus {
 	}
 }
 
+// StatusWriter — writer для вывода агентов: перерисовывает статус-бар
+// после каждой записи (persistent status bar).
 func (ps *PipelineStatus) StatusWriter() *StatusWriter {
 	return ps.writer
 }
 
+// StartAgent отмечает начало этапа index (1-based): выполнено index-1 из total.
 func (ps *PipelineStatus) StartAgent(index int, agent string) {
+	ps.bar.AdvanceTo(index-1, agent)
 	text := ps.bar.BarText(agent)
 	ps.writer.SetBar(text)
 	if IsTerminal() {
@@ -32,15 +36,10 @@ func (ps *PipelineStatus) StartAgent(index int, agent string) {
 	}
 }
 
+// DoneAgent отмечает завершение этапа.
 func (ps *PipelineStatus) DoneAgent(agent string) {
-	text := ps.bar.BarText(agent)
-	ps.writer.SetBar(text)
-}
-
-func (ps *PipelineStatus) Advance(index int, agent string) {
-	ps.bar.AdvanceTo(index, agent)
-	text := ps.bar.BarText(agent)
-	ps.writer.SetBar(text)
+	ps.bar.Next(agent)
+	ps.writer.SetBar(ps.bar.BarText(agent))
 }
 
 func (ps *PipelineStatus) Finalize() {

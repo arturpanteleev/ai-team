@@ -7,6 +7,18 @@ import styles from './Dashboard.module.css';
 
 type Filter = 'all' | PipelineStatus;
 
+const filters: Filter[] = [
+  'all',
+  'running',
+  'completed',
+  'completed_with_warnings',
+  'failed',
+  'blocked',
+  'stopped',
+  'canceled',
+  'interrupted',
+];
+
 export function Dashboard() {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
@@ -35,6 +47,14 @@ export function Dashboard() {
     },
   });
 
+  // CLI пишет в SQLite из отдельного процесса и не может использовать
+  // in-process Hub, поэтому polling остаётся source of truth даже когда
+  // dashboard был открыт до появления первого run.
+  useEffect(() => {
+    const t = window.setInterval(fetchRuns, 5000);
+    return () => window.clearInterval(t);
+  }, [fetchRuns]);
+
   const filtered = filter === 'all' ? runs : runs.filter((r) => r.status === filter);
 
   return (
@@ -42,7 +62,7 @@ export function Dashboard() {
       <div className={styles.header}>
         <h1 className={styles.title}>Pipeline Runs</h1>
         <div className={styles.filters}>
-          {(['all', 'running', 'completed', 'failed'] as Filter[]).map((f) => (
+          {filters.map((f) => (
             <button
               key={f}
               className={`${styles.filterBtn} ${filter === f ? styles.active : ''}`}

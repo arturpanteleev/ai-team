@@ -1,8 +1,9 @@
 package ui
 
 import (
-	"fmt"
 	"os"
+
+	"github.com/mattn/go-isatty"
 )
 
 const (
@@ -23,8 +24,8 @@ func Colorize(text, color string) string {
 }
 
 func IsTerminal() bool {
-	stat, _ := os.Stdout.Stat()
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	fd := os.Stdout.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
 func ColoredStatus(success bool) string {
@@ -38,21 +39,14 @@ func ColoredStatusBlocked() string {
 	return Colorize("⊘", ColorYellow)
 }
 
-func FormatTime(duration interface{}) string {
-	switch d := duration.(type) {
-	case float64:
-		if d < 60 {
-			return fmt.Sprintf("%.1fs", d)
-		}
-		return fmt.Sprintf("%.0fm%.0fs", d/60, float64(int(d)%60))
-	}
-	return ""
-}
-
+// Truncate обрезает строку до maxLen рун (безопасно для UTF-8).
 func Truncate(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
 	}
 	return string(runes[:maxLen-3]) + "..."
 }

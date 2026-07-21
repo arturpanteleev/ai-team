@@ -1,36 +1,37 @@
 ## Purpose
 
-HTTP-сервер для web UI — chi router, static file serving, CORS.
+HTTP-сервер для локального web UI — chi router и static file serving.
 
 ## Requirements
 
 ### Requirement: HTTP-сервер
-Система ДОЛЖНА предоставить HTTP-сервер для обслуживания API и статических файлов.
+Система MUST предоставить HTTP-сервер для обслуживания API и статических файлов.
 
 #### Scenario: Запуск сервера
 - **КОГДА** пользователь запускает `ai-team web --port 8080`
-- **ТОГДА** HTTP-сервер ДОЛЖЕН запуститься на порту 8080
+- **ТОГДА** HTTP-сервер MUST запуститься на порту 8080
 - **И** обслуживать API endpoints на `/api/*`
 - **И** обслуживать статические файлы frontend на `/`
 
 #### Scenario: Порт по умолчанию
 - **КОГДА** порт не указан
-- **ТОГДА** сервер ДОЛЖЕН использовать порт 8080
+- **ТОГДА** сервер MUST использовать порт 8080
 
 #### Scenario: Graceful shutdown
 - **КОГДА** пользователь нажимает Ctrl+C
-- **ТОГДА** сервер ДОЛЖЕН корректно завершить работу
+- **ТОГДА** сервер MUST корректно завершить работу
 
 ### Requirement: SPA fallback
-Сервер ДОЛЖЕН поддерживать клиентскую маршрутизацию (SPA).
+Сервер MUST поддерживать клиентскую маршрутизацию (SPA).
 
 #### Scenario: Несуществующий маршрут
 - **КОГДА** клиент запрашивает маршрут, не являющийся API или статическим файлом
-- **ТОГДА** сервер ДОЛЖЕН вернуть index.html для обработки клиентским роутером
+- **ТОГДА** сервер MUST вернуть index.html для обработки клиентским роутером
 
-### Requirement: CORS middleware
-Сервер ДОЛЖЕН поддерживать CORS для development frontend.
+### Requirement: Local-only security boundary
+CLI MUST по умолчанию bind web server к `127.0.0.1`, а browser WebSocket MUST принимать только same-origin connection.
 
-#### Scenario: CORS headers
-- **КОГДА** frontend запущен отдельно (localhost:5173)
-- **ТОГДА** сервер ДОЛЖЕН добавлять CORS headers для dev requests
+#### Scenario: Cross-origin browser request
+- **КОГДА** запрос приходит с постороннего browser origin
+- **ТОГДА** сервер MUST NOT добавлять permissive CORS headers
+- **И** WebSocket upgrade MUST быть отклонён

@@ -17,14 +17,47 @@
   color: white;
 }
 
+.passed {
+  background: #22c55e;
+  color: white;
+}
+
+.stopped {
+  background: #64748b;
+  color: white;
+}
+
 .failed {
   background: #ef4444;
+  color: white;
+}
+
+.interrupted {
+  background: #7c3aed;
   color: white;
 }
 
 .blocked {
   background: #f59e0b;
   color: black;
+}
+
+.rejected,
+.canceled {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.warning,
+.completed_with_warnings,
+.stopped {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.invalidated {
+  background: rgba(8, 145, 178, 0.12);
+  color: #0891b2;
 }
 
 .pending {

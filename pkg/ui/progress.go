@@ -7,10 +7,10 @@ import (
 )
 
 type ProgressBar struct {
-	feature   string
-	total     int
-	current   int
-	barWidth  int
+	feature  string
+	total    int
+	current  int
+	barWidth int
 }
 
 func NewProgressBar(feature string, total int) *ProgressBar {
@@ -22,41 +22,31 @@ func NewProgressBar(feature string, total int) *ProgressBar {
 	}
 }
 
+// Next увеличивает счётчик выполненных этапов.
 func (pb *ProgressBar) Next(agent string) {
-	pb.current++
+	if pb.current < pb.total {
+		pb.current++
+	}
 	pb.render(agent)
 }
 
+// AdvanceTo устанавливает счётчик (loopback может откатывать назад).
 func (pb *ProgressBar) AdvanceTo(index int, agent string) {
+	if index < 0 {
+		index = 0
+	}
+	if index > pb.total {
+		index = pb.total
+	}
 	pb.current = index
 	pb.render(agent)
-}
-
-func (pb *ProgressBar) Clear() {
-	if IsTerminal() {
-		fmt.Print("\033[2K\r")
-	}
 }
 
 func (pb *ProgressBar) render(agent string) {
 	if !IsTerminal() {
 		return
 	}
-	ratio := float64(pb.current) / float64(pb.total)
-	filled := int(ratio * float64(pb.barWidth))
-	if filled > pb.barWidth {
-		filled = pb.barWidth
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.barWidth-filled)
-
-	line := fmt.Sprintf("%s[ai-team]%s %s | %s%s (%d/%d) %s",
-		ColorBold, ColorReset,
-		Colorize(pb.feature, ColorCyan),
-		Colorize(agent, ColorYellow), ColorReset,
-		pb.current, pb.total,
-		bar,
-	)
-	fmt.Print("\033[s\033[K" + line + "\033[u")
+	fmt.Print("\033[s\033[K" + pb.BarText(agent) + "\033[u")
 }
 
 func (pb *ProgressBar) Done() {
@@ -66,11 +56,15 @@ func (pb *ProgressBar) Done() {
 		fmt.Println()
 	}
 }
+
 func (pb *ProgressBar) BarText(agent string) string {
 	if !IsTerminal() {
 		return ""
 	}
-	ratio := float64(pb.current) / float64(pb.total)
+	ratio := 0.0
+	if pb.total > 0 {
+		ratio = float64(pb.current) / float64(pb.total)
+	}
 	filled := int(ratio * float64(pb.barWidth))
 	if filled > pb.barWidth {
 		filled = pb.barWidth
@@ -85,9 +79,10 @@ func (pb *ProgressBar) BarText(agent string) string {
 	)
 }
 
+// StatusWriter перерисовывает статус-бар после каждой записи вывода.
 type StatusWriter struct {
-	mu       sync.Mutex
-	barText  string
+	mu      sync.Mutex
+	barText string
 }
 
 func NewStatusWriter() *StatusWriter {
@@ -111,5 +106,5 @@ func (w *StatusWriter) Write(p []byte) (int, error) {
 	if IsTerminal() && w.barText != "" {
 		fmt.Print("\033[s\033[K" + w.barText + "\033[u")
 	}
-	return n, nil
+	return len(p), nil
 }

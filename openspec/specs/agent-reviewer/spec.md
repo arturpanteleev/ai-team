@@ -1,26 +1,38 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: Reviewer проверяет код на соответствие спецификациям
-Агент Reviewer ДОЛЖЕН прочитать продуктовые спецификации и проверить реализацию.
+Спецификация определяет нормативное поведение capability `agent-reviewer`.
 
-#### Сценарий: Reviewer создаёт отчёт ревью
+## Requirements
+### Requirement: Reviewer проверяет код на соответствие спецификациям
+Агент Reviewer MUST прочитать продуктовые спецификации и проверить реализацию.
+
+#### Scenario: Reviewer создаёт отчёт ревью
 - **КОГДА** Reviewer запускается
-- **ТОГДА** он ДОЛЖЕН прочитать `.ai-team/artifacts/{feature}/specs/`
+- **ТОГДА** он MUST прочитать `.ai-team/artifacts/{feature}/specs/`
+- **И** прочитать controller-owned `.ai-team/artifacts/{feature}/.control/review-candidate.json`
 - **И** проверить реализованный код в целевом проекте
 - **И** создать `.ai-team/artifacts/{feature}/review.md`
 
-### Требование: Категории ревью
-Ревью ДОЛЖНО категоризировать проблемы как APPROVED, CHANGES_REQUESTED или REJECTED.
+### Requirement: Категории ревью
+Ревью MUST категоризировать проблемы как APPROVED, CHANGES_REQUESTED или REJECTED.
 
-#### Сценарий: Вердикт ревью
+#### Scenario: Вердикт ревью
 - **КОГДА** ревью завершено
-- **ТОГДА** review.md ДОЛЖЕН содержать:
+- **ТОГДА** review.md MUST содержать:
   - Общий вердикт: APPROVED / CHANGES_REQUESTED / REJECTED
   - Список проблем по серьёзности
   - Ссылки на требования спецификации и критерии приёмки
   - Замечания по качеству кода и безопасности
 
-#### Сценарий: Блокирующие проблемы
+#### Scenario: Блокирующие проблемы
 - **КОГДА** ревьюер находит блокирующие проблемы
-- **ТОГДА** вердикт ДОЛЖЕН быть REJECTED или CHANGES_REQUESTED
-- **И** пайплайн ДОЛЖЕН остановиться и сообщить о проблемах
+- **ТОГДА** вердикт MUST быть REJECTED или CHANGES_REQUESTED
+- **И** пайплайн MUST остановиться и сообщить о проблемах
+
+### Requirement: Reviewer связан с candidate identity
+Reviewer MUST получить exact workspace digest, changed paths, fingerprints и
+tracked patch SHA-256 от controller.
+
+#### Scenario: Candidate изменён после review
+- **КОГДА** workspace digest больше не совпадает с reviewed candidate
+- **ТОГДА** tester MUST NOT принимать прежний review как относящийся к новому candidate

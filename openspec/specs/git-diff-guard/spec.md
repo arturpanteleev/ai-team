@@ -1,37 +1,46 @@
-## ADDED Requirements
+## Purpose
 
-### Requirement: Git diff guard для coder-а
-Система ДОЛЖНА проверять git diff после выполнения coder-а (и любого агента с пустыми `outputs`).
+Спецификация определяет нормативное поведение capability `git-diff-guard` как общего per-attempt mutation guard.
+
+## Requirements
+
+### Requirement: Атрибутированный mutation guard
+Система MUST сравнить baseline и итоговое состояние после любого этапа, definition которого явно объявляет mutation policy.
 
 #### Scenario: Coder не создал изменений
 - **КОГДА** coder завершается с кодом 0
-- **И** `git diff --quiet` в targetDir показывает, что нет изменений в отслеживаемых файлах
-- **И** `git status --porcelain` показывает, что нет новых неотслеживаемых файлов
-- **ТОГДА** пайплайн ДОЛЖЕН остановиться с ошибкой `"coder не создал изменений в проекте"`
-- **И** последующие агенты НЕ ДОЛЖНЫ выполняться
+- **И** baseline текущей попытки не отличается от итогового состояния
+- **ТОГДА** пайплайн MUST остановиться с ошибкой `coder не создал изменений в проекте`
+- **И** последующие агенты MUST NOT выполняться
 
-#### Scenario: Coder создал файлы
-- **КОГДА** coder завершается с кодом 0
-- **И** в targetDir появились новые файлы (например `background.go`)
-- **ТОГДА** пайплайн ДОЛЖЕН продолжить выполнение
+#### Scenario: Разрешённые изменения
+- **КОГДА** stage изменил или создал файлы только в `allowed_paths`
+- **ТОГДА** mutations MUST содержать нормализованные workspace-relative пути
+- **И** пайплайн MUST продолжить выполнение
 
-#### Scenario: Coder изменил существующие файлы
-- **КОГДА** coder завершается с кодом 0
-- **И** `git diff --quiet` возвращает ненулевой код (есть изменения)
-- **ТОГДА** пайплайн ДОЛЖЕН продолжить выполнение
+#### Scenario: Мутация вне scope
+- **КОГДА** попытка изменила файл вне `allowed_paths`
+- **ТОГДА** попытка MUST завершиться ошибкой независимо от exit code runtime
 
-### Requirement: Проверка наличия git
-Система ДОЛЖНА проверять, является ли target-проект git-репозиторием, перед запуском git diff.
+### Requirement: Проект без Git не ослабляет контроль
+Если targetDir не является Git-репозиторием, система MUST использовать полный confined workspace snapshot, исключая только controller-owned `.git` и `.ai-team`.
 
 #### Scenario: Проект без git
-- **КОГДА** targetDir не является git-репозиторием (`git rev-parse --git-dir` ошибка)
-- **ТОГДА** система ДОЛЖНА вывести warning
-- **И** git diff guard ДОЛЖЕН быть пропущен
+- **КОГДА** stage требует diff или является read-only, а targetDir не является Git-репозиторием
+- **ТОГДА** система MUST сравнить хэши файлов и symlink targets до и после stage
+- **И** MUST NOT пропускать guard
 
-### Requirement: Проверка только для агентов с пустыми outputs
-Git diff guard ДОЛЖЕН применяться только к агентам, у которых `outputs: {}` в `def.yaml`.
+### Requirement: Существующая грязь не считается изменением stage
+Baseline MUST фиксироваться непосредственно перед stage, а mutations MUST содержать только delta этой попытки.
 
-#### Scenario: Агент с непустыми outputs
-- **КОГДА** у агента есть выходные артефакты в `def.yaml`
-- **ТОГДА** git diff guard НЕ ДОЛЖЕН применяться
-- **И** проверка артефактов через `os.Stat` работает как обычно
+#### Scenario: Pre-existing dirty workspace
+- **КОГДА** до stage уже существует изменённый файл
+- **И** stage его не изменяет
+- **ТОГДА** файл MUST NOT считаться mutation текущей попытки и MUST NOT попасть в delivery plan
+
+### Requirement: Read-only этапы контролируются
+Этап с `mutation: read_only` MUST завершиться ошибкой при любой workspace mutation.
+
+#### Scenario: Reviewer изменил исходник
+- **КОГДА** read-only reviewer меняет файл проекта
+- **ТОГДА** контроллер MUST отклонить попытку и остановить downstream execution

@@ -27,7 +27,6 @@ export function PipelineCard({ run }: PipelineCardProps) {
         <span className={styles.feature}>{run.feature}</span>
         <StatusBadge status={run.status} />
       </div>
-      <div className={styles.task}>{run.task}</div>
       <div className={styles.footer}>
         <span>{time}</span>
         <span className={styles.duration}>{duration}</span>

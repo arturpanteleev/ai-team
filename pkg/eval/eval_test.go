@@ -1,8 +1,11 @@
 package eval
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,6 +20,75 @@ func TestNewEval(t *testing.T) {
 	}
 	if len(e.Criteria) != 2 {
 		t.Errorf("expected 2 criteria, got %d", len(e.Criteria))
+	}
+}
+
+func TestEvalQualityIsStrictStatisticalAdvisoryAndIsolated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "artifact.md")
+	if err := os.WriteFile(artifactPath, []byte("artifact"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pwdPath := filepath.Join(dir, "judge-pwd")
+	t.Setenv("AI_TEAM_EVAL_PWD", pwdPath)
+	judge := filepath.Join(dir, "judge")
+	if err := os.WriteFile(judge, []byte("#!/bin/sh\npwd > \"$AI_TEAM_EVAL_PWD\"\necho '**Оценка:** 8'\necho '**Комментарий:** хорошо'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	evaluation := New("analyst", artifactPath, nil)
+	evaluation.CLI = judge
+	evaluation.Dir = dir
+	quality, err := evaluation.RunQuality(context.Background(), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quality.Advisory || quality.Layer != LayerLLMQuality || quality.Median != 8 || quality.Mean != 8 || len(quality.Samples) != 3 {
+		t.Fatalf("quality result: %+v", quality)
+	}
+	judgePWD, err := os.ReadFile(pwdPath)
+	if err != nil || strings.TrimSpace(string(judgePWD)) == dir {
+		t.Fatalf("judge должен работать в isolated dir: pwd=%q err=%v", judgePWD, err)
+	}
+	outputPath := filepath.Join(dir, "evidence", "eval.json")
+	if err := WriteQualityResult(outputPath, quality); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(outputPath); err != nil || !strings.Contains(string(data), `"advisory": true`) {
+		t.Fatalf("JSON evidence: %s err=%v", data, err)
+	}
+}
+
+func TestStrictJudgeOutputRejectsAmbiguity(t *testing.T) {
+	for name, output := range map[string]string{
+		"missing comment": "**Оценка:** 8\n",
+		"multiple scores": "**Оценка:** 8\n**Оценка:** 9\n**Комментарий:** x\n",
+		"empty comment":   "**Оценка:** 8\n**Комментарий:**\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := parseJudgeOutput(output); err == nil {
+				t.Fatal("ambiguous output должен быть отклонён")
+			}
+		})
+	}
+}
+
+func TestLayeredSuiteAndLLMAdvisoryInvariant(t *testing.T) {
+	suite, err := RunSuite(context.Background(), []Case{
+		{Name: "contract", Layer: LayerDeterministic, Run: func(context.Context) error { return nil }},
+		{Name: "behavior", Layer: LayerBehavioral, Run: func(context.Context) error { return errors.New("fixture failed") }},
+		{Name: "fault", Layer: LayerFault, Run: func(context.Context) error { return nil }},
+		{Name: "judge", Layer: LayerLLMQuality, Advisory: true, Run: func(context.Context) error { return nil }},
+	})
+	if err == nil || len(suite.Cases) != 4 || suite.Cases[1].Passed || !suite.Cases[3].Advisory {
+		t.Fatalf("layered suite: %+v err=%v", suite, err)
+	}
+	if _, err := RunSuite(context.Background(), []Case{{
+		Name: "unsafe-hard-gate", Layer: LayerLLMQuality, Advisory: false, Run: func(context.Context) error { return nil },
+	}}); err == nil {
+		t.Fatal("uncalibrated LLM score cannot be a hard gate")
 	}
 }
 

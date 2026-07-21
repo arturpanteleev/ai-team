@@ -16,9 +16,16 @@ export function ArtifactViewer() {
 
   useEffect(() => {
     if (!path) return;
+    const [runId, ...artifactParts] = path.split('/');
+    if (!runId || artifactParts.length === 0) {
+      setError('Invalid run-aware artifact path');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    getArtifact(path)
-      .then((data) => setContent(data.content))
+    setError(null);
+    getArtifact(runId, artifactParts.join('/'))
+      .then((data) => setContent(data))
       .catch(() => setError('Failed to load artifact'))
       .finally(() => setLoading(false));
   }, [path]);
@@ -35,7 +42,7 @@ export function ArtifactViewer() {
       <Link to={-1 as any} className={styles.back}>← Назад</Link>
 
       <div className={styles.header}>
-        <span className={styles.path}>{decodeURIComponent(path || '')}</span>
+        <span className={styles.path}>{path || ''}</span>
         <button className={styles.toggle} onClick={toggleView}>
           {isRendered ? 'Raw' : 'Rendered'}
         </button>

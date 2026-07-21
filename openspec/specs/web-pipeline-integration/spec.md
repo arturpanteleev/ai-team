@@ -1,30 +1,28 @@
 ## Purpose
 
-Интеграция web UI с пайплайном — WebNotifier, event emitter, запись в SQLite.
+Проекция доменного lifecycle workflow в SQLite и web UI.
 
 ## Requirements
 
-### Requirement: WebNotifier
-Система ДОЛЖНА реализовать Notifier для записи в SQLite и push через WebSocket.
+### Requirement: Recorder adapter
+Pipeline MUST передавать recorder-у run_id, attempt_id, точные timestamps и terminal domain state.
 
-#### Scenario: Notify stage completed
-- **КОГДА** pipeline вызывает `notifier.Notify(stageResult)`
-- **ТОГДА** WebNotifier ДОЛЖЕН:
-  - обновить запись stage в SQLite (статус, duration, error)
-  - broadcast WebSocket event
+#### Scenario: Stage lifecycle
+- **КОГДА** попытка начинается и завершается
+- **ТОГДА** recorder MUST создать running row по attempt_id
+- **И** MUST записать status, execution, decision, outcome, error, verdict, artifacts, checks, mutations и delivery
 
-#### Scenario: Pipeline started
-- **КОГДА** pipeline запускается
-- **ТОГДА** WebNotifier ДОЛЖЕН создать запись в pipeline_runs
+### Requirement: Projection failure isolation
+Ошибка web projection MUST быть явно залогирована, но MUST NOT менять результат immutable workflow.
 
-#### Scenario: Pipeline completed
-- **КОГДА** pipeline завершается
-- **ТОГДА** WebNotifier ДОЛЖЕН обновить запись в pipeline_runs (status, completed_at)
+#### Scenario: SQLite недоступна
+- **КОГДА** запись lifecycle event завершается ошибкой
+- **ТОГДА** recorder MUST отключить дальнейшую projection для run
+- **И** filesystem evidence MUST продолжить публиковаться
 
-### Requirement: Event emitter в pipeline
-Pipeline ДОЛЖЕН уведомлять web backend о stage_started events.
+### Requirement: WebSocket safety
+WebSocket MUST принимать browser connection только с same origin и MUST использовать ping/deadline для удаления мёртвых clients.
 
-#### Scenario: Stage started callback
-- **КОГДА** pipeline начинает выполнение агента
-- **ТОГДА** pipeline ДОЛЖЕН вызвать callback с событием stage_started
-- **И** передать: pipeline_id, agent_name
+#### Scenario: Медленный client
+- **КОГДА** client не читает bounded send queue
+- **ТОГДА** hub MUST отключить его без блокировки других clients

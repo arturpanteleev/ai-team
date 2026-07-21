@@ -10,9 +10,9 @@ import (
 )
 
 type mockNotifier struct {
-	calls  []StageResult
-	err    error
-	delay  time.Duration
+	calls []StageResult
+	err   error
+	delay time.Duration
 }
 
 func (m *mockNotifier) Notify(ctx context.Context, stage StageResult) error {
@@ -162,11 +162,11 @@ func TestNotifierChain_ContextCancellation(t *testing.T) {
 
 func TestStageResult_Artifacts(t *testing.T) {
 	stage := StageResult{
-		Name:         "tester",
-		Status:       StatusPassed,
-		Duration:     5 * time.Second,
-		StageIndex:   2,
-		TotalStages:  6,
+		Name:        "tester",
+		Status:      StatusPassed,
+		Duration:    5 * time.Second,
+		StageIndex:  2,
+		TotalStages: 6,
 		Inputs: []runtime.Artifact{
 			{Name: "design", Path: "/tmp/design.md"},
 		},

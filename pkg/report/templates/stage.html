@@ -14,6 +14,8 @@ th{background:#1a1a2e;color:#fff;font-weight:600;}
 tr:last-child td{border-bottom:none;}
 .status-ok{color:#2e7d32;font-weight:700;}
 .status-err{color:#c62828;font-weight:700;}
+.status-blocked{color:#e65100;font-weight:700;}
+.status-warning{color:#b26a00;font-weight:700;}
 .artifact{font-family:"SFMono-Regular",Consolas,monospace;font-size:13px;color:#1565c0;}
 .artifact a{color:#1565c0;text-decoration:none;}
 .artifact a:hover{text-decoration:underline;}
@@ -29,7 +31,12 @@ tr:last-child td{border-bottom:none;}
 <h1>{{.Agent}}</h1>
 <div class="meta">
 <strong>Feature:</strong> {{.Feature}}<br>
+<strong>Run:</strong> {{.RunID}}<br>
+<strong>Attempt:</strong> {{.AttemptID}}<br>
 <strong>Status:</strong> <span class="status-{{.StatusClass}}">{{.StatusEmoji}} {{.Status}}</span><br>
+{{if .Verdict}}<strong>Verdict:</strong> {{.Verdict}}<br>
+{{end}}{{if .Blocker}}<strong>Blocker:</strong> {{.Blocker}}<br>
+{{end}}<strong>Execution / decision / outcome:</strong> {{.Execution}} / {{.Decision}} / {{.Outcome}}<br>
 <strong>Duration:</strong> {{.Duration}}<br>
 <strong>Stage:</strong> {{.StageIndex}}/{{.TotalStages}}
 </div>
@@ -44,7 +51,7 @@ tr:last-child td{border-bottom:none;}
 <table>
 <tr><th>Name</th><th>Path</th><th>Size</th></tr>
 {{range .Inputs}}
-<tr><td>{{.Name}}</td><td class="artifact"><a href="../../artifacts/{{.RelativePath}}">{{.Path}}</a></td><td>{{.Size}} bytes</td></tr>
+<tr><td>{{.Name}}</td><td class="artifact">{{.Path}}</td><td>{{.Size}} bytes</td></tr>
 {{else}}
 <tr><td colspan="3">—</td></tr>
 {{end}}
@@ -53,10 +60,29 @@ tr:last-child td{border-bottom:none;}
 <table>
 <tr><th>Name</th><th>Path</th><th>Size</th></tr>
 {{range .Outputs}}
-<tr><td>{{.Name}}</td><td class="artifact"><a href="../../artifacts/{{.RelativePath}}">{{.Path}}</a></td><td>{{.Size}} bytes</td></tr>
+<tr><td>{{.Name}}</td><td class="artifact">{{.Path}}</td><td>{{.Size}} bytes</td></tr>
 {{else}}
 <tr><td colspan="3">—</td></tr>
 {{end}}
 </table>
+{{if .Checks}}
+<h2>Deterministic checks</h2>
+<table>
+<tr><th>Name</th><th>Class</th><th>Policy</th><th>Status</th><th>Command</th><th>Exit</th><th>Duration / reason</th></tr>
+{{range .Checks}}
+<tr><td>{{.Name}}</td><td>{{.Class}}</td><td>{{.Policy}}</td><td>{{.Status}}</td><td class="artifact">{{.Command}}</td><td>{{.ExitCode}}</td><td>{{.Duration}} {{.Reason}}</td></tr>
+{{end}}
+</table>
+{{end}}
+{{if .Mutations}}
+<h2>Attributed mutations</h2>
+<ul>{{range .Mutations}}<li class="artifact">{{.}}</li>{{end}}</ul>
+{{end}}
+{{if .Delivery}}
+<h2>Delivery</h2>
+<div class="meta"><strong>Commit:</strong> {{.Delivery.CommitSHA}}<br><strong>PR:</strong> {{.Delivery.PRURL}}<br><strong>Plan hash:</strong> {{.Delivery.PlanHash}}</div>
+<table><tr><th>Step</th><th>Status</th><th>Command</th><th>Exit</th><th>Reason</th></tr>
+{{range .Delivery.Steps}}<tr><td>{{.Step}}</td><td>{{.Status}}</td><td class="artifact">{{range .Command}}{{.}} {{end}}</td><td>{{.ExitCode}}</td><td>{{.Reason}}</td></tr>{{end}}</table>
+{{end}}
 </body>
 </html>

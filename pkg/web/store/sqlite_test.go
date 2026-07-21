@@ -1,6 +1,9 @@
 package store
 
 import (
+	"database/sql"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,11 +33,48 @@ func TestNew_CreatesTables(t *testing.T) {
 	}
 }
 
+func TestNewAppliesVersionedMigrations(t *testing.T) {
+	s := newTestStore(t)
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version <= ?", SchemaVersion).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != SchemaVersion {
+		t.Fatalf("applied migrations=%d want %d", count, SchemaVersion)
+	}
+}
+
+func TestNewRejectsNewerSchemaVersion(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "future.db")
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (999, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := New(databasePath)
+	if store != nil {
+		store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("expected future schema rejection, got %v", err)
+	}
+}
+
 func TestCreatePipelineRun(t *testing.T) {
 	s := newTestStore(t)
 
 	now := time.Now()
 	run := &PipelineRun{
+		RunID:     "run-create",
 		Feature:   "test-feature",
 		Status:    "running",
 		StartedAt: now,
@@ -45,6 +85,42 @@ func TestCreatePipelineRun(t *testing.T) {
 	}
 	if run.ID == 0 {
 		t.Error("expected ID to be set after insert")
+	}
+}
+
+func TestRunIdentityPaginationEventsAndReconciliation(t *testing.T) {
+	s := newTestStore(t)
+	first := &PipelineRun{RunID: "run-old", Feature: "first", Status: "running", StartedAt: time.Now().Add(-time.Hour)}
+	second := &PipelineRun{RunID: "run-new", Feature: "second", Status: "completed", StartedAt: time.Now()}
+	if err := s.CreatePipelineRun(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreatePipelineRun(second); err != nil {
+		t.Fatal(err)
+	}
+	stage := &Stage{PipelineRunID: first.ID, AttemptID: "001-a", StageIndex: 1, AgentName: "a", Status: "running", StartedAt: first.StartedAt}
+	if err := s.CreateStage(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(&Event{RunID: first.RunID, Sequence: 1, Type: "run_started", Timestamp: first.StartedAt}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.GetPipelineRunsPage(1, 0)
+	if err != nil || len(page) != 1 || page[0].RunID != "run-new" {
+		t.Fatalf("pagination: %+v err=%v", page, err)
+	}
+	byUID, err := s.GetPipelineRunByRunID("run-old")
+	if err != nil || byUID.ID != first.ID {
+		t.Fatalf("run identity lookup: %+v err=%v", byUID, err)
+	}
+	finished := time.Now().UTC()
+	if err := s.ReconcileInterrupted(finished); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, _ := s.GetPipelineRunByRunID("run-old")
+	stages, _ := s.GetStagesByPipelineRunID(first.ID)
+	if reconciled.Status != "interrupted" || reconciled.CompletedAt == nil || len(stages) != 1 || stages[0].Status != "interrupted" {
+		t.Fatalf("reconciliation: run=%+v stages=%+v", reconciled, stages)
 	}
 }
 

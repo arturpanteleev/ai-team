@@ -1,17 +1,17 @@
 ## ДОБАВЛЕННЫЕ Требования
 
-### Требование: Заглушка LLM Runtime
-Система ДОЛЖНА предоставить заглушку `LLMRuntime` для использования в будущем.
+### Requirement: Заглушка LLM Runtime
+Система MUST предоставить заглушку `LLMRuntime` для использования в будущем.
 
-#### Сценарий: Заглушка возвращает ошибку
+#### Scenario: Заглушка возвращает ошибку
 - **КОГДА** вызывается LLMRuntime.Execute
-- **ТОГДА** она ДОЛЖНА вернуть `ErrNotImplemented` с сообщением "LLM runtime: пока не реализовано"
+- **ТОГДА** она MUST вернуть `ErrNotImplemented` с сообщением "LLM runtime: пока не реализовано"
 
-### Требование: Выбор runtime
-Система ДОЛЖНА выбирать runtime на основе поля `runtime` в `def.yaml` агента.
+### Requirement: Выбор runtime
+Система MUST выбирать runtime на основе поля `runtime` в `def.yaml` агента.
 
-#### Сценарий: Поле runtime
+#### Scenario: Поле runtime
 - **КОГДА** у агента указано `runtime: llm`
-- **ТОГДА** система ДОЛЖНА использовать LLMRuntime
+- **ТОГДА** система MUST использовать LLMRuntime
 - **КОГДА** у агента указано `runtime: agentcli`
-- **ТОГДА** система ДОЛЖНА использовать AgentCLIRuntime
+- **ТОГДА** система MUST использовать AgentCLIRuntime

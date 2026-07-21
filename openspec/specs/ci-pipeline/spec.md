@@ -1,21 +1,29 @@
-## ДОБАВЛЕННЫЕ Требования
+## Purpose
 
-### Требование: GitHub Actions workflow
-Система ДОЛЖНА иметь GitHub Actions workflow для автоматической проверки.
+Спецификация определяет нормативное поведение capability `ci-pipeline`.
 
-#### Сценарий: Запуск на push
+## Requirements
+### Requirement: GitHub Actions workflow
+Система MUST иметь GitHub Actions workflow для автоматической проверки.
+
+#### Scenario: Запуск на push
 - **КОГДА** происходит push в master
-- **ТОГДА** workflow ДОЛЖЕН запустить `go build ./cmd/ai-team`
-- **И** запустить `go test ./...`
+- **ТОГДА** workflow MUST запустить `go build ./cmd/ai-team`
+- **И** запустить unit и E2E tests
+- **И** запустить race detector и coverage gate не ниже 60%
 - **И** запустить `go vet ./...`
+- **И** проверить gofmt и module checksums
+- **И** строго валидировать все OpenSpec contracts pinned-версией инструмента
+- **И** проверить frontend build, lint, tests и high-severity dependency audit
+- **И** выполнить Go vulnerability scan pinned-версией govulncheck
 
-#### Сценарий: Запуск на pull request
+#### Scenario: Запуск на pull request
 - **КОГДА** создаётся PR в master
-- **ТОГДА** workflow ДОЛЖЕН запустить те же шаги
+- **ТОГДА** workflow MUST запустить те же шаги
 
-### Требование: Badge
-Репозиторий ДОЛЖЕН иметь CI-badge в README.
+### Requirement: Badge
+Репозиторий MUST иметь CI-badge в README.
 
-#### Сценарий: Badge в шапке
+#### Scenario: Badge в шапке
 - **КОГДА** пользователь открывает README
-- **ТОГДА** в начале файла ДОЛЖЕН быть badge с статусом CI
+- **ТОГДА** в начале файла MUST быть badge с статусом CI

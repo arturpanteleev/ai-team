@@ -1,50 +1,33 @@
-## ADDED Requirements
+## Purpose
 
-### Requirement: Поле transition в конфигурации агента
-Каждый агент в `pipeline` конфига ДОЛЖЕН поддерживать поле `transition` со значениями `auto`, `by_confirm` или `gate`.
+Спецификация определяет переходы workflow через единый checkpoint и state-machine контракт.
 
-#### Scenario: По умолчанию auto
-- **КОГДА** `transition` не указан в конфигурации агента
-- **ТОГДА** система ДОЛЖНА использовать значение `auto`
+## Requirements
 
-#### Scenario: by_confirm останавливает пайплайн
-- **КОГДА** агент с `transition: by_confirm` завершается успешно
-- **ТОГДА** система ДОЛЖНА вывести в консоль: `Continue to <next-agent>? [Y/n/diff/summary]`
-- **И** ДОЛЖНА ожидать ввод от пользователя
+### Requirement: Переход определяется доменным состоянием
+Pipeline MUST вычислять execution, decision и outcome до применения checkpoint или loopback.
 
-#### Scenario: gate останавливает пайплайн
-- **КОГДА** агент с `transition: gate` завершается успешно
-- **И** следующий агент имеет `gate_before: true`
-- **ТОГДА** pipeline ДОЛЖЕН остановиться и показать резюме фазы
-- **И** вывести: `Gate: перед {next-agent}. Продолжить? [Y/n]`
+#### Scenario: Негативный вердикт
+- **КОГДА** попытка имеет execution=succeeded и негативный verdict
+- **ТОГДА** её outcome MUST быть rejected
+- **И** pipeline MUST применить loopback либо `on_negative_verdict`
 
-### Requirement: Варианты ответа при confirm
-Пользователь ДОЛЖЕН иметь возможность выбрать вариант продолжения.
+### Requirement: Варианты интерактивного checkpoint
+Интерактивный checkpoint MUST поддерживать `Y`, `n`, `diff` и `summary` без потери текущего состояния.
 
-#### Scenario: Y — продолжить
-- **КОГДА** пользователь вводит `Y` или пустую строку
-- **ТОГДА** пайплайн ДОЛЖЕН продолжить к следующему агенту
-
-#### Scenario: n — остановить
-- **КОГДА** пользователь вводит `n`
-- **ТОГДА** пайплайн ДОЛЖЕН завершиться досрочно
-- **И** ДОЛЖЕН быть сгенерирован итоговый отчёт
-
-#### Scenario: diff — показать изменения
+#### Scenario: diff
 - **КОГДА** пользователь вводит `diff`
-- **ТОГДА** система ДОЛЖЕНА выполнить `git diff` в targetDir
-- **И** показать вывод пользователю
-- **И** снова показать приглашение `Continue to <next-agent>? [Y/n/diff/summary]`
+- **ТОГДА** система MUST показать git diff и повторить тот же checkpoint
 
-#### Scenario: summary — показать сводку этапа
+#### Scenario: summary
 - **КОГДА** пользователь вводит `summary`
-- **ТОГДА** система ДОЛЖЕНА показать `.stage-summary/{agent}.md` если он существует
-- **И** снова показать приглашение
+- **ТОГДА** система MUST показать свежий stage summary и повторить тот же checkpoint
 
-### Requirement: Неинтерактивный режим
-Если stdin не является терминалом, `by_confirm` ДОЛЖЕН работать как `auto`.
+### Requirement: Legacy normalization
+Schema version 3 MUST отклонять legacy checkpoint fields и использовать только
+checkpoint policy. Schema versions 1 и 2 MAY принимать `transition`,
+`gate_before` и `gate_after`; version 2 мигрирует typed check configuration.
 
-#### Scenario: CI/pipe
-- **КОГДА** `ai-team run` запущен с перенаправленным stdin (pipe)
-- **ТОГДА** все `by_confirm` этапы ДОЛЖНЫ выполняться без остановки
-- **И** пользователь НЕ ДОЛЖЕН получить сообщение с ожиданием ввода
+#### Scenario: Одновременные legacy и v2 fields
+- **КОГДА** один этап задаёт legacy gate и checkpoint
+- **ТОГДА** config validation MUST завершиться ошибкой

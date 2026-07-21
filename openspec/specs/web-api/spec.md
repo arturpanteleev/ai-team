@@ -1,50 +1,35 @@
 ## Purpose
 
-REST API для web UI — endpoints для получения информации о pipeline runs, stages и артефактах.
+Run-aware REST API для истории workflow и immutable evidence.
 
 ## Requirements
 
-### Requirement: GET /api/pipelines
-Система ДОЛЖНА возвращать список всех pipeline runs.
+### Requirement: Paginated run list
+`GET /api/pipelines` MUST возвращать runs в порядке started_at DESC с параметрами `limit` от 1 до 100 и неотрицательным `offset`.
 
 #### Scenario: Успешный запрос
-- **КОГДА** клиент отправляет `GET /api/pipelines`
-- **ТОГДА** сервер ДОЛЖЕН вернуть JSON массив pipeline runs
-- **И** каждый run содержит: id, feature, status, started_at, completed_at
-- **И** runs отсортированы по started_at (новые первые)
+- **КОГДА** клиент запрашивает `/api/pipelines?limit=50&offset=0`
+- **ТОГДА** сервер MUST вернуть JSON array с `id`, `run_id`, feature, status и timestamps
+- **И** MUST вернуть общее количество в `X-Total-Count`
 
-#### Scenario: Пустая БД
-- **КОГДА** нет pipeline runs
-- **ТОГДА** сервер ДОЛЖЕН вернуть пустой массив `[]`
+#### Scenario: Невалидный limit
+- **КОГДА** limit больше 100
+- **ТОГДА** сервер MUST вернуть 400
 
-### Requirement: GET /api/pipelines/:id
-Система ДОЛЖНА возвращать детали конкретного pipeline run.
-
-#### Scenario: Успешный запрос
-- **КОГДА** клиент отправляет `GET /api/pipelines/123`
-- **ТОГДА** сервер ДОЛЖЕН вернуть JSON с:
-  - run: id, feature, status, started_at, completed_at, config_snapshot
-  - stages: массив stage с agent_name, status, duration_ms, inputs, outputs
+### Requirement: Run details
+`GET /api/pipelines/:id` MUST возвращать run и упорядоченные attempts с attempt_id, execution, decision, outcome, verdict и evidence JSON fields.
 
 #### Scenario: Run не найден
-- **КОГДА** pipeline run с id 123 не существует
-- **ТОГДА** сервер ДОЛЖЕН вернуть 404
+- **КОГДА** numeric projection id отсутствует
+- **ТОГДА** сервер MUST вернуть 404
 
-### Requirement: GET /api/pipelines/:id/artifacts
-Система ДОЛЖНА возвращать список артефактов pipeline run.
+### Requirement: Immutable artifacts
+`GET /api/pipelines/:id/artifacts` MUST перечислять evidence выбранного run, а `GET /api/runs/:runID/artifacts/:path` MUST читать только его immutable run directory.
 
-#### Scenario: Успешный запрос
-- **КОГДА** клиент отправляет `GET /api/pipelines/123/artifacts`
-- **ТОГДА** сервер ДОЛЖЕН вернуть JSON массив артефактов
-- **И** каждый артефакт содержит: name, path, size, mod_time
+#### Scenario: Фича запущена повторно
+- **КОГДА** live artifact той же фичи изменился после старого run
+- **ТОГДА** API старого run MUST вернуть старое immutable содержимое
 
-### Requirement: GET /api/artifacts/:path
-Система ДОЛЖНА возвращать содержимое артефакта.
-
-#### Scenario: Текстовый артефакт
-- **КОГДА** клиент запрашивает артефакт `.md` файл
-- **ТОГДА** сервер ДОЛЖЕН вернуть содержимое файла с Content-Type: text/markdown
-
-#### Scenario: Артефакт не найден
-- **КОГДА** файл не существует
-- **ТОГДА** сервер ДОЛЖЕН вернуть 404
+#### Scenario: Traversal или symlink
+- **КОГДА** path выходит из run root лексически или через symlink
+- **ТОГДА** сервер MUST отказать в доступе

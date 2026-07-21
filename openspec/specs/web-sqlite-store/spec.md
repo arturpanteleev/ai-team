@@ -1,43 +1,33 @@
 ## Purpose
 
-Хранение данных web UI в SQLite — pipeline runs, stages, автоматические миграции.
+Версионированная SQLite projection run/attempt/event истории.
 
 ## Requirements
 
-### Requirement: SQLite schema для pipeline runs
-Система ДОЛЖНА хранить информацию о pipeline runs в SQLite.
+### Requirement: Run and attempt projection
+SQLite MUST хранить внешний unique run_id, attempt_id, stage_index, execution, decision, outcome, verdict, checks, mutations и delivery results.
 
-#### Scenario: Таблица pipeline_runs
-- **КОГДА** pipeline запускается
-- **ТОГДА** запись ДОЛЖНА быть создана в таблице `pipeline_runs` с полями:
-  - `id` (INTEGER PRIMARY KEY)
-  - `feature` (TEXT)
-  - `status` (TEXT: running/completed/failed/blocked)
-  - `started_at` (DATETIME)
-  - `completed_at` (DATETIME, nullable)
-  - `config_snapshot` (TEXT — JSON конфига)
+#### Scenario: Попытка завершена
+- **КОГДА** controller публикует StageResult
+- **ТОГДА** соответствующая запись attempt MUST обновляться только по её identity
 
-#### Scenario: Таблица stages
-- **КОГДА** агент завершается
-- **ТОГДА** запись ДОЛЖНА быть создана в таблице `stages` с полями:
-  - `id` (INTEGER PRIMARY KEY)
-  - `pipeline_run_id` (INTEGER FK)
-  - `agent_name` (TEXT)
-  - `status` (TEXT: running/passed/failed/blocked)
-  - `started_at` (DATETIME)
-  - `completed_at` (DATETIME, nullable)
-  - `duration_ms` (INTEGER)
-  - `error` (TEXT, nullable)
-  - `inputs_json` (TEXT — JSON артефактов)
-  - `outputs_json` (TEXT — JSON артефактов)
+### Requirement: Versioned migrations
+Schema migrations MUST иметь номера в `schema_migrations` и применяться без потери существующих rows.
 
-### Requirement: Автоматические миграции
-SQLite schema ДОЛЖНА автоматически применяться при запуске сервера.
+#### Scenario: Legacy database
+- **КОГДА** открывается БД со старой таблицей pipeline_runs/stages
+- **ТОГДА** недостающие identity и evidence columns MUST быть добавлены идемпотентно
 
-#### Scenario: Первый запуск
-- **КОГДА** SQLite файл не существует
-- **ТОГДА** система ДОЛЖНА создать файл и применить schema
+### Requirement: SQLite concurrency policy
+Store MUST включать foreign keys, busy timeout и WAL для файловой БД.
 
-#### Scenario: Обновление schema
-- **КОГДА** schema изменилась
-- **ТОГДА** система ДОЛЖНА применить миграции без потери данных
+#### Scenario: Concurrent reader
+- **КОГДА** CLI записывает попытку, а web читает историю
+- **ТОГДА** store MUST ожидать занятый writer в пределах busy timeout вместо немедленного `database is locked`
+
+### Requirement: Interrupted reconciliation
+После получения exclusive workspace lock controller MUST пометить оставшиеся running rows как interrupted.
+
+#### Scenario: Предыдущий процесс аварийно завершился
+- **КОГДА** новый run получает workspace lock
+- **ТОГДА** старый running run и его running attempts MUST получить terminal status interrupted

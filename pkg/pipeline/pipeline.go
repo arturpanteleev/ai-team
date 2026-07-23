@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,8 +356,11 @@ func prepareTaskArtifact(runCfg RunConfig) (string, error) {
 	}
 	if runCfg.RetryFrom != "" {
 		data, err := safeio.ReadRegularFile(taskPath, maxArtifactFileBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("retry-from: для фичи %q ещё нет сохранённого task.md — сначала запустите run с --task для этой фичи", runCfg.Feature)
+		}
 		if err != nil {
-			return "", fmt.Errorf("retry-from: task.md не найден (%s): %w", taskPath, err)
+			return "", fmt.Errorf("retry-from: task.md не читается (%s): %w", taskPath, err)
 		}
 		if len(data) == 0 {
 			return "", fmt.Errorf("retry-from: task.md пуст (%s)", taskPath)
@@ -1724,10 +1728,12 @@ func (rs *runState) enforce(i int, name string, r notifier.StageResult) (int, er
 	}
 
 	targetName := agentCfg.LoopbackTo
+	var targetIdx int
 	if targetName == "" {
-		targetName = "coder"
+		targetIdx = defaultLoopbackTarget(rs.names, i, rs.p.reg.Load)
+	} else {
+		targetIdx = findLoopbackTarget(rs.names, i, targetName)
 	}
-	targetIdx := findLoopbackTarget(rs.names, i, targetName)
 
 	if targetIdx >= 0 {
 		target := rs.names[targetIdx]

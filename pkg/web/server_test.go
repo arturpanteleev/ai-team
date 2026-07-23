@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,16 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
+
+// newLoopbackRequest wraps httptest.NewRequest and sets Host to a loopback
+// value: httptest.NewRequest defaults Host to "example.com" for relative
+// targets, which sameOriginMiddleware now correctly rejects (the CLI only
+// ever binds this server to a loopback address in practice).
+func newLoopbackRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1"
+	return req
+}
 
 func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
@@ -28,7 +39,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 func TestGetPipelines_Empty(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/pipelines", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -54,7 +65,7 @@ func TestGetPipelines_WithData(t *testing.T) {
 		StartedAt: time.Now(),
 	})
 
-	req := httptest.NewRequest("GET", "/api/pipelines", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -76,7 +87,7 @@ func TestGetPipelinesPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	req := httptest.NewRequest("GET", "/api/pipelines?limit=1&offset=1", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines?limit=1&offset=1", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 	var runs []store.PipelineRun
@@ -84,7 +95,7 @@ func TestGetPipelinesPagination(t *testing.T) {
 	if w.Code != http.StatusOK || len(runs) != 1 || w.Header().Get("X-Total-Count") != "3" {
 		t.Fatalf("pagination response: code=%d total=%s runs=%+v", w.Code, w.Header().Get("X-Total-Count"), runs)
 	}
-	bad := httptest.NewRequest("GET", "/api/pipelines?limit=1000", nil)
+	bad := newLoopbackRequest("GET", "/api/pipelines?limit=1000", nil)
 	badWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(badWriter, bad)
 	if badWriter.Code != http.StatusBadRequest {
@@ -98,7 +109,7 @@ func TestGetPipelineByID(t *testing.T) {
 	run := &store.PipelineRun{Feature: "detail-test", Status: "completed", StartedAt: time.Now()}
 	srv.Store().CreatePipelineRun(run)
 
-	req := httptest.NewRequest("GET", "/api/pipelines/1", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines/1", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -120,7 +131,7 @@ func TestGetPipelineByID(t *testing.T) {
 func TestGetPipelineByID_NotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/pipelines/999", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines/999", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -132,7 +143,7 @@ func TestGetPipelineByID_NotFound(t *testing.T) {
 func TestGetPipelineByID_InvalidID(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/pipelines/abc", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines/abc", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -151,7 +162,7 @@ func TestGetArtifacts_ListsFeatureFiles(t *testing.T) {
 	os.MkdirAll(featureDir, 0755)
 	os.WriteFile(filepath.Join(featureDir, "proposal.md"), []byte("# P"), 0644)
 
-	req := httptest.NewRequest("GET", "/api/pipelines/1/artifacts", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines/1/artifacts", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -170,7 +181,7 @@ func TestGetArtifacts_ListsFeatureFiles(t *testing.T) {
 
 func TestGetArtifactsUnknownRunReturnsNotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
-	request := httptest.NewRequest(http.MethodGet, "/api/pipelines/999/artifacts", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/pipelines/999/artifacts", nil)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
@@ -198,7 +209,7 @@ func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(root, "feat", "proposal.md"), []byte("live-mutated"), 0644)
 
-	req := httptest.NewRequest("GET", fmt.Sprintf("/api/pipelines/%d/artifacts", run.ID), nil)
+	req := newLoopbackRequest("GET", fmt.Sprintf("/api/pipelines/%d/artifacts", run.ID), nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 	var artifacts []artifactInfo
@@ -206,7 +217,7 @@ func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 	if len(artifacts) != 1 || artifacts[0].RunID != runID {
 		t.Fatalf("immutable listing: %+v", artifacts)
 	}
-	raw := httptest.NewRequest("GET", "/api/runs/"+runID+"/artifacts/"+artifacts[0].Path, nil)
+	raw := newLoopbackRequest("GET", "/api/runs/"+runID+"/artifacts/"+artifacts[0].Path, nil)
 	rawWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(rawWriter, raw)
 	if rawWriter.Code != http.StatusOK || rawWriter.Body.String() != "immutable" {
@@ -228,7 +239,7 @@ func TestGetArtifact_ConfinedToRoot(t *testing.T) {
 	t.Cleanup(func() { os.Remove(outside) })
 
 	t.Run("valid relative path", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/artifacts/feat/review.md", nil)
+		req := newLoopbackRequest("GET", "/api/artifacts/feat/review.md", nil)
 		w := httptest.NewRecorder()
 		srv.router.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -249,7 +260,7 @@ func TestGetArtifact_ConfinedToRoot(t *testing.T) {
 		"/api/artifacts/etc/passwd",
 	} {
 		t.Run(path, func(t *testing.T) {
-			req := httptest.NewRequest("GET", path, nil)
+			req := newLoopbackRequest("GET", path, nil)
 			w := httptest.NewRecorder()
 			srv.router.ServeHTTP(w, req)
 			if w.Code == http.StatusOK {
@@ -269,7 +280,7 @@ func TestGetArtifact_RejectsSymlinkOutsideRoot(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/artifacts/feat/link.md", nil)
+	req := newLoopbackRequest("GET", "/api/artifacts/feat/link.md", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 	if w.Code == http.StatusOK {
@@ -289,7 +300,7 @@ func TestGetArtifact_RejectsOversizedFile(t *testing.T) {
 	}
 	f.Close()
 
-	req := httptest.NewRequest("GET", "/api/artifacts/large.md", nil)
+	req := newLoopbackRequest("GET", "/api/artifacts/large.md", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
@@ -300,7 +311,7 @@ func TestGetArtifact_RejectsOversizedFile(t *testing.T) {
 func TestGetArtifact_NotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/artifacts/nonexistent.md", nil)
+	req := newLoopbackRequest("GET", "/api/artifacts/nonexistent.md", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
@@ -312,13 +323,57 @@ func TestGetArtifact_NotFound(t *testing.T) {
 func TestNoCORSWildcard(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/pipelines", nil)
+	req := newLoopbackRequest("GET", "/api/pipelines", nil)
 	req.Header.Set("Origin", "https://evil.example")
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
 	if w.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Error("CORS wildcard не должен выставляться")
+	}
+}
+
+func TestSameOriginMiddlewareRejectsHostileHost(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := newLoopbackRequest("GET", "/api/pipelines", nil)
+	req.Host = "evil.example"
+	w := httptest.NewRecorder()
+	srv.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback Host must be rejected, got %d", w.Code)
+	}
+}
+
+func TestSameOriginMiddlewareRejectsHostileOrigin(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// Simulates DNS rebinding: Host is loopback (the connection really did
+	// land here), but Origin reflects the attacker's domain from the
+	// browser's address bar.
+	req := newLoopbackRequest("GET", "/api/pipelines", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	srv.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("hostile Origin must be rejected even with a loopback Host, got %d", w.Code)
+	}
+}
+
+func TestSameOriginMiddlewareAllowsLoopbackRequests(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for _, host := range []string{"127.0.0.1", "127.0.0.1:8080", "localhost", "localhost:8080", "[::1]:8080"} {
+		req := newLoopbackRequest("GET", "/api/pipelines", nil)
+		req.Host = host
+		req.Header.Set("Origin", "http://"+host)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code == http.StatusForbidden {
+			t.Errorf("loopback host %q must not be rejected, got 403", host)
+		}
 	}
 }
 
@@ -330,7 +385,7 @@ func TestSPAHandler(t *testing.T) {
 	handler := spaHandler(dir)
 
 	t.Run("serves existing file", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/app.js", nil)
+		req := newLoopbackRequest("GET", "/app.js", nil)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
@@ -340,7 +395,7 @@ func TestSPAHandler(t *testing.T) {
 	})
 
 	t.Run("falls back to index.html for unknown routes", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/unknown/route", nil)
+		req := newLoopbackRequest("GET", "/unknown/route", nil)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
@@ -364,7 +419,7 @@ func TestNewServerFallsBackToEmbeddedFrontend(t *testing.T) {
 	}
 	defer srv.Close()
 
-	request := httptest.NewRequest(http.MethodGet, "/pipelines/123", nil)
+	request := newLoopbackRequest(http.MethodGet, "/pipelines/123", nil)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 

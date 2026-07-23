@@ -55,8 +55,32 @@ func TestLayeredRegistryUsesExplicitPrecedenceAndSameLayerPrompt(t *testing.T) {
 	if agent.Description != "project" || agent.Prompt != "project prompt" || agent.Source != "project" {
 		t.Fatalf("override должен целиком происходить из project layer: %+v", agent)
 	}
-	if listed := registry.List(); len(listed) != 3 {
-		t.Fatalf("List должен объединять namespaces без дублей: %+v", listed)
+	if listed, failures := registry.List(); len(listed) != 3 || len(failures) != 0 {
+		t.Fatalf("List должен объединять namespaces без дублей: agents=%+v failures=%+v", listed, failures)
+	}
+}
+
+func TestListReportsLoadFailuresForNonShadowingInvalidAgent(t *testing.T) {
+	registry := NewLayered(
+		Layer{Name: "project", FS: fstest.MapFS{
+			// mutation отсутствует — невалидный def.yaml, но имя "broken" не
+			// совпадает ни с одним built-in агентом (не shadowing-сценарий).
+			"broken/def.yaml":  &fstest.MapFile{Data: []byte("name: broken\nruntime: agentcli\nprompt_file: prompt.md\n")},
+			"broken/prompt.md": &fstest.MapFile{Data: []byte("broken prompt")},
+		}},
+		Layer{Name: "builtin", FS: fstest.MapFS{
+			"sample/def.yaml":   &fstest.MapFile{Data: []byte("name: sample\nruntime: agentcli\nmutation: none\nprompt_file: prompt.md\n")},
+			"sample/prompt.md":  &fstest.MapFile{Data: []byte("sample prompt")},
+			"builtin/def.yaml":  &fstest.MapFile{Data: []byte("name: builtin\nruntime: agentcli\nmutation: none\nprompt_file: prompt.md\n")},
+			"builtin/prompt.md": &fstest.MapFile{Data: []byte("builtin prompt")},
+		}},
+	)
+	agents, failures := registry.List()
+	if len(agents) != 2 {
+		t.Fatalf("valid агенты не должны страдать от соседней ошибки: %+v", agents)
+	}
+	if len(failures) != 1 || failures[0].Name != "broken" || failures[0].Err == nil {
+		t.Fatalf("невалидный, не-shadowing агент должен быть виден в failures, а не пропасть молча: %+v", failures)
 	}
 }
 

@@ -1,10 +1,9 @@
 package config
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 )
@@ -12,9 +11,16 @@ import (
 // ApplyDetectedChecks adds explicit, inspectable required checks when a known
 // project manifest is present. Unknown stacks remain without guessed commands;
 // delivery will then fail closed until checks are configured by the user.
-func (c *Config) ApplyDetectedChecks(target string) string {
+//
+// Returns the detected profile name ("" if the stack isn't recognized), and
+// a non-empty warning if a stack WAS detected but there is no "tester" stage
+// to attach the checks to (e.g. a pipeline that renamed or removed it) —
+// detection is currently name-based (config.AgentConfig carries no
+// mutation/verdict metadata; that only exists on the full agent.Agent
+// definition, which init doesn't load a registry for), so this can't be
+// resolved silently and must be surfaced to the caller instead.
+func (c *Config) ApplyDetectedChecks(target string) (profile string, warning string) {
 	var definitions []checks.Definition
-	profile := ""
 	switch {
 	case fileExists(filepath.Join(target, "go.mod")):
 		profile = "go"
@@ -23,14 +29,18 @@ func (c *Config) ApplyDetectedChecks(target string) string {
 			{Name: "go-vet", Class: "lint", Command: []string{"go", "vet", "./..."}, Policy: checks.PolicyRequired, Timeout: "10m"},
 		}
 	default:
-		return ""
+		return "", ""
 	}
 	tester := c.findAgent("tester")
 	if tester == nil {
-		return ""
+		return profile, fmt.Sprintf(
+			"обнаружен %s-профиль, но в pipeline нет стадии \"tester\" — required checks не присвоены. "+
+				"Если стадия была переименована, добавьте эти checks в config.yaml вручную; иначе delivery останется запрещён.",
+			profile,
+		)
 	}
 	tester.Checks = append([]checks.Definition(nil), definitions...)
-	return profile
+	return profile, ""
 }
 
 func (c *Config) findAgent(name string) *AgentConfig {
@@ -45,19 +55,4 @@ func (c *Config) findAgent(name string) *AgentConfig {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func npmTestConfigured(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var manifest struct {
-		Scripts map[string]string `json:"scripts"`
-	}
-	if json.Unmarshal(data, &manifest) != nil {
-		return false
-	}
-	test := strings.TrimSpace(manifest.Scripts["test"])
-	return test != "" && !strings.Contains(test, "no test specified")
 }

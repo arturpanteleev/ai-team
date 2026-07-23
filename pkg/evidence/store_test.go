@@ -156,6 +156,67 @@ func TestEventLogHashChainDetectsTampering(t *testing.T) {
 	}
 }
 
+// TestEventLogRejectsSplicedEventFromAnotherChain covers what per-event
+// digest recomputation alone cannot: an event that is individually
+// self-consistent (its own stored SHA256 still matches its own content,
+// and its own PreviousSHA256 still matches whatever it originally followed)
+// but was spliced in after a *different* preceding event than the one it
+// actually followed. Sequence numbers alone don't catch this either, since
+// both chains number their events identically. Only the previous_sha256
+// link check (comparing against the actual preceding event in this file,
+// not the event's own stored belief about its predecessor) catches it.
+func TestEventLogRejectsSplicedEventFromAnotherChain(t *testing.T) {
+	target := t.TempDir()
+
+	storeA, err := Start(filepath.Join(target, "runs-a"), testRunManifest("run-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.Append(Event{Type: "run_started_chain_a", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	storeB, err := Start(filepath.Join(target, "runs-b"), testRunManifest("run-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeB.Append(Event{Type: "run_started_chain_b", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeB.Append(Event{Type: "stage_started", Stage: "coder", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	pathA := filepath.Join(storeA.RunDir(), "events.jsonl")
+	pathB := filepath.Join(storeB.RunDir(), "events.jsonl")
+	dataA, err := os.ReadFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataB, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linesA := strings.Split(strings.TrimRight(string(dataA), "\n"), "\n")
+	linesB := strings.Split(strings.TrimRight(string(dataB), "\n"), "\n")
+	if len(linesA) != 1 || len(linesB) != 2 {
+		t.Fatalf("unexpected line counts: A=%d B=%d", len(linesA), len(linesB))
+	}
+
+	// Splice chain A's real first event with chain B's real, unmodified
+	// second event. Both are individually valid (correct own digest,
+	// correct own sequence for position 2, same RunID "run-x"), but B's
+	// second event never actually followed A's first event.
+	spliced := linesA[0] + "\n" + linesB[1] + "\n"
+	if err := os.WriteFile(pathA, []byte(spliced), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := VerifyEventLog(pathA, "run-x"); err == nil {
+		t.Fatal("event spliced in from an unrelated chain must be rejected")
+	}
+}
+
 func TestReplayEventLogReconstructsAttemptsAndVerifiesManifest(t *testing.T) {
 	target := t.TempDir()
 	store, err := Start(filepath.Join(target, "runs"), testRunManifest("run-replay"))

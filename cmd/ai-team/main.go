@@ -19,6 +19,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -289,6 +290,7 @@ func cmdRun() {
 		if *taskDesc == "" {
 			fatal("Укажите --task")
 		}
+		warnIfAlreadyDelivered(*target, *feature)
 	} else if *taskDesc != "" {
 		fatal("--task нельзя менять вместе с --retry-from; используется сохранённый task.md")
 	}
@@ -346,6 +348,26 @@ func exitCodeFor(err error) int {
 	default:
 		return exitFailed
 	}
+}
+
+// warnIfAlreadyDelivered предупреждает, если --feature уже был доведён до
+// успешной delivery в прошлом run. Это только диагностика: она не блокирует
+// новый run — фича могла осознанно получить повторную порцию работы под тем
+// же именем. Без этого предупреждения повторный run на уже доставленной
+// фиче тихо перезаписывает artifacts и падает на coder с сообщением "агент
+// не создал изменений", которое вне контекста читается как баг агента.
+func warnIfAlreadyDelivered(target, feature string) {
+	runsRoot := filepath.Join(target, ".ai-team", "runs")
+	delivered, ok, err := evidence.FindDelivered(runsRoot, feature)
+	if err != nil || !ok {
+		return
+	}
+	ref := delivered.Delivery.PRURL
+	if ref == "" {
+		ref = delivered.Delivery.CommitSHA
+	}
+	fmt.Fprintf(os.Stderr, "%s Фича %q уже была доставлена ранее (run %s, %s). Продолжаю новый run с тем же именем — предыдущая поставка не будет затронута.\n",
+		ui.Colorize("⚠", ui.ColorYellow), feature, delivered.RunID, ref)
 }
 
 // openRecorder открывает SQLite-store для записи запусков (web-дашборд).
@@ -495,8 +517,12 @@ func cmdList() {
 
 	fmt.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
-	for _, a := range reg.List() {
+	agents, failures := reg.List()
+	for _, a := range agents {
 		fmt.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
+	}
+	for _, f := range failures {
+		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
@@ -19,7 +20,8 @@ func TestApplyDetectedChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg := Default()
-			if profile := cfg.ApplyDetectedChecks(dir); profile != test.profile {
+			profile, warning := cfg.ApplyDetectedChecks(dir)
+			if profile != test.profile || warning != "" {
 				t.Fatalf("profile=%q want %q", profile, test.profile)
 			}
 			tester := cfg.findAgent("tester")
@@ -43,16 +45,39 @@ func TestApplyDetectedChecksDoesNotOverclaimUnsupportedTypedEvidence(t *testing.
 				t.Fatal(err)
 			}
 			cfg := Default()
-			if profile := cfg.ApplyDetectedChecks(dir); profile != "" || len(cfg.findAgent("tester").Checks) != 0 {
+			profile, _ := cfg.ApplyDetectedChecks(dir)
+			if profile != "" || len(cfg.findAgent("tester").Checks) != 0 {
 				t.Fatalf("unsupported stack must fail closed instead of emitting untyped evidence: profile=%q", profile)
 			}
 		})
 	}
 }
 
+func TestApplyDetectedChecksWarnsWhenNoTesterStage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Default()
+	// Simulate a pipeline that renamed (or removed) the "tester" stage.
+	for i := range cfg.PipelineAgents {
+		if cfg.PipelineAgents[i].Name == "tester" {
+			cfg.PipelineAgents[i].Name = "test-runner"
+		}
+	}
+	profile, warning := cfg.ApplyDetectedChecks(dir)
+	if profile != "go" {
+		t.Fatalf("stack detection itself must still succeed: profile=%q", profile)
+	}
+	if warning == "" || !strings.Contains(warning, "tester") {
+		t.Fatalf("a detected profile with no eligible stage must produce a specific warning, got %q", warning)
+	}
+}
+
 func TestApplyDetectedChecksDoesNotGuessUnknownProject(t *testing.T) {
 	cfg := Default()
-	if profile := cfg.ApplyDetectedChecks(t.TempDir()); profile != "" || len(cfg.findAgent("tester").Checks) != 0 {
+	profile, _ := cfg.ApplyDetectedChecks(t.TempDir())
+	if profile != "" || len(cfg.findAgent("tester").Checks) != 0 {
 		t.Fatalf("unknown stack не должен получать guessed command: profile=%q", profile)
 	}
 }

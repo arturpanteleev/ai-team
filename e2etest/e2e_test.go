@@ -265,7 +265,7 @@ func TestE2E_RejectedReviewStopsPipeline(t *testing.T) {
 	}
 
 	feature := "e2e-rejected"
-	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=rejected"},
+	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=rejected", "AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_MODE"},
 		"run", "--feature", feature, "--task", "Test rejected", "--approve-gates")
 
 	if code != 1 {
@@ -299,7 +299,7 @@ func TestE2E_TesterFailStopsPipeline(t *testing.T) {
 	}
 
 	feature := "e2e-fail"
-	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=fail"},
+	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=fail", "AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_MODE"},
 		"run", "--feature", feature, "--task", "Test fail", "--approve-gates")
 
 	if code != 1 {
@@ -324,7 +324,7 @@ func TestE2E_BlockedAnalyst(t *testing.T) {
 	}
 
 	feature := "e2e-blocked"
-	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=blocked"},
+	code, out := runAI(t, bin, dir, []string{pathEnv, "MOCK_MODE=blocked", "AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_MODE"},
 		"run", "--feature", feature, "--task", "Test blocked", "--approve-gates")
 
 	if code != 2 {

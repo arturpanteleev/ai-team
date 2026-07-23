@@ -1,7 +1,6 @@
 ## Purpose
 
 Спецификация определяет нормативное поведение capability `project-init`.
-
 ## Requirements
 ### Requirement: Конфиг по умолчанию
 Система MUST создавать `.ai-team/config.yaml` с разумными значениями по умолчанию.
@@ -62,3 +61,9 @@
 - **КОГДА** init не может определить verification profile
 - **ТОГДА** он MUST вывести warning
 - **И** delivery MUST оставаться запрещённым до настройки required unit/integration/e2e check
+
+#### Scenario: Стек определён, но нет подходящей стадии
+- **WHEN** init распознаёт известный стек (например, Go), но в pipeline нет стадии `tester`, к которой можно присвоить checks
+- **THEN** init MUST вывести warning, отдельный от warning для нераспознанного стека, явно называющий обнаруженный профиль и отсутствие стадии `tester`
+- **AND** delivery MUST оставаться запрещённым до ручной настройки checks
+

@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { getArtifact } from '../api';
 import styles from './ArtifactViewer.module.css';
 
 export function ArtifactViewer() {
   const { '*': path } = useParams<{ '*': string }>();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,7 +40,7 @@ export function ArtifactViewer() {
 
   return (
     <div className={styles.container}>
-      <Link to={-1 as any} className={styles.back}>← Назад</Link>
+      <button type="button" onClick={() => navigate(-1)} className={styles.back}>← Назад</button>
 
       <div className={styles.header}>
         <span className={styles.path}>{path || ''}</span>

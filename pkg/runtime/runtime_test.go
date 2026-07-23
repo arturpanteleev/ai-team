@@ -209,6 +209,31 @@ func TestOpenCodeIsolationDeniesEffectsAndNarrowsEdits(t *testing.T) {
 	}
 }
 
+func TestOpenCodeIsolationEnvironmentIsAllowListed(t *testing.T) {
+	t.Setenv("AI_TEAM_TEST_SECRET_TOKEN", "super-secret-value")
+	t.Setenv("AI_TEAM_OPENCODE_ENV_ALLOW", "AI_TEAM_TEST_EXPLICITLY_ALLOWED")
+	t.Setenv("AI_TEAM_TEST_EXPLICITLY_ALLOWED", "opted-in-value")
+
+	target := t.TempDir()
+	task := &Task{TargetDir: target, ArtifactRoot: filepath.Join(target, ".ai-team", "artifacts"), Feature: "feat"}
+	agent := &Agent{Name: "analyst", Mutation: "none"}
+	environment, cleanup, err := OpenCodeIsolationEnvironment(agent, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if environmentValue(environment, "AI_TEAM_TEST_SECRET_TOKEN") != "" {
+		t.Fatal("a parent-environment variable not on the allow-list must not reach the subprocess environment")
+	}
+	if environmentValue(environment, "AI_TEAM_TEST_EXPLICITLY_ALLOWED") != "opted-in-value" {
+		t.Fatal("a variable explicitly opted in via AI_TEAM_OPENCODE_ENV_ALLOW must reach the subprocess environment")
+	}
+	if environmentValue(environment, "PATH") == "" {
+		t.Fatal("PATH must always reach the subprocess environment (baseline)")
+	}
+}
+
 func TestOpenCodeIsolationRejectsProjectExecutionSurfaces(t *testing.T) {
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(target, ".opencode", "plugins"), 0755); err != nil {

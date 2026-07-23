@@ -14,7 +14,10 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Same-origin: пустой Origin (не-браузерные клиенты) или совпадение хоста.
+	// Same-origin: пустой Origin (не-браузерные клиенты) разрешён; иначе
+	// Origin должен резолвиться на loopback-хост — сравнение с r.Host не
+	// защищает от DNS rebinding, т.к. оба заголовка одинаково отражают
+	// домен атакующего при rebind (см. isLoopbackHostname).
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -24,7 +27,7 @@ var upgrader = websocket.Upgrader{
 		if err != nil {
 			return false
 		}
-		return u.Host == r.Host
+		return isLoopbackHostname(u.Host)
 	},
 }
 

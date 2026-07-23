@@ -180,9 +180,12 @@ func cmdInit() {
 	}
 
 	cfg := config.Default()
-	if profile := cfg.ApplyDetectedChecks(target); profile != "" {
+	switch profile, warning := cfg.ApplyDetectedChecks(target); {
+	case warning != "":
+		fmt.Fprintf(os.Stderr, "Предупреждение: %s\n", warning)
+	case profile != "":
 		fmt.Printf("✓ Обнаружен verification profile: %s\n", profile)
-	} else {
+	default:
 		fmt.Fprintln(os.Stderr, "Предупреждение: тестовый профиль не обнаружен; delivery будет запрещён до настройки required unit/integration/e2e check")
 	}
 	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")

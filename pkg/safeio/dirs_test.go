@@ -47,6 +47,39 @@ func TestValidateTreeRejectsNestedSymlink(t *testing.T) {
 	}
 }
 
+func TestRejectSymlink(t *testing.T) {
+	root := t.TempDir()
+
+	missing := filepath.Join(root, "does-not-exist")
+	if err := RejectSymlink(missing); err != nil {
+		t.Fatalf("missing path must be valid (nothing to reject yet), got: %v", err)
+	}
+
+	regular := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(regular, []byte("schema_version: 3\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RejectSymlink(regular); err != nil {
+		t.Fatalf("regular file must be accepted, got: %v", err)
+	}
+
+	link := filepath.Join(root, "config-link.yaml")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := RejectSymlink(link); err == nil {
+		t.Fatal("symlink must be rejected")
+	}
+
+	dir := filepath.Join(root, "somedir")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RejectSymlink(dir); err == nil {
+		t.Fatal("non-regular file (directory) must be rejected")
+	}
+}
+
 func TestReadRegularFileRejectsSymlinkAndLimit(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "file")

@@ -791,6 +791,74 @@ func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 	}
 }
 
+// TestRun_Loopback_DefaultTargetIsMetadataDrivenNotNamedCoder проверяет, что
+// дефолтный loopback (без явного loopback_to) находит стадию по mutation:
+// source, даже если она называется не "coder" — ранее дефолт был строковым
+// литералом "coder" и молча не срабатывал для переименованных ролей.
+func TestRun_Loopback_DefaultTargetIsMetadataDrivenNotNamedCoder(t *testing.T) {
+	dir := env(t)
+	reg := agent.NewFS(fstest.MapFS{
+		"analyst/def.yaml": def(`name: analyst
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  proposal: '{feature}/proposal.md'
+`),
+		"implementer/def.yaml": def(`name: implementer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+inputs:
+  proposal: '{feature}/proposal.md'
+outputs: {}
+`),
+		"reviewer/def.yaml": def(`name: reviewer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
+inputs:
+  proposal: '{feature}/proposal.md'
+outputs:
+  review: '{feature}/review.md'
+`),
+		"analyst/prompt.md":     def("test"),
+		"implementer/prompt.md": def("test"),
+		"reviewer/prompt.md":    def("test"),
+	})
+
+	rt := newScripted()
+	rt.contentFn["reviewer"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"review": "исправь\n\n**Verdict:** REJECTED\n"}
+		}
+		return map[string]string{"review": "теперь ок\n\n**Verdict:** APPROVED\n"}
+	}
+
+	n := &captureNotifier{}
+	p := New(cfgFor(
+		config.AgentConfig{Name: "analyst"},
+		config.AgentConfig{Name: "implementer", MaxRetries: 2},
+		config.AgentConfig{Name: "reviewer", OnNegativeVerdict: config.OnNegativeContinue},
+	), reg, WithNotifier(n), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{interactive: true, answers: []string{"y"}}))
+	if err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "т", TargetDir: dir}); err != nil {
+		t.Fatalf("loopback к переименованной source-стадии должен сработать без явного loopback_to: %v", err)
+	}
+	if rt.calls["implementer"] != 2 {
+		t.Errorf("implementer (mutation:source, дефолтная цель по метаданным) должен выполниться дважды, calls=%d", rt.calls["implementer"])
+	}
+	if rt.calls["reviewer"] != 2 {
+		t.Errorf("reviewer должен выполниться дважды после loopback, calls=%d", rt.calls["reviewer"])
+	}
+}
+
 func TestRun_Loopback_ExhaustedStops(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
@@ -1299,6 +1367,23 @@ func TestFindLoopbackTarget(t *testing.T) {
 	}
 	if got := findLoopbackTarget(names, 2, "ghost"); got != -1 {
 		t.Errorf("неизвестная цель: %d", got)
+	}
+}
+
+func TestDefaultLoopbackTarget(t *testing.T) {
+	names := []string{"analyst", "source-writer", "reviewer", "tester"}
+	mutations := map[string]string{"analyst": "none", "source-writer": "source", "reviewer": "none", "tester": "tests"}
+	load := func(name string) (*agent.Agent, error) {
+		return &agent.Agent{Name: name, Mutation: mutations[name]}, nil
+	}
+	if got := defaultLoopbackTarget(names, 2, load); got != 1 {
+		t.Errorf("должен найти ближайшую предыдущую стадию с mutation:source по метаданным, а не по имени 'coder': %d", got)
+	}
+	if got := defaultLoopbackTarget(names, 1, load); got != -1 {
+		t.Errorf("цель после текущего индекса не ищется: %d", got)
+	}
+	if got := defaultLoopbackTarget([]string{"analyst", "reviewer"}, 2, load); got != -1 {
+		t.Errorf("нет стадии с mutation:source: %d", got)
 	}
 }
 

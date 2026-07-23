@@ -73,6 +73,7 @@ func TestArchitectureDocCoversReferencedAnchors(t *testing.T) {
 	assertContainsAll(t, arch, "docs/ARCHITECTURE.md", []string{
 		"## Deployer и canonical delivery plan",
 		"## Layered agent registry",
+		"## Evidence и наблюдаемость",
 	})
 }
 

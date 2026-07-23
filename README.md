@@ -106,8 +106,11 @@ ai-team run --feature add-jwt-auth --task "Реализовать JWT автор
    поведение, а не баг: подтверждение одноразовое и привязано к конкретному
    плану.
 
-4. **Проверьте результат** — `ai-team list` покажет статус запуска, `ai-team
-   web` откроет дашборд с деталями по каждому этапу и артефактами.
+4. **Проверьте результат** — `ai-team web` открывает дашборд со статусом
+   запуска, деталями по каждому этапу и артефактами; сырые evidence того же
+   run лежат в `.ai-team/runs/{run_id}/` (см.
+   [«Evidence и наблюдаемость»](docs/ARCHITECTURE.md#evidence-и-наблюдаемость)),
+   если поднимать web не хочется.
 
 Если что-то пошло не так раньше (например, reviewer вернул
 `CHANGES_REQUESTED`), pipeline завершится с exit code `1`, и `--retry-from`
@@ -119,7 +122,7 @@ ai-team run --feature add-jwt-auth --task "Реализовать JWT автор
 |---|---|
 | `ai-team init [--target <dir>]` | создать `.ai-team/config.yaml`, каталоги artifacts/reports/logs |
 | `ai-team run --feature <name> --task "<desc>" [...]` | провести фичу через конвейер |
-| `ai-team list` | список запусков и их статус |
+| `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
 | `ai-team eval --agent <name> --artifact <path> [--samples N]` | независимая LLM-оценка артефакта |
 | `ai-team web [--port 8080] [--host 127.0.0.1]` | dashboard на localhost |
 | `ai-team version` / `ai-team help` | версия / usage |

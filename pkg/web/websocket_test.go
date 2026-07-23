@@ -11,6 +11,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestUpgraderCheckOriginRejectsRebindStyleOrigin(t *testing.T) {
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Host = "127.0.0.1:8080" // the connection genuinely landed on loopback
+	req.Header.Set("Origin", "http://evil.example:8080")
+	if upgrader.CheckOrigin(req) {
+		t.Fatal("Origin naming a non-loopback host must be rejected even when Host is loopback")
+	}
+}
+
+func TestUpgraderCheckOriginAllowsLoopbackOrigin(t *testing.T) {
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	if !upgrader.CheckOrigin(req) {
+		t.Fatal("loopback Origin must be allowed")
+	}
+}
+
+func TestUpgraderCheckOriginAllowsMissingOrigin(t *testing.T) {
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Host = "127.0.0.1:8080"
+	if !upgrader.CheckOrigin(req) {
+		t.Fatal("non-browser clients without an Origin header must be allowed")
+	}
+}
+
 func TestNewHub(t *testing.T) {
 	hub := NewHub()
 	if hub == nil {

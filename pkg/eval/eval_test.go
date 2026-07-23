@@ -140,8 +140,11 @@ func TestEvalRun_FileNotFound(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent file")
 	}
-	if !strings.Contains(err.Error(), "не удалось прочитать") {
-		t.Errorf("unexpected error: %v", err)
+	// A missing artifact gets a specific, friendly message rather than a raw
+	// lstat error leaking through (independent audit finding: bundled low
+	// severity CLI error message gap).
+	if !strings.Contains(err.Error(), "артефакт не существует") || strings.Contains(err.Error(), "lstat") {
+		t.Errorf("expected a friendly not-exist message without a raw lstat leak, got: %v", err)
 	}
 }
 

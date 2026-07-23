@@ -6,6 +6,7 @@
 - `pkg/` — внутренние пакеты
   - `config/` — конфигурация + валидация
   - `checks/` — deterministic verification runner и evidence
+  - `scope/` — repository-relative mutation path policy (glob-матчинг)
   - `delivery/` — строгий plan и controller-owned executor
   - `evidence/` — immutable run/attempt manifests и append-only events
   - `verdict/` — verdict-контракт (парсер вердиктов, BLOCKED-протокол)
@@ -13,12 +14,18 @@
   - `agent/` — Agent struct + Registry
   - `pipeline/` — оркестрация, enforcement вердиктов, гейты, loopback
   - `workflow/` — доменные state/outcome типы и чистые переходы
+  - `safeio/` — no-follow filesystem primitives (symlink rejection)
+  - `process/` — process-group supervision и kill (Unix/Windows/plan9)
   - `notifier/`, `report/`, `ui/` — уведомления, HTML-отчёты, консоль
   - `web/` — HTTP API + SQLite store + StoreRecorder (дашборд)
 - `agents/{name}/` — встроенные агенты (def.yaml + prompt.md)
 - `web/` — React-фронтенд дашборда
 - `e2etest/` — mock-opencode и E2E-тесты
 - `openspec/` — OpenSpec change history
+
+Подробная карта пакетов и внутреннее устройство — в
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Человеко-читаемое описание
+цикла ниже — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Разработка через OpenSpec
 

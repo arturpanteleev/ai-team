@@ -41,4 +41,3 @@ On platforms without a native advisory-lock primitive, the workspace lock MUST r
 #### Scenario: Inconclusive evidence
 - **WHEN** the existing lock's pid file is missing, unreadable, unparseable, or its liveness cannot be positively disproven
 - **THEN** the lock MUST NOT be reclaimed and acquisition MUST fail exactly as before this capability existed
-

@@ -272,8 +272,19 @@ func (r *Registry) Exists(name string) bool {
 	return err == nil
 }
 
-func (r *Registry) List() []*Agent {
-	var result []*Agent
+// LoadFailure сообщает, что каталог агента обнаружен в одном из registry
+// layers, но не смог быть загружен целиком (невалидный def.yaml, нечитаемый
+// prompt_file и т.д.).
+type LoadFailure struct {
+	Name string
+	Err  error
+}
+
+// List перечисляет все обнаруживаемые агенты across layers. Каталог, который
+// не смог загрузиться, не пропускается молча — он возвращается в failures,
+// чтобы вызывающий код (например, `ai-team list`) мог сообщить об этом, а не
+// показать пустое место без следа ошибки.
+func (r *Registry) List() (agents []*Agent, failures []LoadFailure) {
 	names := make(map[string]bool)
 	for _, layer := range r.layers {
 		entries, err := fs.ReadDir(layer.FS, ".")
@@ -293,11 +304,13 @@ func (r *Registry) List() []*Agent {
 	sort.Strings(ordered)
 	for _, name := range ordered {
 		a, err := r.Load(name)
-		if err == nil {
-			result = append(result, a)
+		if err != nil {
+			failures = append(failures, LoadFailure{Name: name, Err: err})
+			continue
 		}
+		agents = append(agents, a)
 	}
-	return result
+	return agents, failures
 }
 
 func (r *Registry) DefaultPipeline() []string {

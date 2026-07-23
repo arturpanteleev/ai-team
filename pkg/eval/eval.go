@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -71,6 +73,9 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 	}
 
 	data, err := safeio.ReadRegularFile(e.ArtifactPath, 8<<20)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("eval: артефакт не существует: %s", e.ArtifactPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("eval: не удалось прочитать артефакт %s: %w", e.ArtifactPath, err)
 	}

@@ -32,4 +32,3 @@ When a stage or check process is canceled or times out, the controller MUST atte
 - **WHEN** a canceled or timed-out process on a non-Unix platform has spawned child processes of its own
 - **THEN** the controller MUST attempt a whole-tree termination
 - **AND** MUST fall back to terminating only the direct process if tree termination is unavailable, without failing the cancellation itself
-

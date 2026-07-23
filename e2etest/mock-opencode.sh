@@ -7,6 +7,13 @@ set -euo pipefail
 #   rejected — ТОЛЬКО reviewer выдаёт CHANGES_REQUESTED, остальные работают нормально
 #   fail     — ТОЛЬКО tester выдаёт FAIL
 #   blocked  — ТОЛЬКО analyst сигнализирует BLOCKED через status-файл
+#
+# Если задан MOCK_CAPTURE_ENV_DIR, mock дампит собственное полученное
+# окружение в "$MOCK_CAPTURE_ENV_DIR/<agent>.env" перед обычной обработкой —
+# так тесты могут доказать, что OpenCodeIsolationEnvironment (permission
+# JSON, XDG_CONFIG_HOME, env allow-list) реально доходит до подпроцесса через
+# настоящий exec.Command, а не только проверяется на уровне построения
+# слайса в unit-тестах.
 
 MODE="${MOCK_MODE:-normal}"
 PROMPT=""
@@ -57,6 +64,11 @@ AGENT=$(echo "$PROMPT" | head -1 | sed 's/^# //')
 FEATURE=$(echo "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | tail -n +2 | head -1 | xargs)
 
 echo "MOCK: agent=$AGENT feature=$FEATURE mode=$MODE" >&2
+
+if [[ -n "${MOCK_CAPTURE_ENV_DIR:-}" ]]; then
+  mkdir -p "$MOCK_CAPTURE_ENV_DIR"
+  env > "$MOCK_CAPTURE_ENV_DIR/$AGENT.env"
+fi
 
 create_output() {
   local path="$1"

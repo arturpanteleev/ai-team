@@ -419,3 +419,81 @@ func TestE2E_InvalidConfigDoesNotMutateTaskArtifacts(t *testing.T) {
 	}
 	checkAbsent(t, filepath.Join(dir, ".ai-team", "artifacts", "tasks", feature, "task.md"))
 }
+
+// TestE2E_OpenCodeSandboxEnvironmentReachesRealSubprocess proves the
+// isolation environment pkg/runtime.OpenCodeIsolationEnvironment builds
+// (deny-by-default permission policy, isolated XDG_CONFIG_HOME, allow-listed
+// process environment) actually reaches the real child process spawned via
+// exec.Command — not just that the env slice is constructed correctly in
+// isolation (already covered by pkg/runtime unit tests), but that a real
+// `ai-team run` invocation of the real built binary genuinely delivers it.
+// Independent audit Finding 7: this mechanism previously had zero test
+// coverage proving a subprocess actually receives it.
+func TestE2E_OpenCodeSandboxEnvironmentReachesRealSubprocess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
+	}
+	runCommand(t, dir, "git", "add", ".gitignore")
+	runCommand(t, dir, "git", "commit", "-m", "initialize ai-team ignore policy")
+
+	captureDir := filepath.Join(t.TempDir(), "env-capture")
+	envs := []string{
+		pathEnv,
+		"MOCK_CAPTURE_ENV_DIR=" + captureDir,
+		// MOCK_CAPTURE_ENV_DIR itself needs to be on the allow-list to reach
+		// the mock at all — proves the explicit-opt-in half of the
+		// allow-list contract, while AI_TEAM_TEST_SECRET_TOKEN below (NOT
+		// listed here) proves the deny-by-default half, both at the real
+		// subprocess level rather than only in pkg/runtime's unit tests.
+		"AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_CAPTURE_ENV_DIR",
+		// A secret-shaped variable that must NOT reach the subprocess.
+		"AI_TEAM_TEST_SECRET_TOKEN=super-secret-should-not-leak",
+	}
+	// Runs far enough for analyst (and further stages) to actually execute;
+	// final exit code doesn't matter here, only that the mock captured a
+	// real environment along the way.
+	runAI(t, bin, dir, envs, "run", "--feature", "sandbox-contract", "--task", "sandbox env contract test", "--approve-gates")
+
+	analystEnvPath := filepath.Join(captureDir, "analyst.env")
+	data, err := os.ReadFile(analystEnvPath)
+	if err != nil {
+		t.Fatalf("mock did not capture analyst's environment: %v", err)
+	}
+	captured := string(data)
+
+	permMatch := regexp.MustCompile(`(?m)^OPENCODE_PERMISSION=(.+)$`).FindStringSubmatch(captured)
+	if len(permMatch) != 2 {
+		t.Fatalf("OPENCODE_PERMISSION not present in real subprocess environment:\n%s", captured)
+	}
+	var permission map[string]any
+	if err := json.Unmarshal([]byte(permMatch[1]), &permission); err != nil {
+		t.Fatalf("OPENCODE_PERMISSION is not valid JSON in real subprocess environment: %v\n%s", err, permMatch[1])
+	}
+	for _, denied := range []string{"bash", "task", "webfetch", "websearch", "external_directory"} {
+		if permission[denied] != "deny" {
+			t.Errorf("real subprocess permission policy: %s must be deny, got %#v", denied, permission[denied])
+		}
+	}
+
+	if !strings.Contains(captured, "OPENCODE_DISABLE_DEFAULT_PLUGINS=true") {
+		t.Error("real subprocess must have OPENCODE_DISABLE_DEFAULT_PLUGINS=true")
+	}
+	if !regexp.MustCompile(`(?m)^XDG_CONFIG_HOME=`).MatchString(captured) {
+		t.Error("real subprocess must have an isolated XDG_CONFIG_HOME")
+	}
+	if !regexp.MustCompile(`(?m)^PATH=`).MatchString(captured) {
+		t.Error("real subprocess must still receive PATH (baseline allow-list entry)")
+	}
+	if strings.Contains(captured, "AI_TEAM_TEST_SECRET_TOKEN") {
+		t.Error("a secret-shaped variable not on the allow-list must not reach the real subprocess environment")
+	}
+}

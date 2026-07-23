@@ -19,6 +19,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -154,6 +155,26 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// checkControlRoot проверяет, что `.ai-team` существует и безопасен (не
+// symlink и не файл), и различает эти два разных случая при отказе: "проект
+// не инициализирован" — это не то же самое, что "инициализирован, но
+// небезопасен", и пользователю нужно разное действие в ответ на каждый.
+func checkControlRoot(target string) error {
+	if _, err := safeio.ExistingDir(target, ".ai-team"); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("проект не инициализирован в %s — сначала выполните `ai-team init`", target)
+		}
+		return fmt.Errorf("небезопасный control root: %w", err)
+	}
+	return nil
+}
+
+func requireControlRoot(target string) {
+	if err := checkControlRoot(target); err != nil {
+		fatal("%v", err)
+	}
+}
+
 func cmdInit() {
 	target := "."
 	if len(os.Args) > 2 && os.Args[2] == "--target" && len(os.Args) > 3 {
@@ -180,9 +201,12 @@ func cmdInit() {
 	}
 
 	cfg := config.Default()
-	if profile := cfg.ApplyDetectedChecks(target); profile != "" {
+	switch profile, warning := cfg.ApplyDetectedChecks(target); {
+	case warning != "":
+		fmt.Fprintf(os.Stderr, "Предупреждение: %s\n", warning)
+	case profile != "":
 		fmt.Printf("✓ Обнаружен verification profile: %s\n", profile)
-	} else {
+	default:
 		fmt.Fprintln(os.Stderr, "Предупреждение: тестовый профиль не обнаружен; delivery будет запрещён до настройки required unit/integration/e2e check")
 	}
 	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
@@ -266,9 +290,7 @@ func cmdRun() {
 		fatal("Ошибка target: %v", err)
 	}
 	*target = absTarget
-	if _, err := safeio.ExistingDir(*target, ".ai-team"); err != nil {
-		fatal("Небезопасный или отсутствующий control root: %v", err)
-	}
+	requireControlRoot(*target)
 
 	if *feature == "" {
 		fatal("Укажите --feature")
@@ -289,6 +311,7 @@ func cmdRun() {
 		if *taskDesc == "" {
 			fatal("Укажите --task")
 		}
+		warnIfAlreadyDelivered(*target, *feature)
 	} else if *taskDesc != "" {
 		fatal("--task нельзя менять вместе с --retry-from; используется сохранённый task.md")
 	}
@@ -348,6 +371,26 @@ func exitCodeFor(err error) int {
 	}
 }
 
+// warnIfAlreadyDelivered предупреждает, если --feature уже был доведён до
+// успешной delivery в прошлом run. Это только диагностика: она не блокирует
+// новый run — фича могла осознанно получить повторную порцию работы под тем
+// же именем. Без этого предупреждения повторный run на уже доставленной
+// фиче тихо перезаписывает artifacts и падает на coder с сообщением "агент
+// не создал изменений", которое вне контекста читается как баг агента.
+func warnIfAlreadyDelivered(target, feature string) {
+	runsRoot := filepath.Join(target, ".ai-team", "runs")
+	delivered, ok, err := evidence.FindDelivered(runsRoot, feature)
+	if err != nil || !ok {
+		return
+	}
+	ref := delivered.Delivery.PRURL
+	if ref == "" {
+		ref = delivered.Delivery.CommitSHA
+	}
+	fmt.Fprintf(os.Stderr, "%s Фича %q уже была доставлена ранее (run %s, %s). Продолжаю новый run с тем же именем — предыдущая поставка не будет затронута.\n",
+		ui.Colorize("⚠", ui.ColorYellow), feature, delivered.RunID, ref)
+}
+
 // openRecorder открывает SQLite-store для записи запусков (web-дашборд).
 // Недоступность БД не мешает запуску.
 func openRecorder(target string) (pipeline.Recorder, func()) {
@@ -384,9 +427,7 @@ func cmdEval() {
 		fatal("Ошибка target: %v", err)
 	}
 	*target = absTarget
-	if _, err := safeio.ExistingDir(*target, ".ai-team"); err != nil {
-		fatal("Небезопасный или отсутствующий control root: %v", err)
-	}
+	requireControlRoot(*target)
 	if *samples < 1 || *samples > 20 {
 		fatal("--samples должен быть от 1 до 20")
 	}
@@ -495,8 +536,12 @@ func cmdList() {
 
 	fmt.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
-	for _, a := range reg.List() {
+	agents, failures := reg.List()
+	for _, a := range agents {
 		fmt.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
+	}
+	for _, f := range failures {
+		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"gopkg.in/yaml.v3"
@@ -62,21 +63,31 @@ func hasArgument(arguments []string, expected string) bool {
 	return false
 }
 
+// defaultAgentOverrides carries the per-stage config beyond a bare name for
+// the default pipeline. The stage names/order themselves come from
+// (*agent.Registry).DefaultPipeline() — the single source of truth openspec's
+// verifier-integration spec already names — rather than being duplicated
+// here independently.
+var defaultAgentOverrides = map[string]AgentConfig{
+	"analyst":   {CheckpointAfter: CheckpointRequireExplicit},
+	"architect": {CheckpointAfter: CheckpointRequireExplicit},
+	"coder":     {MaxRetries: 2},
+}
+
 func Default() *Config {
+	names := (&agent.Registry{}).DefaultPipeline()
+	agents := make([]AgentConfig, len(names))
+	for i, name := range names {
+		cfg := defaultAgentOverrides[name]
+		cfg.Name = name
+		agents[i] = cfg
+	}
 	return &Config{
-		SchemaVersion: CurrentSchemaVersion,
-		PipelineAgents: []AgentConfig{
-			{Name: "analyst", CheckpointAfter: CheckpointRequireExplicit},
-			{Name: "architect", CheckpointAfter: CheckpointRequireExplicit},
-			{Name: "coder", MaxRetries: 2},
-			{Name: "reviewer"},
-			{Name: "tester"},
-			{Name: "verifier"},
-			{Name: "deployer"},
-		},
-		CLI:          "opencode",
-		Effort:       "medium",
-		StageTimeout: "30m",
+		SchemaVersion:  CurrentSchemaVersion,
+		PipelineAgents: agents,
+		CLI:            "opencode",
+		Effort:         "medium",
+		StageTimeout:   "30m",
 	}
 }
 

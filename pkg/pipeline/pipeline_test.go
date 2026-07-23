@@ -1098,6 +1098,30 @@ func TestRun_RetryFrom_UnknownAgent(t *testing.T) {
 	}
 }
 
+// TestRun_RetryFrom_FeatureNeverRun exercises retry-from against a feature
+// that has no saved task.md at all (never run with --task before) — a
+// distinct rough edge from an unknown agent name: previously this leaked a
+// raw lstat error instead of a specific, actionable message (bundled low
+// severity independent audit finding).
+func TestRun_RetryFrom_FeatureNeverRun(t *testing.T) {
+	dir := t.TempDir() // deliberately not env(t) — no task.md exists for any feature
+	rt := newScripted()
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	err := p.Run(context.Background(), RunConfig{
+		Feature: "never-run-before", TargetDir: dir, RetryFrom: "analyst",
+	})
+	if err == nil {
+		t.Fatal("ожидалась ошибка: retry-from фичи без сохранённого task.md")
+	}
+	if strings.Contains(err.Error(), "lstat") {
+		t.Errorf("не должно быть raw lstat leak в сообщении: %v", err)
+	}
+	if !strings.Contains(err.Error(), "never-run-before") || !strings.Contains(err.Error(), "--task") {
+		t.Errorf("сообщение должно называть фичу и предложить --task: %v", err)
+	}
+}
+
 // --- Git diff guard ---------------------------------------------------------------
 
 func gitInit(t *testing.T, dir string) {

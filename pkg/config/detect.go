@@ -1,11 +1,9 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 )
@@ -57,19 +55,4 @@ func (c *Config) findAgent(name string) *AgentConfig {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func npmTestConfigured(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var manifest struct {
-		Scripts map[string]string `json:"scripts"`
-	}
-	if json.Unmarshal(data, &manifest) != nil {
-		return false
-	}
-	test := strings.TrimSpace(manifest.Scripts["test"])
-	return test != "" && !strings.Contains(test, "no test specified")
 }

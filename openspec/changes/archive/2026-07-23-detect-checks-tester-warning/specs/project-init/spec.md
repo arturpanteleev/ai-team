@@ -1,40 +1,4 @@
-## Purpose
-
-Спецификация определяет нормативное поведение capability `project-init`.
-## Requirements
-### Requirement: Конфиг по умолчанию
-Система MUST создавать `.ai-team/config.yaml` с разумными значениями по умолчанию.
-
-#### Scenario: Структура конфига
-- **КОГДА** `ai-team init` запускается
-- **ТОГДА** config.yaml MUST содержать:
-  - `schema_version: 3`
-  - `pipeline: <list of agents>`
-  - `cli: opencode`
-  - `effort: medium`
-  - explicit checkpoint policies
-
-### Requirement: Кастомный путь конфига
-Система MUST поддерживать флаг `--target` для указания директории целевого проекта.
-
-#### Scenario: Init в кастомной директории
-- **КОГДА** пользователь запускает `ai-team init --target /path/to/project`
-- **ТОГДА** система MUST создать `/path/to/project/.ai-team/` вместо `./.ai-team/`
-
-### Requirement: Gitignore
-Система MUST добавлять `.ai-team/` в `.gitignore`, если его там нет.
-
-#### Scenario: Авто-добавление в gitignore
-- **КОГДА** `ai-team init` запускается и `.gitignore` существует
-- **ТОГДА** система MUST дописать `.ai-team/` в `.gitignore`, если его там ещё нет
-
-### Requirement: Директория reports при инициализации
-Система MUST создавать `.ai-team/reports/` при `ai-team init`.
-
-#### Scenario: Init создаёт reports
-- **КОГДА** `ai-team init` запускается
-- **ТОГДА** система MUST создать `.ai-team/reports/` директорию
-- **И** `.ai-team/reports/` MUST быть добавлена в `.gitignore`
+## MODIFIED Requirements
 
 ### Requirement: Обновлённый конфиг по умолчанию
 Конфиг по умолчанию MUST включать `effort`, stage timeout и стек-специфичные deterministic checks.
@@ -66,4 +30,3 @@
 - **WHEN** init распознаёт известный стек (например, Go), но в pipeline нет стадии `tester`, к которой можно присвоить checks
 - **THEN** init MUST вывести warning, отдельный от warning для нераспознанного стека, явно называющий обнаруженный профиль и отсутствие стадии `tester`
 - **AND** delivery MUST оставаться запрещённым до ручной настройки checks
-

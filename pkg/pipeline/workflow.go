@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/agent"
 )
 
 type filesystemSnapshot struct {
@@ -299,6 +301,24 @@ func gitDiffOutput(dir string) string {
 func findLoopbackTarget(names []string, before int, target string) int {
 	for i := before - 1; i >= 0; i-- {
 		if names[i] == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// defaultLoopbackTarget находит ближайшую предыдущую стадию с mutation:
+// source, когда loopback_to не задан явно в конфигурации агента. Раньше
+// дефолтом был строковый литерал "coder": для pipeline без стадии, буквально
+// названной coder, loopback молча не срабатывал. Выбор по объявленной
+// mutation-семантике, а не по имени, работает для любого набора ролей.
+func defaultLoopbackTarget(names []string, before int, load func(name string) (*agent.Agent, error)) int {
+	for i := before - 1; i >= 0; i-- {
+		definition, err := load(names[i])
+		if err != nil {
+			continue
+		}
+		if definition.Mutation == "source" {
 			return i
 		}
 	}

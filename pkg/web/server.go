@@ -59,6 +59,7 @@ func NewServer(dbPath, distDir, artifactRoot string) (*Server, error) {
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
+	srv.router.Use(sameOriginMiddleware)
 
 	srv.router.Get("/api/pipelines", srv.handleGetPipelines)
 	srv.router.Get("/api/pipelines/{id}", srv.handleGetPipeline)

@@ -1724,10 +1724,12 @@ func (rs *runState) enforce(i int, name string, r notifier.StageResult) (int, er
 	}
 
 	targetName := agentCfg.LoopbackTo
+	var targetIdx int
 	if targetName == "" {
-		targetName = "coder"
+		targetIdx = defaultLoopbackTarget(rs.names, i, rs.p.reg.Load)
+	} else {
+		targetIdx = findLoopbackTarget(rs.names, i, targetName)
 	}
-	targetIdx := findLoopbackTarget(rs.names, i, targetName)
 
 	if targetIdx >= 0 {
 		target := rs.names[targetIdx]

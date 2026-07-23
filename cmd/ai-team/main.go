@@ -154,6 +154,26 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// checkControlRoot проверяет, что `.ai-team` существует и безопасен (не
+// symlink и не файл), и различает эти два разных случая при отказе: "проект
+// не инициализирован" — это не то же самое, что "инициализирован, но
+// небезопасен", и пользователю нужно разное действие в ответ на каждый.
+func checkControlRoot(target string) error {
+	if _, err := safeio.ExistingDir(target, ".ai-team"); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("проект не инициализирован в %s — сначала выполните `ai-team init`", target)
+		}
+		return fmt.Errorf("небезопасный control root: %w", err)
+	}
+	return nil
+}
+
+func requireControlRoot(target string) {
+	if err := checkControlRoot(target); err != nil {
+		fatal("%v", err)
+	}
+}
+
 func cmdInit() {
 	target := "."
 	if len(os.Args) > 2 && os.Args[2] == "--target" && len(os.Args) > 3 {
@@ -266,9 +286,7 @@ func cmdRun() {
 		fatal("Ошибка target: %v", err)
 	}
 	*target = absTarget
-	if _, err := safeio.ExistingDir(*target, ".ai-team"); err != nil {
-		fatal("Небезопасный или отсутствующий control root: %v", err)
-	}
+	requireControlRoot(*target)
 
 	if *feature == "" {
 		fatal("Укажите --feature")
@@ -384,9 +402,7 @@ func cmdEval() {
 		fatal("Ошибка target: %v", err)
 	}
 	*target = absTarget
-	if _, err := safeio.ExistingDir(*target, ".ai-team"); err != nil {
-		fatal("Небезопасный или отсутствующий control root: %v", err)
-	}
+	requireControlRoot(*target)
 	if *samples < 1 || *samples > 20 {
 		fatal("--samples должен быть от 1 до 20")
 	}

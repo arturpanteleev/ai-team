@@ -490,6 +490,36 @@ func TestRun_DeliveryRunsWithExplicitApproval(t *testing.T) {
 	}
 }
 
+func TestRun_DeliveryRejectsMismatchedApprovedPlanHash(t *testing.T) {
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	wrongHash := strings.Repeat("f", 64)
+	if wrongHash == approvedPlanHash {
+		t.Fatal("test invariant broken: wrongHash accidentally matches the real plan hash")
+	}
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+	err := p.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApprovePlanHash: wrongHash,
+	})
+	if err == nil {
+		t.Fatal("delivery с несовпадающим --approve-plan хешем должен быть отклонён, got nil")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("ожидалась ошибка hash mismatch, got: %v", err)
+	}
+	if service.calls != 0 {
+		t.Fatalf("delivery не должен выполниться при несовпадении хеша, calls=%d", service.calls)
+	}
+	reportData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "reports", "feat", "index.html"))
+	if readErr != nil || strings.Contains(string(reportData), "Completed") {
+		t.Fatalf("финальный отчёт не должен показывать успешное завершение: err=%v", readErr)
+	}
+}
+
 func TestRun_DeliveryPreconditionsAreControllerEnforced(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()

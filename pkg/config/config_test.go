@@ -1,11 +1,13 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +18,114 @@ func TestDefault(t *testing.T) {
 	}
 	if len(cfg.PipelineAgents) != 7 {
 		t.Errorf("expected 7 agents, got %d", len(cfg.PipelineAgents))
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatalf("default graph: %v", err)
+	}
+	if graph.Entry != "analyst" || len(graph.Edges) < len(cfg.PipelineAgents) {
+		t.Fatalf("default graph неполон: %+v", graph)
+	}
+}
+
+func TestSchemaV4RejectsUnknownAndUnboundedGraph(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`
+schema_version: 4
+pipeline: [a, b]
+workflow:
+  entry: a
+  max_visits: {}
+  edges:
+    - from: a
+      outcome: passed
+      to: b
+      approval:
+        roles: [operator]
+        quorum: any
+        actions: {approve: b, reject: $stop}
+    - from: b
+      outcome: rejected
+      to: a
+      approval:
+        roles: [operator]
+        quorum: any
+        actions: {approve: a, reject: $stop}
+    - from: b
+      outcome: passed
+      to: $complete
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "max_visits") {
+		t.Fatalf("unbounded graph принят: %v", err)
+	}
+}
+
+func TestSchemaV4RejectsUnknownMaxVisitAndDuplicateAction(t *testing.T) {
+	for name, fragment := range map[string]string{
+		"unknown max visit": "max_visits: {ghost: 2}\n",
+		"duplicate action":  "max_visits: {}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			actions := "{approve: b, reject: $stop}"
+			if name == "duplicate action" {
+				actions = "{approve: b, approve: $stop}"
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := fmt.Sprintf(`schema_version: 4
+pipeline: [a, b]
+workflow:
+  entry: a
+  %s  edges:
+    - from: a
+      outcome: passed
+      to: b
+      approval:
+        roles: [operator]
+        quorum: any
+        actions: %s
+    - from: b
+      outcome: passed
+      to: $complete
+`, fragment, actions)
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if name == "duplicate action" {
+				if err == nil {
+					t.Fatal("duplicate action принят")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "ghost") {
+				t.Fatalf("unknown max_visits принят: %v", err)
+			}
+		})
+	}
+}
+
+func TestLegacySchema3CompilesLinearGraph(t *testing.T) {
+	cfg := &Config{
+		SchemaVersion:  PreviousSchemaVersion,
+		PipelineAgents: []AgentConfig{{Name: "analyst"}, {Name: "coder"}},
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, exists := graph.Edge("analyst", workflow.OutcomePassed)
+	if !exists || edge.To != "coder" {
+		t.Fatalf("legacy linear edge: %+v", graph)
 	}
 }
 
@@ -53,7 +163,7 @@ func TestLoadMigratesV2GoTestToTypedFreshEvidence(t *testing.T) {
 	}
 	check := cfg.PipelineAgents[0].Checks[0]
 	joined := strings.Join(check.Command, " ")
-	if cfg.SchemaVersion != CurrentSchemaVersion || check.Adapter != "go-test-json" || !strings.Contains(joined, "-json") || !strings.Contains(joined, "-count=1") {
+	if cfg.SchemaVersion != PreviousSchemaVersion || check.Adapter != "go-test-json" || !strings.Contains(joined, "-json") || !strings.Contains(joined, "-count=1") {
 		t.Fatalf("v2 migration incomplete: schema=%d check=%+v", cfg.SchemaVersion, check)
 	}
 }
@@ -218,11 +328,9 @@ func TestDefaultWithGates(t *testing.T) {
 	if cfg.SchemaVersion != CurrentSchemaVersion {
 		t.Errorf("default schema_version=%d", cfg.SchemaVersion)
 	}
-	if cfg.PipelineAgents[0].CheckpointAfter != CheckpointRequireExplicit {
-		t.Errorf("expected default analyst checkpoint_after=require_explicit")
-	}
-	if cfg.PipelineAgents[1].CheckpointAfter != CheckpointRequireExplicit {
-		t.Errorf("expected default architect checkpoint_after=require_explicit")
+	if cfg.Workflow == nil || cfg.Workflow.Edges[0].Approval == nil ||
+		cfg.Workflow.Edges[0].Approval.Roles[0] != "product_owner" {
+		t.Errorf("expected graph edge approval role product_owner, got %+v", cfg.Workflow)
 	}
 	if cfg.PipelineAgents[6].CheckpointBeforePolicy() != CheckpointAuto {
 		t.Errorf("delivery имеет отдельный mandatory approval и не должен дублировать checkpoint_before")
@@ -255,6 +363,10 @@ func TestValidate(t *testing.T) {
 		{"bad stage_timeout", &Config{PipelineAgents: []AgentConfig{{Name: "a"}}, StageTimeout: "later"}},
 		{"negative retries", &Config{PipelineAgents: []AgentConfig{{Name: "a", MaxRetries: -1}}}},
 		{"bad checkpoint", &Config{PipelineAgents: []AgentConfig{{Name: "a", CheckpointAfter: "sometimes"}}}},
+		{"empty approval role", &Config{PipelineAgents: []AgentConfig{{Name: "a", ApprovalRoles: []string{""}}}}},
+		{"duplicate approval role", &Config{PipelineAgents: []AgentConfig{{Name: "a", ApprovalRoles: []string{"qa", "qa"}}}}},
+		{"bad approval quorum", &Config{PipelineAgents: []AgentConfig{{Name: "a", ApprovalRoles: []string{"qa"}, ApprovalQuorum: "majority"}}}},
+		{"quorum without roles", &Config{PipelineAgents: []AgentConfig{{Name: "a", ApprovalQuorum: "all"}}}},
 		{"overlapping checkpoint", &Config{PipelineAgents: []AgentConfig{{Name: "a", CheckpointAfter: CheckpointInteractive, GateAfter: true}}}},
 		{"v2 legacy checkpoint", &Config{SchemaVersion: CurrentSchemaVersion, PipelineAgents: []AgentConfig{{Name: "a", GateAfter: true}}}},
 		{"unsupported schema", &Config{SchemaVersion: 99, PipelineAgents: []AgentConfig{{Name: "a"}}}},
@@ -316,15 +428,15 @@ func TestMarshalRoundTrip(t *testing.T) {
 	if len(loaded.PipelineAgents) != len(src.PipelineAgents) {
 		t.Fatalf("агентов после round-trip: %d, ожидалось %d", len(loaded.PipelineAgents), len(src.PipelineAgents))
 	}
-	// Гейты и retries переживают сериализацию (главный баг старого init)
-	if loaded.PipelineAgents[0].CheckpointAfter != CheckpointRequireExplicit {
-		t.Error("checkpoint_after у analyst потерян при round-trip")
+	if loaded.Workflow == nil || loaded.Workflow.Edges[0].Approval == nil ||
+		loaded.Workflow.Edges[0].Approval.Roles[0] != "product_owner" {
+		t.Errorf("edge approval у analyst потерян при round-trip: %+v", loaded.Workflow)
 	}
 	if loaded.PipelineAgents[6].CheckpointBeforePolicy() != CheckpointAuto {
 		t.Error("у deployer появился дублирующий checkpoint_before")
 	}
-	if loaded.PipelineAgents[2].MaxRetries != 2 {
-		t.Error("max_retries у coder потерян при round-trip")
+	if loaded.Workflow.MaxVisits["coder"] != 3 {
+		t.Error("max_visits у coder потерян при round-trip")
 	}
 	if loaded.StageTimeout != "30m" {
 		t.Errorf("stage_timeout после round-trip: %q", loaded.StageTimeout)

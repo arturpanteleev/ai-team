@@ -1,27 +1,24 @@
 ## Purpose
 
 Единые fail-closed checkpoint policies для интерактивных и автоматизированных запусков.
-
 ## Requirements
-
 ### Requirement: Единая checkpoint policy
-Schema version 3 MUST поддерживать `checkpoint_before` и `checkpoint_after` со значениями `auto_continue`, `interactive`, `require_explicit`.
+Schema version 3 MUST нормализовать legacy checkpoints в persisted exact
+transition approvals; TTY и flags MUST быть transport-ами общей модели.
 
 #### Scenario: Checkpoint после этапа
-- **КОГДА** `checkpoint_after: require_explicit` назначен успешно завершённому этапу
-- **ТОГДА** pipeline MUST показать статус, вердикт, длительность и артефакты
-- **И** MUST получить интерактивное подтверждение либо `--approve-gates`
-
-#### Scenario: Checkpoint перед этапом
-- **КОГДА** `checkpoint_before: interactive` назначен следующему этапу
-- **ТОГДА** pipeline MUST показать сводку актуальных попыток перед запросом
+- **КОГДА** защищённый transition достигнут после успешного stage
+- **ТОГДА** pipeline MUST создать persisted approval с exact subject hash
+- **И** MUST продолжить только после допустимого human decision
 
 ### Requirement: Неинтерактивный fail-closed режим
-Checkpoint, требующий решения, MUST NOT автоматически подтверждаться при отсутствии terminal stdin.
+Checkpoint без TTY MUST сохранять pending approval и non-terminal waiting run,
+а не терять возможность продолжения.
 
-#### Scenario: CI без разрешения
-- **КОГДА** checkpoint достигнут в non-interactive процессе без `--approve-gates`
-- **ТОГДА** run MUST завершиться со статусом stopped и exit code 3
+#### Scenario: Worker без решения
+- **КОГДА** protected transition достигнут в non-interactive worker
+- **ТОГДА** run MUST перейти в waiting и process MUST вернуть exit code 3
+- **И** resume без resolved decision MUST быть отклонён
 
 ### Requirement: Отдельное delivery approval
 Обычный checkpoint approval MUST NOT разрешать commit, push или PR. Delivery
@@ -30,3 +27,14 @@ MUST требовать approval точного SHA-256 canonical plan.
 #### Scenario: Gates подтверждены, delivery нет
 - **КОГДА** передан `--approve-gates`, но не передан совпадающий `--approve-plan`
 - **ТОГДА** delivery MUST остановиться после публикации плана и до внешних side effects
+
+### Requirement: Edge approval gate
+
+Для schema v4 controller MUST создавать approval из policy выбранного edge,
+а не из позиции узла в массиве.
+
+#### Scenario: Approval action меняет target
+
+- **КОГДА** resolved action указывает target, отличный от edge `to`
+- **ТОГДА** lifecycle next stage MUST стать action target
+- **И** решение и выбранное ребро MUST попасть в immutable evidence

@@ -10,7 +10,21 @@ CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `versi
 - **ТОГДА** CLI MUST вывести usage и завершиться ненулевым кодом
 
 ### Requirement: Init
-`ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и logs directories, а в git repository MUST обеспечить ignore `.ai-team/`.
+`ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и
+logs directories. В Git repository команда MUST обеспечить ignore
+`.ai-team/`, не изменяя workspace по умолчанию.
+
+#### Scenario: Флаги init
+- **КОГДА** пользователь передаёт `--target <path>` и/или
+  `--write-gitignore` в любом поддерживаемом порядке
+- **ТОГДА** CLI MUST применить оба флага
+- **И** неизвестный флаг или отсутствующее значение MUST привести к
+  ненулевому exit code
+
+#### Scenario: Поведение по умолчанию
+- **КОГДА** `init` запускается в Git repository без `--write-gitignore`
+- **ТОГДА** команда MUST использовать локальный Git exclude
+- **И** MUST NOT изменять `.gitignore`
 
 #### Scenario: Поддерживаемый typed stack
 - **КОГДА** target содержит `go.mod`
@@ -26,11 +40,17 @@ CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `versi
 - **ТОГДА** init MUST предупредить, что delivery запрещён до настройки required unit/integration/e2e check
 
 ### Requirement: Run identity and validation
-`run` MUST валидировать feature и config до создания filesystem paths, получить workspace lock, создать immutable run_id и выполнить настроенный pipeline.
+`run` MUST валидировать новый запуск или resume до запуска агента, получить
+workspace lock и использовать одну immutable run_id на весь долговечный run.
 
 #### Scenario: Feature traversal
 - **КОГДА** feature содержит slash, backslash или `..`
 - **ТОГДА** CLI и direct pipeline API MUST отклонить запрос до записи файлов
+
+#### Scenario: Resume
+- **КОГДА** пользователь запускает `ai-team run --resume <run_id>`
+- **ТОГДА** CLI MUST восстановить feature, task и next stage
+- **И** MUST продолжить ту же run identity после fail-closed проверок
 
 #### Scenario: Повторный run уже доставленной фичи
 - **КОГДА** пользователь запускает `run --feature F` без `--retry-from`, и прошлый run той же `F` уже довёл её до успешной deployer delivery (записанный commit и/или PR)
@@ -38,18 +58,18 @@ CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `versi
 - **И** MUST NOT отказать в выполнении нового run из-за одного этого условия
 
 ### Requirement: Explicit approvals
-Non-interactive run MUST требовать `--approve-gates` для checkpoints. Внешние
-delivery effects MUST требовать `--approve-plan <sha256>`, точно совпадающий с
-SHA-256 опубликованного canonical plan.
+CLI MUST создавать и применять typed exact-subject decisions. Обычный
+transition approval MUST NOT разрешать delivery side effects.
 
-#### Scenario: Только gates разрешены
-- **КОГДА** передан только `--approve-gates`
-- **ТОГДА** pipeline MUST остановиться перед commit/push/PR с exit code 3
-- **И** MUST вывести canonical plan и его SHA-256
+#### Scenario: Запись решения
+- **КОГДА** пользователь передаёт run_id, approval_id, actor, role, action,
+  subject hash и optional comment
+- **ТОГДА** CLI MUST записать audited decision после строгой проверки
 
-#### Scenario: Разрешён другой plan
-- **КОГДА** `--approve-plan` не совпадает с текущим canonical plan
-- **ТОГДА** pipeline MUST NOT выполнять commit, push или PR
+#### Scenario: Resume waiting run
+- **КОГДА** waiting run возобновляется
+- **ТОГДА** CLI MUST требовать resolved persisted approval
+- **И** MUST применить только target выбранного action
 
 ### Requirement: Layered agent list
 `list` MUST объединять project, plugin, user и built-in registry layers и показывать источник победившего определения.

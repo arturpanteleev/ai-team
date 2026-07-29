@@ -1,39 +1,34 @@
 ## Purpose
 
-WebSocket клиент для опциональных in-process updates; polling SQLite API
-остаётся обязательным механизмом обнаружения cross-process CLI runs.
+WebSocket клиент для versioned durable lifecycle event stream.
 
 ## Requirements
 
 ### Requirement: WebSocket hook
-Frontend MUST предоставлять хук для WebSocket соединения.
+Frontend MUST подключаться к `/ws` с последним обработанным cursor,
+дедуплицировать events и автоматически переподключаться.
 
 #### Scenario: Подключение
 - **КОГДА** приложение загружается
 - **ТОГДА** useWebSocket хук MUST построить `ws:` или `wss:` URL из текущего same-origin host
 - **И** начать слушать events
 
-#### Scenario: Обработка events
-- **КОГДА** WebSocket получает event
-- **ТОГДА** хук MUST обновить state приложения:
-  - stage_started → обновить статус этапа на running
-  - stage_completed → обновить статус и duration этапа
-  - pipeline_completed → обновить общий статус
+#### Scenario: Event получен
+- **КОГДА** hook получает валидное version 1 event с новым cursor
+- **ТОГДА** hook MUST сохранить cursor
+- **И** MUST передать event consumer
 
-#### Scenario: Reconnect
-- **КОГДА** WebSocket отключается
-- **ТОГДА** хук MUST попытаться переподключиться с exponential backoff
-- **И** задержка MUST быть bounded
+#### Scenario: Повтор или reconnect
+- **КОГДА** event cursor уже обработан или соединение восстановлено
+- **ТОГДА** дубликат MUST быть проигнорирован
+- **И** новое соединение MUST передать последний cursor в query parameter
+- **И** reconnect delay MUST использовать bounded exponential backoff
 
 ### Requirement: Автообновление Dashboard
-Dashboard MUST автоматически обновляться при WebSocket events и через bounded
-periodic polling независимо от наличия running rows.
+Dashboard и Pipeline Detail MUST обновлять projection по live lifecycle events;
+polling MAY использоваться только как редкий fallback.
 
-#### Scenario: Новый pipeline run
-- **КОГДА** WebSocket получает pipeline_completed
-- **ТОГДА** Dashboard MUST добавить/обновить run в списке без перезагрузки
-
-#### Scenario: CLI не подключён к текущему Hub
-- **КОГДА** CLI пишет lifecycle projection в SQLite из отдельного процесса
-- **ТОГДА** Dashboard MUST периодически poll даже если список пуст или все известные runs terminal
-- **И** Pipeline Detail MUST poll пока выбранный run имеет статус running
+#### Scenario: Production event
+- **КОГДА** приходит event нового run или attempt
+- **ТОГДА** соответствующий экран MUST запросить актуальную projection без
+  ожидания polling interval

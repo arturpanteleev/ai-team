@@ -5,11 +5,18 @@
 ## Requirements
 
 ### Requirement: Run and attempt projection
-SQLite MUST хранить внешний unique run_id, attempt_id, stage_index, execution, decision, outcome, verdict, checks, mutations и delivery results.
+SQLite MUST хранить внешний unique run_id, attempt_id, stage_index, execution,
+decision, outcome, verdict, checks, mutations, delivery results и
+упорядоченный durable lifecycle event stream.
 
 #### Scenario: Попытка завершена
 - **КОГДА** controller публикует StageResult
 - **ТОГДА** соответствующая запись attempt MUST обновляться только по её identity
+
+#### Scenario: Cursor query
+- **КОГДА** consumer запрашивает events после cursor с bounded limit
+- **ТОГДА** store MUST вернуть только events с большим id
+- **И** MUST упорядочить их по id по возрастанию
 
 ### Requirement: Versioned migrations
 Schema migrations MUST иметь номера в `schema_migrations` и применяться без потери существующих rows.

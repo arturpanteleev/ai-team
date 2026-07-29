@@ -42,6 +42,11 @@
   color: black;
 }
 
+.waiting_for_approval {
+  background: rgba(168, 85, 247, 0.16);
+  color: #c084fc;
+}
+
 .rejected,
 .canceled {
   background: rgba(239, 68, 68, 0.12);

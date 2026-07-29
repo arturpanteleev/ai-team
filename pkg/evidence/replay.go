@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -46,8 +47,12 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 	}
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	byID := make(map[string]int)
+	approvalSubjects := make(map[string]string)
+	decidedApprovals := make(map[string]bool)
+	selectedTransitions := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
+	canceled := false
 	for _, event := range events {
 		if terminal {
 			return ReplayedRun{}, fmt.Errorf("event %d occurs after run_finished", event.Sequence)
@@ -126,6 +131,21 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 				return ReplayedRun{}, fmt.Errorf("attempt_finished %q has neither manifest evidence nor publication error", event.AttemptID)
 			}
 			finishedCount++
+		case "attempt_abandoned":
+			index, exists := byID[event.AttemptID]
+			if !exists || !result.Attempts[index].FinishedAt.IsZero() {
+				return ReplayedRun{}, fmt.Errorf("attempt_abandoned %q has no matching active attempt", event.AttemptID)
+			}
+			attempt := &result.Attempts[index]
+			attempt.FinishedAt = event.Timestamp
+			attempt.Status = "canceled"
+			attempt.State = workflow.AttemptState{
+				Execution: workflow.ExecutionCanceled,
+				Decision:  workflow.DecisionNotApplicable,
+				Outcome:   workflow.OutcomeCanceled,
+			}
+			attempt.Error, _ = eventString(event.Data, "reason", false)
+			finishedCount++
 		case "attempts_invalidated":
 			attemptIDs, fieldErr := eventStrings(event.Data, "attempt_ids")
 			if fieldErr != nil {
@@ -143,6 +163,44 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 				result.Attempts[index].State = workflow.Invalidate(result.Attempts[index].State)
 				result.Attempts[index].Status = result.Attempts[index].State.LegacyStatus()
 			}
+		case "approval_requested":
+			approvalID, idErr := eventString(event.Data, "approval_id", true)
+			subjectHash, hashErr := eventString(event.Data, "subject_hash", true)
+			status, statusErr := eventString(event.Data, "status", true)
+			if idErr != nil || hashErr != nil || statusErr != nil ||
+				!safeEventIdentifier(approvalID) || !validSHA256(subjectHash) ||
+				status != "pending" || event.AttemptID == "" {
+				return ReplayedRun{}, fmt.Errorf("approval_requested содержит недопустимую identity")
+			}
+			if previous, exists := approvalSubjects[approvalID]; exists && previous != subjectHash {
+				return ReplayedRun{}, fmt.Errorf("approval_requested %s меняет subject", approvalID)
+			}
+			approvalSubjects[approvalID] = subjectHash
+		case "approval_decided":
+			approvalID, idErr := eventString(event.Data, "approval_id", true)
+			subjectHash, hashErr := eventString(event.Data, "subject_hash", true)
+			status, statusErr := eventString(event.Data, "status", true)
+			action, actionErr := eventString(event.Data, "resolved_action", true)
+			expected, exists := approvalSubjects[approvalID]
+			if idErr != nil || hashErr != nil || statusErr != nil || actionErr != nil ||
+				!exists || expected != subjectHash || status != "resolved" ||
+				action == "" || decidedApprovals[approvalID] {
+				return ReplayedRun{}, fmt.Errorf("approval_decided %s не соответствует запросу", approvalID)
+			}
+			decidedApprovals[approvalID] = true
+		case "transition_selected":
+			index, exists := byID[event.AttemptID]
+			from, fromErr := eventString(event.Data, "from", true)
+			outcome, outcomeErr := eventString(event.Data, "outcome", true)
+			edgeTarget, edgeErr := eventString(event.Data, "edge_target", true)
+			target, targetErr := eventString(event.Data, "target", true)
+			if !exists || result.Attempts[index].FinishedAt.IsZero() || selectedTransitions[event.AttemptID] ||
+				fromErr != nil || outcomeErr != nil || edgeErr != nil || targetErr != nil ||
+				from != result.Attempts[index].Stage || outcome != string(result.Attempts[index].State.Outcome) ||
+				strings.ContainsAny(edgeTarget, "/\\") || strings.ContainsAny(target, "/\\") {
+				return ReplayedRun{}, fmt.Errorf("transition_selected %s не соответствует attempt", event.AttemptID)
+			}
+			selectedTransitions[event.AttemptID] = true
 		case "run_finished":
 			if result.StartedAt.IsZero() {
 				return ReplayedRun{}, fmt.Errorf("run_finished appears before run_started")
@@ -156,6 +214,9 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 				return ReplayedRun{}, fmt.Errorf("run_finished stage_attempts=%d, replayed=%d", attemptCount, finishedCount)
 			}
 			result.Status = workflow.RunOutcome(status)
+			if result.Status == workflow.RunCanceled && !canceled {
+				return ReplayedRun{}, errors.New("canceled run не содержит run_canceled")
+			}
 			if result.Status == workflow.RunCompleted || result.Status == workflow.RunCompletedWithWarnings {
 				states := make([]workflow.AttemptState, 0, len(result.Attempts))
 				for _, attempt := range result.Attempts {
@@ -167,6 +228,24 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 			}
 			result.FinishedAt = event.Timestamp
 			terminal = true
+		case "run_paused":
+			if result.StartedAt.IsZero() {
+				return ReplayedRun{}, fmt.Errorf("run_paused appears before run_started")
+			}
+		case "run_resumed":
+			if result.StartedAt.IsZero() {
+				return ReplayedRun{}, fmt.Errorf("run_resumed appears before run_started")
+			}
+			for _, attempt := range result.Attempts {
+				if attempt.FinishedAt.IsZero() {
+					return ReplayedRun{}, fmt.Errorf("run_resumed contains active attempt %q", attempt.AttemptID)
+				}
+			}
+		case "run_canceled":
+			if result.StartedAt.IsZero() || canceled {
+				return ReplayedRun{}, errors.New("run_canceled имеет недопустимую позицию")
+			}
+			canceled = true
 		}
 	}
 	if len(events) > 0 {

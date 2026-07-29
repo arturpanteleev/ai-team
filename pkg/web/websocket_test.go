@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/gorilla/websocket"
 )
 
@@ -72,10 +75,9 @@ func TestHub_BroadcastEvent(t *testing.T) {
 
 	// Broadcast an event
 	event := Event{
-		Type:       "stage_started",
-		PipelineID: 1,
-		Agent:      "analyst",
-		Status:     "running",
+		Version: 1, Cursor: 1, RunID: "run-1", Sequence: 2,
+		Type: "attempt_started", Timestamp: time.Now(),
+		Data: map[string]any{"agent": "analyst", "status": "running"},
 	}
 	hub.BroadcastEvent(event)
 
@@ -91,14 +93,14 @@ func TestHub_BroadcastEvent(t *testing.T) {
 		t.Fatalf("failed to unmarshal event: %v", err)
 	}
 
-	if received.Type != "stage_started" {
-		t.Errorf("expected type 'stage_started', got %q", received.Type)
+	if received.Type != "attempt_started" {
+		t.Errorf("expected type 'attempt_started', got %q", received.Type)
 	}
-	if received.PipelineID != 1 {
-		t.Errorf("expected pipeline_id 1, got %d", received.PipelineID)
+	if received.Cursor != 1 {
+		t.Errorf("expected cursor 1, got %d", received.Cursor)
 	}
-	if received.Agent != "analyst" {
-		t.Errorf("expected agent 'analyst', got %q", received.Agent)
+	if received.Data["agent"] != "analyst" {
+		t.Errorf("expected agent 'analyst', got %q", received.Data["agent"])
 	}
 }
 
@@ -135,7 +137,7 @@ func TestHub_MultipleClients(t *testing.T) {
 	}
 
 	// Broadcast
-	hub.BroadcastEvent(Event{Type: "test", Agent: "broadcast-test"})
+	hub.BroadcastEvent(Event{Version: 1, Type: "test", Data: map[string]any{"agent": "broadcast-test"}})
 
 	// All 3 should receive
 	for i, conn := range conns {
@@ -146,8 +148,8 @@ func TestHub_MultipleClients(t *testing.T) {
 		}
 		var ev Event
 		json.Unmarshal(msg, &ev)
-		if ev.Agent != "broadcast-test" {
-			t.Errorf("client %d: expected 'broadcast-test', got %q", i, ev.Agent)
+		if ev.Data["agent"] != "broadcast-test" {
+			t.Errorf("client %d: expected 'broadcast-test', got %q", i, ev.Data["agent"])
 		}
 	}
 }
@@ -191,11 +193,9 @@ func TestHub_Unregister(t *testing.T) {
 
 func TestEvent_MarshalJSON(t *testing.T) {
 	event := Event{
-		Type:       "stage_completed",
-		PipelineID: 42,
-		Agent:      "coder",
-		Status:     "passed",
-		DurationMs: 1234,
+		Version: 1, Cursor: 42, RunID: "run-42", Sequence: 3,
+		Type: "attempt_finished", Timestamp: time.Now(),
+		Data: map[string]any{"agent": "coder", "status": "passed", "duration_ms": float64(1234)},
 	}
 
 	data, err := json.Marshal(event)
@@ -211,26 +211,102 @@ func TestEvent_MarshalJSON(t *testing.T) {
 	if decoded.Type != event.Type {
 		t.Errorf("type mismatch: %q vs %q", decoded.Type, event.Type)
 	}
-	if decoded.PipelineID != event.PipelineID {
-		t.Errorf("pipeline_id mismatch")
+	if decoded.Cursor != event.Cursor {
+		t.Errorf("cursor mismatch")
 	}
-	if decoded.DurationMs != event.DurationMs {
-		t.Errorf("duration_ms mismatch")
+	if decoded.Data["duration_ms"] != event.Data["duration_ms"] {
+		t.Errorf("data mismatch")
 	}
 }
 
 func TestEvent_OmitEmpty(t *testing.T) {
-	event := Event{Type: "ping"}
+	event := Event{Version: 1, Type: "ping", Data: map[string]any{}}
 	data, err := json.Marshal(event)
 	if err != nil {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 
 	s := string(data)
-	if strings.Contains(s, "pipeline_id") {
-		t.Error("pipeline_id should be omitted when zero")
+	if strings.Contains(s, "attempt_id") {
+		t.Error("attempt_id should be omitted when empty")
 	}
-	if strings.Contains(s, "agent") {
-		t.Error("agent should be omitted when empty")
+}
+
+func TestWebSocketReplaysAfterCursor(t *testing.T) {
+	server, err := NewServer(filepath.Join(t.TempDir(), "web.db"), "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer server.Close()
+	now := time.Now().UTC()
+	first := &store.Event{RunID: "run-replay", Sequence: 1, Type: "run_started", Timestamp: now, DataJSON: `{"feature":"replay"}`}
+	second := &store.Event{RunID: "run-replay", Sequence: 2, Type: "run_finished", Timestamp: now.Add(time.Second), DataJSON: `{"status":"completed"}`}
+	if err := server.Store().AppendEvent(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Store().AppendEvent(second); err != nil {
+		t.Fatal(err)
+	}
+
+	httpServer := httptest.NewServer(server.router)
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws?cursor=" + strconv.FormatInt(first.ID, 10)
+	connection, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
+	}
+	defer connection.Close()
+	connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var event Event
+	if err := connection.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Cursor != second.ID || event.Type != "run_finished" || event.Version != 1 {
+		t.Fatalf("неожиданный replay event: %+v", event)
+	}
+}
+
+func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
+	server, err := NewServer(filepath.Join(t.TempDir(), "web.db"), "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	httpServer := httptest.NewServer(server.router)
+	defer httpServer.Close()
+	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
+	}
+	defer connection.Close()
+
+	stored := &store.Event{
+		RunID: "run-live", Sequence: 1, Type: "run_started",
+		Timestamp: time.Now().UTC(), DataJSON: `{"feature":"live"}`,
+	}
+	if err := server.Store().AppendEvent(stored); err != nil {
+		t.Fatal(err)
+	}
+	connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var event Event
+	if err := connection.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Cursor != stored.ID || event.RunID != "run-live" {
+		t.Fatalf("неожиданный live event: %+v", event)
+	}
+}
+
+func TestWireEventRejectsMalformedPayload(t *testing.T) {
+	_, err := wireEvent(store.Event{ID: 7, RunID: "run", DataJSON: `[`})
+	if err == nil || !strings.Contains(err.Error(), "event 7 payload") {
+		t.Fatalf("ожидалась контекстная ошибка payload, получено %v", err)
+	}
+}
+
+func responseStatus(response *http.Response) string {
+	if response == nil {
+		return "<nil>"
+	}
+	return response.Status
 }

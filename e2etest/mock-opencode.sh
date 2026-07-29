@@ -19,6 +19,11 @@ MODE="${MOCK_MODE:-normal}"
 PROMPT=""
 PROMPT_FILE=""
 
+if [[ "${1:-}" == "--version" ]]; then
+  echo "opencode mock 1.0.0"
+  exit 0
+fi
+
 if [[ "${1:-}" == "run" ]]; then
   shift
   while [[ $# -gt 0 ]]; do
@@ -64,6 +69,14 @@ AGENT=$(echo "$PROMPT" | head -1 | sed 's/^# //')
 FEATURE=$(echo "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | tail -n +2 | head -1 | xargs)
 
 echo "MOCK: agent=$AGENT feature=$FEATURE mode=$MODE" >&2
+
+if [[ "${MOCK_WAIT_AGENT:-}" == "$AGENT" ]]; then
+  if [[ -n "${MOCK_WAIT_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$MOCK_WAIT_FILE")"
+    : > "$MOCK_WAIT_FILE"
+  fi
+  while true; do sleep 1; done
+fi
 
 if [[ -n "${MOCK_CAPTURE_ENV_DIR:-}" ]]; then
   mkdir -p "$MOCK_CAPTURE_ENV_DIR"

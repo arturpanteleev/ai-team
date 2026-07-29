@@ -206,6 +206,82 @@ func Start(root string, manifest RunManifest) (*Store, error) {
 	}, nil
 }
 
+// Resume открывает существующий non-terminal run после полной проверки
+// manifest, snapshots и hash-chained event log.
+func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
+	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
+		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("недопустимый run_id %q", runID)
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	runDir := filepath.Join(root, runID)
+	if _, err := safeio.ExistingDir(root, runID); err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(manifestData))
+	decoder.DisallowUnknownFields()
+	var manifest RunManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	if manifest.SchemaVersion != SchemaVersion || manifest.RunID != runID {
+		return nil, RunManifest{}, ReplayedRun{}, errors.New("run manifest identity/schema mismatch")
+	}
+	configData, err := safeio.ReadRegularFile(filepath.Join(runDir, manifest.ConfigEvidence), 8<<20)
+	if err != nil || sha256Bytes(configData) != manifest.ConfigSHA256 {
+		return nil, RunManifest{}, ReplayedRun{}, errors.New("config snapshot identity mismatch")
+	}
+	workflowData, err := safeio.ReadRegularFile(filepath.Join(runDir, manifest.ResolvedWorkflow), 8<<20)
+	if err != nil || sha256Bytes(workflowData) != manifest.ResolvedWorkflowSHA256 {
+		return nil, RunManifest{}, ReplayedRun{}, errors.New("workflow snapshot identity mismatch")
+	}
+	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	if !replayed.FinishedAt.IsZero() {
+		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("run %s уже terminal", runID)
+	}
+	events, err := VerifyEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	lastHash := genesisEventHash
+	if len(events) > 0 {
+		lastHash = events[len(events)-1].SHA256
+	}
+	store := &Store{
+		root: root, runID: runID, nextID: uint64(len(events)), lastEventHash: lastHash,
+		provenance: make(map[string]ArtifactRecord),
+	}
+	for _, attempt := range replayed.Attempts {
+		if attempt.ManifestSHA256 == "" {
+			continue
+		}
+		data, readErr := safeio.ReadRegularFile(filepath.Join(runDir, "attempts", attempt.AttemptID, "manifest.json"), 8<<20)
+		if readErr != nil {
+			return nil, RunManifest{}, ReplayedRun{}, readErr
+		}
+		var attemptManifest AttemptManifest
+		if json.Unmarshal(data, &attemptManifest) != nil {
+			return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("attempt manifest %s повреждён", attempt.AttemptID)
+		}
+		for _, output := range attemptManifest.Outputs {
+			store.provenance[cleanArtifactKey(output.SourcePath)] = output
+			store.provenance[cleanArtifactKey(filepath.Join(runDir, filepath.FromSlash(output.EvidencePath)))] = output
+		}
+	}
+	manifest.ConfigSnapshot = configData
+	manifest.WorkflowSnapshot = workflowData
+	return store, manifest, replayed, nil
+}
+
 func currentControllerIdentity() (ControllerIdentity, error) {
 	identity := ControllerIdentity{GoVersion: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}
 	executable, err := os.Executable()
@@ -303,7 +379,11 @@ func (s *Store) SnapshotInputs(attemptID string, inputs []Artifact) ([]Artifact,
 			cleanup()
 			return nil, func() {}, fmt.Errorf("snapshot input %s: %w", input.Name, err)
 		}
-		result = append(result, Artifact{Name: input.Name, Path: destination, SourcePath: input.Path})
+		sourcePath := input.SourcePath
+		if sourcePath == "" {
+			sourcePath = input.Path
+		}
+		result = append(result, Artifact{Name: input.Name, Path: destination, SourcePath: sourcePath})
 	}
 	return result, cleanup, nil
 }
@@ -373,7 +453,9 @@ func (s *Store) PublishAttempt(manifest AttemptManifest, artifactRoot string, in
 			sourcePath = input.Path
 		}
 		if _, relErr := confinedRelative(artifactRoot, sourcePath); relErr != nil {
-			return fmt.Errorf("input %s: %w", input.Name, relErr)
+			if _, evidenceErr := confinedRelative(s.RunDir(), sourcePath); evidenceErr != nil {
+				return fmt.Errorf("input %s: path is neither artifact nor immutable run evidence: %w", input.Name, relErr)
+			}
 		}
 		inputName := fmt.Sprintf("%03d-%s", index+1, sanitize(input.Name))
 		destination := filepath.Join(tmpDir, "inputs", inputName, filepath.Base(sourcePath))

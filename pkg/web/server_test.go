@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +13,118 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
+
+type fakeRunController struct {
+	startFeature string
+	startTask    string
+	startCalls   int
+	resumeRunID  string
+	cancelRunID  string
+	decision     approval.Decision
+	approvalID   string
+	runID        string
+	approvals    []approval.PendingApproval
+}
+
+func (f *fakeRunController) Start(feature, task string) (string, error) {
+	f.startCalls++
+	f.startFeature, f.startTask = feature, task
+	return "run-created", nil
+}
+func (f *fakeRunController) Resume(runID string) error { f.resumeRunID = runID; return nil }
+func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return nil }
+func (f *fakeRunController) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	f.runID, f.approvalID, f.decision = runID, approvalID, decision
+	return approval.PendingApproval{ID: approvalID, RunID: runID, Status: approval.StatusResolved, ResolvedAction: decision.Action}, nil
+}
+func (f *fakeRunController) Approvals(string) ([]approval.PendingApproval, error) {
+	return f.approvals, nil
+}
+func (f *fakeRunController) Preflight(context.Context) preflight.Report {
+	return preflight.Report{Ready: true, CheckedAt: time.Now().UTC(), Checks: []preflight.Check{{
+		ID: "opencode", Status: preflight.StatusPassed, Required: true, Message: "opencode test",
+	}}}
+}
+
+func TestPreflightEndpoint(t *testing.T) {
+	controller := &fakeRunController{}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest(http.MethodGet, "/api/preflight", nil))
+	if writer.Code != http.StatusOK {
+		t.Fatalf("preflight: %d %s", writer.Code, writer.Body.String())
+	}
+	var report preflight.Report
+	if err := json.NewDecoder(writer.Body).Decode(&report); err != nil || !report.Ready || len(report.Checks) != 1 {
+		t.Fatalf("preflight report: %+v, %v", report, err)
+	}
+}
+
+func TestRunLogReturnsBoundedTail(t *testing.T) {
+	srv, artifactRoot := newTestServer(t)
+	run := &store.PipelineRun{RunID: "run-log", Feature: "feat", Status: "running", StartedAt: time.Now()}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(filepath.Dir(artifactRoot), "runs", run.RunID, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("x", maxLogTailSize) + "TAIL"
+	if err := os.WriteFile(filepath.Join(logDir, "001-agent.log"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest(http.MethodGet, "/api/runs/run-log/logs/001-agent", nil))
+	if writer.Code != http.StatusOK {
+		t.Fatalf("log: %d %s", writer.Code, writer.Body.String())
+	}
+	var tail logTail
+	if err := json.NewDecoder(writer.Body).Decode(&tail); err != nil {
+		t.Fatal(err)
+	}
+	if !tail.Truncated || tail.Offset != 4 || len(tail.Content) != maxLogTailSize || !strings.HasSuffix(tail.Content, "TAIL") {
+		t.Fatalf("unexpected log tail: offset=%d truncated=%t size=%d", tail.Offset, tail.Truncated, len(tail.Content))
+	}
+}
+
+func TestRunLogRejectsUnsafeIdentity(t *testing.T) {
+	for _, value := range []string{"", ".", "..", "../attempt", "dir/attempt", `dir\attempt`} {
+		if safeIdentity(value) {
+			t.Errorf("identity %q должна быть отклонена", value)
+		}
+	}
+}
+
+func TestRunWorkflowReturnsImmutableSnapshot(t *testing.T) {
+	srv, artifactRoot := newTestServer(t)
+	run := &store.PipelineRun{RunID: "run-graph", Feature: "feat", Status: "running", StartedAt: time.Now()}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(filepath.Dir(artifactRoot), "runs", run.RunID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := `{"schema_version":2,"graph":{"entry":"analyst","nodes":[],"edges":[]}}`
+	if err := os.WriteFile(filepath.Join(runDir, "workflow.json"), []byte(snapshot), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest(http.MethodGet, "/api/runs/run-graph/workflow", nil))
+	if writer.Code != http.StatusOK || strings.TrimSpace(writer.Body.String()) != snapshot {
+		t.Fatalf("workflow: %d %s", writer.Code, writer.Body.String())
+	}
+}
 
 // newLoopbackRequest wraps httptest.NewRequest and sets Host to a loopback
 // value: httptest.NewRequest defaults Host to "example.com" for relative
@@ -35,6 +146,157 @@ func newTestServer(t *testing.T) (*Server, string) {
 	t.Cleanup(func() { srv.Close() })
 	return srv, artifactRoot
 }
+
+func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *http.Request {
+	t.Helper()
+	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	sessionWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	if sessionWriter.Code != http.StatusOK {
+		t.Fatalf("session bootstrap: %d %s", sessionWriter.Code, sessionWriter.Body.String())
+	}
+	var session struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(sessionWriter.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	response := sessionWriter.Result()
+	cookies := response.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("session cookie отсутствует: %v", cookies)
+	}
+	request := newLoopbackRequest(method, target, strings.NewReader(body))
+	request.AddCookie(cookies[0])
+	request.Header.Set("X-CSRF-Token", session.CSRFToken)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
+	controller := &fakeRunController{}
+	artifactRoot := t.TempDir()
+	srv, err := NewServer(":memory:", "", artifactRoot, WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	noSession := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, noSession)
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("без session: %d", writer.Code)
+	}
+
+	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	sessionWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
+	noCSRF.AddCookie(sessionWriter.Result().Cookies()[0])
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, noCSRF)
+	if writer.Code != http.StatusForbidden {
+		t.Fatalf("без CSRF: %d", writer.Code)
+	}
+}
+
+func TestWriteRunAndDecisionCommands(t *testing.T) {
+	controller := &fakeRunController{}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача"}`)
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, start)
+	if writer.Code != http.StatusAccepted || controller.startFeature != "feat" || controller.startTask != "задача" {
+		t.Fatalf("start: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
+	}
+
+	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача","unknown":true}`)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, bad)
+	if writer.Code != http.StatusBadRequest || controller.startCalls != 1 {
+		t.Fatalf("unknown JSON field запустил worker: code=%d calls=%d", writer.Code, controller.startCalls)
+	}
+
+	decision := authorizedRequest(t, srv, "POST",
+		"/api/runs/run-1/approvals/approval-1/decisions",
+		`{"actor_id":"user-1","actor_role":"qa","action":"approve","comment":"проверено","subject_hash":"`+testSubjectHash+`"}`)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, decision)
+	if writer.Code != http.StatusOK || controller.runID != "run-1" ||
+		controller.approvalID != "approval-1" || controller.decision.ActorID != "user-1" {
+		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
+	}
+}
+
+func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
+	controller := &fakeRunController{}
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := cloudidentity.NewPrincipal("reviewer-1", []cloudidentity.Role{cloudidentity.RoleReviewer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.Issue(principal, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(),
+		WithRunController(controller), WithAuthenticator(manager))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest("GET", "/api/pipelines", nil))
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("cloud read без session: %d", writer.Code)
+	}
+
+	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	sessionRequest.Header.Set("Authorization", "Bearer "+token)
+	sessionWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	if sessionWriter.Code != http.StatusOK {
+		t.Fatalf("cloud session: %d %s", sessionWriter.Code, sessionWriter.Body.String())
+	}
+	var session sessionResponse
+	if err := json.NewDecoder(sessionWriter.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	cookie := sessionWriter.Result().Cookies()[0]
+
+	command := func(target, body string) *httptest.ResponseRecorder {
+		request := newLoopbackRequest("POST", target, strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", session.CSRFToken)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+		return response
+	}
+	if response := command("/api/runs", `{"feature":"f","task":"t"}`); response.Code != http.StatusForbidden {
+		t.Fatalf("reviewer не должен создавать run: %d %s", response.Code, response.Body.String())
+	}
+	response := command("/api/runs/run-1/approvals/approval-1/decisions",
+		`{"actor_id":"spoofed","actor_role":"reviewer","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reviewer decision: %d %s", response.Code, response.Body.String())
+	}
+	if controller.decision.ActorID != "reviewer-1" || controller.decision.ActorRole != "reviewer" {
+		t.Fatalf("decision audit использовал недоверенную identity: %+v", controller.decision)
+	}
+}
+
+const testSubjectHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestGetPipelines_Empty(t *testing.T) {
 	srv, _ := newTestServer(t)

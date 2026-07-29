@@ -111,6 +111,28 @@ func (s *Store) UpdatePipelineRun(run *PipelineRun) error {
 	return requireAffected(result, "pipeline run")
 }
 
+func (s *Store) ResumePipelineRun(runID string) (*PipelineRun, error) {
+	run, err := s.GetPipelineRunByRunID(runID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.db.Exec(`UPDATE pipeline_runs SET status = 'running', completed_at = NULL WHERE id = ? AND run_uid = ?`, run.ID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireAffected(result, "resumed pipeline run"); err != nil {
+		return nil, err
+	}
+	run.Status, run.CompletedAt = "running", nil
+	return run, nil
+}
+
+func (s *Store) LatestRunEventSequence(runID string) (int64, error) {
+	var sequence int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_uid = ?`, runID).Scan(&sequence)
+	return sequence, err
+}
+
 func (s *Store) CreateStage(stage *Stage) error {
 	result, err := s.db.Exec(`INSERT INTO stages
 		(pipeline_run_id, attempt_uid, stage_index, agent_name, status, execution, decision, outcome, started_at, error, verdict, inputs_json, outputs_json, checks_json, mutations_json, delivery_json)
@@ -167,6 +189,33 @@ func (s *Store) AppendEvent(event *Event) error {
 	}
 	event.ID, err = result.LastInsertId()
 	return err
+}
+
+func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
+	if cursor < 0 || limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("invalid event query cursor=%d limit=%d", cursor, limit)
+	}
+	rows, err := s.db.Query(`SELECT id, run_uid, sequence, type, COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
+		FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]Event, 0)
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.AttemptID, &event.Timestamp, &event.DataJSON); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (s *Store) LatestEventCursor() (int64, error) {
+	var cursor int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&cursor)
+	return cursor, err
 }
 
 func (s *Store) GetPipelineRuns() ([]PipelineRun, error) { return s.GetPipelineRunsPage(100, 0) }

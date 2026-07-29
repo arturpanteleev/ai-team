@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from '../router';
 import { describe, expect, it } from 'vitest';
 import { StageRow } from './StageRow';
 import type { Artifact, Stage } from '../types';
@@ -18,6 +18,15 @@ describe('StageRow', () => {
       execution: 'succeeded',
       decision: 'rejected',
       outcome: 'failed',
+      checks_json: JSON.stringify([{
+        name: 'go-test', class: 'unit', command: ['go', 'test', './...'],
+        policy: 'required', status: 'failed', exit_code: 1,
+      }]),
+      mutations_json: JSON.stringify(['reverse.go']),
+      delivery_json: JSON.stringify({
+        pr_url: 'https://example.test/pr/1',
+        steps: [{ step: 'push', status: 'passed', exit_code: 0 }],
+      }),
     };
     const artifacts: Artifact[] = [{
       name: 'review.md',
@@ -35,5 +44,8 @@ describe('StageRow', () => {
     expect(screen.getByText('required check failed')).toBeInTheDocument();
     expect(screen.getByText('002-reviewer')).toBeInTheDocument();
     expect(screen.getByText('rejected')).toBeInTheDocument();
+    expect(screen.getByText('go-test')).toBeInTheDocument();
+    expect(screen.getByText('reverse.go')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://example.test/pr/1' })).toBeInTheDocument();
   });
 });

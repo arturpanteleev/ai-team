@@ -1,0 +1,45 @@
+.page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #0b1020;
+}
+
+.card {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid #28334f;
+  border-radius: 16px;
+  background: #121a2e;
+  color: #eef2ff;
+}
+
+.card h1,
+.card p {
+  margin: 0;
+}
+
+.card textarea {
+  min-height: 120px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid #3c496b;
+  border-radius: 8px;
+  background: #090e1b;
+  color: inherit;
+}
+
+.card button {
+  padding: 11px 16px;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.error {
+  color: #ff9a9a;
+}

@@ -6,13 +6,15 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
 
 // Допустимые значения полей (валидируются в Validate).
 const (
-	CurrentSchemaVersion  = 3
-	PreviousSchemaVersion = 2
+	CurrentSchemaVersion  = 4
+	PreviousSchemaVersion = 3
+	SchemaVersion2        = 2
 	LegacySchemaVersion   = 1
 
 	TransitionAuto      = "auto"
@@ -42,32 +44,55 @@ type AgentConfig struct {
 	LoopbackTo        string              `yaml:"loopback_to,omitempty"`
 	CheckpointAfter   string              `yaml:"checkpoint_after,omitempty"`
 	CheckpointBefore  string              `yaml:"checkpoint_before,omitempty"`
+	ApprovalRoles     []string            `yaml:"approval_roles,omitempty"`
+	ApprovalQuorum    string              `yaml:"approval_quorum,omitempty"`
 	Checks            []checks.Definition `yaml:"checks,omitempty"`
 }
 
 type Config struct {
-	SchemaVersion  int           `yaml:"schema_version,omitempty"`
-	PipelineAgents []AgentConfig `yaml:"pipeline"`
-	CLI            string        `yaml:"cli,omitempty"`
-	Model          string        `yaml:"model,omitempty"`
-	Effort         string        `yaml:"effort,omitempty"`
-	StageTimeout   string        `yaml:"stage_timeout,omitempty"`
+	SchemaVersion  int             `yaml:"schema_version,omitempty"`
+	PipelineAgents []AgentConfig   `yaml:"pipeline"`
+	Workflow       *WorkflowConfig `yaml:"workflow,omitempty"`
+	CLI            string          `yaml:"cli,omitempty"`
+	Model          string          `yaml:"model,omitempty"`
+	Effort         string          `yaml:"effort,omitempty"`
+	StageTimeout   string          `yaml:"stage_timeout,omitempty"`
+}
+
+type WorkflowConfig struct {
+	Entry     string               `yaml:"entry"`
+	MaxVisits map[string]int       `yaml:"max_visits,omitempty"`
+	Edges     []WorkflowEdgeConfig `yaml:"edges"`
+}
+
+type WorkflowEdgeConfig struct {
+	From     string                  `yaml:"from"`
+	Outcome  string                  `yaml:"outcome"`
+	To       string                  `yaml:"to"`
+	Approval *WorkflowApprovalConfig `yaml:"approval,omitempty"`
+}
+
+type WorkflowApprovalConfig struct {
+	Roles   []string          `yaml:"roles"`
+	Quorum  string            `yaml:"quorum"`
+	Actions map[string]string `yaml:"actions"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
-		"effort": true, "stage_timeout": true,
+		"effort": true, "stage_timeout": true, "workflow": true,
 	}, "config"); err != nil {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion int       `yaml:"schema_version"`
-		Pipeline      yaml.Node `yaml:"pipeline"`
-		CLI           string    `yaml:"cli"`
-		Model         string    `yaml:"model"`
-		Effort        string    `yaml:"effort"`
-		StageTimeout  string    `yaml:"stage_timeout"`
+		SchemaVersion int             `yaml:"schema_version"`
+		Pipeline      yaml.Node       `yaml:"pipeline"`
+		CLI           string          `yaml:"cli"`
+		Model         string          `yaml:"model"`
+		Effort        string          `yaml:"effort"`
+		StageTimeout  string          `yaml:"stage_timeout"`
+		Workflow      *WorkflowConfig `yaml:"workflow"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -82,6 +107,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Model = raw.Model
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
+	c.Workflow = raw.Workflow
 
 	if raw.Pipeline.Kind == 0 {
 		return fmt.Errorf("config: pipeline is required")
@@ -95,6 +121,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"gate_before": true, "timeout": true, "on_negative_verdict": true,
 		"loopback_to":      true,
 		"checkpoint_after": true, "checkpoint_before": true,
+		"approval_roles": true, "approval_quorum": true,
 		"checks": true,
 	}
 	for i, item := range raw.Pipeline.Content {
@@ -124,6 +151,80 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (w *WorkflowConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"entry": true, "max_visits": true, "edges": true,
+	}, "config: workflow"); err != nil {
+		return err
+	}
+	for index := 0; index < len(value.Content); index += 2 {
+		if value.Content[index].Value == "max_visits" {
+			if err := rejectDuplicateMappingKeys(value.Content[index+1], "config: workflow max_visits"); err != nil {
+				return err
+			}
+		}
+	}
+	type plain WorkflowConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*w = WorkflowConfig(decoded)
+	return nil
+}
+
+func (e *WorkflowEdgeConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"from": true, "outcome": true, "to": true, "approval": true,
+	}, "config: workflow edge"); err != nil {
+		return err
+	}
+	type plain WorkflowEdgeConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*e = WorkflowEdgeConfig(decoded)
+	return nil
+}
+
+func (a *WorkflowApprovalConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"roles": true, "quorum": true, "actions": true,
+	}, "config: workflow approval"); err != nil {
+		return err
+	}
+	for index := 0; index < len(value.Content); index += 2 {
+		if value.Content[index].Value == "actions" {
+			if err := rejectDuplicateMappingKeys(value.Content[index+1], "config: workflow approval actions"); err != nil {
+				return err
+			}
+		}
+	}
+	type plain WorkflowApprovalConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*a = WorkflowApprovalConfig(decoded)
+	return nil
+}
+
+func rejectDuplicateMappingKeys(node *yaml.Node, context string) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("%s: expected mapping", context)
+	}
+	seen := map[string]bool{}
+	for index := 0; index < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		if seen[key] {
+			return fmt.Errorf("%s: duplicate field %q", context, key)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
 func validateMappingKeys(node *yaml.Node, allowed map[string]bool, context string) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("%s: expected mapping", context)
@@ -150,6 +251,90 @@ func (c *Config) AgentNames() []string {
 	return names
 }
 
+// CompiledGraph нормализует schema v4 и legacy linear pipeline в единый
+// immutable runtime contract.
+func (c *Config) CompiledGraph() (workflow.Graph, error) {
+	graph := workflow.Graph{SchemaVersion: 1}
+	for _, stage := range c.PipelineAgents {
+		graph.Nodes = append(graph.Nodes, workflow.Node{Name: stage.Name})
+	}
+	if len(graph.Nodes) == 0 {
+		return graph, fmt.Errorf("workflow graph: pipeline пуст")
+	}
+	graph.Entry = graph.Nodes[0].Name
+	if c.SchemaVersion == CurrentSchemaVersion {
+		graph.SchemaVersion = CurrentSchemaVersion
+		if c.Workflow == nil {
+			return graph, fmt.Errorf("schema_version %d требует workflow", CurrentSchemaVersion)
+		}
+		graph.Entry = c.Workflow.Entry
+		knownNodes := make(map[string]bool, len(graph.Nodes))
+		for _, node := range graph.Nodes {
+			knownNodes[node.Name] = true
+		}
+		for name := range c.Workflow.MaxVisits {
+			if !knownNodes[name] {
+				return graph, fmt.Errorf("workflow graph: max_visits ссылается на неизвестный node %q", name)
+			}
+		}
+		for index := range graph.Nodes {
+			graph.Nodes[index].MaxVisits = c.Workflow.MaxVisits[graph.Nodes[index].Name]
+		}
+		for _, edge := range c.Workflow.Edges {
+			compiled := workflow.Edge{
+				From: edge.From, Outcome: workflow.Outcome(edge.Outcome), To: edge.To,
+			}
+			if edge.Approval != nil {
+				compiled.Approval = &workflow.ApprovalPolicy{
+					Roles:   append([]string(nil), edge.Approval.Roles...),
+					Quorum:  edge.Approval.Quorum,
+					Actions: copyTargets(edge.Approval.Actions),
+				}
+			}
+			graph.Edges = append(graph.Edges, compiled)
+		}
+		if err := graph.Validate(true, true); err != nil {
+			return graph, err
+		}
+		return graph, nil
+	}
+	for index, stage := range c.PipelineAgents {
+		target := workflow.TerminalComplete
+		if index+1 < len(c.PipelineAgents) {
+			target = c.PipelineAgents[index+1].Name
+		}
+		edge := workflow.Edge{From: stage.Name, Outcome: workflow.OutcomePassed, To: target}
+		if !workflow.IsTerminal(target) && len(stage.ApprovalRoles) > 0 {
+			quorum := stage.ApprovalQuorum
+			if quorum == "" {
+				quorum = "any"
+			}
+			edge.Approval = &workflow.ApprovalPolicy{
+				Roles: append([]string(nil), stage.ApprovalRoles...), Quorum: quorum,
+				Actions: map[string]string{"approve": target, "reject": workflow.TerminalStop},
+			}
+		}
+		graph.Edges = append(graph.Edges, edge)
+		if stage.LoopbackTo != "" {
+			graph.Edges = append(graph.Edges, workflow.Edge{
+				From: stage.Name, Outcome: workflow.OutcomeRejected, To: stage.LoopbackTo,
+			})
+		}
+	}
+	if err := graph.Validate(false, false); err != nil {
+		return graph, err
+	}
+	return graph, nil
+}
+
+func copyTargets(source map[string]string) map[string]string {
+	targets := make(map[string]string, len(source))
+	for action, target := range source {
+		targets[action] = target
+	}
+	return targets
+}
+
 // AgentConfig возвращает конфигурацию агента с подставленными глобальными
 // значениями и дефолтами.
 func (c *Config) AgentConfig(name string) *AgentConfig {
@@ -173,6 +358,9 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 			}
 			if cfg.OnNegativeVerdict == "" {
 				cfg.OnNegativeVerdict = OnNegativeStop
+			}
+			if len(cfg.ApprovalRoles) > 0 && cfg.ApprovalQuorum == "" {
+				cfg.ApprovalQuorum = "any"
 			}
 			return &cfg
 		}
@@ -231,8 +419,12 @@ func (c *Config) Validate(reg AgentLookup) error {
 			errs = append(errs, fmt.Sprintf(format, args...))
 		}
 	}
-	validate(c.SchemaVersion == 0 || c.SchemaVersion == LegacySchemaVersion || c.SchemaVersion == PreviousSchemaVersion || c.SchemaVersion == CurrentSchemaVersion,
-		"schema_version %d не поддерживается (поддерживаются %d, %d и %d)", c.SchemaVersion, LegacySchemaVersion, PreviousSchemaVersion, CurrentSchemaVersion)
+	validate(c.SchemaVersion == 0 || c.SchemaVersion == LegacySchemaVersion || c.SchemaVersion == SchemaVersion2 ||
+		c.SchemaVersion == PreviousSchemaVersion || c.SchemaVersion == CurrentSchemaVersion,
+		"schema_version %d не поддерживается (поддерживаются %d, %d, %d и %d)",
+		c.SchemaVersion, LegacySchemaVersion, SchemaVersion2, PreviousSchemaVersion, CurrentSchemaVersion)
+	validate(c.SchemaVersion == CurrentSchemaVersion || c.Workflow == nil,
+		"workflow разрешён только в schema_version %d", CurrentSchemaVersion)
 
 	if c.StageTimeout != "" {
 		if duration, err := time.ParseDuration(c.StageTimeout); err != nil || duration <= 0 {
@@ -272,9 +464,25 @@ func (c *Config) Validate(reg AgentLookup) error {
 			"%s: checkpoint_after нельзя совмещать с legacy gate_after/transition", a.Name)
 		validate(a.CheckpointBefore == "" || !a.GateBefore,
 			"%s: checkpoint_before нельзя совмещать с legacy gate_before", a.Name)
-		if c.SchemaVersion == CurrentSchemaVersion {
+		roleNames := make(map[string]bool, len(a.ApprovalRoles))
+		for _, role := range a.ApprovalRoles {
+			validate(strings.TrimSpace(role) != "", "%s: approval_roles не может содержать пустую роль", a.Name)
+			validate(!roleNames[role], "%s: approval role %q повторяется", a.Name, role)
+			roleNames[role] = true
+		}
+		validate(isOneOf(a.ApprovalQuorum, "", "any", "all"),
+			"%s: approval_quorum %q недопустим (any|all)", a.Name, a.ApprovalQuorum)
+		validate(a.ApprovalQuorum == "" || len(a.ApprovalRoles) > 0,
+			"%s: approval_quorum требует approval_roles", a.Name)
+		if c.SchemaVersion == PreviousSchemaVersion || c.SchemaVersion == CurrentSchemaVersion {
 			validate(!a.GateAfter && !a.GateBefore && a.Transition == "",
-				"%s: schema_version %d запрещает legacy gate_after/gate_before/transition", a.Name, CurrentSchemaVersion)
+				"%s: schema_version %d запрещает legacy gate_after/gate_before/transition", a.Name, c.SchemaVersion)
+		}
+		if c.SchemaVersion == CurrentSchemaVersion {
+			validate(a.LoopbackTo == "" && a.OnNegativeVerdict == "" && a.MaxRetries == 0 &&
+				len(a.ApprovalRoles) == 0 && a.ApprovalQuorum == "",
+				"%s: schema_version %d хранит route, retries и approvals только в workflow edges/max_visits",
+				a.Name, CurrentSchemaVersion)
 		}
 		if a.Timeout != "" {
 			if duration, err := time.ParseDuration(a.Timeout); err != nil || duration <= 0 {
@@ -294,6 +502,9 @@ func (c *Config) Validate(reg AgentLookup) error {
 		if err := validator.ValidatePipeline(c.AgentNames()); err != nil {
 			errs = append(errs, err.Error())
 		}
+	}
+	if _, err := c.CompiledGraph(); err != nil {
+		errs = append(errs, err.Error())
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("невалидный config.yaml:\n  - %s", strings.Join(errs, "\n  - "))

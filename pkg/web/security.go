@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // isLoopbackHostname reports whether host (a Host or Origin hostname, with
@@ -40,6 +41,24 @@ func sameOriginMiddleware(next http.Handler) http.Handler {
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, err := url.Parse(origin)
 			if err != nil || !isLoopbackHostname(u.Host) {
+				http.Error(w, "запрещённый Origin", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authenticatedOriginMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Host) == "" {
+			http.Error(w, "пустой Host", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || !strings.EqualFold(u.Host, r.Host) ||
+				(u.Scheme != "http" && u.Scheme != "https") {
 				http.Error(w, "запрещённый Origin", http.StatusForbidden)
 				return
 			}

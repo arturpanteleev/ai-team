@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from '../router';
 import type { PipelineRun } from '../types';
 import { StatusBadge } from './StatusBadge';
 import styles from './PipelineCard.module.css';

@@ -3,23 +3,19 @@
 Спецификация определяет нормативное поведение capability `workflow-loopback`.
 ## Requirements
 ### Requirement: Loopback при REJECTED
-Система MUST поддерживать возврат к coder-у при вердикте REJECTED или CHANGES_REQUESTED от reviewer-а.
+Возврат после `REJECTED` или `CHANGES_REQUESTED` MUST выполняться только после
+persisted human decision и MUST NOT зависеть от наличия TTY.
 
-#### Scenario: REJECTED → coder
-- **КОГДА** reviewer завершается с вердиктом `**Verdict:** REJECTED`
-- **И** `max_retries` для coder-а > 0
-- **И** количество retries не превышено
-- **ТОГДА** система MUST предложить: `Reviewer отклонил. Отправить обратно coder-у? [Y/n]`
-- **И** ЕСЛИ пользователь отвечает `Y`, запустить coder снова с review.md как дополнительным входом
+#### Scenario: CHANGES_REQUESTED без TTY
+- **КОГДА** reviewer возвращает `CHANGES_REQUESTED` и retry доступен
+- **ТОГДА** pipeline MUST создать approval с actions `return_to_coder`,
+  `reject`, `request_information`, `override_approve`
+- **И** decision `return_to_coder` MUST инвалидировать downstream attempts и
+  продолжить тот же run с coder
 
-#### Scenario: CHANGES_REQUESTED → coder
-- **КОГДА** reviewer завершается с `**Verdict:** CHANGES_REQUESTED`
-- **ТОГДА** система MUST предложить отправить обратно coder-у аналогично REJECTED
-
-#### Scenario: Лимит retries
-- **КОГДА** количество retries превысило `max_retries`
-- **ТОГДА** пайплайн MUST остановиться с ошибкой
-- **И** сообщить: `Превышен лимит retries (N) для coder-а`
+#### Scenario: Решение reject
+- **КОГДА** уполномоченный человек выбирает `reject`
+- **ТОГДА** run MUST завершиться как rejected без запуска coder
 
 ### Requirement: max_retries в конфиге
 Пайплайн MUST поддерживать поле `max_retries` для каждого агента.

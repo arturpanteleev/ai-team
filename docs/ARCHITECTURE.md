@@ -60,11 +60,32 @@ openspec/            OpenSpec change history (specs/ + changes/)
   file fingerprints и tracked patch SHA-256. Tester только пишет tests; их
   фактический typed execution добавляется в финальный candidate evidence для
   verifier.
-- Loopback создаёт новые attempt IDs и инвалидирует прежнюю downstream-ветку;
-  invalidated/skipped/warning не отображаются как passed или failed. Целевой
-  этап loopback вычисляется из метаданных pipeline (ближайший предшествующий
-  этап с `mutation: source`), а не жёстко закодированного имени — см.
-  `pkg/pipeline/workflow.go:defaultLoopbackTarget`.
+- Для Git-проекта controller создаёт отдельный detached worktree от exact
+  baseline commit. AI-этапы, checks, review и delivery работают только внутри
+  этого candidate; ветка, HEAD и source-файлы live checkout не меняются.
+  Metadata с base commit/tree и workspace hash хранится в control target и
+  проверяется при resume. Human approval содержит exact candidate hash:
+  решение становится stale после любой последующей mutation.
+- Обратное ребро graph создаёт новые attempt IDs и инвалидирует прежнюю
+  downstream-ветку; invalidated/skipped/warning не отображаются как passed
+  или failed. Для legacy schemas 1–3 цель по-прежнему компилируется из
+  `loopback_to` и метаданных mutation.
+
+## Workflow graph v4
+
+Schema v4 разделяет определения узлов (`pipeline`) и маршрут (`workflow`).
+Compiled graph содержит entry, уникальные `(from, outcome)` edges, terminal
+targets, edge approval policies и `max_visits`. Каждый non-terminal edge
+требует human roles/quorum/actions; resolved action выбирает exact target, а
+не просто разрешает увеличение индекса.
+
+Compiler до run проверяет references, достижимость, terminal path и циклы.
+Каждый узел цикла обязан иметь положительный `max_visits`; счётчик включает
+все реальные AI calls и восстанавливается из immutable attempts при resume.
+Выбранное ребро записывается событием `transition_selected` в evidence и
+SQLite/WebSocket projection, а lifecycle сохраняет exact следующий узел.
+Resolved `workflow.json` содержит фактически исполненный graph; web detail
+читает этот immutable snapshot и показывает текущую позицию и policies.
 
 ## Evidence и наблюдаемость
 
@@ -93,13 +114,84 @@ SHA-256 hash chain и проверяются перед каждым append (spl
 lifecycle transitions, terminal status, invalidations и exact digest каждого
 опубликованного attempt manifest.
 
+Изменяемый execution checkpoint хранится отдельно в
+`.ai-team/state/runs/<run_id>.json`. `RunEngine` атомарно обновляет его на
+границах stages и может после restart открыть проверенную evidence chain для
+append. Resume сохраняет исходный `run_id`, добавляет `run_resumed` и
+продолжает ordinal sequence попыток; terminal state возобновить нельзя.
+
+Человеческое решение о переходе — отдельная typed сущность в
+`.ai-team/state/approvals/<run_id>/<approval_id>.json`. Она привязана к
+точному subject hash, attempt, исходному и целевому этапу, набору actions,
+ролям и quorum. Non-TTY запуск атомарно переходит в `waiting`, а CLI
+`decision` записывает actor/role/action/comment. Только resolved approval
+разрешает `resume`; stale или конфликтующее решение не меняет evidence.
+События `approval_requested` и `approval_decided` входят и в immutable hash
+chain, и в SQLite/WebSocket projection.
+
+Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
+run ID до запуска worker goroutine и запрещает дублирующий active worker.
+`POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают
+асинхронный command result; durable lifecycle остаётся источником истины после
+restart. Write routes требуют случайную HttpOnly SameSite session-cookie и
+независимый `X-CSRF-Token` поверх fixed loopback Host/Origin policy.
+
+До резервирования run controller выполняет типизированный runtime preflight.
+Required checks fail closed: доступны OpenCode/version и Git repository, а
+для pipeline с delivery — remote origin и authenticated GitHub CLI.
+Model/provider и имена явно разрешённых credential variables отображаются
+без секретных значений. `GET /api/preflight` возвращает тот же report, который
+повторно применяется при `POST /api/runs`.
+
 SQLite `.ai-team/web.db` — восстанавливаемая projection для web UI, а не
 источник истины. Сервер по умолчанию слушает `127.0.0.1`, проверяет
-same-origin для HTTP (`pkg/web/security.go`) и WebSocket, периодически
-обновляет dashboard и отдаёт bounded файлы только из разрешённого live или
-immutable run root без symlink traversal. Production frontend встроен в
-бинарник (`go:embed`); `--dist` позволяет явно подменить его локальной
-сборкой.
+same-origin для HTTP (`pkg/web/security.go`) и WebSocket. Lifecycle events
+имеют versioned contract, сохраняются в SQLite и передаются через production
+WebSocket bridge с cursor/replay; редкий polling остаётся recovery fallback.
+Сервер отдаёт bounded файлы только из разрешённого live или immutable run root
+без symlink traversal. Production frontend встроен в бинарник (`go:embed`);
+`--dist` позволяет явно подменить его локальной сборкой.
+
+В cloud mode versioned HMAC token устанавливает immutable actor ID,
+канонические роли и bounded expiry. После проверки token заменяется
+уникальной HttpOnly browser-session; token не попадает в SQLite или evidence.
+API reads, commands и WebSocket требуют session, а write-команды —
+дополнительно session-bound CSRF. Decision всегда получает actor ID из
+server-side principal, выбранная роль обязана принадлежать principal.
+Отдельные RBAC policies защищают start и cancel. Без signing secret остаётся
+совместимый zero-config loopback mode.
+
+При `--worker-command` web controller использует process-backed RunEngine.
+Он сериализует строгий job schema v1 для одной операции start/resume/cancel,
+передаёт его через stdin без shell и ограничивает diagnostics. Subcommand
+`ai-team worker` повторно загружает config/agent registry внутри exact
+mounted target, подключает общий SQLite recorder и вызывает обычный
+RunEngine. Поэтому candidate, approvals, checks, delivery и evidence не имеют
+альтернативной cloud-семантики. Локальный subprocess — reference launcher;
+настоящую process/filesystem/network isolation обеспечивает disposable
+container/job инфраструктуры.
+
+Distributed mode (`--scheduler-db`) заменяет direct ProcessEngine на
+queue-backed RunEngine. Persistent SQLite queue хранит strict worker Job,
+idempotent active identity, attempts, cancel flag и случайный ownership token.
+Claim/renew/complete выполняются conditional SQL updates: global limit и
+per-target lock проверяются атомарно, истёкший lease возвращается в очередь,
+а stale worker не может завершить re-claimed job.
+
+`ai-team scheduler-worker` поддерживает one-shot platform job и loop poller.
+Он продлевает lease, передаёт cancel в context disposable process и после
+execution архивирует immutable run tree. Reference artifact backend хранит
+blobs по SHA-256 и отдельную content-addressed manifest reference; restore
+повторно проверяет digest, size, relative path и запрещает symlink/non-regular
+entries. Local SQLite/CAS реализуют cloud contracts, но не подменяют managed
+queue/object storage для multi-host production.
+
+Stage projection сохраняет checks, mutations и delivery как typed JSON,
+который detail page показывает без необходимости открывать HTML-report.
+Лог раскрытого attempt читается отдельным exact-identity endpoint только как
+хвост до 64 KiB; пока attempt активен UI обновляет этот хвост коротким
+polling. Это узкий поток изменяемого текста: lifecycle и approvals остаются
+в durable WebSocket с cursor/replay.
 
 ## Deployer и canonical delivery plan
 

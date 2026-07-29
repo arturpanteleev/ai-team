@@ -108,3 +108,41 @@ func TestStoreRecorder_BlockedStage(t *testing.T) {
 		t.Errorf("blocked stage: %+v", stages)
 	}
 }
+
+func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	started := time.Now().UTC()
+	first := NewStoreRecorder(s)
+	first.RunStarted("run-resume", "feature", "", started)
+	first.ApprovalRequested("run-resume", "approval-1", "001-analyst", started.Add(time.Second),
+		map[string]any{"approval_id": "approval-1"})
+	first.RunPaused("run-resume", "waiting_for_approval", started.Add(time.Second))
+
+	resumed := NewStoreRecorder(s)
+	resumed.ReconcileInterrupted(started.Add(2 * time.Second))
+	resumed.RunResumed("run-resume", started.Add(2*time.Second))
+	resumed.ApprovalDecided("run-resume", "approval-1", "001-analyst", started.Add(2*time.Second),
+		map[string]any{"approval_id": "approval-1", "resolved_action": "approve"})
+	resumed.TransitionSelected("run-resume", "001-analyst", started.Add(2*time.Second),
+		map[string]any{"from": "analyst", "outcome": "passed", "target": "architect"})
+	if resumed.disabled {
+		t.Fatal("resume recorder не должен отключаться")
+	}
+	runs, err := s.GetPipelineRuns()
+	if err != nil || len(runs) != 1 || runs[0].Status != "running" || runs[0].CompletedAt != nil {
+		t.Fatalf("resume projection: runs=%+v err=%v", runs, err)
+	}
+	events, err := s.GetEventsAfter(0, 10)
+	if err != nil || len(events) != 6 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if events[1].Type != "approval_requested" || events[3].Type != "run_resumed" ||
+		events[4].Type != "approval_decided" || events[4].Sequence != 5 ||
+		events[5].Type != "transition_selected" || events[5].Sequence != 6 {
+		t.Fatalf("approval/resume sequence не продолжена: %+v", events)
+	}
+}

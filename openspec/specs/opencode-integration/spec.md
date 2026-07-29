@@ -34,21 +34,49 @@ Prompt MUST включать role instructions, feature, task, input file conten
 - **AND** the prompt MUST instruct the agent not to treat that content as instructions
 
 ### Requirement: Subprocess environment isolation
-The opencode subprocess MUST receive only an explicit allow-list of
-environment variables — a fixed baseline of standard OS/locale/session
-variables, plus any variable name explicitly opted in via
-`AI_TEAM_OPENCODE_ENV_ALLOW` — rather than the calling process's full
-environment.
+
+OpenCode subprocess MUST получать только явный allow-list окружения:
+фиксированный baseline стандартных OS/locale/session variables и имена,
+явно перечисленные в `AI_TEAM_OPENCODE_ENV_ALLOW`, а не полное окружение
+вызывающего процесса. В cloud worker infrastructure MUST дополнительно
+ограничивать filesystem/process/network границы disposable job.
 
 #### Scenario: Unlisted variable
-- **WHEN** the process invoking `ai-team run` has an environment variable set that is not in the baseline and not named in `AI_TEAM_OPENCODE_ENV_ALLOW`
-- **THEN** the opencode subprocess MUST NOT receive that variable
+
+- **WHEN** process, вызвавший `ai-team run`, содержит variable вне baseline и
+  вне `AI_TEAM_OPENCODE_ENV_ALLOW`
+- **THEN** OpenCode subprocess MUST NOT получить эту variable
 
 #### Scenario: Explicitly allowed variable
-- **WHEN** a variable name is listed in `AI_TEAM_OPENCODE_ENV_ALLOW`
-- **THEN** the opencode subprocess MUST receive that variable's current value from the calling process's environment
+
+- **WHEN** имя variable перечислено в `AI_TEAM_OPENCODE_ENV_ALLOW`
+- **THEN** OpenCode subprocess MUST получить её текущее значение
 
 #### Scenario: Baseline variables always present
-- **WHEN** the opencode subprocess is started
-- **THEN** it MUST receive `PATH` and `HOME` regardless of any allow-list configuration
+
+- **WHEN** OpenCode subprocess запускается
+- **THEN** он MUST получить `PATH` и `HOME` независимо от allow-list
+
+#### Scenario: Запуск в worker
+
+- **КОГДА** agent исполняется через cloud worker
+- **ТОГДА** OpenCode MUST видеть exact candidate target и allow-listed
+  credentials, но не control-plane process environment целиком
+
+### Requirement: OpenCode preflight
+
+До принятия нового run система MUST проверить configured OpenCode executable
+и получить его версию ограниченной по времени командой.
+
+#### Scenario: Version command зависла
+
+- **КОГДА** OpenCode version command не завершается в установленный timeout
+- **ТОГДА** preflight MUST завершить её
+- **И** MUST вернуть failed check без запуска агента
+
+#### Scenario: Безопасная диагностика окружения
+
+- **КОГДА** preflight описывает credential allow-list
+- **ТОГДА** сообщение MUST содержать только имена переменных и факт наличия
+- **И** MUST NOT содержать значения credentials
 

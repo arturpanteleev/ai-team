@@ -1,10 +1,10 @@
 ## Purpose
 
 Спецификация определяет нормативное поведение capability `e2e-testing`.
-
 ## Requirements
 ### Requirement: E2E-тест полного пайплайна
-Система MUST иметь тест, проверяющий `ai-team run` от начала до конца.
+Система MUST иметь тест, проверяющий `ai-team run` от начала до конца, включая
+первый запуск сразу после инициализации.
 
 #### Scenario: Успешный пайплайн
 - **КОГДА** E2E-тест запускается
@@ -15,6 +15,13 @@
 - **И** проверяет proposal.md, specs/, design.md, tasks.md, review.md, test-report.md, verification.md и delivery-plan.json
 - **И** проверяет immutable run evidence, successful required check и exact-file delivery commit
 - **И** проверяет exit code первого запуска == 3 и второго == 0
+
+#### Scenario: Успешный pipeline после init
+- **КОГДА** E2E-тест создаёт чистый Git project и запускает `ai-team init`
+- **ТОГДА** `git status --porcelain` MUST остаться пустым
+- **И** тест MUST запустить `ai-team run` без ручного изменения или коммита
+  `.gitignore`
+- **И** baseline guard MUST принять workspace
 
 #### Scenario: Пайплайн падает при REJECTED review
 - **КОГДА** mock opencode для Reviewer возвращает CHANGES_REQUESTED
@@ -33,3 +40,15 @@
 #### Scenario: Init проверяет структуру
 - **КОГДА** `ai-team init` запускается
 - **ТОГДА** E2E-тест проверяет, что созданы `.ai-team/config.yaml` и все директории артефактов
+
+### Requirement: Реальный worktree delivery E2E
+
+E2E MUST доказать, что agents/checks/delivery используют candidate worktree,
+а live checkout сохраняет исходные branch, HEAD и source bytes.
+
+#### Scenario: Candidate доставлен
+
+- **КОГДА** mock-agent создаёт source, реальные checks проходят и delivery
+  создаёт branch/push/PR
+- **ТОГДА** remote MUST содержать candidate commit
+- **И** live checkout MUST остаться неизменным

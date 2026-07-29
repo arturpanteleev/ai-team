@@ -1,16 +1,17 @@
 ## Purpose
 
 Спецификация определяет переходы workflow через единый checkpoint и state-machine контракт.
-
 ## Requirements
-
 ### Requirement: Переход определяется доменным состоянием
-Pipeline MUST вычислять execution, decision и outcome до применения checkpoint или loopback.
+
+Pipeline MUST вычислять execution, decision и outcome до выбора
+декларативного edge, approval или terminal target.
 
 #### Scenario: Негативный вердикт
+
 - **КОГДА** попытка имеет execution=succeeded и негативный verdict
 - **ТОГДА** её outcome MUST быть rejected
-- **И** pipeline MUST применить loopback либо `on_negative_verdict`
+- **И** pipeline MUST выбрать `rejected` edge compiled graph
 
 ### Requirement: Варианты интерактивного checkpoint
 Интерактивный checkpoint MUST поддерживать `Y`, `n`, `diff` и `summary` без потери текущего состояния.

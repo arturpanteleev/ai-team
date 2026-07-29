@@ -61,3 +61,56 @@
   padding: 48px;
   color: #94a3b8;
 }
+
+.runForm {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.runForm input,
+.runForm button {
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 9px 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.runForm span {
+  grid-column: 1 / -1;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.runForm button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.preflight {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -12px 0 24px;
+  padding: 12px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.preflight div {
+  display: grid;
+  grid-template-columns: 130px 150px 1fr;
+  gap: 8px;
+}
+
+.preflight div[data-status='failed'] {
+  color: #f87171;
+}
+
+.preflight div[data-status='warning'] {
+  color: #fbbf24;
+}

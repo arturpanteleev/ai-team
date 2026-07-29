@@ -1,14 +1,22 @@
 package e2etest
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
 func buildBinary(t *testing.T) string {
@@ -76,6 +84,10 @@ func setupMock(t *testing.T) string {
 	ghPath := filepath.Join(mockDir, "gh")
 	ghMarker := filepath.Join(mockDir, "gh-pr-created")
 	ghScript := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "authenticated"
+  exit 0
+fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   if [ ! -f "` + ghMarker + `" ]; then
     exit 1
@@ -158,12 +170,15 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 	bin := buildBinary(t)
 	pathEnv := setupMock(t)
 	setupDeliveryGit(t, dir)
+	liveBranchBefore := strings.TrimSpace(runCommand(t, dir, "git", "branch", "--show-current"))
+	liveHeadBefore := strings.TrimSpace(runCommand(t, dir, "git", "rev-parse", "HEAD"))
 
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
 	}
-	runCommand(t, dir, "git", "add", ".gitignore")
-	runCommand(t, dir, "git", "commit", "-m", "initialize ai-team ignore policy")
+	if status := strings.TrimSpace(runCommand(t, dir, "git", "status", "--porcelain")); status != "" {
+		t.Fatalf("workspace должен остаться чистым после init, получено:\n%s", status)
+	}
 	configData, err := os.ReadFile(filepath.Join(dir, ".ai-team", "config.yaml"))
 	if err != nil || !strings.Contains(string(configData), "name: go-test") {
 		t.Fatalf("Go verification profile не создан: err=%v\n%s", err, configData)
@@ -180,7 +195,11 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 	if len(hashMatch) != 2 {
 		t.Fatalf("canonical delivery plan hash missing:\n%s", firstOut)
 	}
-	code, out := runAI(t, bin, dir, []string{pathEnv}, "run", "--feature", "e2e-test", "--retry-from", "deployer", "--approve-gates", "--approve-plan", hashMatch[1])
+	resumeMatch := regexp.MustCompile(`ai-team run --resume ([^ ]+) --approve-plan`).FindStringSubmatch(firstOut)
+	if len(resumeMatch) != 2 {
+		t.Fatalf("resume command missing:\n%s", firstOut)
+	}
+	code, out := runAI(t, bin, dir, []string{pathEnv}, "run", "--resume", resumeMatch[1], "--approve-gates", "--approve-plan", hashMatch[1])
 	if code != 0 {
 		t.Fatalf("approved delivery retry failed (%d):\n%s", code, out)
 	}
@@ -219,8 +238,8 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 	checkFile(t, filepath.Join(dir, ".ai-team", "reports", feature, "index.html"))
 	checkFile(t, filepath.Join(dir, ".ai-team", "web.db"))
 	runs, err := os.ReadDir(filepath.Join(dir, ".ai-team", "runs"))
-	if err != nil || len(runs) != 2 {
-		t.Fatalf("ожидались два immutable run для prepare/approve flow: entries=%v err=%v", runs, err)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("prepare/approve flow должен продолжить тот же immutable run: entries=%v err=%v", runs, err)
 	}
 	logs, err := filepath.Glob(filepath.Join(dir, ".ai-team", "runs", "*", "logs", "*-analyst.log"))
 	if err != nil || len(logs) != 1 {
@@ -230,12 +249,65 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 	if !strings.Contains(out, "Пайплайн выполнен") {
 		t.Errorf("ожидалось сообщение об успехе:\n%s", out)
 	}
-	if branch := strings.TrimSpace(runCommand(t, dir, "git", "branch", "--show-current")); branch != "ai-team/e2e-test" {
-		t.Errorf("delivery должен создать feature branch, got %q", branch)
+	if branch := strings.TrimSpace(runCommand(t, dir, "git", "branch", "--show-current")); branch != liveBranchBefore {
+		t.Errorf("live checkout branch изменился: before=%q after=%q", liveBranchBefore, branch)
 	}
-	if committed := strings.TrimSpace(runCommand(t, dir, "git", "show", "--name-only", "--format=", "HEAD")); committed != "e2e_implementation.go\ne2e_implementation_test.go" {
+	if head := strings.TrimSpace(runCommand(t, dir, "git", "rev-parse", "HEAD")); head != liveHeadBefore {
+		t.Errorf("live checkout HEAD изменился: before=%q after=%q", liveHeadBefore, head)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "e2e_implementation.go")); !os.IsNotExist(err) {
+		t.Errorf("candidate source не должен появиться в live checkout: %v", err)
+	}
+	if committed := strings.TrimSpace(runCommand(t, dir, "git", "show", "--name-only", "--format=", "origin/ai-team/e2e-test")); committed != "e2e_implementation.go\ne2e_implementation_test.go" {
 		t.Errorf("delivery должен коммитить exact run-attributed file, got %q", committed)
 	}
+}
+
+func TestE2E_DisposableWorkerPersistsPendingApproval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("init failed (%d):\n%s", code, out)
+	}
+	runID := "worker-e2e-run"
+	job, err := json.Marshal(worker.Job{
+		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
+		RunID: runID, TargetDir: dir, Feature: "worker-e2e", Task: "worker task",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(bin, "worker", "--target", dir, "--db", filepath.Join(dir, ".ai-team", "web.db"))
+	command.Dir = dir
+	command.Env = append(os.Environ(), pathEnv)
+	command.Stdin = strings.NewReader(string(job))
+	output, commandErr := command.CombinedOutput()
+	exit := 0
+	if commandErr != nil {
+		if value, ok := commandErr.(*exec.ExitError); ok {
+			exit = value.ExitCode()
+		} else {
+			exit = -1
+		}
+	}
+	if exit != 3 {
+		t.Fatalf("worker должен остановиться на human approval: exit=%d err=%v\n%s", exit, commandErr, output)
+	}
+	state, err := os.ReadFile(filepath.Join(dir, ".ai-team", "state", "runs", runID+".json"))
+	if err != nil || !strings.Contains(string(state), `"phase": "waiting"`) {
+		t.Fatalf("worker не сохранил waiting lifecycle: err=%v\n%s", err, state)
+	}
+	approvals, err := filepath.Glob(filepath.Join(dir, ".ai-team", "state", "approvals", runID, "*.json"))
+	if err != nil || len(approvals) != 1 {
+		t.Fatalf("worker не сохранил exact pending approval: %v err=%v", approvals, err)
+	}
+	checkFile(t, filepath.Join(dir, ".ai-team", "state", "candidates", runID+".json"))
+	checkFile(t, filepath.Join(dir, ".ai-team", "web.db"))
 }
 
 func runCommand(t *testing.T, dir, name string, args ...string) string {
@@ -343,8 +415,9 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	dir := t.TempDir()
 	bin := buildBinary(t)
 	pathEnv := setupMock(t)
+	runCommand(t, dir, "git", "init", "-b", "main")
 
-	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init", "--write-gitignore"); code != 0 {
 		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
 	}
 
@@ -354,8 +427,8 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 		t.Fatalf("config.yaml should exist after init: %v", err)
 	}
 	cfg := string(data)
-	// Init сериализует полный дефолтный конфиг: гейты и retries не теряются
-	for _, want := range []string{"schema_version: 3", "cli: opencode", "checkpoint_after: require_explicit", "max_retries: 2", "stage_timeout: 30m"} {
+	// Init сериализует полный graph config: edge approvals и visit limits не теряются.
+	for _, want := range []string{"schema_version: 4", "workflow:", "outcome: passed", "cli: opencode", "roles:", "product_owner", "max_visits:", "stage_timeout: 30m"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config.yaml должен содержать %q:\n%s", want, cfg)
 		}
@@ -364,6 +437,10 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	checkDir(t, dir, ".ai-team", "artifacts", "tasks")
 	checkDir(t, dir, ".ai-team", "reports")
 	checkDir(t, dir, ".ai-team", "logs")
+	gitignore, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil || !strings.Contains(string(gitignore), ".ai-team/") {
+		t.Fatalf("--write-gitignore должен записать правило: err=%v\n%s", err, gitignore)
+	}
 }
 
 // --help выводит справку и завершается с кодом 0.
@@ -420,6 +497,315 @@ func TestE2E_InvalidConfigDoesNotMutateTaskArtifacts(t *testing.T) {
 	checkAbsent(t, filepath.Join(dir, ".ai-team", "artifacts", "tasks", feature, "task.md"))
 }
 
+func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("init failed (%d):\n%s", code, out)
+	}
+
+	waitFile := filepath.Join(t.TempDir(), "analyst-started")
+	command := exec.Command(bin, "run", "--feature", "durable-resume", "--task", "resume test", "--approve-gates")
+	command.Dir = dir
+	var output strings.Builder
+	command.Stdout, command.Stderr = &output, &output
+	command.Env = append(os.Environ(), pathEnv,
+		"MOCK_WAIT_AGENT=analyst",
+		"MOCK_WAIT_FILE="+waitFile,
+		"AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_WAIT_AGENT,MOCK_WAIT_FILE",
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(waitFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = command.Process.Kill()
+			t.Fatalf("analyst не стартовал:\n%s", output.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err := command.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("остановленный run должен вернуть ненулевой exit")
+	}
+
+	states, err := filepath.Glob(filepath.Join(dir, ".ai-team", "state", "runs", "*.json"))
+	if err != nil || len(states) != 1 {
+		t.Fatalf("ожидался один lifecycle state: %v err=%v", states, err)
+	}
+	runID := strings.TrimSuffix(filepath.Base(states[0]), ".json")
+	code, resumedOutput := runAI(t, bin, dir, []string{pathEnv}, "run", "--resume", runID, "--approve-gates")
+	if code != 3 {
+		t.Fatalf("resume должен дойти до отдельного delivery approval (exit 3), got %d:\n%s", code, resumedOutput)
+	}
+	events, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(events), `"type":"run_started"`) != 1 ||
+		strings.Count(string(events), `"type":"run_resumed"`) != 1 {
+		t.Fatalf("run identity lifecycle некорректен:\n%s", events)
+	}
+}
+
+func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("init failed (%d):\n%s", code, out)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+	command := exec.Command(bin, "web", "--port", port, "--dist=")
+	command.Dir = dir
+	command.Env = append(os.Environ(), pathEnv)
+	var serverOutput strings.Builder
+	command.Stdout, command.Stderr = &serverOutput, &serverOutput
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Signal(os.Interrupt)
+		_ = command.Wait()
+	})
+
+	baseURL := "http://127.0.0.1:" + port
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
+	var csrf string
+	waitUntil(t, 10*time.Second, func() bool {
+		response, requestErr := client.Get(baseURL + "/api/session")
+		if requestErr != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var session struct {
+			CSRF string `json:"csrf_token"`
+		}
+		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
+			return false
+		}
+		csrf = session.CSRF
+		return csrf != ""
+	}, func() string { return serverOutput.String() })
+
+	post := func(path string, body any) (int, map[string]any) {
+		t.Helper()
+		data, _ := json.Marshal(body)
+		request, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CSRF-Token", csrf)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var result map[string]any
+		_ = json.NewDecoder(response.Body).Decode(&result)
+		return response.StatusCode, result
+	}
+	status, started := post("/api/runs", map[string]string{
+		"feature": "web-control", "task": "web approval test",
+	})
+	runID, _ := started["run_id"].(string)
+	if status != http.StatusAccepted || runID == "" {
+		t.Fatalf("web start: status=%d body=%v\n%s", status, started, serverOutput.String())
+	}
+	type approvalState struct {
+		ID          string `json:"id"`
+		SubjectHash string `json:"subject_hash"`
+	}
+	readPending := func() approvalState {
+		statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
+		stateData, err := os.ReadFile(statePath)
+		if err != nil {
+			return approvalState{}
+		}
+		var state struct {
+			Phase      string `json:"phase"`
+			ApprovalID string `json:"pending_approval_id"`
+		}
+		if json.Unmarshal(stateData, &state) != nil || state.Phase != "waiting" {
+			return approvalState{}
+		}
+		approvalData, err := os.ReadFile(filepath.Join(
+			dir, ".ai-team", "state", "approvals", runID, state.ApprovalID+".json",
+		))
+		if err != nil {
+			return approvalState{}
+		}
+		var value approvalState
+		_ = json.Unmarshal(approvalData, &value)
+		return value
+	}
+	var first approvalState
+	waitUntil(t, 10*time.Second, func() bool {
+		first = readPending()
+		return first.ID != ""
+	}, func() string { return serverOutput.String() })
+	status, _ = post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
+		"actor_id": "product-1", "actor_role": "product_owner",
+		"action": "approve", "subject_hash": first.SubjectHash,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("web decision status=%d", status)
+	}
+	status, _ = post("/api/runs/"+runID+"/resume", map[string]string{})
+	if status != http.StatusAccepted {
+		t.Fatalf("web resume status=%d\n%s", status, serverOutput.String())
+	}
+	var second approvalState
+	waitUntil(t, 10*time.Second, func() bool {
+		second = readPending()
+		return second.ID != "" && second.ID != first.ID
+	}, func() string { return serverOutput.String() })
+
+	events, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	analystAttempts, globErr := filepath.Glob(filepath.Join(
+		dir, ".ai-team", "runs", runID, "attempts", "*-analyst",
+	))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if strings.Count(string(events), `"type":"run_started"`) != 1 ||
+		len(analystAttempts) != 1 ||
+		!strings.Contains(string(events), `"type":"transition_selected"`) ||
+		!strings.Contains(string(events), `"stage":"architect"`) {
+		t.Fatalf("web resume повторил этап или сменил identity:\n%s", events)
+	}
+}
+
+func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("init failed (%d):\n%s", code, out)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+	schedulerDB := filepath.Join(dir, ".ai-team", "scheduler.db")
+	artifactRoot := filepath.Join(dir, ".ai-team", "cloud-artifacts")
+	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
+	command.Dir = dir
+	command.Env = append(os.Environ(), pathEnv)
+	var serverOutput strings.Builder
+	command.Stdout, command.Stderr = &serverOutput, &serverOutput
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Signal(os.Interrupt)
+		_ = command.Wait()
+	})
+
+	baseURL := "http://127.0.0.1:" + port
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
+	var csrf string
+	waitUntil(t, 10*time.Second, func() bool {
+		response, requestErr := client.Get(baseURL + "/api/session")
+		if requestErr != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var session struct {
+			CSRF string `json:"csrf_token"`
+		}
+		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
+			return false
+		}
+		csrf = session.CSRF
+		return csrf != ""
+	}, func() string { return serverOutput.String() })
+	data, _ := json.Marshal(map[string]string{"feature": "scheduled", "task": "scheduled task"})
+	request, _ := http.NewRequest(http.MethodPost, baseURL+"/api/runs", bytes.NewReader(data))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started map[string]string
+	_ = json.NewDecoder(response.Body).Decode(&started)
+	response.Body.Close()
+	runID := started["run_id"]
+	if response.StatusCode != http.StatusAccepted || runID == "" {
+		t.Fatalf("scheduler enqueue: status=%d body=%v\n%s", response.StatusCode, started, serverOutput.String())
+	}
+
+	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
+	waitUntil(t, 10*time.Second, func() bool {
+		poller := exec.Command(bin, "scheduler-worker",
+			"--target", dir, "--scheduler-db", schedulerDB,
+			"--artifact-store", artifactRoot, "--db", filepath.Join(dir, ".ai-team", "web.db"),
+			"--worker-command", bin, "--worker-id", "e2e-worker", "--once",
+		)
+		poller.Dir = dir
+		poller.Env = append(os.Environ(), pathEnv)
+		if output, pollErr := poller.CombinedOutput(); pollErr != nil {
+			t.Fatalf("scheduler worker: %v\n%s", pollErr, output)
+		}
+		state, readErr := os.ReadFile(statePath)
+		return readErr == nil && strings.Contains(string(state), `"phase": "waiting"`)
+	}, func() string {
+		queue, openErr := scheduler.Open(schedulerDB, scheduler.Options{})
+		if openErr != nil {
+			return serverOutput.String() + "\nqueue: " + openErr.Error()
+		}
+		defer queue.Close()
+		records, listErr := queue.ListRun(runID)
+		return fmt.Sprintf("%s\nqueue=%+v err=%v", serverOutput.String(), records, listErr)
+	})
+	checkFile(t, filepath.Join(artifactRoot, "manifests", runID+".json"))
+	checkFile(t, filepath.Join(dir, ".ai-team", "state", "candidates", runID+".json"))
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, diagnostics func() string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout ожидания:\n%s", diagnostics())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // TestE2E_OpenCodeSandboxEnvironmentReachesRealSubprocess proves the
 // isolation environment pkg/runtime.OpenCodeIsolationEnvironment builds
 // (deny-by-default permission policy, isolated XDG_CONFIG_HOME, allow-listed
@@ -442,8 +828,6 @@ func TestE2E_OpenCodeSandboxEnvironmentReachesRealSubprocess(t *testing.T) {
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
 	}
-	runCommand(t, dir, "git", "add", ".gitignore")
-	runCommand(t, dir, "git", "commit", "-m", "initialize ai-team ignore policy")
 
 	captureDir := filepath.Join(t.TempDir(), "env-capture")
 	envs := []string{

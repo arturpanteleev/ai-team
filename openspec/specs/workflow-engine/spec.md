@@ -4,11 +4,19 @@
 TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
 ## Requirements
 ### Requirement: Explicit state machine
-Workflow transitions MUST be evaluated by a deterministic state machine independent of console, report and persistence adapters.
+Pipeline MUST вычислять execution/decision/outcome явно, независимо от console
+и report adapters, и MUST сохранять подтверждённое состояние на durable stage
+boundaries.
 
 #### Scenario: Transition test
 - **WHEN** the state machine receives the same state, policy and event sequence
 - **THEN** it MUST produce the same outcome and next transition
+
+#### Scenario: Process restart
+- **КОГДА** процесс завершается между stages
+- **ТОГДА** новый процесс MUST восстановить следующий допустимый stage из
+  persisted state
+- **И** MUST NOT повторять уже подтверждённый attempt без явного rollback
 
 ### Requirement: Declarative contracts
 Stage behavior MUST be declared in configuration rather than inferred from agent names.
@@ -30,4 +38,3 @@ Every checkpoint MUST define its non-interactive behavior.
 #### Scenario: Required checkpoint without TTY
 - **WHEN** a required checkpoint is reached without a TTY or pre-authorized approval
 - **THEN** the run MUST stop with policy-denied
-

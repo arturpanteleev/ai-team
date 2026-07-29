@@ -29,7 +29,7 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	if cfg.SchemaVersion == PreviousSchemaVersion {
+	if cfg.SchemaVersion == SchemaVersion2 {
 		migrateV2ToV3(&cfg)
 	}
 	return &cfg, nil
@@ -51,7 +51,7 @@ func migrateV2ToV3(cfg *Config) {
 			}
 		}
 	}
-	cfg.SchemaVersion = CurrentSchemaVersion
+	cfg.SchemaVersion = PreviousSchemaVersion
 }
 
 func hasArgument(arguments []string, expected string) bool {
@@ -69,9 +69,12 @@ func hasArgument(arguments []string, expected string) bool {
 // verifier-integration spec already names — rather than being duplicated
 // here independently.
 var defaultAgentOverrides = map[string]AgentConfig{
-	"analyst":   {CheckpointAfter: CheckpointRequireExplicit},
-	"architect": {CheckpointAfter: CheckpointRequireExplicit},
-	"coder":     {MaxRetries: 2},
+	"analyst":   {ApprovalRoles: []string{"product_owner"}},
+	"architect": {ApprovalRoles: []string{"architect"}},
+	"coder":     {MaxRetries: 2, ApprovalRoles: []string{"developer"}},
+	"reviewer":  {ApprovalRoles: []string{"reviewer"}},
+	"tester":    {ApprovalRoles: []string{"qa"}},
+	"verifier":  {ApprovalRoles: []string{"qa"}},
 }
 
 func Default() *Config {
@@ -82,13 +85,77 @@ func Default() *Config {
 		cfg.Name = name
 		agents[i] = cfg
 	}
-	return &Config{
+	cfg := &Config{
 		SchemaVersion:  CurrentSchemaVersion,
 		PipelineAgents: agents,
 		CLI:            "opencode",
 		Effort:         "medium",
 		StageTimeout:   "30m",
 	}
+	cfg.Workflow = defaultWorkflow(agents)
+	for index := range cfg.PipelineAgents {
+		cfg.PipelineAgents[index].ApprovalRoles = nil
+		cfg.PipelineAgents[index].ApprovalQuorum = ""
+		cfg.PipelineAgents[index].MaxRetries = 0
+	}
+	return cfg
+}
+
+func defaultWorkflow(agents []AgentConfig) *WorkflowConfig {
+	workflowConfig := &WorkflowConfig{
+		Entry:     agents[0].Name,
+		MaxVisits: map[string]int{},
+	}
+	indices := make(map[string]int, len(agents))
+	for index, stage := range agents {
+		indices[stage.Name] = index
+		target := "$complete"
+		if index+1 < len(agents) {
+			target = agents[index+1].Name
+		}
+		edge := WorkflowEdgeConfig{From: stage.Name, Outcome: "passed", To: target}
+		if target != "$complete" {
+			roles := append([]string(nil), stage.ApprovalRoles...)
+			if len(roles) == 0 {
+				roles = []string{"operator"}
+			}
+			edge.Approval = &WorkflowApprovalConfig{
+				Roles: roles, Quorum: "any",
+				Actions: map[string]string{"approve": target, "reject": "$stop"},
+			}
+		}
+		workflowConfig.Edges = append(workflowConfig.Edges, edge)
+	}
+	for _, source := range []string{"reviewer", "tester", "verifier"} {
+		index, exists := indices[source]
+		coderIndex, coderExists := indices["coder"]
+		if !exists || !coderExists || coderIndex >= index {
+			continue
+		}
+		override := "$complete"
+		if index+1 < len(agents) {
+			override = agents[index+1].Name
+		}
+		roles := append([]string(nil), agents[index].ApprovalRoles...)
+		if len(roles) == 0 {
+			roles = []string{"reviewer"}
+		}
+		workflowConfig.Edges = append(workflowConfig.Edges, WorkflowEdgeConfig{
+			From: source, Outcome: "rejected", To: "coder",
+			Approval: &WorkflowApprovalConfig{
+				Roles: roles, Quorum: "any",
+				Actions: map[string]string{
+					"return_to_coder": "coder", "override_approve": override, "reject": "$stop",
+				},
+			},
+		})
+	}
+	for _, name := range []string{"coder", "reviewer", "tester", "verifier"} {
+		if _, exists := indices[name]; exists {
+			workflowConfig.MaxVisits[name] = 3
+		}
+	}
+	return workflowConfig
 }
 
 // Marshal сериализует конфиг в YAML (используется init-ом: гейты и

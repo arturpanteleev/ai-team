@@ -4,13 +4,23 @@
 
 ## Requirements
 ### Requirement: Флаг --retry-from
-CLI команда `run` MUST поддерживать флаг `--retry-from <agent-name>`.
+CLI MUST поддерживать `--retry-from <agent>` для нового run и
+`--resume <run_id>` для продолжения persisted non-terminal run.
 
 #### Scenario: Перезапуск с указанного агента
 - **КОГДА** пользователь запускает `ai-team run --retry-from coder`
 - **ТОГДА** пайплайн MUST пропустить всех агентов до `coder` (включительно: analyst, architect — пропущены)
 - **И** начать выполнение с агента `coder`
 - **И** артефакты пропущенных этапов MUST NOT удаляться
+
+#### Scenario: Resume без нового task
+- **КОГДА** указан `--resume <run_id>`
+- **ТОГДА** task, feature и next stage MUST быть загружены из persisted state
+- **И** передача нового `--task` MUST быть отклонена
+
+#### Scenario: Resume terminal run
+- **КОГДА** указанный run уже terminal
+- **ТОГДА** CLI MUST завершиться ошибкой без мутации evidence
 
 ### Requirement: Проверка входных артефактов при retry
 Система MUST проверять наличие всех необходимых входных артефактов перед запуском с указанного этапа.

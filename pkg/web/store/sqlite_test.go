@@ -124,6 +124,36 @@ func TestRunIdentityPaginationEventsAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestGetEventsAfterUsesGlobalCursorOrdering(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	events := []*Event{
+		{RunID: "run-a", Sequence: 1, Type: "run_started", Timestamp: now},
+		{RunID: "run-b", Sequence: 1, Type: "run_started", Timestamp: now.Add(time.Second)},
+		{RunID: "run-a", Sequence: 2, Type: "run_finished", Timestamp: now.Add(2 * time.Second)},
+	}
+	for _, event := range events {
+		if err := s.AppendEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := s.GetEventsAfter(events[0].ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].ID != events[1].ID || page[1].ID != events[2].ID {
+		t.Fatalf("неожиданный cursor page: %+v", page)
+	}
+	cursor, err := s.LatestEventCursor()
+	if err != nil || cursor != events[2].ID {
+		t.Fatalf("latest cursor=%d err=%v", cursor, err)
+	}
+	if _, err := s.GetEventsAfter(-1, 10); err == nil {
+		t.Fatal("отрицательный cursor должен быть отклонён")
+	}
+}
+
 func TestGetPipelineRuns_Empty(t *testing.T) {
 	s := newTestStore(t)
 

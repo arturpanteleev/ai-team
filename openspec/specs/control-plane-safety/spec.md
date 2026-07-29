@@ -45,3 +45,24 @@ Each stage MUST declare and obey its allowed mutation scope and capabilities.
 - **WHEN** a read-only stage changes a source file
 - **THEN** the controller MUST reject the attempt and preserve evidence of the violation
 
+### Requirement: Разделение control и candidate root
+
+Controller MUST хранить durable state в control target, но MUST выполнять
+source mutation и checks только в exact candidate root.
+
+#### Scenario: Agent пытается изменить live source
+
+- **КОГДА** mutation отсутствует в candidate delta, но появляется в live source
+- **ТОГДА** run MUST завершиться fail-closed
+
+### Requirement: Control plane не исполняет cloud run inline
+
+При настроенном cloud worker launcher control plane MUST передавать execution
+отдельному worker process/job и MUST NOT вызывать AI runtime в HTTP process.
+
+#### Scenario: Worker command настроен
+
+- **КОГДА** web control plane получает start или resume
+- **ТОГДА** он MUST создать worker job через process-backed engine
+- **И** HTTP process MUST только наблюдать persisted lifecycle/events
+

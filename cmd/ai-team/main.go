@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -17,15 +18,22 @@ import (
 
 	agentdata "github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/web"
 	webstore "github.com/arturpanteleev/ai-team/pkg/web/store"
+	"github.com/arturpanteleev/ai-team/pkg/worker"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -50,6 +58,14 @@ func main() {
 		cmdInit()
 	case "run":
 		cmdRun()
+	case "decision":
+		cmdDecision()
+	case "auth-token":
+		cmdAuthToken()
+	case "worker":
+		cmdWorker()
+	case "scheduler-worker":
+		cmdSchedulerWorker()
 	case "list":
 		cmdList()
 	case "eval":
@@ -71,8 +87,13 @@ func printUsage() {
 	fmt.Println(`ai-team — AI-команда для spec-driven разработки
 
 Использование:
-  ai-team init [--target <path>]   Инициализировать .ai-team/ в проекте
+  ai-team init [--target <path>] [--write-gitignore]
+                                     Инициализировать .ai-team/ в проекте
   ai-team run                      Запустить пайплайн агентов
+  ai-team decision                 Записать решение человека по pending approval
+  ai-team auth-token               Выпустить короткоживущий cloud access token
+  ai-team worker                   Выполнить один disposable worker job из stdin
+  ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list                     Список доступных агентов
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
@@ -84,6 +105,7 @@ func printUsage() {
   --task <description>      Описание задачи
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
 	  --retry-from <agent>      Перезапустить с указанного агента (--task не обязателен)
+	  --resume <run_id>         Продолжить non-terminal run с той же identity
 	  --approve-gates           Явно подтвердить обычные gate-точки в non-interactive режиме
 	  --approve-plan <sha256>    Разрешить только показанный canonical delivery plan
 
@@ -100,11 +122,248 @@ Exit-коды run: 0 — успех, 1 — ошибка или негативн�
 	  --json-out <path>         Путь JSON evidence (по умолчанию .ai-team/evals/...)
 
 Флаги web:
+	  --target <path>           Путь к целевому проекту (по умолчанию текущий)
 	  --port <port>             Порт (по умолчанию 8080)
 	  --host <host>             Адрес bind (по умолчанию 127.0.0.1)
   --db <path>               Путь к SQLite (по умолчанию .ai-team/web.db)
   --dist <path>             Каталог собранного frontend (по умолчанию web/dist)
-  --artifacts <path>        Корень артефактов (по умолчанию .ai-team/artifacts)`)
+  --artifacts <path>        Корень артефактов (по умолчанию .ai-team/artifacts)
+  --auth-secret-env <name>  Env с HMAC secret; если задан, включает cloud auth
+  --worker-command <path>   Запускать pipeline в отдельном worker process
+  --scheduler-db <path>     Enqueue run в persistent scheduler вместо inline execution
+
+Флаги auth-token:
+  --actor <id>              Immutable actor identity
+  --roles <csv>             product_owner, architect, developer, reviewer, qa,
+                            release_manager
+  --ttl <duration>          Срок token, максимум 24h (по умолчанию 1h)
+  --secret-env <name>       Env с HMAC secret (по умолчанию AI_TEAM_AUTH_SECRET)
+
+Флаги scheduler-worker:
+  --scheduler-db <path>     Persistent queue SQLite
+  --artifact-store <path>   Persistent SHA-256 CAS root
+  --worker-command <path>   Executable ai-team worker
+  --worker-id <id>          Уникальный lease owner
+  --once                    Выполнить не более одного claim`)
+}
+
+func cmdAuthToken() {
+	flags := flag.NewFlagSet("auth-token", flag.ExitOnError)
+	actorID := flags.String("actor", "", "Immutable actor identity")
+	roleValues := flags.String("roles", "", "Список ролей через запятую")
+	ttl := flags.Duration("ttl", time.Hour, "Срок token")
+	secretEnv := flags.String("secret-env", "AI_TEAM_AUTH_SECRET", "Env с signing secret")
+	flags.Parse(os.Args[2:])
+	if strings.TrimSpace(*actorID) == "" || strings.TrimSpace(*roleValues) == "" {
+		fatal("--actor и --roles обязательны")
+	}
+	roles, err := cloudidentity.ParseRoles(strings.Split(*roleValues, ","))
+	if err != nil {
+		fatal("%v", err)
+	}
+	principal, err := cloudidentity.NewPrincipal(*actorID, roles)
+	if err != nil {
+		fatal("%v", err)
+	}
+	manager, err := cloudidentity.NewTokenManager([]byte(os.Getenv(*secretEnv)))
+	if err != nil {
+		fatal("%v", err)
+	}
+	token, err := manager.Issue(principal, *ttl)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Println(token)
+}
+
+func cmdWorker() {
+	flags := flag.NewFlagSet("worker", flag.ExitOnError)
+	targetValue := flags.String("target", "", "Exact mounted repository target")
+	dbPath := flags.String("db", "", "SQLite projection path")
+	flags.Parse(os.Args[2:])
+	if *targetValue == "" {
+		fatal("worker требует --target")
+	}
+	target, err := absoluteTarget(*targetValue)
+	if err != nil {
+		fatal("Ошибка worker target: %v", err)
+	}
+	requireControlRoot(target)
+	job, err := worker.DecodeJob(os.Stdin, target)
+	if err != nil {
+		fatal("Невалидный worker job: %v", err)
+	}
+	if *dbPath == "" {
+		*dbPath = filepath.Join(target, ".ai-team", "web.db")
+	} else if !filepath.IsAbs(*dbPath) {
+		fatal("worker --db должен быть absolute path")
+	}
+	if err := safeio.RejectSymlink(*dbPath); err != nil {
+		fatal("Небезопасный worker DB: %v", err)
+	}
+	recorderStore, err := webstore.New(*dbPath)
+	if err != nil {
+		fatal("Worker recorder: %v", err)
+	}
+	reg, err := newAgentRegistry(target)
+	if err != nil {
+		_ = recorderStore.Close()
+		fatal("Worker agent registry: %v", err)
+	}
+	cfg := loadValidatedConfig(target, reg)
+	if job.Operation != worker.OperationCancel {
+		report := preflight.New(cfg, reg, target).Check(context.Background())
+		if !report.Ready {
+			_ = recorderStore.Close()
+			fatal("Worker preflight: %v", report.Error())
+		}
+	}
+	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
+		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore))))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var result pipeline.RunResult
+	switch job.Operation {
+	case worker.OperationStart:
+		result, err = engine.Start(ctx, job.RunConfig())
+	case worker.OperationResume:
+		result, err = engine.Resume(ctx, pipeline.ResumeConfig{
+			RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
+			ApprovePlanHash: job.ApprovePlanHash,
+		})
+	case worker.OperationCancel:
+		result, err = engine.Cancel(pipeline.CancelConfig{RunID: job.RunID, TargetDir: target})
+	}
+	_ = recorderStore.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker %s остановлен: %v\n", job.RunID, err)
+		os.Exit(exitCodeFor(err))
+	}
+	fmt.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
+}
+
+func cmdSchedulerWorker() {
+	flags := flag.NewFlagSet("scheduler-worker", flag.ExitOnError)
+	targetValue := flags.String("target", ".", "Exact mounted repository target")
+	schedulerDB := flags.String("scheduler-db", ".ai-team/scheduler.db", "Persistent scheduler SQLite")
+	webDB := flags.String("db", ".ai-team/web.db", "SQLite event projection")
+	artifactRoot := flags.String("artifact-store", ".ai-team/cloud-artifacts", "Persistent CAS root")
+	workerCommand := flags.String("worker-command", "", "Executable ai-team worker")
+	workerID := flags.String("worker-id", "", "Unique worker owner identity")
+	once := flags.Bool("once", false, "Завершиться после одной попытки claim")
+	pollInterval := flags.Duration("poll-interval", time.Second, "Интервал пустой очереди")
+	leaseDuration := flags.Duration("lease", 30*time.Second, "Worker lease duration")
+	maxConcurrent := flags.Int("max-concurrent", 4, "Global concurrency limit")
+	perTarget := flags.Int("per-target", 1, "Concurrency limit одного target")
+	flags.Parse(os.Args[2:])
+	target, err := absoluteTarget(*targetValue)
+	if err != nil {
+		fatal("Scheduler worker target: %v", err)
+	}
+	requireControlRoot(target)
+	if *workerCommand == "" {
+		executable, executableErr := os.Executable()
+		if executableErr != nil {
+			fatal("Scheduler worker executable: %v", executableErr)
+		}
+		*workerCommand = executable
+	}
+	for _, value := range []*string{schedulerDB, webDB, artifactRoot} {
+		if !filepath.IsAbs(*value) {
+			*value = filepath.Join(target, *value)
+		}
+	}
+	if *workerID == "" {
+		hostname, _ := os.Hostname()
+		*workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+	queue, err := scheduler.Open(*schedulerDB, scheduler.Options{
+		LeaseDuration: *leaseDuration, MaxConcurrent: *maxConcurrent, PerTarget: *perTarget,
+	})
+	if err != nil {
+		fatal("Scheduler queue: %v", err)
+	}
+	defer queue.Close()
+	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB)
+	if err != nil {
+		fatal("Scheduler ProcessEngine: %v", err)
+	}
+	cas, err := artifactstore.NewLocalCAS(*artifactRoot)
+	if err != nil {
+		fatal("Scheduler artifact store: %v", err)
+	}
+	archive, err := artifactstore.NewRunArchive(filepath.Join(target, ".ai-team", "runs"), cas)
+	if err != nil {
+		fatal("Scheduler archive: %v", err)
+	}
+	poller, err := scheduler.NewPoller(queue, processEngine, archive)
+	if err != nil {
+		fatal("Scheduler poller: %v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	for {
+		claimed, pollErr := poller.RunOnce(ctx, *workerID)
+		if pollErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fatal("Scheduler worker: %v", pollErr)
+		}
+		if *once {
+			return
+		}
+		if !claimed {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(*pollInterval):
+			}
+		}
+	}
+}
+
+func cmdDecision() {
+	flags := flag.NewFlagSet("decision", flag.ExitOnError)
+	target := flags.String("target", ".", "Путь к целевому проекту")
+	runID := flags.String("run", "", "Идентификатор run")
+	approvalID := flags.String("approval", "", "Идентификатор approval")
+	actorID := flags.String("actor", "", "Идентификатор человека")
+	role := flags.String("role", "", "Роль человека")
+	action := flags.String("action", "", "Выбранное действие")
+	subject := flags.String("subject", "", "Точный SHA-256 subject")
+	comment := flags.String("comment", "", "Комментарий к решению")
+	if err := flags.Parse(os.Args[2:]); err != nil {
+		fatal("Ошибка аргументов decision: %v", err)
+	}
+	if flags.NArg() != 0 {
+		fatal("Неожиданные аргументы decision: %s", strings.Join(flags.Args(), " "))
+	}
+	if *runID == "" || *approvalID == "" || *actorID == "" || *role == "" || *action == "" || *subject == "" {
+		fatal("decision требует --run, --approval, --actor, --role, --action и --subject")
+	}
+	absolute, err := absoluteTarget(*target)
+	if err != nil {
+		fatal("Ошибка target: %v", err)
+	}
+	requireControlRoot(absolute)
+	store, err := approval.NewStore(absolute)
+	if err != nil {
+		fatal("Ошибка approval store: %v", err)
+	}
+	value, err := store.Decide(*runID, *approvalID, approval.Decision{
+		ActorID: *actorID, ActorRole: *role, Action: *action,
+		SubjectHash: *subject, Comment: *comment,
+	})
+	if err != nil {
+		fatal("Решение отклонено: %v", err)
+	}
+	if value.Status == approval.StatusResolved {
+		fmt.Printf("✓ Approval %s разрешён действием %s; продолжите: ai-team run --target %s --resume %s\n",
+			value.ID, value.ResolvedAction, absolute, value.RunID)
+		return
+	}
+	fmt.Printf("✓ Решение записано для approval %s; ожидается quorum %s\n", value.ID, value.Quorum)
 }
 
 func validFeature(name string) bool {
@@ -176,10 +435,16 @@ func requireControlRoot(target string) {
 }
 
 func cmdInit() {
-	target := "."
-	if len(os.Args) > 2 && os.Args[2] == "--target" && len(os.Args) > 3 {
-		target = os.Args[3]
+	initFlags := flag.NewFlagSet("init", flag.ExitOnError)
+	targetFlag := initFlags.String("target", ".", "Путь к целевому проекту")
+	writeGitignore := initFlags.Bool("write-gitignore", false, "Записать разделяемое правило в .gitignore вместо локального Git exclude")
+	if err := initFlags.Parse(os.Args[2:]); err != nil {
+		fatal("Ошибка аргументов init: %v", err)
 	}
+	if initFlags.NArg() != 0 {
+		fatal("Неожиданные аргументы init: %s", strings.Join(initFlags.Args(), " "))
+	}
+	target := *targetFlag
 	var err error
 	target, err = absoluteTarget(target)
 	if err != nil {
@@ -224,40 +489,77 @@ func cmdInit() {
 		fmt.Fprintf(os.Stderr, "Предупреждение: %v\n", err)
 	}
 
-	ensureGitignore(target)
+	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
+	if err != nil {
+		fatal("Ошибка настройки ignore policy: %v", err)
+	}
+	if ignorePath != "" {
+		fmt.Printf("✓ .ai-team/ исключён через %s\n", ignorePath)
+	}
 
 	fmt.Printf("✓ .ai-team/ инициализирован в %s\n", target)
 }
 
-// ensureGitignore гарантирует исключение .ai-team/ из git: дописывает в
-// существующий .gitignore или создаёт его (только внутри git-репозитория).
-func ensureGitignore(target string) {
-	giPath := filepath.Join(target, ".gitignore")
-	data, err := os.ReadFile(giPath)
-	switch {
-	case err == nil:
-		if strings.Contains(string(data), ".ai-team") {
-			return
-		}
-		f, err := os.OpenFile(giPath, os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Предупреждение: не удалось обновить .gitignore: %v\n", err)
-			return
-		}
-		defer f.Close()
-		if _, err := f.WriteString("\n# ai-team\n.ai-team/\n"); err != nil {
-			fmt.Fprintf(os.Stderr, "Предупреждение: не удалось обновить .gitignore: %v\n", err)
-		}
-	case os.IsNotExist(err):
-		if _, gErr := os.Stat(filepath.Join(target, ".git")); gErr != nil {
-			return // не git-репозиторий — .gitignore не нужен
-		}
-		if wErr := os.WriteFile(giPath, []byte("# ai-team\n.ai-team/\n"), 0644); wErr != nil {
-			fmt.Fprintf(os.Stderr, "Предупреждение: не удалось создать .gitignore: %v\n", wErr)
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "Предупреждение: не удалось прочитать .gitignore: %v\n", err)
+// ensureControlIgnored гарантирует исключение .ai-team/ из Git. По умолчанию
+// используется локальный info/exclude, чтобы init не изменял workspace.
+func ensureControlIgnored(target string, writeGitignore bool) (string, error) {
+	if writeGitignore {
+		path := filepath.Join(target, ".gitignore")
+		return path, appendIgnoreRule(path)
 	}
+
+	check := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree")
+	if output, err := check.Output(); err != nil || strings.TrimSpace(string(output)) != "true" {
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			return "", fmt.Errorf("не удалось проверить Git repository: %w", err)
+		}
+		return "", nil
+	}
+
+	command := exec.Command("git", "-C", target, "rev-parse", "--git-path", "info/exclude")
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("не удалось определить Git exclude path: %w", err)
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		return "", errors.New("Git вернул пустой exclude path")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(target, path)
+	}
+	path = filepath.Clean(path)
+	return path, appendIgnoreRule(path)
+}
+
+func appendIgnoreRule(path string) error {
+	if err := safeio.RejectSymlink(path); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == ".ai-team/" {
+			return nil
+		}
+	}
+
+	prefix := ""
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		prefix = "\n"
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(prefix + "# ai-team\n.ai-team/\n"); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func loadValidatedConfig(target string, reg *agent.Registry) *config.Config {
@@ -281,6 +583,7 @@ func cmdRun() {
 	taskDesc := runFlags.String("task", "", "Описание задачи")
 	target := runFlags.String("target", ".", "Путь к целевому проекту")
 	retryFrom := runFlags.String("retry-from", "", "Перезапустить с указанного агента")
+	resumeRunID := runFlags.String("resume", "", "Продолжить non-terminal run")
 	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме")
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan")
 
@@ -292,11 +595,15 @@ func cmdRun() {
 	*target = absTarget
 	requireControlRoot(*target)
 
-	if *feature == "" {
-		fatal("Укажите --feature")
-	}
-	if !validFeature(*feature) {
-		fatal("недопустимое имя фичи: %q (допустимы буквы, цифры, \"-\", \"_\", \".\")", *feature)
+	if *resumeRunID == "" {
+		if *feature == "" {
+			fatal("Укажите --feature")
+		}
+		if !validFeature(*feature) {
+			fatal("недопустимое имя фичи: %q (допустимы буквы, цифры, \"-\", \"_\", \".\")", *feature)
+		}
+	} else if *feature != "" || *taskDesc != "" || *retryFrom != "" {
+		fatal("--resume нельзя сочетать с --feature, --task или --retry-from; identity и next stage загружаются из state")
 	}
 
 	// Config/registry validation is intentionally before task.md writes: a bad
@@ -307,7 +614,9 @@ func cmdRun() {
 	}
 	cfg := loadValidatedConfig(*target, reg)
 
-	if *retryFrom == "" {
+	if *resumeRunID != "" {
+		// Resume загружает task/feature после получения workspace lock.
+	} else if *retryFrom == "" {
 		if *taskDesc == "" {
 			fatal("Укажите --task")
 		}
@@ -327,14 +636,18 @@ func cmdRun() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runResult, err := p.RunWithResult(ctx, pipeline.RunConfig{
-		Feature:         *feature,
-		TaskDesc:        *taskDesc,
-		TargetDir:       *target,
-		RetryFrom:       *retryFrom,
-		ApproveGates:    *approveGates,
-		ApprovePlanHash: *approvePlan,
-	})
+	engine := pipeline.NewRunEngine(p)
+	var runResult pipeline.RunResult
+	if *resumeRunID != "" {
+		runResult, err = engine.Resume(ctx, pipeline.ResumeConfig{
+			RunID: *resumeRunID, TargetDir: *target, ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
+		})
+	} else {
+		runResult, err = engine.Start(ctx, pipeline.RunConfig{
+			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target, RetryFrom: *retryFrom,
+			ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
+		})
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Пайплайн остановлен: %v\n", ui.Colorize("✗", ui.ColorRed), err)
 		os.Exit(exitCodeFor(err))
@@ -552,16 +865,29 @@ func cmdWeb() {
 	dbPath := webFlags.String("db", ".ai-team/web.db", "Path to SQLite database")
 	distDir := webFlags.String("dist", "web/dist", "Path to frontend dist directory")
 	artifacts := webFlags.String("artifacts", ".ai-team/artifacts", "Artifact root directory")
+	targetFlag := webFlags.String("target", ".", "Путь к целевому проекту")
+	authSecretEnv := webFlags.String("auth-secret-env", "AI_TEAM_AUTH_SECRET", "Env с cloud auth HMAC secret")
+	workerCommand := webFlags.String("worker-command", "", "Executable ai-team для disposable worker process")
+	schedulerDB := webFlags.String("scheduler-db", "", "Persistent scheduler SQLite (включает enqueue-only mode)")
+	schedulerMax := webFlags.Int("max-concurrent", 4, "Scheduler global concurrency")
+	schedulerPerTarget := webFlags.Int("per-target", 1, "Scheduler per-target concurrency")
 	webFlags.Parse(os.Args[2:])
-	target, err := absoluteTarget(".")
+	target, err := absoluteTarget(*targetFlag)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
 	}
-	if _, err := safeio.EnsureDir(target, ".ai-team"); err != nil {
-		fatal("Небезопасный control root: %v", err)
+	requireControlRoot(target)
+	if !filepath.IsAbs(*dbPath) {
+		*dbPath = filepath.Join(target, *dbPath)
 	}
-	if filepath.Clean(*dbPath) == filepath.Join(".ai-team", "web.db") {
-		if err := safeio.RejectSymlink(filepath.Join(target, *dbPath)); err != nil {
+	if !filepath.IsAbs(*artifacts) {
+		*artifacts = filepath.Join(target, *artifacts)
+	}
+	if *schedulerDB != "" && !filepath.IsAbs(*schedulerDB) {
+		*schedulerDB = filepath.Join(target, *schedulerDB)
+	}
+	if filepath.Clean(*dbPath) == filepath.Join(target, ".ai-team", "web.db") {
+		if err := safeio.RejectSymlink(*dbPath); err != nil {
 			fatal("Небезопасный путь БД: %v", err)
 		}
 	}
@@ -572,7 +898,61 @@ func cmdWeb() {
 		}
 	}
 
-	srv, err := web.NewServer(*dbPath, *distDir, *artifacts)
+	reg, err := newAgentRegistry(target)
+	if err != nil {
+		fatal("Небезопасный project agent registry: %v", err)
+	}
+	cfg := loadValidatedConfig(target, reg)
+	recorderStore, err := webstore.New(*dbPath)
+	if err != nil {
+		fatal("Ошибка recorder store: %v", err)
+	}
+	defer recorderStore.Close()
+	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
+		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore))))
+	var runController *control.Controller
+	var schedulerQueue *scheduler.Queue
+	if *schedulerDB != "" {
+		if *workerCommand != "" {
+			fatal("--scheduler-db и --worker-command нельзя использовать одновременно: scheduler worker запускается отдельно")
+		}
+		schedulerQueue, err = scheduler.Open(*schedulerDB, scheduler.Options{
+			MaxConcurrent: *schedulerMax, PerTarget: *schedulerPerTarget,
+		})
+		if err != nil {
+			fatal("Ошибка scheduler queue: %v", err)
+		}
+		defer schedulerQueue.Close()
+		queueEngine, queueErr := scheduler.NewQueueEngine(schedulerQueue, target)
+		if queueErr != nil {
+			fatal("Ошибка queue engine: %v", queueErr)
+		}
+		runController, err = control.New(queueEngine, target)
+	} else if *workerCommand != "" {
+		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath)
+		if processErr != nil {
+			fatal("Ошибка worker launcher: %v", processErr)
+		}
+		runController, err = control.New(processEngine, target,
+			control.WithPreflight(preflight.New(cfg, reg, target)))
+	} else {
+		runController, err = control.New(localEngine, target,
+			control.WithPreflight(preflight.New(cfg, reg, target)))
+	}
+	if err != nil {
+		fatal("Ошибка run controller: %v", err)
+	}
+	serverOptions := []web.ServerOption{web.WithRunController(runController)}
+	authEnabled := false
+	if secret := os.Getenv(*authSecretEnv); secret != "" {
+		tokenManager, managerErr := cloudidentity.NewTokenManager([]byte(secret))
+		if managerErr != nil {
+			fatal("Ошибка cloud authentication: %v", managerErr)
+		}
+		serverOptions = append(serverOptions, web.WithAuthenticator(tokenManager))
+		authEnabled = true
+	}
+	srv, err := web.NewServer(*dbPath, *distDir, *artifacts, serverOptions...)
 	if err != nil {
 		fatal("Ошибка запуска web сервера: %v", err)
 	}
@@ -586,7 +966,7 @@ func cmdWeb() {
 	}()
 
 	addr := net.JoinHostPort(*host, *port)
-	if *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
+	if !authEnabled && *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
 		fatal("web UI не имеет authentication и может bind только loopback host")
 	}
 	fmt.Printf("Web UI available at http://%s\n", addr)

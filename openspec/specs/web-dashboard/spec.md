@@ -1,9 +1,7 @@
 ## Purpose
 
 Dashboard — главная страница web UI, список pipeline runs с фильтрацией.
-
 ## Requirements
-
 ### Requirement: Dashboard page
 Frontend MUST отображать Dashboard с списком pipeline runs.
 
@@ -35,3 +33,29 @@ API и frontend MUST использовать bounded pagination, а общее 
 - **КОГДА** Dashboard запрашивает runs
 - **ТОГДА** запрос MUST содержать bounded limit и non-negative offset
 - **И** API MUST вернуть `X-Total-Count`
+
+### Requirement: New run control
+Dashboard MUST позволять авторизованному локальному пользователю создать run с
+feature и task.
+
+#### Scenario: Команда принята
+- **КОГДА** пользователь отправляет валидную форму
+- **ТОГДА** UI MUST показать зарезервированный run_id
+- **И** MUST обновлять состояние из WebSocket/projection
+
+### Requirement: Waiting status
+Dashboard MUST явно отличать `waiting_for_approval` от failed и stopped.
+
+#### Scenario: Pending approval
+- **КОГДА** run ждёт решения
+- **ТОГДА** карточка MUST показать отдельный status и ссылку на controls
+
+### Requirement: Readiness перед запуском
+
+Dashboard MUST показывать preflight report рядом с формой нового run.
+
+#### Scenario: Required check failed
+
+- **КОГДА** readiness имеет failed required check
+- **ТОГДА** dashboard MUST показать конкретную проверку
+- **И** MUST заблокировать отправку формы нового run

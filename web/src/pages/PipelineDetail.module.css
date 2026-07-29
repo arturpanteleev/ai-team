@@ -58,3 +58,119 @@
   padding: 24px;
   text-align: center;
 }
+
+.controls {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #cbd5e1;
+}
+
+.controlHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.controlHeader h2 {
+  margin: 0 auto 0 0;
+  font-size: 18px;
+}
+
+.controlHeader input,
+.controlHeader button,
+.actions button {
+  border: 1px solid #475569;
+  border-radius: 5px;
+  padding: 7px 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 12px;
+  background: #0f172a;
+  border-radius: 6px;
+}
+
+.approval code {
+  overflow-wrap: anywhere;
+  color: #93c5fd;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.controlError {
+  margin-top: 8px;
+  color: #f87171;
+}
+
+.workflow {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #cbd5e1;
+}
+
+.workflowHeader {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.workflowHeader h2 {
+  margin: 0 auto 0 0;
+  font-size: 18px;
+}
+
+.nodes {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.nodes span {
+  padding: 5px 8px;
+  border: 1px solid #475569;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.nodes span[data-current='true'] {
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+
+.edges {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edges article {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(70px, auto) minmax(100px, 1fr);
+  gap: 8px;
+  padding: 7px;
+  background: #0f172a;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.edges small {
+  grid-column: 1 / -1;
+  color: #94a3b8;
+}

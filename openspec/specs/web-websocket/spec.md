@@ -1,7 +1,6 @@
 ## Purpose
 
-Опциональный in-process WebSocket transport. Он не является источником истины и
-не переносит SQLite events между отдельными CLI и web process.
+Live WebSocket transport поверх durable SQLite event stream.
 
 ## Requirements
 
@@ -18,19 +17,18 @@
 - **ТОГДА** сервер MUST удалить клиента из hub
 
 ### Requirement: Broadcast events
-Hub MUST отправлять явно опубликованные events всем подключённым клиентам; cross-process SQLite writer MUST NOT ошибочно считаться подключённым к in-memory hub.
+Hub MUST публиковать versioned events из production SQLite stream и
+поддерживать durable replay по cursor.
 
-#### Scenario: Stage started event
-- **КОГДА** producer публикует stage started event в hub
-- **ТОГДА** hub MUST отправить JSON: `{"type": "stage_started", "pipeline_id": 123, "agent": "analyst"}`
+#### Scenario: Event записан другим процессом
+- **КОГДА** CLI сохраняет lifecycle event в общей SQLite database
+- **ТОГДА** запущенный web server MUST обнаружить event
+- **И** MUST передать его подключённым WebSocket clients
 
-#### Scenario: Stage completed event
-- **КОГДА** producer публикует stage completed event в hub
-- **ТОГДА** hub MUST отправить JSON: `{"type": "stage_completed", "pipeline_id": 123, "agent": "analyst", "status": "passed", "duration_ms": 5000}`
-
-#### Scenario: Pipeline completed event
-- **КОГДА** producer публикует pipeline completed event в hub
-- **ТОГДА** hub MUST отправить JSON: `{"type": "pipeline_completed", "pipeline_id": 123, "status": "completed"}`
+#### Scenario: Replay перед live mode
+- **КОГДА** клиент подключается с валидным cursor
+- **ТОГДА** hub MUST упорядоченно отправить пропущенные durable events
+- **И** после replay MUST продолжить live broadcast
 
 ### Requirement: Connection safety
 Browser connections MUST быть same-origin, иметь bounded send queues, read/write deadlines и ping/pong cleanup.

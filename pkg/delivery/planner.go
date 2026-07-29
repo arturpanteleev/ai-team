@@ -37,7 +37,7 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, fmt.Errorf("delivery planner: check verified workspace %s, current workspace is %s", verification.WorkspaceDigest, currentWorkspaceDigest)
 	}
 	current, err := commandOutput(ctx, targetDir, "git", "branch", "--show-current")
-	if err != nil || current == "" {
+	if err != nil {
 		return Plan{}, fmt.Errorf("delivery planner: не удалось определить текущую git branch: %w", err)
 	}
 	base, err := detectBaseBranch(ctx, targetDir, current)
@@ -45,7 +45,7 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, err
 	}
 	branch := "ai-team/" + feature
-	if current != base && current != branch {
+	if current != "" && current != base && current != branch {
 		return Plan{}, fmt.Errorf("delivery planner: текущая branch %q должна быть protected base %q или %q", current, base, branch)
 	}
 	baselineHead, err := commandOutput(ctx, targetDir, "git", "rev-parse", "--verify", base)

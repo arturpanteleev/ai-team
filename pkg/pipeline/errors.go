@@ -23,10 +23,17 @@ func (e *RunError) Unwrap() error { return e.Err }
 // ApprovalRequiredError — required checkpoint не был явно подтверждён.
 // Для CLI это управляемая остановка (exit-код 3), а не ошибка агента.
 type ApprovalRequiredError struct {
-	Checkpoint string
+	Checkpoint  string
+	RunID       string
+	ApprovalID  string
+	SubjectHash string
 }
 
 func (e *ApprovalRequiredError) Error() string {
+	if e.ApprovalID != "" {
+		return fmt.Sprintf("%s: требуется решение человека (run=%s approval=%s subject=%s)",
+			e.Checkpoint, e.RunID, e.ApprovalID, e.SubjectHash)
+	}
 	return fmt.Sprintf("%s: требуется явное подтверждение", e.Checkpoint)
 }
 

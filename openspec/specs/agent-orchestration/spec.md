@@ -1,22 +1,26 @@
 ## Purpose
 
 Спецификация определяет нормативное поведение capability `agent-orchestration`.
-
 ## Requirements
 ### Requirement: Порядок выполнения пайплайна
-Система MUST выполнять агентов в строгом порядке, указанном в конфигурации пайплайна.
 
-#### Scenario: Последовательное выполнение
-- **КОГДА** пайплайн запускается (полный запуск)
-- **ТОГДА** первый агент в конфигурации выполняется первым
-- **И** каждый последующий агент выполняется только после успешного завершения предыдущего
-- **И** дефолтный порядок: analyst → architect → coder → reviewer → tester → verifier → deployer
+Schema v4 MUST выполнять первый узел из `workflow.entry`, а каждый следующий
+узел — только по выбранному outcome edge и resolved human approval. Legacy
+schemas MUST сохранять строгий порядок массива pipeline.
 
-#### Scenario: Сбой пайплайна
-- **КОГДА** любой агент возвращает ошибку
-- **И** НЕ указан флаг `--retry-from`
-- **ТОГДА** пайплайн MUST остановиться
-- **И** последующие агенты MUST NOT выполняться
+#### Scenario: Последовательное выполнение schema v4
+
+- **КОГДА** graph run запускается
+- **ТОГДА** entry node MUST выполняться первым
+- **И** следующий node MUST совпадать с exact target выбранного edge action
+- **И** дефолтный успешный маршрут MUST быть analyst → architect → coder →
+  reviewer → tester → verifier → deployer
+
+#### Scenario: Сбой без recovery edge
+
+- **КОГДА** attempt возвращает outcome без соответствующего edge
+- **ТОГДА** pipeline MUST остановиться
+- **И** последующие узлы MUST NOT выполняться
 - **И** MUST быть сгенерирован итоговый отчёт с указанием упавшего этапа
 
 ### Requirement: Коммуникация через артефакты
@@ -45,11 +49,16 @@
 - **ТОГДА** артефакты MUST храниться раздельно: `.ai-team/artifacts/add-auth/` и `.ai-team/artifacts/add-payment/`
 
 ### Requirement: Настройка пайплайна
-Пайплайн MUST настраиваться через `.ai-team/config.yaml`.
 
-#### Scenario: Кастомный пайплайн
-- **КОГДА** пользователь указывает `pipeline: [analyst, coder, deployer]` в конфиге
-- **ТОГДА** система MUST выполнить только указанных агентов в заданном порядке
+Schema v4 pipeline MUST определять nodes, а `workflow` MUST определять entry,
+outcome edges и approvals; legacy pipeline list MUST компилироваться в
+последовательный graph.
+
+#### Scenario: Кастомный graph
+
+- **КОГДА** пользователь задаёт entry и edges между выбранными pipeline nodes
+- **ТОГДА** система MUST выполнять только маршрут, выбранный recorded outcomes
+  и human decisions
 
 ### Requirement: Runtime интерфейс с передачей артефактов
 Runtime MUST принимать на вход список верифицированных артефактов.
@@ -114,7 +123,6 @@ Runtime MUST принимать на вход список верифициро�
 - **ТОГДА** пайплайн MUST пропустить всех агентов до указанного
 - **И** проверить наличие артефактов пропущенных этапов
 - **И** ЕСЛИ артефакты отсутствуют — вывести ошибку и остановиться
-
 
 ### Requirement: Git diff guard в пайплайне
 Пайплайн MUST применять mutation policy из definition, а не эвристику по имени агента или пустому outputs.

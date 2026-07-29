@@ -156,6 +156,41 @@ func TestEventLogHashChainDetectsTampering(t *testing.T) {
 	}
 }
 
+func TestResumeContinuesVerifiedNonTerminalChain(t *testing.T) {
+	target := t.TempDir()
+	root := filepath.Join(target, "runs")
+	manifest := testRunManifest("run-resume")
+	manifest.Feature, manifest.TargetDir, manifest.StartedAt = "feature", target, time.Now().UTC()
+	store, err := Start(root, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "run_started", Timestamp: manifest.StartedAt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "run_paused", Timestamp: manifest.StartedAt.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, loaded, replayed, err := Resume(root, "run-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RunID != "run-resume" || !replayed.FinishedAt.IsZero() {
+		t.Fatalf("unexpected resume state: manifest=%+v replay=%+v", loaded, replayed)
+	}
+	if err := resumed.Append(Event{Type: "run_resumed", Timestamp: manifest.StartedAt.Add(2 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := resumed.Append(Event{Type: "run_finished", Timestamp: manifest.StartedAt.Add(3 * time.Second), Data: map[string]any{
+		"status": "failed", "stage_attempts": 0,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := Resume(root, "run-resume"); err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("terminal resume должен быть отклонён: %v", err)
+	}
+}
+
 // TestEventLogRejectsSplicedEventFromAnotherChain covers what per-event
 // digest recomputation alone cannot: an event that is individually
 // self-consistent (its own stored SHA256 still matches its own content,

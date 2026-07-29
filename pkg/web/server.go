@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -12,30 +13,73 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
 	agentdata "github.com/arturpanteleev/ai-team"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
 const maxArtifactSize = 10 << 20 // 10 MiB: web viewer не предназначен для больших бинарных файлов.
+const maxLogTailSize = 64 << 10
+const maxCommandBody = 64 << 10
+const sessionCookieName = "ai_team_session"
+
+type RunController interface {
+	Start(feature, task string) (string, error)
+	Resume(runID string) error
+	Cancel(runID string) error
+	Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
+	Approvals(runID string) ([]approval.PendingApproval, error)
+	Preflight(context.Context) preflight.Report
+}
+
+type ServerOption func(*Server)
+
+func WithRunController(controller RunController) ServerOption {
+	return func(server *Server) { server.controller = controller }
+}
+
+type IdentityVerifier interface {
+	Verify(token string) (cloudidentity.Principal, error)
+}
+
+func WithAuthenticator(verifier IdentityVerifier) ServerOption {
+	return func(server *Server) { server.authenticator = verifier }
+}
+
+type browserSession struct {
+	CSRFToken string
+	Principal cloudidentity.Principal
+	ExpiresAt time.Time
+}
 
 type Server struct {
-	store        *store.Store
-	hub          *Hub
-	router       *chi.Mux
-	frontend     http.Handler
-	artifactRoot string // абсолютный корень артефактов; всё вне него не отдаётся
-	runRoot      string // immutable .ai-team/runs root
-	httpServer   *http.Server
+	store         *store.Store
+	hub           *Hub
+	router        *chi.Mux
+	frontend      http.Handler
+	artifactRoot  string // абсолютный корень артефактов; всё вне него не отдаётся
+	runRoot       string // immutable .ai-team/runs root
+	httpServer    *http.Server
+	cancelEvents  context.CancelFunc
+	eventWorkers  sync.WaitGroup
+	controller    RunController
+	authenticator IdentityVerifier
+	sessions      map[string]browserSession
+	sessionMu     sync.Mutex
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
 // (обычно .ai-team/artifacts); файлы вне корня недоступны.
-func NewServer(dbPath, distDir, artifactRoot string) (*Server, error) {
+func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*Server, error) {
 	s, err := store.New(dbPath)
 	if err != nil {
 		return nil, err
@@ -48,25 +92,60 @@ func NewServer(dbPath, distDir, artifactRoot string) (*Server, error) {
 	}
 
 	hub := NewHub()
-	go hub.Run()
 
 	srv := &Server{
 		store:        s,
 		hub:          hub,
 		artifactRoot: absRoot,
 		runRoot:      filepath.Join(filepath.Dir(absRoot), "runs"),
+		sessions:     make(map[string]browserSession),
 	}
+	for _, option := range options {
+		option(srv)
+	}
+	hub.SetReplay(srv.replayEvents)
+	go hub.Run()
+	eventContext, cancelEvents := context.WithCancel(context.Background())
+	srv.cancelEvents = cancelEvents
+	eventCursor, err := s.LatestEventCursor()
+	if err != nil {
+		cancelEvents()
+		s.Close()
+		return nil, fmt.Errorf("initial event cursor: %w", err)
+	}
+	srv.eventWorkers.Add(1)
+	go srv.tailEvents(eventContext, eventCursor)
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
-	srv.router.Use(sameOriginMiddleware)
+	if srv.authenticator == nil {
+		srv.router.Use(sameOriginMiddleware)
+	} else {
+		srv.router.Use(authenticatedOriginMiddleware)
+	}
 
-	srv.router.Get("/api/pipelines", srv.handleGetPipelines)
-	srv.router.Get("/api/pipelines/{id}", srv.handleGetPipeline)
-	srv.router.Get("/api/pipelines/{id}/artifacts", srv.handleGetArtifacts)
-	srv.router.Get("/api/artifacts/*", srv.handleGetArtifact)
-	srv.router.Get("/api/runs/{runID}/artifacts/*", srv.handleGetRunArtifact)
-	srv.router.Get("/ws", srv.handleWebSocket)
+	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
+	srv.router.Get("/api/session", srv.handleSession)
+	srv.router.Group(func(router chi.Router) {
+		router.Use(srv.readSecurity)
+		router.Get("/api/pipelines", srv.handleGetPipelines)
+		router.Get("/api/pipelines/{id}", srv.handleGetPipeline)
+		router.Get("/api/pipelines/{id}/artifacts", srv.handleGetArtifacts)
+		router.Get("/api/artifacts/*", srv.handleGetArtifact)
+		router.Get("/api/runs/{runID}/artifacts/*", srv.handleGetRunArtifact)
+		router.Get("/api/runs/{runID}/logs/{attemptID}", srv.handleGetRunLog)
+		router.Get("/api/runs/{runID}/workflow", srv.handleGetRunWorkflow)
+		router.Get("/api/preflight", srv.handlePreflight)
+		router.Get("/api/auth/me", srv.handleCurrentIdentity)
+	})
+	srv.router.Group(func(router chi.Router) {
+		router.Use(srv.writeSecurity)
+		router.Post("/api/runs", srv.handleStartRun)
+		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)
+		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)
+		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
+	})
+	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
@@ -78,6 +157,15 @@ func NewServer(dbPath, distDir, artifactRoot string) (*Server, error) {
 	}
 
 	return srv, nil
+}
+
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	if s.controller == nil {
+		http.Error(w, "run controller unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.controller.Preflight(r.Context()))
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -102,6 +190,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) Close() error {
+	if s.cancelEvents != nil {
+		s.cancelEvents()
+		s.eventWorkers.Wait()
+	}
 	return s.store.Close()
 }
 
@@ -111,6 +203,63 @@ func (s *Server) Store() *store.Store {
 
 func (s *Server) Hub() *Hub {
 	return s.hub
+}
+
+func (s *Server) replayEvents(cursor int64) ([]Event, error) {
+	const pageSize = 500
+	events := make([]Event, 0)
+	for {
+		stored, err := s.store.GetEventsAfter(cursor, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range stored {
+			event, err := wireEvent(item)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, event)
+			cursor = item.ID
+		}
+		if len(stored) < pageSize {
+			return events, nil
+		}
+	}
+}
+
+func (s *Server) tailEvents(ctx context.Context, cursor int64) {
+	defer s.eventWorkers.Done()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				stored, queryErr := s.store.GetEventsAfter(cursor, 200)
+				if queryErr != nil {
+					fmt.Fprintf(os.Stderr, "web event stream: %v\n", queryErr)
+					break
+				}
+				for _, item := range stored {
+					event, convertErr := wireEvent(item)
+					if convertErr != nil {
+						fmt.Fprintf(os.Stderr, "web event stream: %v\n", convertErr)
+						cursor = item.ID
+						continue
+					}
+					if !s.hub.BroadcastEventContext(ctx, event) {
+						return
+					}
+					cursor = item.ID
+				}
+				if len(stored) < 200 {
+					break
+				}
+			}
+		}
+	}
 }
 
 func (s *Server) handleGetPipelines(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +304,22 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"run":    run,
 		"stages": stages,
+	}
+	if run.RunID != "" {
+		target := filepath.Dir(filepath.Dir(s.artifactRoot))
+		if stateStore, stateErr := lifecycle.NewStore(target); stateErr == nil {
+			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
+				response["next_stage"] = state.NextStage
+			}
+		}
+	}
+	if s.controller != nil && run.RunID != "" {
+		approvals, approvalErr := s.controller.Approvals(run.RunID)
+		if approvalErr != nil {
+			http.Error(w, approvalErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		response["approvals"] = approvals
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -235,6 +400,97 @@ func (s *Server) handleGetRunArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveArtifact(w, r, filepath.Join(s.runRoot, runID), relative)
+}
+
+type logTail struct {
+	RunID     string `json:"run_id"`
+	AttemptID string `json:"attempt_id"`
+	Offset    int64  `json:"offset"`
+	Truncated bool   `json:"truncated"`
+	Content   string `json:"content"`
+}
+
+func (s *Server) handleGetRunLog(w http.ResponseWriter, r *http.Request) {
+	runID, attemptID := chi.URLParam(r, "runID"), chi.URLParam(r, "attemptID")
+	if !safeIdentity(runID) || !safeIdentity(attemptID) {
+		http.Error(w, "invalid run or attempt id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetPipelineRunByRunID(runID); err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	logPath := filepath.Join(s.runRoot, runID, "logs", attemptID+".log")
+	file, err := os.Open(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(logTail{RunID: runID, AttemptID: attemptID})
+			return
+		}
+		http.Error(w, "log unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.Error(w, "log unavailable", http.StatusInternalServerError)
+		return
+	}
+	offset := info.Size() - maxLogTailSize
+	if offset < 0 {
+		offset = 0
+	}
+	content := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(content, offset); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "log unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(logTail{
+		RunID: runID, AttemptID: attemptID, Offset: offset,
+		Truncated: offset > 0, Content: string(content),
+	})
+}
+
+func (s *Server) handleGetRunWorkflow(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	if !safeIdentity(runID) {
+		http.Error(w, "invalid run id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetPipelineRunByRunID(runID); err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	workflowPath := filepath.Join(s.runRoot, runID, "workflow.json")
+	pathInfo, err := os.Lstat(workflowPath)
+	if err != nil {
+		http.Error(w, "workflow not found", http.StatusNotFound)
+		return
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		http.Error(w, "workflow unavailable", http.StatusForbidden)
+		return
+	}
+	file, err := os.Open(workflowPath)
+	if err != nil {
+		http.Error(w, "workflow not found", http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxArtifactSize {
+		http.Error(w, "workflow unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func safeIdentity(value string) bool {
+	return value != "" && filepath.Base(value) == value && value != "." && value != ".." &&
+		!strings.ContainsAny(value, `/\`)
 }
 
 func allowedRunArtifactPath(relative string) bool {

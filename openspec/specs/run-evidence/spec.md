@@ -4,11 +4,13 @@
 TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
 ## Requirements
 ### Requirement: Run and attempt identity
-Every pipeline run and stage attempt MUST have stable unique identifiers.
+Run evidence MUST сохранять identity attempts, transitions и всех человеческих
+approval requests/decisions в одной verified chain.
 
-#### Scenario: Repeated feature
-- **WHEN** the same feature is executed more than once
-- **THEN** each run MUST store independent logs, reports, artifacts and events
+#### Scenario: Approval evidence
+- **КОГДА** approval создаётся или получает решение
+- **ТОГДА** event MUST содержать approval_id, subject hash, actor/action при
+  решении и связанные from/to stages
 
 ### Requirement: Artifact provenance
 Every published artifact MUST record producer, run, attempt, size and SHA-256 hash.
@@ -41,3 +43,25 @@ On platforms without a native advisory-lock primitive, the workspace lock MUST r
 #### Scenario: Inconclusive evidence
 - **WHEN** the existing lock's pid file is missing, unreadable, unparseable, or its liveness cannot be positively disproven
 - **THEN** the lock MUST NOT be reclaimed and acquisition MUST fail exactly as before this capability existed
+
+### Requirement: Evidence compiled graph
+
+Immutable workflow snapshot MUST содержать фактически исполненный compiled
+graph, включая entry, edges, approval policies и max_visits.
+
+#### Scenario: Resume graph run
+
+- **КОГДА** graph run возобновляется после restart
+- **ТОГДА** engine MUST проверить snapshot digest
+- **И** восстановить visit counters и next node из immutable evidence/lifecycle
+
+### Requirement: Candidate metadata в run evidence
+
+Run evidence MUST сохранять candidate metadata и актуальную `candidate.json`
+без зависимости от существования live projection.
+
+#### Scenario: Evidence проверяется после run
+
+- **КОГДА** worktree позднее удалён
+- **ТОГДА** base identity, patch hash, changed files, checks и attempts MUST
+  оставаться доступны в immutable run evidence

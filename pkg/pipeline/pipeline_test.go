@@ -15,13 +15,17 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // --- Тестовая инфраструктура -------------------------------------------------
@@ -142,6 +146,7 @@ type scriptedRuntime struct {
 	waitCtx   map[string]bool   // agent -> блокироваться до отмены ctx
 	onExec    func(agentName string, inputs []runtime.Artifact)
 	calls     map[string]int
+	targetDir string
 }
 
 func newScripted() *scriptedRuntime {
@@ -161,6 +166,7 @@ func (r *scriptedRuntime) factory(string) (runtime.Runtime, error) { return r, n
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
 	r.calls[a.Name]++
+	r.targetDir = task.TargetDir
 	if r.onExec != nil {
 		r.onExec(a.Name, inputs)
 	}
@@ -389,6 +395,204 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 	if n.calls[0].RunID == "" || n.calls[0].AttemptID == "" || n.calls[0].RunID != n.calls[1].RunID {
 		t.Fatalf("run/attempt identity не передана в StageResult: %+v", n.calls)
+	}
+}
+
+func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	cfg := cfgFor(
+		config.AgentConfig{Name: "analyst", ApprovalRoles: []string{"product_owner"}},
+		config.AgentConfig{Name: "reviewer"},
+	)
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("ожидался pending approval, got result=%+v err=%v", first, err)
+	}
+	if rt.calls["analyst"] != 1 || rt.calls["reviewer"] != 0 {
+		t.Fatalf("до решения выполнены неверные этапы: %+v", rt.calls)
+	}
+	stateStore, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := stateStore.Load(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID != required.ApprovalID {
+		t.Fatalf("не сохранено ожидание approval: %+v", state)
+	}
+	approvalStore, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := approvalStore.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "approve",
+		SubjectHash: required.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := p.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: first.RunID, TargetDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("resume должен завершиться успешно: result=%+v err=%v", second, err)
+	}
+	if second.RunID != first.RunID || rt.calls["analyst"] != 1 || rt.calls["reviewer"] != 1 {
+		t.Fatalf("resume изменил identity или повторил этап: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+	state, err = stateStore.Load(first.RunID)
+	if err != nil || state.Phase != lifecycle.PhaseTerminal {
+		t.Fatalf("run не стал terminal: %+v err=%v", state, err)
+	}
+}
+
+func TestRun_ResumeRejectsApprovalForMutatedCandidate(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	cfg := cfgFor(
+		config.AgentConfig{Name: "analyst", ApprovalRoles: []string{"product_owner"}},
+		config.AgentConfig{Name: "reviewer"},
+	)
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("ожидался pending approval, got result=%+v err=%v", first, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.CandidateSHA256 == "" {
+		t.Fatal("approval subject не содержит candidate identity")
+	}
+	manager, err := candidate.Load(context.Background(), dir, first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.Root(), "stale.go"), []byte("package stale\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "approve",
+		SubjectHash: required.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: first.RunID, TargetDir: dir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "candidate identity changed") {
+		t.Fatalf("stale candidate approval должен быть отклонён: %v", err)
+	}
+	if rt.calls["reviewer"] != 0 {
+		t.Fatalf("после stale approval нельзя запускать следующий AI stage: %+v", rt.calls)
+	}
+}
+
+func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package retry\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	rt.contentFn["reviewer"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"review": "**Verdict:** CHANGES_REQUESTED\n"}
+		}
+		return map[string]string{"review": "**Verdict:** APPROVED\n"}
+	}
+	var secondCoderInputs []string
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name != "coder" {
+			return
+		}
+		if rt.calls["coder"] == 2 {
+			for _, input := range inputs {
+				secondCoderInputs = append(secondCoderInputs, input.Name)
+			}
+		}
+		_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"),
+			[]byte(fmt.Sprintf("package retry\nconst Revision = %d\n", rt.calls["coder"])), 0644)
+	}
+	cfg := cfgFor(
+		config.AgentConfig{Name: "analyst"},
+		config.AgentConfig{Name: "coder", MaxRetries: 2},
+		config.AgentConfig{Name: "reviewer", ApprovalRoles: []string{"reviewer"}},
+	)
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("review loopback должен ожидать человека: result=%+v err=%v", first, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder",
+		SubjectHash: required.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: first.RunID, TargetDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("approved loopback resume: result=%+v err=%v", second, err)
+	}
+	if rt.calls["analyst"] != 1 || rt.calls["coder"] != 2 || rt.calls["reviewer"] != 2 {
+		t.Fatalf("неверное число запусков после loopback: %+v", rt.calls)
+	}
+	if !containsString(secondCoderInputs, "review") {
+		t.Fatalf("исправляющий coder не получил review: %v", secondCoderInputs)
+	}
+	events, err := os.ReadFile(filepath.Join(onlyRunDir(t, dir), "events.jsonl"))
+	if err != nil || !strings.Contains(string(events), `"reason":"approved_loopback"`) {
+		t.Fatalf("нет evidence approved loopback invalidation: err=%v", err)
 	}
 }
 
@@ -772,7 +976,7 @@ func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 	var coderInputs [][]string
 	rt.onExec = func(name string, inputs []runtime.Artifact) {
 		if name == "coder" {
-			_ = os.WriteFile(filepath.Join(dir, "coder.go"), []byte(fmt.Sprintf("package retry\nconst Revision = %d\n", rt.calls["coder"])), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"), []byte(fmt.Sprintf("package retry\nconst Revision = %d\n", rt.calls["coder"])), 0644)
 			var names []string
 			for _, in := range inputs {
 				names = append(names, in.Name)
@@ -895,7 +1099,7 @@ func TestRun_Loopback_ExhaustedStops(t *testing.T) {
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** REJECTED\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "coder" {
-			_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("coder-%d.go", rt.calls["coder"])), []byte("package retry\n"), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, fmt.Sprintf("coder-%d.go", rt.calls["coder"])), []byte("package retry\n"), 0644)
 		}
 	}
 
@@ -915,13 +1119,61 @@ func TestRun_Loopback_ExhaustedStops(t *testing.T) {
 	}
 }
 
+func TestRun_GraphV4RoutesRejectedEdgeAndEnforcesMaxVisits(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** REJECTED\n"}
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		if name == "coder" {
+			_ = os.WriteFile(filepath.Join(rt.targetDir, fmt.Sprintf("graph-%d.go", rt.calls["coder"])), []byte("package retry\n"), 0644)
+		}
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, CLI: "opencode",
+		PipelineAgents: []config.AgentConfig{{Name: "analyst"}, {Name: "coder"}, {Name: "reviewer"}},
+		Workflow: &config.WorkflowConfig{
+			Entry: "analyst", MaxVisits: map[string]int{"coder": 2, "reviewer": 2},
+			Edges: []config.WorkflowEdgeConfig{
+				graphEdge("analyst", "passed", "coder", "product_owner", map[string]string{"approve": "coder", "reject": "$stop"}),
+				graphEdge("coder", "passed", "reviewer", "developer", map[string]string{"approve": "reviewer", "reject": "$stop"}),
+				graphEdge("reviewer", "rejected", "coder", "reviewer", map[string]string{"return_to_coder": "coder", "reject": "$stop"}),
+				{From: "reviewer", Outcome: "passed", To: "$complete"},
+			},
+		},
+	}
+	err, _ := runPipeline(t, dir, cfg, rt, &scriptedPrompter{
+		interactive: true, answers: []string{"y", "y", "y", "y", "y"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_visits=2") {
+		t.Fatalf("ожидался max_visits gate, got: %v", err)
+	}
+	if rt.calls["coder"] != 2 || rt.calls["reviewer"] != 2 {
+		t.Fatalf("graph visits: coder=%d reviewer=%d", rt.calls["coder"], rt.calls["reviewer"])
+	}
+	events, readErr := os.ReadFile(filepath.Join(onlyRunDir(t, dir), "events.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(events), `"type":"transition_selected"`) ||
+		!strings.Contains(string(events), `"target":"coder"`) {
+		t.Fatalf("graph transition не записан:\n%s", events)
+	}
+}
+
+func graphEdge(from, outcome, to, role string, actions map[string]string) config.WorkflowEdgeConfig {
+	return config.WorkflowEdgeConfig{
+		From: from, Outcome: outcome, To: to,
+		Approval: &config.WorkflowApprovalConfig{Roles: []string{role}, Quorum: "any", Actions: actions},
+	}
+}
+
 func TestRun_Loopback_DeclineStops(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** REJECTED\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "coder" {
-			_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("coder-%d.go", rt.calls["coder"])), []byte("package retry\n"), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, fmt.Sprintf("coder-%d.go", rt.calls["coder"])), []byte("package retry\n"), 0644)
 		}
 	}
 
@@ -1175,7 +1427,7 @@ func TestRun_GitGuard_WithChangesPasses(t *testing.T) {
 	rt := newScripted()
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "coder" {
-			os.WriteFile(filepath.Join(dir, "new.go"), []byte("package main\n"), 0644)
+			os.WriteFile(filepath.Join(rt.targetDir, "new.go"), []byte("package main\n"), 0644)
 		}
 	}
 
@@ -1234,7 +1486,7 @@ func TestRun_ReadOnlyAgentCannotMutateProject(t *testing.T) {
 	rt := newScripted()
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "analyst" {
-			_ = os.WriteFile(filepath.Join(dir, "unauthorized.go"), []byte("package unauthorized\n"), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "unauthorized.go"), []byte("package unauthorized\n"), 0644)
 		}
 	}
 	err, _ := runPipeline(t, dir, cfgFor(config.AgentConfig{Name: "analyst"}), rt, &scriptedPrompter{})
@@ -1249,7 +1501,7 @@ func TestRun_MutationPoliciesFailClosedWithoutGit(t *testing.T) {
 		rt := newScripted()
 		rt.onExec = func(name string, _ []runtime.Artifact) {
 			if name == "analyst" {
-				_ = os.WriteFile(filepath.Join(dir, "unauthorized.txt"), []byte("changed"), 0644)
+				_ = os.WriteFile(filepath.Join(rt.targetDir, "unauthorized.txt"), []byte("changed"), 0644)
 			}
 		}
 		err, _ := runPipeline(t, dir, cfgFor(config.AgentConfig{Name: "analyst"}), rt, &scriptedPrompter{})
@@ -1285,7 +1537,7 @@ func TestRun_TestMutationScopeRejectsProductionFile(t *testing.T) {
 	rt.content["tester"] = map[string]string{"report": "**Result:** PASS\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "tester" {
-			_ = os.WriteFile(filepath.Join(dir, "production.go"), []byte("package production\n"), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "production.go"), []byte("package production\n"), 0644)
 		}
 	}
 	err, _ := runPipeline(t, dir,
@@ -1313,7 +1565,7 @@ func TestRun_TestMutationScopeAllowsTestFile(t *testing.T) {
 	rt.content["tester"] = map[string]string{"report": "**Result:** PASS\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "tester" {
-			_ = os.WriteFile(filepath.Join(dir, "production_test.go"), []byte("package production\n"), 0644)
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "production_test.go"), []byte("package production\n"), 0644)
 		}
 	}
 	err, _ := runPipeline(t, dir,
@@ -1345,6 +1597,80 @@ func TestRun_CancelledContext(t *testing.T) {
 	reportData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "reports", "feat", "index.html"))
 	if readErr != nil || !strings.Contains(string(reportData), "Canceled") {
 		t.Fatalf("отчёт отменённого run должен иметь Canceled: err=%v", readErr)
+	}
+}
+
+func TestRun_ResumeKeepsRunIdentity(t *testing.T) {
+	dir := env(t)
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"})
+	first := New(cfg, testRegistry(),
+		WithRuntimeFactory(newScripted().factory), WithPrompter(&scriptedPrompter{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	firstResult, err := first.RunWithResult(ctx, RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir})
+	if err == nil || firstResult.RunID == "" {
+		t.Fatalf("ожидался resumable run с identity: result=%+v err=%v", firstResult, err)
+	}
+
+	secondRuntime := newScripted()
+	second := New(cfg, testRegistry(),
+		WithRuntimeFactory(secondRuntime.factory), WithPrompter(&scriptedPrompter{}))
+	secondResult, err := second.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: firstResult.RunID,
+		TargetDir:   dir,
+	})
+	if err != nil {
+		t.Fatalf("resume должен завершиться: %v", err)
+	}
+	if secondResult.RunID != firstResult.RunID {
+		t.Fatalf("run identity изменилась: %s != %s", secondResult.RunID, firstResult.RunID)
+	}
+	events, err := evidence.VerifyEventLog(
+		filepath.Join(dir, ".ai-team", "runs", firstResult.RunID, "events.jsonl"),
+		firstResult.RunID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started, resumed int
+	for _, event := range events {
+		switch event.Type {
+		case "run_started":
+			started++
+		case "run_resumed":
+			resumed++
+		}
+	}
+	if started != 1 || resumed != 1 {
+		t.Fatalf("ожидались один start и один resume, получено start=%d resume=%d", started, resumed)
+	}
+}
+
+func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
+	dir := env(t)
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"})
+	p := New(cfg, testRegistry(),
+		WithRuntimeFactory(newScripted().factory), WithPrompter(&scriptedPrompter{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started, err := p.RunWithResult(ctx, RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir})
+	if err == nil || started.RunID == "" {
+		t.Fatalf("не создан resumable run: %+v %v", started, err)
+	}
+	result, err := NewRunEngine(p).Cancel(CancelConfig{RunID: started.RunID, TargetDir: dir})
+	if err != nil || result.Outcome != workflow.RunCanceled {
+		t.Fatalf("cancel: result=%+v err=%v", result, err)
+	}
+	stateStore, _ := lifecycle.NewStore(dir)
+	state, err := stateStore.Load(started.RunID)
+	if err != nil || state.Phase != lifecycle.PhaseTerminal {
+		t.Fatalf("cancel lifecycle: %+v err=%v", state, err)
+	}
+	replayed, err := evidence.ReplayEventLog(
+		filepath.Join(dir, ".ai-team", "runs", started.RunID, "events.jsonl"), started.RunID,
+	)
+	if err != nil || replayed.Status != workflow.RunCanceled {
+		t.Fatalf("cancel evidence: %+v err=%v", replayed, err)
 	}
 }
 

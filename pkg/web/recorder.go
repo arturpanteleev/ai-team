@@ -55,6 +55,81 @@ func (r *StoreRecorder) RunStarted(runID, feature, configSnapshot string, starte
 	r.event("run_started", "", startedAt, map[string]any{"feature": feature})
 }
 
+func (r *StoreRecorder) RunResumed(runID string, resumedAt time.Time) {
+	if r.disabled {
+		return
+	}
+	run, err := r.store.ResumePipelineRun(runID)
+	if err != nil {
+		r.warn("resume run", err)
+		return
+	}
+	sequence, err := r.store.LatestRunEventSequence(runID)
+	if err != nil {
+		r.warn("resume event sequence", err)
+		return
+	}
+	r.runID, r.runUID, r.sequence = run.ID, runID, sequence
+	r.event("run_resumed", "", resumedAt, nil)
+}
+
+func (r *StoreRecorder) RunAttached(runID string) {
+	if r.disabled {
+		return
+	}
+	run, err := r.store.GetPipelineRunByRunID(runID)
+	if err != nil {
+		r.warn("attach run", err)
+		return
+	}
+	sequence, err := r.store.LatestRunEventSequence(runID)
+	if err != nil {
+		r.warn("attach event sequence", err)
+		return
+	}
+	r.runID, r.runUID, r.sequence = run.ID, runID, sequence
+}
+
+func (r *StoreRecorder) RunPaused(runID, status string, pausedAt time.Time) {
+	if r.disabled || r.runID == 0 || runID != r.runUID {
+		return
+	}
+	run := &store.PipelineRun{ID: r.runID, RunID: runID, Status: status, CompletedAt: &pausedAt}
+	if err := r.store.UpdatePipelineRun(run); err != nil {
+		r.warn("pause run", err)
+		return
+	}
+	r.event("run_paused", "", pausedAt, map[string]any{"status": status})
+}
+
+func (r *StoreRecorder) RunCanceled(runID string, canceledAt time.Time) {
+	if r.disabled || r.runID == 0 || runID != r.runUID {
+		return
+	}
+	r.event("run_canceled", "", canceledAt, nil)
+}
+
+func (r *StoreRecorder) ApprovalRequested(runID, approvalID, attemptID string, at time.Time, data map[string]any) {
+	if r.disabled || r.runID == 0 || runID != r.runUID {
+		return
+	}
+	r.event("approval_requested", attemptID, at, data)
+}
+
+func (r *StoreRecorder) ApprovalDecided(runID, approvalID, attemptID string, at time.Time, data map[string]any) {
+	if r.disabled || r.runID == 0 || runID != r.runUID {
+		return
+	}
+	r.event("approval_decided", attemptID, at, data)
+}
+
+func (r *StoreRecorder) TransitionSelected(runID, attemptID string, at time.Time, data map[string]any) {
+	if r.disabled || r.runID == 0 || runID != r.runUID {
+		return
+	}
+	r.event("transition_selected", attemptID, at, data)
+}
+
 func (r *StoreRecorder) StageStarted(runID, attemptID, agentName string, index int, startedAt time.Time) {
 	if r.disabled || r.runID == 0 || runID != r.runUID {
 		return

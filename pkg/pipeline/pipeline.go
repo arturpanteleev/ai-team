@@ -19,10 +19,13 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/report"
@@ -49,6 +52,13 @@ const (
 type Recorder interface {
 	ReconcileInterrupted(at time.Time)
 	RunStarted(runID, feature, configSnapshot string, startedAt time.Time)
+	RunResumed(runID string, resumedAt time.Time)
+	RunAttached(runID string)
+	RunPaused(runID, status string, pausedAt time.Time)
+	RunCanceled(runID string, canceledAt time.Time)
+	ApprovalRequested(runID, approvalID, attemptID string, at time.Time, data map[string]any)
+	ApprovalDecided(runID, approvalID, attemptID string, at time.Time, data map[string]any)
+	TransitionSelected(runID, attemptID string, at time.Time, data map[string]any)
 	StageStarted(runID, attemptID, agentName string, index int, startedAt time.Time)
 	StageFinished(stage notifier.StageResult)
 	AttemptsInvalidated(runID string, attemptIDs []string, at time.Time)
@@ -118,13 +128,15 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 }
 
 type RunConfig struct {
-	RunID           string
-	Feature         string
-	TaskDesc        string
-	TargetDir       string
-	RetryFrom       string
-	ApproveGates    bool
-	ApprovePlanHash string
+	RunID                string
+	ResumeRunID          string
+	Feature              string
+	TaskDesc             string
+	TargetDir            string
+	RetryFrom            string
+	ApproveGates         bool
+	ApprovePlanHash      string
+	resumeDecisionAction string
 }
 
 type RunResult struct {
@@ -154,6 +166,23 @@ type runState struct {
 	evidence         *evidence.Store
 	attemptOrdinal   int
 	userOwnedPaths   map[string]bool
+	lifecycleStore   *lifecycle.Store
+	lifecycleState   lifecycle.State
+	approvalStore    *approval.Store
+	resumedApproval  *approval.PendingApproval
+	resumed          bool
+	graph            workflow.Graph
+	visits           map[string]int
+	candidate        *candidate.Manager
+	sourceTarget     string
+	liveWorkspaceSHA string
+}
+
+func (rs *runState) sourceDir() string {
+	if rs.sourceTarget != "" {
+		return rs.sourceTarget
+	}
+	return rs.runCfg.TargetDir
 }
 
 func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
@@ -165,7 +194,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if err := p.cfg.Validate(p.reg); err != nil {
 		return RunResult{}, err
 	}
-	if !workflow.ValidFeature(runCfg.Feature) {
+	compiledGraph, err := p.cfg.CompiledGraph()
+	if err != nil {
+		return RunResult{}, err
+	}
+	if runCfg.ResumeRunID == "" && !workflow.ValidFeature(runCfg.Feature) {
 		return RunResult{}, fmt.Errorf("недопустимое имя feature %q", runCfg.Feature)
 	}
 	targetDir, err := filepath.Abs(runCfg.TargetDir)
@@ -194,12 +227,77 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 	}()
 
+	lifecycleStore, err := lifecycle.NewStore(runCfg.TargetDir)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("lifecycle store: %w", err)
+	}
+	approvalStore, err := approval.NewStore(runCfg.TargetDir)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("approval store: %w", err)
+	}
+	var resumedState lifecycle.State
+	var resumedApproval *approval.PendingApproval
+	var resumedTransitionData map[string]any
+	if runCfg.ResumeRunID != "" {
+		resumedState, err = lifecycleStore.Load(runCfg.ResumeRunID)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("resume run: %w", err)
+		}
+		if resumedState.Phase == lifecycle.PhaseTerminal {
+			return RunResult{}, fmt.Errorf("resume run: run %s уже terminal", runCfg.ResumeRunID)
+		}
+		if resumedState.TargetDir != runCfg.TargetDir {
+			return RunResult{}, fmt.Errorf("resume run: target identity mismatch")
+		}
+		if runCfg.Feature != "" && runCfg.Feature != resumedState.Feature {
+			return RunResult{}, fmt.Errorf("resume run: feature нельзя менять")
+		}
+		runCfg.RunID = resumedState.RunID
+		runCfg.Feature = resumedState.Feature
+		runCfg.TaskDesc = ""
+		runCfg.RetryFrom = resumedState.NextStage
+		if resumedState.Phase == lifecycle.PhaseWaiting {
+			value, loadErr := approvalStore.Load(resumedState.RunID, resumedState.PendingApprovalID)
+			if loadErr != nil {
+				return RunResult{}, fmt.Errorf("resume approval: %w", loadErr)
+			}
+			if value.Status != approval.StatusResolved {
+				return RunResult{}, &ApprovalRequiredError{
+					Checkpoint: "переход ожидает решения", RunID: value.RunID,
+					ApprovalID: value.ID, SubjectHash: value.SubjectHash,
+				}
+			}
+			target := value.Targets[value.ResolvedAction]
+			if target == "" {
+				return RunResult{}, fmt.Errorf("resume approval: action %s не имеет target", value.ResolvedAction)
+			}
+			runCfg.RetryFrom = target
+			runCfg.resumeDecisionAction = value.ResolvedAction
+			resumedApproval = &value
+			if strings.HasPrefix(value.Trigger, "graph_outcome:") {
+				outcome := workflow.Outcome(strings.TrimPrefix(value.Trigger, "graph_outcome:"))
+				edge, found := compiledGraph.Edge(value.FromStage, outcome)
+				if !found || edge.To != value.ToStage || edge.Approval == nil ||
+					edge.Approval.Actions[value.ResolvedAction] != target {
+					return RunResult{}, fmt.Errorf("resume approval: graph edge identity mismatch")
+				}
+				resumedTransitionData = map[string]any{
+					"from": value.FromStage, "outcome": string(outcome), "edge_target": edge.To,
+					"action": value.ResolvedAction, "target": target,
+				}
+			}
+		}
+	}
+
 	// task.md is a workflow input and therefore must be created/read while the
 	// workspace lock is held. Otherwise a rejected concurrent run could overwrite
 	// the task consumed by the active run before failing to acquire the lock.
 	runCfg.TaskDesc, err = prepareTaskArtifact(runCfg)
 	if err != nil {
 		return RunResult{}, err
+	}
+	if runCfg.ResumeRunID != "" && runCfg.TaskDesc != resumedState.Task {
+		return RunResult{}, fmt.Errorf("resume run: сохранённый task.md изменён")
 	}
 
 	runStartedAt := time.Now().UTC()
@@ -210,19 +308,174 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{}, err
 		}
 	}
+	sourceTarget := runCfg.TargetDir
+	var candidateManager *candidate.Manager
+	if runCfg.ResumeRunID != "" {
+		candidateManager, err = candidate.Load(ctx, runCfg.TargetDir, runID)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume candidate: %w", err)
+		}
+	} else {
+		var gitAvailable bool
+		candidateManager, gitAvailable, err = candidate.Create(ctx, runCfg.TargetDir, runID)
+		if err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, err
+		}
+		if !gitAvailable {
+			candidateManager = nil
+		}
+	}
+	if candidateManager != nil {
+		sourceTarget = candidateManager.Root()
+		if runCfg.ResumeRunID == "" && runCfg.RetryFrom != "" {
+			if err := syncArtifactProjection(
+				filepath.Join(runCfg.TargetDir, ".ai-team", "artifacts"),
+				filepath.Join(sourceTarget, ".ai-team", "artifacts"),
+				runCfg.Feature,
+			); err != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed},
+					fmt.Errorf("восстановление artifact projection в candidate: %w", err)
+			}
+		}
+		if resumedApproval != nil && resumedApproval.CandidateSHA256 != "" {
+			identity, identityErr := candidateManager.Identity()
+			if identityErr != nil || identity.WorkspaceSHA256 != resumedApproval.CandidateSHA256 {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed},
+					fmt.Errorf("resume approval: candidate identity changed after decision request")
+			}
+		}
+		if err := copyTaskToCandidate(runCfg.TargetDir, sourceTarget, runCfg.Feature); err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, err
+		}
+	}
+	if resumedApproval != nil && resumedApproval.CandidateSHA256 != "" && candidateManager == nil {
+		return RunResult{RunID: runID, Outcome: workflow.RunFailed},
+			fmt.Errorf("resume approval: candidate worktree отсутствует")
+	}
 	configSnapshot, workflowSnapshot, err := p.resolvedEvidenceSnapshots()
 	if err != nil {
 		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resolved workflow evidence: %w", err)
 	}
-	evidenceStore, err := evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
-		RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
-		ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
-	})
-	if err != nil {
-		return RunResult{}, fmt.Errorf("создание evidence run: %w", err)
+	var evidenceStore *evidence.Store
+	var replayedRun evidence.ReplayedRun
+	var resumeInvalidated []string
+	var resumeMutations []string
+	attemptOrdinal := 0
+	if runCfg.ResumeRunID != "" {
+		var manifest evidence.RunManifest
+		evidenceStore, manifest, replayedRun, err = evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
+		}
+		configDigest := sha256.Sum256(configSnapshot)
+		workflowDigest := sha256.Sum256(workflowSnapshot)
+		if manifest.Feature != runCfg.Feature || manifest.TargetDir != runCfg.TargetDir ||
+			manifest.ConfigSHA256 != resumedState.ConfigSHA256 ||
+			manifest.ResolvedWorkflowSHA256 != resumedState.WorkflowSHA256 ||
+			fmt.Sprintf("%x", configDigest[:]) != resumedState.ConfigSHA256 ||
+			fmt.Sprintf("%x", workflowDigest[:]) != resumedState.WorkflowSHA256 {
+			return RunResult{}, fmt.Errorf("resume run: config/workflow identity mismatch")
+		}
+		for _, attempt := range replayedRun.Attempts {
+			if attempt.ManifestSHA256 != "" {
+				manifestPath := filepath.Join(evidenceStore.RunDir(), "attempts", attempt.AttemptID, "manifest.json")
+				data, readErr := safeio.ReadRegularFile(manifestPath, maxArtifactFileBytes)
+				if readErr != nil {
+					return RunResult{}, readErr
+				}
+				var attemptManifest evidence.AttemptManifest
+				if json.Unmarshal(data, &attemptManifest) != nil {
+					return RunResult{}, fmt.Errorf("resume attempt manifest %s повреждён", attempt.AttemptID)
+				}
+				resumeMutations = append(resumeMutations, attemptManifest.Mutations...)
+			}
+			if attempt.FinishedAt.IsZero() {
+				if err := evidenceStore.Append(evidence.Event{
+					Type: "attempt_abandoned", AttemptID: attempt.AttemptID, Stage: attempt.Stage,
+					Timestamp: runStartedAt, Data: map[string]any{"reason": "controller restarted"},
+				}); err != nil {
+					return RunResult{}, err
+				}
+			}
+		}
+		if resumedApproval != nil {
+			if err := evidenceStore.Append(evidence.Event{
+				Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
+				Timestamp: runStartedAt, Data: approvalEventData(*resumedApproval),
+			}); err != nil {
+				return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+			}
+			if resumedTransitionData != nil {
+				if err := evidenceStore.Append(evidence.Event{
+					Type: "transition_selected", AttemptID: resumedApproval.AttemptID,
+					Stage: resumedApproval.FromStage, Timestamp: runStartedAt, Data: resumedTransitionData,
+				}); err != nil {
+					return RunResult{}, fmt.Errorf("запись resumed transition_selected: %w", err)
+				}
+			}
+			if resumedApproval.ResolvedAction == "return_to_coder" {
+				targetIndex := indexOf(p.cfg.AgentNames(), runCfg.RetryFrom)
+				for index := range replayedRun.Attempts {
+					attempt := &replayedRun.Attempts[index]
+					if targetIndex >= 0 && attempt.StageIndex > targetIndex+1 && !attempt.Superseded {
+						attempt.Superseded = true
+						attempt.State = workflow.Invalidate(attempt.State)
+						attempt.Status = attempt.State.LegacyStatus()
+						resumeInvalidated = append(resumeInvalidated, attempt.AttemptID)
+					}
+				}
+				if len(resumeInvalidated) > 0 {
+					if err := evidenceStore.Append(evidence.Event{
+						Type: "attempts_invalidated", Timestamp: runStartedAt,
+						Data: map[string]any{
+							"from_stage_index": targetIndex + 2,
+							"attempt_ids":      resumeInvalidated, "reason": "approved_loopback",
+						},
+					}); err != nil {
+						return RunResult{}, fmt.Errorf("запись loopback invalidation: %w", err)
+					}
+				}
+			}
+		}
+		if err := evidenceStore.Append(evidence.Event{Type: "run_resumed", Timestamp: runStartedAt}); err != nil {
+			return RunResult{}, fmt.Errorf("запись run_resumed: %w", err)
+		}
+		attemptOrdinal = len(replayedRun.Attempts)
+		nextState := resumedState
+		nextState.Phase = lifecycle.PhaseRunning
+		nextState.PendingApprovalID = ""
+		nextState.NextStage = runCfg.RetryFrom
+		if err := lifecycleStore.Save(resumedState, nextState); err != nil {
+			return RunResult{}, err
+		}
+		resumedState = nextState
+	} else {
+		evidenceStore, err = evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
+			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
+			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
+		})
+		if err != nil {
+			return RunResult{}, fmt.Errorf("создание evidence run: %w", err)
+		}
+		if err := evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: runStartedAt}); err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("запись run_started: %w", err)
+		}
+		configDigest := sha256.Sum256(configSnapshot)
+		workflowDigest := sha256.Sum256(workflowSnapshot)
+		resumedState = lifecycle.State{
+			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, Task: runCfg.TaskDesc,
+			Phase: lifecycle.PhaseRunning, NextStage: compiledGraph.Entry,
+			ConfigSHA256: fmt.Sprintf("%x", configDigest[:]), WorkflowSHA256: fmt.Sprintf("%x", workflowDigest[:]),
+			CreatedAt: runStartedAt,
+		}
+		if err := lifecycleStore.Create(resumedState); err != nil {
+			return RunResult{}, fmt.Errorf("создание lifecycle state: %w", err)
+		}
 	}
-	if err := evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: runStartedAt}); err != nil {
-		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("запись run_started: %w", err)
+	if candidateManager != nil {
+		if err := publishCandidateMetadata(evidenceStore.RunDir(), candidateManager.Metadata()); err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, err
+		}
 	}
 
 	reportsDir := p.reportsDir
@@ -252,29 +505,69 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		task: &runtime.Task{
 			Feature:      runCfg.Feature,
 			TaskDesc:     runCfg.TaskDesc,
-			TargetDir:    runCfg.TargetDir,
-			ArtifactRoot: filepath.Join(runCfg.TargetDir, ".ai-team", "artifacts"),
+			TargetDir:    sourceTarget,
+			ArtifactRoot: filepath.Join(sourceTarget, ".ai-team", "artifacts"),
 			LogDir:       evidenceStore.LogDir(),
 		},
 		reportsDir:       reportsDir,
 		names:            p.cfg.AgentNames(),
 		extraInputs:      make(map[string][]runtime.Artifact),
 		retryCounts:      make(map[string]int),
+		results:          replayedStageResults(replayedRun),
 		startTime:        runStartedAt,
 		approvedPlanHash: runCfg.ApprovePlanHash,
 		runID:            runID,
 		evidence:         evidenceStore,
+		attemptOrdinal:   attemptOrdinal,
+		lifecycleStore:   lifecycleStore,
+		lifecycleState:   resumedState,
+		approvalStore:    approvalStore,
+		resumedApproval:  resumedApproval,
+		resumed:          runCfg.ResumeRunID != "",
+		graph:            compiledGraph,
+		visits:           make(map[string]int),
+		candidate:        candidateManager,
+		sourceTarget:     sourceTarget,
+	}
+	for _, previous := range rs.results {
+		rs.visits[previous.Name]++
 	}
 	rs.ps = ui.NewPipelineStatus(filepath.Base(runCfg.TargetDir), runCfg.Feature, len(rs.names))
 	rs.task.ConsoleOut = rs.ps.StatusWriter()
 	if p.recorder != nil {
 		snapshot, _ := yaml.Marshal(p.cfg)
 		p.recorder.ReconcileInterrupted(rs.startTime)
-		p.recorder.RunStarted(runID, runCfg.Feature, string(snapshot), rs.startTime)
+		if rs.resumed {
+			p.recorder.RunResumed(runID, rs.startTime)
+			if resumedApproval != nil {
+				p.recorder.ApprovalDecided(runID, resumedApproval.ID, resumedApproval.AttemptID,
+					rs.startTime, approvalEventData(*resumedApproval))
+				if resumedTransitionData != nil {
+					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, rs.startTime, resumedTransitionData)
+				}
+			}
+			if len(resumeInvalidated) > 0 {
+				p.recorder.AttemptsInvalidated(runID, resumeInvalidated, rs.startTime)
+			}
+		} else {
+			p.recorder.RunStarted(runID, runCfg.Feature, string(snapshot), rs.startTime)
+		}
 	}
 	if err := rs.initializeWorkspaceOwnership(); err != nil {
 		outcome, finalErr := rs.finalize(err)
 		return RunResult{RunID: runID, Outcome: outcome}, finalErr
+	}
+	for _, mutation := range resumeMutations {
+		delete(rs.userOwnedPaths, filepath.ToSlash(mutation))
+	}
+	if resumedApproval != nil && resumedApproval.ResolvedAction == "return_to_coder" {
+		inputs, inputErr := rs.stageOutputs(resumedApproval.FromStage, resumedApproval.AttemptID)
+		if inputErr != nil {
+			outcome, finalErr := rs.finalize(inputErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		rs.extraInputs[runCfg.RetryFrom] = inputs
+		rs.retryCounts[runCfg.RetryFrom] = 1
 	}
 
 	runErr := rs.execute(ctx)
@@ -314,6 +607,12 @@ func (rs *runState) initializeWorkspaceOwnership() error {
 			rs.userOwnedPaths[path] = true
 		}
 	}
+	if rs.candidate != nil {
+		rs.liveWorkspaceSHA, err = checks.WorkspaceDigest(rs.runCfg.TargetDir)
+		if err != nil {
+			return fmt.Errorf("live workspace identity: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -331,8 +630,13 @@ func (p *Pipeline) resolvedEvidenceSnapshots() (json.RawMessage, json.RawMessage
 	type resolvedWorkflow struct {
 		SchemaVersion int             `json:"schema_version"`
 		Stages        []resolvedStage `json:"stages"`
+		Graph         workflow.Graph  `json:"graph"`
 	}
-	resolved := resolvedWorkflow{SchemaVersion: 1}
+	compiledGraph, err := p.cfg.CompiledGraph()
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved := resolvedWorkflow{SchemaVersion: 2, Graph: compiledGraph}
 	for index, name := range p.cfg.AgentNames() {
 		definition, loadErr := p.reg.Load(name)
 		if loadErr != nil {
@@ -402,7 +706,61 @@ func prepareTaskArtifact(runCfg RunConfig) (string, error) {
 	return runCfg.TaskDesc, nil
 }
 
+func copyTaskToCandidate(controlTarget, candidateTarget, feature string) error {
+	source := filepath.Join(controlTarget, ".ai-team", "artifacts", "tasks", feature, "task.md")
+	data, err := safeio.ReadRegularFile(source, maxArtifactFileBytes)
+	if err != nil {
+		return fmt.Errorf("candidate task input: %w", err)
+	}
+	directory, err := safeio.EnsureDir(candidateTarget, ".ai-team", "artifacts", "tasks", feature)
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(directory, "task.md")
+	if err := safeio.RejectSymlink(destination); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".task-projection-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0644); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, destination)
+}
+
+func publishCandidateMetadata(runDir string, metadata candidate.Metadata) error {
+	path := filepath.Join(runDir, "candidate-metadata.json")
+	if existing, err := safeio.ReadRegularFile(path, maxArtifactFileBytes); err == nil {
+		var stored candidate.Metadata
+		if json.Unmarshal(existing, &stored) != nil || stored != metadata {
+			return fmt.Errorf("candidate evidence metadata identity mismatch")
+		}
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return writeControllerJSON(path, metadata)
+}
+
 func (rs *runState) execute(ctx context.Context) error {
+	if rs.runCfg.resumeDecisionAction == "reject" {
+		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
+	}
+	if rs.p.cfg.SchemaVersion == config.CurrentSchemaVersion {
+		return rs.executeGraph(ctx)
+	}
 	startIdx := 0
 	if rs.runCfg.RetryFrom != "" {
 		idx, err := rs.prepareRetryFrom()
@@ -423,6 +781,9 @@ func (rs *runState) execute(ctx context.Context) error {
 		}
 
 		name := rs.names[i]
+		if err := rs.saveLifecycle(lifecycle.PhaseRunning, name); err != nil {
+			return err
+		}
 		if err := rs.prepareControllerStageEvidence(ctx, name); err != nil {
 			return fmt.Errorf("controller evidence for %s: %w", name, err)
 		}
@@ -431,6 +792,9 @@ func (rs *runState) execute(ctx context.Context) error {
 		}
 		r := rs.runStage(ctx, i, name)
 		rs.results = append(rs.results, r)
+		if err := rs.afterAttempt(ctx); err != nil {
+			return err
+		}
 
 		if err := rs.p.notifier.Notify(ctx, r); err != nil {
 			fmt.Fprintf(os.Stderr, "  %s notifier error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
@@ -467,13 +831,302 @@ func (rs *runState) execute(ctx context.Context) error {
 			}
 		}
 
+		if i+1 < len(rs.names) {
+			agentCfg := rs.p.cfg.AgentConfig(name)
+			if agentCfg != nil && len(agentCfg.ApprovalRoles) > 0 {
+				nextName := rs.names[i+1]
+				action, err := rs.authorizeTransition(
+					name, nextName, "stage_completed", r,
+					agentCfg.ApprovalRoles, agentCfg.ApprovalQuorum,
+					[]string{"approve", "reject"},
+					map[string]string{"approve": nextName, "reject": nextName},
+				)
+				if err != nil {
+					return err
+				}
+				if action == "reject" {
+					return fmt.Errorf("%w: переход %s → %s отклонён", ErrUserStopped, name, nextName)
+				}
+			}
+		}
+
 		if err := rs.checkpoints(i, name, r); err != nil {
 			return err
 		}
 
 		rs.ps.DoneAgent(name)
+		nextStage := name
+		if i+1 < len(rs.names) {
+			nextStage = rs.names[i+1]
+		}
+		if err := rs.saveLifecycle(lifecycle.PhaseRunning, nextStage); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+func (rs *runState) executeGraph(ctx context.Context) error {
+	current := rs.graph.Entry
+	if rs.runCfg.RetryFrom != "" {
+		current = rs.runCfg.RetryFrom
+	}
+	if workflow.IsTerminal(current) {
+		return graphTerminalError(current, "", nil)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		node, exists := rs.graph.Node(current)
+		if !exists {
+			return fmt.Errorf("workflow graph: next node %q не существует", current)
+		}
+		if node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
+			return fmt.Errorf("workflow graph: max_visits=%d исчерпан для %s", node.MaxVisits, current)
+		}
+		index := rs.graph.Index(current)
+		if err := rs.saveLifecycle(lifecycle.PhaseRunning, current); err != nil {
+			return err
+		}
+		if err := rs.prepareControllerStageEvidence(ctx, current); err != nil {
+			return fmt.Errorf("controller evidence for %s: %w", current, err)
+		}
+		if err := rs.authorizeStage(current); err != nil {
+			return err
+		}
+		result := rs.runStage(ctx, index, current)
+		rs.results = append(rs.results, result)
+		rs.visits[current]++
+		if err := rs.afterAttempt(ctx); err != nil {
+			return err
+		}
+
+		if err := rs.p.notifier.Notify(ctx, result); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s notifier error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		}
+		if err := report.GenerateStageReport(rs.reportsDir, rs.runCfg.Feature, result.AttemptID, result, rs.task.ArtifactRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s report error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		}
+		if rs.p.recorder != nil {
+			rs.p.recorder.StageFinished(result)
+		}
+		if result.Status == notifier.StatusBlocked {
+			fmt.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
+			fmt.Printf("  Для исправления уточните задачу и запустите: ai-team run --feature %s --retry-from %s\n",
+				rs.runCfg.Feature, current)
+		}
+
+		edge, found := rs.graph.Edge(current, result.State.Outcome)
+		if !found {
+			if result.Status == notifier.StatusBlocked {
+				return &BlockedError{Agent: current, Reason: result.Blocker}
+			}
+			if result.Err != nil {
+				return result.Err
+			}
+			if result.Verdict.IsNegative() {
+				return &NegativeVerdictError{Agent: current, Verdict: result.Verdict}
+			}
+			return fmt.Errorf("workflow graph: для %s outcome %s нет ребра", current, result.State.Outcome)
+		}
+
+		target := edge.To
+		action := ""
+		if edge.Approval != nil {
+			actions := orderedGraphActions(edge)
+			selected, err := rs.authorizeTransition(
+				current, edge.To, "graph_outcome:"+string(edge.Outcome), result,
+				edge.Approval.Roles, edge.Approval.Quorum, actions, edge.Approval.Actions,
+			)
+			if err != nil {
+				return err
+			}
+			action = selected
+			target = edge.Approval.Actions[selected]
+		}
+		if target == "" {
+			return fmt.Errorf("workflow graph: edge %s/%s выбрал пустой target", current, edge.Outcome)
+		}
+		transitionAt := time.Now().UTC()
+		transitionData := map[string]any{
+			"from": current, "outcome": string(edge.Outcome), "edge_target": edge.To,
+			"action": action, "target": target,
+		}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "transition_selected", AttemptID: result.AttemptID, Stage: current,
+			Timestamp: transitionAt, Data: transitionData,
+		}); err != nil {
+			return err
+		}
+		if rs.p.recorder != nil {
+			rs.p.recorder.TransitionSelected(rs.runID, result.AttemptID, transitionAt, transitionData)
+		}
+		rs.ps.DoneAgent(current)
+		if workflow.IsTerminal(target) {
+			if err := rs.saveLifecycle(lifecycle.PhaseRunning, target); err != nil {
+				return err
+			}
+			return graphTerminalError(target, current, result.Err)
+		}
+		targetIndex := rs.graph.Index(target)
+		if targetIndex < 0 {
+			return fmt.Errorf("workflow graph: target %q не существует", target)
+		}
+		if targetIndex <= index {
+			if err := rs.invalidateAttempts(targetIndex + 1); err != nil {
+				return err
+			}
+			rs.extraInputs[target] = result.Outputs
+		}
+		if err := rs.saveLifecycle(lifecycle.PhaseRunning, target); err != nil {
+			return err
+		}
+		current = target
+	}
+}
+
+func orderedGraphActions(edge workflow.Edge) []string {
+	actions := make([]string, 0, len(edge.Approval.Actions))
+	for action := range edge.Approval.Actions {
+		actions = append(actions, action)
+	}
+	sort.Slice(actions, func(i, j int) bool {
+		iPrimary := edge.Approval.Actions[actions[i]] == edge.To
+		jPrimary := edge.Approval.Actions[actions[j]] == edge.To
+		if iPrimary != jPrimary {
+			return iPrimary
+		}
+		return actions[i] < actions[j]
+	})
+	return actions
+}
+
+func graphTerminalError(target, stage string, cause error) error {
+	switch target {
+	case workflow.TerminalComplete:
+		return nil
+	case workflow.TerminalStop:
+		return fmt.Errorf("%w: graph transition после %s", ErrUserStopped, stage)
+	case workflow.TerminalBlocked:
+		return &BlockedError{Agent: stage, Reason: "graph terminal blocked"}
+	case workflow.TerminalFailed:
+		if cause != nil {
+			return cause
+		}
+		return fmt.Errorf("workflow graph завершил run как failed после %s", stage)
+	default:
+		return fmt.Errorf("workflow graph: неизвестный terminal target %q", target)
+	}
+}
+
+func replayedStageResults(run evidence.ReplayedRun) []notifier.StageResult {
+	results := make([]notifier.StageResult, 0, len(run.Attempts))
+	for _, attempt := range run.Attempts {
+		var attemptErr error
+		if attempt.Error != "" {
+			attemptErr = errors.New(attempt.Error)
+		}
+		results = append(results, notifier.StageResult{
+			RunID: run.RunID, AttemptID: attempt.AttemptID, Name: attempt.Stage,
+			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
+			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
+			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
+			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded,
+		})
+	}
+	return results
+}
+
+func (rs *runState) stageOutputs(stage, attemptID string) ([]runtime.Artifact, error) {
+	if attemptID != "" {
+		runDir := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID)
+		manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+		data, err := safeio.ReadRegularFile(manifestPath, maxArtifactFileBytes)
+		if err != nil {
+			return nil, fmt.Errorf("approval source manifest: %w", err)
+		}
+		var manifest evidence.AttemptManifest
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&manifest); err != nil {
+			return nil, fmt.Errorf("approval source manifest: %w", err)
+		}
+		if manifest.RunID != rs.runID || manifest.AttemptID != attemptID || manifest.Stage != stage {
+			return nil, errors.New("approval source manifest identity mismatch")
+		}
+		outputs := make([]runtime.Artifact, 0, len(manifest.Outputs))
+		for _, output := range manifest.Outputs {
+			path := filepath.Join(runDir, filepath.FromSlash(output.EvidencePath))
+			relative, err := filepath.Rel(runDir, path)
+			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				return nil, fmt.Errorf("approval evidence path %s выходит за run", output.EvidencePath)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, fmt.Errorf("approval evidence output %s: %w", output.Name, err)
+			}
+			outputs = append(outputs, runtime.Artifact{
+				Name: output.Name, Path: path,
+				Size: info.Size(), ModTime: info.ModTime(),
+			})
+		}
+		return outputs, nil
+	}
+	definition, err := rs.p.reg.Load(stage)
+	if err != nil {
+		return nil, fmt.Errorf("approval source stage %s: %w", stage, err)
+	}
+	outputs := make([]runtime.Artifact, 0, len(definition.Outputs))
+	for _, name := range sortedStringMapKeys(definition.Outputs) {
+		path := filepath.Join(rs.task.ArtifactRoot, runtime.ReplaceVars(definition.Outputs[name], rs.runCfg.Feature))
+		if err := validateExistingArtifactPath(rs.task.ArtifactRoot, path); err != nil {
+			return nil, fmt.Errorf("approval source output %s: %w", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("approval source output %s: %w", name, err)
+		}
+		outputs = append(outputs, runtime.Artifact{Name: name, Path: path, Size: info.Size(), ModTime: info.ModTime()})
+	}
+	return outputs, nil
+}
+
+func indexOf(values []string, expected string) int {
+	for index, value := range values {
+		if value == expected {
+			return index
+		}
+	}
+	return -1
+}
+
+func (rs *runState) saveLifecycle(phase lifecycle.Phase, nextStage string) error {
+	next := rs.lifecycleState
+	next.Phase = phase
+	next.NextStage = nextStage
+	next.PendingApprovalID = ""
+	next.AttemptOrdinal = rs.attemptOrdinal
+	if err := rs.lifecycleStore.Save(rs.lifecycleState, next); err != nil {
+		return fmt.Errorf("lifecycle checkpoint: %w", err)
+	}
+	rs.lifecycleState = next
+	return nil
+}
+
+func (rs *runState) saveWaiting(nextStage, approvalID string) error {
+	next := rs.lifecycleState
+	next.Phase = lifecycle.PhaseWaiting
+	next.NextStage = nextStage
+	next.PendingApprovalID = approvalID
+	next.AttemptOrdinal = rs.attemptOrdinal
+	if err := rs.lifecycleStore.Save(rs.lifecycleState, next); err != nil {
+		return fmt.Errorf("lifecycle approval checkpoint: %w", err)
+	}
+	rs.lifecycleState = next
 	return nil
 }
 
@@ -482,6 +1135,7 @@ type candidateEvidence struct {
 	RunID                string             `json:"run_id"`
 	Purpose              string             `json:"purpose"`
 	BaselineHead         string             `json:"baseline_head,omitempty"`
+	BaselineTree         string             `json:"baseline_tree,omitempty"`
 	WorkspaceSHA256      string             `json:"workspace_sha256"`
 	ChangedFiles         []candidateFile    `json:"changed_files"`
 	TrackedPatchSHA256   string             `json:"tracked_patch_sha256,omitempty"`
@@ -543,15 +1197,15 @@ func (rs *runState) prepareControllerStageEvidence(ctx context.Context, stage st
 }
 
 func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose string) error {
-	workspaceDigest, err := checks.WorkspaceDigest(rs.runCfg.TargetDir)
+	workspaceDigest, err := checks.WorkspaceDigest(rs.sourceDir())
 	if err != nil {
 		return err
 	}
-	snapshot, err := captureWorkspaceSnapshot(rs.runCfg.TargetDir)
+	snapshot, err := captureWorkspaceSnapshot(rs.sourceDir())
 	if err != nil {
 		return err
 	}
-	gitState, gitAvailable, err := captureGitMetadataSnapshot(rs.runCfg.TargetDir)
+	gitState, gitAvailable, err := captureGitMetadataSnapshot(rs.sourceDir())
 	if err != nil {
 		return err
 	}
@@ -560,10 +1214,9 @@ func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose st
 		for changed := range gitState.Dirty {
 			changedSet[changed] = true
 		}
-	} else {
-		for _, changed := range rs.attributedDeliveryFiles() {
-			changedSet[changed] = true
-		}
+	}
+	for _, changed := range rs.attributedDeliveryFiles() {
+		changedSet[changed] = true
 	}
 	changed := make([]string, 0, len(changedSet))
 	for path := range changedSet {
@@ -576,8 +1229,14 @@ func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose st
 		Checks: make([]candidateCheck, 0), Attempts: make([]candidateAttempt, 0),
 	}
 	if gitAvailable {
-		evidenceDocument.BaselineHead = gitState.Head
-		patch, patchErr := collectTrackedPatch(ctx, rs.runCfg.TargetDir)
+		baseline := gitState.Head
+		if rs.candidate != nil {
+			metadata := rs.candidate.Metadata()
+			baseline = metadata.BaseCommit
+			evidenceDocument.BaselineTree = metadata.BaseTree
+		}
+		evidenceDocument.BaselineHead = baseline
+		patch, patchErr := collectTrackedPatch(ctx, rs.sourceDir(), baseline)
 		if patchErr != nil {
 			return fmt.Errorf("tracked patch: %w", patchErr)
 		}
@@ -591,7 +1250,7 @@ func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose st
 	for _, changedPath := range changed {
 		fingerprint := snapshot.Files[changedPath]
 		mode := "deleted"
-		if info, statErr := os.Lstat(filepath.Join(rs.runCfg.TargetDir, filepath.FromSlash(changedPath))); statErr == nil {
+		if info, statErr := os.Lstat(filepath.Join(rs.sourceDir(), filepath.FromSlash(changedPath))); statErr == nil {
 			mode = info.Mode().String()
 		} else if !os.IsNotExist(statErr) {
 			return statErr
@@ -645,7 +1304,7 @@ func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
 	} else if !errors.Is(err, io.EOF) {
 		return err
 	}
-	current, err := checks.WorkspaceDigest(rs.runCfg.TargetDir)
+	current, err := checks.WorkspaceDigest(rs.sourceDir())
 	if err != nil {
 		return err
 	}
@@ -653,6 +1312,81 @@ func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
 		return fmt.Errorf("reviewed candidate identity changed before test authoring")
 	}
 	return nil
+}
+
+func (rs *runState) afterAttempt(ctx context.Context) error {
+	if rs.candidate == nil {
+		return nil
+	}
+	if err := rs.writeCandidateEvidence(ctx, "candidate.json", "run_candidate"); err != nil {
+		return fmt.Errorf("candidate identity: %w", err)
+	}
+	source := filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".control", "candidate.json")
+	data, err := safeio.ReadRegularFile(source, maxArtifactFileBytes)
+	if err != nil {
+		return err
+	}
+	var document candidateEvidence
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return err
+	}
+	if err := writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "candidate.json"), document); err != nil {
+		return err
+	}
+	return syncArtifactProjection(rs.task.ArtifactRoot, filepath.Join(rs.runCfg.TargetDir, ".ai-team", "artifacts"), rs.runCfg.Feature)
+}
+
+func syncArtifactProjection(sourceRoot, destinationRoot, feature string) error {
+	source := filepath.Join(sourceRoot, feature)
+	if _, err := os.Lstat(source); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, err := safeio.EnsureDir(destinationRoot); err != nil {
+		return err
+	}
+	destination := filepath.Join(destinationRoot, feature)
+	if info, err := os.Lstat(destination); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("artifact projection %s небезопасна", destination)
+		}
+		if err := os.RemoveAll(destination); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("artifact projection содержит special file %s", relative)
+		}
+		data, err := safeio.ReadRegularFile(path, maxArtifactFileBytes)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // digestCapture hashes the complete stream while retaining only a bounded
@@ -692,10 +1426,10 @@ func (capture *digestCapture) String() string  { return capture.buffer.String() 
 func (capture *digestCapture) Total() int64    { return capture.total }
 func (capture *digestCapture) Truncated() bool { return capture.truncated }
 
-func collectTrackedPatch(ctx context.Context, dir string) (*digestCapture, error) {
+func collectTrackedPatch(ctx context.Context, dir, baseline string) (*digestCapture, error) {
 	stdout := newDigestCapture(maxCandidatePatchBytes)
 	stderr := newDigestCapture(maxCandidateGitStderr)
-	command := exec.Command("git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--")
+	command := exec.Command("git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", baseline, "--")
 	command.Dir = dir
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -961,11 +1695,11 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	var gitAvailable bool
 	guardWorkspace := a.Kind != "delivery"
 	if guardWorkspace {
-		workspaceBefore, err = captureWorkspaceSnapshot(rs.runCfg.TargetDir)
+		workspaceBefore, err = captureWorkspaceSnapshot(rs.sourceDir())
 		if err != nil {
 			return fail(fmt.Errorf("агент %s: не удалось снять workspace baseline: %w", name, err))
 		}
-		gitBefore, gitAvailable, err = captureGitMetadataSnapshot(rs.runCfg.TargetDir)
+		gitBefore, gitAvailable, err = captureGitMetadataSnapshot(rs.sourceDir())
 		if err != nil {
 			return fail(fmt.Errorf("агент %s: не удалось снять git metadata baseline: %w", name, err))
 		}
@@ -979,6 +1713,14 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			r.ValidationFailed = true
 			r.Err = errors.Join(r.Err, guardErr)
 			r.Status = notifier.StatusFailed
+		}
+		if rs.candidate != nil {
+			currentLive, liveErr := checks.WorkspaceDigest(rs.runCfg.TargetDir)
+			if liveErr != nil || currentLive != rs.liveWorkspaceSHA {
+				r.ValidationFailed = true
+				r.Err = errors.Join(r.Err, fmt.Errorf("live workspace изменён во время isolated candidate attempt"))
+				r.Status = notifier.StatusFailed
+			}
 		}
 	}()
 
@@ -1052,7 +1794,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			r.ValidationFailed = true
 			return fail(fmt.Errorf("агент %s: %w", name, planErr))
 		}
-		if _, prepareErr := delivery.Prepare(rs.runCfg.TargetDir, rs.runCfg.Feature, plan); prepareErr != nil {
+		if _, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan); prepareErr != nil {
 			return fail(fmt.Errorf("агент %s: подготовка delivery state: %w", name, prepareErr))
 		}
 		if approvalErr := rs.authorizeDelivery(name, plan); approvalErr != nil {
@@ -1060,7 +1802,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(approvalErr)
 		}
 		deliveryResult, deliveryErr := rs.p.delivery.Execute(stageCtx, delivery.Request{
-			TargetDir: rs.runCfg.TargetDir, Feature: rs.runCfg.Feature, Plan: plan,
+			TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan,
 		})
 		r.Delivery = &deliveryResult
 		if deliveryErr != nil {
@@ -1070,7 +1812,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	definitions := mergeChecks(a.Checks, agentCfg.Checks)
 	if len(definitions) > 0 {
-		r.Checks, err = (checks.Runner{TargetDir: rs.runCfg.TargetDir}).RunAll(stageCtx, definitions)
+		r.Checks, err = (checks.Runner{TargetDir: rs.sourceDir()}).RunAll(stageCtx, definitions)
 		if err != nil {
 			r.ValidationFailed = true
 			return fail(fmt.Errorf("агент %s: детерминированные проверки: %w", name, err))
@@ -1149,7 +1891,7 @@ func (rs *runState) enforceMutationGuard(
 ) error {
 	var guardErrors []error
 	if guardWorkspace {
-		workspaceAfter, err := captureWorkspaceSnapshot(rs.runCfg.TargetDir)
+		workspaceAfter, err := captureWorkspaceSnapshot(rs.sourceDir())
 		if err != nil {
 			guardErrors = append(guardErrors, fmt.Errorf("агент %s: не удалось проверить workspace state: %w", name, err))
 		} else {
@@ -1183,7 +1925,7 @@ func (rs *runState) enforceMutationGuard(
 			}
 		}
 		if gitAvailable {
-			gitAfter, stillAvailable, err := captureGitMetadataSnapshot(rs.runCfg.TargetDir)
+			gitAfter, stillAvailable, err := captureGitMetadataSnapshot(rs.sourceDir())
 			if err != nil || !stillAvailable {
 				guardErrors = append(guardErrors, fmt.Errorf("агент %s: не удалось проверить git metadata state: %w", name, err))
 			} else if gitBefore.Fingerprint != gitAfter.Fingerprint {
@@ -1253,7 +1995,7 @@ func deliveryPlanFromOutputs(outputs []runtime.Artifact) (delivery.Plan, error) 
 func toEvidenceArtifacts(artifacts []runtime.Artifact) []evidence.Artifact {
 	result := make([]evidence.Artifact, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		result = append(result, evidence.Artifact{Name: artifact.Name, Path: artifact.Path})
+		result = append(result, evidence.Artifact{Name: artifact.Name, Path: artifact.Path, SourcePath: artifact.Source})
 	}
 	return result
 }
@@ -1473,7 +2215,13 @@ func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifa
 	}
 
 	for _, extra := range rs.extraInputs[name] {
-		if err := validateExistingArtifactPath(rs.task.ArtifactRoot, extra.Path); err != nil {
+		validationRoot := rs.task.ArtifactRoot
+		runEvidenceRoot := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID)
+		if relative, relErr := filepath.Rel(runEvidenceRoot, extra.Path); relErr == nil &&
+			relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			validationRoot = runEvidenceRoot
+		}
+		if err := validateExistingArtifactPath(validationRoot, extra.Path); err != nil {
 			return nil, all, fmt.Errorf("агент %s: loopback input %s небезопасен: %w", name, extra.Name, err)
 		}
 		fmt.Printf("  %s %s %s(loopback)\n",
@@ -1548,7 +2296,7 @@ func (rs *runState) validateDeliveryChecks() error {
 }
 
 func (rs *runState) currentDeliveryVerification() (delivery.Verification, error) {
-	workspaceDigest, err := checks.WorkspaceDigest(rs.runCfg.TargetDir)
+	workspaceDigest, err := checks.WorkspaceDigest(rs.sourceDir())
 	if err != nil {
 		return delivery.Verification{}, fmt.Errorf("delivery workspace digest: %w", err)
 	}
@@ -1567,7 +2315,7 @@ func (rs *runState) currentDeliveryVerification() (delivery.Verification, error)
 			}
 		}
 	}
-	if plan, prepared, loadErr := delivery.LoadPreparedPlan(rs.runCfg.TargetDir, rs.runCfg.Feature); loadErr != nil {
+	if plan, prepared, loadErr := delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature); loadErr != nil {
 		return delivery.Verification{}, fmt.Errorf("проверка prepared delivery plan: %w", loadErr)
 	} else if prepared {
 		if plan.VerifiedWorkspaceDigest != workspaceDigest {
@@ -1607,7 +2355,7 @@ func (rs *runState) authorizeDelivery(name string, plan delivery.Plan) error {
 		return approve("hash_flag")
 	}
 	if !rs.p.prompter.Interactive() {
-		fmt.Printf("Для продолжения: ai-team run --feature %s --retry-from %s --approve-plan %s\n", rs.runCfg.Feature, name, planHash)
+		fmt.Printf("Для продолжения: ai-team run --resume %s --approve-plan %s\n", rs.runID, planHash)
 		return &ApprovalRequiredError{Checkpoint: "delivery перед " + name}
 	}
 	ans := rs.p.prompter.Ask(fmt.Sprintf("%s %s может выполнить commit/push/PR. Продолжить? [y/N]",
@@ -1624,18 +2372,18 @@ func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preco
 	var err error
 	if len(files) == 0 {
 		var exists bool
-		plan, exists, err = delivery.LoadPreparedPlan(rs.runCfg.TargetDir, rs.runCfg.Feature)
+		plan, exists, err = delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature)
 		if err != nil {
 			return err
 		}
 		if !exists {
 			return fmt.Errorf("delivery planner: в текущем run нет атрибутированных изменений и prepared plan отсутствует")
 		}
-		workspaceDigest, digestErr := checks.WorkspaceDigest(rs.runCfg.TargetDir)
+		workspaceDigest, digestErr := checks.WorkspaceDigest(rs.sourceDir())
 		if digestErr != nil {
 			return digestErr
 		}
-		if verifyErr := delivery.VerifyPreparedWorkspace(rs.runCfg.TargetDir, plan, workspaceDigest); verifyErr != nil {
+		if verifyErr := delivery.VerifyPreparedWorkspace(rs.sourceDir(), plan, workspaceDigest); verifyErr != nil {
 			return verifyErr
 		}
 		if verifyErr := evidence.VerifyCheckEvidence(filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs"), plan.SourceRunID, plan.CheckEvidenceDigest, workspaceDigest); verifyErr != nil {
@@ -1650,7 +2398,7 @@ func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preco
 			return verificationErr
 		}
 		verification.Preconditions = preconditions
-		plan, err = delivery.BuildPlan(ctx, rs.runCfg.TargetDir, rs.runCfg.Feature, rs.runCfg.TaskDesc, files, verification)
+		plan, err = delivery.BuildPlan(ctx, rs.sourceDir(), rs.runCfg.Feature, rs.runCfg.TaskDesc, files, verification)
 		if err != nil {
 			return err
 		}
@@ -1718,8 +2466,8 @@ func validateSnapshotPreconditions(name string, a *agent.Agent, inputs []runtime
 	return result, nil
 }
 
-// enforce обрабатывает негативный вердикт: сначала loopback (интерактивно,
-// если сконфигурирован), затем политика on_negative_verdict.
+// enforce обрабатывает негативный вердикт: loopback всегда требует
+// сохранённого решения человека и не зависит от наличия TTY.
 // Возвращает индекс цели loopback (-1, если loopback не выполняется).
 func (rs *runState) enforce(i int, name string, r notifier.StageResult) (int, error) {
 	agentCfg := rs.p.cfg.AgentConfig(name)
@@ -1746,26 +2494,32 @@ func (rs *runState) enforce(i int, name string, r notifier.StageResult) (int, er
 			if rs.retryCounts[target] >= maxRetries {
 				return -1, fmt.Errorf("превышен лимит retries (%d) для %s", maxRetries, target)
 			}
-			if rs.p.prompter.Interactive() {
-				for {
-					ans := rs.p.prompter.Ask(fmt.Sprintf("%s %s: вердикт %s — отправить обратно %s-у? retry %d/%d [Y/n/diff]",
-						ui.Colorize("⟳", ui.ColorYellow),
-						ui.Colorize(name, ui.ColorYellow),
-						r.Verdict, target,
-						rs.retryCounts[target]+1, maxRetries))
-					switch ans {
-					case "y", "":
-						rs.retryCounts[target]++
-						rs.extraInputs[target] = r.Outputs
-						return targetIdx, nil
-					case "diff":
-						fmt.Println(gitDiffOutput(rs.runCfg.TargetDir))
-					case "n":
-						return -1, fmt.Errorf("%w: отказ от retry после вердикта %s от %s", ErrUserStopped, r.Verdict, name)
-					default:
-						fmt.Printf("  неизвестный ответ: %s (ожидалось Y/n/diff)\n", ans)
-					}
-				}
+			roles := agentCfg.ApprovalRoles
+			if len(roles) == 0 {
+				roles = []string{"reviewer"}
+			}
+			action, err := rs.authorizeTransition(
+				name, target, "negative_verdict", r, roles, agentCfg.ApprovalQuorum,
+				[]string{"return_to_coder", "override_approve", "reject"},
+				map[string]string{
+					"return_to_coder":  target,
+					"override_approve": rs.nextStage(i),
+					"reject":           rs.nextStage(i),
+				},
+			)
+			if err != nil {
+				return -1, err
+			}
+			switch action {
+			case "return_to_coder":
+				rs.retryCounts[target]++
+				rs.extraInputs[target] = r.Outputs
+				return targetIdx, nil
+			case "override_approve":
+				return -1, nil
+			default:
+				return -1, fmt.Errorf("%w: retry после вердикта %s от %s отклонён человеком",
+					ErrUserStopped, r.Verdict, name)
 			}
 		}
 	}
@@ -1789,6 +2543,152 @@ func (rs *runState) enforce(i int, name string, r notifier.StageResult) (int, er
 	}
 }
 
+func (rs *runState) nextStage(index int) string {
+	if index+1 < len(rs.names) {
+		return rs.names[index+1]
+	}
+	return rs.names[index]
+}
+
+func (rs *runState) authorizeTransition(
+	fromStage, toStage, trigger string,
+	result notifier.StageResult,
+	roles []string,
+	quorum string,
+	actions []string,
+	targets map[string]string,
+) (string, error) {
+	if quorum == "" {
+		quorum = approval.QuorumAny
+	}
+	label := fmt.Sprintf("переход %s → %s", fromStage, toStage)
+	subjectHash, err := rs.checkpointSubjectHash(label, fromStage)
+	if err != nil {
+		return "", err
+	}
+	candidateSHA := ""
+	if rs.candidate != nil {
+		identity, identityErr := rs.candidate.Identity()
+		if identityErr != nil {
+			return "", identityErr
+		}
+		candidateSHA = identity.WorkspaceSHA256
+	}
+	value, err := rs.approvalStore.Create(approval.PendingApproval{
+		RunID: rs.runID, AttemptID: result.AttemptID,
+		FromStage: fromStage, ToStage: toStage, Trigger: trigger,
+		SubjectHash: subjectHash, CandidateSHA256: candidateSHA,
+		RequiredRoles: append([]string(nil), roles...),
+		Quorum:        quorum, Actions: append([]string(nil), actions...), Targets: targets,
+	})
+	if err != nil {
+		return "", err
+	}
+	requestedAt := time.Now().UTC()
+	if err := rs.evidence.Append(evidence.Event{
+		Type: "approval_requested", AttemptID: result.AttemptID,
+		Timestamp: requestedAt, Data: approvalEventData(value),
+	}); err != nil {
+		return "", err
+	}
+	if rs.p.recorder != nil {
+		rs.p.recorder.ApprovalRequested(rs.runID, value.ID, result.AttemptID, requestedAt, approvalEventData(value))
+	}
+
+	action := ""
+	if rs.runCfg.ApproveGates {
+		action = actions[0]
+	} else if rs.p.prompter.Interactive() {
+		for {
+			answer := rs.p.prompter.Ask(fmt.Sprintf(
+				"%s %s, subject %s [%s/diff]",
+				ui.Colorize("Решение человека:", ui.ColorBold), label, subjectHash,
+				strings.Join(actions, "/"),
+			))
+			if answer == "diff" {
+				fmt.Println(gitDiffOutput(rs.sourceDir()))
+				continue
+			}
+			if answer == "" || answer == "y" {
+				answer = actions[0]
+			} else if answer == "n" && containsString(actions, "reject") {
+				answer = "reject"
+			}
+			if containsString(actions, answer) {
+				action = answer
+				break
+			}
+			fmt.Printf("  неизвестный ответ: %s\n", answer)
+		}
+	}
+	if action == "" {
+		if err := rs.saveWaiting(targets[actions[0]], value.ID); err != nil {
+			return "", err
+		}
+		return "", &ApprovalRequiredError{
+			Checkpoint: label, RunID: rs.runID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
+		}
+	}
+
+	rolesToDecide := value.RequiredRoles
+	if value.Quorum == approval.QuorumAny {
+		rolesToDecide = rolesToDecide[:1]
+	}
+	for _, role := range rolesToDecide {
+		value, err = rs.approvalStore.Decide(value.RunID, value.ID, approval.Decision{
+			ActorID: "local-user", ActorRole: role, Action: action,
+			SubjectHash: value.SubjectHash,
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	decidedAt := time.Now().UTC()
+	if err := rs.evidence.Append(evidence.Event{
+		Type: "approval_decided", AttemptID: result.AttemptID,
+		Timestamp: decidedAt, Data: approvalEventData(value),
+	}); err != nil {
+		return "", err
+	}
+	if rs.p.recorder != nil {
+		rs.p.recorder.ApprovalDecided(rs.runID, value.ID, result.AttemptID, decidedAt, approvalEventData(value))
+	}
+	return value.ResolvedAction, nil
+}
+
+func approvalEventData(value approval.PendingApproval) map[string]any {
+	data := map[string]any{
+		"approval_id": value.ID, "subject_hash": value.SubjectHash,
+		"candidate_sha256": value.CandidateSHA256,
+		"from_stage":       value.FromStage, "to_stage": value.ToStage,
+		"trigger": value.Trigger, "required_roles": value.RequiredRoles,
+		"quorum": value.Quorum, "actions": value.Actions,
+		"status": value.Status, "resolved_action": value.ResolvedAction,
+		"decisions": value.Decisions,
+	}
+	// Event hashing is verified after JSON is decoded into generic values.
+	// Normalize named string types and nested structs before hashing so the
+	// in-memory and replay representations are byte-identical.
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return data
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return data
+	}
+	return normalized
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 // checkpoints применяет единую checkpoint policy. Legacy gate/transition поля
 // нормализуются Config.Checkpoint*Policy и не создают отдельные механизмы.
 func (rs *runState) checkpoints(i int, name string, r notifier.StageResult) error {
@@ -1800,7 +2700,7 @@ func (rs *runState) checkpoints(i int, name string, r notifier.StageResult) erro
 	afterPolicy := agentCfg.CheckpointAfterPolicy()
 	if afterPolicy != config.CheckpointAuto {
 		showGateSummary(name, r, len(rs.names))
-		if err := rs.applyCheckpoint("после "+name, afterPolicy, name); err != nil {
+		if err := rs.applyCheckpoint("после "+name, afterPolicy, name, rs.nextStage(i), r); err != nil {
 			return err
 		}
 	}
@@ -1816,7 +2716,7 @@ func (rs *runState) checkpoints(i int, name string, r notifier.StageResult) erro
 			// Delivery имеет отдельный mandatory approval в authorizeStage.
 			if nextAgent.Kind != "delivery" {
 				showPipelineSummary(rs.results)
-				if err := rs.applyCheckpoint("перед "+nextName, nextCfg.CheckpointBeforePolicy(), name); err != nil {
+				if err := rs.applyCheckpoint("перед "+nextName, nextCfg.CheckpointBeforePolicy(), name, nextName, r); err != nil {
 					return err
 				}
 			}
@@ -1826,49 +2726,26 @@ func (rs *runState) checkpoints(i int, name string, r notifier.StageResult) erro
 	return nil
 }
 
-func (rs *runState) applyCheckpoint(label, policy, summaryAgent string) error {
+func (rs *runState) applyCheckpoint(
+	label, policy, summaryAgent, targetStage string,
+	result notifier.StageResult,
+) error {
 	if policy == config.CheckpointAuto {
 		return nil
 	}
-	subjectHash, err := rs.checkpointSubjectHash(label, summaryAgent)
+	action, err := rs.authorizeTransition(
+		summaryAgent, targetStage, "legacy_checkpoint:"+label, result,
+		[]string{"operator"}, approval.QuorumAny,
+		[]string{"approve", "reject"},
+		map[string]string{"approve": targetStage, "reject": targetStage},
+	)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  Checkpoint subject SHA-256: %s\n", subjectHash)
-	record := func(eventType, mode string) error {
-		return rs.evidence.Append(evidence.Event{Type: eventType, Timestamp: time.Now().UTC(), Data: map[string]any{
-			"label": label, "subject_hash": subjectHash, "mode": mode, "actor": "local-user",
-		}})
+	if action == "reject" {
+		return fmt.Errorf("%w: checkpoint %s", ErrUserStopped, label)
 	}
-	if rs.runCfg.ApproveGates {
-		return record("checkpoint_approved", "blanket_flag_at_reached_checkpoint")
-	}
-	if !rs.p.prompter.Interactive() {
-		if err := record("checkpoint_approval_required", "non_interactive"); err != nil {
-			return err
-		}
-		return &ApprovalRequiredError{Checkpoint: "checkpoint " + label}
-	}
-	for {
-		ans := rs.p.prompter.Ask(fmt.Sprintf("%s %s %s",
-			ui.Colorize("Checkpoint:", ui.ColorBold), ui.Colorize(label, ui.ColorYellow),
-			ui.Colorize("[Y/n/diff/summary]", ui.ColorBold)))
-		switch ans {
-		case "y", "":
-			return record("checkpoint_approved", "interactive_exact_subject")
-		case "n":
-			if err := record("checkpoint_rejected", "interactive_exact_subject"); err != nil {
-				return err
-			}
-			return fmt.Errorf("%w: checkpoint %s", ErrUserStopped, label)
-		case "diff":
-			fmt.Println(gitDiffOutput(rs.runCfg.TargetDir))
-		case "summary":
-			fmt.Println(report.ReadStageSummary(rs.task.ArtifactRoot, rs.runCfg.Feature, summaryAgent))
-		default:
-			fmt.Printf("  неизвестный ответ: %s (ожидалось Y/n/diff/summary)\n", ans)
-		}
-	}
+	return nil
 }
 
 func (rs *runState) checkpointSubjectHash(label, stage string) (string, error) {
@@ -1879,14 +2756,15 @@ func (rs *runState) checkpointSubjectHash(label, stage string) (string, error) {
 		SHA256 string `json:"sha256"`
 	}
 	type subject struct {
-		RunID      string                `json:"run_id"`
-		Label      string                `json:"label"`
-		AttemptID  string                `json:"attempt_id"`
-		Stage      string                `json:"stage"`
-		State      workflow.AttemptState `json:"state"`
-		Verdict    verdict.Verdict       `json:"verdict,omitempty"`
-		Artifacts  []artifactSubject     `json:"artifacts,omitempty"`
-		CheckProof []string              `json:"check_evidence_digests,omitempty"`
+		RunID           string                `json:"run_id"`
+		Label           string                `json:"label"`
+		AttemptID       string                `json:"attempt_id"`
+		Stage           string                `json:"stage"`
+		State           workflow.AttemptState `json:"state"`
+		Verdict         verdict.Verdict       `json:"verdict,omitempty"`
+		Artifacts       []artifactSubject     `json:"artifacts,omitempty"`
+		CheckProof      []string              `json:"check_evidence_digests,omitempty"`
+		CandidateSHA256 string                `json:"candidate_sha256,omitempty"`
 	}
 	value := subject{RunID: rs.runID, Label: label, Stage: stage}
 	for index := len(rs.results) - 1; index >= 0; index-- {
@@ -1911,6 +2789,13 @@ func (rs *runState) checkpointSubjectHash(label, stage string) (string, error) {
 	}
 	if value.AttemptID == "" {
 		return "", fmt.Errorf("checkpoint %s: subject stage %s не найден", label, stage)
+	}
+	if rs.candidate != nil {
+		identity, identityErr := rs.candidate.Identity()
+		if identityErr != nil {
+			return "", fmt.Errorf("checkpoint %s candidate identity: %w", label, identityErr)
+		}
+		value.CandidateSHA256 = identity.WorkspaceSHA256
 	}
 	sort.Strings(value.CheckProof)
 	data, err := json.Marshal(value)
@@ -1963,6 +2848,52 @@ func (rs *runState) prepareRetryFrom() (int, error) {
 func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	endTime := time.Now()
 	status := runStatusFor(runErr, rs.results)
+	var approvalRequired *ApprovalRequiredError
+	if errors.As(runErr, &approvalRequired) {
+		if err := report.GenerateFinalReport(
+			rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime,
+			rs.task.ArtifactRoot, string(workflow.RunStopped),
+		); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("waiting report: %w", err))
+		}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "run_paused", Timestamp: endTime.UTC(),
+			Data: map[string]any{
+				"status":      "waiting_for_approval",
+				"next_stage":  rs.lifecycleState.NextStage,
+				"approval_id": rs.lifecycleState.PendingApprovalID,
+			},
+		}); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+		rs.ps.Finalize()
+		if rs.p.recorder != nil {
+			rs.p.recorder.RunPaused(rs.runID, "waiting_for_approval", endTime.UTC())
+		}
+		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		if err := report.GenerateFinalReport(
+			rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime,
+			rs.task.ArtifactRoot, status,
+		); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("paused report: %w", err))
+		}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "run_paused", Timestamp: endTime.UTC(),
+			Data: map[string]any{"status": status, "next_stage": rs.lifecycleState.NextStage},
+		}); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+		if err := rs.saveLifecycle(lifecycle.PhaseResumable, rs.lifecycleState.NextStage); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+		rs.ps.Finalize()
+		if rs.p.recorder != nil {
+			rs.p.recorder.RunPaused(rs.runID, status, endTime.UTC())
+		}
+		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
+	}
 	var finalizeErr error
 	if err := report.GenerateFinalReport(rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime, rs.task.ArtifactRoot, status); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("final report: %w", err))
@@ -1977,7 +2908,7 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	}
 	if err := rs.evidence.Append(evidence.Event{
 		Type: "run_finished", Timestamp: endTime.UTC(),
-		Data: map[string]any{"status": status, "stage_attempts": len(rs.results)},
+		Data: map[string]any{"status": status, "stage_attempts": rs.attemptOrdinal},
 	}); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("запись run_finished: %w", err))
 		status = string(workflow.RunFailed)
@@ -1987,6 +2918,14 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	rs.printSummary()
 	if rs.p.recorder != nil {
 		rs.p.recorder.RunFinished(rs.runID, status, endTime.UTC())
+	}
+	terminal := rs.lifecycleState
+	terminal.Phase, terminal.NextStage, terminal.PendingApprovalID, terminal.AttemptOrdinal =
+		lifecycle.PhaseTerminal, "", "", rs.attemptOrdinal
+	if err := rs.lifecycleStore.Save(rs.lifecycleState, terminal); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("terminal lifecycle state: %w", err))
+	} else {
+		rs.lifecycleState = terminal
 	}
 	combinedErr := errors.Join(runErr, finalizeErr)
 	outcome := workflow.RunOutcome(status)

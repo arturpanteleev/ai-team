@@ -185,7 +185,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 	}
 	currentBranch := strings.TrimSpace(currentBranchResult.Stdout)
 	if currentBranch != request.Plan.Branch {
-		if currentBranch != request.Plan.BaseBranch && currentBranch != "main" && currentBranch != "master" {
+		if currentBranch != "" && currentBranch != request.Plan.BaseBranch && currentBranch != "main" && currentBranch != "master" {
 			return result(), fmt.Errorf("delivery: текущая ветка %q не совпадает с plan branch %q или protected base", currentBranch, request.Plan.Branch)
 		}
 		probe := c.Runner.Run(ctx, target, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+request.Plan.Branch)

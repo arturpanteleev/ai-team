@@ -34,7 +34,10 @@ verify: specs
 	go test -race ./...
 	$(MAKE) test-coverage
 	$(MAKE) test-e2e
-	cd web && npm ci && npm audit --audit-level=high && npm run lint && npm test && npm run build
+	@FRONTEND_DIST_SNAPSHOT=$$(mktemp -d); \
+	cp -R web/dist "$$FRONTEND_DIST_SNAPSHOT/dist"; \
+	trap 'rm -rf -- "$$FRONTEND_DIST_SNAPSHOT"' EXIT; \
+	cd web && npm ci && npm run build && diff -qr "$$FRONTEND_DIST_SNAPSHOT/dist" dist && npm run lint && npm test && npm audit --audit-level=high
 
 clean:
 	rm -rf bin/

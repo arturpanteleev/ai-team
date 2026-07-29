@@ -35,3 +35,14 @@ Delivery MUST persist step results and safely resume after partial failure.
 - **THEN** the executor MUST re-verify commit message, parent, paths, modes and blob hashes before recovery
 - **AND** it MUST NOT create a duplicate commit
 
+### Requirement: Delivery только из candidate
+
+Planner и executor MUST строить, проверять, коммитить и отправлять exact
+candidate worktree.
+
+#### Scenario: Успешная delivery
+
+- **КОГДА** plan hash одобрен и candidate identity неизменна
+- **ТОГДА** executor MUST commit/push candidate branch
+- **И** MUST NOT переключать live checkout
+

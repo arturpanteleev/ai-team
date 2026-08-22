@@ -1,7 +1,7 @@
 # workflow-graph Specification
 
 ## Purpose
-TBD - created by archiving change workflow-graph-v4. Update Purpose after archive.
+Граф workflow schema v4: узлы pipeline, рёбра по outcome с approval policies, terminal targets и max_visits, проверяемые до первого LLM-вызова.
 ## Requirements
 ### Requirement: Декларативный outcome graph
 

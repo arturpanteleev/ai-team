@@ -75,6 +75,7 @@ type Server struct {
 	authenticator IdentityVerifier
 	sessions      map[string]browserSession
 	sessionMu     sync.Mutex
+	streamID      string
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -93,9 +94,15 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	hub := NewHub()
 
+	streamID, tokenErr := randomToken()
+	if tokenErr != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("stream identity: %w", tokenErr)
+	}
 	srv := &Server{
 		store:        s,
 		hub:          hub,
+		streamID:     streamID[:16],
 		artifactRoot: absRoot,
 		runRoot:      filepath.Join(filepath.Dir(absRoot), "runs"),
 		sessions:     make(map[string]browserSession),
@@ -182,6 +189,31 @@ func (s *Server) ListenAndServe(addr string) error {
 }
 
 // Shutdown корректно останавливает HTTP-сервер (graceful shutdown).
+// RecordAdmissionFailure фиксирует run, который контроллер принял по 202,
+// но который упал в фоне до создания durable state. Без этой записи run
+// остался бы «призраком», невидимым в дашборде.
+func (s *Server) RecordAdmissionFailure(runID, cause string) {
+	now := time.Now().UTC()
+	existing, err := s.store.GetPipelineRunByRunID(runID)
+	if err == nil && existing != nil {
+		existing.Status = "failed"
+		existing.CompletedAt = &now
+		if updateErr := s.store.UpdatePipelineRun(existing); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", updateErr)
+		}
+		return
+	}
+	run := &store.PipelineRun{RunID: runID, Feature: "unknown", Status: "failed", StartedAt: now, CompletedAt: &now}
+	if err := s.store.CreatePipelineRun(run); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", err)
+		return
+	}
+	_ = s.store.AppendEvent(&store.Event{
+		RunID: runID, Sequence: 1, Type: "run_finished", Timestamp: now,
+		DataJSON: fmt.Sprintf(`{"status":"failed","error":%q}`, cause),
+	})
+}
+
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
@@ -218,6 +250,7 @@ func (s *Server) replayEvents(cursor int64) ([]Event, error) {
 			if err != nil {
 				return nil, err
 			}
+			event.Stream = s.streamID
 			events = append(events, event)
 			cursor = item.ID
 		}
@@ -249,6 +282,7 @@ func (s *Server) tailEvents(ctx context.Context, cursor int64) {
 						cursor = item.ID
 						continue
 					}
+					event.Stream = s.streamID
 					if !s.hub.BroadcastEventContext(ctx, event) {
 						return
 					}

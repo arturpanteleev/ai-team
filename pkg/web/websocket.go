@@ -37,7 +37,11 @@ var upgrader = websocket.Upgrader{
 }
 
 type Event struct {
-	Version   int            `json:"version"`
+	Version int `json:"version"`
+	// Stream — identity конкретного event stream (случайный ID на время
+	// жизни SQLite-базы сервера). Клиент сбрасывает cursor при смене stream,
+	// иначе после пересоздания БД новые события с меньшими ID игнорируются.
+	Stream    string         `json:"stream,omitempty"`
 	Cursor    int64          `json:"cursor"`
 	RunID     string         `json:"run_id"`
 	Sequence  int64          `json:"sequence"`
@@ -130,13 +134,6 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 		}
 	}
-}
-
-func (h *Hub) BroadcastEvent(event Event) {
-	// Durable tailer applies backpressure here instead of dropping a cursor in
-	// the middle of an otherwise ordered live stream. SQLite remains the
-	// replay source while the bounded queue drains.
-	h.broadcast <- event
 }
 
 func (h *Hub) BroadcastEventContext(ctx context.Context, event Event) bool {

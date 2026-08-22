@@ -1,7 +1,7 @@
 # workflow-engine Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Детерминированное исполнение workflow: контроллер владеет переходами, исходами и лимитами визитов; LLM предлагает только вердикты.
 ## Requirements
 ### Requirement: Explicit state machine
 Pipeline MUST вычислять execution/decision/outcome явно, независимо от console
@@ -29,7 +29,7 @@ Stage behavior MUST be declared in configuration rather than inferred from agent
 Configuration and agent definitions MUST reject unknown fields, duplicate stages, invalid loopback targets and unsupported ordering constraints.
 
 #### Scenario: Misspelled field
-- **WHEN** config contains `gate_afer` instead of `gate_after`
+- **WHEN** config contains an unknown top-level field (например, опечатка в имени ключа)
 - **THEN** validation MUST fail before any task or artifact file is changed
 
 ### Requirement: Explicit non-interactive policy

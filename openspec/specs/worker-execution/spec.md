@@ -1,7 +1,7 @@
 # worker-execution Specification
 
 ## Purpose
-TBD - created by archiving change cloud-worker-execution. Update Purpose after archive.
+Disposable worker process исполняет ровно один strict job (start/resume/cancel) через общий RunEngine без альтернативной cloud-семантики.
 ## Requirements
 ### Requirement: Versioned worker job
 

@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -26,17 +24,6 @@ type Registry struct {
 type Layer struct {
 	Name string
 	FS   fs.FS
-}
-
-func NewRegistry(agentsDir string) *Registry {
-	absDir, err := filepath.Abs(agentsDir)
-	if err != nil {
-		absDir = agentsDir
-	}
-	return &Registry{
-		layers: []Layer{{Name: "filesystem", FS: os.DirFS(absDir)}},
-		agents: make(map[string]*Agent),
-	}
 }
 
 func NewFS(fsys fs.FS) *Registry {

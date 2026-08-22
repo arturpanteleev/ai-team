@@ -1,7 +1,7 @@
 # run-evidence Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Immutable run/attempt manifests и hash-chained event log как источник истины; SQLite/web — восстанавливаемые projections.
 ## Requirements
 ### Requirement: Run and attempt identity
 Run evidence MUST сохранять identity attempts, transitions и всех человеческих

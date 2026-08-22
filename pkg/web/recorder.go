@@ -19,7 +19,9 @@ type StoreRecorder struct {
 	runUID   string
 	sequence int64
 	current  map[string]*store.Stage
-	disabled bool
+	// Проеция переживает транзиентные ошибки SQLite (busy lock): запись не
+	// отключается навсегда, предупреждения троттлятся.
+	lastWarn time.Time
 }
 
 func NewStoreRecorder(s *store.Store) *StoreRecorder {
@@ -27,23 +29,20 @@ func NewStoreRecorder(s *store.Store) *StoreRecorder {
 }
 
 func (r *StoreRecorder) warn(op string, err error) {
-	fmt.Fprintf(os.Stderr, "⚠ web store (%s): %v — запись отключена\n", op, err)
-	r.disabled = true
+	if !r.lastWarn.IsZero() && time.Since(r.lastWarn) < 30*time.Second {
+		return
+	}
+	r.lastWarn = time.Now()
+	fmt.Fprintf(os.Stderr, "⚠ web store (%s): %v\n", op, err)
 }
 
 func (r *StoreRecorder) ReconcileInterrupted(at time.Time) {
-	if r.disabled {
-		return
-	}
 	if err := r.store.ReconcileInterrupted(at); err != nil {
 		r.warn("reconcile interrupted", err)
 	}
 }
 
 func (r *StoreRecorder) RunStarted(runID, feature, configSnapshot string, startedAt time.Time) {
-	if r.disabled {
-		return
-	}
 	run := &store.PipelineRun{
 		RunID: runID, Feature: feature, Status: "running", StartedAt: startedAt, ConfigSnapshot: configSnapshot,
 	}
@@ -56,9 +55,6 @@ func (r *StoreRecorder) RunStarted(runID, feature, configSnapshot string, starte
 }
 
 func (r *StoreRecorder) RunResumed(runID string, resumedAt time.Time) {
-	if r.disabled {
-		return
-	}
 	run, err := r.store.ResumePipelineRun(runID)
 	if err != nil {
 		r.warn("resume run", err)
@@ -74,9 +70,6 @@ func (r *StoreRecorder) RunResumed(runID string, resumedAt time.Time) {
 }
 
 func (r *StoreRecorder) RunAttached(runID string) {
-	if r.disabled {
-		return
-	}
 	run, err := r.store.GetPipelineRunByRunID(runID)
 	if err != nil {
 		r.warn("attach run", err)
@@ -91,7 +84,7 @@ func (r *StoreRecorder) RunAttached(runID string) {
 }
 
 func (r *StoreRecorder) RunPaused(runID, status string, pausedAt time.Time) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	run := &store.PipelineRun{ID: r.runID, RunID: runID, Status: status, CompletedAt: &pausedAt}
@@ -103,35 +96,35 @@ func (r *StoreRecorder) RunPaused(runID, status string, pausedAt time.Time) {
 }
 
 func (r *StoreRecorder) RunCanceled(runID string, canceledAt time.Time) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	r.event("run_canceled", "", canceledAt, nil)
 }
 
 func (r *StoreRecorder) ApprovalRequested(runID, approvalID, attemptID string, at time.Time, data map[string]any) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	r.event("approval_requested", attemptID, at, data)
 }
 
 func (r *StoreRecorder) ApprovalDecided(runID, approvalID, attemptID string, at time.Time, data map[string]any) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	r.event("approval_decided", attemptID, at, data)
 }
 
 func (r *StoreRecorder) TransitionSelected(runID, attemptID string, at time.Time, data map[string]any) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	r.event("transition_selected", attemptID, at, data)
 }
 
 func (r *StoreRecorder) StageStarted(runID, attemptID, agentName string, index int, startedAt time.Time) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	stage := &store.Stage{
@@ -147,7 +140,7 @@ func (r *StoreRecorder) StageStarted(runID, attemptID, agentName string, index i
 }
 
 func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
-	if r.disabled || r.runID == 0 || stage.RunID != r.runUID {
+	if r.runID == 0 || stage.RunID != r.runUID {
 		return
 	}
 	stored := r.current[stage.AttemptID]
@@ -195,7 +188,7 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 }
 
 func (r *StoreRecorder) AttemptsInvalidated(runID string, attemptIDs []string, at time.Time) {
-	if r.disabled || r.runID == 0 || runID != r.runUID || len(attemptIDs) == 0 {
+	if r.runID == 0 || runID != r.runUID || len(attemptIDs) == 0 {
 		return
 	}
 	if err := r.store.InvalidateAttempts(r.runID, attemptIDs, at); err != nil {
@@ -206,7 +199,7 @@ func (r *StoreRecorder) AttemptsInvalidated(runID string, attemptIDs []string, a
 }
 
 func (r *StoreRecorder) RunFinished(runID, status string, completedAt time.Time) {
-	if r.disabled || r.runID == 0 || runID != r.runUID {
+	if r.runID == 0 || runID != r.runUID {
 		return
 	}
 	run := &store.PipelineRun{ID: r.runID, RunID: runID, Status: status, CompletedAt: &completedAt}
@@ -218,9 +211,6 @@ func (r *StoreRecorder) RunFinished(runID, status string, completedAt time.Time)
 }
 
 func (r *StoreRecorder) event(eventType, attemptID string, timestamp time.Time, data any) {
-	if r.disabled {
-		return
-	}
 	r.sequence++
 	event := &store.Event{
 		RunID: r.runUID, Sequence: r.sequence, Type: eventType, AttemptID: attemptID,

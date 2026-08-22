@@ -1,32 +1,37 @@
-# React + TypeScript + Vite
+# ai-team web frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + TypeScript + Vite SPA для дашборда ai-team. Продакшн-сборка
+встраивается в Go-бинарник через `go:embed` (`web/dist`); `ai-team web
+--dist <path>` позволяет подменить её локальной сборкой.
 
-Currently, two official plugins are available:
+## Разработка
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm ci
+npm run dev        # dev-сервер; API ожидается на том же origin (proxy)
+npm run lint
+npm test           # vitest + testing-library
+npm run build      # прод-сборка в dist/
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`make verify` дополнительно проверяет, что `web/dist` в репозитории
+соответствует свежей сборке — после изменений фронта выполните
+`npm run build` и закоммитьте dist.
+
+## Архитектура
+
+- `src/api.ts` — типизированный клиент REST API (`/api/pipelines`, `/api/runs`,
+  approvals, artifacts).
+- `src/hooks/useWebSocket.ts` — живой event stream `/ws` с cursor/replay;
+  stream identity сбрасывает cursor при пересоздании SQLite store, polling
+  остаётся recovery fallback.
+- `src/pages/Dashboard.tsx` — список runs; `PipelineDetail.tsx` — детали run,
+  pending approvals (subject hash, actions), checks/mutations/delivery.
+- Аутентификация: в cloud-режиме Bearer token обменивается на HttpOnly
+  session cookie; все write-запросы требуют `X-CSRF-Token` (см. `src/api.ts`).
+
+События, которые эмитит бэкенд: `run_started`, `run_resumed`, `run_paused`,
+`run_canceled`, `attempt_started`, `attempt_finished`, `attempts_invalidated`,
+`approval_requested`, `approval_decided`, `transition_selected`,
+`run_finished` (контракт — `src/types/index.ts`, источник —
+`pkg/web/recorder.go`).

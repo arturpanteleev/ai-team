@@ -1,7 +1,7 @@
 # cloud-identity Specification
 
 ## Purpose
-TBD - created by archiving change cloud-auth-and-rbac. Update Purpose after archive.
+Cloud auth: HMAC token с immutable actor ID и ролями, обмен на HttpOnly session; actor решения берётся с сервера.
 ## Requirements
 ### Requirement: Проверяемая cloud identity
 

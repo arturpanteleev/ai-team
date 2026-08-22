@@ -1,9 +1,12 @@
 package approval
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -153,5 +156,100 @@ func TestStoreListOrdersApprovalsAndReturnsEmpty(t *testing.T) {
 	values, err := store.List("run-list")
 	if err != nil || len(values) != 2 || values[0].FromStage != "a" || values[1].FromStage != "b" {
 		t.Fatalf("ordered list: %+v err=%v", values, err)
+	}
+}
+
+func TestStoreConcurrentDecisionsLoseNoUpdate(t *testing.T) {
+	target := t.TempDir()
+	store, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-race", AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "tester",
+		Trigger: "stage_completed", SubjectHash: testSubject,
+		RequiredRoles: []string{"product_owner"}, Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": "tester", "reject": "tester"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 16
+	var wg sync.WaitGroup
+	results := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			action := "approve"
+			if index%2 == 1 {
+				action = "reject"
+			}
+			_, decideErr := store.Decide(value.RunID, value.ID, Decision{
+				ActorID: fmt.Sprintf("user-%d", index), ActorRole: "product_owner",
+				Action: action, SubjectHash: testSubject,
+			})
+			results <- decideErr
+		}(index)
+	}
+	wg.Wait()
+	close(results)
+
+	succeeded := 0
+	for decideErr := range results {
+		if decideErr == nil {
+			succeeded++
+		}
+	}
+	if succeeded == 0 {
+		t.Fatal("ни одно решение не записалось")
+	}
+
+	final, loadErr := store.Load(value.RunID, value.ID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if final.Status != StatusResolved || len(final.Decisions) != succeeded {
+		t.Fatalf("рассинхронизация decisions: записано=%d успешно=%d status=%s",
+			len(final.Decisions), succeeded, final.Status)
+	}
+	for _, decision := range final.Decisions {
+		if decision.Action != final.ResolvedAction && final.Quorum == QuorumAny {
+			t.Fatalf("чужое action после разрешения: %+v", final)
+		}
+	}
+}
+
+func TestStorePayloadRoundTripAndValidation(t *testing.T) {
+	target := t.TempDir()
+	store, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-payload", AttemptID: "attempt-1", FromStage: "deployer", ToStage: "deployer",
+		Trigger: "delivery_plan", SubjectHash: testSubject,
+		RequiredRoles: []string{"release_manager"}, Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": "deployer", "reject": "deployer"},
+		Payload: json.RawMessage(`{"commit_message":"x"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, loadErr := store.Load(value.RunID, value.ID)
+	var payload map[string]any
+	if loadErr != nil || json.Unmarshal(reloaded.Payload, &payload) != nil ||
+		payload["commit_message"] != "x" {
+		t.Fatalf("payload потерян: %q err=%v", reloaded.Payload, loadErr)
+	}
+	if _, err := store.Create(PendingApproval{
+		RunID: "run-payload-bad", AttemptID: "attempt-1", FromStage: "deployer", ToStage: "deployer",
+		Trigger: "delivery_plan", SubjectHash: testSubject,
+		RequiredRoles: []string{"release_manager"}, Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": "deployer", "reject": "deployer"},
+		Payload: json.RawMessage(`{broken`),
+	}); err == nil || !strings.Contains(err.Error(), "payload") {
+		t.Fatalf("битый payload должен быть отклонён, got %v", err)
 	}
 }

@@ -86,11 +86,7 @@ func (p *Poller) RunOnce(ctx context.Context, owner string) (claimed bool, err e
 		return true, leaseErr
 	}
 
-	success := executionErr == nil || controlledWorkerExit(executionErr)
-	diagnostic := ""
-	if executionErr != nil {
-		diagnostic = executionErr.Error()
-	}
+	success, diagnostic := classifyExecution(executionErr)
 	if p.archiver != nil {
 		if archiveErr := p.archiver.Archive(record.Job.RunID); archiveErr != nil {
 			success = false
@@ -103,8 +99,19 @@ func (p *Poller) RunOnce(ctx context.Context, owner string) (claimed bool, err e
 	return true, nil
 }
 
-func controlledWorkerExit(err error) bool {
+// classifyExecution отличает durable business-исходы run (waiting/blocked/
+// stopped/canceled/completed) от инфраструктурного сбоя воркера. Решение
+// принимает строка результата `ai-team worker`, а не exit code: crash,
+// preflight fatal или чужой binary строки не пишут и классифицируются как
+// инфраструктурный сбой.
+func classifyExecution(err error) (success bool, diagnostic string) {
+	if err == nil {
+		return true, ""
+	}
+	diagnostic = err.Error()
 	var processError *worker.ProcessError
-	return errors.As(err, &processError) &&
-		(processError.ExitCode == 1 || processError.ExitCode == 2 || processError.ExitCode == 3)
+	if !errors.As(err, &processError) || processError.Result == nil {
+		return false, diagnostic
+	}
+	return processError.Result.Controlled(), diagnostic
 }

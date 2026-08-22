@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const maxDiagnostics = 64 << 10
@@ -24,6 +25,7 @@ type ProcessEngine struct {
 type ProcessError struct {
 	ExitCode    int
 	Diagnostics string
+	Result      *Result
 	Err         error
 }
 
@@ -101,6 +103,13 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	err = command.Run()
 	result := pipeline.RunResult{RunID: job.RunID}
 	if err == nil {
+		// Успешный exit без строки результата — чужой binary: не считаем
+		// это контролируемым завершением job.
+		parsed, parseErr := ParseResult(output.String())
+		if parseErr != nil {
+			return result, &ProcessError{ExitCode: 0, Diagnostics: output.String(), Err: parseErr}
+		}
+		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 		return result, nil
 	}
 	if ctx.Err() != nil {
@@ -111,7 +120,13 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	if errors.As(err, &exitError) {
 		exitCode = exitError.ExitCode()
 	}
-	return result, &ProcessError{ExitCode: exitCode, Diagnostics: output.String(), Err: err}
+	processErr := &ProcessError{ExitCode: exitCode, Diagnostics: output.String(), Err: err}
+	if parsed, parseErr := ParseResult(output.String()); parseErr == nil {
+		parsedResult := parsed
+		processErr.Result = &parsedResult
+		result.Outcome = workflow.RunOutcome(parsed.Outcome)
+	}
+	return result, processErr
 }
 
 type limitedOutput struct {

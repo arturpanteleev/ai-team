@@ -153,6 +153,8 @@ export interface Approval {
   required_roles: string[];
   quorum: 'any' | 'all';
   actions: string[];
+  targets?: Record<string, string>;
+  payload?: unknown;
   status: 'pending' | 'resolved';
   decisions?: ApprovalDecision[];
   resolved_action?: string;
@@ -162,10 +164,11 @@ export interface Approval {
 
 export interface WsEvent {
   version: 1;
+  stream?: string;
   cursor: number;
   run_id: string;
   sequence: number;
-  type: 'run_started' | 'run_resumed' | 'run_paused' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'run_finished';
+  type: 'run_started' | 'run_resumed' | 'run_paused' | 'run_canceled' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'run_finished';
   attempt_id?: string;
   timestamp: string;
   data: Record<string, unknown>;

@@ -1,5 +1,12 @@
 # План развития ai-team
 
+> **⚠️ Исторический документ.** Большая часть этого плана реализована в
+> change «Implement human-controlled cloud workflow» (commit 91e4fda):
+> approvals/RBAC, RunEngine, web write API, WebSocket bridge, scheduler,
+> candidate worktree. Статус конкретных пунктов не отслеживается здесь —
+> актуальное состояние см. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) и
+> `TECHNICAL_AUDIT_2026-08-05.html`.
+
 ## 1. Целевая концепция
 
 `ai-team` — это управляемый человеком control plane для последовательной

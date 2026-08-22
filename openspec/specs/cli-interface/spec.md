@@ -53,7 +53,7 @@ workspace lock и использовать одну immutable run_id на вес
 - **И** MUST продолжить ту же run identity после fail-closed проверок
 
 #### Scenario: Повторный run уже доставленной фичи
-- **КОГДА** пользователь запускает `run --feature F` без `--retry-from`, и прошлый run той же `F` уже довёл её до успешной deployer delivery (записанный commit и/или PR)
+- **КОГДА** пользователь запускает `run --feature F`, и прошлый run той же `F` уже довёл её до успешной deployer delivery (записанный commit и/или PR)
 - **ТОГДА** CLI MUST вывести non-blocking предупреждение в stderr с run_id и ссылкой на предыдущую доставку до перезаписи артефактов analyst
 - **И** MUST NOT отказать в выполнении нового run из-за одного этого условия
 

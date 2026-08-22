@@ -123,9 +123,20 @@ export function PipelineDetail() {
         {approvals.length === 0 ? <p>Approvals пока нет.</p> : approvals.map((value) => (
           <article key={value.id} className={styles.approval}>
             <strong>{value.from_stage} → {value.to_stage}</strong>
-            <span>{value.status} · quorum {value.quorum}</span>
+            <span>{value.status} · trigger {value.trigger} · quorum {value.quorum}</span>
             <code>subject {value.subject_hash}</code>
             {value.candidate_sha256 && <code>candidate {value.candidate_sha256}</code>}
+            {value.targets && (
+              <small>
+                {Object.entries(value.targets).map(([action, target]) => `${action}→${target}`).join(', ')}
+              </small>
+            )}
+            {value.payload != null && (
+              <details>
+                <summary>Payload (canonical JSON)</summary>
+                <pre><code>{JSON.stringify(value.payload, null, 2)}</code></pre>
+              </details>
+            )}
             <div className={styles.actions}>
               {value.status === 'pending' && value.required_roles
                 .filter((role) => !principal || principal.roles.includes(role as CloudRole))

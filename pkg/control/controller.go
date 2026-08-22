@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -41,10 +42,11 @@ func WithPreflight(checker PreflightChecker) Option {
 }
 
 type Controller struct {
-	engine    runEngine
-	target    string
-	approvals *approval.Store
-	preflight PreflightChecker
+	engine      runEngine
+	target      string
+	approvals   *approval.Store
+	preflight   PreflightChecker
+	failureSink FailureSink
 
 	mu     sync.Mutex
 	active map[string]*worker
@@ -72,20 +74,30 @@ func (c *Controller) Start(feature, task string) (string, error) {
 	if !workflow.ValidFeature(feature) || strings.TrimSpace(task) == "" {
 		return "", errors.New("feature и непустой task обязательны")
 	}
-	if report := c.Preflight(context.Background()); !report.Ready {
-		return "", report.Error()
+	if c.preflight != nil {
+		if report := c.Preflight(context.Background()); !report.Ready {
+			return "", report.Error()
+		}
+	}
+	// Синхронное резервирование target до ответа 202: без захваченного
+	// lock второй start мог бы получить 202, а затем молча исчезнуть.
+	lock, err := evidence.AcquireWorkspaceLock(c.target)
+	if err != nil {
+		return "", fmt.Errorf("target занят другим run: %w", err)
 	}
 	runID, err := evidence.NewRunID(time.Now().UTC())
 	if err != nil {
+		_ = lock.Close()
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.active[runID] = &worker{cancel: cancel}
 	c.mu.Unlock()
-	go c.run(runID, ctx, func(ctx context.Context) {
-		_, _ = c.engine.Start(ctx, pipeline.RunConfig{
+	go c.run(runID, ctx, lock, func(ctx context.Context) (pipeline.RunResult, error) {
+		return c.engine.Start(ctx, pipeline.RunConfig{
 			RunID: runID, Feature: feature, TaskDesc: task, TargetDir: c.target,
+			WorkspaceLock: lock,
 		})
 	})
 	return runID, nil
@@ -93,7 +105,8 @@ func (c *Controller) Start(feature, task string) (string, error) {
 
 func (c *Controller) Preflight(ctx context.Context) preflight.Report {
 	if c.preflight == nil {
-		return preflight.Report{Ready: true, CheckedAt: time.Now().UTC()}
+		// Enqueue-only режим: готовность runtime известна только воркерам.
+		return preflight.Report{Unknown: true, CheckedAt: time.Now().UTC()}
 	}
 	return c.preflight.Check(ctx)
 }
@@ -128,8 +141,8 @@ func (c *Controller) Resume(runID string) error {
 	}
 	c.active[runID] = &worker{cancel: cancel}
 	c.mu.Unlock()
-	go c.run(runID, ctx, func(ctx context.Context) {
-		_, _ = c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target})
+	go c.run(runID, ctx, nil, func(ctx context.Context) (pipeline.RunResult, error) {
+		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target})
 	})
 	return nil
 }
@@ -155,15 +168,39 @@ func (c *Controller) Approvals(runID string) ([]approval.PendingApproval, error)
 	return c.approvals.List(runID)
 }
 
-func (c *Controller) run(runID string, ctx context.Context, execute func(context.Context)) {
-	execute(ctx)
+func (c *Controller) run(runID string, ctx context.Context, lock *evidence.WorkspaceLock, execute func(context.Context) (pipeline.RunResult, error)) {
+	_, execErr := execute(ctx)
+	if lock != nil {
+		_ = lock.Close()
+	}
 	c.mu.Lock()
 	active := c.active[runID]
 	c.mu.Unlock()
 	if active != nil && active.cancelRequested {
 		_, _ = c.engine.Cancel(pipeline.CancelConfig{RunID: runID, TargetDir: c.target})
 	}
+	if execErr != nil && !errors.Is(execErr, pipeline.ErrUserStopped) {
+		// Фоновая ошибка не должна «проглатываться» в 202: отдаём её в
+		// failure sink (SQLite projection web-сервера), иначе run остаётся
+		// невидимым «призраком».
+		if c.failureSink != nil {
+			c.failureSink(runID, execErr.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "⚠ run %s завершился ошибкой: %v\n", runID, execErr)
+		}
+	}
 	c.mu.Lock()
 	delete(c.active, runID)
 	c.mu.Unlock()
 }
+
+// FailureSink получает фоновые ошибки run для durable-фиксации.
+type FailureSink func(runID, cause string)
+
+func WithFailureSink(sink FailureSink) Option {
+	return func(controller *Controller) { controller.failureSink = sink }
+}
+
+// SetFailureSink доустанавливает sink после сборки (web-сервер создаёт
+// SQLite store позже контроллера).
+func (c *Controller) SetFailureSink(sink FailureSink) { c.failureSink = sink }

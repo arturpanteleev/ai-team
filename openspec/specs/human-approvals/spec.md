@@ -1,7 +1,7 @@
 # human-approvals Specification
 
 ## Purpose
-TBD - created by archiving change human-transition-approvals. Update Purpose after archive.
+PendingApproval/ApprovalDecision как typed сущности: exact subject hash, stale-rejection, idempotency и persisted waiting state.
 ## Requirements
 ### Requirement: Exact transition approval
 Каждый защищённый workflow transition MUST иметь persisted approval,

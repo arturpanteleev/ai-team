@@ -3,6 +3,7 @@
 package approval
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -58,10 +60,17 @@ type PendingApproval struct {
 	ResolvedAction  string            `json:"resolved_action,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	ResolvedAt      time.Time         `json:"resolved_at,omitempty"`
+	// Payload содержит машиночитаемое представление subject (например,
+	// canonical JSON delivery plan) для осознанного решения без доступа к
+	// filesystem. Не является частью identity: subject уже зафиксирован hash.
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type Store struct {
 	root string
+	// mu сериализует read-modify-write циклы внутри одного процесса; между
+	// процессами сериализует lockRun (flock на run-каталоге).
+	mu sync.Mutex
 }
 
 func NewStore(target string) (*Store, error) {
@@ -81,6 +90,13 @@ func NewID(runID, attemptID, fromStage, toStage, trigger, subjectHash string) st
 }
 
 func (s *Store) Create(value PendingApproval) (PendingApproval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockRun(value.RunID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	defer unlock()
 	value.SchemaVersion = SchemaVersion
 	value.Status = StatusPending
 	value.ResolvedAction = ""
@@ -180,6 +196,13 @@ func (s *Store) List(runID string) ([]PendingApproval, error) {
 }
 
 func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingApproval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockRun(runID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	defer unlock()
 	value, err := s.Load(runID, approvalID)
 	if err != nil {
 		return PendingApproval{}, err
@@ -259,6 +282,12 @@ func validate(value PendingApproval) error {
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {
 		return errors.New("approval содержит недопустимый candidate hash")
 	}
+	if len(value.Payload) > 0 {
+		var payload any
+		if json.Unmarshal(value.Payload, &payload) != nil {
+			return errors.New("approval payload должен быть валидным JSON")
+		}
+	}
 	if value.Quorum != QuorumAny && value.Quorum != QuorumAll {
 		return fmt.Errorf("неподдерживаемый approval quorum %q", value.Quorum)
 	}
@@ -302,7 +331,8 @@ func sameRequest(left, right PendingApproval) bool {
 		left.Trigger == right.Trigger && left.SubjectHash == right.SubjectHash &&
 		left.CandidateSHA256 == right.CandidateSHA256 &&
 		left.Quorum == right.Quorum && fmt.Sprint(left.RequiredRoles) == fmt.Sprint(right.RequiredRoles) &&
-		fmt.Sprint(left.Actions) == fmt.Sprint(right.Actions) && fmt.Sprint(left.Targets) == fmt.Sprint(right.Targets)
+		fmt.Sprint(left.Actions) == fmt.Sprint(right.Actions) && fmt.Sprint(left.Targets) == fmt.Sprint(right.Targets) &&
+		bytes.Equal(left.Payload, right.Payload)
 }
 
 func coversAllRoles(roles []string, decisions []Decision) bool {

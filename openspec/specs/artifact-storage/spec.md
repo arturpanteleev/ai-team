@@ -1,7 +1,7 @@
 # artifact-storage Specification
 
 ## Purpose
-TBD - created by archiving change distributed-run-scheduling. Update Purpose after archive.
+Content-addressed архивирование immutable run tree после исполнения с проверяемым restore (digest/path/symlink policy).
 ## Requirements
 ### Requirement: Content-addressed immutable blobs
 

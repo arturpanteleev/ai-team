@@ -1,7 +1,7 @@
 # run-scheduling Specification
 
 ## Purpose
-TBD - created by archiving change distributed-run-scheduling. Update Purpose after archive.
+Persistent queue для distributed-исполнения: lease/claim/renew/complete с атомарными conditional updates и concurrency limits.
 ## Requirements
 ### Requirement: Persistent idempotent queue
 

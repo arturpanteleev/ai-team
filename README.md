@@ -107,8 +107,12 @@ ai-team run --feature add-jwt-auth --task "Реализовать JWT автор
      --approve-gates --approve-plan <sha256-из-шага-1>
    ```
 
-   Если план изменился (другой коммит поверх, другие файлы) — старый SHA-256
-   не подойдёт, и контроллер откажется выполнять delivery. Это осознанное
+   Delivery approval — обычная persisted approval с subject = SHA-256 плана
+   и ролью `release_manager`. То же решение можно записать без CLI-resume:
+   через web UI (`POST /decisions`) или командой `ai-team decision`, после
+   чего достаточно `ai-team run --resume <run_id>`. Если план изменился
+   (другой коммит поверх, другие файлы) — старый SHA-256 не подойдёт ни
+   одним из путей, и контроллер откажется выполнять delivery. Это осознанное
    поведение, а не баг: подтверждение одноразовое и привязано к конкретному
    плану.
 
@@ -140,8 +144,7 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team version` / `ai-team help` | версия / usage |
 
 Флаги `run`: `--feature`, `--task`, `--target` (по умолчанию `.`),
-`--retry-from <agent>`, `--resume <run_id>`, `--approve-gates`,
-`--approve-plan <sha256>`.
+`--resume <run_id>`, `--approve-gates`, `--approve-plan <sha256>`.
 
 Если процесс был остановлен во время non-terminal run, controller сохраняет
 атомарный checkpoint в `.ai-team/state/runs/<run_id>.json`. Команда
@@ -298,8 +301,8 @@ stage_timeout: 30m
 
 Unknown/duplicate YAML-поля, несколько документов, неподдерживаемые
 schema/CLI, неоднозначные edges, недостижимые узлы, неограниченные циклы,
-пути или checks отклоняются до первого LLM-вызова. Config schemas 1–3
-продолжают исполняться через совместимый linear graph. Как именно резолвятся агенты между
+пути или checks отклоняются до первого LLM-вызова. Поддерживается только
+schema v4; конфиги schemas 1–3 отклоняются с подсказкой о миграции. Как именно резолвятся агенты между
 project/plugin/user/built-in слоями и что происходит с invalid override —
 в [ARCHITECTURE.md](docs/ARCHITECTURE.md#layered-agent-registry).
 
@@ -365,8 +368,8 @@ make specs
 make verify
 ```
 
-`make verify` выполняет строгую OpenSpec-валидацию, module verification, vet,
-govulncheck, race tests, frontend audit/lint/tests/build. CI дополнительно
-отдельными job'ами проверяет gofmt и coverage gate 60% (`make test-coverage`) —
-если меняете код, перед PR стоит запустить их локально отдельно, `make
-verify` их не покрывает.
+`make verify` выполняет gofmt-проверку, строгую OpenSpec-валидацию, module
+verification, vet, govulncheck, race tests, coverage gate 60% (`make
+test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
+проверкой, что встроенный dist соответствует исходникам фронта. CI повторяет
+те же проверки отдельными job'ами.

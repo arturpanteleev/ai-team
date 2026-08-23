@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -127,5 +128,27 @@ func TestLargeOutput(t *testing.T) { t.Log(strings.Repeat("x", 400000)) }
 	})
 	if err != nil || !IsTestEvidence(result) || !result.Truncated || result.StructuredOutputBytes <= maxCapturedOutput || result.StructuredOutputSHA256 == "" {
 		t.Fatalf("streamed structured evidence lost: result=%+v err=%v", result, err)
+	}
+}
+
+func BenchmarkWorkspaceDigest(b *testing.B) {
+	root := b.TempDir()
+	payload := []byte("benchmark payload for workspace digest hashing\n")
+	for i := 0; i < 2000; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("mod%02d", i%20), fmt.Sprintf("sub%02d", (i/20)%10))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			b.Fatal(err)
+		}
+		name := filepath.Join(dir, fmt.Sprintf("file%03d.txt", i))
+		if err := os.WriteFile(name, payload, 0o644); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := WorkspaceDigest(root); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

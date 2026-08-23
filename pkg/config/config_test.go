@@ -381,3 +381,42 @@ func TestMarshalRoundTrip(t *testing.T) {
 		t.Errorf("stage_timeout после round-trip: %q", loaded.StageTimeout)
 	}
 }
+
+func TestDefaultProfiles(t *testing.T) {
+	fast, err := DefaultProfile(ProfileFast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fast.PipelineAgents); got != 5 {
+		t.Fatalf("fast: %d агентов, ожидалось 5", got)
+	}
+	if err := fast.Validate(nil); err != nil {
+		t.Fatalf("fast конфиг невалиден: %v", err)
+	}
+
+	regulated, err := DefaultProfile(ProfileRegulated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := regulated.Validate(nil); err != nil {
+		t.Fatalf("regulated конфиг невалиден: %v", err)
+	}
+	for _, edge := range regulated.Workflow.Edges {
+		if edge.Approval != nil && edge.Approval.Quorum != "all" &&
+			edge.Outcome == "passed" && edge.To != "$complete" {
+			t.Fatalf("regulated: ребро %s→%s с quorum %s, ожидался all", edge.From, edge.To, edge.Approval.Quorum)
+		}
+	}
+	if regulated.Workflow.MaxVisits["coder"] != 2 {
+		t.Fatalf("regulated max_visits coder = %d", regulated.Workflow.MaxVisits["coder"])
+	}
+
+	standard := Default()
+	if err := standard.Validate(nil); err != nil {
+		t.Fatalf("standard сломан рефакторингом: %v", err)
+	}
+
+	if _, err := DefaultProfile("unknown"); err == nil {
+		t.Fatal("неизвестный профиль должен быть отклонён")
+	}
+}

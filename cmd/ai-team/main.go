@@ -489,6 +489,7 @@ func requireControlRoot(target string) {
 func cmdInit() {
 	initFlags := flag.NewFlagSet("init", flag.ExitOnError)
 	targetFlag := initFlags.String("target", ".", "Путь к целевому проекту")
+	profileFlag := initFlags.String("profile", config.ProfileStandard, "Профиль workflow: fast, standard или regulated")
 	writeGitignore := initFlags.Bool("write-gitignore", false, "Записать разделяемое правило в .gitignore вместо локального Git exclude")
 	if err := initFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов init: %v", err)
@@ -517,7 +518,10 @@ func cmdInit() {
 		}
 	}
 
-	cfg := config.Default()
+	cfg, err := config.DefaultProfile(*profileFlag)
+	if err != nil {
+		fatal("Ошибка профиля: %v", err)
+	}
 	switch profile, warning := cfg.ApplyDetectedChecks(target); {
 	case warning != "":
 		fmt.Fprintf(os.Stderr, "Предупреждение: %s\n", warning)
@@ -541,6 +545,13 @@ func cmdInit() {
 		fmt.Fprintf(os.Stderr, "Предупреждение: %v\n", err)
 	}
 
+	if *profileFlag == config.ProfileFast {
+		if err := writeFastReviewerOverride(target); err != nil {
+			fatal("Ошибка project-local override для fast-профиля: %v", err)
+		}
+		fmt.Printf("✓ fast-профиль: reviewer совмещает ревью и верификацию (.ai-team/agents/reviewer/)\n")
+	}
+
 	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
 	if err != nil {
 		fatal("Ошибка настройки ignore policy: %v", err)
@@ -550,6 +561,64 @@ func cmdInit() {
 	}
 
 	fmt.Printf("✓ .ai-team/ инициализирован в %s\n", target)
+}
+
+// writeFastReviewerOverride создаёт project-local определение reviewer'а,
+// которое совмещает ревью и верификацию (output verification с тем же
+// verdict-маркером) — deployer precondition остаётся выполнимым без
+// отдельной стадии verifier. Prompt наследует встроенный и дополняется
+// секцией про верификацию.
+func writeFastReviewerOverride(target string) error {
+	embedded, err := fs.Sub(agentdata.Agents, "agents/reviewer")
+	if err != nil {
+		return err
+	}
+	basePrompt, err := fs.ReadFile(embedded, "prompt.md")
+	if err != nil {
+		return fmt.Errorf("встроенный prompt reviewer: %w", err)
+	}
+	overrideDir := filepath.Join(target, ".ai-team", "agents", "reviewer")
+	if _, err := safeio.EnsureDir(target, ".ai-team", "agents", "reviewer"); err != nil {
+		return err
+	}
+	def := `name: reviewer
+description: Reviewer (fast) — ревью кода и верификация одним проходом
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
+inputs:
+  specs: '{feature}/specs'
+  test-report: '{feature}/test-report.md'
+  candidate: '{feature}/.control/review-candidate.json'
+outputs:
+  review: '{feature}/review.md'
+  verification: '{feature}/verification.md'
+`
+	prompt := strings.TrimSpace(string(basePrompt)) + `
+
+## Верификация (fast profile)
+
+Дополнительно к review.md подготовь verification.md — итог самопроверки
+реализации перед доставкой: соответствие acceptance criteria из proposal,
+результаты ручной проверки ключевых сценариев, известные ограничения и
+непроверенные сценарии. Заверши файл тем же маркером вердикта:
+
+**Verdict:** APPROVED | CHANGES_REQUESTED | REJECTED
+`
+	defPath := filepath.Join(overrideDir, "def.yaml")
+	if err := os.WriteFile(defPath, []byte(def), 0644); err != nil {
+		return err
+	}
+	promptPath := filepath.Join(overrideDir, "prompt.md")
+	if err := os.WriteFile(promptPath, []byte(prompt+"\n"), 0644); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ensureControlIgnored гарантирует исключение .ai-team/ из Git. По умолчанию

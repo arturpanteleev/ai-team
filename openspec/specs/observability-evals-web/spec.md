@@ -1,7 +1,7 @@
 # observability-evals-web Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Наблюдаемость run (events, projections, WebSocket) и advisory LLM-оценка артефактов вне нормативных гарантий.
 ## Requirements
 ### Requirement: Append-only lifecycle events
 The system MUST persist sequence-checked, SHA-256 hash-chained run and attempt

@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: true
       - name: Build
         run: go build ./cmd/ai-team
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: true
       - name: Vet
         run: go vet ./...
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: true
       - name: Unit tests
         run: go test ./pkg/...
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: true
       - name: Race detector
         run: go test -race ./pkg/...
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: true
       - name: E2E tests
         run: go test ./e2etest/...
@@ -134,6 +134,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
       - name: Go vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

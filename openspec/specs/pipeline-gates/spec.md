@@ -28,6 +28,14 @@ MUST требовать approval точного SHA-256 canonical plan.
 - **КОГДА** передан `--approve-gates`, но не передан совпадающий `--approve-plan`
 - **ТОГДА** delivery MUST остановиться после публикации плана и до внешних side effects
 
+#### Scenario: Delivery approval является persisted approval
+- **КОГДА** non-interactive run достигает подготовленного canonical delivery plan
+- **ТОГДА** controller MUST создать persisted approval с `trigger: delivery_plan`,
+  subject = SHA-256 canonical plan и ролью release_manager
+- **И** canonical JSON плана MUST быть доступен в payload approval для web-решения
+- **И** решение MUST приниматься через decision transport, либо `--resume` с
+  совпадающим `--approve-plan`, который записывает exact-subject decision
+
 ### Requirement: Edge approval gate
 
 Для schema v4 controller MUST создавать approval из policy выбранного edge,

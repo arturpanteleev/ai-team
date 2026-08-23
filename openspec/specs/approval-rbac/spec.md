@@ -1,7 +1,7 @@
 # approval-rbac Specification
 
 ## Purpose
-TBD - created by archiving change cloud-auth-and-rbac. Update Purpose after archive.
+RBAC approval-решений: роль обязана принадлежать principal, permission checks на start/cancel/decide, quorum any/all.
 ## Requirements
 ### Requirement: Канонические workflow-роли
 

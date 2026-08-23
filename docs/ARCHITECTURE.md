@@ -68,8 +68,8 @@ openspec/            OpenSpec change history (specs/ + changes/)
   решение становится stale после любой последующей mutation.
 - Обратное ребро graph создаёт новые attempt IDs и инвалидирует прежнюю
   downstream-ветку; invalidated/skipped/warning не отображаются как passed
-  или failed. Для legacy schemas 1–3 цель по-прежнему компилируется из
-  `loopback_to` и метаданных mutation.
+  или failed. Каждое non-terminal ребро требует approval — негативный
+  вердикт без rejected-ребра останавливает run (fail-closed).
 
 ## Workflow graph v4
 
@@ -123,11 +123,16 @@ append. Resume сохраняет исходный `run_id`, добавляет 
 Человеческое решение о переходе — отдельная typed сущность в
 `.ai-team/state/approvals/<run_id>/<approval_id>.json`. Она привязана к
 точному subject hash, attempt, исходному и целевому этапу, набору actions,
-ролям и quorum. Non-TTY запуск атомарно переходит в `waiting`, а CLI
-`decision` записывает actor/role/action/comment. Только resolved approval
-разрешает `resume`; stale или конфликтующее решение не меняет evidence.
-События `approval_requested` и `approval_decided` входят и в immutable hash
-chain, и в SQLite/WebSocket projection.
+ролям и quorum. Delivery plan использует тот же примитив: pending approval
+с `trigger: "delivery_plan"`, subject = SHA-256 canonical plan и ролью
+`release_manager`; canonical JSON плана хранится в payload approval для
+осознанного решения из web. Non-TTY запуск атомарно переходит в `waiting`,
+а CLI `decision` записывает actor/role/action/comment. Только resolved
+approval разрешает `resume`; stale или конфликтующее решение не меняет
+evidence. Решения сериализуются in-process mutex и flock на каталоге run,
+поэтому конкурентные CLI/web-решения не теряются. События
+`approval_requested` и `approval_decided` входят и в immutable hash chain,
+и в SQLite/WebSocket projection.
 
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.

@@ -27,7 +27,8 @@ Pipeline MUST вычислять execution, decision и outcome до выбор�
 ### Requirement: Legacy normalization
 Schema version 3 MUST отклонять legacy checkpoint fields и использовать только
 checkpoint policy. Schema versions 1 и 2 MAY принимать `transition`,
-`gate_before` и `gate_after`; version 2 мигрирует typed check configuration.
+Поддерживается только schema v4: маршрут задаётся workflow edges; legacy
+синтаксисы `gate_before`/`gate_after`/`transition`/`checkpoint_*` отклоняются.
 
 #### Scenario: Одновременные legacy и v2 fields
 - **КОГДА** один этап задаёт legacy gate и checkpoint

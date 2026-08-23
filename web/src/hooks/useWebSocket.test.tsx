@@ -37,7 +37,10 @@ describe('useWebSocket', () => {
   });
 
   it('восстанавливает cursor и игнорирует дубликаты', () => {
-    window.sessionStorage.setItem('ai-team:event-cursor', '4');
+    window.sessionStorage.setItem(
+      'ai-team:event-cursor',
+      JSON.stringify({ stream: 's1', cursor: 4 }),
+    );
     const onEvent = vi.fn();
     const { unmount } = renderHook(() => useWebSocket({ onEvent }));
     const socket = MockWebSocket.instances[0];
@@ -45,6 +48,7 @@ describe('useWebSocket', () => {
 
     const event: WsEvent = {
       version: 1,
+      stream: 's1',
       cursor: 5,
       run_id: 'run-1',
       sequence: 1,
@@ -58,7 +62,40 @@ describe('useWebSocket', () => {
     });
 
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(window.sessionStorage.getItem('ai-team:event-cursor')).toBe('5');
+    expect(window.sessionStorage.getItem('ai-team:event-cursor')).toBe(
+      JSON.stringify({ stream: 's1', cursor: 5 }),
+    );
+    unmount();
+  });
+
+  it('сбрасывает cursor при смене stream identity', () => {
+    window.sessionStorage.setItem(
+      'ai-team:event-cursor',
+      JSON.stringify({ stream: 'old', cursor: 100 }),
+    );
+    const onEvent = vi.fn();
+    const { unmount } = renderHook(() => useWebSocket({ onEvent }));
+    const socket = MockWebSocket.instances[0];
+    expect(socket.url).toContain('/ws?cursor=100');
+
+    const event: WsEvent = {
+      version: 1,
+      stream: 'new',
+      cursor: 3,
+      run_id: 'run-1',
+      sequence: 1,
+      type: 'run_started',
+      timestamp: new Date().toISOString(),
+      data: { feature: 'demo' },
+    };
+    act(() => {
+      socket.message(event);
+    });
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem('ai-team:event-cursor')).toBe(
+      JSON.stringify({ stream: 'new', cursor: 3 }),
+    );
     unmount();
   });
 });

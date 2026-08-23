@@ -1,7 +1,7 @@
 # control-plane-safety Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Безопасность control plane: workspace lock, fail-closed контракты, symlink rejection, bounded outputs, allow-list окружения.
 ## Requirements
 ### Requirement: Mandatory verdict contract
 The controller MUST require exactly one valid verdict from every stage whose definition declares a verdict contract.

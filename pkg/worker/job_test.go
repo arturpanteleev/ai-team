@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +127,12 @@ func TestProcessEngineHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	result, encodeErr := json.Marshal(Result{
+		SchemaVersion: ResultSchemaVersion, RunID: job.RunID, Outcome: OutcomeCompleted,
+	})
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	fmt.Printf("%s%s\n", ResultPrefix, result)
 	os.Exit(0)
 }

@@ -406,8 +406,8 @@ func TestE2E_BlockedAnalyst(t *testing.T) {
 	checkAbsent(t, artifactsDir(dir, feature, "proposal.md"))
 	checkAbsent(t, artifactsDir(dir, feature, "design.md"))
 
-	if !strings.Contains(out, "retry-from analyst") {
-		t.Errorf("ожидалась подсказка retry-from:\n%s", out)
+	if !strings.Contains(out, "запустите заново") || !strings.Contains(out, "--feature e2e-blocked") {
+		t.Errorf("ожидалась подсказка о перезапуске задачи:\n%s", out)
 	}
 }
 

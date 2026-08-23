@@ -1,7 +1,7 @@
 # deterministic-checks Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Deterministic verification runner: argv без shell, timeout, typed evidence, required check переопределяет LLM verdict.
 ## Requirements
 ### Requirement: Command evidence
 The controller MUST execute configured deterministic checks and persist their command, tool version, timing, exit code, stdout and stderr.

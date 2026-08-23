@@ -20,20 +20,20 @@ Pipeline MUST останавливаться при получении BLOCKED �
 - **КОГДА** analyst вернул BLOCKED (требования противоречивы)
 - **ТОГДА** pipeline MUST остановиться
 - **И** показать: `Требования неоднозначны: {детали}`
-- **И** предложить: `Вернуться на этап анализа? Используйте: ai-team run --retry-from analyst`
+- **И** предложить: `Исправьте задачу и запустите: ai-team run --feature <feature> --task "<описание>"`
 
 #### Scenario: BLOCKED от architect
 - **КОГДА** architect вернул BLOCKED (технически нереализуемо)
 - **ТОГДА** pipeline MUST остановиться
 - **И** показать: `Техническое решение невозможно: {детали}`
-- **И** предложить: `Вернуться на этап проектирования? Используйте: ai-team run --retry-from architect`
+- **И** предложить: `Исправьте задачу и запустите: ai-team run --feature <feature> --task "<описание>"`
 
-### Requirement: Предложение retry-from при BLOCKED
-Pipeline MUST предлагать retry-from агента, вернувшего BLOCKED.
+### Requirement: Подсказка перезапуска при BLOCKED
+Pipeline MUST предлагать перезапуск задачи с исправленным описанием.
 
-#### Scenario: Предложение retry
+#### Scenario: Подсказка после BLOCKED
 - **КОГДА** агент вернул BLOCKED
-- **ТОГДА** pipeline MUST вывести: `Для исправления запустите: ai-team run --retry-from {agent_name}`
+- **ТОГДА** pipeline MUST вывести подсказку вида `Для исправления уточните задачу и запустите заново: ai-team run --feature {feature} --task "<описание>"`
 - **И** pipeline MUST завершиться с кодом выхода, указывающим на BLOCKED
 
 ### Requirement: BLOCKED vs failed
@@ -47,7 +47,7 @@ Pipeline MUST предлагать retry-from агента, вернувшего
 #### Scenario: failed — ошибка
 - **КОГДА** агент вернул failed
 - **ТОГДА** pipeline MUST считать это ошибкой (код выхода 1)
-- **И** MUST NOT предлагать retry-from автоматически
+- **И** MUST NOT предлагать автоматический перезапуск
 
 ### Requirement: Неинтерактивный режим для BLOCKED
 BLOCKED MUST сохранять ту же доменную семантику независимо от наличия TTY и MUST NOT ожидать ввод.

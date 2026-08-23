@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +80,7 @@ func TestHub_BroadcastEvent(t *testing.T) {
 		Type: "attempt_started", Timestamp: time.Now(),
 		Data: map[string]any{"agent": "analyst", "status": "running"},
 	}
-	hub.BroadcastEvent(event)
+	hub.BroadcastEventContext(context.Background(), event)
 
 	// Read the message
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -137,7 +138,7 @@ func TestHub_MultipleClients(t *testing.T) {
 	}
 
 	// Broadcast
-	hub.BroadcastEvent(Event{Version: 1, Type: "test", Data: map[string]any{"agent": "broadcast-test"}})
+	hub.BroadcastEventContext(context.Background(), Event{Version: 1, Type: "test", Data: map[string]any{"agent": "broadcast-test"}})
 
 	// All 3 should receive
 	for i, conn := range conns {

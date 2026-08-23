@@ -1,7 +1,7 @@
 # web-run-control Specification
 
 ## Purpose
-TBD - created by archiving change web-run-control-plane. Update Purpose after archive.
+Write API web-сервера: start/resume/cancel/approval decisions поверх общего RunEngine с session+CSRF защитой.
 ## Requirements
 ### Requirement: Async run commands
 Web control plane MUST запускать start, resume и cancel через общий

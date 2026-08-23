@@ -4,6 +4,7 @@ package preflight
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,11 +39,18 @@ type Report struct {
 	Ready     bool      `json:"ready"`
 	CheckedAt time.Time `json:"checked_at"`
 	Checks    []Check   `json:"checks"`
+	// Unknown означает, что локальный runtime checker недоступен
+	// (например, enqueue-only scheduler mode): готовность воркеров не
+	// проверялась и не может считаться true.
+	Unknown bool `json:"unknown,omitempty"`
 }
 
 func (r Report) Error() error {
 	if r.Ready {
 		return nil
+	}
+	if r.Unknown {
+		return errors.New("preflight неизвестен: локальный runtime checker недоступен")
 	}
 	var failed []string
 	for _, check := range r.Checks {

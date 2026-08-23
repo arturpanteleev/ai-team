@@ -1,40 +1,38 @@
 ## Purpose
 
-Спецификация определяет нормативное поведение capability `workflow-loopback`.
+Спецификация определяет нормативное поведение capability `workflow-loopback`:
+возврат к предыдущей стадии после негативного вердикта через approval-ребро
+графа workflow.
 ## Requirements
 ### Requirement: Loopback при REJECTED
 Возврат после `REJECTED` или `CHANGES_REQUESTED` MUST выполняться только после
 persisted human decision и MUST NOT зависеть от наличия TTY.
 
 #### Scenario: CHANGES_REQUESTED без TTY
-- **КОГДА** reviewer возвращает `CHANGES_REQUESTED` и retry доступен
-- **ТОГДА** pipeline MUST создать approval с actions `return_to_coder`,
-  `reject`, `request_information`, `override_approve`
+- **КОГДА** reviewer возвращает `CHANGES_REQUESTED` и в графе есть
+  rejected-ребро с approval policy (actions `return_to_coder`,
+  `override_approve`, `reject`)
+- **ТОГДА** pipeline MUST создать persisted approval с exact subject hash
 - **И** decision `return_to_coder` MUST инвалидировать downstream attempts и
-  продолжить тот же run с coder
+  продолжить тот же run с целевой стадией ребра
 
 #### Scenario: Решение reject
 - **КОГДА** уполномоченный человек выбирает `reject`
-- **ТОГДА** run MUST завершиться как rejected без запуска coder
+- **ТОГДА** run MUST завершиться как rejected без повторного запуска
+  целевой стадии
 
-### Requirement: max_retries в конфиге
-Пайплайн MUST поддерживать поле `max_retries` для каждого агента.
+### Requirement: Loopback задаётся рёбрами графа
+Loopback MUST задаваться rejected-ребром графа workflow schema v4, цель
+которого указывает на предыдущую стадию. Конфигурации агентов MUST NOT
+содержать полей `loopback_to`, `max_retries`, `on_negative_verdict` —
+маршрут, лимиты повторов (`max_visits`) и approvals живут только в
+workflow edges/max_visits.
 
-#### Scenario: max_retries по умолчанию
-- **КОГДА** `max_retries` не указан в конфигурации
-- **ТОГДА** значение MUST быть 0 (без ретраев)
+#### Scenario: Негативный вердикт без rejected-ребра
+- **КОГДА** стадия возвращает негативный вердикт, а rejected-ребро в графе
+  отсутствует
+- **ТОГДА** pipeline MUST остановить run (fail-closed NegativeVerdictError)
 
-### Requirement: Default loopback target is metadata-driven
-When a stage does not declare `loopback_to` explicitly, the system MUST
-select the closest preceding stage whose definition declares
-`mutation: source` as the default loopback target, rather than matching a
-fixed name.
-
-#### Scenario: Renamed source-writing stage
-- **WHEN** a pipeline's source-writing stage is not named "coder" and no stage declares `loopback_to` explicitly
-- **THEN** a negative verdict MUST still trigger loopback to that renamed stage, provided its definition declares `mutation: source`
-
-#### Scenario: No eligible stage
-- **WHEN** no preceding stage declares `mutation: source`
-- **THEN** loopback MUST NOT trigger, matching the existing behavior for an unmatched explicit `loopback_to` target
-
+#### Scenario: Исчерпан max_visits
+- **КОГДА** счётчик визитов целевой стадии loopback достигает `max_visits`
+- **ТОГДА** pipeline MUST остановить run с ошибкой лимита до запуска стадии

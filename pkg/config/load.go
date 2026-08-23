@@ -6,7 +6,6 @@ import (
 	"io"
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
-	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"gopkg.in/yaml.v3"
 )
@@ -29,61 +28,29 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	if cfg.SchemaVersion == SchemaVersion2 {
-		migrateV2ToV3(&cfg)
-	}
 	return &cfg, nil
 }
 
-func migrateV2ToV3(cfg *Config) {
-	for agentIndex := range cfg.PipelineAgents {
-		for checkIndex := range cfg.PipelineAgents[agentIndex].Checks {
-			check := &cfg.PipelineAgents[agentIndex].Checks[checkIndex]
-			if check.Adapter != "" || len(check.Command) < 2 || check.Command[0] != "go" || check.Command[1] != "test" {
-				continue
-			}
-			check.Adapter = checks.AdapterGoTest
-			if !hasArgument(check.Command[2:], "-json") {
-				check.Command = append(check.Command[:2], append([]string{"-json"}, check.Command[2:]...)...)
-			}
-			if !hasArgument(check.Command[2:], "-count=1") {
-				check.Command = append(check.Command[:2], append([]string{"-count=1"}, check.Command[2:]...)...)
-			}
-		}
-	}
-	cfg.SchemaVersion = PreviousSchemaVersion
+// defaultStageRoles — human-роли рёбер default workflow. Источник имён/порядка
+// стадий — (*agent.Registry).DefaultPipeline(); роли нужны только для
+// генерации approval policies, в AgentConfig не пишутся.
+var defaultStageRoles = map[string][]string{
+	"analyst":   {"product_owner"},
+	"architect": {"architect"},
+	"coder":     {"developer"},
+	"reviewer":  {"reviewer"},
+	"tester":    {"qa"},
+	"verifier":  {"qa"},
 }
 
-func hasArgument(arguments []string, expected string) bool {
-	for _, argument := range arguments {
-		if argument == expected {
-			return true
-		}
-	}
-	return false
-}
-
-// defaultAgentOverrides carries the per-stage config beyond a bare name for
-// the default pipeline. The stage names/order themselves come from
-// (*agent.Registry).DefaultPipeline() — the single source of truth openspec's
-// verifier-integration spec already names — rather than being duplicated
-// here independently.
-var defaultAgentOverrides = map[string]AgentConfig{
-	"analyst":   {ApprovalRoles: []string{"product_owner"}},
-	"architect": {ApprovalRoles: []string{"architect"}},
-	"coder":     {MaxRetries: 2, ApprovalRoles: []string{"developer"}},
-	"reviewer":  {ApprovalRoles: []string{"reviewer"}},
-	"tester":    {ApprovalRoles: []string{"qa"}},
-	"verifier":  {ApprovalRoles: []string{"qa"}},
-}
+// defaultLoopbackSources — стадии, чей негативный вердикт возвращается к coder.
+var defaultLoopbackSources = []string{"reviewer", "tester", "verifier"}
 
 func Default() *Config {
 	names := (&agent.Registry{}).DefaultPipeline()
 	agents := make([]AgentConfig, len(names))
 	for i, name := range names {
-		cfg := defaultAgentOverrides[name]
-		cfg.Name = name
-		agents[i] = cfg
+		agents[i] = AgentConfig{Name: name}
 	}
 	cfg := &Config{
 		SchemaVersion:  CurrentSchemaVersion,
@@ -92,30 +59,25 @@ func Default() *Config {
 		Effort:         "medium",
 		StageTimeout:   "30m",
 	}
-	cfg.Workflow = defaultWorkflow(agents)
-	for index := range cfg.PipelineAgents {
-		cfg.PipelineAgents[index].ApprovalRoles = nil
-		cfg.PipelineAgents[index].ApprovalQuorum = ""
-		cfg.PipelineAgents[index].MaxRetries = 0
-	}
+	cfg.Workflow = defaultWorkflow(names)
 	return cfg
 }
 
-func defaultWorkflow(agents []AgentConfig) *WorkflowConfig {
+func defaultWorkflow(names []string) *WorkflowConfig {
 	workflowConfig := &WorkflowConfig{
-		Entry:     agents[0].Name,
+		Entry:     names[0],
 		MaxVisits: map[string]int{},
 	}
-	indices := make(map[string]int, len(agents))
-	for index, stage := range agents {
-		indices[stage.Name] = index
+	indices := make(map[string]int, len(names))
+	for index, name := range names {
+		indices[name] = index
 		target := "$complete"
-		if index+1 < len(agents) {
-			target = agents[index+1].Name
+		if index+1 < len(names) {
+			target = names[index+1]
 		}
-		edge := WorkflowEdgeConfig{From: stage.Name, Outcome: "passed", To: target}
+		edge := WorkflowEdgeConfig{From: name, Outcome: "passed", To: target}
 		if target != "$complete" {
-			roles := append([]string(nil), stage.ApprovalRoles...)
+			roles := append([]string(nil), defaultStageRoles[name]...)
 			if len(roles) == 0 {
 				roles = []string{"operator"}
 			}
@@ -126,17 +88,17 @@ func defaultWorkflow(agents []AgentConfig) *WorkflowConfig {
 		}
 		workflowConfig.Edges = append(workflowConfig.Edges, edge)
 	}
-	for _, source := range []string{"reviewer", "tester", "verifier"} {
+	coderIndex, coderExists := indices["coder"]
+	for _, source := range defaultLoopbackSources {
 		index, exists := indices[source]
-		coderIndex, coderExists := indices["coder"]
-		if !exists || !coderExists || coderIndex >= index {
+		if !coderExists || !exists || index <= coderIndex {
 			continue
 		}
 		override := "$complete"
-		if index+1 < len(agents) {
-			override = agents[index+1].Name
+		if index+1 < len(names) {
+			override = names[index+1]
 		}
-		roles := append([]string(nil), agents[index].ApprovalRoles...)
+		roles := append([]string(nil), defaultStageRoles[source]...)
 		if len(roles) == 0 {
 			roles = []string{"reviewer"}
 		}

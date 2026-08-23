@@ -115,15 +115,6 @@ Runtime MUST принимать на вход список верифициро�
 - **ТОГДА** пайплайн MUST передать эти настройки при запуске агента
 - **И** MUST NOT использовать глобальные значения для этого агента
 
-### Requirement: Retry-from в пайплайне
-Пайплайн MUST поддерживать частичный запуск, начиная с указанного агента.
-
-#### Scenario: Пропуск этапов при retry-from
-- **КОГДА** пайплайн запущен с флагом `--retry-from <agent>`
-- **ТОГДА** пайплайн MUST пропустить всех агентов до указанного
-- **И** проверить наличие артефактов пропущенных этапов
-- **И** ЕСЛИ артефакты отсутствуют — вывести ошибку и остановиться
-
 ### Requirement: Git diff guard в пайплайне
 Пайплайн MUST применять mutation policy из definition, а не эвристику по имени агента или пустому outputs.
 
@@ -133,14 +124,15 @@ Runtime MUST принимать на вход список верифициро�
 - **И** проверить required diff и allowed paths
 - **И** если контроль не может быть выполнен — завершиться fail-closed
 
-### Requirement: Checkpoint policy в пайплайне
-Пайплайн MUST поддерживать явные `checkpoint_before` и `checkpoint_after`; legacy schema v1 `transition: by_confirm` MUST нормализоваться в interactive checkpoint.
+### Requirement: Точки подтверждения через approval-рёбра
+Точки подтверждения MUST задаваться approval-политиками рёбер графа workflow
+schema v4; per-agent поля `checkpoint_before`, `checkpoint_after`,
+`transition` и legacy-нормализация НЕ поддерживаются.
 
-#### Scenario: Пауза после этапа
-- **КОГДА** агент с interactive или require_explicit checkpoint завершается
-- **ТОГДА** пайплайн MUST показать приглашение и ждать ввод
-- **И** ЕСЛИ ввод `n` — завершить пайплайн досрочно
-- **И** в non-interactive режиме без явного approval MUST завершить run как stopped
+#### Scenario: Ожидание решения на ребре
+- **КОГДА** выбранное ребро содержит approval policy
+- **ТОГДА** pipeline MUST создать persisted approval с exact subject hash
+- **И** продолжить только после допустимого human decision
 
 ### Requirement: Loopback в пайплайне
 Пайплайн MUST поддерживать возврат к coder-у при REJECTED/CHANGES_REQUESTED.

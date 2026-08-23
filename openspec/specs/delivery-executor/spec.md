@@ -1,7 +1,7 @@
 # delivery-executor Specification
 
 ## Purpose
-TBD - created by archiving change control-plane-hardening. Update Purpose after archive.
+Controller-owned delivery: canonical plan, подтверждение exact SHA-256, семь предусловий, exact-file commit/push/PR и post-commit recovery.
 ## Requirements
 ### Requirement: Validated delivery plan
 Delivery MUST consume a structured plan containing branch, base commit, exact

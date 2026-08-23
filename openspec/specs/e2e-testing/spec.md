@@ -11,7 +11,7 @@
 - **ТОГДА** он создаёт временный проект
 - **И** запускает `ai-team init`
 - **И** первый запуск с `--approve-gates` останавливается до side effects и публикует canonical plan SHA-256
-- **И** второй запуск использует `--retry-from deployer --approve-plan <точный-sha256>`
+- **И** второй запуск продолжает тот же run через `--resume <run_id> --approve-plan <точный-sha256>`
 - **И** проверяет proposal.md, specs/, design.md, tasks.md, review.md, test-report.md, verification.md и delivery-plan.json
 - **И** проверяет immutable run evidence, successful required check и exact-file delivery commit
 - **И** проверяет exit code первого запуска == 3 и второго == 0

@@ -1,13 +1,14 @@
 package agent
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
 )
 
 func TestRegistry_Load(t *testing.T) {
-	r := NewRegistry("../../e2etest/agents")
+	r := NewFS(os.DirFS("../../e2etest/agents"))
 	a, err := r.Load("test-agent")
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +25,7 @@ func TestRegistry_Load(t *testing.T) {
 }
 
 func TestRegistry_Load_NotFound(t *testing.T) {
-	r := NewRegistry("../../e2etest/agents")
+	r := NewFS(os.DirFS("../../e2etest/agents"))
 	_, err := r.Load("nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent agent")
@@ -95,7 +96,7 @@ func TestLayeredRegistryInvalidOverrideFailsClosed(t *testing.T) {
 }
 
 func TestRegistry_DefaultPipeline(t *testing.T) {
-	r := NewRegistry("../../e2etest/agents")
+	r := NewFS(os.DirFS("../../e2etest/agents"))
 	p := r.DefaultPipeline()
 	if len(p) != 7 {
 		t.Errorf("expected 7 agents, got %d", len(p))

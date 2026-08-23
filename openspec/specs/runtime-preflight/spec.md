@@ -1,7 +1,7 @@
 # runtime-preflight Specification
 
 ## Purpose
-TBD - created by archiving change web-observability-and-preflight. Update Purpose after archive.
+Typed runtime preflight перед созданием run: OpenCode/version, model/provider, credentials, Git и delivery-зависимости; fail-closed.
 ## Requirements
 ### Requirement: Типизированная проверка готовности
 

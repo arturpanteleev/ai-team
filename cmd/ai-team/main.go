@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -104,7 +105,6 @@ func printUsage() {
   --feature <name>          Имя фичи (буквы, цифры, "-", "_", ".")
   --task <description>      Описание задачи
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
-	  --retry-from <agent>      Перезапустить с указанного агента (--task не обязателен)
 	  --resume <run_id>         Продолжить non-terminal run с той же identity
 	  --approve-gates           Явно подтвердить обычные gate-точки в non-interactive режиме
 	  --approve-plan <sha256>    Разрешить только показанный canonical delivery plan
@@ -215,6 +215,10 @@ func cmdWorker() {
 		report := preflight.New(cfg, reg, target).Check(context.Background())
 		if !report.Ready {
 			_ = recorderStore.Close()
+			printWorkerResult(job.RunID, worker.Result{
+				SchemaVersion: worker.ResultSchemaVersion, RunID: job.RunID,
+				Outcome: worker.OutcomeInfraFailed, Error: report.Error().Error(),
+			})
 			fatal("Worker preflight: %v", report.Error())
 		}
 	}
@@ -236,10 +240,58 @@ func cmdWorker() {
 	}
 	_ = recorderStore.Close()
 	if err != nil {
+		outcome := workerOutcomeFor(err)
+		printWorkerResult(job.RunID, worker.Result{
+			SchemaVersion: worker.ResultSchemaVersion, RunID: job.RunID,
+			Outcome: outcome, Error: err.Error(),
+		})
 		fmt.Fprintf(os.Stderr, "worker %s остановлен: %v\n", job.RunID, err)
 		os.Exit(exitCodeFor(err))
 	}
+	printWorkerResult(job.RunID, worker.Result{
+		SchemaVersion: worker.ResultSchemaVersion, RunID: result.RunID,
+		Outcome: string(result.Outcome),
+	})
 	fmt.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
+}
+
+func printWorkerResult(runID string, value worker.Result) {
+	if runID != "" && value.RunID == "" {
+		value.RunID = runID
+	}
+	if encoded, err := json.Marshal(value); err == nil {
+		fmt.Printf("%s%s\n", worker.ResultPrefix, encoded)
+	}
+}
+
+// workerOutcomeFor переводит ошибку run в исход воркер-задачи. Ошибки вне
+// контракта run (например, падение контроллера) считаются инфраструктурными.
+func workerOutcomeFor(err error) string {
+	var runErr *pipeline.RunError
+	switch {
+	case errors.As(err, &runErr):
+		switch string(runErr.Outcome) {
+		case "blocked":
+			return worker.OutcomeBlocked
+		case "stopped":
+			return worker.OutcomeStopped
+		case "canceled":
+			return worker.OutcomeCanceled
+		default:
+			return worker.OutcomeFailed
+		}
+	case errors.Is(err, pipeline.ErrUserStopped):
+		return worker.OutcomeStopped
+	default:
+		var approvalErr *pipeline.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			return worker.OutcomeWaitingApproval
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return worker.OutcomeCanceled
+		}
+		return worker.OutcomeInfraFailed
+	}
 }
 
 func cmdSchedulerWorker() {
@@ -582,7 +634,6 @@ func cmdRun() {
 	feature := runFlags.String("feature", "", "Имя фичи")
 	taskDesc := runFlags.String("task", "", "Описание задачи")
 	target := runFlags.String("target", ".", "Путь к целевому проекту")
-	retryFrom := runFlags.String("retry-from", "", "Перезапустить с указанного агента")
 	resumeRunID := runFlags.String("resume", "", "Продолжить non-terminal run")
 	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме")
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan")
@@ -602,8 +653,8 @@ func cmdRun() {
 		if !validFeature(*feature) {
 			fatal("недопустимое имя фичи: %q (допустимы буквы, цифры, \"-\", \"_\", \".\")", *feature)
 		}
-	} else if *feature != "" || *taskDesc != "" || *retryFrom != "" {
-		fatal("--resume нельзя сочетать с --feature, --task или --retry-from; identity и next stage загружаются из state")
+	} else if *feature != "" || *taskDesc != "" {
+		fatal("--resume нельзя сочетать с --feature или --task; identity и next stage загружаются из state")
 	}
 
 	// Config/registry validation is intentionally before task.md writes: a bad
@@ -616,13 +667,11 @@ func cmdRun() {
 
 	if *resumeRunID != "" {
 		// Resume загружает task/feature после получения workspace lock.
-	} else if *retryFrom == "" {
+	} else {
 		if *taskDesc == "" {
 			fatal("Укажите --task")
 		}
 		warnIfAlreadyDelivered(*target, *feature)
-	} else if *taskDesc != "" {
-		fatal("--task нельзя менять вместе с --retry-from; используется сохранённый task.md")
 	}
 
 	opts := []pipeline.Option{}
@@ -644,7 +693,7 @@ func cmdRun() {
 		})
 	} else {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{
-			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target, RetryFrom: *retryFrom,
+			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target,
 			ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
 		})
 	}
@@ -957,6 +1006,9 @@ func cmdWeb() {
 		fatal("Ошибка запуска web сервера: %v", err)
 	}
 	defer srv.Close()
+	// Фоновые ошибки run не должны исчезать после 202: фиксируем их в
+	// SQLite projection дашборда.
+	runController.SetFailureSink(srv.RecordAdmissionFailure)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

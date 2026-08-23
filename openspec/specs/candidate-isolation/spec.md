@@ -1,7 +1,7 @@
 # candidate-isolation Specification
 
 ## Purpose
-TBD - created by archiving change candidate-worktree-isolation. Update Purpose after archive.
+Изолированный candidate worktree на каждый run: live checkout не мутируется, review/checks/delivery привязаны к точной baseline identity.
 ## Requirements
 ### Requirement: Отдельный candidate root на run
 

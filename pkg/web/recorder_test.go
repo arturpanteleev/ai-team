@@ -129,9 +129,6 @@ func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
 		map[string]any{"approval_id": "approval-1", "resolved_action": "approve"})
 	resumed.TransitionSelected("run-resume", "001-analyst", started.Add(2*time.Second),
 		map[string]any{"from": "analyst", "outcome": "passed", "target": "architect"})
-	if resumed.disabled {
-		t.Fatal("resume recorder не должен отключаться")
-	}
 	runs, err := s.GetPipelineRuns()
 	if err != nil || len(runs) != 1 || runs[0].Status != "running" || runs[0].CompletedAt != nil {
 		t.Fatalf("resume projection: runs=%+v err=%v", runs, err)

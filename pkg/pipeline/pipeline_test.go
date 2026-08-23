@@ -329,8 +329,56 @@ func onlyRunDir(t *testing.T, target string) string {
 	return dirs[0]
 }
 
+// cfgFor строит v4 конфиг с линейными passed-рёбрами без approvals:
+// негативный вердикт без rejected-ребра останавливает run.
 func cfgFor(agents ...config.AgentConfig) *config.Config {
-	return &config.Config{PipelineAgents: agents, CLI: "opencode"}
+	return cfgForGraph(nil, agents...)
+}
+
+// cfgForGraph строит линейный v4 граф и даёт тесту дополнить его
+// (approvals, rejected-рёбра, max_visits).
+func cfgForGraph(setup func(wf *config.WorkflowConfig), agents ...config.AgentConfig) *config.Config {
+	cfg := &config.Config{SchemaVersion: config.CurrentSchemaVersion, PipelineAgents: agents, CLI: "opencode"}
+	wf := &config.WorkflowConfig{Entry: agents[0].Name, MaxVisits: map[string]int{}}
+	operatorApproval := func(target string) *config.WorkflowApprovalConfig {
+		return &config.WorkflowApprovalConfig{
+			Roles: []string{"operator"}, Quorum: "any",
+			Actions: map[string]string{"approve": target, "reject": "$stop"},
+		}
+	}
+	for i, a := range agents {
+		target := workflow.TerminalComplete
+		if i+1 < len(agents) {
+			target = agents[i+1].Name
+		}
+		passed := config.WorkflowEdgeConfig{From: a.Name, Outcome: "passed", To: target}
+		if !workflow.IsTerminal(target) {
+			passed.Approval = operatorApproval(target)
+			wf.Edges = append(wf.Edges, passed)
+			wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+				From: a.Name, Outcome: "warning", To: target, Approval: operatorApproval(target),
+			})
+		} else {
+			wf.Edges = append(wf.Edges, passed)
+			wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{From: a.Name, Outcome: "warning", To: target})
+		}
+	}
+	if setup != nil {
+		setup(wf)
+	}
+	cfg.Workflow = wf
+	return cfg
+}
+
+// loopbackEdge — rejected-ребро с approval на возврат к source.
+func loopbackEdge(from, to, role string) config.WorkflowEdgeConfig {
+	return config.WorkflowEdgeConfig{
+		From: from, Outcome: "rejected", To: to,
+		Approval: &config.WorkflowApprovalConfig{
+			Roles: []string{role}, Quorum: "any",
+			Actions: map[string]string{"return_to_coder": to, "override_approve": "$complete", "reject": "$stop"},
+		},
+	}
 }
 
 func runPipeline(t *testing.T, dir string, cfg *config.Config, rt *scriptedRuntime, pr Prompter) (error, *captureNotifier) {
@@ -342,9 +390,10 @@ func runPipeline(t *testing.T, dir string, cfg *config.Config, rt *scriptedRunti
 		WithPrompter(pr),
 	)
 	err := p.Run(context.Background(), RunConfig{
-		Feature:   "feat",
-		TaskDesc:  "тестовая задача",
-		TargetDir: dir,
+		Feature:      "feat",
+		TaskDesc:     "тестовая задача",
+		TargetDir:    dir,
+		ApproveGates: true,
 	})
 	return err, n
 }
@@ -402,10 +451,12 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 	dir := env(t)
 	rt := newScripted()
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-	cfg := cfgFor(
-		config.AgentConfig{Name: "analyst", ApprovalRoles: []string{"product_owner"}},
-		config.AgentConfig{Name: "reviewer"},
-	)
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.Edges[0].Approval = &config.WorkflowApprovalConfig{
+			Roles: []string{"product_owner"}, Quorum: "any",
+			Actions: map[string]string{"approve": "reviewer", "reject": "$stop"},
+		}
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"})
 	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
 
 	first, err := p.RunWithResult(context.Background(), RunConfig{
@@ -432,6 +483,9 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 	approvalStore, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if dbg, dbgErr := approvalStore.Load(first.RunID, required.ApprovalID); dbgErr == nil {
+		t.Logf("DEBUG pending: %s -> %s trigger=%s roles=%v actions=%v", dbg.FromStage, dbg.ToStage, dbg.Trigger, dbg.RequiredRoles, dbg.Actions)
 	}
 	if _, err := approvalStore.Decide(first.RunID, required.ApprovalID, approval.Decision{
 		ActorID: "product-1", ActorRole: "product_owner", Action: "approve",
@@ -470,10 +524,12 @@ func TestRun_ResumeRejectsApprovalForMutatedCandidate(t *testing.T) {
 	}
 
 	rt := newScripted()
-	cfg := cfgFor(
-		config.AgentConfig{Name: "analyst", ApprovalRoles: []string{"product_owner"}},
-		config.AgentConfig{Name: "reviewer"},
-	)
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.Edges[0].Approval = &config.WorkflowApprovalConfig{
+			Roles: []string{"product_owner"}, Quorum: "any",
+			Actions: map[string]string{"approve": "reviewer", "reject": "$stop"},
+		}
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"})
 	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
 	first, err := p.RunWithResult(context.Background(), RunConfig{
 		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
@@ -555,32 +611,38 @@ func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"),
 			[]byte(fmt.Sprintf("package retry\nconst Revision = %d\n", rt.calls["coder"])), 0644)
 	}
-	cfg := cfgFor(
-		config.AgentConfig{Name: "analyst"},
-		config.AgentConfig{Name: "coder", MaxRetries: 2},
-		config.AgentConfig{Name: "reviewer", ApprovalRoles: []string{"reviewer"}},
-	)
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["coder"] = 3
+		wf.MaxVisits["reviewer"] = 3
+		wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "coder"}, config.AgentConfig{Name: "reviewer"})
 	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	first, err := p.RunWithResult(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
-	})
-	var required *ApprovalRequiredError
-	if !errors.As(err, &required) {
-		t.Fatalf("review loopback должен ожидать человека: result=%+v err=%v", first, err)
-	}
+	runCfg := RunConfig{Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir}
 	store, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
-		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder",
-		SubjectHash: required.SubjectHash,
-	}); err != nil {
-		t.Fatal(err)
+	// V4-семантика: каждое переходное ребро требует решения. Последовательно
+	// проводим два обычных перехода, затем loopback-решение.
+	var required *ApprovalRequiredError
+	for i, step := range []struct{ role, action string }{
+		{"operator", "approve"}, {"operator", "approve"}, {"reviewer", "return_to_coder"},
+		// после возврата к coder повторный переход coder → reviewer требует решения
+		{"operator", "approve"},
+	} {
+		result, runErr := p.RunWithResult(context.Background(), runCfg)
+		if !errors.As(runErr, &required) {
+			t.Fatalf("шаг %d: ожидался pending approval, got %v", i, runErr)
+		}
+		if _, err := store.Decide(result.RunID, required.ApprovalID, approval.Decision{
+			ActorID: "human-1", ActorRole: step.role, Action: step.action,
+			SubjectHash: required.SubjectHash,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		runCfg = RunConfig{ResumeRunID: result.RunID, TargetDir: dir}
 	}
-	second, err := p.RunWithResult(context.Background(), RunConfig{
-		ResumeRunID: first.RunID, TargetDir: dir,
-	})
+	second, err := p.RunWithResult(context.Background(), runCfg)
 	if err != nil {
 		t.Fatalf("approved loopback resume: result=%+v err=%v", second, err)
 	}
@@ -661,7 +723,7 @@ func TestRun_DeliveryRequiresExplicitApprovalNonInteractive(t *testing.T) {
 	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
 		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir})
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
 	var approvalErr *ApprovalRequiredError
 	if !errors.As(err, &approvalErr) {
 		t.Fatalf("delivery без explicit approval должен быть остановлен, got: %v", err)
@@ -684,7 +746,7 @@ func TestRun_DeliveryRunsWithExplicitApproval(t *testing.T) {
 	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
 		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
 	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApprovePlanHash: approvedPlanHash,
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
 	})
 	if err != nil {
 		t.Fatalf("delivery с explicit approval должен пройти: %v", err)
@@ -707,7 +769,7 @@ func TestRun_DeliveryRejectsMismatchedApprovedPlanHash(t *testing.T) {
 	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
 		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
 	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApprovePlanHash: wrongHash,
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: wrongHash,
 	})
 	if err == nil {
 		t.Fatal("delivery с несовпадающим --approve-plan хешем должен быть отклонён, got nil")
@@ -728,12 +790,12 @@ func TestRun_DeliveryPreconditionsAreControllerEnforced(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["approver"] = map[string]string{"review": "**Verdict:** CHANGES_REQUESTED\n"}
-	p := New(cfgFor(
-		config.AgentConfig{Name: "approver", OnNegativeVerdict: config.OnNegativeContinue},
-		config.AgentConfig{Name: "deployer"},
-	), deliveryRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	p := New(cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.Edges = append(wf.Edges, loopbackEdge("approver", "deployer", "operator"))
+	}, config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}),
+		deliveryRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
 	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "t", TargetDir: dir,
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "precondition review не выполнен") {
 		t.Fatalf("контроллер должен запретить delivery с негативным prerequisite, got: %v", err)
@@ -750,13 +812,163 @@ func TestRun_DeliveryRequiresDeterministicTestEvidence(t *testing.T) {
 	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
 		WithRuntimeFactory(runtime.factory), WithPrompter(&scriptedPrompter{}))
 	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "t", TargetDir: dir,
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "нет успешно выполненного required check") {
 		t.Fatalf("LLM approval без controller-run tests не должен разрешать delivery: %v", err)
 	}
 	if got := strings.Join(runtime.executed, ","); got != "approver" {
 		t.Fatalf("delivery planner/executor не должны стартовать: %s", got)
+	}
+}
+
+func TestRun_DeliveryApprovalPersistedAndResumable(t *testing.T) {
+	dir := env(t)
+	prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) || approvalErr.ApprovalID == "" {
+		t.Fatalf("non-TTY delivery должен создать persisted approval, got: %v", err)
+	}
+	if service.calls != 0 {
+		t.Fatalf("delivery не должен выполниться до решения, calls=%d", service.calls)
+	}
+
+	store, storeErr := approval.NewStore(dir)
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	value, loadErr := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if value.Status != approval.StatusPending || value.Trigger != "delivery_plan" ||
+		value.SubjectHash != approvalErr.SubjectHash {
+		t.Fatalf("неожиданный pending approval: status=%s trigger=%s subject=%s",
+			value.Status, value.Trigger, value.SubjectHash)
+	}
+	if fmt.Sprint(value.RequiredRoles) != fmt.Sprint([]string{"release_manager"}) {
+		t.Fatalf("роль delivery approval: %v", value.RequiredRoles)
+	}
+	var payload any
+	if len(value.Payload) == 0 || json.Unmarshal(value.Payload, &payload) != nil {
+		t.Fatalf("approval должен содержать canonical plan JSON payload: %q", value.Payload)
+	}
+
+	// Повторный resume без решения — снова waiting, без доставки.
+	err = p.Run(context.Background(), RunConfig{ResumeRunID: approvalErr.RunID, TargetDir: dir, ApproveGates: true})
+	if !errors.As(err, &approvalErr) || approvalErr.ApprovalID != value.ID {
+		t.Fatalf("resume pending approval должен вернуть ApprovalRequiredError, got: %v", err)
+	}
+	if service.calls != 0 {
+		t.Fatalf("delivery не должен выполниться без решения, calls=%d", service.calls)
+	}
+
+	// Resume с exact hash записывает решение и выполняет доставку.
+	err = p.Run(context.Background(), RunConfig{
+		ResumeRunID: approvalErr.RunID, TargetDir: dir, ApprovePlanHash: value.SubjectHash,
+	})
+	if err != nil {
+		t.Fatalf("resume с --approve-plan должен завершить delivery: %v", err)
+	}
+	if service.calls != 1 {
+		t.Fatalf("delivery должен выполниться ровно один раз, calls=%d", service.calls)
+	}
+	resolved, loadErr := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if resolved.Status != approval.StatusResolved || resolved.ResolvedAction != "approve" ||
+		len(resolved.Decisions) != 1 || resolved.Decisions[0].ActorRole != "release_manager" {
+		t.Fatalf("решение не зафиксировано: %+v", resolved)
+	}
+}
+
+func TestRun_DeliveryResumeRejectsMismatchedPlanHash(t *testing.T) {
+	dir := env(t)
+	prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("ожидался ApprovalRequiredError, got: %v", err)
+	}
+
+	wrongHash := strings.Repeat("f", 64)
+	err = p.Run(context.Background(), RunConfig{
+		ResumeRunID: approvalErr.RunID, TargetDir: dir, ApprovePlanHash: wrongHash,
+	})
+	if err == nil || !strings.Contains(err.Error(), "не совпадает с subject") {
+		t.Fatalf("чужой --approve-plan должен быть отклонён на resume, got: %v", err)
+	}
+	if service.calls != 0 {
+		t.Fatalf("delivery не должен выполниться, calls=%d", service.calls)
+	}
+	store, storeErr := approval.NewStore(dir)
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	value, loadErr := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
+	if loadErr != nil || value.Status != approval.StatusPending {
+		t.Fatalf("решение не должно быть записано чужим хешем: %+v err=%v", value, loadErr)
+	}
+}
+
+func TestRun_DeliveryInteractiveRejectRecordsDecision(t *testing.T) {
+	dir := env(t)
+	prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	prompter := &scriptedPrompter{interactive: true}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(prompter), WithDeliveryService(service))
+
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+	if !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("отказ в интерактиве должен остановить run, got: %v", err)
+	}
+	if service.calls != 0 {
+		t.Fatalf("delivery не должен выполниться после отказа, calls=%d", service.calls)
+	}
+	store, storeErr := approval.NewStore(dir)
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	// prepareDelivery создаёт отдельный immutable run "prepared-run",
+	// поэтому ищем run по единственному каталогу approvals.
+	approvalRoot := filepath.Join(dir, ".ai-team", "state", "approvals")
+	entries, readErr := os.ReadDir(approvalRoot)
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("ожидался один каталог approvals: %v err=%v", entries, readErr)
+	}
+	approvals, listErr := store.List(entries[0].Name())
+	if listErr != nil || len(approvals) < 2 {
+		t.Fatalf("ожидались approvals перехода и delivery: %v err=%v", approvals, listErr)
+	}
+	var deliveryApproval *approval.PendingApproval
+	for i := range approvals {
+		if approvals[i].Trigger == "delivery_plan" {
+			deliveryApproval = &approvals[i]
+		}
+	}
+	if deliveryApproval == nil {
+		t.Fatalf("delivery_plan approval не найден: %+v", approvals)
+	}
+	approvals = []approval.PendingApproval{*deliveryApproval}
+	if approvals[0].Status != approval.StatusResolved || approvals[0].ResolvedAction != "reject" {
+		t.Fatalf("отказ должен быть зафиксирован как решение: %+v", approvals[0])
 	}
 }
 
@@ -804,9 +1016,11 @@ func TestRun_NegativeVerdict_ContinuePolicy(t *testing.T) {
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** CHANGES_REQUESTED\n"}
 
 	err, _ := runPipeline(t, dir,
-		cfgFor(
+		cfgForGraph(func(wf *config.WorkflowConfig) {
+			wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "deployer", "operator"))
+		},
 			config.AgentConfig{Name: "analyst"},
-			config.AgentConfig{Name: "reviewer", OnNegativeVerdict: config.OnNegativeContinue},
+			config.AgentConfig{Name: "reviewer"},
 			config.AgentConfig{Name: "deployer"},
 		),
 		rt, &scriptedPrompter{})
@@ -819,25 +1033,6 @@ func TestRun_NegativeVerdict_ContinuePolicy(t *testing.T) {
 	reportData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "reports", "feat", "index.html"))
 	if readErr != nil || !strings.Contains(string(reportData), "Completed with warnings") || !strings.Contains(string(reportData), "Rejected") {
 		t.Fatalf("negative-continue не должен выглядеть зелёным: err=%v", readErr)
-	}
-}
-
-func TestRun_NegativeVerdict_AskNonInteractiveStops(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** REJECTED\n"}
-
-	err, _ := runPipeline(t, dir,
-		cfgFor(
-			config.AgentConfig{Name: "analyst"},
-			config.AgentConfig{Name: "reviewer", OnNegativeVerdict: config.OnNegativeAsk},
-			config.AgentConfig{Name: "deployer"},
-		),
-		rt, &scriptedPrompter{interactive: false})
-
-	var nve *NegativeVerdictError
-	if !errors.As(err, &nve) {
-		t.Fatalf("ask в неинтерактивном режиме = stop, got: %v", err)
 	}
 }
 
@@ -987,9 +1182,13 @@ func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 
 	pr := &scriptedPrompter{interactive: true, answers: []string{"y"}}
 	err, _ := runPipeline(t, dir,
-		cfgFor(
+		cfgForGraph(func(wf *config.WorkflowConfig) {
+			wf.MaxVisits["coder"] = 3
+			wf.MaxVisits["reviewer"] = 3
+			wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+		},
 			config.AgentConfig{Name: "analyst"},
-			config.AgentConfig{Name: "coder", MaxRetries: 2},
+			config.AgentConfig{Name: "coder"},
 			config.AgentConfig{Name: "reviewer"},
 			config.AgentConfig{Name: "deployer"},
 		),
@@ -1028,71 +1227,6 @@ func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 // TestRun_Loopback_DefaultTargetIsMetadataDrivenNotNamedCoder проверяет, что
 // дефолтный loopback (без явного loopback_to) находит стадию по mutation:
 // source, даже если она называется не "coder" — ранее дефолт был строковым
-// литералом "coder" и молча не срабатывал для переименованных ролей.
-func TestRun_Loopback_DefaultTargetIsMetadataDrivenNotNamedCoder(t *testing.T) {
-	dir := env(t)
-	reg := agent.NewFS(fstest.MapFS{
-		"analyst/def.yaml": def(`name: analyst
-runtime: agentcli
-prompt_file: prompt.md
-mutation: none
-inputs:
-  task: tasks/{feature}/task.md
-outputs:
-  proposal: '{feature}/proposal.md'
-`),
-		"implementer/def.yaml": def(`name: implementer
-runtime: agentcli
-prompt_file: prompt.md
-mutation: source
-allowed_paths: ['**']
-inputs:
-  proposal: '{feature}/proposal.md'
-outputs: {}
-`),
-		"reviewer/def.yaml": def(`name: reviewer
-runtime: agentcli
-prompt_file: prompt.md
-mutation: none
-verdict:
-  required: true
-  marker: Verdict
-  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
-inputs:
-  proposal: '{feature}/proposal.md'
-outputs:
-  review: '{feature}/review.md'
-`),
-		"analyst/prompt.md":     def("test"),
-		"implementer/prompt.md": def("test"),
-		"reviewer/prompt.md":    def("test"),
-	})
-
-	rt := newScripted()
-	rt.contentFn["reviewer"] = func(call int) map[string]string {
-		if call == 1 {
-			return map[string]string{"review": "исправь\n\n**Verdict:** REJECTED\n"}
-		}
-		return map[string]string{"review": "теперь ок\n\n**Verdict:** APPROVED\n"}
-	}
-
-	n := &captureNotifier{}
-	p := New(cfgFor(
-		config.AgentConfig{Name: "analyst"},
-		config.AgentConfig{Name: "implementer", MaxRetries: 2},
-		config.AgentConfig{Name: "reviewer", OnNegativeVerdict: config.OnNegativeContinue},
-	), reg, WithNotifier(n), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{interactive: true, answers: []string{"y"}}))
-	if err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "т", TargetDir: dir}); err != nil {
-		t.Fatalf("loopback к переименованной source-стадии должен сработать без явного loopback_to: %v", err)
-	}
-	if rt.calls["implementer"] != 2 {
-		t.Errorf("implementer (mutation:source, дефолтная цель по метаданным) должен выполниться дважды, calls=%d", rt.calls["implementer"])
-	}
-	if rt.calls["reviewer"] != 2 {
-		t.Errorf("reviewer должен выполниться дважды после loopback, calls=%d", rt.calls["reviewer"])
-	}
-}
-
 func TestRun_Loopback_ExhaustedStops(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
@@ -1103,16 +1237,20 @@ func TestRun_Loopback_ExhaustedStops(t *testing.T) {
 		}
 	}
 
-	pr := &scriptedPrompter{interactive: true, answers: []string{"y", "y", "y"}}
+	pr := &scriptedPrompter{interactive: true, answers: []string{"y", "y"}}
 	err, _ := runPipeline(t, dir,
-		cfgFor(
+		cfgForGraph(func(wf *config.WorkflowConfig) {
+			wf.MaxVisits["coder"] = 2
+			wf.MaxVisits["reviewer"] = 3
+			wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+		},
 			config.AgentConfig{Name: "analyst"},
-			config.AgentConfig{Name: "coder", MaxRetries: 1},
+			config.AgentConfig{Name: "coder"},
 			config.AgentConfig{Name: "reviewer"},
 		),
 		rt, pr)
-	if err == nil || !strings.Contains(err.Error(), "превышен лимит retries") {
-		t.Fatalf("ожидалась ошибка лимита retries, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "max_visits=2") {
+		t.Fatalf("ожидался gate max_visits, got: %v", err)
 	}
 	if rt.calls["coder"] != 2 {
 		t.Errorf("coder: 1 исходный + 1 retry = 2 запуска, got %d", rt.calls["coder"])
@@ -1177,76 +1315,21 @@ func TestRun_Loopback_DeclineStops(t *testing.T) {
 		}
 	}
 
-	pr := &scriptedPrompter{interactive: true, answers: []string{"n"}}
-	err, _ := runPipeline(t, dir,
-		cfgFor(
-			config.AgentConfig{Name: "analyst"},
-			config.AgentConfig{Name: "coder", MaxRetries: 2},
-			config.AgentConfig{Name: "reviewer"},
-		),
-		rt, pr)
+	// В интерактиве каждое approval-ребро задаётся вопрос; отказ ("n") на
+	// запросе loopback маппится в action reject → $stop → ErrUserStopped.
+	pr := &scriptedPrompter{interactive: true, answers: []string{"y", "y", "n"}}
+	p := New(cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["coder"] = 3
+		wf.MaxVisits["reviewer"] = 3
+		wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "coder"}, config.AgentConfig{Name: "reviewer"}),
+		testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(pr))
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir})
 	if !errors.Is(err, ErrUserStopped) {
 		t.Fatalf("отказ от retry = ErrUserStopped, got: %v", err)
 	}
-}
-
-// --- Gates ----------------------------------------------------------------------
-
-func TestRun_GateAfterStop(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-
-	pr := &scriptedPrompter{interactive: true, answers: []string{"n"}}
-	err, _ := runPipeline(t, dir,
-		cfgFor(
-			config.AgentConfig{Name: "analyst", GateAfter: true},
-			config.AgentConfig{Name: "reviewer"},
-		),
-		rt, pr)
-	if !errors.Is(err, ErrUserStopped) {
-		t.Fatalf("ожидался ErrUserStopped, got: %v", err)
-	}
-	if len(rt.executed) != 1 {
-		t.Errorf("reviewer не должен был запуститься: %v", rt.executed)
-	}
-}
-
-func TestRun_GatesRequireExplicitApprovalNonInteractive(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-
-	pr := &scriptedPrompter{interactive: false}
-	err, _ := runPipeline(t, dir,
-		cfgFor(
-			config.AgentConfig{Name: "analyst", GateAfter: true},
-			config.AgentConfig{Name: "reviewer", Transition: config.TransitionByConfirm},
-			config.AgentConfig{Name: "deployer", GateBefore: true},
-		),
-		rt, pr)
-	if !errors.Is(err, ErrUserStopped) {
-		t.Fatalf("required gate без approval должен остановить run: %v", err)
-	}
-	if len(pr.asked) != 0 {
-		t.Errorf("вопросов быть не должно: %v", pr.asked)
-	}
-}
-
-func TestRun_GatesExplicitlyApprovedNonInteractive(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-	pr := &scriptedPrompter{interactive: false}
-	n := &captureNotifier{}
-	p := New(cfgFor(
-		config.AgentConfig{Name: "analyst", GateAfter: true},
-		config.AgentConfig{Name: "reviewer"},
-	), testRegistry(), WithNotifier(n), WithRuntimeFactory(rt.factory), WithPrompter(pr))
-	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true,
-	})
-	if err != nil {
-		t.Fatalf("explicit gate approval должен разрешить run: %v", err)
+	if rt.calls["coder"] != 1 || rt.calls["reviewer"] != 1 {
+		t.Fatalf("после отказа retry не должен выполняться: %+v", rt.calls)
 	}
 }
 
@@ -1290,87 +1373,6 @@ func TestRun_StageTimeout(t *testing.T) {
 		rt, &scriptedPrompter{})
 	if err == nil || !strings.Contains(err.Error(), "превысил таймаут") {
 		t.Fatalf("ожидалась ошибка таймаута, got: %v", err)
-	}
-}
-
-// --- Retry-from -----------------------------------------------------------------
-
-func TestRun_RetryFrom_MissingArtifacts(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-
-	n := &captureNotifier{}
-	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}),
-		testRegistry(), WithNotifier(n), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TargetDir: dir, RetryFrom: "reviewer",
-	})
-	if err == nil || !strings.Contains(err.Error(), "missing artifacts from previous stage: analyst") {
-		t.Fatalf("ожидалась ошибка про артефакты analyst, got: %v", err)
-	}
-	if len(rt.executed) != 0 {
-		t.Errorf("агенты не должны были запускаться: %v", rt.executed)
-	}
-}
-
-func TestRun_RetryFrom_SkipsCompleted(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-
-	// Артефакт analyst уже существует
-	proposal := filepath.Join(dir, ".ai-team", "artifacts", "feat", "proposal.md")
-	os.MkdirAll(filepath.Dir(proposal), 0755)
-	os.WriteFile(proposal, []byte("старый proposal"), 0644)
-
-	n := &captureNotifier{}
-	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}),
-		testRegistry(), WithNotifier(n), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TargetDir: dir, RetryFrom: "reviewer",
-	})
-	if err != nil {
-		t.Fatalf("retry-from должен пройти: %v", err)
-	}
-	if got := strings.Join(rt.executed, ","); got != "reviewer" {
-		t.Errorf("должен выполниться только reviewer: %s", got)
-	}
-}
-
-func TestRun_RetryFrom_UnknownAgent(t *testing.T) {
-	dir := env(t)
-	rt := newScripted()
-	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(),
-		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{
-		Feature: "feat", TargetDir: dir, RetryFrom: "ghost",
-	})
-	if err == nil {
-		t.Error("ожидалась ошибка для неизвестного агента")
-	}
-}
-
-// TestRun_RetryFrom_FeatureNeverRun exercises retry-from against a feature
-// that has no saved task.md at all (never run with --task before) — a
-// distinct rough edge from an unknown agent name: previously this leaked a
-// raw lstat error instead of a specific, actionable message (bundled low
-// severity independent audit finding).
-func TestRun_RetryFrom_FeatureNeverRun(t *testing.T) {
-	dir := t.TempDir() // deliberately not env(t) — no task.md exists for any feature
-	rt := newScripted()
-	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(),
-		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{
-		Feature: "never-run-before", TargetDir: dir, RetryFrom: "analyst",
-	})
-	if err == nil {
-		t.Fatal("ожидалась ошибка: retry-from фичи без сохранённого task.md")
-	}
-	if strings.Contains(err.Error(), "lstat") {
-		t.Errorf("не должно быть raw lstat leak в сообщении: %v", err)
-	}
-	if !strings.Contains(err.Error(), "never-run-before") || !strings.Contains(err.Error(), "--task") {
-		t.Errorf("сообщение должно называть фичу и предложить --task: %v", err)
 	}
 }
 
@@ -1734,55 +1736,7 @@ func TestNewPipeline_Defaults(t *testing.T) {
 	}
 }
 
-func TestFindLoopbackTarget(t *testing.T) {
-	names := []string{"analyst", "coder", "reviewer", "tester"}
-	if got := findLoopbackTarget(names, 2, "coder"); got != 1 {
-		t.Errorf("точное совпадение: %d", got)
-	}
-	if got := findLoopbackTarget(names, 1, "coder"); got != -1 {
-		t.Errorf("цель после текущего индекса не ищется: %d", got)
-	}
-	if got := findLoopbackTarget([]string{"go-coder", "reviewer"}, 1, "coder"); got != -1 {
-		t.Errorf("частичное совпадение не должно приниматься: %d", got)
-	}
-	if got := findLoopbackTarget(names, 2, "ghost"); got != -1 {
-		t.Errorf("неизвестная цель: %d", got)
-	}
-}
-
-func TestDefaultLoopbackTarget(t *testing.T) {
-	names := []string{"analyst", "source-writer", "reviewer", "tester"}
-	mutations := map[string]string{"analyst": "none", "source-writer": "source", "reviewer": "none", "tester": "tests"}
-	load := func(name string) (*agent.Agent, error) {
-		return &agent.Agent{Name: name, Mutation: mutations[name]}, nil
-	}
-	if got := defaultLoopbackTarget(names, 2, load); got != 1 {
-		t.Errorf("должен найти ближайшую предыдущую стадию с mutation:source по метаданным, а не по имени 'coder': %d", got)
-	}
-	if got := defaultLoopbackTarget(names, 1, load); got != -1 {
-		t.Errorf("цель после текущего индекса не ищется: %d", got)
-	}
-	if got := defaultLoopbackTarget([]string{"analyst", "reviewer"}, 2, load); got != -1 {
-		t.Errorf("нет стадии с mutation:source: %d", got)
-	}
-}
-
 func TestRunStatus(t *testing.T) {
-	if runStatus(nil) != "completed" {
-		t.Error("nil → completed")
-	}
-	if runStatus(&BlockedError{Agent: "a", Reason: "r"}) != "blocked" {
-		t.Error("BlockedError → blocked")
-	}
-	if runStatus(fmt.Errorf("wrap: %w", ErrUserStopped)) != "stopped" {
-		t.Error("ErrUserStopped → stopped")
-	}
-	if runStatus(errors.New("x")) != "failed" {
-		t.Error("прочее → failed")
-	}
-	if runStatus(context.Canceled) != "canceled" {
-		t.Error("context.Canceled → canceled")
-	}
 	if got := runStatusFor(nil, []notifier.StageResult{{Status: notifier.StatusRejected, Verdict: verdict.ChangesRequested}}); got != "completed_with_warnings" {
 		t.Errorf("negative continue → completed_with_warnings, got %s", got)
 	}

@@ -163,6 +163,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			Mutation:     a.Mutation,
 			AllowedPaths: append([]string(nil), a.AllowedPaths...),
 			RequireDiff:  a.RequireDiff,
+			AskQuestions: a.AskQuestions,
 		}
 		if agentCfg.CLI != "" {
 			runtimeAgent.CLI = agentCfg.CLI

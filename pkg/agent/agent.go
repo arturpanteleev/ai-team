@@ -21,5 +21,9 @@ type Agent struct {
 	Mutation      string                       `yaml:"mutation,omitempty"`
 	AllowedPaths  []string                     `yaml:"allowed_paths,omitempty"`
 	RequireDiff   bool                         `yaml:"require_diff,omitempty"`
-	Checks        []checks.Definition          `yaml:"checks,omitempty"`
+	// AskQuestions разрешает агенту инструмент question в интерактивном
+	// TTY-режиме. В non-TTY инструмент всегда запрещён: вопрос повис бы до
+	// таймаута. Предназначено для analyst-этапа (grill-me discovery).
+	AskQuestions bool                `yaml:"ask_questions,omitempty"`
+	Checks       []checks.Definition `yaml:"checks,omitempty"`
 }

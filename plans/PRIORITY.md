@@ -5,8 +5,8 @@
 
 | # | Фича | Файл | Суть | Статус |
 |---|------|------|------|--------|
-| 1 | Analyst question tool | plans/analyst-question-tool.md | Разрешить аналитику задавать вопросы (сейчас tool denied) | idea |
-| 2 | Workflow profiles | plans/workflow-profiles.md | Пресеты fast/standard/regulated одним полем конфига | idea |
+| 1 | Analyst question tool | plans/analyst-question-tool.md | Разрешить аналитику задавать вопросы (сейчас tool denied) | **PR** [#36](https://github.com/arturpanteleev/ai-team/pull/36) |
+| 2 | Workflow profiles | plans/workflow-profiles.md | Пресеты fast/standard/regulated одним полем конфига | **PR** [#40](https://github.com/arturpanteleev/ai-team/pull/40) |
 | 3 | Metrics & usage | plans/metrics-and-usage.md | Мерить токены/время/ретраи/исходы на каждом этапе | idea |
 | 4 | Evals harness | plans/evals-harness.md | Golden traces + негативные сценарии + метрики протокола | idea |
 | 5 | Log redaction | plans/log-redaction.md | Редакция секретов в логах/отчётах/экспортах | idea |
@@ -24,7 +24,7 @@
 | 17 | Forge adapters | plans/forge-adapters.md | Delivery: GitHub/GitLab/Gitea/bare-remote | idea |
 | 18 | Tree hashing perf | plans/tree-hashing-performance.md | Убрать ~17 полных проходов хеширования за прогон | idea |
 | 19 | Pipeline refactoring | plans/pipeline-refactoring.md | Доразрезать runStage и RunWithResult | idea |
-| 20 | Strict-decode helper | plans/strict-decode-helper.md | Один строгий JSON-парсер вместо трёх копий | idea |
+| 20 | Strict-decode helper | plans/strict-decode-helper.md | Один строгий JSON-парсер вместо трёх копий | **PR** [#37](https://github.com/arturpanteleev/ai-team/pull/37) |
 | 21 | Role consolidation | plans/role-consolidation.md | AI-роли 7→5: tester/verifier → reviewer после checks | idea |
 | 22 | Surface pruning | plans/surface-pruning.md | Удалить pkg/report и дублирующий консольный UI | idea |
 | 23 | Write-only evidence | plans/write-only-evidence.md | ControllerIdentity/snapshots: дать читателей или убрать | idea |
@@ -36,8 +36,8 @@
 | 29 | Scheduler hardening | plans/scheduler-hardening.md | Typed enqueue conflicts, archive retry, cancellable cancel | idea |
 | 30 | Specs pruning | plans/specs-pruning.md | Спеки 62→~10, одна копия opsx на инструмент | idea |
 | 31 | OpenSpec errata | plans/openspec-errata.md | Архив append-only, исправления через errata | idea |
-| 32 | CI supply chain | plans/ci-supply-chain.md | Pin actions по SHA, permissions, per-package coverage | idea |
-| 33 | Release basics | plans/release-basics.md | LICENSE, CHANGELOG, теги, сборка бинарников | idea |
+| 32 | CI supply chain | plans/ci-supply-chain.md | Pin actions по SHA, permissions, per-package coverage | **PR** [#38](https://github.com/arturpanteleev/ai-team/pull/38) |
+| 33 | Release basics | plans/release-basics.md | LICENSE, CHANGELOG, теги, сборка бинарников | **PR** [#39](https://github.com/arturpanteleev/ai-team/pull/39) |
 | 34 | Onboarding pack | plans/onboarding-pack.md | Tutorial с ожидаемым выводом, демо-репо, troubleshooting | idea |
 | 35 | Windows support | plans/windows-support.md | Заявить поддержку или честно ограничить macOS/Linux | idea |
 | 36 | Sandbox | plans/sandbox.md | OS-containment: fs/network/process/env receipts | idea |

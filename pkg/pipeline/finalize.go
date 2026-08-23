@@ -12,6 +12,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
@@ -89,6 +90,9 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		status = string(workflow.RunFailed)
 		_ = report.GenerateFinalReport(rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime, rs.task.ArtifactRoot, status)
 	}
+	if err := rs.writeUsageEnvelope(endTime, status); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("usage envelope: %w", err))
+	}
 	rs.ps.Finalize()
 	rs.printSummary()
 	if rs.p.recorder != nil {
@@ -108,6 +112,14 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		return outcome, &RunError{Outcome: outcome, Err: combinedErr}
 	}
 	return outcome, nil
+}
+
+// writeUsageEnvelope публикует attempt-independent usage-сводку run в
+// {RunDir}/usage.json — рядом с run.json, вне attempts/.
+func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) error {
+	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
+		rs.results, rs.loopbackCycles, status)
+	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
 }
 
 // runStatus — финальный статус запуска для store.

@@ -17,6 +17,7 @@ test-coverage:
 	go tool cover -func=coverage.out
 	@COVERAGE=$$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $$3); print $$3}'); \
 	awk -v coverage="$$COVERAGE" 'BEGIN { if (coverage < 60.0) { printf "coverage %.1f%% is below 60.0%%\n", coverage; exit 1 } }'
+	bash scripts/coverage-gate.sh coverage.out
 
 specs:
 	npx --yes @fission-ai/openspec@1.4.1 validate --all --strict --no-interactive

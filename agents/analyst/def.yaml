@@ -4,6 +4,7 @@ runtime: agentcli
 cli: opencode
 prompt_file: prompt.md
 mutation: none
+ask_questions: true
 inputs:
   task: tasks/{feature}/task.md
 outputs:

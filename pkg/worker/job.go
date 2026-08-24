@@ -2,8 +2,6 @@
 package worker
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -41,18 +40,9 @@ func DecodeJob(reader io.Reader, expectedTarget string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	if len(data) == 0 || len(data) > MaxJobBytes {
-		return Job{}, errors.New("worker job пуст или превышает limit")
-	}
 	var job Job
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&job); err != nil {
-		return Job{}, fmt.Errorf("worker job JSON: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return Job{}, errors.New("worker job должен содержать один JSON document")
+	if err := strictjson.Unmarshal(data, MaxJobBytes, &job); err != nil {
+		return Job{}, fmt.Errorf("worker job: %w", err)
 	}
 	if err := job.Validate(expectedTarget); err != nil {
 		return Job{}, err

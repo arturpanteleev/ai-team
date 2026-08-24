@@ -256,6 +256,7 @@ func (rs *runState) invalidateAttempts(fromStageIndex int) error {
 	if len(invalidated) == 0 {
 		return nil
 	}
+	rs.loopbackCycles++
 	at := time.Now().UTC()
 	if rs.p.recorder != nil {
 		rs.p.recorder.AttemptsInvalidated(rs.runID, invalidated, at)

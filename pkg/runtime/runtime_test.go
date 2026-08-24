@@ -256,3 +256,29 @@ func environmentValue(environment []string, key string) string {
 	}
 	return ""
 }
+
+func TestQuestionPermission(t *testing.T) {
+	asker := &Agent{Name: "analyst", AskQuestions: true}
+	plain := &Agent{Name: "coder"}
+	interactive := &Task{Interactive: true}
+	batch := &Task{}
+
+	cases := []struct {
+		name   string
+		agent  *Agent
+		task   *Task
+		expect string
+	}{
+		{"asker interactive → allow", asker, interactive, "allow"},
+		{"asker non-interactive → deny", asker, batch, "deny"},
+		{"plain agent interactive → deny", plain, interactive, "deny"},
+		{"nil task → deny", asker, nil, "deny"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := questionPermission(tc.agent, tc.task); got != tc.expect {
+				t.Fatalf("questionPermission = %q, want %q", got, tc.expect)
+			}
+		})
+	}
+}

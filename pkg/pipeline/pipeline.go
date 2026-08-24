@@ -170,6 +170,7 @@ type runState struct {
 	candidate        *candidate.Manager
 	sourceTarget     string
 	liveWorkspaceSHA string
+	loopbackCycles   int
 }
 
 func (rs *runState) sourceDir() string {
@@ -521,6 +522,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			TargetDir:    sourceTarget,
 			ArtifactRoot: filepath.Join(sourceTarget, ".ai-team", "artifacts"),
 			LogDir:       evidenceStore.LogDir(),
+			Interactive:  p.prompter.Interactive(),
 		},
 		reportsDir:       reportsDir,
 		names:            p.cfg.AgentNames(),
@@ -540,6 +542,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		visits:           make(map[string]int),
 		candidate:        candidateManager,
 		sourceTarget:     sourceTarget,
+	}
+	if len(resumeInvalidated) > 0 {
+		rs.loopbackCycles = 1
 	}
 	for _, previous := range rs.results {
 		rs.visits[previous.Name]++

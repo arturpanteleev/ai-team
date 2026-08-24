@@ -37,6 +37,8 @@ type Agent struct {
 	Mutation     string
 	AllowedPaths []string
 	RequireDiff  bool
+	// AskQuestions — агенту разрешён инструмент question (см. Task.Interactive).
+	AskQuestions bool
 }
 
 type Task struct {
@@ -48,4 +50,7 @@ type Task struct {
 	LogDir string
 	// ConsoleOut — куда дублировать вывод агента (по умолчанию os.Stdout).
 	ConsoleOut io.Writer
+	// Interactive — запуск в интерактивном TTY-режиме: агенту с
+	// ask_questions разрешается инструмент question.
+	Interactive bool
 }

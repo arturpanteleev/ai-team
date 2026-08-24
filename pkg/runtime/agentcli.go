@@ -85,6 +85,16 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 // The controller remains the only component allowed to run commands, access
 // the network and perform delivery. File edits are narrowed to the stage's
 // declared source scopes and immutable artifact contract.
+// questionPermission разрешает инструмент question только агентам с
+// ask_questions в интерактивном режиме; иначе deny (вопрос в non-TTY повис
+// бы до таймаута).
+func questionPermission(agent *Agent, task *Task) string {
+	if agent != nil && agent.AskQuestions && task != nil && task.Interactive {
+		return "allow"
+	}
+	return "deny"
+}
+
 func OpenCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) ([]string, func(), error) {
 	for _, relative := range []string{"opencode.json", "opencode.jsonc", filepath.Join(".opencode", "plugins"), filepath.Join(".opencode", "tools")} {
 		if info, err := os.Lstat(filepath.Join(task.TargetDir, relative)); err == nil && (info.IsDir() || info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
@@ -157,7 +167,7 @@ func OpenCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 		"grep":               "allow",
 		"list":               "allow",
 		"lsp":                "deny",
-		"question":           "deny",
+		"question":           questionPermission(agent, task),
 		"read":               readRules,
 		"skill":              "deny",
 		"task":               "deny",

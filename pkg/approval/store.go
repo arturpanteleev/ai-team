@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
 const SchemaVersion = 1
@@ -144,15 +144,9 @@ func (s *Store) Load(runID, approvalID string) (PendingApproval, error) {
 	if err != nil {
 		return PendingApproval{}, err
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
 	var value PendingApproval
-	if err := decoder.Decode(&value); err != nil {
+	if err := strictjson.Unmarshal(data, 1<<20, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", approvalID, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return PendingApproval{}, fmt.Errorf("approval %s содержит trailing JSON", approvalID)
 	}
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err

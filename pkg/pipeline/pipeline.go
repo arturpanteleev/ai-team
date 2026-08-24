@@ -522,6 +522,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			TargetDir:    sourceTarget,
 			ArtifactRoot: filepath.Join(sourceTarget, ".ai-team", "artifacts"),
 			LogDir:       evidenceStore.LogDir(),
+			Interactive:  p.prompter.Interactive(),
 		},
 		reportsDir:       reportsDir,
 		names:            p.cfg.AgentNames(),

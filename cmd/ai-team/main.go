@@ -38,7 +38,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
-const version = "0.2.0"
+var version = "dev"
 
 // Exit-коды run (см. спеку cli-interface).
 const (

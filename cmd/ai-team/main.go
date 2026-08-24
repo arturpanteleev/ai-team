@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -69,6 +71,8 @@ func main() {
 		cmdSchedulerWorker()
 	case "list":
 		cmdList()
+	case "usage":
+		cmdUsage()
 	case "eval":
 		cmdEval()
 	case "web":
@@ -96,6 +100,7 @@ func printUsage() {
   ai-team worker                   Выполнить один disposable worker job из stdin
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list                     Список доступных агентов
+  ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
   ai-team version                  Версия
@@ -877,6 +882,52 @@ func evalSingleAgent(ctx context.Context, target, feature, taskDesc, agentName s
 func defaultEvalOutput(target, agentName string) string {
 	safeAgent := regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(agentName, "-")
 	return filepath.Join(target, ".ai-team", "evals", time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+safeAgent+".json")
+}
+
+// cmdUsage печатает usage-сводку завершённого run из {target}/.ai-team/runs/<run_id>/usage.json.
+func cmdUsage() {
+	flags := flag.NewFlagSet("usage", flag.ExitOnError)
+	target := flags.String("target", ".", "Путь к целевому проекту")
+	if err := flags.Parse(os.Args[2:]); err != nil {
+		fatal("Ошибка аргументов usage: %v", err)
+	}
+	if flags.NArg() != 1 {
+		fatal("Использование: ai-team usage --target <dir> <run_id>")
+	}
+	runID := flags.Arg(0)
+	if runID == "." || runID == ".." || filepath.Base(runID) != runID {
+		fatal("Некорректный run_id: %q", runID)
+	}
+	absolute, err := absoluteTarget(*target)
+	if err != nil {
+		fatal("Ошибка target: %v", err)
+	}
+	requireControlRoot(absolute)
+	path := filepath.Join(absolute, ".ai-team", "runs", runID, "usage.json")
+	data, err := safeio.ReadRegularFile(path, 8<<20)
+	if err != nil {
+		fatal("Не удалось прочитать usage: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var envelope metrics.UsageEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		fatal("Повреждённый usage.json: %v", err)
+	}
+	fmt.Printf("Run:      %s\n", envelope.RunID)
+	fmt.Printf("Feature:  %s\n", envelope.Feature)
+	fmt.Printf("Outcome:  %s\n", envelope.Outcome)
+	fmt.Printf("Период:   %s → %s\n",
+		envelope.StartedAt.Format(time.RFC3339), envelope.FinishedAt.Format(time.RFC3339))
+	fmt.Printf("Loopback: %d\n", envelope.LoopbackCycles)
+	tokens := "unknown"
+	if !envelope.TokensUnknown {
+		tokens = "known"
+	}
+	fmt.Printf("Токены:   %s\n\n", tokens)
+	if err := envelope.Format(os.Stdout); err != nil {
+		fatal("Ошибка вывода usage: %v", err)
+	}
 }
 
 func cmdList() {

@@ -579,6 +579,12 @@ func (s *Store) Append(event Event) error {
 	}
 	s.nextID = event.Sequence
 	s.lastEventHash = event.SHA256
+	if isTerminalEventType(event.Type) {
+		events = append(events, event)
+		if err := s.writeAnchor(event.Type, events); err != nil {
+			return fmt.Errorf("запись anchor.json: %w", err)
+		}
+	}
 	return nil
 }
 

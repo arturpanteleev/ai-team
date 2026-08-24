@@ -73,6 +73,8 @@ func main() {
 		cmdList()
 	case "usage":
 		cmdUsage()
+	case "verify":
+		cmdVerify()
 	case "eval":
 		cmdEval()
 	case "web":
@@ -103,6 +105,7 @@ func printUsage() {
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list                     Список доступных агентов
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
+  ai-team verify                   Проверить tamper-evident anchor терминального run
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
   ai-team gc                       Уборка растущих артефактов .ai-team
@@ -1035,6 +1038,34 @@ func cmdList() {
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
 	}
+}
+
+// cmdVerify проверяет tamper-evident anchor терминального run:
+// ai-team verify --target <dir> <run_id>
+func cmdVerify() {
+	verifyFlags := flag.NewFlagSet("verify", flag.ExitOnError)
+	target := verifyFlags.String("target", ".", "Путь к целевому проекту")
+	if err := verifyFlags.Parse(os.Args[2:]); err != nil {
+		fatal("Ошибка аргументов verify: %v", err)
+	}
+	if verifyFlags.NArg() != 1 {
+		fatal("Использование: ai-team verify --target <dir> <run_id>")
+	}
+	runID := verifyFlags.Arg(0)
+	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
+		fatal("недопустимый run_id %q", runID)
+	}
+	absolute, err := absoluteTarget(*target)
+	if err != nil {
+		fatal("Ошибка target: %v", err)
+	}
+	requireControlRoot(absolute)
+	runDir := filepath.Join(absolute, ".ai-team", "runs", runID)
+	if err := evidence.VerifyAnchor(runDir); err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
+		os.Exit(exitFailed)
+	}
+	fmt.Printf("✓ Run %s: anchor OK — event chain и manifests digest совпадают\n", runID)
 }
 
 func cmdWeb() {

@@ -1,4 +1,8 @@
-.PHONY: build test test-short test-e2e test-coverage specs verify clean
+TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
+
+.PHONY: build test test-short test-e2e test-coverage specs verify clean release-binaries
 
 build:
 	go build -o bin/ai-team ./cmd/ai-team
@@ -43,3 +47,11 @@ verify: specs
 clean:
 	rm -rf bin/
 	rm -rf tmp/
+
+release-binaries:
+	@mkdir -p bin
+	@for platform in $(PLATFORMS); do \
+		os="$${platform%%-*}"; arch="$${platform##*-}"; \
+		echo "GOOS=$$os GOARCH=$$arch go build -ldflags \"-X main.version=$(TAG)\" -o bin/ai-team-$${platform} ./cmd/ai-team"; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -ldflags "-X main.version=$(TAG)" -o bin/ai-team-$${platform} ./cmd/ai-team || exit 1; \
+	done

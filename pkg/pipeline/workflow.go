@@ -3,12 +3,13 @@ package pipeline
 import (
 	"crypto/sha256"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/checks"
 )
 
 type filesystemSnapshot struct {
@@ -24,10 +25,11 @@ type gitMetadataSnapshot struct {
 }
 
 // captureWorkspaceSnapshot provides the same per-attempt attribution when the
-// target is not a git repository. Controller-owned .ai-team and .git metadata
-// are excluded; all other regular files and symlinks are hashed.
+// target is not a git repository. Controller-owned metadata and dependency
+// directories from checks.DefaultIgnoreDirs are excluded; all other regular
+// files and symlinks are hashed.
 func captureWorkspaceSnapshot(root string) (filesystemSnapshot, error) {
-	return captureFilesystemSnapshot(root, map[string]bool{".ai-team": true, ".git": true})
+	return captureFilesystemSnapshot(root, checks.DefaultIgnoreDirs())
 }
 
 // captureArtifactSnapshot attributes changes inside the controller's artifact
@@ -37,59 +39,14 @@ func captureArtifactSnapshot(root string) (filesystemSnapshot, error) {
 	return captureFilesystemSnapshot(root, nil)
 }
 
-func captureFilesystemSnapshot(root string, ignoredTopLevel map[string]bool) (filesystemSnapshot, error) {
-	root, err := filepath.Abs(root)
+// captureFilesystemSnapshot adapts checks.WorkspaceFileDigests — the single
+// tree-walking implementation shared with checks.WorkspaceDigest.
+func captureFilesystemSnapshot(root string, ignoredDirs map[string]bool) (filesystemSnapshot, error) {
+	files, fingerprint, err := checks.WorkspaceFileDigests(root, ignoredDirs)
 	if err != nil {
 		return filesystemSnapshot{}, err
 	}
-	rootInfo, err := os.Lstat(root)
-	if err != nil {
-		return filesystemSnapshot{}, err
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return filesystemSnapshot{}, fmt.Errorf("snapshot root %s должен быть обычным каталогом без symlink", root)
-	}
-	snapshot := filesystemSnapshot{Files: make(map[string]string)}
-	err = filepath.WalkDir(root, func(filePath string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		relative, relErr := filepath.Rel(root, filePath)
-		if relErr != nil {
-			return relErr
-		}
-		relative = filepath.ToSlash(relative)
-		if relative == "." {
-			return nil
-		}
-		first := strings.SplitN(relative, "/", 2)[0]
-		if entry.IsDir() && ignoredTopLevel[first] {
-			return filepath.SkipDir
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		digest, hashErr := hashWorkspacePath(root, filepath.FromSlash(relative))
-		if hashErr != nil {
-			return hashErr
-		}
-		snapshot.Files[relative] = digest
-		return nil
-	})
-	if err != nil {
-		return filesystemSnapshot{}, err
-	}
-	paths := make([]string, 0, len(snapshot.Files))
-	for relative := range snapshot.Files {
-		paths = append(paths, relative)
-	}
-	sort.Strings(paths)
-	hash := sha256.New()
-	for _, relative := range paths {
-		fmt.Fprintf(hash, "%s\x00%s\x00", relative, snapshot.Files[relative])
-	}
-	snapshot.Fingerprint = fmt.Sprintf("%x", hash.Sum(nil))
-	return snapshot, nil
+	return filesystemSnapshot{Fingerprint: fingerprint, Files: files}, nil
 }
 
 // captureGitMetadataSnapshot binds an attempt to HEAD, the current symbolic
@@ -183,50 +140,6 @@ func captureGitMetadataSnapshot(dir string) (snapshot gitMetadataSnapshot, avail
 
 	snapshot.Fingerprint = fmt.Sprintf("%x", h.Sum(nil))
 	return snapshot, true, nil
-}
-
-func hashWorkspacePath(root, rel string) (string, error) {
-	full := filepath.Join(root, filepath.FromSlash(rel))
-	info, err := os.Lstat(full)
-	if os.IsNotExist(err) {
-		return "missing", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("git snapshot %s: %w", rel, err)
-	}
-
-	h := sha256.New()
-	fmt.Fprintf(h, "mode\x00%d\x00", info.Mode())
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, linkErr := os.Readlink(full)
-		if linkErr != nil {
-			return "", fmt.Errorf("git snapshot symlink %s: %w", rel, linkErr)
-		}
-		_, _ = io.WriteString(h, target)
-		return fmt.Sprintf("%x", h.Sum(nil)), nil
-	}
-	if info.IsDir() {
-		submoduleHead, submoduleErr := gitOutput(full, "rev-parse", "--verify", "HEAD")
-		if submoduleErr == nil {
-			_, _ = h.Write(submoduleHead)
-		}
-		return fmt.Sprintf("%x", h.Sum(nil)), nil
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Sprintf("%x", h.Sum(nil)), nil
-	}
-	f, openErr := os.Open(full)
-	if openErr != nil {
-		return "", fmt.Errorf("git snapshot open %s: %w", rel, openErr)
-	}
-	if _, copyErr := io.Copy(h, f); copyErr != nil {
-		_ = f.Close()
-		return "", fmt.Errorf("git snapshot read %s: %w", rel, copyErr)
-	}
-	if closeErr := f.Close(); closeErr != nil {
-		return "", fmt.Errorf("git snapshot close %s: %w", rel, closeErr)
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func changedSnapshotPaths(before, after filesystemSnapshot) []string {

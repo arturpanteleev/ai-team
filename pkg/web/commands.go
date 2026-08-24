@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
 func randomToken() (string, error) {
@@ -252,16 +252,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 func decodeCommand(w http.ResponseWriter, r *http.Request, destination any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCommandBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("невалидный JSON command: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("command должен содержать один JSON document")
-	}
-	return nil
+	return strictjson.Decode(r.Body, destination)
 }
 
 func requireEmptyCommand(w http.ResponseWriter, r *http.Request) error {

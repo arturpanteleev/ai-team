@@ -77,6 +77,8 @@ func main() {
 		cmdEval()
 	case "web":
 		cmdWeb()
+	case "gc":
+		cmdGC()
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -103,8 +105,16 @@ func printUsage() {
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
+  ai-team gc                       Уборка растущих артефактов .ai-team
   ai-team version                  Версия
   ai-team help                     Эта справка
+
+Флаги gc:
+  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+  --older-than <duration>   Возраст terminal-ранов для уборки state (по умолчанию 720h)
+  --keep-last <n>           Защитить n самых свежих terminal-ранов (по умолчанию 20)
+  --dry-run                 Только показать план: что удалится и сколько байт
+  --prune-runs              Разрешить удаление immutable run evidence (.ai-team/runs)
 
 Флаги run:
   --feature <name>          Имя фичи (буквы, цифры, "-", "_", ".")

@@ -203,6 +203,7 @@ func Default() *Config {
 	}
 	return cfg
 }
+
 // Marshal сериализует конфиг в YAML (используется init-ом: граф и
 // approval-политики сохраняются целиком).
 func (c *Config) Marshal() ([]byte, error) {

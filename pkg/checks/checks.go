@@ -199,13 +199,13 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 		return result, err
 	}
 	result.WorkingDir = workingDir
-	result.WorkspaceDigestBefore, err = workspaceDigest(r.TargetDir)
+	result.WorkspaceDigestBefore, err = WorkspaceDigest(r.TargetDir)
 	if err != nil {
 		result.Status, result.Reason = StatusFailed, "workspace baseline: "+err.Error()
 		return result, err
 	}
 	defer func() {
-		after, digestErr := workspaceDigest(r.TargetDir)
+		after, digestErr := WorkspaceDigest(r.TargetDir)
 		if digestErr != nil {
 			result.Status = StatusFailed
 			result.Reason = "workspace verification: " + digestErr.Error()
@@ -487,23 +487,40 @@ func VerifyResultDigest(result Result) bool {
 	return result.EvidenceDigest != "" && result.EvidenceDigest == resultDigest(result)
 }
 
-// WorkspaceDigest is the canonical source-tree digest used to bind checks to
-// delivery. Controller metadata and Git internals are excluded.
-func WorkspaceDigest(target string) (string, error) { return workspaceDigest(target) }
+// DefaultIgnoreDirs is the single canonical ignore list for workspace tree
+// hashing: controller metadata (.git, .ai-team) plus dependency/build
+// directories that are never part of a mutation contract. Directories are
+// matched by name at any depth of the walk.
+func DefaultIgnoreDirs() map[string]bool {
+	return map[string]bool{
+		".git":         true,
+		".ai-team":     true,
+		"node_modules": true,
+		"vendor":       true,
+		"dist":         true,
+		".venv":        true,
+		"__pycache__":  true,
+	}
+}
 
-func workspaceDigest(target string) (string, error) {
+// WorkspaceFileDigests is the single tree-walking implementation shared by
+// WorkspaceDigest and pipeline filesystem snapshots. It returns the per-path
+// file hashes plus the canonical fingerprint computed over them. Symlinks are
+// hashed by target string, regular files by content, both prefixed with the
+// Lstat mode. ignoredDirs may be nil to exclude nothing (artifact namespace).
+func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map[string]string, fingerprint string, err error) {
 	root, err := filepath.Abs(target)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return "", fmt.Errorf("workspace root должен быть обычным каталогом без symlink")
+		return nil, "", fmt.Errorf("workspace root должен быть обычным каталогом без symlink")
 	}
-	files := make(map[string]string)
+	files = make(map[string]string)
 	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -516,11 +533,12 @@ func workspaceDigest(target string) (string, error) {
 		if relative == "." {
 			return nil
 		}
-		first := strings.SplitN(relative, "/", 2)[0]
-		if entry.IsDir() && (first == ".git" || first == ".ai-team") {
-			return filepath.SkipDir
-		}
 		if entry.IsDir() {
+			for _, component := range strings.Split(relative, "/") {
+				if ignoredDirs[component] {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		info, statErr := os.Lstat(current)
@@ -553,7 +571,7 @@ func workspaceDigest(target string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	paths := make([]string, 0, len(files))
 	for relative := range files {
@@ -564,7 +582,15 @@ func workspaceDigest(target string) (string, error) {
 	for _, relative := range paths {
 		fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return files, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// WorkspaceDigest is the canonical source-tree digest used to bind checks to
+// delivery. Controller metadata and dependency directories from
+// DefaultIgnoreDirs are excluded.
+func WorkspaceDigest(target string) (string, error) {
+	_, fingerprint, err := WorkspaceFileDigests(target, DefaultIgnoreDirs())
+	return fingerprint, err
 }
 
 type limitedBuffer struct {

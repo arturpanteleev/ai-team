@@ -20,6 +20,7 @@
 | Дата | Ветка | Что сделано | Итог |
 |---|---|---|---|
 | 2026-08-30 | backlog-sprint | Базовая линия: чистая ветка от origin/master 2e48ecc, бэклог-доки и статус-лог внесены в git | baseline |
+| 2026-08-30 | p1-1-runtime-adapter-contract | P1-1: контракт RuntimeAdapter (adapter.go: Name/Describe/Validate/Command/Environment + Capability + Registry), OpenCodeAdapter (opencode.go), AgentCLIRuntime — тонкий оркестратор (agentcli.go), валидация CLI в config/agent/preflight через registry, eval через адаптеры. Все `go test ./...` зелёные, build/vet/gofmt чисто. | review |
 
 ---
 
@@ -40,7 +41,7 @@
 
 | № | ID | Приор. | Статус | Ветка/PR | Заметки |
 |---|---|---|---|---|---|
-| 1 | P1-1 | P0 | open | — | Тонкий RuntimeAdapter contract; блокирует ADP-1/ADP-2 |
+| 1 | P1-1 | P0 | review | p1-1-runtime-adapter-contract | Тонкий RuntimeAdapter contract; блокирует ADP-1/ADP-2 |
 | 2 | ADP-1 | P0 | open | — | Codex adapter (`codex exec`) — зависит от P1-1 |
 | 3 | ADP-2 | P0 | open | — | Claude Code adapter (`claude -p`) — зависит от P1-1 |
 | 4 | APF-1 | P0 | open | — | Трение approvals: default 1–2 клика |
@@ -93,8 +94,8 @@
 
 ## Резюме на текущий момент
 
-- open: 47
+- open: 46
 - in-progress: 0
-- review: 0
+- review: 1 (P1-1)
 - deployed (в рамках спринта): 0
 - n/a (требуют владельца/внешних): OPS-1, EXP-1, V0-7 (частично)

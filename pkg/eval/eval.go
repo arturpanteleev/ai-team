@@ -84,6 +84,10 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 	if cli == "" {
 		cli = "opencode"
 	}
+	adapter, err := runtime.Adapter(filepath.Base(cli))
+	if err != nil {
+		return nil, fmt.Errorf("eval: %w", err)
+	}
 	if _, err := exec.LookPath(cli); err != nil {
 		return nil, fmt.Errorf("eval: %s не найден в PATH", cli)
 	}
@@ -97,46 +101,46 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 	defer os.RemoveAll(isolatedDir)
 	startedAt := time.Now().UTC()
 	out := cappedBuffer{limit: 1 << 20}
-	args := []string{"run", prompt}
-	if filepath.Base(cli) == "opencode" {
-		promptFile, err := os.CreateTemp("", "ai-team-eval-prompt-*.md")
-		if err != nil {
-			return nil, err
-		}
-		promptPath := promptFile.Name()
-		defer os.Remove(promptPath)
-		if err := promptFile.Chmod(0600); err != nil {
-			_ = promptFile.Close()
-			return nil, err
-		}
-		if _, err := promptFile.WriteString(prompt); err != nil {
-			_ = promptFile.Close()
-			return nil, err
-		}
-		if err := promptFile.Close(); err != nil {
-			return nil, err
-		}
-		args, err = runtime.AgentCLIArgs(cli, "", promptPath)
-		if err != nil {
-			return nil, err
-		}
+	promptFile, err := os.CreateTemp("", "ai-team-eval-prompt-*.md")
+	if err != nil {
+		return nil, err
+	}
+	promptPath := promptFile.Name()
+	defer os.Remove(promptPath)
+	if err := promptFile.Chmod(0600); err != nil {
+		_ = promptFile.Close()
+		return nil, err
+	}
+	if _, err := promptFile.WriteString(prompt); err != nil {
+		_ = promptFile.Close()
+		return nil, err
+	}
+	if err := promptFile.Close(); err != nil {
+		return nil, err
+	}
+
+	launch := runtime.Launch{RequireIsolation: true}
+	if err := adapter.Validate(launch); err != nil {
+		return nil, fmt.Errorf("eval: %w", err)
+	}
+	args, err := adapter.Command(cli, "", promptPath)
+	if err != nil {
+		return nil, err
 	}
 	cmd := exec.Command(cli, args...)
 	cmd.Dir = isolatedDir
 	cmd.Stdout = &out
 	stderr := cappedBuffer{limit: 256 << 10}
 	cmd.Stderr = &stderr
-	if filepath.Base(cli) == "opencode" {
-		environment, cleanupEnvironment, envErr := runtime.OpenCodeIsolationEnvironment(
-			&runtime.Agent{Name: "eval-judge", Mutation: "none"},
-			&runtime.Task{TargetDir: isolatedDir, ArtifactRoot: filepath.Join(isolatedDir, "artifacts"), Feature: "eval"},
-		)
-		if envErr != nil {
-			return nil, fmt.Errorf("eval: isolated OpenCode environment: %w", envErr)
-		}
-		defer cleanupEnvironment()
-		cmd.Env = environment
+	environment, cleanupEnvironment, envErr := adapter.Environment(
+		&runtime.Agent{Name: "eval-judge", Mutation: "none"},
+		&runtime.Task{TargetDir: isolatedDir, ArtifactRoot: filepath.Join(isolatedDir, "artifacts"), Feature: "eval"},
+	)
+	if envErr != nil {
+		return nil, fmt.Errorf("eval: isolated environment: %w", envErr)
 	}
+	defer cleanupEnvironment()
+	cmd.Env = environment
 
 	if err := process.Run(ctx, cmd); err != nil {
 		return nil, fmt.Errorf("eval: судья завершился с ошибкой: %w: %s", err, strings.TrimSpace(stderr.String()))

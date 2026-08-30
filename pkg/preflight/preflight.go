@@ -15,6 +15,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
 
 const commandTimeout = 5 * time.Second
@@ -86,16 +87,16 @@ func (c *Checker) Check(ctx context.Context) Report {
 
 	cli := strings.TrimSpace(c.config.CLI)
 	if cli == "" {
-		cli = "opencode"
+		cli = runtime.DefaultCLI
 	}
-	if filepath.Base(cli) != "opencode" {
-		add(Check{ID: "opencode", Status: StatusFailed, Required: true, Message: "configured CLI не поддерживается"})
+	if !runtime.AdapterExists(filepath.Base(cli)) {
+		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "configured CLI не поддерживается (нет runtime adapter: " + filepath.Base(cli) + ")"})
 	} else if resolved, err := c.lookPath(cli); err != nil {
-		add(Check{ID: "opencode", Status: StatusFailed, Required: true, Message: "команда opencode не найдена в PATH"})
+		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "команда " + filepath.Base(cli) + " не найдена в PATH"})
 	} else if version, err := c.command(ctx, resolved, "--version"); err != nil {
-		add(Check{ID: "opencode", Status: StatusFailed, Required: true, Message: "не удалось получить версию: " + safeError(err)})
+		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "не удалось получить версию: " + safeError(err)})
 	} else {
-		add(Check{ID: "opencode", Status: StatusPassed, Required: true, Message: firstLine(version)})
+		add(Check{ID: "cli", Status: StatusPassed, Required: true, Message: firstLine(version)})
 	}
 
 	model := strings.TrimSpace(c.config.Model)

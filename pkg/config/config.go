@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -339,8 +340,8 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	validate(isOneOf(c.Effort, "", "low", "medium", "high"),
 		"effort %q недопустим (low|medium|high)", c.Effort)
-	validate(isOneOf(c.CLI, "", "opencode"),
-		"cli %q не поддерживается (реализован только явный adapter opencode)", c.CLI)
+	validate(c.CLI == "" || runtime.AdapterExists(c.CLI),
+		"cli %q не поддерживается (неизвестный runtime adapter; доступны: %s)", c.CLI, runtime.AdapterNames())
 
 	seenNames := make(map[string]bool, len(c.PipelineAgents))
 	for _, a := range c.PipelineAgents {
@@ -352,8 +353,8 @@ func (c *Config) Validate(reg AgentLookup) error {
 		}
 		validate(isOneOf(a.Effort, "", "low", "medium", "high"),
 			"%s: effort %q недопустим (low|medium|high)", a.Name, a.Effort)
-		validate(isOneOf(a.CLI, "", "opencode"),
-			"%s: cli %q не поддерживается (реализован только явный adapter opencode)", a.Name, a.CLI)
+		validate(a.CLI == "" || runtime.AdapterExists(a.CLI),
+			"%s: cli %q не поддерживается (неизвестный runtime adapter)", a.Name, a.CLI)
 		if a.Timeout != "" {
 			if duration, err := time.ParseDuration(a.Timeout); err != nil || duration <= 0 {
 				errs = append(errs, fmt.Sprintf("%s: timeout %q не парсится (пример: 45m)", a.Name, a.Timeout))

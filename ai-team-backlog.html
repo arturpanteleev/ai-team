@@ -578,11 +578,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-6-junit-adapter</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-7" data-order="14">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-7" data-order="14">
         <div class="task-seq">#14</div>
         <div class="task-key"><strong>V0-7</strong><span class="prio prio-P0">P0</span><span class="tag">Adoption</span></div>
-        <div class="task-content"><h3>Demo + CI action + truthful README</h3><p>Публичный demo показывает <code>gate → bundle → verify</code> одним version-pinned CI-файлом. README разделяет run/gate, integrity/authenticity и отсутствие OS sandbox.</p><p class="detail">Зависит от V0-4/V0-5/V0-6. Закрывает барьер невидимости (⭐0) и устаревший README. Требование: три внешних человека проходят демо без вопросов.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3>Demo + CI action + truthful README</h3><p>Публичный demo показывает <code>gate → bundle → verify</code> одним version-pinned CI-файлом. README разделяет run/gate, integrity/authenticity и отсутствие OS sandbox.</p><p class="detail">Реализовано: `gate.VerifyBundle` (самодостаточная проверка gate-bundle, матрица tampering), `ai-team verify &lt;dir&gt;` различает run-/gate-bundle; `docs/demo/` — run-demo.sh (Python, три сценария PASS/Fail-policy/Fail-junit, bash 3.2), ci-gate-demo.yaml (version-pinned по SHA, merge-base → gate → verify+upload); README честно разделяет run/gate и integrity/authenticity. Завершает «только Go»-обход. Осталось внешнее требование: три внешних человека проходят демо без вопросов (за владельцем).</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-7-demo-ci-readme</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P1" data-horizon="V0" data-id="EXP-1" data-order="15">

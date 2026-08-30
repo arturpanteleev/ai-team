@@ -23,6 +23,40 @@ verification-команды (тесты, vet, линтеры) выполняют
 Система пока не является hermetic sandbox — подробности и открытые риски в
 [AUDIT.md](AUDIT.md).
 
+## Демо за пять минут (без runtime и без LLM)
+
+`ai-team gate` работает на любом Git-репозитории — в том числе не-Go — без
+`.ai-team`, без runtime и без модели: детерминированный diff-policy вердикт,
+typed checks (включая JUnit-отчёты), самодостаточный attestation bundle и
+стабильные exit codes (`0` PASS / `1` FAIL / `2` BLOCKED).
+
+```bash
+bash docs/demo/run-demo.sh
+```
+
+Скрипт создаёт отдельный Python-репозиторий и прогоняет три независимых
+сценария: **PASS** (source + сменяющий тест, зелёный JUnit-отчёт), **FAIL по
+политике** (source-правка без тестов), **FAIL по JUnit** (failure в XML
+авторитетнее exit code команды — Maven/Gradle-семантика). Для каждого
+сценария строится bundle и затем проверяется самодостаточно —
+`ai-team verify <bundle>` — без исходного repo и `.ai-team`.
+
+Тот же конвейер включается в CI одним version-pinned файлом:
+[`docs/demo/ci-gate-demo.yaml`](docs/demo/ci-gate-demo.yaml). Закрепите
+ревизию `ai-team` и github-actions в нём после merge.
+
+## run против gate
+
+- **run** — полный pipeline: LLM-агенты, approvals, evidence-цепочка,
+  attestation и delivery. Описан в разделе
+  [«Как поставить фичу»](#как-поставить-фичу-от-начала-до-конца).
+- **gate** — лёгкий детерминированный вердикт «изменение соответствует
+  политике и checks» по trusted local base/candidate. Без runtime; это
+  дешёвый вход для внешних проектов и CI.
+
+Интеграция не обязательна: gate работает самостоятельно, а run использует
+те же typed checks из `.ai-team/config.yaml`.
+
 ## Предварительные требования и установка
 
 | Зависимость | Зачем | Проверка |
@@ -139,6 +173,9 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
 | `ai-team worker --target <dir> --db <path>` | исполнить один strict worker job из stdin (обычно вызывается launcher-ом) |
 | `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
+| `ai-team gate --target <dir> --base <ref> --candidate <ref|WORKTREE> [--config <file>] [--out <dir>]` | детерминированный diff-policy вердикт + typed checks + attestation bundle; exit 0/1/2 |
+| `ai-team export [--target <dir>] [--out <path>] <run_id>` | собрать проверенный portable bundle терминального run |
+| `ai-team verify <bundle-dir>` / `verify --target <dir> <run_id>` | самодостаточная проверка run-/gate-bundle или локальной evidence |
 | `ai-team eval --agent <name> --artifact <path> [--samples N]` | независимая LLM-оценка артефакта |
 | `ai-team web [--target <dir>] [--port 8080] [--host 127.0.0.1]` | локальный dashboard и control plane |
 | `ai-team version` / `ai-team help` | версия / usage |
@@ -346,6 +383,19 @@ project/plugin/user/built-in слоями и что происходит с inva
   не переиспользует старый).
 
 ## Граница безопасности
+
+### integrity vs authenticity
+
+- **Integrity (гарантируется):** и run-, и gate-bundle перепроверяются цепочкой
+  хэшей — `ai-team verify` подтверждает, что ни одна запись не изменена после
+  создания, и работает самодостаточно (без repo и `.ai-team`).
+- **Authenticity (пока не гарантируется):** у bundle нет подписи автора
+  (DSSE/Sigstore — задача P1-5). Digest — это контроль целостности
+  (факт «записи не тронуты»), а не доказательство авторства («кто создал»).
+  Доверие к создателю — out-of-band решение человека/CI, подпись появится
+  позже.
+
+### Граница для недоверенного кода
 
 Система пока не является hermetic sandbox. OpenCode получает app-level deny
 для shell/network/tasks, ограниченные edit/read rules и отдельный config home,

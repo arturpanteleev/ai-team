@@ -223,7 +223,23 @@ pkg/checks Runner (evidence digests, workspace immutability). Вердикт п�
 связан со своим sha256 в индексе). Стабильные exit codes:
 0 PASS, 1 FAIL (policy/required checks), 2 BLOCKED. Fail-closed по умолчанию:
 ref, который не разрешается в локальный объект, или --allow-untrusted дают
-BLOCKED — untrusted mode запрещён до P1-4.
+BLOCKED — untrusted mode запрещён до P1-4. Bundles проверяются самодостаточно:
+`gate.VerifyBundle` перечитывает каждый record и сверяет digest с index.json,
+реагирует на лишние файлы (за пределами checks/*+gate.json), на отсутствующие
+records и на расхождение заявленного bundle_sha256; `ai-team verify <dir>`
+автоматически различает run-bundle (V0-4) и gate-bundle по наличию gate.json.
+WORKTREE-кандидат идентифицируется в index как ref "WORKTREE" (commit пуст).
+
+Demo + CI action + truthful README (V0-7): `docs/demo/` — самодостаточное демо
+`gate → bundle → verify` на не-Go репозитории. `run-demo.sh` строит изолирован-
+ный Python-репозиторий и прогоняет три сценария (PASS / test_modify violation /
+JUnit failure при exit code команды 0), каждый со своим bundle и verify;
+`ci-gate-demo.yaml` — один version-pinned workflow (ai-team по зафиксированному
+SHA, actions по SHA), который на PR считает merge-base, выполняет gate, затем в
+любом случае verify и upload bundle артефактом. README честно разделяет run и
+gate, integrity (гарантируется цепочкой хэшей) и authenticity (пока не
+гарантируется — подпись DSSE/Sigstore это P1-5), а также фиксирует отсутствие
+OS sandbox. Внешняя верификация «три человека проходят демо» — за владельцем.
 
 JUnit XML typed adapter (V0-6): `pkg/junit` — bounded strict parser JUnit-отчётов
 (корни testsuite/testsuites, вложенные suite). Counts suites/testcases/

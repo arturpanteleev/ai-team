@@ -84,3 +84,24 @@ func TestContributingCoversOpenSpecCycle(t *testing.T) {
 		"Gate rule",
 	})
 }
+
+func TestReadmeCoversGateDemoAndTruthfulBoundaries(t *testing.T) {
+	// V0-7: README разделяет run/gate, integrity/authenticity и отсутствие
+	// OS sandbox и ведёт к самодостаточному демо.
+	readme := readRepoFile(t, "../README.md")
+	assertContainsAll(t, readme, "README.md", []string{
+		"## Демо за пять минут",
+		"docs/demo/run-demo.sh",
+		"docs/demo/ci-gate-demo.yaml",
+		"## run против gate",
+		"### integrity vs authenticity",
+		"не является hermetic sandbox",
+	})
+	demoPage := readRepoFile(t, "demo/README.md")
+	assertContainsAll(t, demoPage, "docs/demo/README.md", []string{
+		"gate → bundle → verify",
+		"pass-fix", "policy-fail", "junit-fail",
+		"version-pinned",
+		"ai-team verify",
+	})
+}

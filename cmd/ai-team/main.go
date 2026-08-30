@@ -27,6 +27,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/export"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -73,6 +74,8 @@ func main() {
 		cmdList()
 	case "usage":
 		cmdUsage()
+	case "export":
+		cmdExport()
 	case "verify":
 		cmdVerify()
 	case "eval":
@@ -105,12 +108,24 @@ func printUsage() {
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list                     Список доступных агентов
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
-  ai-team verify                   Проверить tamper-evident anchor терминального run
+  ai-team export <run_id>          Собрать проверенный portable bundle терминального run
+                                   (whitelisted typed records и digests; публикует
+                                   verified-запись state/exports)
+  ai-team verify [--target <dir>] <run_id>
+                                   Проверить evidence терминального run (anchor, chain, попытки, attestation)
+  ai-team verify <bundle-dir>      Проверить portable bundle самодостаточно (без repo и .ai-team)
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
   ai-team gc                       Уборка растущих артефактов .ai-team
   ai-team version                  Версия
   ai-team help                     Эта справка
+
+Флаги usage:
+  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+
+Флаги export:
+  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+  --out <path>              Каталог bundle (по умолчанию .ai-team/exports/<run_id>.bundle)
 
 Флаги gc:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
@@ -1045,8 +1060,11 @@ func cmdList() {
 	}
 }
 
-// cmdVerify проверяет tamper-evident anchor терминального run:
-// ai-team verify --target <dir> <run_id>
+// cmdVerify проверяет tamper-evident evidence терминального run или
+// самодостаточного portable bundle (V0-4).
+//
+//	ai-team verify --target <dir> <run_id>   — локальная evidence run
+//	ai-team verify <bundle-dir>              — bundle без repo и .ai-team
 func cmdVerify() {
 	verifyFlags := flag.NewFlagSet("verify", flag.ExitOnError)
 	target := verifyFlags.String("target", ".", "Путь к целевому проекту")
@@ -1054,23 +1072,39 @@ func cmdVerify() {
 		fatal("Ошибка аргументов verify: %v", err)
 	}
 	if verifyFlags.NArg() != 1 {
-		fatal("Использование: ai-team verify --target <dir> <run_id>")
+		fatal("Использование: ai-team verify [--target <dir>] <run_id> | <bundle-dir>")
 	}
-	runID := verifyFlags.Arg(0)
-	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
-		fatal("недопустимый run_id %q", runID)
+	arg := verifyFlags.Arg(0)
+	if len(arg) > 1024 {
+		fatal("недопустимый аргумент verify")
 	}
+	info, statErr := os.Stat(arg)
+	if statErr == nil && info.IsDir() {
+		if err := export.VerifyBundle(arg); err != nil {
+			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
+			os.Exit(exitFailed)
+		}
+		fmt.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы\n", arg)
+		return
+	}
+	if strings.ContainsAny(arg, `/\`) || arg == "." || arg == ".." || filepath.Base(arg) != arg {
+		if statErr != nil && !os.IsNotExist(statErr) {
+			fatal("Ошибка доступа к %q: %v", arg, statErr)
+		}
+		fatal("Bundle %q не найден (каталог bundle должен существовать)", arg)
+	}
+	runID := arg
 	absolute, err := absoluteTarget(*target)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
 	runDir := filepath.Join(absolute, ".ai-team", "runs", runID)
-	if err := evidence.VerifyAnchor(runDir); err != nil {
+	if err := export.VerifyEvidence(runDir); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)
 	}
-	fmt.Printf("✓ Run %s: anchor OK — event chain и manifests digest совпадают\n", runID)
+	fmt.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
 }
 
 func cmdWeb() {

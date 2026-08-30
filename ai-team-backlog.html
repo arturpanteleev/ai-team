@@ -487,25 +487,25 @@
   <main class="wrap" id="backlog">
     <div class="task-list" id="tasks">
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="P1" data-id="P1-1" data-order="1">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="P1-1" data-order="1">
         <div class="task-seq">#1</div>
         <div class="task-key"><strong>P1-1</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Тонкий RuntimeAdapter contract</h3><p>Разделить launch, session protocol, capabilities, identity, usage и policy mapping; OpenCode становится первой реализацией без ослабления текущих гарантий.</p><p class="detail">Блокирует ADP-1/ADP-2. Unknown capability в strict profile блокирует запуск; контракт без vendor-specific полей. Жёсткая привязка к opencode в agentcli.go:25:383 должна быть заменена реестром адаптеров.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">p1-1-runtime-adapter-contract</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="P1" data-id="ADP-1" data-order="2">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="ADP-1" data-order="2">
         <div class="task-seq">#2</div>
         <div class="task-key"><strong>ADP-1</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Codex adapter (<code>codex exec</code>)</h3><p>Полная поддержка OpenAI Codex CLI как второго runtime: non-interactive exec, model/effort, изоляция env, типизированный разбор результата, usage и error taxonomy, отмена.</p><p class="detail">Решение владельца 30.08: Codex и Claude Code нужны обязательно, без ожидания ACP-спайка. Замечание FEATURES.md §6 про «вечный долг за версиями» принимается осознанно. Зависит от P1-1.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">adp-1-codex-adapter</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="P1" data-id="ADP-2" data-order="3">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="ADP-2" data-order="3">
         <div class="task-seq">#3</div>
         <div class="task-key"><strong>ADP-2</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Claude Code adapter (<code>claude -p</code>)</h3><p>Поддержка Claude Code как третьего runtime: print-mode JSON, total_cost_usd, deny-list инструментов, те же capability/usage контракты, что и у Codex.</p><p class="detail">Требование владельца: проект не должен выглядеть «только OpenCode». Зависит от P1-1. Оба адаптера проходят одни и те же offline contract tests + live canary.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">adp-2-claude-code-adapter</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="P1" data-id="APF-1" data-order="4">

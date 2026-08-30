@@ -571,11 +571,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-5-gate-mvp</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-6" data-order="13">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-6" data-order="13">
         <div class="task-seq">#13</div>
         <div class="task-key"><strong>V0-6</strong><span class="prio prio-P0">P0</span><span class="tag">Checks</span></div>
-        <div class="task-content"><h3>Generic JUnit XML typed adapter</h3><p>Bounded strict parser с zero-test detection, suite/test counts, failures/errors/skips и digest исходного отчёта.</p><p class="detail">Golden fixtures: pytest, Jest, Gradle, Maven. Снимает «только Go» — до V0-7, потому что демо обязано проходить не на Go. Native adapters — только если fixtures покажут несовместимую семантику.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3>Generic JUnit XML typed adapter</h3><p>Bounded strict parser с zero-test detection, suite/test counts, failures/errors/skips и digest исходного отчёта.</p><p class="detail">Реализовано: `pkg/junit` — bounded strict token-walk (golden fixtures pytest/Jest/Gradle/Maven + zero/doctype, counts из реальных testcase), adapter `junit-xml` в pkg/checks с обязательным repo-relative `report_file`, токен workspace side-effect (report исключается из immutability-детекции), Maven/Gradle-семантика «отчёт авторитетнее exit code». Снимает «только Go» — V0-7 демо готово не на Go. Native adapters — только если fixtures покажут несовместимую семантику.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-6-junit-adapter</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-7" data-order="14">

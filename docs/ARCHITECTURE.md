@@ -225,6 +225,23 @@ pkg/checks Runner (evidence digests, workspace immutability). Вердикт п�
 ref, который не разрешается в локальный объект, или --allow-untrusted дают
 BLOCKED — untrusted mode запрещён до P1-4.
 
+JUnit XML typed adapter (V0-6): `pkg/junit` — bounded strict parser JUnit-отчётов
+(корни testsuite/testsuites, вложенные suite). Counts suites/testcases/
+failures/errors/skips выводятся только из реальных `<testcase>` элементов, а не
+из атрибутов-агрегатов (jest/maven/gradle заполняют их непоследовательно);
+zero-test/zero-passed отчёты отклоняются (не evidence). DOCTYPE/entity и
+прочие processing instructions запрещены, глубина ≤32, размер ≤64 MiB. В
+pkg/checks новый adapter `junit-xml` с `report_file` (repo-relative обязательный
+путь внутри target): command запускается в confined workingDir и пишет отчёт,
+adapter читает его строгим parser'ом и дигирует сырой файл (StructuredOutput-
+Bytes/SHA256), #тестов (discovered/passed/failed/errored/skipped) попадают в
+Result. Семантика Maven/Gradle: exit code команды не является авторитетным —
+failure/error в XML фейлит required check даже при `sh` exit 0. report_file —
+объявленный side-effect проверки и исключается из workspace-immutability
+детекции; всё остальное остаётся read-only. Golden fixtures: pytest, Jest,
+Gradle, Maven (плюс zero/doctype/entity). Снимает ограничение «только Go» для
+демо (V0-7) — проверки любых языковых флотов работают с одним adapter.
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

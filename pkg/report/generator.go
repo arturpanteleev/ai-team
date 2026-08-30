@@ -11,6 +11,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/scope"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 )
 
@@ -47,7 +48,14 @@ type stageData struct {
 	Outputs     []artifactData
 	Checks      []checkData
 	Mutations   []string
+	TestChanges []mutationChangeData
 	Delivery    any
+}
+
+type mutationChangeData struct {
+	Path  string
+	Kind  string
+	Class string
 }
 
 type checkData struct {
@@ -128,6 +136,11 @@ func GenerateStageReport(reportsDir, feature, attemptID string, result notifier.
 		Outcome:     string(result.State.Outcome),
 		Mutations:   append([]string(nil), result.Mutations...),
 		Delivery:    result.Delivery,
+	}
+	for _, change := range result.MutationChanges {
+		if change.Class == scope.ClassTests {
+			data.TestChanges = append(data.TestChanges, mutationChangeData{Path: change.Path, Kind: change.Kind, Class: change.Class})
+		}
 	}
 
 	if result.Err != nil {

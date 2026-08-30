@@ -78,6 +78,16 @@ tr:last-child td{border-bottom:none;}
 <h2>Attributed mutations</h2>
 <ul>{{range .Mutations}}<li class="artifact">{{.}}</li>{{end}}</ul>
 {{end}}
+{{if .TestChanges}}
+<h2>Test mutations review</h2>
+<div class="meta">Классифицированные изменения тестового флота этапа: добавленные, изменённые и удалённые тесты.</div>
+<table>
+<tr><th>Path</th><th>Class</th><th>Kind</th></tr>
+{{range .TestChanges}}
+<tr><td class="artifact">{{.Path}}</td><td>{{.Class}}</td><td>{{.Kind}}</td></tr>
+{{end}}
+</table>
+{{end}}
 {{if .Delivery}}
 <h2>Delivery</h2>
 <div class="meta"><strong>Commit:</strong> {{.Delivery.CommitSHA}}<br><strong>PR:</strong> {{.Delivery.PRURL}}<br><strong>Plan hash:</strong> {{.Delivery.PlanHash}}</div>

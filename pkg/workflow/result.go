@@ -28,6 +28,21 @@ type Artifact struct {
 	Source  string
 }
 
+// Режимы изменения файла относительно baseline этапа (V0-1).
+const (
+	MutationAdded    = "added"
+	MutationModified = "modified"
+	MutationRemoved  = "removed"
+)
+
+// MutationChange — контроллер-атрибутированная мутация одного
+// repository-relative пути: режим изменения и класс пути.
+type MutationChange struct {
+	Path  string `json:"path"`
+	Kind  string `json:"kind"`
+	Class string `json:"class"`
+}
+
 // StageResult is the domain record of one immutable stage attempt.
 type StageResult struct {
 	RunID            string
@@ -46,6 +61,7 @@ type StageResult struct {
 	State            AttemptState
 	Checks           []checks.Result
 	Mutations        []string
+	MutationChanges  []MutationChange
 	Delivery         *delivery.Result
 	StageIndex       int
 	TotalStages      int

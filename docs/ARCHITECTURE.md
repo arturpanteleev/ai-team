@@ -144,6 +144,23 @@ delivery). Rоль/кворум отдельного гейта в этом сл
 subject не создаёт новое ожидание и не перевалидируется (событие
 `approval_reused`).
 
+Test-mutation provenance (V0-1): mutation guard дополнительно классифицирует
+каждый attributed change: режим изменения (added/modified/removed относительно
+baseline этапа) и класс пути (`pkg/scope.ClassifyMutation` —
+source/tests/meta/infra/generated/unknown, приоритет tests > generated > infra >
+meta > source, остальное — явно видимый unknown). Классифицированные изменения
+попадают в attempt manifest (`mutation_changes`) и typed-событие
+`test_mutations` с политикой агента. Политика `test_modify_policy` задаётся в
+definition агента (`required`/`warn`/`off`); default fail-closed: source-агент
+по умолчанию `required`. При required на любую tests-мутацию создаётся
+deferred-approval с точным subject = SHA-256 канонического списка
+тест-изменений (без attempt ID — повторный проход с идентичной мутацией не
+создаёт новый гейт) и действиями approve/reject, который разрешается тем же
+consolidated delivery-решением, что и прочие deferred-гейты (APF-1). Так
+изменение существующего теста source-этапом по умолчанию требует явного
+человеческого решения на delivery; warn и off фиксируют тот же evidence без
+гейта. Отчёт этапа показывает Test mutations review (path/class/kind).
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

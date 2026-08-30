@@ -422,9 +422,9 @@
   </header>
 
   <section class="wrap stats" aria-label="Сводка по статусам">
-    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">40</strong><span>Open</span></button>
+    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">39</strong><span>Open</span></button>
     <button class="stat stat-progress" type="button" data-set-status="In Progress"><strong data-count="In Progress">0</strong><span>In Progress</span></button>
-    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">8</strong><span>Review</span></button>
+    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">9</strong><span>Review</span></button>
     <button class="stat stat-deployed" type="button" data-set-status="Deployed"><strong data-count="Deployed">15</strong><span>Deployed</span></button>
   </section>
 
@@ -550,11 +550,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-2-provenance-manifest</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-3" data-order="10">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-3" data-order="10">
         <div class="task-seq">#10</div>
         <div class="task-key"><strong>V0-3</strong><span class="prio prio-P0">P0</span><span class="tag">Attestation</span></div>
-        <div class="task-content"><h3>Attestation predicate v1</h3><p>Версионированная in-toto-compatible predicate связывает candidate с run, spec, checks, mutations, approvals, verdicts и provenance. Заранее предусмотреть импорт внешних attestation от харнесов.</p><p class="detail">Зависит от V0-1/V0-2. Canonical JSON, golden fixtures и compatibility policy обязательны.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3>Attestation predicate v1</h3><p>Версионированная in-toto-compatible predicate связывает candidate с run, spec, checks, mutations, approvals, verdicts и provenance. Заранее предусмотреть импорт внешних attestation от харнесов.</p><p class="detail">Реализовано: `pkg/attest` — in-toto Statement (subject=candidate workspace digest), predicateType .../run/v1, публикуется в `{RunDir}/attestation.json` на terminal-завершении; связывает run/spec/checks/mutations/approvals/verdicts/provenance. Зависит от V0-1/V0-2. Canonical JSON, golden fixtures и compatibility policy обязательны.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-3-attestation-predicate</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-4" data-order="11">

@@ -422,9 +422,9 @@
   </header>
 
   <section class="wrap stats" aria-label="Сводка по статусам">
-    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">39</strong><span>Open</span></button>
+    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">38</strong><span>Open</span></button>
     <button class="stat stat-progress" type="button" data-set-status="In Progress"><strong data-count="In Progress">0</strong><span>In Progress</span></button>
-    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">9</strong><span>Review</span></button>
+    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">10</strong><span>Review</span></button>
     <button class="stat stat-deployed" type="button" data-set-status="Deployed"><strong data-count="Deployed">15</strong><span>Deployed</span></button>
   </section>
 
@@ -557,11 +557,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-3-attestation-predicate</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-4" data-order="11">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-4" data-order="11">
         <div class="task-seq">#11</div>
         <div class="task-key"><strong>V0-4</strong><span class="prio prio-P0">P0</span><span class="tag">Evidence</span></div>
-        <div class="task-content"><h3><code>ai-team export</code> + <code>verify &lt;bundle&gt;</code></h3><p>Самодостаточный deterministic bundle проверяется без исходного repo и <code>.ai-team</code>. По умолчанию экспортируются только whitelisted typed records и digests, без raw logs/stdout.</p><p class="detail">Зависит от V0-3. Основа local anchor/verify уже есть в #43, но новый DoD не реализован. Ключевой дифференциатор продукта.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/43" target="_blank" rel="noopener noreferrer">foundation #43</a></div>
+        <div class="task-content"><h3><code>ai-team export</code> + <code>verify &lt;bundle&gt;</code></h3><p>Самодостаточный deterministic bundle проверяется без исходного repo и <code>.ai-team</code>. По умолчанию экспортируются только whitelisted typed records и digests, без raw logs/stdout.</p><p class="detail">Реализовано: `pkg/export` — deterministic bundle (index.json, sha256 каждого record, без тайм-меток), полная verify перед публикацией verified-записи в state/exports (контракт V0-0), самодостаточный `ai-team verify &lt;bundle&gt;`, связка attempt manifests↔event chain и attestation v1↔evidence. Зависит от V0-3. Ключевой дифференциатор продукта.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-4-export-verify</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-5" data-order="12">

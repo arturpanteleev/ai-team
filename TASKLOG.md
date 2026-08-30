@@ -29,6 +29,7 @@
 | 2026-08-30 | v0-2-provenance-manifest | V0-2 (полный DoD): `pkg/provenance` — authority-bearing manifest v1 (runtime-бинарник, resolved config surface cli/model/effort, срез agent_definition, prompt, check_suite, provider_model по этапам, base {commit, tree}, candidate control-metadata; unknown без догадок). Manifest inline в run.json (opaque RawMessage, `RunManifest.Provenance`); resume сверяет с заново построенным (`CheckDrift`): изменённое/пропавшее/ставшее unknown поле и новый известный источник блокируют resume fail-closed; unknown не дрифтит. Runtime-digest ловит замену бинарника между start/resume (сигнал сверх config/workflow snapshots). Go-тесты: детерминизм DigestBytes/JSON, Add/Find/Unknown, матрица CheckDrift (identical/legacy/known change/unknown ×2/missing live/disappeared stored), pipeline capture (kinds+counts+runtime known), tamper runtime-digest → resume drift, стабильный resume без дрифта. | review |
 | 2026-08-30 | v0-3-attestation-predicate | V0-3 (полный DoD): `pkg/attest` — in-toto compatible statement (`_type Statement/v0.1`, subject=candidate workspace digest, `predicateType .../run/v1`), публикуется в `{RunDir}/attestation.json` на terminal-завершении. Predicate schema v1 связывает candidate с run identity (evidence schema, config/workflow sha, digest event log, controller exec sha, attempt count), spec (resolved workflow), check summaries (по attempts), typed mutations (V0-1), approvals + решения (из approval store), verdicts/outcome, provenance manifest v1 (V0-2). Canonical JSON (фикс. порядок полей), golden fixture-тест, строгий `Parse` (DisallowUnknownFields + _type/predicateType/schema_version) и детерминированный `Digest` — compatibility policy; вне Git subject честно пуст. Go-тесты: golden fixture (полные байты), Parse-отклонения (version/unknown field), pipeline terminal → attestation присутствует/парсится/subject+provenance+run evidence. | review |
 | 2026-08-30 | v0-4-export-verify | V0-4 (полный DoD): `pkg/export` + CLI `ai-team export <run_id>` / `verify <bundle-dir>|--target <dir> <run_id>`. Самодостаточный deterministic bundle (whitelisted typed records + digests, без raw logs/stdout): run/config/workflow snapshots, event log (hash chain), anchor, attestation v1, attempt manifests; index.json (sha256 каждого record, без тайм-меток) → детерминированный BundleDigest. Экспорт только для terminal run; перед публикацией — полная verify (records-хэши, run identity/schema, snapshots↔manifest, VerifyAnchor, attempt manifests↔manifest_sha256 событий (файлы↔events), attestation↔events/config/workflow/attempt_count/provenance). verified-запись state/exports/<runID>.json после успешной проверки (fail-closed: иначе bundle не публикуется и evidence неприкосновенна). verify самодостаточен (без repo и .ai-team). Go-тесты: build+verify+детерминизм BundleDigest, live VerifyEvidence, отказ non-terminal, матрица tampering (events/manifest/attestation/run/config/anchor/лишний attempt), чужой index, PublishVerified-контракт roundtrip с retention. E2E: реальный pipeline → export → verify локально+из bundle → tampered events ловится вне repo. | review |
+| 2026-08-30 | v0-5-gate-mvp | V0-5 (полный DoD): `pkg/gate` + CLI `ai-team gate` — deterministic diff-policy гейт для trusted local base/candidate без .ai-team и без runtime. Git diff (--name-status -z -M) парсится в типизированные мутации (added/modified/removed + V0-1 классификация scope), политика test_modify (required/warning/off): изменение source без сопутствующих тестов блокирует (required) или только предупреждает. Typed checks через pkg/checks Runner (workspace digests, immutable). Самодостаточный attestation bundle: gate.json + checks/*.json + детерминированный index.json (sha256 каждого record) + BundleDigest. Стабильные exit codes 0/1/2; fail-closed: неразрешаемый в локальный объект ref и --allow-untrusted (запрещён до P1-4) → BLOCKED. Работает из WORKTREE; конфиг строгий (неизвестные поля/версия/уровни политики отклоняются). Go-тесты: строгая валидация конфига, policy required/warning/off (pass/fail), WORKTREE-кандидат, BLOCKED (unknown ref, non-git target, untrusted), required check fail, детерминизм BundleDigest + сверка record-дигестов и сортировка. E2E: реальный бинарник — FAIL (1), PASS (0), BLOCKED (2), bundle reader. | review |
 
 ---
 
@@ -60,7 +61,7 @@
 | 9 | V0-2 | P0 | review | v0-2-provenance-manifest | Provenance manifest v1 |
 | 10 | V0-3 | P0 | review | v0-3-attestation-predicate | Attestation predicate v1 — зависит от V0-1/V0-2 |
 | 11 | V0-4 | P0 | review | v0-4-export-verify | `ai-team export` + `verify <bundle>` — зависит от V0-3 |
-| 12 | V0-5 | P0 | open | — | `ai-team gate` MVP — зависит от V0-1/V0-4 |
+| 12 | V0-5 | P0 | review | v0-5-gate-mvp | `ai-team gate` MVP — зависит от V0-1/V0-4 |
 | 13 | V0-6 | P0 | open | — | Generic JUnit XML typed adapter |
 | 14 | V0-7 | P0 | open | — | Demo + CI action + truthful README — после V0-4/5/6; нужны внешние люди |
 | 15 | EXP-1 | P1 | open | — | Track V kill-watch + интервью (не-кодовая) |
@@ -102,8 +103,8 @@
 
 ## Резюме на текущий момент
 
-- open: 38
+- open: 37
 - in-progress: 0
-- review: 9 (P1-1, ADP-1, ADP-2, V0-0, APF-1, V0-1, V0-2, V0-3, V0-4)
+- review: 10 (P1-1, ADP-1, ADP-2, V0-0, APF-1, V0-1, V0-2, V0-3, V0-4, V0-5)
 - deployed (в рамках спринта): 0
 - n/a (требуют владельца/внешних): OPS-1, EXP-1, V0-7 (частично)

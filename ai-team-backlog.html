@@ -422,9 +422,9 @@
   </header>
 
   <section class="wrap stats" aria-label="Сводка по статусам">
-    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">38</strong><span>Open</span></button>
+    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">37</strong><span>Open</span></button>
     <button class="stat stat-progress" type="button" data-set-status="In Progress"><strong data-count="In Progress">0</strong><span>In Progress</span></button>
-    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">10</strong><span>Review</span></button>
+    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">11</strong><span>Review</span></button>
     <button class="stat stat-deployed" type="button" data-set-status="Deployed"><strong data-count="Deployed">15</strong><span>Deployed</span></button>
   </section>
 
@@ -564,11 +564,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-4-export-verify</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-5" data-order="12">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-5" data-order="12">
         <div class="task-seq">#12</div>
         <div class="task-key"><strong>V0-5</strong><span class="prio prio-P0">P0</span><span class="tag">Track V</span></div>
-        <div class="task-content"><h3><code>ai-team gate</code> MVP</h3><p>Для trusted local base/candidate: diff-policy, typed checks, attestation bundle и стабильные exit codes. Спека fingerprinted, но без runtime не объявляется семантически проверенной.</p><p class="detail">Зависит от V0-1/V0-4. LLM review — отдельная опция; untrusted mode запрещён до P1-4. Дешёвый вход для внешних проектов без замены рабочего процесса.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3><code>ai-team gate</code> MVP</h3><p>Для trusted local base/candidate: diff-policy, typed checks, attestation bundle и стабильные exit codes. Спека fingerprinted, но без runtime не объявляется семантически проверенной.</p><p class="detail">Реализовано: пакет pkg/gate (типизированные мутации diff по scope V0-1, политика test_modify required/warning/off), typed checks через pkg/checks, самодостаточный attestation bundle с детерминированным index.json и BundleDigest, стабильные exit codes 0/1/2, fail-closed untrusted (до P1-4). Дешёвый вход для внешних проектов без замены рабочего процесса.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-5-gate-mvp</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-6" data-order="13">

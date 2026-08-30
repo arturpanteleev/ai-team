@@ -422,9 +422,9 @@
   </header>
 
   <section class="wrap stats" aria-label="Сводка по статусам">
-    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">41</strong><span>Open</span></button>
+    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">40</strong><span>Open</span></button>
     <button class="stat stat-progress" type="button" data-set-status="In Progress"><strong data-count="In Progress">0</strong><span>In Progress</span></button>
-    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">7</strong><span>Review</span></button>
+    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">8</strong><span>Review</span></button>
     <button class="stat stat-deployed" type="button" data-set-status="Deployed"><strong data-count="Deployed">15</strong><span>Deployed</span></button>
   </section>
 
@@ -543,11 +543,11 @@
         <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-1-test-mutation-provenance</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-2" data-order="9">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-2" data-order="9">
         <div class="task-seq">#9</div>
         <div class="task-key"><strong>V0-2</strong><span class="prio prio-P0">P0</span><span class="tag">Provenance</span></div>
-        <div class="task-content"><h3>Provenance manifest v1</h3><p>Зафиксировать digests prompt, agent definition, check suite, controller/runtime binary, provider/model и base/candidate identity. Неизвестные данные оставлять <code>unknown</code>.</p><p class="detail">DoD: drift authority-bearing полей обнаруживается при resume; никаких догадок о модели или usage. Поле runtime identity после ADP-1/ADP-2 становится содержательным.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3>Provenance manifest v1</h3><p>Зафиксировать digests prompt, agent definition, check suite, controller/runtime binary, provider/model и base/candidate identity. Неизвестные данные оставлять <code>unknown</code>.</p><p class="detail">Реализовано: `pkg/provenance` — authority-bearing manifest v1, inline в run.json; resume сверяет с заново построенным (`CheckDrift`, fail-closed; unknown не дрифтит), runtime-digest ловит замену бинарника; base/candidate по стабильному control-состоянию, не по mutable workspace-хэшу. DoD: drift authority-bearing полей обнаруживается при resume; никаких догадок о модели или usage. Поле runtime identity после ADP-1/ADP-2 становится содержательным.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-2-provenance-manifest</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-3" data-order="10">

@@ -26,6 +26,7 @@
 | 2026-08-30 | v0-0-prune-runs-export-guard | V0-0: export guard в retention (export.go) — immutable run evidence удаляется `--prune-runs` только при verified-записи `state/exports/<runID>.json` (schema v1, bundle_sha256). Fail-closed: отсутствие/невалидная/non-regular запись → Skipped с причиной и V0-4. Обновлены fixture и CLI-help gc. Тесты: только verified-export prunable, unverified/malformed — пропускаются. | review |
 | 2026-08-30 | apf-1-approvals-friction | APF-1 (полный DoD): deferred-гейты — forward-рёбра standard/fast профилей `deferred: true`, переход не паузит и не решается per-gate, а аттестуется отдельным approval с точным subject и ratify-ится одним consolidated delivery-решением (`--approve-plan`/интерактив) через `ResolveDeferred` (роль/кворум гейта осознанно замещаются delivery-контрпоинтом `release_manager`; regulated профиль — пошаговые approvals). Повторный проход того же перехода+subject не дублирует pending и не перевалидирует (событие `approval_reused`). `decisions` в evidence per-gate + сводное `deferred_gates_ratified`. Клик-редукция + осмысленные дефолты (delivery-reject по умолчанию fail-closed, exact-SHA сохранён). Go-тесты: store-цикл deferred, YAML/compile deferral, pipeline consolidated flow (gate не паузит → 1 delivery-решение), матрица reuse. | review |
 | 2026-08-30 | v0-1-test-mutation-provenance | V0-1 (полный DoD): mutation guard классифицирует каждое attributed change — kind (added/modified/removed) × класс пути (`pkg/scope.ClassifyMutation`: source/tests/meta/infra/generated/unknown, приоритет tests > generated > infra > meta > source), результат в attempt manifest (`mutation_changes`) и typed-событии `test_mutations`. Политика `test_modify_policy` в definition агента (`required`/`warn`/`off`), default fail-closed: source-агент → required. At required — deferred-approval с точным subject (SHA-256 канонического списка тест-изменений, без attempt ID — повтор без дубля гейта) и действиями approve/reject, разрешается consolidated delivery-решением (APF-1). warn/off сохраняют evidence без гейта. Отчёт этапа — Test mutations review (path/class/kind). Go-тесты: классификатор ~40 кейсов, defaults/валидация registry, required (гейт+события+manifest), default fail-closed, warn/off, не-test-мутации, deterministic subject hash. | review |
+| 2026-08-30 | v0-2-provenance-manifest | V0-2 (полный DoD): `pkg/provenance` — authority-bearing manifest v1 (runtime-бинарник, resolved config surface cli/model/effort, срез agent_definition, prompt, check_suite, provider_model по этапам, base {commit, tree}, candidate control-metadata; unknown без догадок). Manifest inline в run.json (opaque RawMessage, `RunManifest.Provenance`); resume сверяет с заново построенным (`CheckDrift`): изменённое/пропавшее/ставшее unknown поле и новый известный источник блокируют resume fail-closed; unknown не дрифтит. Runtime-digest ловит замену бинарника между start/resume (сигнал сверх config/workflow snapshots). Go-тесты: детерминизм DigestBytes/JSON, Add/Find/Unknown, матрица CheckDrift (identical/legacy/known change/unknown ×2/missing live/disappeared stored), pipeline capture (kinds+counts+runtime known), tamper runtime-digest → resume drift, стабильный resume без дрифта. | review |
 
 ---
 
@@ -54,7 +55,7 @@
 | 6 | OPS-1 | P0 | open | — | git tag v0.1.0 + GitHub Release (нужен owner-доступ) |
 | 7 | DOC-45 | P0 | deployed | PR #45 | Уже в Review/отдельный PR; HMR-рывок не в спринte |
 | 8 | V0-1 | P0 | review | v0-1-test-mutation-provenance | Test-mutation provenance + policy |
-| 9 | V0-2 | P0 | open | — | Provenance manifest v1 |
+| 9 | V0-2 | P0 | review | v0-2-provenance-manifest | Provenance manifest v1 |
 | 10 | V0-3 | P0 | open | — | Attestation predicate v1 — зависит от V0-1/V0-2 |
 | 11 | V0-4 | P0 | open | — | `ai-team export` + `verify <bundle>` — зависит от V0-3 |
 | 12 | V0-5 | P0 | open | — | `ai-team gate` MVP — зависит от V0-1/V0-4 |
@@ -99,8 +100,8 @@
 
 ## Резюме на текущий момент
 
-- open: 41
+- open: 40
 - in-progress: 0
-- review: 6 (P1-1, ADP-1, ADP-2, V0-0, APF-1, V0-1)
+- review: 7 (P1-1, ADP-1, ADP-2, V0-0, APF-1, V0-1, V0-2)
 - deployed (в рамках спринта): 0
 - n/a (требуют владельца/внешних): OPS-1, EXP-1, V0-7 (частично)

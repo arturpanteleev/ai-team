@@ -21,6 +21,7 @@
 |---|---|---|---|
 | 2026-08-30 | backlog-sprint | Базовая линия: чистая ветка от origin/master 2e48ecc, бэклог-доки и статус-лог внесены в git | baseline |
 | 2026-08-30 | p1-1-runtime-adapter-contract | P1-1: контракт RuntimeAdapter (adapter.go: Name/Describe/Validate/Command/Environment + Capability + Registry), OpenCodeAdapter (opencode.go), AgentCLIRuntime — тонкий оркестратор (agentcli.go), валидация CLI в config/agent/preflight через registry, eval через адаптеры. Все `go test ./...` зелёные, build/vet/gofmt чисто. | review |
+| 2026-08-30 | adp-1-codex-adapter | ADP-1: CodexAdapter (codex.go) — headless `codex exec --json`, sandbox workspace-write, CODEX_HOME-изоляция, usage из turn.completed (attested tokens), error taxonomy (auth/model/config/network/sandbox), отмена через процессную группу. Эволюция контракта: Command получает Launch (effort), stubby stdin-prompt для `exec -`, генеральный AI_TEAM_HARNESS_ENV_ALLOW. Offline-тесты mock-бинарником. | review |
 
 ---
 
@@ -42,7 +43,7 @@
 | № | ID | Приор. | Статус | Ветка/PR | Заметки |
 |---|---|---|---|---|---|
 | 1 | P1-1 | P0 | review | p1-1-runtime-adapter-contract | Тонкий RuntimeAdapter contract; блокирует ADP-1/ADP-2 |
-| 2 | ADP-1 | P0 | open | — | Codex adapter (`codex exec`) — зависит от P1-1 |
+| 2 | ADP-1 | P0 | review | adp-1-codex-adapter | Codex adapter (`codex exec`) — зависит от P1-1 |
 | 3 | ADP-2 | P0 | open | — | Claude Code adapter (`claude -p`) — зависит от P1-1 |
 | 4 | APF-1 | P0 | open | — | Трение approvals: default 1–2 клика |
 | 5 | V0-0 | P0 | open | — | Безопасность `--prune-runs` до portable export |
@@ -94,8 +95,8 @@
 
 ## Резюме на текущий момент
 
-- open: 46
+- open: 45
 - in-progress: 0
-- review: 1 (P1-1)
+- review: 2 (P1-1, ADP-1)
 - deployed (в рамках спринта): 0
 - n/a (требуют владельца/внешних): OPS-1, EXP-1, V0-7 (частично)

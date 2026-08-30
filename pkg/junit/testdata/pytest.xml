@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="4" failures="1" errors="0" skipped="1" time="0.123">
+    <testcase classname="test_calc" name="test_add" time="0.001"/>
+    <testcase classname="test_calc" name="test_sub" time="0.001"/>
+    <testcase classname="test_calc" name="test_mul" time="0.002">
+      <skipped type="pytest.skip" message="not implemented yet"/>
+    </testcase>
+    <testcase classname="test_calc" name="test_div" time="0.002">
+      <failure message="AssertionError: division by zero" type="AssertionError"/>
+    </testcase>
+  </testsuite>
+</testsuites>

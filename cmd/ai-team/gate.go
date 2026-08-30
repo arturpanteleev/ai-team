@@ -107,6 +107,15 @@ func defaultGateOut(target string) string {
 	return filepath.Join("gate-out", ts)
 }
 
+// abbrev12 усекает commit sha до 12 символов; не-sha значения (WORKTREE)
+// печатаются как есть.
+func abbrev12(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
 func printGateSummary(result *gate.Result, outDir string) {
 	byClass := make(map[string]int)
 	for _, mutation := range result.Mutations {
@@ -129,11 +138,11 @@ func printGateSummary(result *gate.Result, outDir string) {
 	}
 	fmt.Printf("\n%s Gate %s (exit %d) — %s\n", mark, status, gate.ExitCode(result), strings.Join(parts, ", "))
 
-	candLabel := result.Candidate
+	candidateRef := result.Candidate
 	if result.CandidateCommit != "" {
-		candLabel = shortSHA(result.CandidateCommit)
+		candidateRef = result.CandidateCommit
 	}
-	fmt.Printf("  base %s → %s (%s)\n", shortSHA(result.BaseCommit), candLabel, result.DiffPolicy)
+	fmt.Printf("  base %s → %s (%s)\n", abbrev12(result.BaseCommit), abbrev12(candidateRef), result.DiffPolicy)
 
 	switch result.PolicyVerdict {
 	case gate.VerdictPassed:
@@ -166,11 +175,4 @@ func printGateSummary(result *gate.Result, outDir string) {
 	fmt.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
 }
 
-// shortSHA — безопасный короткий префикс SHA для вывода: не паникует на
-// коротких/пустых строках (например, WORKTREE-кандидат без commit).
-func shortSHA(s string) string {
-	if len(s) < 12 {
-		return s
-	}
-	return s[:12]
-}
+

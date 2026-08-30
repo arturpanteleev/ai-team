@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Gradle Test Executor 1" tests="3" failures="0" errors="1" skipped="0" timestamp="2026-08-01T10:00:00" hostname="ci">
+  <properties>
+    <property name="gradle.version" value="8.9"/>
+  </properties>
+  <testcase name="sum works" classname="com.example.CalculatorTest" time="0.011"/>
+  <testcase name="sub works" classname="com.example.CalculatorTest" time="0.009"/>
+  <testcase name="throws on negative" classname="com.example.CalculatorTest" time="0.004">
+    <error message="expected exception, none thrown" type="org.junit.runners.model.TestFailedToRunException">at com.example.CalculatorTest.throwsOnNegative</error>
+  </testcase>
+  <system-out><![CDATA[dummy output]]></system-out>
+</testsuite>

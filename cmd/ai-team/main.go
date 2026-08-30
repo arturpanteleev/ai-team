@@ -117,7 +117,9 @@ func printUsage() {
   --older-than <duration>   Возраст terminal-ранов для уборки state (по умолчанию 720h)
   --keep-last <n>           Защитить n самых свежих terminal-ранов (по умолчанию 20)
   --dry-run                 Только показать план: что удалится и сколько байт
-  --prune-runs              Разрешить удаление immutable run evidence (.ai-team/runs)
+  --prune-runs              Разрешить удаление immutable run evidence (.ai-team/runs),
+                            но только для run с verified-записью state/exports (V0-4 guard;
+                            пока нет экспорта — флаг безопасно не удаляет evidence)
 
 Флаги run:
   --feature <name>          Имя фичи (буквы, цифры, "-", "_", ".")

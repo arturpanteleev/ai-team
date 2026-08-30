@@ -180,6 +180,21 @@ test_modify_policy/inputs/outputs/ask_questions/checks/verdict/preconditions),
 Runtime-digest даёт сигнал, не покрытый config/workflow snapshots: замена
 бинарника контроллера между start и resume останавливает run.
 
+Attestation predicate v1 (V0-3): `pkg/attest` строит in-toto compatible
+statement (`_type: https://in-toto.io/Statement/v0.1`, subject = candidate
+workspace digest, `predicateType: https://ai-team.dev/attestation/run/v1`) на
+terminal-завершении run'а в `{RunDir}/attestation.json`. Predicate (schema v1)
+связывает candidate с run identity (evidence schema, config/workflow sha,
+digest всего event log, controller executable sha, attempt count), spec
+(resolved workflow evidence+sha), check summaries (stage/name/class/policy/
+status/exit_code/reason по attempts), typed mutations (V0-1), approvals c
+решениями (из approval store), verdicts/outcome по попыткам и provenance
+manifest v1 (V0-2). Canonical JSON (фиксированный порядок полей), golden
+fixture-тест и строгий `Parse` (DisallowUnknownFields + проверка
+_type/predicateType/schema_version) — compatibility policy; `Digest` даёт
+стабильный sha256 statement'а. За рамки warning/usage не утверждает ничего,
+что не может вычислить deterministically (subject пуст вне Git).
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

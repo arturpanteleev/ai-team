@@ -12,9 +12,11 @@ import (
 	"testing"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // TestRun_ProvenanceCapturedAndStableResume проверяет, что authority-bearing
@@ -199,6 +201,64 @@ func TestRun_ProvenanceDriftBlocksResume(t *testing.T) {
 		RunConfig{ResumeRunID: result.RunID, TargetDir: dir})
 	if resumeErr == nil || !strings.Contains(resumeErr.Error(), "provenance drift") {
 		t.Fatalf("ожидался provenance drift при resume, got %v", resumeErr)
+	}
+}
+
+// TestRun_AttestationWrittenOnTerminal проверяет, что после terminal-завершения
+// run'а публикуется in-toto compatible attestation statement (V0-3) с subject
+// candidate и корректным run evidence, и что он проходит строгий Parse.
+func TestRun_AttestationWrittenOnTerminal(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package p\nfunc F(){}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := commandIn(dir, "git", args...)
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	result, err := p.RunWithResult(context.Background(),
+		RunConfig{Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir})
+	if err != nil {
+		t.Fatalf("terminal run: %v", err)
+	}
+	if result.Outcome != workflow.RunCompleted {
+		t.Fatalf("ожидался completed, got %s", result.Outcome)
+	}
+	runDir := onlyRunDir(t, dir)
+	data, err := os.ReadFile(filepath.Join(runDir, "attestation.json"))
+	if err != nil {
+		t.Fatalf("attestation.json отсутствует: %v", err)
+	}
+	statement, err := attest.Parse(data)
+	if err != nil {
+		t.Fatalf("attestation не парсится: %v", err)
+	}
+	if statement.Predicate.RunID != result.RunID {
+		t.Fatalf("run_id в attestation: %s != %s", statement.Predicate.RunID, result.RunID)
+	}
+	if statement.Predicate.Run.AttemptCount != 1 {
+		t.Fatalf("attempt_count: %d", statement.Predicate.Run.AttemptCount)
+	}
+	if len(statement.Subject) != 1 || statement.Subject[0].Name != "candidate" ||
+		statement.Subject[0].Digest["sha256"] == "" {
+		t.Fatalf("subject candidate не зафиксирован: %+v", statement.Subject)
+	}
+	if statement.Predicate.Provenance == nil || statement.Predicate.Provenance.SchemaVersion != provenance.SchemaVersion {
+		t.Fatalf("attestation не содержит provenance manifest v1")
+	}
+	if statement.Predicate.Run.EventLogSHA256 == "" || statement.Predicate.Run.ConfigSHA256 == "" ||
+		statement.Predicate.Spec.ResolvedWorkflowSHA256 == "" {
+		t.Fatalf("run evidence в attestation неполный: %+v", statement.Predicate.Run)
 	}
 }
 

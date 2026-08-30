@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
@@ -93,6 +94,9 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	if err := rs.writeUsageEnvelope(endTime, status); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("usage envelope: %w", err))
 	}
+	if err := rs.writeAttestation(endTime, status); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("attestation: %w", err))
+	}
 	rs.ps.Finalize()
 	rs.printSummary()
 	if rs.p.recorder != nil {
@@ -120,6 +124,37 @@ func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) erro
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
 		rs.results, rs.loopbackCycles, status)
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
+}
+
+// writeAttestation публикует in-toto compatible attestation statement v1
+// (V0-3) в {RunDir}/attestation.json после terminal-завершения run'а.
+// subject = candidate workspace identity; approvals берутся из approval store.
+func (rs *runState) writeAttestation(finishedAt time.Time, status string) error {
+	approvals, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return fmt.Errorf("attestation approvals: %w", err)
+	}
+	var subjects []attest.Subject
+	if rs.candidate != nil {
+		identity, identityErr := rs.candidate.Identity()
+		if identityErr == nil && identity.WorkspaceSHA256 != "" {
+			subjects = append(subjects, attest.Subject{
+				Name:   "candidate",
+				Digest: map[string]string{"sha256": identity.WorkspaceSHA256},
+			})
+		}
+		// Вне Git или при нерезолвимой identity subject честно пустой: не
+		// утверждаем то, что не можем вычислить deterministically.
+	}
+	statement, err := attest.Build(attest.Options{
+		RunDir: rs.evidence.RunDir(), RunID: rs.runID,
+		FinishedAt: finishedAt, Outcome: status,
+		CandidateSubject: subjects, Approvals: approvals,
+	})
+	if err != nil {
+		return err
+	}
+	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "attestation.json"), statement)
 }
 
 // runStatus — финальный статус запуска для store.

@@ -20,10 +20,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/risk"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 
 	"github.com/arturpanteleev/ai-team/pkg/scope"
@@ -215,9 +217,25 @@ type Result struct {
 	PolicyVerdict    string          `json:"policy_verdict"`
 	PolicyViolations []Mutation      `json:"policy_violations,omitempty"`
 	Checks           []checks.Result `json:"checks"`
+	Signals          Signals         `json:"signals"`
 	Status           string          `json:"status"`
 	FinishedAt       time.Time       `json:"finished_at"`
 	BundleSHA256     string          `json:"bundle_sha256,omitempty"`
+}
+
+// Signals (V0-8) — измеренные risk-signals diff: размер/тип изменений,
+// чувствительные пути, тестовые изменения, failed checks. Записываются в
+// bundle как данные и НЕ маршрутизируют pipeline (routing — позже, P2-1/P2-2).
+type Signals struct {
+	AddedFiles     int          `json:"added_files"`
+	ModifiedFiles  int          `json:"modified_files"`
+	RemovedFiles   int          `json:"removed_files"`
+	AddedLines     int64        `json:"added_lines"`
+	RemovedLines   int64        `json:"removed_lines"`
+	TestChanges    int          `json:"test_changes"`
+	ChecksRun      int          `json:"checks_run"`
+	FailedChecks   int          `json:"failed_checks"`
+	SensitivePaths []risk.Entry `json:"sensitive_paths,omitempty"`
 }
 
 // Run выполняет diff-policy проверку и typed checks для trusted local
@@ -305,9 +323,42 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 	result.PolicyVerdict = verdict
 	result.PolicyViolations = violations
 
+	addLines, remLines, numstatErr := diffNumstatLines(ctx, opt.TargetDir, baseCommit, candidateCommit, worktreeMode)
+	if numstatErr != nil {
+		return nil, ExitBlocked, &BlockedError{Reason: "не удалось измерить размер diff (numstat): " + numstatErr.Error()}
+	}
+	signalPaths := make([]string, 0, len(mutations))
+	for _, mutation := range mutations {
+		signalPaths = append(signalPaths, mutation.Path)
+	}
+	result.Signals = Signals{
+		AddedLines:     addLines,
+		RemovedLines:   remLines,
+		SensitivePaths: risk.Entries(signalPaths),
+	}
+	for _, mutation := range mutations {
+		switch mutation.Kind {
+		case KindAdded:
+			result.Signals.AddedFiles++
+		case KindModified:
+			result.Signals.ModifiedFiles++
+		case KindRemoved:
+			result.Signals.RemovedFiles++
+		}
+		if mutation.Class == scope.ClassTests && (mutation.Kind == KindAdded || mutation.Kind == KindModified) {
+			result.Signals.TestChanges++
+		}
+	}
+
 	if len(cfg.Checks) > 0 {
 		results, checkErr := (checks.Runner{TargetDir: opt.TargetDir}).RunAll(ctx, cfg.Checks)
 		result.Checks = results
+		result.Signals.ChecksRun = len(results)
+		for _, check := range results {
+			if check.Status == checks.StatusFailed {
+				result.Signals.FailedChecks++
+			}
+		}
 		if checkErr != nil {
 			result.Status = "failed"
 			return result, ExitFail, nil
@@ -321,6 +372,48 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 	}
 	result.Status = "passed"
 	return result, ExitPass, nil
+}
+
+// diffNumstatLines измеряет размер diff в добавленных/удалённых строках через
+// `git diff --numstat`. Бинарные файлы выводятся как "-" и учитываются как 0
+// строк (факт их наличия уже покрыт file counts в Signals).
+func diffNumstatLines(ctx context.Context, target, baseCommit, candidateCommit string, worktreeMode bool) (added, removed int64, err error) {
+	args := []string{"-C", target, "--no-pager", "diff", "--numstat", baseCommit}
+	if !worktreeMode {
+		args = append(args, candidateCommit)
+	}
+	command := exec.CommandContext(ctx, "git", args...)
+	var buffer bytes.Buffer
+	command.Stdout = &buffer
+	command.Stderr = &buffer
+	if err := command.Run(); ctx.Err() != nil {
+		return 0, 0, ctx.Err()
+	} else if err != nil {
+		return 0, 0, errors.New(strings.TrimSpace(buffer.String()))
+	}
+	for _, line := range strings.Split(buffer.String(), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 {
+			continue
+		}
+		add := parseIntOrZero(fields[0])
+		rem := parseIntOrZero(fields[1])
+		added += add
+		removed += rem
+	}
+	return added, removed, nil
+}
+
+func parseIntOrZero(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 func isWorkTree(ctx context.Context, target string) (bool, error) {

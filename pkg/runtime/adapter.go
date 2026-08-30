@@ -34,10 +34,12 @@ type RuntimeAdapter interface {
 	// декларирует capability, обязательную для запроса.
 	Validate(launch Launch) error
 
-	// Command — argv запуска харнесса. CLI указывает бинарник; model — модель,
-	// если пустая, применяется дефолт; promptFile — временный файл 0600 с
-	// промптом (адаптер решает, использовать ли его через --file и т.п.).
-	Command(cli, model, promptFile string) ([]string, error)
+	// Command — argv запуска харнесса. Launch несёт model/effort политику этапа
+	// (adapter маппит её в харнесс-специфичные флаги); cli — бинарник;
+	// promptFile — временный файл 0600 с промптом. Адаптер, принимающий промпт
+	// через stdin (codex exec -), ожидает, что оркестратор направляет
+	// promptFile в cmd.Stdin.
+	Command(cli string, launch Launch, promptFile string) ([]string, error)
 
 	// Environment — окружение субпроцесса с изоляцией сессии (allow-list env,
 	// запрет эффектных инструментов, суженные edit-scope). Возвращает cleanup,

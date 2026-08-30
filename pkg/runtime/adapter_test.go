@@ -87,7 +87,7 @@ func (a restrictedAdapter) Describe() Descriptor {
 
 func (a restrictedAdapter) Validate(launch Launch) error { return ValidateLaunch(a, launch) }
 
-func (restrictedAdapter) Command(cli, model, promptFile string) ([]string, error) {
+func (restrictedAdapter) Command(cli string, launch Launch, promptFile string) ([]string, error) {
 	return []string{cli, promptFile}, nil
 }
 

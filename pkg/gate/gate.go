@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -509,6 +510,135 @@ func BundleDigest(index *Index) string {
 	return hex.EncodeToString(sum[:])
 }
 
+const maxRecordSize = 16 << 20 // 16 MiB на record файл при верификации
+
+// VerifyBundle самодостаточно проверяет gate attestation bundle (V0-7): index.json
+// каноничен и детерминирован, каждый заявленный record существует и совпадает по
+// sha256, лишних файлов (не описанных в index) нет, заявленный bundle_sha256 в
+// gate.json либо отсутствует, либо совпадает с пересчитанным digest. Работает без
+// repo и .ai-team — bundle является единственным источником данных. Возвращает
+// детерминированный digest bundle.
+func VerifyBundle(bundleDir string) (string, error) {
+	dir, err := safeio.ExistingDir(bundleDir)
+	if err != nil {
+		return "", fmt.Errorf("verify gate bundle: %v", err)
+	}
+	if err := safeio.ValidateTree(dir); err != nil {
+		return "", fmt.Errorf("verify gate bundle: %v", err)
+	}
+	indexData, err := safeio.ReadRegularFile(filepath.Join(dir, indexFileName), maxIndexSize)
+	if err != nil {
+		return "", fmt.Errorf("verify gate bundle: index.json: %v", err)
+	}
+	var index Index
+	if err := strictDecode(indexData, &index); err != nil {
+		return "", fmt.Errorf("verify gate bundle: index.json: %v", err)
+	}
+	if index.SchemaVersion != SchemaVersion {
+		return "", fmt.Errorf("verify gate bundle: несовместимая schema_version %d", index.SchemaVersion)
+	}
+	if index.Type != BundleType {
+		return "", fmt.Errorf("verify gate bundle: неизвестный тип bundle %q", index.Type)
+	}
+	if index.Base == "" || index.Candidate == "" {
+		return "", errors.New("verify gate bundle: отсутствует base/candidate identity в index.json")
+	}
+	expected := make(map[string]string, len(index.Records))
+	for _, record := range index.Records {
+		cleaned := filepath.Clean(filepath.FromSlash(record.Path))
+		if record.Path == "" || filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." ||
+			strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("verify gate bundle: недопустимый record path %q", record.Path)
+		}
+		if _, dup := expected[record.Path]; dup {
+			return "", fmt.Errorf("verify gate bundle: дублирующий record %q", record.Path)
+		}
+		if len(record.SHA256) != sha256BytesLen {
+			return "", fmt.Errorf("verify gate bundle: некорректный sha256 для %q", record.Path)
+		}
+		if _, hexErr := hex.DecodeString(record.SHA256); hexErr != nil {
+			return "", fmt.Errorf("verify gate bundle: некорректный sha256 для %q", record.Path)
+		}
+		expected[record.Path] = record.SHA256
+	}
+	actual := map[string]bool{}
+	err = filepath.WalkDir(dir, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, current)
+		if relErr != nil {
+			return relErr
+		}
+		slashed := filepath.ToSlash(rel)
+		if slashed == indexFileName {
+			return nil
+		}
+		if _, ok := expected[slashed]; !ok {
+			return fmt.Errorf("verify gate bundle: лишний файл %q (отсутствует в index.json)", slashed)
+		}
+		actual[slashed] = true
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("verify gate bundle: %v", err)
+	}
+	if len(actual) != len(expected) {
+		for path := range expected {
+			if !actual[path] {
+				return "", fmt.Errorf("verify gate bundle: record %q заявлен в index.json, но отсутствует", path)
+			}
+		}
+	}
+	for path, want := range expected {
+		if !strings.HasPrefix(path, "checks/") && path != "gate.json" {
+			return "", fmt.Errorf("verify gate bundle: record %q вне известных типов bundle", path)
+		}
+		data, readErr := safeio.ReadRegularFile(filepath.Join(dir, filepath.FromSlash(path)), maxRecordSize)
+		if readErr != nil {
+			return "", fmt.Errorf("verify gate bundle: %v", readErr)
+		}
+		if sha256Bytes(data) != want {
+			return "", fmt.Errorf("verify gate bundle: record %q повреждён (sha256 не совпадает)", path)
+		}
+	}
+	digest := BundleDigest(&index)
+	gateData, readErr := safeio.ReadRegularFile(filepath.Join(dir, "gate.json"), maxRecordSize)
+	if readErr != nil {
+		return "", fmt.Errorf("verify gate bundle: %v", readErr)
+	}
+	var verdict Result
+	if err := strictDecode(gateData, &verdict); err != nil {
+		return "", fmt.Errorf("verify gate bundle: gate.json: %v", err)
+	}
+	if verdict.BundleSHA256 != "" && verdict.BundleSHA256 != digest {
+		return "", fmt.Errorf("verify gate bundle: заявленный bundle_sha256 %q не равен digest %q",
+			verdict.BundleSHA256, digest)
+	}
+	return digest, nil
+}
+
+const sha256BytesLen = 64
+
+func strictDecode(data []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("trailing data after JSON document")
+		}
+		return err
+	}
+	return nil
+}
+
 func sha256Bytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -558,11 +688,17 @@ func WriteBundle(outDir string, result *Result) error {
 		}
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
+	// CandidateCommit пуст для WORKTREE-кандидата — identity bundle берётся из
+	// запрошенного ref (BaseCommit всегда непуст после разрешения).
+	candidate := result.CandidateCommit
+	if candidate == "" {
+		candidate = result.Candidate
+	}
 	index := &Index{
 		SchemaVersion: SchemaVersion,
 		Type:          BundleType,
 		Base:          result.BaseCommit,
-		Candidate:     result.CandidateCommit,
+		Candidate:     candidate,
 		Records:       records,
 	}
 	data, err := json.MarshalIndent(index, "", "  ")

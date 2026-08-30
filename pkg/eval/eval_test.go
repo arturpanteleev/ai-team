@@ -31,7 +31,7 @@ func (a testJudgeAdapter) Validate(launch aiteamruntime.Launch) error {
 	return aiteamruntime.ValidateLaunch(a, launch)
 }
 
-func (testJudgeAdapter) Command(cli, model, promptFile string) ([]string, error) {
+func (testJudgeAdapter) Command(cli string, launch aiteamruntime.Launch, promptFile string) ([]string, error) {
 	return []string{"run", promptFile}, nil
 }
 

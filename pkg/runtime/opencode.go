@@ -38,13 +38,13 @@ func (a *OpenCodeAdapter) Validate(launch Launch) error {
 
 // Command — документированный argv OpenCode CLI. Большой промпт прикрепляется
 // файлом (0600), избегая ARG_MAX и случайного продолжения прежней сессии.
-func (a *OpenCodeAdapter) Command(cli, model, promptFile string) ([]string, error) {
+func (a *OpenCodeAdapter) Command(cli string, launch Launch, promptFile string) ([]string, error) {
 	if filepath.Base(cli) != a.Name() {
 		return nil, fmt.Errorf("CLI %q не поддерживается адаптером opencode: требуется явный adapter вместо guessed arguments", cli)
 	}
 	args := []string{"run"}
-	if model != "" && model != "auto" {
-		args = append(args, "-m", model)
+	if launch.Model != "" && launch.Model != "auto" {
+		args = append(args, "-m", launch.Model)
 	}
 	args = append(args, "--file", promptFile, "Выполни все инструкции из прикреплённого workflow-файла.")
 	return args, nil
@@ -193,21 +193,24 @@ var baselineOpenCodeEnvironmentKeys = []string{
 }
 
 // allowedEnvironmentKeys returns the set of environment variable names
-// permitted to reach the opencode subprocess: the fixed baseline above, plus
-// any names the project or user explicitly opts in via
+// permitted to reach a harness subprocess: the fixed baseline above, plus
+// any names the project or user explicitly opts in via either
+// AI_TEAM_HARNESS_ENV_ALLOW (canonical) or the legacy
 // AI_TEAM_OPENCODE_ENV_ALLOW (comma-separated). This replaces passing the
 // full parent environment minus a short deny-list: by default nothing beyond
 // standard OS/locale plumbing crosses into the subprocess, and any provider
-// credential (e.g. an LLM API key opencode itself needs to authenticate)
-// must be named explicitly rather than leaking implicitly.
+// credential (e.g. an LLM API key opencode/codex itself needs to
+// authenticate) must be named explicitly rather than leaking implicitly.
 func allowedEnvironmentKeys() map[string]bool {
 	allowed := make(map[string]bool, len(baselineOpenCodeEnvironmentKeys))
 	for _, key := range baselineOpenCodeEnvironmentKeys {
 		allowed[key] = true
 	}
-	for _, extra := range strings.Split(os.Getenv("AI_TEAM_OPENCODE_ENV_ALLOW"), ",") {
-		if key := strings.TrimSpace(extra); key != "" {
-			allowed[key] = true
+	for _, raw := range []string{os.Getenv(HarnessEnvAllowVar), os.Getenv(HarnessEnvAllowLegacyVar)} {
+		for _, extra := range strings.Split(raw, ",") {
+			if key := strings.TrimSpace(extra); key != "" {
+				allowed[key] = true
+			}
 		}
 	}
 	return allowed
@@ -226,9 +229,16 @@ func withAllowedEnvironmentKeys(environment []string, allowed map[string]bool) [
 	return filtered
 }
 
-// EnvAllowVar — инструмент явного opt-in для проброса переменных окружения
-// в opencode-субпроцесс (список имён через запятую).
+// HarnessEnvAllowVar — инструмент явного opt-in для проброса переменных
+// окружения в harness-субпроцесс (список имён через запятую). Каноническое
+// имя для всех адаптеров.
+const HarnessEnvAllowVar = "AI_TEAM_HARNESS_ENV_ALLOW"
+
+// EnvAllowVar — устаревшее имя AI_TEAM_OPENCODE_ENV_ALLOW; сохраняется как
+// алиас для обратной совместимости.
 const EnvAllowVar = "AI_TEAM_OPENCODE_ENV_ALLOW"
+
+const HarnessEnvAllowLegacyVar = EnvAllowVar
 
 // LookPath проверяет доступность бинарника харнесса в PATH.
 func (a *OpenCodeAdapter) LookPath(cli string) error {

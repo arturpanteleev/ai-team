@@ -32,6 +32,7 @@ func (rs *runState) enforceMutationGuard(
 		} else {
 			changedPaths := changedSnapshotPaths(workspaceBefore, workspaceAfter)
 			result.Mutations = append([]string(nil), changedPaths...)
+			result.MutationChanges = classifyMutationChanges(workspaceBefore, workspaceAfter, changedPaths)
 			if a.Mutation == "none" && workspaceBefore.Fingerprint != workspaceAfter.Fingerprint {
 				guardErrors = append(guardErrors, fmt.Errorf("агент %s нарушил mutation policy: read-only этап изменил проект", name))
 			}

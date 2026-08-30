@@ -62,8 +62,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
 			Status: r.Status, Verdict: string(r.Verdict), Blocker: r.Blocker,
 			Execution: string(r.State.Execution), Decision: string(r.State.Decision), Outcome: string(r.State.Outcome),
-			Checks:    append([]checks.Result(nil), r.Checks...),
-			Mutations: append([]string(nil), r.Mutations...), Delivery: r.Delivery,
+			Checks:          append([]checks.Result(nil), r.Checks...),
+			Mutations:       append([]string(nil), r.Mutations...),
+			MutationChanges: append([]workflow.MutationChange(nil), r.MutationChanges...),
+			Delivery:        r.Delivery,
 		}
 		if r.Err != nil {
 			manifest.Error = r.Err.Error()

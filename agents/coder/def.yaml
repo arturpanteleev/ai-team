@@ -6,6 +6,9 @@ prompt_file: prompt.md
 mutation: source
 allowed_paths: ['**']
 require_diff: true
+# V0-1: изменения тестового флота source-этапом блокируются deferred
+# exact-subject гейтом, консолидированным в delivery-решение.
+test_modify_policy: required
 inputs:
   design: '{feature}/design.md'
   tasks: '{feature}/tasks.md'

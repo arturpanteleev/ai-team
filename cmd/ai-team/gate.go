@@ -172,5 +172,17 @@ func printGateSummary(result *gate.Result, outDir string) {
 		fmt.Printf("  check %-16s %-8s %s (%s)\n", check.Name, statusMark, check.Status, time.Duration(check.Duration).Round(time.Millisecond))
 	}
 
+	sig := result.Signals
+	fmt.Printf("  signals: +%d/-%d lines, %d→%d files, tests=%d, checks=%d failed=%d",
+		sig.AddedLines, sig.RemovedLines, sig.AddedFiles+sig.ModifiedFiles, sig.RemovedFiles, sig.TestChanges, sig.ChecksRun, sig.FailedChecks)
+	if len(sig.SensitivePaths) > 0 {
+		paths := make([]string, 0, len(sig.SensitivePaths))
+		for _, entry := range sig.SensitivePaths {
+			paths = append(paths, entry.Path)
+		}
+		fmt.Printf("; sensitive: %s", strings.Join(paths, ", "))
+	}
+	fmt.Println()
+
 	fmt.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
 }

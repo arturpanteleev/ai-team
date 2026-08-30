@@ -298,6 +298,71 @@ func writeBundleCopy(t *testing.T, result *Result) (string, error) {
 	return result.BundleSHA256, nil
 }
 
+func TestSignalsRecorded(t *testing.T) {
+	repo := newRepo(t, map[string]string{
+		"src/app.go":        "package app\n",
+		"tests/app_test.go": "package app\n",
+		".env.example":      "KEY=placeholder\n",
+	})
+	base := gitCmd(t, repo, "rev-parse", "HEAD")
+	feature := commitChange(t, repo, "source + test + secret", map[string]string{
+		"src/app.go":             "package app\n// change\n",
+		"tests/app_test.go":      "package app\n\nfunc TestApp() {}\n",
+		"config/.env.production": "DB=prod-secret\n",
+		"deploy/server.key":      "key-material\n",
+	})
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: base, Candidate: feature, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if code != ExitPass {
+		t.Fatalf("code=%d, ожидался pass", code)
+	}
+	sig := result.Signals
+	if sig.AddedFiles != 2 || sig.ModifiedFiles != 2 || sig.RemovedFiles != 0 {
+		t.Fatalf("signals files: %+v", sig)
+	}
+	if sig.TestChanges != 1 {
+		t.Fatalf("test_changes = %d, ожидался 1 (tests/app_test.go mofified)", sig.TestChanges)
+	}
+	if sig.AddedLines == 0 || sig.RemovedLines != 0 {
+		t.Fatalf("signals lines: %+v", sig)
+	}
+	if len(sig.SensitivePaths) != 2 {
+		t.Fatalf("sensitive paths = %+v, ожидалось 2 (env + key)", sig.SensitivePaths)
+	}
+	if sig.SensitivePaths[0].Path != "config/.env.production" || sig.SensitivePaths[0].Kind != "env" {
+		t.Fatalf("sensitive order/kind: %+v", sig.SensitivePaths)
+	}
+	if sig.SensitivePaths[1].Path != "deploy/server.key" || sig.SensitivePaths[1].Kind != "secrets" {
+		t.Fatalf("sensitive order/kind: %+v", sig.SensitivePaths)
+	}
+	if sig.ChecksRun != 0 || sig.FailedChecks != 0 {
+		t.Fatalf("checks signals: %+v", sig)
+	}
+}
+
+func TestSignalsRecordFailedChecks(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n", "tests/app_test.go": "package app\n"})
+	cfg := &Config{
+		SchemaVersion: SchemaVersion,
+		DiffPolicy:    DiffPolicy{TestModify: TestModifyOff},
+		Checks: []checks.Definition{{
+			Name: "must-fail", Class: "unit", Adapter: checks.AdapterCommand, Policy: checks.PolicyRequired,
+			Command: []string{"sh", "-c", "exit 1"},
+		}},
+	}
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD", Config: cfg})
+	if err != nil || code != ExitFail {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	if result.Signals.ChecksRun != 1 || result.Signals.FailedChecks != 1 {
+		t.Fatalf("checks signals: %+v", result.Signals)
+	}
+}
+
 func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	result := &Result{

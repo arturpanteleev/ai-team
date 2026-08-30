@@ -23,6 +23,7 @@
 | 2026-08-30 | p1-1-runtime-adapter-contract | P1-1: контракт RuntimeAdapter (adapter.go: Name/Describe/Validate/Command/Environment + Capability + Registry), OpenCodeAdapter (opencode.go), AgentCLIRuntime — тонкий оркестратор (agentcli.go), валидация CLI в config/agent/preflight через registry, eval через адаптеры. Все `go test ./...` зелёные, build/vet/gofmt чисто. | review |
 | 2026-08-30 | adp-1-codex-adapter | ADP-1: CodexAdapter (codex.go) — headless `codex exec --json`, sandbox workspace-write, CODEX_HOME-изоляция, usage из turn.completed (attested tokens), error taxonomy (auth/model/config/network/sandbox), отмена через процессную группу. Эволюция контракта: Command получает Launch (effort), stubby stdin-prompt для `exec -`, генеральный AI_TEAM_HARNESS_ENV_ALLOW. Offline-тесты mock-бинарником. | review |
 | 2026-08-30 | adp-2-claude-code-adapter | ADP-2: ClaudeAdapter (claude.go) — headless `claude -p --output-format json`, `--effort` low/medium/high, `--permission-mode acceptEdits` + deny-list эффектных инструментов (Bash/WebFetch/WebSearch/Task/Skill/LSP), CLAUDE_CONFIG_DIR-изоляция 0700 с settings.json (path-deny секретов), usage из result JSON (total_cost_usd + input/cache/output tokens, attested), ClaudeRunError taxonomy (auth/model/config/network/budget/timeout/permission/runtime). Правка config_test.go (claude более не невалидный CLI). Offline-тесты mock-бинарником `claude`. | review |
+| 2026-08-30 | v0-0-prune-runs-export-guard | V0-0: export guard в retention (export.go) — immutable run evidence удаляется `--prune-runs` только при verified-записи `state/exports/<runID>.json` (schema v1, bundle_sha256). Fail-closed: отсутствие/невалидная/non-regular запись → Skipped с причиной и V0-4. Обновлены fixture и CLI-help gc. Тесты: только verified-export prunable, unverified/malformed — пропускаются. | review |
 
 ---
 
@@ -47,7 +48,7 @@
 | 2 | ADP-1 | P0 | review | adp-1-codex-adapter | Codex adapter (`codex exec`) — зависит от P1-1 |
 | 3 | ADP-2 | P0 | review | adp-2-claude-code-adapter | Claude Code adapter (`claude -p`) — зависит от P1-1 |
 | 4 | APF-1 | P0 | open | — | Трение approvals: default 1–2 клика |
-| 5 | V0-0 | P0 | open | — | Безопасность `--prune-runs` до portable export |
+| 5 | V0-0 | P0 | review | v0-0-prune-runs-export-guard | Безопасность `--prune-runs` до portable export |
 | 6 | OPS-1 | P0 | open | — | git tag v0.1.0 + GitHub Release (нужен owner-доступ) |
 | 7 | DOC-45 | P0 | deployed | PR #45 | Уже в Review/отдельный PR; HMR-рывок не в спринte |
 | 8 | V0-1 | P0 | open | — | Test-mutation provenance + policy |
@@ -96,8 +97,8 @@
 
 ## Резюме на текущий момент
 
-- open: 44
+- open: 43
 - in-progress: 0
-- review: 3 (P1-1, ADP-1, ADP-2)
+- review: 4 (P1-1, ADP-1, ADP-2, V0-0)
 - deployed (в рамках спринта): 0
 - n/a (требуют владельца/внешних): OPS-1, EXP-1, V0-7 (частично)

@@ -422,9 +422,9 @@
   </header>
 
   <section class="wrap stats" aria-label="Сводка по статусам">
-    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">47</strong><span>Open</span></button>
+    <button class="stat stat-open" type="button" data-set-status="Open"><strong data-count="Open">41</strong><span>Open</span></button>
     <button class="stat stat-progress" type="button" data-set-status="In Progress"><strong data-count="In Progress">0</strong><span>In Progress</span></button>
-    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">1</strong><span>Review</span></button>
+    <button class="stat stat-review" type="button" data-set-status="Review"><strong data-count="Review">7</strong><span>Review</span></button>
     <button class="stat stat-deployed" type="button" data-set-status="Deployed"><strong data-count="Deployed">15</strong><span>Deployed</span></button>
   </section>
 
@@ -536,11 +536,11 @@
         <div class="task-state"><span class="status status-review">◇ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/45" target="_blank" rel="noopener noreferrer">PR #45</a></div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-1" data-order="8">
+      <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-1" data-order="8">
         <div class="task-seq">#8</div>
         <div class="task-key"><strong>V0-1</strong><span class="prio prio-P0">P0</span><span class="tag">Integrity</span></div>
-        <div class="task-content"><h3>Test-mutation provenance + policy</h3><p>Классифицировать diff по стадиям и отдельно раскрывать добавление, изменение и удаление тестов. Изменение существующего теста source-стадией по умолчанию требует exact-subject approval.</p><p class="detail">Дыра подтверждена кодом: guard сверяет только glob, у coder <code>['**']</code>. DoD: typed evidence, review-line, configurable fail-closed policy, видимый класс unknown. Не имеет внешних зависимостей — можно делать сразу после P0-адаптеров или параллельно.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
+        <div class="task-content"><h3>Test-mutation provenance + policy</h3><p>Классифицировать diff по стадиям и отдельно раскрывать добавление, изменение и удаление тестов. Изменение существующего теста source-стадией по умолчанию требует exact-subject approval.</p><p class="detail">Реализовано: `pkg/scope.ClassifyMutation` (source/tests/meta/infra/generated/unknown), kind added/modified/removed, attempt manifest `mutation_changes`, typed-событие `test_mutations`, политика `test_modify_policy` в def.yaml агента (required/warn/off, default fail-closed), deferred-гейт exact-subject при required, Test mutations review в отчёте этапа.</p></div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-1-test-mutation-provenance</div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="V0" data-id="V0-2" data-order="9">

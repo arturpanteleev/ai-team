@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="no tests">
+  <testsuite name="empty" tests="0" failures="0" errors="0" skipped="0">
+    <system-out/>
+  </testsuite>
+</testsuites>

@@ -420,3 +420,92 @@ func TestDefaultProfiles(t *testing.T) {
 		t.Fatal("неизвестный профиль должен быть отклонён")
 	}
 }
+
+func TestDefaultProfilesDeferredGates(t *testing.T) {
+	for _, profile := range []string{ProfileFast, ProfileStandard} {
+		cfg, err := DefaultProfile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, edge := range cfg.Workflow.Edges {
+			switch {
+			case edge.Outcome == "rejected":
+				if edge.Approval != nil && edge.Approval.Deferred {
+					t.Fatalf("%s: loopback-ребро %s→%s не должно быть deferred", profile, edge.From, edge.To)
+				}
+			case edge.To != "$complete" && edge.Approval == nil:
+				t.Fatalf("%s: forward-ребро %s→%s без approval", profile, edge.From, edge.To)
+			case edge.To != "$complete" && !edge.Approval.Deferred:
+				t.Fatalf("%s: forward-ребро %s→%s должно быть deferred (APF-1 consolidation)", profile, edge.From, edge.To)
+			}
+		}
+		graph, err := cfg.CompiledGraph()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, edge := range graph.Edges {
+			if edge.Approval != nil && edge.Approval.Deferred && edge.Outcome == "rejected" {
+				t.Fatalf("%s: compile потерял deferred distinction на loopback %s→%s", profile, edge.From, edge.To)
+			}
+		}
+	}
+	regulated, err := DefaultProfile(ProfileRegulated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range regulated.Workflow.Edges {
+		if edge.Approval != nil && edge.Approval.Deferred {
+			t.Fatalf("regulated: ребро %s→%s не должно быть deferred (строгий пошаговый контроль)", edge.From, edge.To)
+		}
+	}
+}
+
+func TestWorkflowApprovalDeferredParsesAndCompiles(t *testing.T) {
+	cfg := Default()
+	cfg.Workflow.Edges[0].Approval.Deferred = true
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Config
+	if err := yaml.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Workflow.Edges[0].Approval.Deferred {
+		t.Fatal("deferred не должен потеряться при YAML round-trip")
+	}
+	// CompiledGraph должен нести флаг в runtime-контракт.
+	graph, err := decoded.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, found := graph.Edge("analyst", "passed")
+	if !found || edge.Approval == nil || !edge.Approval.Deferred {
+		t.Fatalf("compiled edge analyst→passed deferred=%v approval=%v found=%v", edge.Approval, edge.Approval, found)
+	}
+	// Неизвестный ключ approval должен оставаться запрещённым.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+schema_version: 4
+pipeline:
+  - name: a
+workflow:
+  entry: a
+  edges:
+    - from: a
+      outcome: passed
+      to: $complete
+      approval:
+        roles: [operator]
+        quorum: any
+        actions:
+          approve: $complete
+        bogus_key: true
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "workflow approval") {
+		t.Fatalf("неизвестный approval-ключ должен отклоняться, got %v", err)
+	}
+}

@@ -106,6 +106,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			selected, err := rs.authorizeTransition(
 				current, edge.To, "graph_outcome:"+string(edge.Outcome), result,
 				edge.Approval.Roles, edge.Approval.Quorum, actions, edge.Approval.Actions,
+				edge.Approval.Deferred,
 			)
 			if err != nil {
 				return err

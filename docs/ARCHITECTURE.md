@@ -134,6 +134,16 @@ evidence. Решения сериализуются in-process mutex и flock н
 `approval_requested` и `approval_decided` входят и в immutable hash chain,
 и в SQLite/WebSocket projection.
 
+Deferred-гейты (APF-1): для стандартного и fast профилей forward-gate рёбра
+помечаются `deferred: true` — переход не паузит и не решается по отдельности,
+а аттестуется отдельным approval с точным subject и разрешается одним
+consolidated delivery-решением run'а (`--approve-plan` или интерактивный
+delivery). Rоль/кворум отдельного гейта в этом случае осознанно замещаются
+единым delivery-контрпоинтом (роль `release_manager`); regulated-профиль
+сохраняет пошаговые approvals. Повторный проход того же перехода с тем же
+subject не создаёт новое ожидание и не перевалидируется (событие
+`approval_reused`).
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

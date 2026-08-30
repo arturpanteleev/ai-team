@@ -28,6 +28,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/export"
+	"github.com/arturpanteleev/ai-team/pkg/gate"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -1096,6 +1097,15 @@ func cmdVerify() {
 	}
 	info, statErr := os.Stat(arg)
 	if statErr == nil && info.IsDir() {
+		if gateBundleExists(arg) {
+			digest, err := gate.VerifyBundle(arg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "✗ Gate bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
+				os.Exit(exitFailed)
+			}
+			fmt.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s\n", arg, digest)
+			return
+		}
 		if err := export.VerifyBundle(arg); err != nil {
 			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
 			os.Exit(exitFailed)
@@ -1121,6 +1131,12 @@ func cmdVerify() {
 		os.Exit(exitFailed)
 	}
 	fmt.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
+}
+
+// gateBundleExists отличает gate attestation bundle (V0-5) от run bundle (V0-4).
+func gateBundleExists(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "gate.json"))
+	return err == nil && !info.IsDir()
 }
 
 func cmdWeb() {

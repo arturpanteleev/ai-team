@@ -1,0 +1,15 @@
+# ai-team gate config для демо на не-Go стеке (Python/питоновские тесты).
+# Diff-policy: изменение source без изменения тестов блокирует gate (required).
+# Typed check junit-xml читает отчёт тестов и дигирует исходный файл —
+# для CI-демо отчёт генерируется статическим фикстуром; в реальном проекте
+# здесь была бы команда, запускающая настоящий pytest и пишущая report.xml.
+schema_version: 1
+diff_policy:
+  test_modify: required
+checks:
+  - name: pytest-unit
+    class: unit
+    adapter: junit-xml
+    report_file: report.xml
+    command: ["sh", "-c", "cat reports/pytest-pass.xml > report.xml"]
+    policy: required

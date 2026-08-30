@@ -241,6 +241,18 @@ gate, integrity (гарантируется цепочкой хэшей) и auth
 гарантируется — подпись DSSE/Sigstore это P1-5), а также фиксирует отсутствие
 OS sandbox. Внешняя верификация «три человека проходят демо» — за владельцем.
 
+Risk-signals (V0-8): `pkg/risk` — детерминированный классификатор
+чувствительных путей (env / secrets / credentials: `.env*`, ключи и
+cert-расширения, id_*/secret-каталоги, credentials файлы; `.env.example` —
+шаблон, не сигнал). `gate.Result.Signals` собирает в bundle измеренные
+signals: размер diff (added/removed lines через `git diff --numstat`, файловый
+разбив added/modified/removed), количество тестовых изменений (class tests ×
+added/modified), чувствительные пути, `checks_run` и `failed_checks`. Сигналы
+записываются как данные и НЕ маршрутизируют pipeline (никакого
+автоматического решения на их основе); routing придёт отдельно в P2-1/P2-2
+вместе с продуктовым решением владельца. CLI summary печатает однострочный
+срез signals; в index.json и gate.json сигналы входят в record digest.
+
 JUnit XML typed adapter (V0-6): `pkg/junit` — bounded strict parser JUnit-отчётов
 (корни testsuite/testsuites, вложенные suite). Counts suites/testcases/
 failures/errors/skips выводятся только из реальных `<testcase>` элементов, а не

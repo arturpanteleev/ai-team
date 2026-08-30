@@ -310,8 +310,8 @@ func TestValidate(t *testing.T) {
 	}{
 		{"empty pipeline", &Config{}},
 		{"bad effort", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Effort: "max"}}}},
-		{"bad global cli", &Config{SchemaVersion: 4, CLI: "claude", PipelineAgents: []AgentConfig{{Name: "a"}}}},
-		{"bad agent cli", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", CLI: "claude"}}}},
+		{"bad global cli", &Config{SchemaVersion: 4, CLI: "nonexistent-cli", PipelineAgents: []AgentConfig{{Name: "a"}}}},
+		{"bad agent cli", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", CLI: "nonexistent-cli"}}}},
 		{"bad timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Timeout: "30 minutes"}}}},
 		{"bad stage_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, StageTimeout: "later"}},
 		{"unsupported schema", &Config{SchemaVersion: 99, PipelineAgents: []AgentConfig{{Name: "a"}}}},

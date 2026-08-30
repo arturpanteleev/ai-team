@@ -1,6 +1,8 @@
 // Package retention строит план уборки растущих артефактов .ai-team:
-// candidate worktrees, mutable control state и (только по явному флагу)
-// immutable run evidence.
+// candidate worktrees, mutable control state и (только по явному флагу и
+// только для verified-экспортированных evidence) immutable run records.
+// V0-0 guard: run evidence никогда не удаляется, пока в state/exports нет
+// verified-записи о её portable export (V0-4).
 package retention
 
 import (
@@ -70,6 +72,7 @@ type planner struct {
 	now      time.Time
 	plan     Plan
 	terminal map[string]time.Time
+	exports  map[string]bool
 	keepSet  map[string]bool
 	cutoff   time.Duration
 }
@@ -89,10 +92,14 @@ func Build(options Options) (*Plan, error) {
 		aiTeam:   aiTeam,
 		now:      time.Now().UTC(),
 		terminal: map[string]time.Time{},
+		exports:  map[string]bool{},
 		keepSet:  map[string]bool{},
 		cutoff:   options.OlderThan,
 	}
 	if err := p.loadTerminalRuns(); err != nil {
+		return nil, err
+	}
+	if err := p.loadVerifiedExports(); err != nil {
 		return nil, err
 	}
 	p.markKeepLast()
@@ -300,7 +307,9 @@ func (p *planner) planState() error {
 }
 
 // planRuns: immutable evidence удаляется только когда вызывающий явно
-// включил PruneRuns, раны terminal, старше older-than и вне keep-last.
+// включил PruneRuns, раны terminal, старше older-than, вне keep-last И их
+// portable export проверенно зафиксирован в state/exports (V0-0 guard).
+// Отсутствие verified-export записи — fail-closed: evidence не удаляется.
 func (p *planner) planRuns() error {
 	root := filepath.Join(p.aiTeam, "runs")
 	entries, err := os.ReadDir(root)
@@ -328,6 +337,12 @@ func (p *planner) planRuns() error {
 		if !p.eligibleForAge(runID) {
 			p.plan.Skipped = append(p.plan.Skipped, Skipped{
 				Path: path, Reason: "свежий terminal run (older-than или keep-last)",
+			})
+			continue
+		}
+		if !p.exports[runID] {
+			p.plan.Skipped = append(p.plan.Skipped, Skipped{
+				Path: path, Reason: "evidence не проверенно экспортирована (нет verified-записи в state/exports; V0-4)",
 			})
 			continue
 		}

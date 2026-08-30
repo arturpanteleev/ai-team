@@ -1,8 +1,10 @@
 package retention
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,7 +54,7 @@ func newFixture(t *testing.T) *fixture {
 	old := now.Add(-1000 * time.Hour)
 
 	for _, dir := range [][]string{
-		{"state", "runs"}, {"state", "candidates"}, {"state", "approvals"},
+		{"state", "runs"}, {"state", "candidates"}, {"state", "approvals"}, {"state", "exports"},
 		{"worktrees"}, {"runs"},
 	} {
 		if err := os.MkdirAll(filepath.Join(append([]string{base}, dir...)...), 0755); err != nil {
@@ -85,7 +87,19 @@ func newFixture(t *testing.T) *fixture {
 	// Mutable state.
 	writeFile(t, filepath.Join(base, "state", "candidates", oldTerminalRunID+".json"), `{"run_id":"`+oldTerminalRunID+`"}`)
 	writeFile(t, filepath.Join(base, "state", "approvals", oldTerminalRunID, "appr.json"), `{"id":"appr"}`)
+
+	// Verified export Guard (V0-0): только старый terminal run экспортирован.
+	writeExport(t, f.target, oldTerminalRunID)
 	return f
+}
+
+func writeExport(t *testing.T, target, runID string) {
+	t.Helper()
+	path := filepath.Join(target, ".ai-team", "state", "exports", runID+".json")
+	data := fmt.Sprintf(`{"schema_version":1,"run_id":%q,"verified":true,"bundle_sha256":"face01","exported_at":"2026-08-01T00:00:00Z"}`, runID)
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write export %s: %v", runID, err)
+	}
 }
 
 func (f *fixture) build(t *testing.T, pruneRuns bool) *Plan {
@@ -236,4 +250,53 @@ func totalBytesOf(t *testing.T, plan *Plan) int64 {
 		total += size
 	}
 	return total
+}
+
+func TestRunEvidencePrunedOnlyWithVerifiedExport(t *testing.T) {
+	f := newFixture(t)
+	// Удаляем verified-запись: у старого run нет защищённого portable export.
+	if err := os.Remove(filepath.Join(f.target, ".ai-team", "state", "exports", oldTerminalRunID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	plan := f.build(t, true)
+	if actions := actionsFor(plan, CategoryRuns); len(actions) != 0 {
+		t.Fatalf("V0-0: без verified-export evidence не должна удаляться, получено %+v", actions)
+	}
+	var skippedOld bool
+	for _, skipped := range plan.Skipped {
+		if strings.HasSuffix(skipped.Path, oldTerminalRunID) && strings.Contains(skipped.Reason, "state/exports") {
+			skippedOld = true
+		}
+	}
+	if !skippedOld {
+		t.Fatalf("не-экспортированный run должен попасть в Skipped с причиной state/exports, got %+v", plan.Skipped)
+	}
+	if err := plan.Execute(f.target); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(f.target, ".ai-team", "runs", oldTerminalRunID)) {
+		t.Fatal("выполнение плана не должно удалить evidence без verified-export")
+	}
+}
+
+func TestRunEvidenceSkippedOnUnverifiedOrMalformedExport(t *testing.T) {
+	f := newFixture(t)
+	base := filepath.Join(f.target, ".ai-team", "state", "exports", oldTerminalRunID+".json")
+	if err := os.WriteFile(base, []byte(`{"schema_version":1,"run_id":"`+oldTerminalRunID+`","verified":false}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan := f.build(t, true)
+	if actions := actionsFor(plan, CategoryRuns); len(actions) != 0 {
+		t.Fatalf("unverified export не даёт права на удаление, получено %+v", actions)
+	}
+
+	f = newFixture(t)
+	base = filepath.Join(f.target, ".ai-team", "state", "exports", oldTerminalRunID+".json")
+	if err := os.WriteFile(base, []byte(`не json`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan = f.build(t, true)
+	if actions := actionsFor(plan, CategoryRuns); len(actions) != 0 {
+		t.Fatalf("malformed export не даёт права на удаление, получено %+v", actions)
+	}
 }

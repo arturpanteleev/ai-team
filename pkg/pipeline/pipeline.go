@@ -22,6 +22,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
@@ -390,6 +391,24 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			fmt.Sprintf("%x", workflowDigest[:]) != resumedState.WorkflowSHA256 {
 			return RunResult{}, fmt.Errorf("resume run: config/workflow identity mismatch")
 		}
+		if len(manifest.Provenance) > 0 {
+			var storedProvenance provenance.Manifest
+			if json.Unmarshal(manifest.Provenance, &storedProvenance) != nil {
+				return RunResult{}, fmt.Errorf("resume provenance manifest повреждён")
+			}
+			liveIdentity, liveErr := evidence.CurrentControllerIdentity()
+			if liveErr != nil {
+				return RunResult{}, fmt.Errorf("resume controller identity: %w", liveErr)
+			}
+			liveProvenance, provErr := p.captureProvenance(runID, liveIdentity, candidateManager)
+			if provErr != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, provErr
+			}
+			if err := provenance.CheckDrift(&storedProvenance, liveProvenance); err != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed},
+					fmt.Errorf("resume run: %w", err)
+			}
+		}
 		for _, attempt := range replayedRun.Attempts {
 			if attempt.ManifestSHA256 != "" {
 				manifestPath := filepath.Join(evidenceStore.RunDir(), "attempts", attempt.AttemptID, "manifest.json")
@@ -464,9 +483,22 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 		resumedState = nextState
 	} else {
+		identity, identityErr := evidence.CurrentControllerIdentity()
+		if identityErr != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed},
+				fmt.Errorf("controller identity: %w", identityErr)
+		}
+		provenanceManifest, provErr := p.captureProvenance(runID, identity, candidateManager)
+		if provErr != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, provErr
+		}
+		provenanceData, marshalErr := json.Marshal(provenanceManifest)
+		if marshalErr != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("provenance manifest: %w", marshalErr)
+		}
 		evidenceStore, err = evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
 			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
-			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
+			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot, Provenance: provenanceData,
 		})
 		if err != nil {
 			return RunResult{}, fmt.Errorf("создание evidence run: %w", err)

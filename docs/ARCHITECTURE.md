@@ -161,6 +161,25 @@ consolidated delivery-решением, что и прочие deferred-гейт
 человеческого решения на delivery; warn и off фиксируют тот же evidence без
 гейта. Отчёт этапа показывает Test mutations review (path/class/kind).
 
+Provenance manifest v1 (V0-2): `pkg/provenance` сериализует authority-bearing
+identity каждого источника истины — `runtime` (digest исполняемого бинарника
+контроллера через `evidence.ControllerIdentity`), `config` (resolved surface
+cli/model/effort по этапам), по каждому этапу `agent_definition` (canonical
+срез контракта: runtime/cli/kind/mutation/allowed_paths/require_diff/
+test_modify_policy/inputs/outputs/ask_questions/checks/verdict/preconditions),
+`prompt` (digest содержимого prompt), `check_suite` (canonical digest
+отсортированного списка checks) и `provider_model`. Base identity фиксируется
+по стабильному {base_commit, base_tree}; candidate — по control metadata
+(run_id/base/worktree), а не по mutable workspace-хэшу (содержимое worktree
+меняется между попытками и охраняется approval'ами с exact CandidateSHA256).
+Неперечислимое значение честно помечается `unknown` без догадок. Manifest
+хранится inline в run.json (`RunManifest.Provenance`, opaque RawMessage) и
+при resume сверяется с заново построенным (evident `CheckDrift`): известноe
+поле, изменившееся/пропавшее/ставшее unknown, и возникновение нового
+известного источника блокируют resume fail-closed; unknown никогда не дрифтит.
+Runtime-digest даёт сигнал, не покрытый config/workflow snapshots: замена
+бинарника контроллера между start и resume останавливает run.
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

@@ -890,6 +890,77 @@ func TestRun_DeliveryApprovalPersistedAndResumable(t *testing.T) {
 	}
 }
 
+func TestRun_DeferredGateConsolidatedIntoDeliveryDecision(t *testing.T) {
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.Edges[0].Approval.Deferred = true
+	}, config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"})
+	p := New(cfg, deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+
+	// Первый прогон — non-interactive БЕЗ --approve-gates: deferred-гейт не
+	// паузит, run доходит до единственного consolidated delivery-решения.
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir})
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("ожидался ApprovalRequiredError на delivery, got: %v", err)
+	}
+	if got := strings.Join(rt.executed, ","); got != "approver" {
+		t.Fatalf("deferral не должен паузить у гейта: %s", got)
+	}
+	store, storeErr := approval.NewStore(dir)
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	deliveryApproval, loadErr := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if deliveryApproval.Trigger != "delivery_plan" {
+		t.Fatalf("run должен остановиться именно на delivery, trigger=%s", deliveryApproval.Trigger)
+	}
+	values, listErr := store.List(approvalErr.RunID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	var gate *approval.PendingApproval
+	for i := range values {
+		if values[i].Deferred {
+			gate = &values[i]
+			break
+		}
+	}
+	if gate == nil {
+		t.Fatal("deferred-гейт не создан")
+	}
+	if gate.Status != approval.StatusPending || gate.FromStage != "approver" || gate.ToStage != "deployer" {
+		t.Fatalf("неожиданный deferred-гейт: %+v", gate)
+	}
+
+	// Resume с точным canonical plan hash решает delivery и ratify-ит гейт.
+	err = p.Run(context.Background(), RunConfig{
+		ResumeRunID: approvalErr.RunID, TargetDir: dir, ApprovePlanHash: approvedPlanHash,
+	})
+	if err != nil {
+		t.Fatalf("resume с --approve-plan должен завершиться: %v", err)
+	}
+	if service.calls != 1 {
+		t.Fatalf("delivery должен выполниться после решения, calls=%d", service.calls)
+	}
+	resolvedGate, loadErr := store.Load(gate.RunID, gate.ID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if resolvedGate.Status != approval.StatusResolved || resolvedGate.ResolvedAction != "approve" ||
+		len(resolvedGate.Decisions) != 1 || resolvedGate.Decisions[0].ActorRole != "release_manager" {
+		t.Fatalf("deferred-гейт не ratify-ён consolidated delivery-решением: %+v", resolvedGate)
+	}
+}
+
 func TestRun_DeliveryResumeRejectsMismatchedPlanHash(t *testing.T) {
 	dir := env(t)
 	prepareDelivery(t, dir)

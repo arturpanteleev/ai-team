@@ -142,6 +142,10 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 		specByName[s.name] = s
 	}
 	workflowConfig := &WorkflowConfig{Entry: names[0], MaxVisits: map[string]int{}}
+	// APF-1: в standard/fast профилях forward gate-переходы откладываются и
+	// подтверждаются одним consolidated delivery-решением (1–2 клика на фичу);
+	// regulated сохраняет пошаговые approvals (quorum all).
+	deferredGates := profile == ProfileStandard || profile == ProfileFast
 	for i, name := range names {
 		target := "$complete"
 		if i+1 < len(names) {
@@ -154,7 +158,7 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 				roles = []string{"operator"}
 			}
 			edge.Approval = &WorkflowApprovalConfig{
-				Roles: roles, Quorum: quorum,
+				Roles: roles, Quorum: quorum, Deferred: deferredGates,
 				Actions: map[string]string{"approve": target, "reject": "$stop"},
 			}
 		}
@@ -191,7 +195,6 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 			workflowConfig.MaxVisits[name] = defaultMaxVisits
 		}
 	}
-	_ = profile
 	return workflowConfig
 }
 

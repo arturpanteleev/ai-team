@@ -13,6 +13,11 @@ type ApprovalPolicy struct {
 	Roles   []string          `json:"roles"`
 	Quorum  string            `json:"quorum"`
 	Actions map[string]string `json:"actions"`
+	// Deferred — подтверждение перехода откладывается до delivery-решения
+	// run'а (одно consolidated решение на весь delivery-план, APF-1). Пока
+	// delivery не разрешён, deferred approval остаётся pending и attestуется
+	// со своим точным subject; в strict/regulated профилях deferred=false.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 type Node struct {

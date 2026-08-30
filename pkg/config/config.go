@@ -55,6 +55,8 @@ type WorkflowApprovalConfig struct {
 	Roles   []string          `yaml:"roles"`
 	Quorum  string            `yaml:"quorum"`
 	Actions map[string]string `yaml:"actions"`
+	// Deferred — см. workflow.ApprovalPolicy.Deferred.
+	Deferred bool `yaml:"deferred,omitempty"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
@@ -164,7 +166,7 @@ func (e *WorkflowEdgeConfig) UnmarshalYAML(value *yaml.Node) error {
 
 func (a *WorkflowApprovalConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
-		"roles": true, "quorum": true, "actions": true,
+		"roles": true, "quorum": true, "actions": true, "deferred": true,
 	}, "config: workflow approval"); err != nil {
 		return err
 	}
@@ -256,9 +258,10 @@ func (c *Config) CompiledGraph() (workflow.Graph, error) {
 		}
 		if edge.Approval != nil {
 			compiled.Approval = &workflow.ApprovalPolicy{
-				Roles:   append([]string(nil), edge.Approval.Roles...),
-				Quorum:  edge.Approval.Quorum,
-				Actions: copyTargets(edge.Approval.Actions),
+				Roles:    append([]string(nil), edge.Approval.Roles...),
+				Quorum:   edge.Approval.Quorum,
+				Actions:  copyTargets(edge.Approval.Actions),
+				Deferred: edge.Approval.Deferred,
 			}
 		}
 		graph.Edges = append(graph.Edges, compiled)

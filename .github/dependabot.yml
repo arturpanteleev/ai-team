@@ -1,0 +1,20 @@
+# Dependabot для SHA-pinned GitHub Actions (OPS-10).
+# CI закрепляет Actions по полному SHA с комментарием вида "# v<semver>"
+# (см. .github/workflows/ci.yaml). version-comment: "# v" велит Dependabot
+# обновлять и SHA, и этот комментарий согласованно, не откатывая к mutable tag.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    target-branch: "master"
+    versioning-strategy: increase
+    version-comment: "# v"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"

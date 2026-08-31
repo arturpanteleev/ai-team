@@ -3,6 +3,8 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"gopkg.in/yaml.v3"
 )
 
@@ -463,5 +466,57 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 		if _, err := VerifyBundle(fresh); err == nil {
 			t.Fatalf("tamper %q: VerifyBundle не обнаружил повреждение", name)
 		}
+	}
+}
+
+func TestGateBundleSignAndVerify(t *testing.T) {
+	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	result := &Result{
+		SchemaVersion: SchemaVersion, Base: "HEAD", Candidate: "HEAD",
+		BaseCommit: "aabb", CandidateCommit: "ccdd",
+		BaseTree: "tree-a", CandidateTree: "tree-b",
+		DiffPolicy: TestModifyRequired, PolicyVerdict: VerdictPassed,
+		Status: "passed", FinishedAt: fixed,
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Без подписи, без ключа — integrity-only pass.
+	unsigned := t.TempDir()
+	if err := WriteBundle(unsigned, result); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBundle(unsigned); err != nil {
+		t.Fatalf("unsigned no-key pass: %v", err)
+	}
+	// Без подписи, но ключ задан — fail-closed.
+	if _, err := VerifyBundle(unsigned, pub); err == nil {
+		t.Fatal("unsigned + key должен FAIL (fail-closed)")
+	}
+
+	// С подписью: правильный ключ pass, чужой FAIL.
+	signed := t.TempDir()
+	if err := WriteBundle(signed, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := SignBundle(signed, priv); err != nil {
+		t.Fatalf("SignBundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(signed, dsse.EnvelopeFileName)); err != nil {
+		t.Fatalf("dsse.json отсутствует: %v", err)
+	}
+	// dsse.json не должен ломать extra-file detection.
+	if _, err := VerifyBundle(signed); err != nil {
+		t.Fatalf("signed no-key pass: %v", err)
+	}
+	if _, err := VerifyBundle(signed, pub); err != nil {
+		t.Fatalf("signed correct key: %v", err)
+	}
+	wrongPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := VerifyBundle(signed, wrongPub); err == nil {
+		t.Fatal("signed wrong key должен FAIL")
 	}
 }

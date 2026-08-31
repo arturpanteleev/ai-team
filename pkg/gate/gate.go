@@ -10,6 +10,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/risk"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 
@@ -626,7 +628,11 @@ const maxRecordSize = 16 << 20 // 16 MiB на record файл при вериф�
 // gate.json либо отсутствует, либо совпадает с пересчитанным digest. Работает без
 // repo и .ai-team — bundle является единственным источником данных. Возвращает
 // детерминированный digest bundle.
-func VerifyBundle(bundleDir string) (string, error) {
+//
+// Опционально (variadic keyVerify, P1-5) проверяется DSSE-подпись bundle
+// (dsse.json): задан ключ → подпись обязана быть и совпадать (fail-closed);
+// ключ пуст и подписи нет → integrity-only pass.
+func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) (string, error) {
 	dir, err := safeio.ExistingDir(bundleDir)
 	if err != nil {
 		return "", fmt.Errorf("verify gate bundle: %v", err)
@@ -682,7 +688,7 @@ func VerifyBundle(bundleDir string) (string, error) {
 			return relErr
 		}
 		slashed := filepath.ToSlash(rel)
-		if slashed == indexFileName {
+		if slashed == indexFileName || slashed == dsse.EnvelopeFileName {
 			return nil
 		}
 		if _, ok := expected[slashed]; !ok {
@@ -736,7 +742,36 @@ func VerifyBundle(bundleDir string) (string, error) {
 		return "", fmt.Errorf("verify gate bundle: заявленный bundle_sha256 %q не равен digest %q",
 			verdict.BundleSHA256, digest)
 	}
+	if err := verifyDSSeSignature(dir, digest, keyVerify...); err != nil {
+		return "", fmt.Errorf("verify gate bundle: %w", err)
+	}
 	return digest, nil
+}
+
+// verifyDSSeSignature проверяет DSSE-подпись (dsse.json) против digest
+// (P1-5, fail-closed). См. export.verifySignature за правилами.
+func verifyDSSeSignature(bundleDir, digest string, keyVerify ...ed25519.PublicKey) error {
+	env, present, err := dsse.ReadEnvelopeFile(bundleDir)
+	if err != nil {
+		return err
+	}
+	keyGiven := len(keyVerify) > 0 && len(keyVerify[0]) > 0
+	if !present {
+		if keyGiven {
+			return errors.New("задан --verify-key, но dsse.json (подпись bundle) отсутствует")
+		}
+		return nil
+	}
+	if !keyGiven {
+		return nil
+	}
+	if env.PayloadType != dsse.SignaturePayloadType || string(env.Payload) != digest {
+		return errors.New("подпись bundle не соответствует digest (payload подменён)")
+	}
+	if err := dsse.Verify(keyVerify[0], env.PayloadType, env.Payload, env.Signature); err != nil {
+		return err
+	}
+	return nil
 }
 
 const sha256BytesLen = 64
@@ -827,6 +862,28 @@ func WriteBundle(outDir string, result *Result) error {
 		return err
 	}
 	result.BundleSHA256 = BundleDigest(index)
+	return nil
+}
+
+// SignBundle подписывает детерминированный BundleDigest записанного bundle
+// (outDir с index.json) ed25519-ключом priv и пишет dsse.json. Вызывается в
+// cmdGate после WriteBundle.
+func SignBundle(outDir string, priv ed25519.PrivateKey) error {
+	data, err := safeio.ReadRegularFile(filepath.Join(outDir, indexFileName), maxIndexSize)
+	if err != nil {
+		return fmt.Errorf("gate sign: index.json: %w", err)
+	}
+	var index Index
+	if err := strictDecode(data, &index); err != nil {
+		return fmt.Errorf("gate sign: index.json decode: %w", err)
+	}
+	if index.Type != BundleType {
+		return fmt.Errorf("gate sign: index.json не является gate bundle")
+	}
+	digest := BundleDigest(&index)
+	if err := dsse.SignBundleFile(outDir, priv, dsse.SignaturePayloadType, []byte(digest)); err != nil {
+		return fmt.Errorf("gate sign: %w", err)
+	}
 	return nil
 }
 

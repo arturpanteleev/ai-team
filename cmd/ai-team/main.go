@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +27,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/control"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/export"
@@ -136,6 +138,7 @@ func printUsage() {
 Флаги export:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
   --out <path>              Каталог bundle (по умолчанию .ai-team/exports/<run_id>.bundle)
+  --sign-key <path>         ed25519 private key (PEM PKCS8/raw) для DSSE-подписи bundle (P1-5)
 
 Флаги gc:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
@@ -154,6 +157,11 @@ func printUsage() {
                             .ai-team/gate.yaml; иначе — дефолты: test_modify required)
   --out <path>              Каталог attestation bundle (по умолчанию
                             <target>/.ai-team/gates/<ts> или gate-out/<ts>)
+  --sign-key <path>         ed25519 private key (PEM PKCS8/raw) для DSSE-подписи bundle (P1-5)
+
+Флаги verify:
+  --verify-key <path>       ed25519 public key (PEM/raw) — требовать валидную
+                            DSSE-подпись bundle (fail-closed, P1-5)
 
 Exit-коды gate: 0 — PASS, 1 — FAIL (diff-policy/required checks), 2 — BLOCKED
                 (конфиг, отсутствующий/нелокальный ref, untrusted — запрещён до P1-4)
@@ -1106,32 +1114,41 @@ func cmdList() {
 func cmdVerify() {
 	verifyFlags := flag.NewFlagSet("verify", flag.ExitOnError)
 	target := verifyFlags.String("target", ".", "Путь к целевому проекту")
+	verifyKey := verifyFlags.String("verify-key", "", "Путь к ed25519 public key (PEM или raw) для DSSE-верификации подписи bundle (P1-5)")
 	if err := verifyFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов verify: %v", err)
 	}
 	if verifyFlags.NArg() != 1 {
-		fatal("Использование: ai-team verify [--target <dir>] <run_id> | <bundle-dir>")
+		fatal("Использование: ai-team verify [--target <dir>] [--verify-key <path>] <run_id> | <bundle-dir>")
 	}
 	arg := verifyFlags.Arg(0)
 	if len(arg) > 1024 {
 		fatal("недопустимый аргумент verify")
 	}
+	var keyVerify ed25519.PublicKey
+	if *verifyKey != "" {
+		key, err := dsse.LoadPublicKey(*verifyKey)
+		if err != nil {
+			fatal("Ошибка загрузки verify key: %v", err)
+		}
+		keyVerify = key
+	}
 	info, statErr := os.Stat(arg)
 	if statErr == nil && info.IsDir() {
 		if gateBundleExists(arg) {
-			digest, err := gate.VerifyBundle(arg)
+			digest, err := gate.VerifyBundle(arg, keyVerify)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "✗ Gate bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
 				os.Exit(exitFailed)
 			}
-			fmt.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s\n", arg, digest)
+			fmt.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s%s\n", arg, digest, sigNote(keyVerify))
 			return
 		}
-		if err := export.VerifyBundle(arg); err != nil {
+		if err := export.VerifyBundle(arg, keyVerify); err != nil {
 			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
 			os.Exit(exitFailed)
 		}
-		fmt.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы\n", arg)
+		fmt.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
 		return
 	}
 	if strings.ContainsAny(arg, `/\`) || arg == "." || arg == ".." || filepath.Base(arg) != arg {
@@ -1158,6 +1175,14 @@ func cmdVerify() {
 func gateBundleExists(dir string) bool {
 	info, err := os.Stat(filepath.Join(dir, "gate.json"))
 	return err == nil && !info.IsDir()
+}
+
+// sigNote возвращает постфикс о статусе подписи в выводе verify.
+func sigNote(key ed25519.PublicKey) string {
+	if len(key) == 0 {
+		return " (без верификации подписи: --verify-key не задан)"
+	}
+	return " — подпись DSSE ed25519 подтверждена"
 }
 
 func cmdWeb() {

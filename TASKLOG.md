@@ -59,9 +59,9 @@
 | 15 | EXP-1 | P1 | open | — | Track V kill-watch + интервью (не-кодовая) |
 | 16 | V0-8 | P1 | review | v0-8-risk-signals | Risk-signal measurement (записывать, не маршрутизировать) |
 | 17 | V0-9 | P1 | review | v0-9-agent-attribution-trailers | Agent attribution в Git trailers (deferred post-terminal delivery) — после V0-2/V0-3 |
-| 18 | P1-4 | P1 | open | — | Containment profile v1 + receipt |
-| 19 | P1-9 | P1 | open | — | Contract test: coder не видит будущее ревью |
-| 20 | P1-5 | P1 | open | — | Signed bundle через DSSE |
+| 18 | P1-4 | P1 | review | p1-4-containment-profile-v1 | Containment profile v1 + receipt (OS-sandbox backend — V2) |
+| 19 | P1-9 | P1 | review | p1-9-coder-stage-independence | Contract test: coder не видит будущее ревью |
+| 20 | P1-5 | P1 | review | p15-dsse-signed-bundle | Signed bundle через DSSE (ed25519, stdlib-only) |
 | 21 | P1-6 | P1 | open | — | Redaction + retention contract |
 | 22 | P1-7 | P1 | open | — | Budget guard + usage truthfulness |
 | 23 | P1-8 | P1 | open | — | CI-parity check import |

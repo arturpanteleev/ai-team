@@ -190,6 +190,12 @@ non-interactive режиме: он сохраняет запрос решени�
 Флаги `run`: `--feature`, `--task`, `--target` (по умолчанию `.`),
 `--resume <run_id>`, `--approve-gates`, `--approve-plan <sha256>`.
 
+Глобальные флаги вывода (OPS-6): `--json` — стабильные machine-readable JSON
+records на stdout для результатов `run`/`verify`/`export`/`gate`;
+`--quiet`/`-q` — подавить второстепенный вывод (stdout без JSON, критичное —
+на stderr). Флаги принимаются и до, и после имени подкоманды; exit-коды не
+меняются.
+
 Если процесс был остановлен во время non-terminal run, controller сохраняет
 атомарный checkpoint в `.ai-team/state/runs/<run_id>.json`. Команда
 `ai-team run --resume <run_id>` проверяет immutable evidence chain и

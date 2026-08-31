@@ -491,35 +491,35 @@
         <div class="task-seq">#1</div>
         <div class="task-key"><strong>P1-1</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Тонкий RuntimeAdapter contract</h3><p>Разделить launch, session protocol, capabilities, identity, usage и policy mapping; OpenCode становится первой реализацией без ослабления текущих гарантий.</p><p class="detail">Блокирует ADP-1/ADP-2. Unknown capability в strict profile блокирует запуск; контракт без vendor-specific полей. Жёсткая привязка к opencode в agentcli.go:25:383 должна быть заменена реестром адаптеров.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">p1-1-runtime-adapter-contract</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/46" target="_blank" rel="noopener noreferrer">PR #46</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="ADP-1" data-order="2">
         <div class="task-seq">#2</div>
         <div class="task-key"><strong>ADP-1</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Codex adapter (<code>codex exec</code>)</h3><p>Полная поддержка OpenAI Codex CLI как второго runtime: non-interactive exec, model/effort, изоляция env, типизированный разбор результата, usage и error taxonomy, отмена.</p><p class="detail">Решение владельца 30.08: Codex и Claude Code нужны обязательно, без ожидания ACP-спайка. Замечание FEATURES.md §6 про «вечный долг за версиями» принимается осознанно. Зависит от P1-1.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">adp-1-codex-adapter</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/47" target="_blank" rel="noopener noreferrer">PR #47</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="ADP-2" data-order="3">
         <div class="task-seq">#3</div>
         <div class="task-key"><strong>ADP-2</strong><span class="prio prio-P0">P0</span><span class="tag">Runtime</span></div>
         <div class="task-content"><h3>Claude Code adapter (<code>claude -p</code>)</h3><p>Поддержка Claude Code как третьего runtime: print-mode JSON, total_cost_usd, deny-list инструментов, те же capability/usage контракты, что и у Codex.</p><p class="detail">Требование владельца: проект не должен выглядеть «только OpenCode». Зависит от P1-1. Оба адаптера проходят одни и те же offline contract tests + live canary.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">adp-2-claude-code-adapter</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/48" target="_blank" rel="noopener noreferrer">PR #48</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="P1" data-id="APF-1" data-order="4">
         <div class="task-seq">#4</div>
         <div class="task-key"><strong>APF-1</strong><span class="prio prio-P0">P0</span><span class="tag">UX</span></div>
         <div class="task-content"><h3>Трение approvals: default-профиль за 1–2 клика</h3><p>Сгруппировать подтверждения: одно решение на весь delivery-план, не перевалидировать прежние этапы при loopback, осмысленные дефолты действий. exact-SHA subject и fail-closed сохраняются.</p><p class="detail">Потерялась при переносе в HTML: в BACKLOG.md это G1/P0. ~6 approvals на фичу — главный барьер входа в Track P. Дешёвая правка поверх уже готового #34.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">apf-1-approvals-friction</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/50" target="_blank" rel="noopener noreferrer">PR #50</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-0" data-order="5">
         <div class="task-seq">#5</div>
         <div class="task-key"><strong>V0-0</strong><span class="prio prio-P0">P0</span><span class="tag">Safety</span></div>
         <div class="task-content"><h3>Безопасность pruning до portable export</h3><p>Убрать или fail-closed ограничить <code>--prune-runs</code> (cmd/ai-team/gc.go), пока V0-4 не позволяет сохранить проверяемый bundle.</p><p class="detail">Owner decision RQ15. Основа GC уже доставлена в #44. Час работы, закрывает риск уничтожения единственной копии evidence.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/44" target="_blank" rel="noopener noreferrer">foundation #44</a>, v0-0-prune-runs-export-guard</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/44" target="_blank" rel="noopener noreferrer">foundation #44</a> · <a href="https://github.com/arturpanteleev/ai-team/pull/49" target="_blank" rel="noopener noreferrer">PR #49</a></div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P0" data-horizon="Operations" data-id="OPS-1" data-order="6">
@@ -540,49 +540,49 @@
         <div class="task-seq">#8</div>
         <div class="task-key"><strong>V0-1</strong><span class="prio prio-P0">P0</span><span class="tag">Integrity</span></div>
         <div class="task-content"><h3>Test-mutation provenance + policy</h3><p>Классифицировать diff по стадиям и отдельно раскрывать добавление, изменение и удаление тестов. Изменение существующего теста source-стадией по умолчанию требует exact-subject approval.</p><p class="detail">Реализовано: `pkg/scope.ClassifyMutation` (source/tests/meta/infra/generated/unknown), kind added/modified/removed, attempt manifest `mutation_changes`, typed-событие `test_mutations`, политика `test_modify_policy` в def.yaml агента (required/warn/off, default fail-closed), deferred-гейт exact-subject при required, Test mutations review в отчёте этапа.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-1-test-mutation-provenance</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/51" target="_blank" rel="noopener noreferrer">PR #51</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-2" data-order="9">
         <div class="task-seq">#9</div>
         <div class="task-key"><strong>V0-2</strong><span class="prio prio-P0">P0</span><span class="tag">Provenance</span></div>
         <div class="task-content"><h3>Provenance manifest v1</h3><p>Зафиксировать digests prompt, agent definition, check suite, controller/runtime binary, provider/model и base/candidate identity. Неизвестные данные оставлять <code>unknown</code>.</p><p class="detail">Реализовано: `pkg/provenance` — authority-bearing manifest v1, inline в run.json; resume сверяет с заново построенным (`CheckDrift`, fail-closed; unknown не дрифтит), runtime-digest ловит замену бинарника; base/candidate по стабильному control-состоянию, не по mutable workspace-хэшу. DoD: drift authority-bearing полей обнаруживается при resume; никаких догадок о модели или usage. Поле runtime identity после ADP-1/ADP-2 становится содержательным.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-2-provenance-manifest</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/52" target="_blank" rel="noopener noreferrer">PR #52</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-3" data-order="10">
         <div class="task-seq">#10</div>
         <div class="task-key"><strong>V0-3</strong><span class="prio prio-P0">P0</span><span class="tag">Attestation</span></div>
         <div class="task-content"><h3>Attestation predicate v1</h3><p>Версионированная in-toto-compatible predicate связывает candidate с run, spec, checks, mutations, approvals, verdicts и provenance. Заранее предусмотреть импорт внешних attestation от харнесов.</p><p class="detail">Реализовано: `pkg/attest` — in-toto Statement (subject=candidate workspace digest), predicateType .../run/v1, публикуется в `{RunDir}/attestation.json` на terminal-завершении; связывает run/spec/checks/mutations/approvals/verdicts/provenance. Зависит от V0-1/V0-2. Canonical JSON, golden fixtures и compatibility policy обязательны.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-3-attestation-predicate</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/53" target="_blank" rel="noopener noreferrer">PR #53</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-4" data-order="11">
         <div class="task-seq">#11</div>
         <div class="task-key"><strong>V0-4</strong><span class="prio prio-P0">P0</span><span class="tag">Evidence</span></div>
         <div class="task-content"><h3><code>ai-team export</code> + <code>verify &lt;bundle&gt;</code></h3><p>Самодостаточный deterministic bundle проверяется без исходного repo и <code>.ai-team</code>. По умолчанию экспортируются только whitelisted typed records и digests, без raw logs/stdout.</p><p class="detail">Реализовано: `pkg/export` — deterministic bundle (index.json, sha256 каждого record, без тайм-меток), полная verify перед публикацией verified-записи в state/exports (контракт V0-0), самодостаточный `ai-team verify &lt;bundle&gt;`, связка attempt manifests↔event chain и attestation v1↔evidence. Зависит от V0-3. Ключевой дифференциатор продукта.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-4-export-verify</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/54" target="_blank" rel="noopener noreferrer">PR #54</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-5" data-order="12">
         <div class="task-seq">#12</div>
         <div class="task-key"><strong>V0-5</strong><span class="prio prio-P0">P0</span><span class="tag">Track V</span></div>
         <div class="task-content"><h3><code>ai-team gate</code> MVP</h3><p>Для trusted local base/candidate: diff-policy, typed checks, attestation bundle и стабильные exit codes. Спека fingerprinted, но без runtime не объявляется семантически проверенной.</p><p class="detail">Реализовано: пакет pkg/gate (типизированные мутации diff по scope V0-1, политика test_modify required/warning/off), typed checks через pkg/checks, самодостаточный attestation bundle с детерминированным index.json и BundleDigest, стабильные exit codes 0/1/2, fail-closed untrusted (до P1-4). Дешёвый вход для внешних проектов без замены рабочего процесса.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-5-gate-mvp</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/55" target="_blank" rel="noopener noreferrer">PR #55</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-6" data-order="13">
         <div class="task-seq">#13</div>
         <div class="task-key"><strong>V0-6</strong><span class="prio prio-P0">P0</span><span class="tag">Checks</span></div>
         <div class="task-content"><h3>Generic JUnit XML typed adapter</h3><p>Bounded strict parser с zero-test detection, suite/test counts, failures/errors/skips и digest исходного отчёта.</p><p class="detail">Реализовано: `pkg/junit` — bounded strict token-walk (golden fixtures pytest/Jest/Gradle/Maven + zero/doctype, counts из реальных testcase), adapter `junit-xml` в pkg/checks с обязательным repo-relative `report_file`, токен workspace side-effect (report исключается из immutability-детекции), Maven/Gradle-семантика «отчёт авторитетнее exit code». Снимает «только Go» — V0-7 демо готово не на Go. Native adapters — только если fixtures покажут несовместимую семантику.</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-6-junit-adapter</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/56" target="_blank" rel="noopener noreferrer">PR #56</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P0" data-horizon="V0" data-id="V0-7" data-order="14">
         <div class="task-seq">#14</div>
         <div class="task-key"><strong>V0-7</strong><span class="prio prio-P0">P0</span><span class="tag">Adoption</span></div>
         <div class="task-content"><h3>Demo + CI action + truthful README</h3><p>Публичный demo показывает <code>gate → bundle → verify</code> одним version-pinned CI-файлом. README разделяет run/gate, integrity/authenticity и отсутствие OS sandbox.</p><p class="detail">Реализовано: `gate.VerifyBundle` (самодостаточная проверка gate-bundle, матрица tampering), `ai-team verify &lt;dir&gt;` различает run-/gate-bundle; `docs/demo/` — run-demo.sh (Python, три сценария PASS/Fail-policy/Fail-junit, bash 3.2), ci-gate-demo.yaml (version-pinned по SHA, merge-base → gate → verify+upload); README честно разделяет run/gate и integrity/authenticity. Завершает «только Go»-обход. Осталось внешнее требование: три внешних человека проходят демо без вопросов (за владельцем).</p></div>
-        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr">v0-7-demo-ci-readme</div>
+        <div class="task-state"><span class="status status-review">● Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/57" target="_blank" rel="noopener noreferrer">PR #57</a></div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P1" data-horizon="V0" data-id="EXP-1" data-order="15">
@@ -596,35 +596,35 @@
         <div class="task-seq">#16</div>
         <div class="task-key"><strong>V0-8</strong><span class="prio prio-P1">P1</span><span class="tag">Risk</span></div>
         <div class="task-content"><h3>Risk-signal measurement без routing</h3><p>Сразу записывать размер/тип diff, sensitive paths, test changes и failed checks в bundle, но пока не менять маршрут автоматически.</p><p class="detail">Снимает циклическую зависимость P2-1: сначала данные, затем решение об adaptive routing.</p></div>
-        <div class="task-state"><span class="status status-review">◍ Review</span></div><div class="task-pr">v0-8-risk-signals</div>
+        <div class="task-state"><span class="status status-review">◍ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/58" target="_blank" rel="noopener noreferrer">PR #58</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P1" data-horizon="V0" data-id="V0-9" data-order="17">
         <div class="task-seq">#17</div>
         <div class="task-key"><strong>V0-9</strong><span class="prio prio-P1">P1</span><span class="tag">Provenance</span></div>
         <div class="task-content"><h3>Agent attribution в Git trailers</h3><p>Добавить run ID, model/runtime identity и attestation digest в commit trailers (deferred post-terminal delivery); подпись остаётся отдельной опцией.</p><p class="detail">Зависит от стабильных полей V0-2/V0-3. Провенанс переживает потерю локального bundle. После ADP-1/ADP-2 различает, каким харнесом сделан коммит.</p></div>
-        <div class="task-state"><span class="status status-review">◉ Review</span></div><div class="task-pr">v0-9-agent-attribution-trailers</div>
+        <div class="task-state"><span class="status status-review">◉ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/59" target="_blank" rel="noopener noreferrer">PR #59</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P1" data-horizon="P1" data-id="P1-4" data-order="18">
         <div class="task-seq">#18</div>
         <div class="task-key"><strong>P1-4</strong><span class="prio prio-P1">P1</span><span class="tag">Security</span></div>
         <div class="task-content"><h3>Containment profile v1 + receipt</h3><p>Threat model и enforcement по fs/net/proc/env, network deny-by-default, process-tree cleanup и receipt <code>ENFORCED/PARTIAL/UNAVAILABLE</code>.</p><p class="detail">Обязателен до untrusted gate. #20/#28/#33 — полезная основа, но не OS containment. До готовности — честная формулировка «controlled, not OS-sandboxed».</p></div>
-        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/28" target="_blank" rel="noopener noreferrer">foundation #28</a></div>
+        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/60" target="_blank" rel="noopener noreferrer">PR #60</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P1" data-horizon="P1" data-id="P1-9" data-order="19">
         <div class="task-seq">#19</div>
         <div class="task-key"><strong>P1-9</strong><span class="prio prio-P1">P1</span><span class="tag">Independence</span></div>
         <div class="task-content"><h3>Coder не видит будущее ревью</h3><p>Закрепить contract test: reviewer/tester/verifier artifacts не попадают во входы coder иначе как через явное loopback-ребро.</p><p class="detail">Дешёвый тест, страхующий независимость оценки — второй после V0-1 столп «агент не может сам себе поставить зачёт».</p></div>
-        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr">—</div>
+        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/61" target="_blank" rel="noopener noreferrer">PR #61</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P1" data-horizon="P1" data-id="P1-5" data-order="20">
         <div class="task-seq">#20</div>
         <div class="task-key"><strong>P1-5</strong><span class="prio prio-P1">P1</span><span class="tag">Signing</span></div>
         <div class="task-content"><h3>Signed bundle через DSSE</h3><p>Local/pluggable signer для V0-3; verifier отдельно сообщает integrity и signer identity.</p><p class="detail">Нельзя маскировать signing failure как unsigned success в strict policy.</p></div>
-        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr">—</div>
+        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/62" target="_blank" rel="noopener noreferrer">PR #62</a></div>
       </article>
 
       <article class="task" data-status="Open" data-prio="P1" data-horizon="P1" data-id="P1-6" data-order="21">

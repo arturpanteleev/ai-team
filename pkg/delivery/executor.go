@@ -36,6 +36,75 @@ type Request struct {
 	TargetDir string
 	Feature   string
 	Plan      Plan
+	// Trailers (V0-9) — controller-производные Git trailer'ы (значения
+	// детерминируются из terminal evidence контроллером, не агентом) и НЕ
+	// входят в canonical plan / subject approval. Переживают потерю bundle:
+	// git история связывает commit с run, runtime identity и attestation.
+	Trailers []string `json:"-"`
+}
+
+// V0-9: ключи trailer'ов, добавляемых контроллером в commit message.
+const (
+	TrailerRunID       = "ai-team-run"
+	TrailerRuntime     = "ai-team-runtime"
+	TrailerAttestation = "ai-team-attestation"
+)
+
+// ValidateTrailers проверяет формат controller-траилей: только известные
+// ключи без дублей и с непустыми значениями (одна строка `key: value`).
+func ValidateTrailers(trailers []string) error {
+	seen := make(map[string]bool, len(trailers))
+	for _, trailer := range trailers {
+		key, value, ok := strings.Cut(trailer, ": ")
+		if !ok || key == "" || value == "" || strings.Contains(value, ": ") {
+			return fmt.Errorf("delivery trailer: некорректный формат %q (ожидается `key: value`)", trailer)
+		}
+		switch key {
+		case TrailerRunID, TrailerRuntime, TrailerAttestation:
+		default:
+			return fmt.Errorf("delivery trailer: неизвестный ключ %q", key)
+		}
+		if !trailerValueChars(value) {
+			return fmt.Errorf("delivery trailer: недопустимые символы в значении %q", value)
+		}
+		if seen[key] {
+			return fmt.Errorf("delivery trailer: дублирующийся ключ %q", key)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func trailerValueChars(value string) bool {
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func sameTrailers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// FullCommitMessage собирает итоговое сообщение commit: approved subject
+// (plan.CommitMessage) + пустая строка + controller-траилей. Без trailer'ов
+// возвращает subject байт-в-байт (обратная совместимость).
+func FullCommitMessage(subject string, trailers []string) string {
+	if len(trailers) == 0 {
+		return subject
+	}
+	return subject + "\n\n" + strings.Join(trailers, "\n")
 }
 
 type StepResult struct {
@@ -123,6 +192,7 @@ type state struct {
 	SchemaVersion  int          `json:"schema_version"`
 	PlanHash       string       `json:"plan_hash"`
 	Plan           Plan         `json:"plan"`
+	Trailers       []string     `json:"trailers,omitempty"`
 	CommitSHA      string       `json:"commit_sha,omitempty"`
 	CommitVerified bool         `json:"commit_verified,omitempty"`
 	Pushed         bool         `json:"pushed,omitempty"`
@@ -156,6 +226,18 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
+	if len(currentState.Trailers) == 0 && len(request.Trailers) > 0 {
+		if err := ValidateTrailers(request.Trailers); err != nil {
+			return Result{}, err
+		}
+		currentState.Trailers = append([]string(nil), request.Trailers...)
+		if err := writeState(statePath, currentState); err != nil {
+			return Result{}, err
+		}
+	} else if len(request.Trailers) > 0 && !sameTrailers(currentState.Trailers, request.Trailers) {
+		return Result{}, fmt.Errorf("delivery: trailer'ы не совпадают с сохранённым состоянием")
+	}
+	commitMessage := FullCommitMessage(request.Plan.CommitMessage, currentState.Trailers)
 	result := func() Result {
 		return Result{PlanHash: planHash, StatePath: statePath, CommitSHA: currentState.CommitSHA, PRURL: currentState.PRURL, Steps: append([]StepResult(nil), currentState.Steps...)}
 	}
@@ -227,7 +309,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		// The process may have crashed after git commit succeeded but before its
 		// identity was durably recorded. Recover only an exact approved commit;
 		// any unrelated branch advance remains fail-closed.
-		if err := verifyCommittedChange(ctx, c.Runner, target, request.Plan, actualHead, record); err != nil {
+		if err := verifyCommittedChange(ctx, c.Runner, target, request.Plan, actualHead, currentState.Trailers, record); err != nil {
 			return result(), fmt.Errorf("delivery: unrecorded HEAD is not the approved commit: %w", err)
 		}
 		currentState.CommitSHA = actualHead
@@ -294,7 +376,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 			_, _ = run("rollback_staging", "git", resetArgs...)
 			return result(), err
 		}
-		if _, err := run("commit", "git", "-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-m", request.Plan.CommitMessage); err != nil {
+		if _, err := run("commit", "git", "-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-m", commitMessage); err != nil {
 			return result(), err
 		}
 		commit, err := run("record_commit", "git", "rev-parse", "HEAD")
@@ -302,7 +384,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 			return result(), err
 		}
 		commitSHA := strings.TrimSpace(commit.Stdout)
-		if err := verifyCommittedChange(ctx, c.Runner, target, request.Plan, commitSHA, record); err != nil {
+		if err := verifyCommittedChange(ctx, c.Runner, target, request.Plan, commitSHA, currentState.Trailers, record); err != nil {
 			return result(), err
 		}
 		currentState.CommitSHA = commitSHA
@@ -426,6 +508,7 @@ func verifyCommittedChange(
 	target string,
 	plan Plan,
 	commitSHA string,
+	trailers []string,
 	record func(StepResult) error,
 ) error {
 	run := func(step string, args ...string) (StepResult, error) {
@@ -443,7 +526,7 @@ func verifyCommittedChange(
 	if err != nil {
 		return err
 	}
-	if strings.TrimRight(message.Stdout, "\r\n") != plan.CommitMessage {
+	if strings.TrimRight(message.Stdout, "\r\n") != FullCommitMessage(plan.CommitMessage, trailers) {
 		return fmt.Errorf("delivery: commit message не совпадает с approved plan")
 	}
 	parent, err := run("verify_commit_parent", "rev-parse", commitSHA+"^")

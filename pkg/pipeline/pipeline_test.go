@@ -235,7 +235,7 @@ type fakeDeliveryService struct {
 func (f *fakeDeliveryService) Execute(_ context.Context, request delivery.Request) (delivery.Result, error) {
 	f.calls++
 	hash, _ := request.Plan.Hash()
-	return delivery.Result{PlanHash: hash, CommitSHA: "deadbeef", PRURL: "https://example.test/pr/1"}, nil
+	return delivery.Result{PlanHash: hash, CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PRURL: "https://example.test/pr/1"}, nil
 }
 
 func prepareDelivery(t *testing.T, dir string) string {
@@ -323,6 +323,15 @@ func onlyRunDir(t *testing.T, target string) string {
 			dirs = append(dirs, filepath.Join(target, ".ai-team", "runs", entry.Name()))
 		}
 	}
+	// delivery-тесты рядом кладут prepared-run (delivery.Prepare) — это не цель.
+	live := dirs[:0]
+	for _, dir := range dirs {
+		if filepath.Base(dir) == "prepared-run" {
+			continue
+		}
+		live = append(live, dir)
+	}
+	dirs = live
 	if len(dirs) != 1 {
 		t.Fatalf("ожидался один immutable run, got %v", dirs)
 	}
@@ -753,6 +762,66 @@ func TestRun_DeliveryRunsWithExplicitApproval(t *testing.T) {
 	}
 	if got := strings.Join(rt.executed, ","); got != "approver" || service.calls != 1 {
 		t.Fatalf("LLM deployer не должен запускаться, controller calls=%d runtimes=%s", service.calls, got)
+	}
+
+	// V0-9: deferral → контроллер исполнил доставку строго один раз
+	// (post-terminal). Terminal delivery.json фиксирует commit + trailers,
+	// привязанные к evidence run.
+	runDir := onlyRunDir(t, dir)
+	record, ok, readErr := delivery.ReadTerminalRecord(runDir)
+	if readErr != nil || !ok {
+		t.Fatalf("terminal delivery record не записан: err=%v ok=%v", readErr, ok)
+	}
+	if record.CommitSHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || record.PlanHash != approvedPlanHash {
+		t.Fatalf("terminal record не согласован: %+v", record)
+	}
+	if len(record.Trailers) != 3 {
+		t.Fatalf("expected 3 commit trailers, got %v", record.Trailers)
+	}
+	runID := filepath.Base(runDir)
+	for _, trailer := range record.Trailers {
+		switch {
+		case strings.HasPrefix(trailer, delivery.TrailerRunID+": "):
+			if trailer != delivery.TrailerRunID+": "+runID {
+				t.Fatalf("trailer run id mismatch: %q != %q", trailer, runID)
+			}
+		case strings.HasPrefix(trailer, delivery.TrailerRuntime+": "):
+			if record.RuntimeIdentity == "" {
+				t.Fatalf("runtime identity не заполнена")
+			}
+		case strings.HasPrefix(trailer, delivery.TrailerAttestation+": "):
+			if record.AttestationSHA256 == "" || !strings.Contains(trailer, record.AttestationSHA256) {
+				t.Fatalf("attestation trailer не согласован: %q", trailer)
+			}
+		default:
+			t.Fatalf("неожиданный trailer: %q", trailer)
+		}
+	}
+}
+
+func TestDeliverDaemonRejectsAlreadyDeliveredRun(t *testing.T) {
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+	if err := p.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
+	}); err != nil {
+		t.Fatalf("run должен завершиться с deferred delivery: %v", err)
+	}
+	runDir := onlyRunDir(t, dir)
+	runID := filepath.Base(runDir)
+
+	// Повтор доставки невозможен — запись однократная.
+	if _, err := New(nil, nil).DeliverDeferred(runDir, "", dir); err == nil {
+		t.Fatal("повтор доставки уже доставленного run должен быть отклонён")
+	}
+	// Неизвестный run id также отклоняется.
+	if _, err := New(nil, nil).DeliverDeferred(filepath.Join(dir, ".ai-team", "runs", runID+"-nope"), "", dir); err == nil {
+		t.Fatal("доставка несуществующего run должна быть отклонена")
 	}
 }
 

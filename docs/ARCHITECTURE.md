@@ -358,6 +358,48 @@ commit` (например, процесс убит между commit и push), c
 parent, paths, modes и blob hashes — так что штатный retry не создаёт
 дублирующий commit или PR.
 
+### Отложенная (deferred) delivery и Git trailers — V0-9
+
+Git-история меняется ТОЛЬКО после terminal finalize run'а (commit, push, PR),
+когда attestation digest детерминирован.  Причины:
+
+- attestation.json пишется в finalize ПОСЛЕ delivery-стадии; выполнить
+  in-run delivery и при этом вшить в commit честный digest было бы циклично;
+- попытка-манифесты immutable: `CommitSHA` заполнять внутри run нельзя, иначе
+  погибает доказательство «что именно одобрено» при переживании потери bundle.
+
+Внутри run delivery-стадия делает `delivery.Prepare` (state на диске), затем
+`authorizeDelivery` (в интерактивном режиме run может встать в ожидание
+approval `delivery_plan`, в resume выполняется `--approve-plan <sha>`), а не
+`delivery.Execute`. Результат — deferred marker `{StatePath, PlanHash}` + event
+`delivery_deferred`. После финального `finalize` при outcome `completed` и
+наличии маркера post-terminal хук (`pkg/pipeline/delivery_deferred.go`):
+
+1. перегружает canonical plan из prepared state и сверяет `plan.Hash()` с
+   маркером стадии и с `approvedPlanHash`;
+2. читает `attestation.json` → `attest.Parse` → `attest.Digest`;
+3. вычисляет runtime identity = `sha256(run.json.Provenance)` (raw bytes);
+4. собирает controller-derived trailers:
+   - `ai-team-run: <run_id>`, `ai-team-runtime: <hex>`,
+     `ai-team-attestation: <digest>`;
+5. исполняет реальный `delivery.Execute(context.Background(), …)` рабочей
+   копии (workspace lock всё ещё удержан — хук внутри `RunWithResult`);
+6. записывает tamper-evident `{RunDir}/delivery.json` (self-integrity
+   `record_sha256`, строгая валидация, однократная запись, idempotent retry).
+
+Трейлеры не входят в canonical plan и subject approval (они controller-derived,
+не из LLM). Commit message = plan.CommitMessage + trailers. Трейлеры персистятся
+в delivery state ДО commit, поэтому crash-recovery (retry после commit) сверяет
+message с `FullCommitMessage(plan.CommitMessage, savedTrailers)`. При расхождении
+траилей восстановленный commit отклоняется.
+
+`FindDelivered` (evidence/query) сначала читает `delivery.json` (канонический
+источник), при его отсутствии падает на attempt-манифесты. Если post-terminal
+хук упал (например, сетевой сбой push), доставка повторяема командой
+`ai-team deliver --run <run_id> [--target <dir>] [--feature <name>]`: enforcement
+детерминированный — run обязан быть терминальным `completed`, plan обязан
+совпасть с `delivery_deferred` event, запись `delivery.json` однократная.
+
 ## Layered agent registry
 
 `ai-team list` показывает источник победившего definition агента. Registry

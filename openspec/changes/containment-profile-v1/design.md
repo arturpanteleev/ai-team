@@ -49,19 +49,24 @@ Strict profile требует OS-sandbox backend. Если backend недост�
 containment receipt = `UNAVAILABLE`, run MUST быть отклонён. Не полагаемся
 на application-level mitigations для strict.
 
-### D4: Receipt в evidence manifest
+### D4: Receipt в evidence
 
-`RunManifest.ContainmentReceipt` — JSON-объект `{fs: PARTIAL, net: PARTIAL,
-proc: PARTIAL, env: PARTIAL}`. При генерации attest statement receipt
-входит в predicate как доказательство containment-состояния run.
+`run.json` immutable с момента `Start`, поэтому receipt пишется отдельным
+evidence-файлом `{RunDir}/containment.json` (параллельно `usage.json`) на
+terminal-завершении. JSON-объект `{axes: {fs: PARTIAL, net: PARTIAL,
+proc: PARTIAL, env: PARTIAL}, details: {...}, profile: "trusted-local"}`.
+Legacy-раны без файла валидны — verify/gate трактуют оси как `UNAVAILABLE`
+(без fail). При генерации attest statement receipt входит в predicate как
+доказательство containment-состояния run. CLI `ai-team usage` печатает
+per-axis статус из `containment.json`, если он есть.
 
 ### D5: Gate --allow-untrusted требует receipt
 
-`--allow-untrusted` разрешён только если:
-- run containment receipt существует и все оси ≠ `UNAVAILABLE`
-- или gate profile = `trusted-local` (auto-approve без receipt для baseline)
-
-Для strict profile без receipt → BLOCKED.
+`--allow-untrusted` разрешён только если передан containment receipt с ни одной
+осью ≠ `UNAVAILABLE`. Отсутствие receipt или receipt с `UNAVAILABLE` осью →
+BLOCKED (fail-closed). Для strict profile без backend receipt всегда
+`UNAVAILABLE`, потому untrusted с strict → BLOCKED. Legacy baseline без receipt
+и без `--allow-untrusted` продолжает работать как раньше (флаг не используется).
 
 ### D6: Process cleanup verification
 

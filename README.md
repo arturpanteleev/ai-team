@@ -405,11 +405,22 @@ project/plugin/user/built-in слоями и что происходит с inva
 ### Граница для недоверенного кода
 
 Система пока не является hermetic sandbox. OpenCode получает app-level deny
-для shell/network/tasks, ограниченные edit/read rules и отдельный config home,
+для shell/network/tasks, ограниченные edit/read rules (в т.ч. deny на
+`.ssh/**`, `.aws/**`, `.gnupg/**`, `**/credentials`), и отдельный config home,
 но сам процесс агента и команды проверок работают с правами текущего OS-user.
-Поэтому текущий профиль допустим только для доверенного локального проекта;
-секреты и недоверенный код должны запускаться во внешнем container/VM sandbox.
-Полный список открытых рисков и release gates — в [AUDIT.md](AUDIT.md).
+Поэтому текущий профиль допустим только для доверенного локального проекта
+(`trusted-local`); секреты и недоверенный код должны запускаться во внешнем
+container/VM sandbox. Полный список открытых рисков и release gates — в
+[AUDIT.md](AUDIT.md).
+
+Каждый run пишет в evidence `containment.json` — детерминированный per-axis
+receipt (fs/net/proc/env: `ENFORCED`/`PARTIAL`/`UNAVAILABLE`), показывающий
+фактическое состояние изоляции. Значение по умолчанию `trusted-local` =
+все оси `PARTIAL` (application-level controls). Профиль `strict` требует
+OS-sandbox backend и без него fail-closes в `UNAVAILABLE`. Gate
+`--allow-untrusted` разрешён только при наличии receipt без `UNAVAILABLE`
+осей (fail-closed). Подробнее — `docs/ARCHITECTURE.md`, секция «Containment
+threat model».
 
 ## Разработка
 

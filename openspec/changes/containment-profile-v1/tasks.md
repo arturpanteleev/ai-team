@@ -37,15 +37,16 @@ Add `TrackAndCleanup(pids []int) CleanupReceipt`:
 
 ### T5: Receipt generation in pkg/pipeline/finalize.go
 
-In `finalize()`, after writing attestation:
-- Build receipt from runtime adapter capabilities + process cleanup result
-- Set `RunManifest.ContainmentReceipt`
-- Write to evidence manifest (update `RunManifest` struct)
+In `finalize()`, after writing usage envelope:
+- Build receipt from containment profile (config) + process cleanup result
+- Write `{RunDir}/containment.json` (sibling of `usage.json`; `run.json`
+  immutable с момента Start, поэтому не поле в manifest, а отдельный файл)
 
-### T6: RunManifest receipt field in pkg/evidence
+### T6: (merged into T5)
 
-Add `ContainmentReceipt json.RawMessage` to `RunManifest` (omitempty for
-backward compat). Verify existing tests pass with nil receipt.
+Receipt persists as separate `containment.json` evidence file, not a field in
+immutable `RunManifest`. Legacy runs without the file are valid — verify/gate
+treat axes as `UNAVAILABLE` without failing.
 
 ### T7: CLI receipt display
 

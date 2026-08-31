@@ -400,6 +400,37 @@ message с `FullCommitMessage(plan.CommitMessage, savedTrailers)`. При рас
 детерминированный — run обязан быть терминальным `completed`, plan обязан
 совпасть с `delivery_deferred` event, запись `delivery.json` однократная.
 
+## Containment threat model — V0-P1-4
+
+`pkg/containment` задаёт четырёхосевую модель изоляции run и детерминированный
+record их фактического состояния (receipt). Оси:
+
+- **fs** — filesystem: symlink rejection (safeio), worktree isolation, credential deny
+- **net** — network: tool deny, env isolation
+- **proc** — process: process-group kill, cleanup verification
+- **env** — environment: env allow-list, config dir isolation, credential file deny
+
+Уровни: `ENFORCED` (OS-level: bubblewrap/landlock/sandbox-exec), `PARTIAL`
+(application-level mitigations из control-plane), `UNAVAILABLE` (mitigations
+отсутствуют).
+
+Профиль `trusted-local` подразумевает application-level controls — все оси
+`PARTIAL`. Профиль `strict` требует OS-sandbox backend; без него (V1 backend не
+включён) receipt = все оси `UNAVAILABLE` и run fail-closed отклоняется.
+
+Receipt пишется отдельным evidence-файлом `{RunDir}/containment.json` на
+terminal-завершении (`pkg/pipeline/finalize.go`), sibling `usage.json`: `run.json`
+immutable с момента `Start`, потому receipt не поле manifest, а параллельный файл.
+Legacy-раны без файла валидны — `verify`/gate трактуют оси как `UNAVAILABLE`
+без fail. `ai-team usage` печатает per-axis статус.
+
+Процессная ось верифицируется через `pkg/process.TrackAndCleanup`: SIGKILL
+процессной группе + ожидание завершения ≤2s → `CleanupReceipt{Verified, Timeout}`.
+
+Gate `--allow-untrusted` разрешён только при наличии receipt, у которого ни одна
+ось ≠ `UNAVAILABLE` (fail-closed: без receipt или с `UNAVAILABLE` осью → BLOCKED).
+Отсутствие receipt для legacy baseline остаётся backward-compat allow.
+
 ## Layered agent registry
 
 `ai-team list` показывает источник победившего definition агента. Registry

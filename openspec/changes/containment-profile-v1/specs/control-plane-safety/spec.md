@@ -4,21 +4,24 @@
 
 ### Requirement: Containment receipt in run evidence
 
-Run evidence manifest (`RunManifest`) MUST include `ContainmentReceipt` field
-containing per-axis containment status. Receipt MUST be generated on terminal
-run completion and included in the immutable run manifest.
+The run evidence directory MUST include a `containment_receipt` per-axis
+containment status, persisted as `{RunDir}/containment.json` at terminal run
+completion. `run.json` is immutable since `Start`, so the receipt is a sibling
+evidence file (parallel to `usage.json`) rather than a field inside
+`RunManifest`. Legacy runs without a receipt remain valid; `ai-team verify`
+and the gate treat their axes as `UNAVAILABLE`.
 
 #### Scenario: Receipt present in evidence
 
 - **WHEN** a terminal run completes
-- **THEN** `RunManifest.ContainmentReceipt` MUST be non-nil
+- **THEN** `containment.json` MUST be present in the run evidence directory
 - **AND** receipt MUST contain keys: fs, net, proc, env
+- **AND** each key MUST be one of: `ENFORCED`, `PARTIAL`, `UNAVAILABLE`
 
 ### Requirement: Containment receipt in gate evidence
 
-Gate attestation bundle MAY include containment receipt for the gate run.
-If present, receipt MUST be included in gate.json record and verifiable
-during `ai-team verify`.
+When a gate run has a containment receipt, the gate MUST include it in the
+gate.json record, and `ai-team verify` MUST verify it against the bundle.
 
 #### Scenario: Gate verify shows receipt
 

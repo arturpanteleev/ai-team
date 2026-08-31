@@ -19,6 +19,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -440,6 +441,18 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Error("stage-отчёт reviewer не создан")
 	}
 	runDir := onlyRunDir(t, dir)
+	// Containment receipt (V0-P1-4): trusted-local → все оси PARTIAL.
+	receiptData, readErr := os.ReadFile(filepath.Join(runDir, "containment.json"))
+	if readErr != nil {
+		t.Fatalf("containment.json не записан: %v", readErr)
+	}
+	var receipt containment.Receipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatalf("повреждённый containment.json: %v", err)
+	}
+	if receipt.Profile != "trusted-local" || receipt.HasUnavailable() {
+		t.Fatalf("trusted-local receipt: profile=%q unavailable=%v", receipt.Profile, receipt.HasUnavailable())
+	}
 	attempts, readErr := os.ReadDir(filepath.Join(runDir, "attempts"))
 	if readErr != nil || len(attempts) != 3 {
 		t.Fatalf("immutable attempts: count=%d err=%v", len(attempts), readErr)
@@ -453,6 +466,34 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 	if n.calls[0].RunID == "" || n.calls[0].AttemptID == "" || n.calls[0].RunID != n.calls[1].RunID {
 		t.Fatalf("run/attempt identity не передана в StageResult: %+v", n.calls)
+	}
+}
+
+func TestRun_StrictProfileReceiptIsUnavailable(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "# Ревью\n\nвсё ок\n\n**Verdict:** APPROVED\n"}
+
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}, config.AgentConfig{Name: "deployer"}),
+		testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	err := p.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ContainmentProfile: "strict", ApproveGates: true,
+	})
+	if err != nil {
+		t.Fatalf("ожидался успех, got: %v", err)
+	}
+	runDir := onlyRunDir(t, dir)
+	receiptData, readErr := os.ReadFile(filepath.Join(runDir, "containment.json"))
+	if readErr != nil {
+		t.Fatalf("containment.json не записан: %v", readErr)
+	}
+	var receipt containment.Receipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatalf("повреждённый containment.json: %v", err)
+	}
+	// strict без OS backend (V1) → все оси UNAVAILABLE (fail-closed).
+	if receipt.Profile != "strict" || !receipt.HasUnavailable() {
+		t.Fatalf("strict receipt: profile=%q unavailable=%v", receipt.Profile, receipt.HasUnavailable())
 	}
 }
 

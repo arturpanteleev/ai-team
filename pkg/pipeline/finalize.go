@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
@@ -94,6 +95,9 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	if err := rs.writeUsageEnvelope(endTime, status); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("usage envelope: %w", err))
 	}
+	if err := rs.writeContainmentReceipt(); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("containment receipt: %w", err))
+	}
 	if err := rs.writeAttestation(endTime, status); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("attestation: %w", err))
 	}
@@ -124,6 +128,33 @@ func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) erro
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
 		rs.results, rs.loopbackCycles, status)
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
+}
+
+// writeContainmentReceipt публикует per-axis containment receipt (V0-P1-4) в
+// {RunDir}/containment.json — рядом с run.json, вне attempts/. run.json
+// immutable c момента Start, поэтому receipt — отдельный evidence-файл:
+// legacy-раны без него валидны, verify трактует их как UNAVAILABLE.
+func (rs *runState) writeContainmentReceipt() error {
+	receipt := rs.containmentReceipt()
+	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "containment.json"), receipt)
+}
+
+// containmentReceipt строит receipt для текущего run. trusted-local профиль —
+// все оси PARTIAL (application-level mitigations). strict без OS backend в V1
+// не поддерживается: отсутствующий/иной профиль → честный UNAVAILABLE.
+func (rs *runState) containmentReceipt() containment.Receipt {
+	profile := "trusted-local"
+	if rs.runCfg.ContainmentProfile != "" {
+		profile = rs.runCfg.ContainmentProfile
+	}
+	base := containment.DefaultTrustedLocalReceipt()
+	base.Profile = profile
+	if profile != "trusted-local" {
+		// strict (или незнакомый) без OS backend V1 → все оси UNAVAILABLE.
+		base = containment.UnavailableReceipt()
+		base.Profile = profile
+	}
+	return base
 }
 
 // writeAttestation публикует in-toto compatible attestation statement v1

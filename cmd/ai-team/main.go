@@ -32,6 +32,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/export"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -60,6 +61,8 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+
+	applyOutputMode()
 
 	switch os.Args[1] {
 	case "init":
@@ -134,6 +137,10 @@ func printUsage() {
 
 Флаги usage:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+
+Глобальные флаги вывода (OPS-6):
+  --json                    Стабильные machine-readable JSON records на stdout
+  --quiet, -q               Подавить второстепенный человеческий вывод
 
 Флаги export:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
@@ -534,6 +541,29 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// applyOutputMode сканирует аргументы на --json/--quiet и переключает
+// machine-readable режим вывода (OPS-6) ДО диспатча команды. Глобальные
+// флаги вывода при этом вырезаются из os.Args, чтобы подкоманды (их
+// собственные FlagSet'ы) никогда их не видели и не падали на неизвестном
+// флаге. Работает и до, и после имени подкоманды (сканируется весь хвост,
+// начиная с индекса 1).
+func applyOutputMode() {
+	filtered := []string{os.Args[0]}
+	for i := 1; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--json":
+			logging.SetMode(logging.ModeJSON)
+		case "--quiet", "-q":
+			logging.SetMode(logging.ModeQuiet)
+		default:
+			filtered = append(filtered, os.Args[i])
+		}
+	}
+	if len(filtered) != len(os.Args) {
+		os.Args = filtered
+	}
+}
+
 // checkControlRoot проверяет, что `.ai-team` существует и безопасен (не
 // symlink и не файл), и различает эти два разных случая при отказе: "проект
 // не инициализирован" — это не то же самое, что "инициализирован, но
@@ -849,6 +879,18 @@ func cmdRun() {
 	} else {
 		fmt.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
 	}
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Emit(logging.Record{
+			Level: "ok", Command: "run", Type: "run",
+			Message: "Пайплайн выполнен",
+			Data: map[string]any{
+				"outcome": string(runResult.Outcome),
+				"run_id":  runResult.RunID,
+				"feature": *feature,
+			},
+			Exit: exitOK,
+		})
+	}
 }
 
 func exitCodeFor(err error) int {
@@ -1139,16 +1181,22 @@ func cmdVerify() {
 			digest, err := gate.VerifyBundle(arg, keyVerify)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "✗ Gate bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
+				logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "gate_bundle", Message: err.Error()})
 				os.Exit(exitFailed)
 			}
 			fmt.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s%s\n", arg, digest, sigNote(keyVerify))
+			logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "gate_bundle", Message: "Gate bundle OK",
+				Data: map[string]any{"bundle_sha256": digest}, Exit: exitOK})
 			return
 		}
 		if err := export.VerifyBundle(arg, keyVerify); err != nil {
 			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
+			logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run_bundle", Message: err.Error()})
 			os.Exit(exitFailed)
 		}
 		fmt.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
+		logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run_bundle",
+			Message: "Bundle OK", Data: map[string]any{"target": arg}, Exit: exitOK})
 		return
 	}
 	if strings.ContainsAny(arg, `/\`) || arg == "." || arg == ".." || filepath.Base(arg) != arg {
@@ -1166,9 +1214,12 @@ func cmdVerify() {
 	runDir := filepath.Join(absolute, ".ai-team", "runs", runID)
 	if err := export.VerifyEvidence(runDir); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
+		logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run", Message: err.Error()})
 		os.Exit(exitFailed)
 	}
 	fmt.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
+	logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run",
+		Message: "Run OK", Data: map[string]any{"run_id": runID}, Exit: exitOK})
 }
 
 // gateBundleExists отличает gate attestation bundle (V0-5) от run bundle (V0-4).

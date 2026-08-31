@@ -10,6 +10,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/export"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 )
 
 // cmdExport собирает проверенный portable bundle терминального run (V0-4):
@@ -106,4 +107,15 @@ func cmdExport() {
 		fmt.Printf("  signed:        DSSE ed25519 (dsse.json)\n")
 	}
 	fmt.Printf("  verified:      state/exports/%s.json (разрешает gc --prune-runs)\n", runID)
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Emit(logging.Record{
+			Level: "ok", Command: "export", Type: "bundle",
+			Message: "Экспорт выполнен",
+			Data: map[string]any{
+				"run_id": runID, "bundle": outDir,
+				"bundle_sha256": bundleSHA, "signed": privKey != nil,
+			},
+			Exit: 0,
+		})
+	}
 }

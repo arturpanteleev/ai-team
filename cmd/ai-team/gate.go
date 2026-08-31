@@ -16,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -87,6 +88,20 @@ func cmdGate() {
 		}
 	}
 	printGateSummary(result, *out)
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Emit(logging.Record{
+			Level: "ok", Command: "gate", Type: "gate",
+			Message: "Gate вердикт",
+			Data: map[string]any{
+				"status":        result.Status,
+				"policy":        result.PolicyVerdict,
+				"bundle_sha256": result.BundleSHA256,
+				"bundle":        *out,
+				"signed":        privKey != nil,
+			},
+			Exit: gate.ExitCode(result),
+		})
+	}
 	os.Exit(gate.ExitCode(result))
 }
 

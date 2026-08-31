@@ -83,7 +83,7 @@
 | 25 | OPS-3 | P1 | open | — | Fail-closed evidence verification при resume |
 | 26 | OPS-2 | P1 | open | — | Configurable tree-hash ignore list |
 | 27 | OPS-10 | P1 | review | ops10-dependabot-sha-pinned | Dependabot для SHA-pinned Actions |
-| 28 | OPS-6 | P1 | open | — | Structured logging (slog + quiet/json) |
+| 28 | OPS-6 | P1 | review | ops6-structured-output | Structured logging (slog + quiet/json) |
 | 29 | P1-2 | P2 | open | — | ACP feasibility spike (research/conformance) |
 | 30 | P2-13 | P2 | open | — | Meta-file guard |
 | 31 | P2-1 | P2 | open | — | Adaptive workflow depth (signal-gated) |

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/risk"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 
@@ -201,6 +202,10 @@ type Options struct {
 	Candidate      string
 	Config         *Config
 	AllowUntrusted bool
+	// Receipt (V0-P1-4) — containment receipt for the gating run. When absent,
+	// untrusted mode is blocked (fail-closed). Present + no UNAVAILABLE axes →
+	// untrusted allowed.
+	Receipt *containment.Receipt
 }
 
 // Result — детерминированный вердикт gate (за исключением FinishedAt).
@@ -254,8 +259,11 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 	if len(opt.Base) > 1024 || len(opt.Candidate) > 1024 {
 		return nil, ExitBlocked, &BlockedError{Reason: "ref слишком длинный"}
 	}
-	if opt.AllowUntrusted {
-		return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён до P1-4"}
+	if opt.AllowUntrusted && opt.Receipt == nil {
+		return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode требует containment receipt (--allow-untrusted)"}
+	}
+	if opt.AllowUntrusted && opt.Receipt.HasUnavailable() {
+		return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён: оси containment UNAVAILABLE"}
 	}
 	cfg := opt.Config
 	if cfg == nil {

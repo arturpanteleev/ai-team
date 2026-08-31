@@ -99,8 +99,11 @@ const claudeSettingsJSON = `{
     "allow": ["Read", "Edit", "Write", "Glob", "Grep"],
     "deny": [
       "Bash(**)", "PowerShell(**)", "WebFetch(**)", "WebSearch", "Task(**)", "Agent(**)", "Skill(**)", "LSP(*)",
-      "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(**/.env)", "Read(**/.env.*)",
+      "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)",
+      "Read(**/.env)", "Read(**/.env.*)",
       "Read(.env)", "Read(.env.*)", "Read(**/.git/**)", "Read(.git/**)",
+      "Read(**/.ssh/**)", "Read(**/.aws/**)", "Read(**/.gnupg/**)",
+      "Read(**/credentials)", "Read(**/credentials/**)",
       "Edit(**/.git/**)", "Edit(.git/**)", "Edit(**/.ai-team/**)", "Edit(.ai-team/**)",
       "Edit(//**)", "Write(//**)",
       "Edit(~/**)", "Write(~/**)"

@@ -29,13 +29,35 @@ type AgentConfig struct {
 }
 
 type Config struct {
-	SchemaVersion  int             `yaml:"schema_version,omitempty"`
-	PipelineAgents []AgentConfig   `yaml:"pipeline"`
-	Workflow       *WorkflowConfig `yaml:"workflow,omitempty"`
-	CLI            string          `yaml:"cli,omitempty"`
-	Model          string          `yaml:"model,omitempty"`
-	Effort         string          `yaml:"effort,omitempty"`
-	StageTimeout   string          `yaml:"stage_timeout,omitempty"`
+	SchemaVersion  int                `yaml:"schema_version,omitempty"`
+	PipelineAgents []AgentConfig      `yaml:"pipeline"`
+	Workflow       *WorkflowConfig    `yaml:"workflow,omitempty"`
+	CLI            string             `yaml:"cli,omitempty"`
+	Model          string             `yaml:"model,omitempty"`
+	Effort         string             `yaml:"effort,omitempty"`
+	StageTimeout   string             `yaml:"stage_timeout,omitempty"`
+	Containment    *ContainmentConfig `yaml:"containment,omitempty"`
+}
+
+type ContainmentConfig struct {
+	Profile string `yaml:"profile"`
+}
+
+var validContainmentProfiles = map[string]bool{
+	"trusted-local": true, "strict": true,
+}
+
+func (cc *ContainmentConfig) Validate() error {
+	if cc == nil {
+		return nil
+	}
+	if cc.Profile == "" {
+		cc.Profile = "trusted-local"
+	}
+	if !validContainmentProfiles[cc.Profile] {
+		return fmt.Errorf("containment.profile: неизвестный профиль %q (допустимы: trusted-local, strict)", cc.Profile)
+	}
+	return nil
 }
 
 type WorkflowConfig struct {
@@ -62,7 +84,7 @@ type WorkflowApprovalConfig struct {
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
-		"effort": true, "stage_timeout": true, "workflow": true,
+		"effort": true, "stage_timeout": true, "workflow": true, "containment": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -379,6 +401,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if _, err := c.CompiledGraph(); err != nil {
 		errs = append(errs, err.Error())
+	}
+	if c.Containment != nil {
+		if err := c.Containment.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("невалидный config.yaml:\n  - %s", strings.Join(errs, "\n  - "))

@@ -133,6 +133,9 @@ type RunConfig struct {
 	// что pipeline захватывает lock самостоятельно (CLI-путь).
 	WorkspaceLock        *evidence.WorkspaceLock
 	resumeDecisionAction string
+	// ContainmentProfile — containment profile run (trusted-local | strict).
+	// Пустое значение → trusted-local. Влияет на containment receipt в evidence.
+	ContainmentProfile string
 }
 
 type RunResult struct {

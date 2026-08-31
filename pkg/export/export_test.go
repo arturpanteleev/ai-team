@@ -1,6 +1,8 @@
 package export
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/retention"
@@ -282,5 +285,81 @@ func TestPublishVerifiedRoundtripRetention(t *testing.T) {
 	}
 	if !record.Verified || record.BundleSHA256 != sha {
 		t.Fatalf("roundtrip mismatch: %+v", record)
+	}
+}
+
+func TestBundleSignAndVerify(t *testing.T) {
+	base := t.TempDir()
+	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+	bundle := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundle); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SignBundle(bundle, priv); err != nil {
+		t.Fatalf("SignBundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bundle, dsse.EnvelopeFileName)); err != nil {
+		t.Fatalf("dsse.json не создан: %v", err)
+	}
+
+	// Верификация с правильным ключом — успех.
+	if err := VerifyBundle(bundle); err != nil {
+		t.Fatalf("VerifyBundle unsigned-key (integrity): %v", err)
+	}
+	if err := VerifyBundle(bundle, pub); err != nil {
+		t.Fatalf("VerifyBundle correct key: %v", err)
+	}
+
+	// Подмена payload (индекс) при валидной подписи другого содержимого →
+	// digest изменится и подпись fail.
+	wrongPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := VerifyBundle(bundle, wrongPub); err == nil {
+		t.Fatal("VerifyBundle wrong key должен FAIL")
+	}
+
+	// Удаление подписи при заданном ключе → fail-closed.
+	sigPath := filepath.Join(bundle, dsse.EnvelopeFileName)
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundle, pub); err == nil {
+		t.Fatal("VerifyBundle с ключом без dsse.json должен FAIL (fail-closed)")
+	}
+	if err := VerifyBundle(bundle); err != nil {
+		t.Fatalf("VerifyBundle без подписи и без ключа должен PASS: %v", err)
+	}
+}
+
+func TestVerifyBundleTamperedSignature(t *testing.T) {
+	base := t.TempDir()
+	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+	bundle := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundle); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := SignBundle(bundle, priv); err != nil {
+		t.Fatalf("SignBundle: %v", err)
+	}
+	// Порти ском подписи в dsse.json.
+	if err := os.Chmod(filepath.Join(bundle, dsse.EnvelopeFileName), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env, present, err := dsse.ReadEnvelopeFile(bundle)
+	if err != nil || !present {
+		t.Fatalf("read envelope: present=%v err=%v", present, err)
+	}
+	env.Signature[0] ^= 0xff
+	data, _ := dsse.Marshal(env)
+	if err := os.WriteFile(filepath.Join(bundle, dsse.EnvelopeFileName), append(data, '\n'), 0444); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundle, pub); err == nil {
+		t.Fatal("tampered signature с ключом должен FAIL")
 	}
 }

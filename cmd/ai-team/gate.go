@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
@@ -30,11 +32,21 @@ func cmdGate() {
 	configPath := gateFlags.String("config", "", "Путь gate config (по умолчанию gate.yaml в target, затем .ai-team/gate.yaml)")
 	out := gateFlags.String("out", "", "Каталог attestation bundle (по умолчанию <target>/.ai-team/gates/<ts> или gate-out/<ts>)")
 	allowUntrusted := gateFlags.Bool("allow-untrusted", false, "Запрещено до P1-4")
+	signKey := gateFlags.String("sign-key", "", "Путь к ed25519 private key (PEM PKCS8 или raw) для DSSE-подписи bundle (P1-5)")
 	if err := gateFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов gate: %v", err)
 	}
 	if gateFlags.NArg() != 0 {
 		fatal("Неожиданные аргументы gate: %s", strings.Join(gateFlags.Args(), " "))
+	}
+
+	var privKey ed25519.PrivateKey
+	if *signKey != "" {
+		key, err := dsse.LoadPrivateKey(*signKey)
+		if err != nil {
+			fatal("Ошибка загрузки signing key: %v", err)
+		}
+		privKey = key
 	}
 
 	absolute, err := absoluteTarget(*target)
@@ -67,6 +79,12 @@ func cmdGate() {
 	if err := gate.WriteBundle(*out, result); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Gate bundle: %v\n", err)
 		os.Exit(exitBlocked)
+	}
+	if privKey != nil {
+		if err := gate.SignBundle(*out, privKey); err != nil {
+			fmt.Fprintf(os.Stderr, "✗ Gate bundle подпись: %v\n", err)
+			os.Exit(exitBlocked)
+		}
 	}
 	printGateSummary(result, *out)
 	os.Exit(gate.ExitCode(result))

@@ -211,6 +211,21 @@ attempt_count/provenance. Только после успешной verify пиш
 .ai-team; `ai-team verify <run_id>` — та же full-свёртка live evidence.
 Экспорт отказастся от non-terminal run и от run без attestation.json.
 
+Signed bundle (P1-5, DSSE): `pkg/dsse` реализует минимальный DSSE-envelope на
+stdlib-only (PAE — Pre-Authentication Encoding `"DSSEv1"` с длинами payloadType
+и payload + ed25519 sign/verify из `crypto/ed25519`; ноль внешних зависимостей).
+`export.SignBundle` и `gate.SignBundle` подписывают детерминированный
+`BundleDigest` (sha256 канонического index.json) и пишут `dsse.json` в bundle
+(рядом с index.json); сам signature-файл не попадает в index.Records, чтобы не
+влиять на детерминизм. Ключи загружаются из файлов каждая команда через
+`--sign-key <path>` (PEM PKCS8 ed25519 или raw), никогда не коммитятся и не
+попадают в evidence. Верификация fail-closed: `ai-team verify --verify-key
+<pub>` требует наличия и валидности подписи для каждого проверяемого bundle
+(export/gate `VerifyBundle` принимают variadic verify-key); без ключа —
+integrity-only как раньше, с ключом при отсутствии/несовпадении подписи —
+ошибка. Подпись связывает digest с автором («кто создал») поверх integrity
+(«не изменено»), поддерживая future audit.
+
 gate MVP (V0-5): `pkg/gate` + `ai-team gate` — deterministic diff-policy гейт
 для trusted local base/candidate без .ai-team и без runtime. Диф между двумя
 локальными ref'ами (или ref и WORKTREE) парсится в типизированные мутации
@@ -237,8 +252,8 @@ JUnit failure при exit code команды 0), каждый со своим b
 `ci-gate-demo.yaml` — один version-pinned workflow (ai-team по зафиксированному
 SHA, actions по SHA), который на PR считает merge-base, выполняет gate, затем в
 любом случае verify и upload bundle артефактом. README честно разделяет run и
-gate, integrity (гарантируется цепочкой хэшей) и authenticity (пока не
-гарантируется — подпись DSSE/Sigstore это P1-5), а также фиксирует отсутствие
+gate, integrity (гарантируется цепочкой хэшей) и authenticity (P1-5: DSSE-ed25519
+подпись BundleDigest через `--sign-key`/`--verify-key`, см. ниже), а также фиксирует отсутствие
 OS sandbox. Внешняя верификация «три человека проходят демо» — за владельцем.
 
 Risk-signals (V0-8): `pkg/risk` — детерминированный классификатор

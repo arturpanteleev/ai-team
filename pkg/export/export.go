@@ -9,9 +9,11 @@ package export
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/retention"
@@ -151,6 +154,28 @@ func Build(runDir, outDir string) (*Index, error) {
 	return index, nil
 }
 
+// SignBundle подписывает детерминированный BundleDigest собранного bundle
+// (outDir с index.json) ed25519-ключом priv и пишет dsse.json
+// (SignaturePayloadType). Вызывается после Build.
+func SignBundle(outDir string, priv ed25519.PrivateKey) error {
+	data, err := safeio.ReadRegularFile(filepath.Join(outDir, indexFileName), maxIndexSize)
+	if err != nil {
+		return fmt.Errorf("export sign: index.json: %w", err)
+	}
+	var index Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		return fmt.Errorf("export sign: index.json decode: %w", err)
+	}
+	if index.Type != BundleType || index.RunID == "" {
+		return fmt.Errorf("export sign: index.json не является run bundle")
+	}
+	digest := BundleDigest(&index)
+	if err := dsse.SignBundleFile(outDir, priv, dsse.SignaturePayloadType, []byte(digest)); err != nil {
+		return fmt.Errorf("export sign: %w", err)
+	}
+	return nil
+}
+
 func fromSlash(path string) string {
 	return filepath.FromSlash(strings.TrimSpace(path))
 }
@@ -221,7 +246,12 @@ func readRunManifest(runDir string) (*evidence.RunManifest, error) {
 // .ai-team: каждый record обязан совпадать со своим sha256, а все semantic
 // связи (run manifest ↔ config/workflow snapshots ↔ event chain ↔ anchor ↔
 // attempt manifests ↔ attestation v1 ↔ provenance) обязаны сойтись.
-func VerifyBundle(bundleDir string) error {
+//
+// Опционально (variadic keyVerify) проверяется DSSE-подпись bundle (P1-5):
+// если задан открытый ключ — подпись обязана присутствовать и совпадать
+// (fail-closed). Если dsse.json присутствует, а ключ пуст — сообщение о
+// неподтверждённой подписи (не ошибка, но требование при verify с ключом).
+func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 	indexData, err := safeio.ReadRegularFile(filepath.Join(bundleDir, indexFileName), maxIndexSize)
 	if err != nil {
 		return fmt.Errorf("verify: bundle index: %w", err)
@@ -257,6 +287,40 @@ func VerifyBundle(bundleDir string) error {
 	}
 	if err := verifyCore(bundleDir, index.RunID, index.Records); err != nil {
 		return err
+	}
+	digest := BundleDigest(&index)
+	if err := verifySignature(bundleDir, digest, keyVerify...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// verifySignature проверяет DSSE-подпись (dsse.json) против digest. Правила
+// (P1-5, fail-closed): ключ задан → подпись обязана быть и совпадать;
+// ключ пуст и подписи нет → pass (integrity-only); ключ пуст, подпись есть →
+// pass, но подпись остаётся непроверенной (без ключа проверить нельзя).
+func verifySignature(bundleDir, digest string, keyVerify ...ed25519.PublicKey) error {
+	env, present, err := dsse.ReadEnvelopeFile(bundleDir)
+	if err != nil {
+		return fmt.Errorf("verify: dsse.json: %w", err)
+	}
+	keyGiven := len(keyVerify) > 0 && len(keyVerify[0]) > 0
+	if !present {
+		if keyGiven {
+			return errors.New("verify: задан --verify-key, но dsse.json (подпись bundle) отсутствует")
+		}
+		return nil
+	}
+	if !keyGiven {
+		return nil
+	}
+	payloadType := dsse.SignaturePayloadType
+	want := []byte(digest)
+	if env.PayloadType != payloadType || string(env.Payload) != string(want) {
+		return errors.New("verify: подпись bundle не соответствует digest (payload подменён)")
+	}
+	if err := dsse.Verify(keyVerify[0], env.PayloadType, env.Payload, env.Signature); err != nil {
+		return fmt.Errorf("verify: подпись bundle недействительна: %w", err)
 	}
 	return nil
 }

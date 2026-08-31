@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/export"
 )
 
@@ -19,11 +21,21 @@ func cmdExport() {
 	exportFlags := flag.NewFlagSet("export", flag.ExitOnError)
 	target := exportFlags.String("target", ".", "Путь к целевому проекту")
 	out := exportFlags.String("out", "", "Каталог bundle (по умолчанию .ai-team/exports/<run_id>.bundle)")
+	signKey := exportFlags.String("sign-key", "", "Путь к ed25519 private key (PEM PKCS8 или raw) для DSSE-подписи bundle (P1-5)")
 	if err := exportFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов export: %v", err)
 	}
 	if exportFlags.NArg() != 1 {
-		fatal("Использование: ai-team export [--target <dir>] [--out <path>] <run_id>")
+		fatal("Использование: ai-team export [--target <dir>] [--out <path>] [--sign-key <path>] <run_id>")
+	}
+
+	var privKey ed25519.PrivateKey
+	if *signKey != "" {
+		key, err := dsse.LoadPrivateKey(*signKey)
+		if err != nil {
+			fatal("Ошибка загрузки signing key: %v", err)
+		}
+		privKey = key
 	}
 	runID := exportFlags.Arg(0)
 	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
@@ -72,6 +84,11 @@ func cmdExport() {
 	if err := export.VerifyBundle(tmp); err != nil {
 		fatal("Экспорт не прошёл полную проверку (evidence повреждена?): %v", err)
 	}
+	if privKey != nil {
+		if err := export.SignBundle(tmp, privKey); err != nil {
+			fatal("Ошибка подписи bundle: %v", err)
+		}
+	}
 	if err := os.Rename(tmp, outDir); err != nil {
 		fatal("Не удалось зафиксировать bundle: %v", err)
 	}
@@ -85,5 +102,8 @@ func cmdExport() {
 	fmt.Printf("✓ Run %s проверенно экспортирован\n", runID)
 	fmt.Printf("  bundle:        %s\n", outDir)
 	fmt.Printf("  bundle_sha256: %s\n", bundleSHA)
+	if privKey != nil {
+		fmt.Printf("  signed:        DSSE ed25519 (dsse.json)\n")
+	}
 	fmt.Printf("  verified:      state/exports/%s.json (разрешает gc --prune-runs)\n", runID)
 }

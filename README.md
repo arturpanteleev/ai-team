@@ -139,6 +139,10 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
 | `ai-team worker --target <dir> --db <path>` | исполнить один strict worker job из stdin (обычно вызывается launcher-ом) |
 | `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
+| `ai-team gate --target <dir> --base <ref> --candidate <ref|WORKTREE> [--config <file>] [--out <dir>]` | детерминированный diff-policy вердикт + typed checks + attestation bundle; exit 0/1/2 |
+| `ai-team export [--target <dir>] [--out <path>] <run_id>` | собрать проверенный portable bundle терминального run |
+| `ai-team verify <bundle-dir>` / `verify --target <dir> <run_id>` | самодостаточная проверка run-/gate-bundle или локальной evidence |
+| `ai-team deliver --run <run_id> [--target <dir>] [--feature <name>]` | повторить отложенную (deferred) доставку терминального run — commit/push/PR с trailers (run id, runtime identity, attestation digest), однократная запись delivery.json |
 | `ai-team eval --agent <name> --artifact <path> [--samples N]` | независимая LLM-оценка артефакта |
 | `ai-team web [--target <dir>] [--port 8080] [--host 127.0.0.1]` | локальный dashboard и control plane |
 | `ai-team version` / `ai-team help` | версия / usage |

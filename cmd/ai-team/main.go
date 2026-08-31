@@ -79,6 +79,8 @@ func main() {
 		cmdExport()
 	case "verify":
 		cmdVerify()
+	case "deliver":
+		cmdDeliver()
 	case "gate":
 		cmdGate()
 	case "eval":
@@ -117,6 +119,8 @@ func printUsage() {
   ai-team verify [--target <dir>] <run_id>
                                    Проверить evidence терминального run (anchor, chain, попытки, attestation)
   ai-team verify <bundle-dir>      Проверить portable bundle самодостаточно (без repo и .ai-team)
+  ai-team deliver               Повторить отложенную (deferred) доставку завершённого run:
+                                   --run <run_id> --target <.ai-team root> [--feature <name>]
   ai-team gate                     Deterministic diff-policy gate для trusted local
                                    base/candidate (typed checks + attestation bundle)
   ai-team eval                     Оценить качество артефакта или агента

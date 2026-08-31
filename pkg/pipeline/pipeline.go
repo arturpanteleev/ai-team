@@ -172,6 +172,16 @@ type runState struct {
 	sourceTarget     string
 	liveWorkspaceSHA string
 	loopbackCycles   int
+	deferredDelivery *deferredDelivery
+}
+
+// deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
+// отложен до terminal finalize, когда attestation digest уже детерминирован.
+// Инициализируется в delivery-стадии после успешной авторизации плана; реальный
+// git-commit создаёт контроллер после finalize (см. executeDeferredDelivery).
+type deferredDelivery struct {
+	StatePath string
+	PlanHash  string
 }
 
 func (rs *runState) sourceDir() string {
@@ -620,6 +630,18 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 
 	runErr := rs.execute(ctx)
 	outcome, finalErr := rs.finalize(runErr)
+	if finalErr != nil {
+		return RunResult{RunID: runID, Outcome: outcome}, finalErr
+	}
+	// V0-9: отложенная (deferred) доставка — только после terminal finalize и
+	// только для полностью completed-ранна, когда attestation digest и runtime
+	// identity детерминированы. Enforcement: план перегружается из prepared
+	// state и должен совпасть с approvedPlanHash и маркером стадии.
+	if outcome == workflow.RunCompleted && rs.deferredDelivery != nil {
+		if deferredErr := rs.executeDeferredDelivery(); deferredErr != nil {
+			return RunResult{RunID: runID, Outcome: outcome}, deferredErr
+		}
+	}
 	return RunResult{RunID: runID, Outcome: outcome}, finalErr
 }
 

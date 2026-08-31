@@ -61,7 +61,7 @@
 | 3 | ADP-2 | P0 | review | adp-2-claude-code-adapter | Claude Code adapter (`claude -p`) — зависит от P1-1 |
 | 4 | APF-1 | P0 | review | apf-1-approvals-friction | Трение approvals: 1–2 клика (deferred-гейты, один delivery-решение) |
 | 5 | V0-0 | P0 | review | v0-0-prune-runs-export-guard | Безопасность `--prune-runs` до portable export |
-| 6 | OPS-1 | P0 | open | — | git tag v0.1.0 + GitHub Release (нужен owner-доступ) |
+| 6 | OPS-1 | P0 | review | [v0.1.0](https://github.com/arturpanteleev/ai-team/releases/tag/v0.1.0) | git tag v0.1.0 + GitHub Release |
 | 7 | DOC-45 | P0 | deployed | PR #45 | Уже в Review/отдельный PR; HMR-рывок не в спринte |
 | 8 | V0-1 | P0 | review | v0-1-test-mutation-provenance | Test-mutation provenance + policy |
 | 9 | V0-2 | P0 | review | v0-2-provenance-manifest | Provenance manifest v1 |

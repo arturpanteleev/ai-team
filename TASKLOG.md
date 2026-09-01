@@ -78,7 +78,7 @@
 | 20 | P1-5 | P1 | review | [PR #62](https://github.com/arturpanteleev/ai-team/pull/62) · v0-p15-dsse-signed-bundle | Signed bundle через DSSE (ed25519, stdlib-only) |
 | 21 | P1-6 | P1 | open | — | Redaction + retention contract |
 | 22 | P1-7 | P1 | open | — | Budget guard + usage truthfulness |
-| 23 | P1-8 | P1 | open | — | CI-parity check import |
+| 23 | P1-8 | P1 | review | p1-8-ci-parity-check-import | PR #67 |
 | 24 | OPS-8 | P1 | open | — | Data/control separation remainder |
 | 25 | OPS-3 | P1 | review | ops3-fail-closed-resume | PR #65 |
 | 26 | OPS-2 | P1 | review | ops2-configurable-tree-hash-ignore | PR #66 |

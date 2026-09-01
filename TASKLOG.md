@@ -81,7 +81,7 @@
 | 23 | P1-8 | P1 | open | — | CI-parity check import |
 | 24 | OPS-8 | P1 | open | — | Data/control separation remainder |
 | 25 | OPS-3 | P1 | review | ops3-fail-closed-resume | PR #65 |
-| 26 | OPS-2 | P1 | open | — | Configurable tree-hash ignore list |
+| 26 | OPS-2 | P1 | review | ops2-configurable-tree-hash-ignore | PR #66 |
 | 27 | OPS-10 | P1 | review | ops10-dependabot-sha-pinned | Dependabot для SHA-pinned Actions |
 | 28 | OPS-6 | P1 | review | ops6-structured-output | PR #64 |
 | 29 | P1-2 | P2 | open | — | ACP feasibility spike (research/conformance) |

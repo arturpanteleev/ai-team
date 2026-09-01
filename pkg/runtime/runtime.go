@@ -15,6 +15,14 @@ type Runtime interface {
 	Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error
 }
 
+// UsageReporter — опциональный интерфейс runtime: после успешного Execute
+// отдаёт attested usage-данные (tokens/cost), принятые ТОЛЬКО от адаптера с
+// capability usage-reported (P1-7). Возвращает nil, если источник не
+// аттестован или usage не получен.
+type UsageReporter interface {
+	Usage() *Usage
+}
+
 // Artifact is kept as a compatibility alias; the domain type lives in workflow.
 type Artifact = workflow.Artifact
 

@@ -258,6 +258,17 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return fail(execErr)
 	}
 
+	// P1-7: usage принимается ТОЛЬКО от attested adapter (runtime.UsageReporter);
+	// бакетускается в общий usage envelope run'а.
+	if reporter, ok := stageRuntime.(runtime.UsageReporter); ok {
+		if u := reporter.Usage(); u != nil && u.Attested {
+			rs.usageTotal.Attested = true
+			rs.usageTotal.TokensInput += u.TokensInput
+			rs.usageTotal.TokensOutput += u.TokensOutput
+			rs.usageTotal.CostUSD += u.CostUSD
+		}
+	}
+
 	outputs, err := rs.collectOutputs(a, name)
 	r.Outputs = outputs
 	if err != nil {

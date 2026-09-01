@@ -17,6 +17,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -126,8 +127,19 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 // {RunDir}/usage.json — рядом с run.json, вне attempts/.
 func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) error {
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
-		rs.results, rs.loopbackCycles, status)
+		rs.results, rs.loopbackCycles, status, usageToMetrics(rs.usageTotal))
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
+}
+
+// usageToMetrics переносит attested usage из runtime-слоя в metrics-слой
+// (P1-7). metrics остаётся без зависимости на runtime.
+func usageToMetrics(u runtime.Usage) metrics.Usage {
+	return metrics.Usage{
+		Attested:     u.Attested,
+		TokensInput:  u.TokensInput,
+		TokensOutput: u.TokensOutput,
+		CostUSD:      u.CostUSD,
+	}
 }
 
 // writeContainmentReceipt публикует per-axis containment receipt (V0-P1-4) в

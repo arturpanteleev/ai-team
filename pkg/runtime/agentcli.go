@@ -24,7 +24,16 @@ const DefaultCLI = "opencode"
 // запуска процесса и логирования. Путь к харнессу и изоляция выбираются из
 // реестра адаптеров по имени бинарника (CLI). Никакой opencode-специфики в
 // этом типе нет — только контракт RuntimeAdapter.
-type AgentCLIRuntime struct{}
+type AgentCLIRuntime struct {
+	lastUsage *Usage
+}
+
+// Usage возвращает attested usage последнего успешного Execute (nil, если
+// адаптер не аттестует usage или разбор не удался). Удовлетворяет
+// UsageReporter (P1-7): tokens/cost принимаются только от attested источника.
+func (r *AgentCLIRuntime) Usage() *Usage {
+	return r.lastUsage
+}
 
 func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error {
 	cli := agent.CLI
@@ -127,6 +136,18 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
 		}
 		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, err)
+	}
+
+	// P1-7: usage принимается ТОЛЬКО от адаптера с attested usage-reported
+	// (UsageSource); при ошибке разбора молча пропускаем (usage остаётся
+	// unknown), не проваливая успешный run.
+	if source, ok := adapter.(UsageSource); ok {
+		output := capturedStdout.String()
+		if u, err := source.ParseUsage(strings.NewReader(output)); err == nil && u != nil && u.Attested {
+			r.lastUsage = u
+		} else {
+			r.lastUsage = nil
+		}
 	}
 
 	return nil

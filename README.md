@@ -139,6 +139,7 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
 | `ai-team worker --target <dir> --db <path>` | исполнить один strict worker job из stdin (обычно вызывается launcher-ом) |
 | `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
+| `ai-team ci-import [--target <dir>] [--format github-actions]` | импортировать ограниченный объяснимый набор checks из project CI (GitHub Actions) без исполнения произвольного YAML; показывает effective suite и fingerprint перед запуском |
 | `ai-team gate --target <dir> --base <ref> --candidate <ref|WORKTREE> [--config <file>] [--out <dir>]` | детерминированный diff-policy вердикт + typed checks + attestation bundle; exit 0/1/2 |
 | `ai-team export [--target <dir>] [--out <path>] <run_id>` | собрать проверенный portable bundle терминального run |
 | `ai-team verify <bundle-dir>` / `verify --target <dir> <run_id>` | самодостаточная проверка run-/gate-bundle или локальной evidence |

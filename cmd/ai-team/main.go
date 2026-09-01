@@ -23,6 +23,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
+	"github.com/arturpanteleev/ai-team/pkg/ciimport"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
@@ -79,6 +80,8 @@ func main() {
 		cmdSchedulerWorker()
 	case "list":
 		cmdList()
+	case "ci-import":
+		cmdCIImport()
 	case "usage":
 		cmdUsage()
 	case "export":
@@ -1004,6 +1007,74 @@ func cmdEval() {
 	}
 
 	fatal("Укажите --artifact + --agent, либо --feature + --task + --agent")
+}
+
+// cmdCIImport импортирует ограниченный объяснимый набор checks из real project
+// CI (P1-8) без исполнения произвольного YAML и печатает effective suite с
+// fingerprint'ом ДО запуска. Сам command checks не выполняет.
+func cmdCIImport() {
+	ciFlags := flag.NewFlagSet("ci-import", flag.ExitOnError)
+	target := ciFlags.String("target", ".", "Путь к проекту")
+	format := ciFlags.String("format", string(ciimport.DefaultImportFormat),
+		"Adopter-формат CI (github-actions)")
+	ciFlags.Parse(os.Args[2:])
+
+	absTarget, err := absoluteTarget(*target)
+	if err != nil {
+		fatal("Ошибка target: %v", err)
+	}
+	*target = absTarget
+	requireControlRoot(*target)
+
+	imp, err := ciimport.Import(*target, ciimport.ImportFormat(*format))
+	if err != nil {
+		fatal("Ошибка импорта CI: %v", err)
+	}
+
+	data := map[string]any{
+		"format":       imp.Format,
+		"workflows":    imp.WorkflowCount,
+		"checks":       len(imp.Definitions),
+		"skipped":      len(imp.Skipped),
+		"fingerprint":  imp.Fingerprint,
+		"source_files": imp.SourceFiles,
+	}
+	logging.Emit(logging.Record{
+		Level:   "ok",
+		Command: "ci-import",
+		Type:    "ci-import",
+		Message: fmt.Sprintf("CI import: %d checks (fingerprint %s)", len(imp.Definitions), shortFingerprint(imp.Fingerprint)),
+		Data:    data,
+	})
+	logging.Emit(logging.Record{
+		Level:   "info",
+		Command: "ci-import",
+		Type:    "ci-import-suite",
+		Message: "Effective suite (до запуска):",
+	})
+	for _, d := range imp.Definitions {
+		logging.Emit(logging.Record{
+			Level:   "info",
+			Command: "ci-import",
+			Type:    "ci-import-check",
+			Message: fmt.Sprintf("  %-16s %-10s %s", d.Name, d.Class, strings.Join(d.Command, " ")),
+		})
+	}
+	for _, s := range imp.Skipped {
+		logging.Emit(logging.Record{
+			Level:   "info",
+			Command: "ci-import",
+			Type:    "ci-import-skipped",
+			Message: fmt.Sprintf("  skip %s job=%s step=%d: %s", s.Source, s.Job, s.Step, s.Reason),
+		})
+	}
+}
+
+func shortFingerprint(fp string) string {
+	if len(fp) > 12 {
+		return fp[:12]
+	}
+	return fp
 }
 
 // evalSingleAgent запускает пайплайн из одного агента и оценивает его

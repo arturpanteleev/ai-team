@@ -148,6 +148,8 @@ type scriptedRuntime struct {
 	onExec    func(agentName string, inputs []runtime.Artifact)
 	calls     map[string]int
 	targetDir string
+	usage     *runtime.Usage
+	usagePer  map[string]*runtime.Usage
 }
 
 func newScripted() *scriptedRuntime {
@@ -164,10 +166,16 @@ func newScripted() *scriptedRuntime {
 
 func (r *scriptedRuntime) factory(string) (runtime.Runtime, error) { return r, nil }
 
+// Usage — UsageReporter для тестов (P1-7): имитирует attested usage.
+func (r *scriptedRuntime) Usage() *runtime.Usage { return r.usage }
+
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
 	r.calls[a.Name]++
 	r.targetDir = task.TargetDir
+	if r.usagePer != nil {
+		r.usage = r.usagePer[a.Name]
+	}
 	if r.onExec != nil {
 		r.onExec(a.Name, inputs)
 	}

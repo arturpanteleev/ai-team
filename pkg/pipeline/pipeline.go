@@ -176,6 +176,8 @@ type runState struct {
 	liveWorkspaceSHA string
 	loopbackCycles   int
 	deferredDelivery *deferredDelivery
+	budgetConfig     *config.BudgetConfig
+	usageTotal       runtime.Usage
 }
 
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
@@ -600,6 +602,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		visits:           make(map[string]int),
 		candidate:        candidateManager,
 		sourceTarget:     sourceTarget,
+		budgetConfig:     p.cfg.Budget,
 	}
 	if len(resumeInvalidated) > 0 {
 		rs.loopbackCycles = 1
@@ -644,7 +647,21 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		rs.extraInputs[runCfg.retryFrom] = inputs
 	}
 
-	runErr := rs.execute(ctx)
+	// P1-7: жёсткий wall-time бюджет run'а (всегда, default 24h) поверх
+	// per-stage timeout-ов. Превышение → остановка run с явной причиной.
+	var runErr error
+	if budgetDur, budgetStr := rs.budgetConfig.EffectiveMaxWallTime(); budgetDur > 0 {
+		var cancel context.CancelFunc
+		var budgetCtx context.Context
+		budgetCtx, cancel = context.WithTimeout(ctx, budgetDur)
+		defer cancel()
+		runErr = rs.execute(budgetCtx)
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			runErr = fmt.Errorf("run budget: превышен max_wall_time %s", budgetStr)
+		}
+	} else {
+		runErr = rs.execute(ctx)
+	}
 	outcome, finalErr := rs.finalize(runErr)
 	if finalErr != nil {
 		return RunResult{RunID: runID, Outcome: outcome}, finalErr

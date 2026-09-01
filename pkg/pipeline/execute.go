@@ -53,6 +53,11 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
 			return fmt.Errorf("workflow graph: max_visits=%d исчерпан для %s", node.MaxVisits, current)
 		}
+		// P1-7: глобальный лимит попыток run'а (всегда, default 100). Проверка
+		// ДО исполнения: cap строгий, лишняя попытка не запускается.
+		if rs.attemptOrdinal >= rs.budgetConfig.EffectiveMaxAttempts() {
+			return fmt.Errorf("run budget: превышен лимит попыток max_attempts=%d", rs.budgetConfig.EffectiveMaxAttempts())
+		}
 		index := rs.graph.Index(current)
 		if err := rs.saveLifecycle(lifecycle.PhaseRunning, current); err != nil {
 			return err

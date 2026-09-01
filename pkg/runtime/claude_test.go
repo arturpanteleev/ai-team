@@ -101,6 +101,28 @@ func TestClaudeParseUsageMissingResultFails(t *testing.T) {
 	}
 }
 
+func TestClaudeParseUsageIgnoresForeignEventTypes(t *testing.T) {
+	a := &ClaudeAdapter{}
+
+	stream := strings.Join([]string{
+		`{"type":"text","content":"поток модели"}`,
+		`{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.11,"usage":{"input_tokens":1,"output_tokens":1}}`,
+		`{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.42,"usage":{"input_tokens":1000,"output_tokens":2000}}`,
+	}, "\n")
+	usage, err := a.ParseUsage(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.TokensOutput != 2000 || usage.CostUSD != 0.42 {
+		t.Errorf("последний реальный result должен выигрывать (foreign/ранний JSON игнорируется), got %+v", usage)
+	}
+
+	if _, err := a.ParseUsage(strings.NewReader(
+		`{"type":"text","content":"модель не печатает result"}`)); err == nil {
+		t.Fatal("только foreign JSON-строки без type=result должны быть ошибкой")
+	}
+}
+
 func TestClaudeClassifyErrorTaxonomyFromSubtype(t *testing.T) {
 	a := &ClaudeAdapter{}
 	for subtype, want := range map[string]ClaudeErrorCategory{

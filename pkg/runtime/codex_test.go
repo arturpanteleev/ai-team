@@ -104,6 +104,29 @@ func TestCodexParseUsageMissingTurnFails(t *testing.T) {
 	}
 }
 
+func TestCodexParseUsageIgnoresForeignEventTypes(t *testing.T) {
+	a := &CodexAdapter{}
+
+	stream := strings.Join([]string{
+		`{"type":"usage","usage":{"input_tokens":99999,"output_tokens":99999}}`,
+		`{"type":"text","content":"не JSONL-событие харнесса"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"..."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":25,"reasoning_output_tokens":0}}`,
+	}, "\n")
+	usage, err := a.ParseUsage(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.TokensInput != 100 || usage.TokensOutput != 25 {
+		t.Errorf("model-mimic JSON не должен читаться как usage: got %+v", usage)
+	}
+
+	if _, err := a.ParseUsage(strings.NewReader(
+		`{"type":"usage","usage":{"input_tokens":1,"output_tokens":1}}`)); err == nil {
+		t.Fatal("только чужой событийный JSON — это отсутствие turn.completed, должно быть ошибкой")
+	}
+}
+
 func TestCodexClassifyErrorTaxonomy(t *testing.T) {
 	a := &CodexAdapter{}
 	for output, want := range map[string]CodexErrorCategory{

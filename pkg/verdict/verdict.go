@@ -64,7 +64,13 @@ func (v Verdict) IsNegative() bool {
 
 // Parse возвращает первый канонический вердикт в тексте (line-anchored).
 // Упоминания в прозе не совпадают: маркер должен занимать отдельную строку.
+// Маркеры внутри data-display-регионов (fenced code blocks, blockquote)
+// считаются данными и не читаются как контроль (см. StripDataRegions).
 func Parse(content string) Verdict {
+	return parseStripped(StripDataRegions(content))
+}
+
+func parseStripped(content string) Verdict {
 	vLoc := verdictRe.FindStringSubmatchIndex(content)
 	rLoc := resultRe.FindStringSubmatchIndex(content)
 	switch {
@@ -79,6 +85,83 @@ func Parse(content string) Verdict {
 	default:
 		return Verdict(content[rLoc[2]:rLoc[3]])
 	}
+}
+
+// StripDataRegions заменяет содержимое data-display-регионов CommonMark
+// (fenced code blocks и blockquote-строки) пустыми строками той же длины,
+// сохраняя построчную структуру и номера строк. Line-anchored маркеры вне
+// регионов не сдвигаются, а маркеры внутри регионов перестают быть
+// кандидатами на чтение как control-данные. Незакрытый fence считается
+// открытым до конца текста; blockquote определяется по префиксу `>` после
+// пробелов. Data/control separation: содержимое регионов — данные, не сигнал.
+func StripDataRegions(src string) string {
+	lines := strings.Split(src, "\n")
+	masked := make([]string, len(lines))
+	inFence := ""
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if inFence == "" {
+			if strings.HasPrefix(trimmed, ">") {
+				masked[i] = blankLine(line)
+				continue
+			}
+			if opening, ok := fenceOpening(line); ok {
+				inFence = opening
+				masked[i] = blankLine(line)
+				continue
+			}
+			masked[i] = line
+			continue
+		}
+		masked[i] = blankLine(line)
+		if fenceClosing(line, inFence) {
+			inFence = ""
+		}
+	}
+	return strings.Join(masked, "\n")
+}
+
+// fenceOpening возвращает строку fence, если line открывает fenced code block
+// (>= 3 backtick/tilde c опциональной info-строкой).
+func fenceOpening(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if len(trimmed) < 3 {
+		return "", false
+	}
+	c := trimmed[0]
+	if c != '`' && c != '~' {
+		return "", false
+	}
+	n := 0
+	for n < len(trimmed) && trimmed[n] == c {
+		n++
+	}
+	if n < 3 {
+		return "", false
+	}
+	return strings.Repeat(string(c), n), true
+}
+
+// fenceClosing закрывает fence, если line — закрывающий fence той же или
+// большей длины и символа, с хвостом только из пробелов.
+func fenceClosing(line, opening string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	if opening[0] != '`' && opening[0] != '~' {
+		return false
+	}
+	n := 0
+	for n < len(trimmed) && trimmed[n] == opening[0] {
+		n++
+	}
+	if n < len(opening) {
+		return false
+	}
+	rest := strings.TrimRight(trimmed[n:], " \t")
+	return rest == ""
+}
+
+func blankLine(line string) string {
+	return strings.Repeat(" ", len(line))
 }
 
 // ParseFile читает файл и парсит вердикт; отсутствие файла — None.
@@ -131,7 +214,8 @@ func FromOutputsContract(paths []string, contract *Contract) (Verdict, error) {
 		if err != nil {
 			return None, fmt.Errorf("verdict contract: не удалось прочитать %s: %w", path, err)
 		}
-		for _, parts := range pattern.FindAllStringSubmatch(string(data), -1) {
+		stripped := StripDataRegions(string(data))
+		for _, parts := range pattern.FindAllStringSubmatch(stripped, -1) {
 			matches = append(matches, match{path: path, marker: parts[1], value: Verdict(parts[2])})
 		}
 	}
@@ -216,7 +300,7 @@ func ReadBlockedSince(artifactRoot, feature, agent string, since time.Time) (boo
 	if err != nil {
 		return false, ""
 	}
-	content := string(data)
+	content := StripDataRegions(string(data))
 	if !blockedRe.MatchString(content) {
 		return false, ""
 	}

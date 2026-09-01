@@ -82,6 +82,8 @@ func main() {
 		cmdList()
 	case "ci-import":
 		cmdCIImport()
+	case "redact":
+		cmdRedact()
 	case "usage":
 		cmdUsage()
 	case "export":
@@ -122,6 +124,9 @@ func printUsage() {
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list                     Список доступных агентов
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
+  ai-team redact verify|scan|redact   P1-6 redaction-контракт: сеcrets-скан evidence,
+                                   verify (fail-closed для экспорта) или detached-копия
+                                   с заменой секретов на [REDACTED:...]
   ai-team export <run_id>          Собрать проверенный portable bundle терминального run
                                    (whitelisted typed records и digests; публикует
                                    verified-запись state/exports)

@@ -634,11 +634,11 @@
         <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr">—</div>
       </article>
 
-      <article class="task" data-status="Open" data-prio="P1" data-horizon="P1" data-id="P1-7" data-order="22">
+      <article class="task" data-status="Review" data-prio="P1" data-horizon="P1" data-id="P1-7" data-order="22">
         <div class="task-seq">#22</div>
         <div class="task-key"><strong>P1-7</strong><span class="prio prio-P1">P1</span><span class="tag">Cost</span></div>
-        <div class="task-content"><h3>Budget guard + usage truthfulness</h3><p>Всегда ограничивать wall-time/attempts; tokens/cost принимать только от attested adapter support.</p><p class="detail">#42 доставил usage envelope, tokens остаются unknown. ADP-1/ADP-2 дают первые реальные источники usage (<code>total_cost_usd</code>) — нормализовать через контракт P1-1.</p></div>
-        <div class="task-state"><span class="status status-open">○ Open</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/42" target="_blank" rel="noopener noreferrer">foundation #42</a></div>
+        <div class="task-content"><h3>Budget guard + usage truthfulness</h3><p>Всегда ограничивать wall-time/attempts; tokens/cost принимать только от attested adapter support.</p><p class="detail">Hard budget (wall-time 24h / attempts 100) применяется всегда; usage разбирается из вывода агента только от attested usage-reported adapters; envelope несёт usage_reported/tokens/cost при аттестации.</p></div>
+        <div class="task-state"><span class="status status-review">◐ Review</span></div><div class="task-pr"><a href="https://github.com/arturpanteleev/ai-team/pull/68" target="_blank" rel="noopener noreferrer">PR #68</a> · <a href="https://github.com/arturpanteleev/ai-team/pull/42" target="_blank" rel="noopener noreferrer">foundation #42</a></div>
       </article>
 
       <article class="task" data-status="Review" data-prio="P1" data-horizon="P1" data-id="P1-8" data-order="23">

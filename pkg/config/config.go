@@ -37,6 +37,36 @@ type Config struct {
 	Effort         string             `yaml:"effort,omitempty"`
 	StageTimeout   string             `yaml:"stage_timeout,omitempty"`
 	Containment    *ContainmentConfig `yaml:"containment,omitempty"`
+	TreeHash       *TreeHashConfig    `yaml:"tree_hash,omitempty"`
+}
+
+// TreeHashConfig — project-specific настройки tree hashing (OPS-2).
+// IgnoreDirs добавляет имена каталогов к каноническому baseline без его
+// ослабления. Только простые имена (строгий ValidIgnoreDirName), никаких путей
+// или glob'ов.
+type TreeHashConfig struct {
+	IgnoreDirs []string `yaml:"ignore_dirs,omitempty"`
+}
+
+// ValidIgnoreDirName — строгий шаблон имени каталога для tree-hash ignore
+// (канонический — в pkg/checks, где живёт tree hashing).
+func ValidIgnoreDirName(name string) bool { return checks.ValidIgnoreDirName(name) }
+
+func (tc *TreeHashConfig) Validate() error {
+	if tc == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(tc.IgnoreDirs))
+	for _, name := range tc.IgnoreDirs {
+		if !checks.ValidIgnoreDirName(name) {
+			return fmt.Errorf("tree_hash.ignore_dirs: недопустимое имя каталога %q (допустимо только простое имя: буквы/цифры/-/./_, без '/', не '.'/'..', без ведущего '-')", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("tree_hash.ignore_dirs: дубликат %q", name)
+		}
+		seen[name] = true
+	}
+	return nil
 }
 
 type ContainmentConfig struct {
@@ -85,6 +115,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "workflow": true, "containment": true,
+		"tree_hash": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -96,6 +127,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Effort        string          `yaml:"effort"`
 		StageTimeout  string          `yaml:"stage_timeout"`
 		Workflow      *WorkflowConfig `yaml:"workflow"`
+		TreeHash      *TreeHashConfig `yaml:"tree_hash"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -111,6 +143,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
 	c.Workflow = raw.Workflow
+	c.TreeHash = raw.TreeHash
 
 	if raw.Pipeline.Kind == 0 {
 		return fmt.Errorf("config: pipeline is required")
@@ -404,6 +437,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if c.Containment != nil {
 		if err := c.Containment.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.TreeHash != nil {
+		if err := c.TreeHash.Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

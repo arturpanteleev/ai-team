@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,12 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: multiple YAML documents are not supported")
 		}
 		return nil, err
+	}
+	// OPS-2: регистрируем project-specific ignore dirs в каноническом tree
+	// hash'е как процесс-глобальный набор — все вычисления workspace digest
+	// (checks, pipeline, delivery) используют идентичный ignore-list.
+	if cfg.TreeHash != nil {
+		checks.SetExtraIgnoreDirs(cfg.TreeHash.IgnoreDirs)
 	}
 	return &cfg, nil
 }

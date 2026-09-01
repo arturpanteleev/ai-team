@@ -571,9 +571,11 @@ func VerifyResultDigest(result Result) bool {
 // DefaultIgnoreDirs is the single canonical ignore list for workspace tree
 // hashing: controller metadata (.git, .ai-team) plus dependency/build
 // directories that are never part of a mutation contract. Directories are
-// matched by name at any depth of the walk.
+// matched by name at any depth of the walk. Project-specific additions from
+// config (OPS-2) are merged in; the canonical baseline is never removable.
 func DefaultIgnoreDirs() map[string]bool {
-	return map[string]bool{
+	extra := loadExtraIgnoreDirs()
+	result := map[string]bool{
 		".git":         true,
 		".ai-team":     true,
 		"node_modules": true,
@@ -582,6 +584,13 @@ func DefaultIgnoreDirs() map[string]bool {
 		".venv":        true,
 		"__pycache__":  true,
 	}
+	for name := range extra {
+		if name == "" {
+			continue
+		}
+		result[name] = true
+	}
+	return result
 }
 
 // WorkspaceFileDigests is the single tree-walking implementation shared by

@@ -1164,6 +1164,9 @@ func cmdVerify() {
 	}
 	requireControlRoot(absolute)
 	runDir := filepath.Join(absolute, ".ai-team", "runs", runID)
+	if len(keyVerify) > 0 {
+		fatal("Run %s: DSSE-подпись применима только к bundle (export/gate), а не к live run evidence; --verify-key не используется на этой ветке — отказ (fail-closed)", runID)
+	}
 	if err := export.VerifyEvidence(runDir); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)

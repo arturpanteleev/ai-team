@@ -406,3 +406,39 @@ func TestVerifyBundleTamperedSignature(t *testing.T) {
 		t.Fatal("tampered signature с ключом должен FAIL")
 	}
 }
+
+func TestVerifyBundleEmptySignatureFailsClosed(t *testing.T) {
+	base := t.TempDir()
+	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+	bundle := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundle); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	sigPath := filepath.Join(bundle, dsse.EnvelopeFileName)
+
+	writeEnv := func(t *testing.T, env *dsse.Envelope) {
+		t.Helper()
+		data, err := dsse.Marshal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sigPath, append(data, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Пустая подпись: с ключом — fail-closed (не молчаливый pass).
+	writeEnv(t, &dsse.Envelope{PayloadType: dsse.SignaturePayloadType, Payload: []byte("x"), Signature: nil})
+	if err := VerifyBundle(bundle, pub); err == nil {
+		t.Fatal("VerifyBundle с пустой подписью и ключом должен FAIL (fail-closed)")
+	}
+
+	// Искажённый dsse.json (не валидный envelope) — с ключом fail.
+	if err := os.WriteFile(sigPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundle, pub); err == nil {
+		t.Fatal("VerifyBundle с повреждённым dsse.json и ключом должен FAIL")
+	}
+}

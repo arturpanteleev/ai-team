@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/provenance"
 )
 
 // syntheticRun строит immutable run evidence с фиксированным содержимым.
@@ -276,5 +277,43 @@ func TestParseRejectsUnknownFieldsAndVersion(t *testing.T) {
 	}
 	if _, err := Parse(tampered); err == nil {
 		t.Fatalf("unknown поле predicate должно отклоняться")
+	}
+}
+
+func TestParseRejectsTrailingJSON(t *testing.T) {
+	root := t.TempDir()
+	syntheticRun(t, root)
+	data, err := Serialize(builtStatement(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	garbage := append(append([]byte{}, data...), []byte(`{"extra":true}`)...)
+	if _, err := Parse(garbage); err == nil {
+		t.Fatalf("trailing JSON-документ должен отклоняться")
+	}
+}
+
+func TestParseRejectsRunIDMismatch(t *testing.T) {
+	root := t.TempDir()
+	syntheticRun(t, root)
+	base, err := Serialize(builtStatement(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(base)
+	if err != nil {
+		t.Fatalf("базовый Parse должен пройти: %v", err)
+	}
+	tampered := *parsed
+	tampered.Predicate.Provenance = &provenance.Manifest{
+		SchemaVersion: provenance.SchemaVersion,
+		RunID:         "r-ДРУГОЙ",
+	}
+	data, err := Serialize(&tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(data); err == nil {
+		t.Fatalf("рассинхрон run_id predicate/provenance должен отклоняться")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -277,13 +278,18 @@ func Digest(statement *Statement) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// Parse — строгий парсинг: неизвестные поля и version/type mismatch — ошибки.
+// Parse — строгий парсинг: неизвестные поля, trailing JSON, version/type
+// mismatch и рассинхрон run_id между predicate и provenance — ошибки.
 func Parse(data []byte) (*Statement, error) {
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	var statement Statement
 	if err := decoder.Decode(&statement); err != nil {
 		return nil, fmt.Errorf("attestation statement decode: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("attestation: должен содержать ровно один JSON-документ")
 	}
 	if statement.Type != StatementType {
 		return nil, fmt.Errorf("attestation: неожиданный _type %q", statement.Type)
@@ -297,6 +303,12 @@ func Parse(data []byte) (*Statement, error) {
 	}
 	if statement.Predicate.RunID == "" {
 		return nil, errors.New("attestation: пустой run_id")
+	}
+	if p := statement.Predicate.Provenance; p != nil {
+		if p.RunID != statement.Predicate.RunID {
+			return nil, fmt.Errorf("attestation: run_id рассинхронизирован (predicate=%q provenance=%q)",
+				statement.Predicate.RunID, p.RunID)
+		}
 	}
 	return &statement, nil
 }

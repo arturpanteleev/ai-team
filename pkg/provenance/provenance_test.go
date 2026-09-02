@@ -116,6 +116,18 @@ func TestCheckDriftMatrix(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown stored schema_version fails closed", func(t *testing.T) {
+		stored := New("run-1", now)
+		stored.Add("runtime", "", known("bin"))
+		stored.SchemaVersion = SchemaVersion + 1
+		live := New("run-1", now)
+		live.Add("runtime", "", known("bin"))
+		if err := CheckDrift(stored, live); err == nil ||
+			!strings.Contains(err.Error(), "schema_version") {
+			t.Fatalf("неподдерживаемая schema_version должна быть drift'ом, got %v", err)
+		}
+	})
+
 	t.Run("live authority missing in stored", func(t *testing.T) {
 		stored := New("run-1", now)
 		stored.Add("runtime", "", known("bin"))

@@ -152,6 +152,10 @@ func CheckDrift(stored, live *Manifest) error {
 	if stored == nil || live == nil {
 		return nil
 	}
+	if stored.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("provenance drift: сохранённый manifest имеет неподдерживаемую schema_version %d (ожидается %d)",
+			stored.SchemaVersion, SchemaVersion)
+	}
 	for _, liveItem := range live.Items {
 		if !liveItem.Digest.Known() {
 			continue

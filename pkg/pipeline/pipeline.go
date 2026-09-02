@@ -391,6 +391,20 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	attemptOrdinal := 0
 	if runCfg.ResumeRunID != "" {
 		var manifest evidence.RunManifest
+		runEvidenceDir := filepath.Join(runCfg.TargetDir, ".ai-team", "runs", runID)
+		// OPS-3: fail-closed проверка применимой evidence chain/snapshots перед
+		// продолжением. Если цепочка/снимки повреждены — отклоняем resume и явно
+		// фиксируем причину в evidence (resume_blocked), пока лог аппендабелен.
+		verifyErr := evidence.VerifyResumeEvidence(runEvidenceDir)
+		if verifyErr != nil {
+			recErr := &evidence.ResumeEvidenceError{}
+			if errors.As(verifyErr, &recErr) && recErr.Reason != evidence.ReasonEventChain &&
+				recErr.Reason != evidence.ReasonManifestIdentity &&
+				recErr.Reason != evidence.ReasonAlreadyTerminal {
+				_ = evidence.AppendBlockedEvent(runEvidenceDir, runID, recErr.Reason, recErr.Detail)
+			}
+			return RunResult{}, fmt.Errorf("resume evidence run: %w", verifyErr)
+		}
 		evidenceStore, manifest, replayedRun, err = evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)

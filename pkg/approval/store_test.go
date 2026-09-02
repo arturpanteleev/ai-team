@@ -221,6 +221,105 @@ func TestStoreConcurrentDecisionsLoseNoUpdate(t *testing.T) {
 	}
 }
 
+func TestStoreDeferredResolvedByConsolidatedDeliveryDecision(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-deferred", AttemptID: "attempt-1", FromStage: "coder", ToStage: "reviewer",
+		Trigger: "stage_completed", SubjectHash: testSubject,
+		RequiredRoles: []string{"developer"}, Actions: []string{"approve", "reject"},
+		Targets:  map[string]string{"approve": "reviewer", "reject": ".ai-team"},
+		Deferred: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !value.Deferred {
+		t.Fatal("deferred flag не сохранён")
+	}
+	// per-gate Decide запрещён для deferred.
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "user-1", ActorRole: "developer", Action: "approve", SubjectHash: testSubject,
+	}); err == nil || !strings.Contains(err.Error(), "deferred") {
+		t.Fatalf("Decide не должен разрешать deferred approval, got %v", err)
+	}
+	// Consolidated delivery-решение: роль delivery-контрпоинта не обязана быть
+	// в RequiredRoles гейта, subject и action проверяются строго.
+	resolved, err := store.ResolveDeferred(value.RunID, value.ID, Decision{
+		ActorID: "release-1", ActorRole: "release_manager", Action: "approve",
+		SubjectHash: testSubject, Comment: "consolidated delivery decision",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != StatusResolved || resolved.ResolvedAction != "approve" ||
+		len(resolved.Decisions) != 1 || resolved.Decisions[0].ActorRole != "release_manager" {
+		t.Fatalf("неожиданный consolidated результат: %+v", resolved)
+	}
+	reloaded, err := store.Load(value.RunID, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Status != StatusResolved || reloaded.Deferred != true ||
+		reloaded.Decisions[0].ActorRole != "release_manager" {
+		t.Fatalf("resolved deferred не пережил reload: %+v", reloaded)
+	}
+	// Повторное разрешение запрещено.
+	if _, err := store.ResolveDeferred(value.RunID, value.ID, Decision{
+		ActorID: "release-2", ActorRole: "release_manager", Action: "approve",
+		SubjectHash: testSubject,
+	}); err == nil || !strings.Contains(err.Error(), "уже разрешён") {
+		t.Fatalf("двойное разрешение deferred принято: %v", err)
+	}
+}
+
+func TestStoreDeferredStrictSubjectAndAction(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-deferred-strict", AttemptID: "attempt-1", FromStage: "a", ToStage: "b",
+		Trigger: "stage_completed", SubjectHash: testSubject,
+		RequiredRoles: []string{"owner"}, Actions: []string{"approve", "reject"},
+		Targets:  map[string]string{"approve": "b", "reject": "b"},
+		Deferred: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveDeferred(value.RunID, value.ID, Decision{
+		ActorID: "release-1", ActorRole: "release_manager", Action: "approve",
+		SubjectHash: strings.Repeat("b", 64),
+	}); err == nil || !strings.Contains(err.Error(), "subject hash") {
+		t.Fatalf("несовпадающий subject должен быть отклонён: %v", err)
+	}
+	if _, err := store.ResolveDeferred(value.RunID, value.ID, Decision{
+		ActorID: "release-1", ActorRole: "release_manager", Action: "override_approve",
+		SubjectHash: testSubject,
+	}); err == nil || !strings.Contains(err.Error(), "action") {
+		t.Fatalf("недопустимый action должен быть отклонён: %v", err)
+	}
+	// ResolveDeferred не применяется к обычным (не deferred) approvals.
+	plain, err := store.Create(PendingApproval{
+		RunID: "run-plain", AttemptID: "attempt-1", FromStage: "a", ToStage: "b",
+		Trigger: "stage_completed", SubjectHash: testSubject,
+		RequiredRoles: []string{"owner"}, Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": "b", "reject": "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveDeferred(plain.RunID, plain.ID, Decision{
+		ActorID: "release-1", ActorRole: "release_manager", Action: "approve",
+		SubjectHash: testSubject,
+	}); err == nil || !strings.Contains(err.Error(), "deferred approval") {
+		t.Fatalf("ResolveDeferred не должен применяться к обычному approval: %v", err)
+	}
+}
+
 func TestStorePayloadRoundTripAndValidation(t *testing.T) {
 	target := t.TempDir()
 	store, err := NewStore(target)

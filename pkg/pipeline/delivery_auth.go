@@ -120,6 +120,11 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		if rs.approvedPlanHash != planHash {
 			return fmt.Errorf("delivery approval hash mismatch: approved=%s actual=%s", rs.approvedPlanHash, planHash)
 		}
+		// Явное подтверждение точного canonical plan (--approve-plan) расширяется
+		// на отложенные гейты run'а (APF-1).
+		if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
+			return err
+		}
 		return recordApproval("hash_flag")
 	}
 
@@ -159,8 +164,13 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 
 	action := ""
 	if rs.p.prompter.Interactive() {
-		ans := rs.p.prompter.Ask(fmt.Sprintf("%s %s может выполнить commit/push/PR. Продолжить? [y/N]",
-			ui.Colorize("Delivery:", ui.ColorBold), ui.Colorize(name, ui.ColorYellow)))
+		prompt := fmt.Sprintf("%s %s может выполнить commit/push/PR. Продолжить? [y/N]",
+			ui.Colorize("Delivery:", ui.ColorBold), ui.Colorize(name, ui.ColorYellow))
+		if deferredCount := rs.pendingDeferredCount(); deferredCount > 0 {
+			prompt = fmt.Sprintf("%s %s консолидирует %d отложенных approval-гейта. Продолжить? [y/N]",
+				ui.Colorize("Delivery:", ui.ColorBold), ui.Colorize(name, ui.ColorYellow), deferredCount)
+		}
+		ans := rs.p.prompter.Ask(prompt)
 		if ans == "y" {
 			action = "approve"
 		} else {
@@ -198,9 +208,87 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		rs.p.recorder.ApprovalDecided(rs.runID, value.ID, result.AttemptID, decidedAt, approvalEventData(value))
 	}
 	if action == "reject" {
+		if err := rs.ratifyDeferredGates("local-user", "reject"); err != nil {
+			return err
+		}
 		return fmt.Errorf("%w: delivery перед %s отклонён человеком", ErrUserStopped, name)
 	}
+	if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
+		return err
+	}
 	return recordApproval("resolved_approval")
+}
+
+// pendingDeferredCount — число ждущих consolidated-подтверждения deferred-гейтов
+// текущего run (для осмысленного решения человека в delivery-промпте, APF-1).
+func (rs *runState) pendingDeferredCount() int {
+	list, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, value := range list {
+		if value.Status == approval.StatusPending && value.Deferred {
+			count++
+		}
+	}
+	return count
+}
+
+// ratifyDeferredGates разрешает все pending deferred-гейты run'а одним
+// consolidated delivery-решением (APF-1). Действие человека (approve/reject)
+// распространяется на каждый отложенный гейт; точный subject каждого approval
+// проверяется в approval store. Уже разрешённые гейты не трогаются.
+func (rs *runState) ratifyDeferredGates(actorID, action string) error {
+	list, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return err
+	}
+	ratified := make([]map[string]string, 0)
+	for _, value := range list {
+		if value.Status != approval.StatusPending || !value.Deferred {
+			continue
+		}
+		decidedAction := action
+		if !containsString(value.Actions, decidedAction) {
+			if containsString(value.Actions, "reject") {
+				decidedAction = "reject"
+			} else {
+				decidedAction = value.Actions[0]
+			}
+		}
+		resolved, err := rs.approvalStore.ResolveDeferred(rs.runID, value.ID, approval.Decision{
+			ActorID: actorID, ActorRole: deliveryApprovalRole,
+			Action: decidedAction, SubjectHash: value.SubjectHash,
+			Comment: "consolidated delivery decision",
+		})
+		if err != nil {
+			return fmt.Errorf("deferred approval %s: %w", value.ID, err)
+		}
+		decidedAt := time.Now().UTC()
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "approval_decided", AttemptID: resolved.AttemptID,
+			Timestamp: decidedAt, Data: approvalEventData(resolved),
+		}); err != nil {
+			return err
+		}
+		if rs.p.recorder != nil {
+			rs.p.recorder.ApprovalDecided(rs.runID, resolved.ID, resolved.AttemptID, decidedAt, approvalEventData(resolved))
+		}
+		ratified = append(ratified, map[string]string{
+			"approval_id": resolved.ID, "subject_hash": resolved.SubjectHash, "action": resolved.ResolvedAction,
+		})
+	}
+	if len(ratified) > 0 {
+		ratifiedAt := time.Now().UTC()
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "deferred_gates_ratified", Timestamp: ratifiedAt,
+			Data: map[string]any{"action": action, "approver": actorID, "gates": ratified},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preconditions map[string]delivery.PreconditionEvidence) error {

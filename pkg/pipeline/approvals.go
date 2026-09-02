@@ -34,6 +34,7 @@ func (rs *runState) authorizeTransition(
 	quorum string,
 	actions []string,
 	targets map[string]string,
+	deferred bool,
 ) (string, error) {
 	if quorum == "" {
 		quorum = approval.QuorumAny
@@ -51,12 +52,38 @@ func (rs *runState) authorizeTransition(
 		}
 		candidateSHA = identity.WorkspaceSHA256
 	}
+
+	// APF-1: повторный проход того же перехода с тем же subject не создаёт
+	// новое ожидание и не требует повторного решения (нет перевалидации
+	// прежних этапов при loopback).
+	if list, listErr := rs.approvalStore.List(rs.runID); listErr == nil {
+		if prior := priorApprovalIn(list, fromStage, toStage, trigger, subjectHash, deferred); prior != nil {
+			action := prior.ResolvedAction
+			if prior.Status == approval.StatusPending {
+				action = actions[0]
+			}
+			reusedAt := time.Now().UTC()
+			if err := rs.evidence.Append(evidence.Event{
+				Type: "approval_reused", AttemptID: result.AttemptID,
+				Timestamp: reusedAt, Data: map[string]any{
+					"approval_id": prior.ID, "prior_status": prior.Status,
+					"from_stage": fromStage, "to_stage": toStage, "trigger": trigger,
+					"subject_hash": subjectHash,
+				},
+			}); err != nil {
+				return "", err
+			}
+			return action, nil
+		}
+	}
+
 	value, err := rs.approvalStore.Create(approval.PendingApproval{
 		RunID: rs.runID, AttemptID: result.AttemptID,
 		FromStage: fromStage, ToStage: toStage, Trigger: trigger,
 		SubjectHash: subjectHash, CandidateSHA256: candidateSHA,
 		RequiredRoles: append([]string(nil), roles...),
 		Quorum:        quorum, Actions: append([]string(nil), actions...), Targets: targets,
+		Deferred: deferred,
 	})
 	if err != nil {
 		return "", err
@@ -70,6 +97,13 @@ func (rs *runState) authorizeTransition(
 	}
 	if rs.p.recorder != nil {
 		rs.p.recorder.ApprovalRequested(rs.runID, value.ID, result.AttemptID, requestedAt, approvalEventData(value))
+	}
+
+	// Deferred гейт: переход не паузит и не решается здесь — отдельный
+	// approval аттестуется с точным subject и разрешится одним
+	// consolidated delivery-решением run'а (APF-1).
+	if deferred {
+		return actions[0], nil
 	}
 
 	action := ""
@@ -131,6 +165,35 @@ func (rs *runState) authorizeTransition(
 		rs.p.recorder.ApprovalDecided(rs.runID, value.ID, result.AttemptID, decidedAt, approvalEventData(value))
 	}
 	return value.ResolvedAction, nil
+}
+
+// priorApprovalIn — APF-1: поиск в списке ранее зафиксированного approval
+// того же перехода и точного subject. Возвращает первый (по времени создания)
+// подходящий approval, если:
+//
+//   - pending deferred-гейт того же перехода/subject ещё не разрешён — новый
+//     не создаётся, повтора при loopback не бывает;
+//   - resolved-approval, чьё действие ведёт в тот же toStage и остаётся
+//     валидным action'ом ребра — решение не запрашивается повторно (нет
+//     перевалидации прежних этапов).
+func priorApprovalIn(list []approval.PendingApproval, from, to, trigger, subject string, deferred bool) *approval.PendingApproval {
+	for i := range list {
+		value := &list[i]
+		if value.FromStage != from || value.ToStage != to || value.Trigger != trigger || value.SubjectHash != subject {
+			continue
+		}
+		switch value.Status {
+		case approval.StatusPending:
+			if value.Deferred && value.Deferred == deferred {
+				return value
+			}
+		case approval.StatusResolved:
+			if value.Targets[value.ResolvedAction] == to && containsString(list[i].Actions, value.ResolvedAction) {
+				return value
+			}
+		}
+	}
+	return nil
 }
 
 func approvalEventData(value approval.PendingApproval) map[string]any {

@@ -56,10 +56,15 @@ type PendingApproval struct {
 	Actions         []string          `json:"actions"`
 	Targets         map[string]string `json:"targets"`
 	Status          Status            `json:"status"`
-	Decisions       []Decision        `json:"decisions,omitempty"`
-	ResolvedAction  string            `json:"resolved_action,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	ResolvedAt      time.Time         `json:"resolved_at,omitempty"`
+	// Deferred — подтверждение перехода отложено и будет разрешено одним
+	// consolidated delivery-решением run'а (APF-1). Deferred approval не
+	// содержит per-gate человеческих решений: их роль/кворум замещаются
+	// единым delivery-контрпоинтом, subject при этом сохраняется точно.
+	Deferred       bool       `json:"deferred,omitempty"`
+	Decisions      []Decision `json:"decisions,omitempty"`
+	ResolvedAction string     `json:"resolved_action,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ResolvedAt     time.Time  `json:"resolved_at,omitempty"`
 	// Payload содержит машиночитаемое представление subject (например,
 	// canonical JSON delivery plan) для осознанного решения без доступа к
 	// filesystem. Не является частью identity: subject уже зафиксирован hash.
@@ -201,6 +206,9 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 	if err != nil {
 		return PendingApproval{}, err
 	}
+	if value.Deferred {
+		return PendingApproval{}, errors.New("deferred approval разрешается consolidated delivery-решением (ResolveDeferred)")
+	}
 	decision.ApprovalID = approvalID
 	decision.ActorID = strings.TrimSpace(decision.ActorID)
 	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
@@ -255,6 +263,63 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 	return value, nil
 }
 
+// ResolveDeferred разрешает deferred-approval одним consolidated
+// delivery-решением run'а (APF-1). В отличие от Decide, не требует
+// принадлежности actor'а к RequiredRoles: для deferred-гейта роль и кворум
+// замещаются единым delivery-контрпоинтом, но subject/action проверяются
+// строго (exact subject hash, action из Actions).
+func (s *Store) ResolveDeferred(runID, approvalID string, decision Decision) (PendingApproval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockRun(runID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	defer unlock()
+	value, err := s.Load(runID, approvalID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	if !value.Deferred {
+		return PendingApproval{}, errors.New("ResolveDeferred применяется только к deferred approval")
+	}
+	if value.Status == StatusResolved {
+		return PendingApproval{}, errors.New("deferred approval уже разрешён")
+	}
+	decision.ApprovalID = approvalID
+	decision.ActorID = strings.TrimSpace(decision.ActorID)
+	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
+	decision.Action = strings.TrimSpace(decision.Action)
+	decision.SubjectHash = strings.ToLower(strings.TrimSpace(decision.SubjectHash))
+	decision.Comment = strings.TrimSpace(decision.Comment)
+	if decision.DecidedAt.IsZero() {
+		decision.DecidedAt = time.Now().UTC()
+	} else {
+		decision.DecidedAt = decision.DecidedAt.UTC()
+	}
+	if decision.SubjectHash != value.SubjectHash {
+		return PendingApproval{}, errors.New("subject hash решения не совпадает с ожидаемым")
+	}
+	if decision.ActorID == "" || decision.ActorRole == "" || !contains(value.Actions, decision.Action) {
+		return PendingApproval{}, errors.New("delivery решение содержит недопустимого actor, role или action")
+	}
+	value.Decisions = append(value.Decisions, decision)
+	value.Status = StatusResolved
+	value.ResolvedAction = decision.Action
+	value.ResolvedAt = decision.DecidedAt
+	if err := validate(value); err != nil {
+		return PendingApproval{}, err
+	}
+	path, err := s.path(runID, approvalID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	if err := s.write(path, value); err != nil {
+		return PendingApproval{}, err
+	}
+	return value, nil
+}
+
 func normalize(value *PendingApproval) {
 	value.SubjectHash = strings.ToLower(strings.TrimSpace(value.SubjectHash))
 	for index := range value.RequiredRoles {
@@ -295,7 +360,9 @@ func validate(value PendingApproval) error {
 	}
 	for _, decision := range value.Decisions {
 		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
-			!contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) ||
+			decision.ActorRole == "" ||
+			(!value.Deferred && !contains(value.RequiredRoles, decision.ActorRole)) ||
+			!contains(value.Actions, decision.Action) ||
 			decision.SubjectHash != value.SubjectHash || decision.DecidedAt.IsZero() {
 			return errors.New("approval содержит недопустимое решение")
 		}
@@ -309,7 +376,7 @@ func validate(value PendingApproval) error {
 		if !contains(value.Actions, value.ResolvedAction) || value.ResolvedAt.IsZero() || len(value.Decisions) == 0 {
 			return errors.New("resolved approval не содержит итогового решения")
 		}
-		if value.Quorum == QuorumAll && !coversAllRoles(value.RequiredRoles, value.Decisions) {
+		if value.Quorum == QuorumAll && !value.Deferred && !coversAllRoles(value.RequiredRoles, value.Decisions) {
 			return errors.New("resolved approval не достиг quorum all")
 		}
 	default:
@@ -324,7 +391,8 @@ func sameRequest(left, right PendingApproval) bool {
 		left.FromStage == right.FromStage && left.ToStage == right.ToStage &&
 		left.Trigger == right.Trigger && left.SubjectHash == right.SubjectHash &&
 		left.CandidateSHA256 == right.CandidateSHA256 &&
-		left.Quorum == right.Quorum && fmt.Sprint(left.RequiredRoles) == fmt.Sprint(right.RequiredRoles) &&
+		left.Deferred == right.Deferred && left.Quorum == right.Quorum &&
+		fmt.Sprint(left.RequiredRoles) == fmt.Sprint(right.RequiredRoles) &&
 		fmt.Sprint(left.Actions) == fmt.Sprint(right.Actions) && fmt.Sprint(left.Targets) == fmt.Sprint(right.Targets) &&
 		bytes.Equal(left.Payload, right.Payload)
 }

@@ -127,7 +127,10 @@ func printUsage() {
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
 	  --resume <run_id>         Продолжить non-terminal run с той же identity
 	  --approve-gates           Явно подтвердить обычные gate-точки в non-interactive режиме
+	                            (в default-профилях forward-гейты отложены — одно consolidated
+	                            delivery-решение на весь run, APF-1)
 	  --approve-plan <sha256>    Разрешить только показанный canonical delivery plan
+	                            (ratify-ит и все отложенные гейты run'а)
 
 Exit-коды run: 0 — успех, 1 — ошибка или негативный вердикт,
                2 — BLOCKED (нужно вмешательство), 3 — остановлен пользователем
@@ -724,8 +727,8 @@ func cmdRun() {
 	taskDesc := runFlags.String("task", "", "Описание задачи")
 	target := runFlags.String("target", ".", "Путь к целевому проекту")
 	resumeRunID := runFlags.String("resume", "", "Продолжить non-terminal run")
-	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме")
-	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan")
+	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме (forward-гейты default-профилей отложены до delivery-решения, APF-1)")
+	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan (ratify-ит отложенные гейты run'а)")
 
 	runFlags.Parse(os.Args[2:])
 	absTarget, err := absoluteTarget(*target)

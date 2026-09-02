@@ -84,9 +84,32 @@ func Emit(r Record) {
 		prefix = "• "
 	}
 	if r.Level == "ok" && emitter.mode != ModeQuiet {
-		fmt.Fprintf(os.Stdout, "%s%s\n", prefix, r.Message)
+		fmt.Fprintf(emitter.out, "%s%s\n", prefix, r.Message)
 	} else if r.Level != "ok" {
-		fmt.Fprintf(os.Stderr, "%s%s\n", prefix, r.Message)
+		fmt.Fprintf(emitter.err, "%s%s\n", prefix, r.Message)
+	}
+}
+
+// Printf печатает человеко-читаемое сообщение (ранее fmt.Printf в stdout) в
+// поток, зависящий от режима, чтобы в JSON-режиме stdout содержал только
+// структурированные records, а в quiet — вообще ничего, кроме критичного
+// (ошибки всегда идут в stderr через Emit/fatal). Маршрутизация:
+//   - ModeJSON:  человеческий прогресс в stderr (stdout остаётся чистым JSON);
+//   - ModeQuiet: второстепенный человеческий прогресс подавляется;
+//   - ModeDefault: как раньше — в stdout.
+func Printf(format string, args ...interface{}) {
+	mu.Lock()
+	mode := emitter.mode
+	out := emitter.out
+	err := emitter.err
+	mu.Unlock()
+	switch mode {
+	case ModeJSON:
+		fmt.Fprintf(err, format, args...)
+	case ModeQuiet:
+		// подавляем второстепенный человеческий прогресс
+	default:
+		fmt.Fprintf(out, format, args...)
 	}
 }
 

@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/ed25519"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -103,13 +102,13 @@ func cmdExport() {
 		fatal("Не удалось записать verified-запись state/exports: %v", err)
 	}
 
-	fmt.Printf("✓ Run %s проверенно экспортирован\n", runID)
-	fmt.Printf("  bundle:        %s\n", outDir)
-	fmt.Printf("  bundle_sha256: %s\n", bundleSHA)
+	logging.Printf("✓ Run %s проверенно экспортирован\n", runID)
+	logging.Printf("  bundle:        %s\n", outDir)
+	logging.Printf("  bundle_sha256: %s\n", bundleSHA)
 	if privKey != nil {
-		fmt.Printf("  signed:        DSSE ed25519 (dsse.json)\n")
+		logging.Printf("  signed:        DSSE ed25519 (dsse.json)\n")
 	}
-	fmt.Printf("  verified:      state/exports/%s.json (разрешает gc --prune-runs)\n", runID)
+	logging.Printf("  verified:      state/exports/%s.json (разрешает gc --prune-runs)\n", runID)
 	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
 		logging.Emit(logging.Record{
 			Level: "ok", Command: "export", Type: "bundle",

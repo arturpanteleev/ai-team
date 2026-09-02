@@ -42,3 +42,75 @@ func TestSetModeRoundtrip(t *testing.T) {
 		t.Fatalf("default not restored")
 	}
 }
+
+func TestPrintfRoutesByMode(t *testing.T) {
+	orig := emitter
+	defer func() { emitter = orig }()
+
+	t.Run("json writes to err not out", func(t *testing.T) {
+		out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+		emitter = &Emitter{out: out, err: errBuf, mode: ModeJSON}
+		Printf("progress %s\n", "x")
+		if out.Len() != 0 {
+			t.Fatalf("JSON mode: stdout не должен содержать human-вывод")
+		}
+		if !strings.Contains(errBuf.String(), "progress x") {
+			t.Fatalf("JSON mode: human-вывод должен идти в stderr")
+		}
+	})
+
+	t.Run("quiet suppresses", func(t *testing.T) {
+		out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+		emitter = &Emitter{out: out, err: errBuf, mode: ModeQuiet}
+		Printf("suppressed\n")
+		if out.Len() != 0 || errBuf.Len() != 0 {
+			t.Fatalf("quiet mode: второстепенный вывод должен подавляться")
+		}
+	})
+
+	t.Run("default writes to out", func(t *testing.T) {
+		out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+		emitter = &Emitter{out: out, err: errBuf, mode: ModeDefault}
+		Printf("human\n")
+		if out.String() != "human\n" {
+			t.Fatalf("default mode: вывод должен идти в stdout, got %q", out.String())
+		}
+		if errBuf.Len() != 0 {
+			t.Fatalf("default mode: stderr не должен получать обычный вывод")
+		}
+	})
+}
+
+func TestEmitErrorCarriesExit(t *testing.T) {
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	emitter = &Emitter{out: out, err: errBuf, mode: ModeJSON}
+
+	Emit(Record{Level: "error", Command: "verify", Type: "run", Message: "boom", Exit: 1})
+
+	var rec map[string]interface{}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &rec); err != nil {
+		t.Fatalf("не-валидный JSON: %v", err)
+	}
+	code, ok := rec["exit_code"]
+	if !ok || code != float64(1) {
+		t.Fatalf("error-запись должна нести exit_code=1, got %#v", rec)
+	}
+}
+
+func TestEmitUsesConfiguredStreams(t *testing.T) {
+	orig := emitter
+	defer func() { emitter = orig }()
+
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	emitter = &Emitter{out: out, err: errBuf, mode: ModeDefault}
+
+	Emit(Record{Level: "ok", Message: "ok-msg"})
+	if !strings.Contains(out.String(), "ok-msg") {
+		t.Fatalf("ok должен идти в emitter.out, got out=%q", out.String())
+	}
+
+	Emit(Record{Level: "error", Message: "err-msg"})
+	if !strings.Contains(errBuf.String(), "err-msg") {
+		t.Fatalf("error должен идти в emitter.err, got err=%q", errBuf.String())
+	}
+}

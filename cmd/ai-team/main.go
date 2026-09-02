@@ -327,7 +327,7 @@ func cmdWorker() {
 		SchemaVersion: worker.ResultSchemaVersion, RunID: result.RunID,
 		Outcome: string(result.Outcome),
 	})
-	fmt.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
+	logging.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
 }
 
 func printWorkerResult(runID string, value worker.Result) {
@@ -335,7 +335,7 @@ func printWorkerResult(runID string, value worker.Result) {
 		value.RunID = runID
 	}
 	if encoded, err := json.Marshal(value); err == nil {
-		fmt.Printf("%s%s\n", worker.ResultPrefix, encoded)
+		logging.Printf("%s%s\n", worker.ResultPrefix, encoded)
 	}
 }
 
@@ -486,11 +486,11 @@ func cmdDecision() {
 		fatal("Решение отклонено: %v", err)
 	}
 	if value.Status == approval.StatusResolved {
-		fmt.Printf("✓ Approval %s разрешён действием %s; продолжите: ai-team run --target %s --resume %s\n",
+		logging.Printf("✓ Approval %s разрешён действием %s; продолжите: ai-team run --target %s --resume %s\n",
 			value.ID, value.ResolvedAction, absolute, value.RunID)
 		return
 	}
-	fmt.Printf("✓ Решение записано для approval %s; ожидается quorum %s\n", value.ID, value.Quorum)
+	logging.Printf("✓ Решение записано для approval %s; ожидается quorum %s\n", value.ID, value.Quorum)
 }
 
 func validFeature(name string) bool {
@@ -624,7 +624,7 @@ func cmdInit() {
 	case warning != "":
 		fmt.Fprintf(os.Stderr, "Предупреждение: %s\n", warning)
 	case profile != "":
-		fmt.Printf("✓ Обнаружен verification profile: %s\n", profile)
+		logging.Printf("✓ Обнаружен verification profile: %s\n", profile)
 	default:
 		fmt.Fprintln(os.Stderr, "Предупреждение: тестовый профиль не обнаружен; delivery будет запрещён до настройки required unit/integration/e2e check")
 	}
@@ -647,7 +647,7 @@ func cmdInit() {
 		if err := writeFastReviewerOverride(target); err != nil {
 			fatal("Ошибка project-local override для fast-профиля: %v", err)
 		}
-		fmt.Printf("✓ fast-профиль: reviewer совмещает ревью и верификацию (.ai-team/agents/reviewer/)\n")
+		logging.Printf("✓ fast-профиль: reviewer совмещает ревью и верификацию (.ai-team/agents/reviewer/)\n")
 	}
 
 	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
@@ -655,10 +655,10 @@ func cmdInit() {
 		fatal("Ошибка настройки ignore policy: %v", err)
 	}
 	if ignorePath != "" {
-		fmt.Printf("✓ .ai-team/ исключён через %s\n", ignorePath)
+		logging.Printf("✓ .ai-team/ исключён через %s\n", ignorePath)
 	}
 
-	fmt.Printf("✓ .ai-team/ инициализирован в %s\n", target)
+	logging.Printf("✓ .ai-team/ инициализирован в %s\n", target)
 }
 
 // writeFastReviewerOverride создаёт project-local определение reviewer'а,
@@ -875,9 +875,9 @@ func cmdRun() {
 	}
 
 	if string(runResult.Outcome) == "completed_with_warnings" {
-		fmt.Printf("\n%s Пайплайн выполнен с предупреждениями\n", ui.Colorize("!", ui.ColorYellow))
+		logging.Printf("\n%s Пайплайн выполнен с предупреждениями\n", ui.Colorize("!", ui.ColorYellow))
 	} else {
-		fmt.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
+		logging.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
 	}
 	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
 		logging.Emit(logging.Record{
@@ -1039,7 +1039,7 @@ func evalSingleAgent(ctx context.Context, target, feature, taskDesc, agentName s
 		if info, err := os.Stat(fullPath); err != nil || info.IsDir() {
 			continue
 		}
-		fmt.Printf("\n--- Оценка артефакта: %s ---\n", fullPath)
+		logging.Printf("\n--- Оценка артефакта: %s ---\n", fullPath)
 		artifactOutput := outputPath
 		if len(a.Outputs) > 1 {
 			extension := filepath.Ext(outputPath)
@@ -1093,24 +1093,24 @@ func cmdUsage() {
 	if err := decoder.Decode(&envelope); err != nil {
 		fatal("Повреждённый usage.json: %v", err)
 	}
-	fmt.Printf("Run:      %s\n", envelope.RunID)
-	fmt.Printf("Feature:  %s\n", envelope.Feature)
-	fmt.Printf("Outcome:  %s\n", envelope.Outcome)
-	fmt.Printf("Период:   %s → %s\n",
+	logging.Printf("Run:      %s\n", envelope.RunID)
+	logging.Printf("Feature:  %s\n", envelope.Feature)
+	logging.Printf("Outcome:  %s\n", envelope.Outcome)
+	logging.Printf("Период:   %s → %s\n",
 		envelope.StartedAt.Format(time.RFC3339), envelope.FinishedAt.Format(time.RFC3339))
-	fmt.Printf("Loopback: %d\n", envelope.LoopbackCycles)
+	logging.Printf("Loopback: %d\n", envelope.LoopbackCycles)
 	tokens := "unknown"
 	if !envelope.TokensUnknown {
 		tokens = "known"
 	}
-	fmt.Printf("Токены:   %s\n\n", tokens)
+	logging.Printf("Токены:   %s\n\n", tokens)
 	// Containment receipt (V0-P1-4) — если присутствует.
 	if cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20); cerr == nil {
 		var receipt containment.Receipt
 		if err := json.Unmarshal(cdata, &receipt); err == nil {
-			fmt.Printf("Containment (%s):\n", receipt.Profile)
+			logging.Printf("Containment (%s):\n", receipt.Profile)
 			for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
-				fmt.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
+				logging.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
 			}
 			fmt.Println()
 		}
@@ -1137,11 +1137,11 @@ func cmdList() {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
 
-	fmt.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
+	logging.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
 	agents, failures := reg.List()
 	for _, a := range agents {
-		fmt.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
+		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
 	}
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
@@ -1181,20 +1181,20 @@ func cmdVerify() {
 			digest, err := gate.VerifyBundle(arg, keyVerify)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "✗ Gate bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
-				logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "gate_bundle", Message: err.Error()})
+				logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "gate_bundle", Message: err.Error(), Exit: exitFailed})
 				os.Exit(exitFailed)
 			}
-			fmt.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s%s\n", arg, digest, sigNote(keyVerify))
+			logging.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s%s\n", arg, digest, sigNote(keyVerify))
 			logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "gate_bundle", Message: "Gate bundle OK",
 				Data: map[string]any{"bundle_sha256": digest}, Exit: exitOK})
 			return
 		}
 		if err := export.VerifyBundle(arg, keyVerify); err != nil {
 			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
-			logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run_bundle", Message: err.Error()})
+			logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run_bundle", Message: err.Error(), Exit: exitFailed})
 			os.Exit(exitFailed)
 		}
-		fmt.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
+		logging.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
 		logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run_bundle",
 			Message: "Bundle OK", Data: map[string]any{"target": arg}, Exit: exitOK})
 		return
@@ -1217,10 +1217,10 @@ func cmdVerify() {
 	}
 	if err := export.VerifyEvidence(runDir); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
-		logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run", Message: err.Error()})
+		logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run", Message: err.Error(), Exit: exitFailed})
 		os.Exit(exitFailed)
 	}
-	fmt.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
+	logging.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
 	logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run",
 		Message: "Run OK", Data: map[string]any{"run_id": runID}, Exit: exitOK})
 }
@@ -1353,7 +1353,7 @@ func cmdWeb() {
 	if !authEnabled && *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
 		fatal("web UI не имеет authentication и может bind только loopback host")
 	}
-	fmt.Printf("Web UI available at http://%s\n", addr)
+	logging.Printf("Web UI available at http://%s\n", addr)
 	if err := srv.ListenAndServe(addr); err != nil {
 		fatal("Ошибка сервера: %v", err)
 	}

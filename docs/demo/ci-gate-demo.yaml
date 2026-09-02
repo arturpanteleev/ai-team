@@ -1,0 +1,62 @@
+# ci-gate-demo.yaml — один version-pinned CI-файл для публичного демо
+# `gate → bundle → verify` (V0-7). Использование: положите этот workflow в
+# ваш репозиторий (например `.github/workflows/gate.yaml`) и замените
+# AI_TEAM_SHA ниже на конкретную ревизию ai-team (version-pinned).
+#
+# Семантика exit codes: 0 = PASS, 1 = FAIL (политика/checks), 2 = BLOCKED.
+# Bundle пишется всегда — и для FAIL, и для PASS — и всегда проходит verify,
+# поэтому отчёт о провале тоже аттестуется и прикладывается артефактом.
+name: ai-team gate
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # version-pinned: после каждого merge обновляйте на зафиксированную ревизию.
+  AI_TEAM_SHA: '0000000000000000000000000000000000000000'
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base commit
+        id: base
+        run: |
+          BASE="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Build ai-team (AI_TEAM_SHA)
+        run: |
+          url="https://github.com/arturpanteleev/ai-team.git"
+          git clone --quiet --filter=blob:none "$url" /tmp/ai-team
+          git -C /tmp/ai-team checkout --quiet "$AI_TEAM_SHA"
+          (cd /tmp/ai-team && go build -o "$HOME/.local/bin/ai-team" ./cmd/ai-team)
+        env:
+          GOFLAGS: '-mod=mod'
+
+      - name: Gate (gate → bundle)
+        id: gate
+        run: ai-team gate --target . --base "${{ steps.base.outputs.base }}" --candidate HEAD --out bundle
+
+      - name: Verify bundle (самодостаточно)
+        if: always()
+        run: ai-team verify bundle
+
+      - name: Upload gate bundle
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ai-team-gate-bundle
+          path: bundle
+          if-no-files-found: error
+
+      - name: Fail on non-zero gate (кроме уже отражённого FAIL)
+        if: steps.gate.outcome == 'failure'
+        run: exit 1

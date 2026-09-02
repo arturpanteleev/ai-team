@@ -297,3 +297,79 @@ func writeBundleCopy(t *testing.T, result *Result) (string, error) {
 	}
 	return result.BundleSHA256, nil
 }
+
+func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
+	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	result := &Result{
+		SchemaVersion: SchemaVersion, Base: "HEAD", Candidate: "HEAD",
+		BaseCommit: "aabb", CandidateCommit: "ccdd",
+		BaseTree: "tree-a", CandidateTree: "tree-b",
+		DiffPolicy:    TestModifyRequired,
+		Mutations:     []Mutation{{Path: "src/app.go", Kind: KindModified, Class: "source"}},
+		PolicyVerdict: VerdictPassed, Status: "passed", FinishedAt: fixed,
+		Checks: []checks.Result{{
+			Name: "go-test", Class: "unit", Adapter: checks.AdapterGoTest,
+			Command: []string{"go", "test", "-json", "./..."}, Policy: checks.PolicyRequired,
+			ExitCode: 0, Status: checks.StatusPassed, StartedAt: fixed, FinishedAt: fixed,
+		}},
+	}
+	dir := t.TempDir()
+	if err := WriteBundle(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := VerifyBundle(dir)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if digest != result.BundleSHA256 {
+		t.Fatalf("verify digest %s != result.BundleSHA256 %s", digest, result.BundleSHA256)
+	}
+
+	tamperCases := map[string]func(bundleDir string){
+		"tamper check record": func(bundleDir string) {
+			path := filepath.Join(bundleDir, "checks", "001-go-test.json")
+			check, _ := os.ReadFile(path)
+			_ = os.Chmod(path, 0644)
+			os.WriteFile(path, append(check, []byte("\ntampered")...), 0644)
+		},
+		"extra file": func(bundleDir string) {
+			os.WriteFile(filepath.Join(bundleDir, "sneaky.json"), []byte("{}"), 0644)
+		},
+		"foreign type": func(bundleDir string) {
+			path := filepath.Join(bundleDir, "index.json")
+			indexData, _ := os.ReadFile(path)
+			os.WriteFile(path, bytes.Replace(indexData, []byte(BundleType), []byte("other-bundle"), 1), 0644)
+		},
+		"wrong declared digest": func(bundleDir string) {
+			path := filepath.Join(bundleDir, "gate.json")
+			gateData, _ := os.ReadFile(path)
+			_ = os.Chmod(path, 0644)
+			body := strings.TrimSuffix(string(gateData), "\n")
+			fake := strings.Repeat("0", 64)
+			if body != "" && strings.HasSuffix(body, "}") {
+				body = body[:len(body)-1] + `,
+  "bundle_sha256": "` + fake + `"
+}`
+			}
+			os.WriteFile(path, []byte(body), 0644)
+		},
+		"missing record": func(bundleDir string) {
+			os.Remove(filepath.Join(bundleDir, "checks", "001-go-test.json"))
+		},
+		"index identity diverges from gate.json": func(bundleDir string) {
+			path := filepath.Join(bundleDir, "index.json")
+			indexData, _ := os.ReadFile(path)
+			os.WriteFile(path, bytes.Replace(indexData, []byte("aabb"), []byte("0000"), 1), 0644)
+		},
+	}
+	for name, mutate := range tamperCases {
+		fresh := t.TempDir()
+		if err := WriteBundle(fresh, result); err != nil {
+			t.Fatal(err)
+		}
+		mutate(fresh)
+		if _, err := VerifyBundle(fresh); err == nil {
+			t.Fatalf("tamper %q: VerifyBundle не обнаружил повреждение", name)
+		}
+	}
+}

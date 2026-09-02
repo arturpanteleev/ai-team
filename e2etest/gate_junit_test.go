@@ -67,6 +67,15 @@ func TestE2E_GateJUnitAdapterNonGoRepo(t *testing.T) {
 	if !strings.Contains(out, "PASS") {
 		t.Fatalf("PASS-строка не найдена:\n%s", out)
 	}
+	// Демо-цепочка gate → bundle → verify: verify обязан принять gate bundle
+	// и перевычислить детерминированный bundle_sha256 (V0-7).
+	vcode, vout := runAI(t, bin, t.TempDir(), nil, "verify", outDir)
+	if vcode != 0 {
+		t.Fatalf("verify gate bundle: exit=%d, out:\n%s", vcode, vout)
+	}
+	if !strings.Contains(vout, "bundle_sha256") {
+		t.Fatalf("verify не напечатал digest:\n%s", vout)
+	}
 	checkData, err := os.ReadFile(filepath.Join(outDir, "checks", "001-pytest-unit.json"))
 	if err != nil {
 		t.Fatalf("check evidence: %v", err)

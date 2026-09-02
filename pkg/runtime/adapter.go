@@ -97,7 +97,7 @@ type Launch struct {
 // от адаптера, аттестующего источник данных (see CapUsageReported / P1-7);
 // контроллер никогда не угадывает usage сам.
 type Usage struct {
-	TokensInput int64   `json:"tokens_input,omitempty"`
+	TokensInput int64 `json:"tokens_input,omitempty"`
 	// CachedInputTokens — доля входных токенов, прочитанных из кэша харнесса.
 	// По конвенции OpenAI кэшированные входные токены уже входят в
 	// TokensInput; это поле ведётся отдельно для учёта скидки cache-read

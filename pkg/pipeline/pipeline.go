@@ -399,7 +399,8 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if verifyErr != nil {
 			recErr := &evidence.ResumeEvidenceError{}
 			if errors.As(verifyErr, &recErr) && recErr.Reason != evidence.ReasonEventChain &&
-				recErr.Reason != evidence.ReasonManifestIdentity {
+				recErr.Reason != evidence.ReasonManifestIdentity &&
+				recErr.Reason != evidence.ReasonAlreadyTerminal {
 				_ = evidence.AppendBlockedEvent(runEvidenceDir, runID, recErr.Reason, recErr.Detail)
 			}
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", verifyErr)

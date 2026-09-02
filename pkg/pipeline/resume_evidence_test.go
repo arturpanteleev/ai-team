@@ -95,3 +95,72 @@ func TestRun_ResumeBlockedRecordsEvent(t *testing.T) {
 		t.Fatalf("событие resume_blocked не записано")
 	}
 }
+
+// TestRun_ResumeBlockedNotAppendedOnTerminal проверяет OPS-3: если resume
+// отвергнут с причиной already_terminal (run уже terminal), событие
+// resume_blocked НЕ дописывается после run_finished — терминальное событие
+// остаётся последним в event log.
+func TestRun_ResumeBlockedNotAppendedOnTerminal(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	rt := newScripted()
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+
+	// Terminal run до completion.
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тест", TargetDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("terminal run: %v", err)
+	}
+	runDir := filepath.Join(dir, ".ai-team", "runs", result.RunID)
+	terminal, evErr := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), result.RunID)
+	if evErr != nil {
+		t.Fatalf("event chain: %v", evErr)
+	}
+	if len(terminal) == 0 || terminal[len(terminal)-1].Type != "run_finished" {
+		t.Fatalf("ожидался последним run_finished, got %d events (last=%q)", len(terminal), lastType(terminal))
+	}
+
+	// Resume терминального run должен отклониться (already_terminal).
+	if _, err := p.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: result.RunID, TargetDir: dir,
+	}); err == nil {
+		t.Fatal("resume терминального run должен отклониться")
+	}
+
+	// Terminal событие должно остаться последним: resume_blocked НЕ дописывается.
+	after, evErr := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), result.RunID)
+	if evErr != nil {
+		t.Fatalf("event chain после отклонения resume: %v", evErr)
+	}
+	if len(after) != len(terminal) {
+		t.Fatalf("event log изменился после отклонения resume: было %d, стало %d", len(terminal), len(after))
+	}
+	if len(after) == 0 || after[len(after)-1].Type != "run_finished" {
+		t.Fatalf("после отклонения resume терминальное событие должно остаться последним, got last=%q", lastType(after))
+	}
+	for _, ev := range after {
+		if ev.Type == "resume_blocked" {
+			t.Fatalf("resume_blocked не должен дописываться после run_finished")
+		}
+	}
+}
+
+func lastType(events []evidence.Event) string {
+	if len(events) == 0 {
+		return "<none>"
+	}
+	return events[len(events)-1].Type
+}

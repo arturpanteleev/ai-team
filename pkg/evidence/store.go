@@ -55,8 +55,12 @@ type RunManifest struct {
 	ResolvedWorkflow       string             `json:"resolved_workflow_evidence"`
 	ResolvedWorkflowSHA256 string             `json:"resolved_workflow_sha256"`
 	Controller             ControllerIdentity `json:"controller"`
-	ConfigSnapshot         json.RawMessage    `json:"-"`
-	WorkflowSnapshot       json.RawMessage    `json:"-"`
+	// Provenance (V0-2) — authority-bearing provenance manifest v1, хранится
+	// inline в run.json; при resume сверяется с заново построенным manifest'ом
+	// (drift detection). Опак для evidence: содержимое интерпретирует pipeline.
+	Provenance       json.RawMessage `json:"provenance,omitempty"`
+	ConfigSnapshot   json.RawMessage `json:"-"`
+	WorkflowSnapshot json.RawMessage `json:"-"`
 }
 
 type AttemptManifest struct {
@@ -170,6 +174,9 @@ func Start(root string, manifest RunManifest) (*Store, error) {
 	}()
 	if !json.Valid(manifest.ConfigSnapshot) || !json.Valid(manifest.WorkflowSnapshot) {
 		return nil, fmt.Errorf("run evidence: config и resolved workflow snapshots обязательны и должны быть JSON")
+	}
+	if len(manifest.Provenance) > 0 && !json.Valid(manifest.Provenance) {
+		return nil, fmt.Errorf("run evidence: provenance manifest должен быть JSON")
 	}
 	manifest.SchemaVersion = SchemaVersion
 	manifest.ConfigEvidence = "config.json"
@@ -307,6 +314,12 @@ func currentControllerIdentity() (ControllerIdentity, error) {
 		}
 	}
 	return identity, nil
+}
+
+// CurrentControllerIdentity возвращает текущую identity исполняемого бинарника
+// контроллера (runtime identity для provenance/runtime digest, V0-2).
+func CurrentControllerIdentity() (ControllerIdentity, error) {
+	return currentControllerIdentity()
 }
 
 func sha256Bytes(data []byte) string {

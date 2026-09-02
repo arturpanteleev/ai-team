@@ -657,6 +657,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		budgetCtx, cancel = context.WithTimeout(ctx, budgetDur)
 		defer cancel()
 		runErr = rs.execute(budgetCtx)
+		// Здесь матчится ТОЛЬКО подлинное превышение budget: per-stage таймауты
+		// возвращают ErrStageTimeout (не wrapping context.DeadlineExceeded) и
+		// до этой ветки не доходят — остаются resumable, а не терминал-бюджет.
 		if errors.Is(runErr, context.DeadlineExceeded) {
 			runErr = fmt.Errorf("run budget: превышен max_wall_time %s", budgetStr)
 		}

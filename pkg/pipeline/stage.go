@@ -26,6 +26,29 @@ import (
 // stage.go — исполнение одного этапа: runtime вызов, guard артефактов,
 // парсинг вердикта и сбор входов/выходов.
 
+// ErrStageTimeout — отдельный sentinel таймаута отдельной стадии. Намеренно
+// НЕ оборачивает context.DeadlineExceeded (в отличие от типовой ошибки),
+// чтобы бюджетный guard в pipeline.go (errors.Is(runErr, context.DeadlineExceeded))
+// не принимал таймаут стадии за превышение общего budget run'а и не превращал
+// resumable стадию в терминальную бюджет-ошибку.
+var ErrStageTimeout = errors.New("stage timeout")
+
+// stageTimeoutError — ошибка таймаута стадии. Реализует Is так, что матчится
+// только ErrStageTimeout, но не context.DeadlineExceeded → бюджетный guard
+// и resumable-переход finalize.go не путают её с подлинным превышением budget.
+type stageTimeoutError struct {
+	stage   string
+	timeout time.Duration
+}
+
+func (e *stageTimeoutError) Error() string {
+	return fmt.Sprintf("этап %s превысил таймаут %s", e.stage, e.timeout)
+}
+
+func (e *stageTimeoutError) Is(target error) bool {
+	return target == ErrStageTimeout
+}
+
 func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifier.StageResult) {
 	stageStart := time.Now()
 	rs.attemptOrdinal++
@@ -252,7 +275,14 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 
 	if execErr != nil {
+		if stageCtx.Err() == context.DeadlineExceeded && timeout > 0 && ctx.Err() == nil {
+			// Исчерпан собственный per-stage таймаут, родительский (бюджетный)
+			// ctx жив → resumable sentinel, не матчащий context.DeadlineExceeded.
+			return fail(&stageTimeoutError{stage: name, timeout: timeout})
+		}
 		if stageCtx.Err() == context.DeadlineExceeded {
+			// Истёк родительский (бюджетный) ctx — подлинное превышение budget,
+			// сохраняем context.DeadlineExceeded для бюджетного guard'а.
 			return fail(fmt.Errorf("этап %s превысил таймаут %s: %w", name, timeout, context.DeadlineExceeded))
 		}
 		return fail(execErr)
@@ -391,6 +421,8 @@ func mergeChecks(base, overrides []checks.Definition) []checks.Definition {
 func (rs *runState) deriveStageState(result *notifier.StageResult) {
 	execution := workflow.ExecutionSucceeded
 	switch {
+	case errors.Is(result.Err, ErrStageTimeout):
+		execution = workflow.ExecutionTimedOut
 	case errors.Is(result.Err, context.Canceled):
 		execution = workflow.ExecutionCanceled
 	case errors.Is(result.Err, context.DeadlineExceeded):

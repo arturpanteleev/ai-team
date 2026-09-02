@@ -1908,11 +1908,33 @@ func TestRun_StageTimeout(t *testing.T) {
 	rt := newScripted()
 	rt.waitCtx["analyst"] = true
 
-	err, _ := runPipeline(t, dir,
-		cfgFor(config.AgentConfig{Name: "analyst", Timeout: "50ms"}),
-		rt, &scriptedPrompter{})
-	if err == nil || !strings.Contains(err.Error(), "превысил таймаут") {
-		t.Fatalf("ожидалась ошибка таймаута, got: %v", err)
+	cfg := cfgFor(config.AgentConfig{Name: "analyst", Timeout: "50ms"})
+	p := New(cfg, testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ApproveGates: true,
+	})
+	if err == nil {
+		t.Fatal("ожидалась ошибка таймаута стадии")
+	}
+	// stage-timeout — resumable sentinel, а НЕ превышение run budget:
+	if !errors.Is(err, ErrStageTimeout) {
+		t.Fatalf("ожидался ErrStageTimeout, got: %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stage-timeout не должен матчить context.DeadlineExceeded: %v", err)
+	}
+	if strings.Contains(err.Error(), "run budget") {
+		t.Fatalf("stage-timeout не должен превращаться в бюджет-ошибку: %v", err)
+	}
+	// resume сохраняет run identity (resumable, а не терминальный бюджет).
+	if result.RunID == "" {
+		t.Fatalf("stage-timeout должен быть resumable: %+v err=%v", result, err)
+	}
+	stateStore, _ := lifecycle.NewStore(dir)
+	state, loadErr := stateStore.Load(result.RunID)
+	if loadErr != nil || state.Phase != lifecycle.PhaseResumable {
+		t.Fatalf("stage-timeout должен перевести run в resumable: %+v err=%v", state, loadErr)
 	}
 }
 

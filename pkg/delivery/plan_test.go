@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,6 +141,159 @@ func TestBuildPlanUsesOnlyAttributedFiles(t *testing.T) {
 	}
 	if strings.Join(plan.Files, ",") != "z.go" || plan.Branch != "ai-team/feat" || plan.BaseBranch != "main" {
 		t.Fatalf("неверный детерминированный plan: %+v", plan)
+	}
+}
+
+func TestControllerAddsProvenanceTrailersToCommit(t *testing.T) {
+	repo, _ := setupRepository(t)
+	installFakeGH(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// changed\n")
+	plan, err := BuildPlan(context.Background(), repo, "feat", "change", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trailers := []string{
+		TrailerRunID + ": run-abcdef123456",
+		TrailerRuntime + ": 0f2b5a11c9d34e55809f",
+		TrailerAttestation + ": 5f0d6b2c3a49e781f6a2",
+	}
+	result, err := NewController().Execute(context.Background(), Request{
+		TargetDir: repo, Feature: "feat", Plan: plan, Trailers: trailers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CommitSHA == "" {
+		t.Fatalf("commit не создан: %+v", result)
+	}
+	message := git(t, repo, "show", "-s", "--format=%B", "HEAD")
+	expected := FullCommitMessage(plan.CommitMessage, trailers)
+	if strings.TrimRight(message, "\r\n") != expected {
+		t.Fatalf("commit message не содержит trailers:\n--- got ---\n%s\n--- want ---\n%s", message, expected)
+	}
+	show := git(t, repo, "show", "-s", "--format=%B", "HEAD")
+	if !strings.Contains(show, TrailerRunID+": run-abcdef123456") {
+		t.Fatalf("trailer ai-team-run отсутствует:\n%s", show)
+	}
+
+	// Resume/idempotent повтор: те же trailers допускаются, сообщение сверяется
+	// с сохранённым состоянием.
+	resumed, err := NewController().Execute(context.Background(), Request{
+		TargetDir: repo, Feature: "feat", Plan: plan, Trailers: trailers,
+	})
+	if err != nil || resumed.CommitSHA != result.CommitSHA {
+		t.Fatalf("resume с теми же trailers нескомпенсирован: err=%v result=%+v", err, resumed)
+	}
+
+	// «Краш после git commit до записи identity»: очищаем commit_sha в state —
+	// Execute должен восстановить точный approved commit и сверить trailers.
+	var raw struct {
+		CommitSHA string `json:"commit_sha"`
+	}
+	data, err := os.ReadFile(result.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.CommitSHA != result.CommitSHA {
+		t.Fatalf("state.commit_sha=%q, ожидался %s", raw.CommitSHA, result.CommitSHA)
+	}
+	synthetic := strings.Replace(string(data), `"commit_sha":"`+result.CommitSHA+`"`, `"commit_sha":""`, 1)
+	if err := os.WriteFile(result.StatePath, []byte(synthetic), 0644); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := NewController().Execute(context.Background(), Request{
+		TargetDir: repo, Feature: "feat", Plan: plan,
+	})
+	if err != nil {
+		t.Fatalf("crash recovery с trailers: %v", err)
+	}
+	if recovered.CommitSHA != result.CommitSHA {
+		t.Fatalf("recovery вернул другой commit: %s != %s", recovered.CommitSHA, result.CommitSHA)
+	}
+}
+
+func TestValidateTrailersRejectsBadForm(t *testing.T) {
+	cases := [][]string{
+		{"ai-team-run: "},
+		{": value"},
+		{"ai-team-run: run-123", "ai-team-run: run-456"},
+		{"unknown-key: value"},
+		{"ai-team-attestation: 123 456"},
+		{"ai-team-run:run-123"},
+	}
+	for _, trailers := range cases {
+		if err := ValidateTrailers(trailers); err == nil {
+			t.Fatalf("trailers %v должны быть отклонены", trailers)
+		}
+	}
+	good := []string{"ai-team-run: run-abc", "ai-team-runtime: ab12", "ai-team-attestation: 5f0d_1-2a"}
+	if err := ValidateTrailers(good); err != nil {
+		t.Fatalf("валидные trailers отклонены: %v", err)
+	}
+}
+
+func TestTerminalRecordRoundtripAndTamper(t *testing.T) {
+	runDir := t.TempDir()
+	record := TerminalRecord{
+		SchemaVersion:     TerminalRecordSchemaVersion,
+		RunID:             "20260901T120000.000000000Z-abcdef0123456789",
+		Feature:           "feat",
+		PlanHash:          strings.Repeat("c", 64),
+		CommitSHA:         strings.Repeat("a", 40),
+		PRURL:             "https://example.test/pr/1",
+		Trailers:          []string{"ai-team-run: 20260901T120000.000000000Z-abcdef0123456789", "ai-team-runtime: " + strings.Repeat("b", 64)},
+		AttestationSHA256: "",
+		RuntimeIdentity:   strings.Repeat("b", 64),
+		PerformedAt:       time.Now().UTC(),
+	}
+	// Attestation trailer обязан совпадать с полем — должен быть отклонён.
+	record.Trailers = []string{
+		"ai-team-run: " + record.RunID,
+		"ai-team-runtime: " + record.RuntimeIdentity,
+		"ai-team-attestation: " + strings.Repeat("e", 64),
+	}
+	record.AttestationSHA256 = strings.Repeat("d", 64)
+	if err := WriteTerminalRecord(runDir, record); err == nil {
+		t.Fatal("record с несогласованным attestation trailer должен быть отклонён")
+	}
+	record.Trailers = []string{
+		"ai-team-run: " + record.RunID,
+		"ai-team-runtime: " + record.RuntimeIdentity,
+		"ai-team-attestation: " + record.AttestationSHA256,
+	}
+	if err := WriteTerminalRecord(runDir, record); err != nil {
+		t.Fatalf("валидный record должен быть записан: %v", err)
+	}
+	got, ok, err := ReadTerminalRecord(runDir)
+	if err != nil || !ok || got.PlanHash != record.PlanHash || len(got.Trailers) != 3 {
+		t.Fatalf("roundtrip failed: %+v ok=%v err=%v", got, ok, err)
+	}
+	// Идемпотентный retry допускается, произвольная перезапись — нет.
+	if err := WriteTerminalRecord(runDir, record); err != nil {
+		t.Fatalf("идемпотентный repeat должен быть допущен: %v", err)
+	}
+	other := record
+	other.PlanHash = strings.Repeat("d", 64)
+	if err := WriteTerminalRecord(runDir, other); err == nil {
+		t.Fatal("перезапись существующего record должна быть запрещена")
+	}
+	// Tamper: правка commit_sha должна быть обнаружена.
+	data, err := os.ReadFile(filepath.Join(runDir, "delivery.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := []byte(strings.Replace(string(data), record.CommitSHA, strings.Repeat("f", 40), 1))
+	if err := os.WriteFile(filepath.Join(runDir, "delivery.json"), tampered, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadTerminalRecord(runDir); err == nil {
+		t.Fatal("tampered record должен быть отклонён")
+	}
+	if _, ok, err := ReadTerminalRecord(t.TempDir()); err != nil || ok {
+		t.Fatalf("отсутствующий record: ok=%v err=%v", ok, err)
 	}
 }
 

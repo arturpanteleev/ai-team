@@ -293,20 +293,31 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			r.ValidationFailed = true
 			return fail(fmt.Errorf("агент %s: %w", name, planErr))
 		}
-		if _, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan); prepareErr != nil {
+		statePath, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan)
+		if prepareErr != nil {
 			return fail(fmt.Errorf("агент %s: подготовка delivery state: %w", name, prepareErr))
 		}
 		if approvalErr := rs.authorizeDelivery(name, r, plan); approvalErr != nil {
 			r.ControlStopped = true
 			return fail(approvalErr)
 		}
-		deliveryResult, deliveryErr := rs.p.delivery.Execute(stageCtx, delivery.Request{
-			TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan,
-		})
-		r.Delivery = &deliveryResult
-		if deliveryErr != nil {
-			return fail(fmt.Errorf("агент %s: delivery execution: %w", name, deliveryErr))
+		// V0-9: commit/push/PR откладывается до terminal finalize — к этому
+		// моменту известен attestation digest, и commit trailer'ы (run ID,
+		// runtime identity, attestation digest) детерминированы. Внутри run
+		// git-история не меняется (провенанс переживает потерю bundle).
+		planHash, hashErr := plan.Hash()
+		if hashErr != nil {
+			return fail(fmt.Errorf("агент %s: delivery plan hash: %w", name, hashErr))
 		}
+		rs.deferredDelivery = &deferredDelivery{StatePath: statePath, PlanHash: planHash}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "delivery_deferred", AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
+			Data: map[string]any{"plan_hash": planHash, "state_path": filepath.ToSlash(statePath)},
+		}); err != nil {
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
+		}
+		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
 	}
 
 	definitions := mergeChecks(a.Checks, agentCfg.Checks)

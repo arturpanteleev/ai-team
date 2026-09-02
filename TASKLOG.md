@@ -21,6 +21,7 @@
 |---|---|---|---|
 | 2026-08-30 | backlog-sprint | Базовая линия: чистая ветка от origin/master 2e48ecc, бэклог-доки и статус-лог внесены в git | baseline |
 | 2026-08-30 | p1-1-runtime-adapter-contract | P1-1: контракт RuntimeAdapter (adapter.go: Name/Describe/Validate/Command/Environment + Capability + Registry), OpenCodeAdapter (opencode.go), AgentCLIRuntime — тонкий оркестратор (agentcli.go), валидация CLI в config/agent/preflight через registry, eval через адаптеры. Все `go test ./...` зелёные, build/vet/gofmt чисто. | review |
+| 2026-08-31 | v0-9-agent-attribution-trailers | V0-9: agent attribution через Git trailers. Deferred (post-terminal) delivery: внутри run delivery-стадия делает только `delivery.Prepare` + `authorizeDelivery` (event `delivery_deferred`, marker `{StatePath, PlanHash}`), git-история НЕ меняется до terminal finalize. После finalize при outcome completed post-terminal хук (`pkg/pipeline/delivery_deferred.go`) перегружает canonical plan (сверка plan.Hash с маркером и approvedPlanHash), читает attestation digest + runtime identity = sha256(run.json.Provenance) и исполняет реальный controller.Execute с controller-derived trailers `ai-team-run`/`ai-team-runtime`/`ai-team-attestation`. `pkg/delivery`: Request.Trailers, ValidateTrailers, trailers персистятся в state ДО commit, commit message = FullCommitMessage(plan.CommitMessage, trailers), verifyCommittedChange сверяет trailers (crash-recovery/resume idempotent). Tamper-evident terminal record `{RunDir}/delivery.json` (TerminalRecord v1 + self-integrity record_sha256, строгая валидация, однократная запись, idempotent retry). `evidence.FindDelivered` сначала читает delivery.json, fallback — attempt manifests. Сбой post-terminal хука повторяем: CLI `ai-team deliver --run <id> [--target] [--feature]` (run обязан быть terminal completed, plan обязан совпасть с delivery_deferred event). Go-тесты: trailer-формат/commit-with-trailers/crash-recovery, TerminalRecord roundtrip+tamper (вкл. несогласованные trailers), deferred flow через explicit approval (fake controller вызван ровно 1 раз post-terminal, record+trailers сверены), DeliverDeferred guards. E2E TestE2E_SuccessfulPipeline зелёный (approve → deferred commit на origin-ветке, live HEAD не тронут). | review |
 
 ---
 
@@ -56,8 +57,8 @@
 | 13 | V0-6 | P0 | open | — | Generic JUnit XML typed adapter |
 | 14 | V0-7 | P0 | open | — | Demo + CI action + truthful README — после V0-4/5/6; нужны внешние люди |
 | 15 | EXP-1 | P1 | open | — | Track V kill-watch + интервью (не-кодовая) |
-| 16 | V0-8 | P1 | open | — | Risk-signal measurement (записывать, не маршрутизировать) |
-| 17 | V0-9 | P1 | open | — | Agent attribution в Git trailers — после V0-2/V0-3 |
+| 16 | V0-8 | P1 | review | v0-8-risk-signals | Risk-signal measurement (записывать, не маршрутизировать) |
+| 17 | V0-9 | P1 | review | v0-9-agent-attribution-trailers | Agent attribution в Git trailers (deferred post-terminal delivery) — после V0-2/V0-3 |
 | 18 | P1-4 | P1 | open | — | Containment profile v1 + receipt |
 | 19 | P1-9 | P1 | open | — | Contract test: coder не видит будущее ревью |
 | 20 | P1-5 | P1 | open | — | Signed bundle через DSSE |

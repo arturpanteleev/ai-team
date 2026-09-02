@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/risk"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 
@@ -201,6 +202,10 @@ type Options struct {
 	Candidate      string
 	Config         *Config
 	AllowUntrusted bool
+	// Receipt (V0-P1-4) — containment receipt for the gating run. When absent,
+	// untrusted mode is blocked (fail-closed). Present + no UNAVAILABLE axes →
+	// untrusted allowed.
+	Receipt *containment.Receipt
 }
 
 // Result — детерминированный вердикт gate (за исключением FinishedAt).
@@ -255,7 +260,17 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 		return nil, ExitBlocked, &BlockedError{Reason: "ref слишком длинный"}
 	}
 	if opt.AllowUntrusted {
-		return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён до P1-4"}
+		if opt.Receipt == nil {
+			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode требует containment receipt (--allow-untrusted)"}
+		}
+		// Fail-closed (P1-4 R2): невалидный/пустой receipt обязан блокировать
+		// untrusted, а не проходить сквозь vacuous HasUnavailable.
+		if validateErr := opt.Receipt.Validate(); validateErr != nil {
+			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode: невалидный containment receipt: " + validateErr.Error()}
+		}
+		if opt.Receipt.HasUnavailable() {
+			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён: оси containment UNAVAILABLE"}
+		}
 	}
 	cfg := opt.Config
 	if cfg == nil {

@@ -89,6 +89,9 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 	readRules := map[string]string{
 		"*": "allow", ".git/**": "deny", ".ai-team/**": "deny",
 		".env": "deny", ".env.*": "deny", "**/.env": "deny", "**/.env.*": "deny",
+		".ssh/**": "deny", ".aws/**": "deny", ".gnupg/**": "deny",
+		"**/.ssh/**": "deny", "**/.aws/**": "deny", "**/.gnupg/**": "deny",
+		"**/credentials": "deny", "**/credentials/**": "deny",
 	}
 	readRules[filepath.ToSlash(filepath.Join(target, ".ai-team"))+"/**"] = "deny"
 	readRules[filepath.ToSlash(filepath.Join(target, ".git"))+"/**"] = "deny"

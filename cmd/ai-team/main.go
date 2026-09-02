@@ -24,6 +24,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -814,6 +815,10 @@ func cmdRun() {
 	defer stop()
 
 	engine := pipeline.NewRunEngine(p)
+	containmentProfile := "trusted-local"
+	if cfg.Containment != nil && cfg.Containment.Profile != "" {
+		containmentProfile = cfg.Containment.Profile
+	}
 	var runResult pipeline.RunResult
 	if *resumeRunID != "" {
 		runResult, err = engine.Resume(ctx, pipeline.ResumeConfig{
@@ -823,6 +828,7 @@ func cmdRun() {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{
 			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target,
 			ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
+			ContainmentProfile: containmentProfile,
 		})
 	}
 	if err != nil {
@@ -1048,6 +1054,17 @@ func cmdUsage() {
 		tokens = "known"
 	}
 	fmt.Printf("Токены:   %s\n\n", tokens)
+	// Containment receipt (V0-P1-4) — если присутствует.
+	if cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20); cerr == nil {
+		var receipt containment.Receipt
+		if err := json.Unmarshal(cdata, &receipt); err == nil {
+			fmt.Printf("Containment (%s):\n", receipt.Profile)
+			for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
+				fmt.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
+			}
+			fmt.Println()
+		}
+	}
 	if err := envelope.Format(os.Stdout); err != nil {
 		fatal("Ошибка вывода usage: %v", err)
 	}

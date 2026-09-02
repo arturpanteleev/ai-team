@@ -44,3 +44,26 @@ func killTree(pid int) error {
 	}
 	return process.Kill()
 }
+
+// CleanupReceipt фиксирует результат уничтожения process tree при отмене run.
+// См. run_unix.go для деталей полей.
+type CleanupReceipt struct {
+	Verified bool  `json:"verified"`
+	PIDs     []int `json:"pids,omitempty"`
+	Timeout  bool  `json:"timeout,omitempty"`
+}
+
+// TrackAndCleanup — best-effort процессный cleanup для non-Unix платформ
+// (Windows). Использует taskkill /T /F; верификация по проверке недоступности
+// PID — честно best-effort (Verified может быть false при недоступности).
+func TrackAndCleanup(pgid int, trackedPIDs []int) CleanupReceipt {
+	receipt := CleanupReceipt{PIDs: append([]int(nil), trackedPIDs...)}
+	for _, pid := range trackedPIDs {
+		_ = killTree(pid)
+	}
+	// На non-Unix не можем надёжно проверить завершение дерева — честный
+	// best-effort без утверждения Verified.
+	receipt.Verified = false
+	receipt.Timeout = true
+	return receipt
+}

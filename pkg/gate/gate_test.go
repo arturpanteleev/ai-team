@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"gopkg.in/yaml.v3"
 )
 
@@ -197,6 +198,32 @@ func TestBlockedOnUnknownRefAndUntrusted(t *testing.T) {
 		Config: &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}}, AllowUntrusted: true})
 	if code != ExitBlocked || err == nil {
 		t.Fatalf("untrusted flag: code=%d err=%v", code, err)
+	}
+
+	// untrusted + валидный receipt без UNAVAILABLE осей → не блокируется.
+	receipt := containment.DefaultTrustedLocalReceipt()
+	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
+		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
+		AllowUntrusted: true, Receipt: &receipt}); code == ExitBlocked || err != nil {
+		t.Fatalf("untrusted с receipt: code=%d err=%v", code, err)
+	}
+
+	// untrusted + receipt с UNAVAILABLE осью → блокируется.
+	unavail := containment.UnavailableReceipt()
+	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
+		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
+		AllowUntrusted: true, Receipt: &unavail}); code != ExitBlocked || err == nil {
+		t.Fatalf("untrusted с UNAVAILABLE receipt: code=%d err=%v", code, err)
+	}
+
+	// untrusted + zero-value receipt (nil Axes, пустой Profile) → блокируется
+	// (P1-4 R2 fail-closed): пустой receipt не должен пропускать untrusted
+	// через vacuous HasUnavailable.
+	empty := containment.Receipt{}
+	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
+		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
+		AllowUntrusted: true, Receipt: &empty}); code != ExitBlocked || err == nil {
+		t.Fatalf("untrusted с zero-value receipt: code=%d err=%v", code, err)
 	}
 }
 

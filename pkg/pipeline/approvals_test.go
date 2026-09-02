@@ -50,6 +50,14 @@ func TestPriorApprovalIn(t *testing.T) {
 			t.Fatal("deferred гейт не должен совпадать с обычным запросом")
 		}
 	})
+	t.Run("pending non-deferred не переиспользуется (латентный fail-open)", func(t *testing.T) {
+		value := base()
+		value.Status = approval.StatusPending
+		value.Deferred = false
+		if got := priorApprovalIn([]approval.PendingApproval{value}, "approver", "deployer", "graph_outcome:passed", subject, false); got != nil {
+			t.Fatalf("pending non-deferred approval не должен авто-переиспользоваться (fail-open), got %+v", got)
+		}
+	})
 	t.Run("resolved к другому target не переиспользуется", func(t *testing.T) {
 		value := base()
 		value.Status = approval.StatusResolved

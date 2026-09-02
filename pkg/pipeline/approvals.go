@@ -184,7 +184,7 @@ func priorApprovalIn(list []approval.PendingApproval, from, to, trigger, subject
 		}
 		switch value.Status {
 		case approval.StatusPending:
-			if value.Deferred == deferred {
+			if value.Deferred && value.Deferred == deferred {
 				return value
 			}
 		case approval.StatusResolved:

@@ -70,7 +70,7 @@
 | 12 | V0-5 | P0 | review | v0-5-gate-mvp | `ai-team gate` MVP — зависит от V0-1/V0-4 |
 | 13 | V0-6 | P0 | review | v0-6-junit-adapter | Generic JUnit XML typed adapter — независим от V0-5 |
 | 14 | V0-7 | P0 | review | v0-7-demo-ci-readme | Demo + CI action + truthful README — после V0-4/5/6; код готов, внешняя валидация «3 человека» за владельцем |
-| 15 | EXP-1 | P1 | open | — | Track V kill-watch + интервью (не-кодовая) |
+| 15 | EXP-1 | P1 | review | exp-1-dependency-kill-watch | PR #71 |
 | 16 | V0-8 | P1 | review | v0-8-risk-signals | Risk-signal measurement (записывать, не маршрутизировать) |
 | 17 | V0-9 | P1 | review | v0-9-agent-attribution-trailers | Agent attribution в Git trailers (deferred post-terminal delivery) — после V0-2/V0-3 |
 | 18 | P1-4 | P1 | review | p1-4-containment-profile-v1 | Containment profile v1 + receipt (OS-sandbox backend — V2) |

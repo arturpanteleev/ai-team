@@ -85,6 +85,27 @@ func TestContributingCoversOpenSpecCycle(t *testing.T) {
 	})
 }
 
+func TestDependencyKillWatchTracksSignals(t *testing.T) {
+	// EXP-1: стратегическая ставка Track V обязана оставаться наблюдаемой;
+	// удаление сценария/сигнала/действия или Stop-правила — явный акт.
+	doc := readRepoFile(t, "DEPENDENCY-KILL-WATCH.md")
+	feat := readRepoFile(t, "../FEATURES.cloud.md")
+
+	assertContainsAll(t, doc, "docs/DEPENDENCY-KILL-WATCH.md", []string{
+		"GitHub Agent HQ",
+		"Claude Code / Codex",
+		"«Верификация — не боль»",
+		"Bundle никто не открывает, потому что он непонятен",
+		"Сигнал раннего обнаружения",
+		"Действие",
+		"три подряд интервью дали «нам это не нужно»",
+		"ноль внешних повторных запусков за 8 недель",
+	})
+	if !strings.Contains(feat, "Чего нет ни в codex, ни в ревизии 2") {
+		t.Error("docs/DEPENDENCY-KILL-WATCH.md: не найден источник правил FEATURES.cloud.md §")
+	}
+}
+
 func TestReadmeCoversGateDemoAndTruthfulBoundaries(t *testing.T) {
 	// V0-7: README разделяет run/gate, integrity/authenticity и отсутствие
 	// OS sandbox и ведёт к самодостаточному демо.

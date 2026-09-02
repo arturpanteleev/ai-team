@@ -1,7 +1,7 @@
 # Release basics (лицензия, changelog, теги)
 
 Статус: идея
-Источник: TECHNICAL_AUDIT «Documentation»
+Источник: docs/audits/2026-08-05-technical-audit.md «Documentation»
 
 ## Задача
 

@@ -1,7 +1,7 @@
 # Write-only evidence (дать читателей или убрать)
 
 Статус: идея
-Источник: SCOPE_REVIEW корзина 3
+Источник: docs/audits/2026-07-25-scope-review.md корзина 3
 
 ## Задача
 

@@ -1,7 +1,7 @@
 # Specs pruning (62 → ~10 capability-спек)
 
 Статус: идея
-Источник: SCOPE_REVIEW шаг 10, раздел 6
+Источник: docs/audits/2026-07-25-scope-review.md шаг 10, раздел 6
 
 ## Задача
 

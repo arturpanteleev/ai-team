@@ -45,4 +45,5 @@ evidence и delivery исполняет детерминированный Go-к
 - [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — внутреннее устройство,
   единственный точный навигационный документ.
 - [AUDIT.md](../AUDIT.md) — исторический аудит 2026-07-20 (см. баннер).
-- `TECHNICAL_AUDIT_2026-08-05.html` — свежайший независимый аудит.
+- [docs/audits/2026-08-05-technical-audit.md](../docs/audits/2026-08-05-technical-audit.md) —
+  свежайший независимый аудит.

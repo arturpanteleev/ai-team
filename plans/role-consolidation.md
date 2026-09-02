@@ -1,7 +1,7 @@
 # Role consolidation (схлопывание AI-ролей 7 → 5)
 
 Статус: идея
-Источник: SCOPE_REVIEW корзина 4
+Источник: docs/audits/2026-07-25-scope-review.md корзина 4
 
 ## Задача
 

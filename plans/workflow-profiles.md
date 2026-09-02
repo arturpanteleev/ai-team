@@ -1,7 +1,7 @@
 # Workflow profiles (fast / standard / regulated)
 
 Статус: idea
-Источник: TECHNICAL_AUDIT «Роли и scope»; SCOPE_REVIEW
+Источник: docs/audits/2026-08-05-technical-audit.md «Роли и scope»; docs/audits/2026-07-25-scope-review.md
 
 ## Задача
 

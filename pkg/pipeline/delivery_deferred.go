@@ -101,7 +101,7 @@ func (rs *runState) executeDeferredDelivery() error {
 // детерминированный: результат привязан к plan, зафиксированному в
 // delivery_deferred event, и к terminal статусу run.
 func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.TerminalRecord, error) {
-	if _, err := safeio.ExistingDir(runDir, ""); err != nil {
+	if _, err := safeio.ExistingDir(runDir); err != nil {
 		return delivery.TerminalRecord{}, err
 	}
 	runID := filepath.Base(runDir)
@@ -114,7 +114,11 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: run %s уже доставлен (delivery.json существует)", runID)
 	}
 
-	_, manifest, _, err := evidence.Resume(runDir, runID)
+	// evidence.Resume не применим: он открывает только НЕ-терминальные run
+	// (терминальный отклоняется «already terminal»), а DeliverDeferred работает
+	// именно с терминальными. Читаем манифест терминального run напрямую из
+	// run.json (паттерн export.readRunManifest), сверяя identity/schema.
+	manifest, err := readRunManifest(runDir)
 	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: replayed evidence: %w", err)
 	}
@@ -271,4 +275,22 @@ func runtimeIdentityOfRun(runDir string) (string, error) {
 	}
 	sum := sha256.Sum256(manifest.Provenance)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// readRunManifest читает манифест терминального run напрямую из run.json
+// (anapek export.readRunManifest), сверяя identity/schema. evidence.Resume
+// не подходит: он открывает только НЕ-терминальные run.
+func readRunManifest(runDir string) (*evidence.RunManifest, error) {
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return nil, fmt.Errorf("deferred delivery: run manifest: %w", err)
+	}
+	var manifest evidence.RunManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("deferred delivery: run manifest decode: %w", err)
+	}
+	if manifest.RunID == "" || manifest.SchemaVersion != evidence.SchemaVersion {
+		return nil, errors.New("deferred delivery: run manifest identity/schema mismatch")
+	}
+	return &manifest, nil
 }

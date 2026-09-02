@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<testsuites name="jest tests" tests="5" failures="1" time="1.234">
+  <testsuite name="auth.test.js" tests="3" failures="0" time="0.500">
+    <testcase classname="auth" name="login ok" time="0.100"/>
+    <testcase classname="auth" name="refresh ok" time="0.120"/>
+    <testcase classname="auth" name="logout clears state" time="0.080"/>
+  </testsuite>
+  <testsuite name="profile.test.js" tests="2" failures="1" time="0.300">
+    <testcase classname="profile" name="renders name" time="0.050"/>
+    <testcase classname="profile" name="loads profile from api" time="0.070">
+      <failure message="expect(received).toBeDefined()" type="AssertionError"/>
+    </testcase>
+  </testsuite>
+</testsuites>

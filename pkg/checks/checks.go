@@ -18,7 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/junit"
 	"github.com/arturpanteleev/ai-team/pkg/process"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,6 +32,7 @@ const (
 	PolicyOptional = "optional"
 	AdapterCommand = "command"
 	AdapterGoTest  = "go-test-json"
+	AdapterJUnit   = "junit-xml"
 
 	StatusPassed  = "passed"
 	StatusFailed  = "failed"
@@ -50,6 +53,10 @@ type Definition struct {
 	Policy     string   `yaml:"policy" json:"policy"`
 	Timeout    string   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	WorkingDir string   `yaml:"working_dir,omitempty" json:"working_dir,omitempty"`
+	// ReportFile — repo-relative путь JUnit XML внутри target (только для
+	// adapter junit-xml). Command пишет сюда отчёт; adapter читает строгим
+	// bounded parser и дигирует сырой файл как evidence (V0-6).
+	ReportFile string `yaml:"report_file,omitempty" json:"report_file,omitempty"`
 }
 
 func (d *Definition) UnmarshalYAML(node *yaml.Node) error {
@@ -58,7 +65,7 @@ func (d *Definition) UnmarshalYAML(node *yaml.Node) error {
 	}
 	allowed := map[string]bool{
 		"name": true, "class": true, "adapter": true, "command": true, "policy": true,
-		"timeout": true, "working_dir": true,
+		"timeout": true, "working_dir": true, "report_file": true,
 	}
 	seen := make(map[string]bool)
 	for i := 0; i < len(node.Content); i += 2 {
@@ -91,7 +98,7 @@ func (d Definition) Validate() error {
 		return fmt.Errorf("check %s: command обязателен", d.Name)
 	}
 	adapter := d.NormalizedAdapter()
-	if adapter != AdapterCommand && adapter != AdapterGoTest {
+	if adapter != AdapterCommand && adapter != AdapterGoTest && adapter != AdapterJUnit {
 		return fmt.Errorf("check %s: неизвестный adapter %q", d.Name, d.Adapter)
 	}
 	if adapter == AdapterGoTest {
@@ -101,6 +108,20 @@ func (d Definition) Validate() error {
 		if d.Class != "unit" && d.Class != "integration" && d.Class != "e2e" {
 			return fmt.Errorf("check %s: adapter %s допустим только для test class", d.Name, AdapterGoTest)
 		}
+	}
+	if adapter == AdapterJUnit {
+		if d.ReportFile == "" {
+			return fmt.Errorf("check %s: adapter %s требует report_file", d.Name, AdapterJUnit)
+		}
+		if report := filepath.Clean(filepath.FromSlash(d.ReportFile)); report == "." || filepath.IsAbs(report) ||
+			report == ".." || strings.HasPrefix(report, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("check %s: report_file должен быть repo-relative путём внутри target", d.Name)
+		}
+		if d.Class != "unit" && d.Class != "integration" && d.Class != "e2e" {
+			return fmt.Errorf("check %s: adapter %s допустим только для test class", d.Name, AdapterJUnit)
+		}
+	} else if d.ReportFile != "" {
+		return fmt.Errorf("check %s: report_file допустим только для adapter %s", d.Name, AdapterJUnit)
 	}
 	if d.Policy != PolicyRequired && d.Policy != PolicyOptional {
 		return fmt.Errorf("check %s: policy должен быть required или optional", d.Name)
@@ -149,6 +170,9 @@ type Result struct {
 	EvidenceDigest         string        `json:"evidence_digest,omitempty"`
 	DiscoveredTests        int           `json:"discovered_tests,omitempty"`
 	PassedTests            int           `json:"passed_tests,omitempty"`
+	FailedTests            int           `json:"failed_tests,omitempty"`
+	ErroredTests           int           `json:"errored_tests,omitempty"`
+	SkippedTests           int           `json:"skipped_tests,omitempty"`
 	StructuredOutputBytes  int64         `json:"structured_output_bytes,omitempty"`
 	StructuredOutputSHA256 string        `json:"structured_output_sha256,omitempty"`
 }
@@ -199,24 +223,44 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 		return result, err
 	}
 	result.WorkingDir = workingDir
-	result.WorkspaceDigestBefore, err = WorkspaceDigest(r.TargetDir)
+	// JUnit adapter объявляет report_file как легитимный side-effect проверки —
+	// путь исключается из детекции мутации workspace (остальное обязано быть
+	// read-only, иначе check fail).
+	reportExclude := ""
+	if definition.NormalizedAdapter() == AdapterJUnit {
+		reportExclude = filepath.ToSlash(filepath.FromSlash(definition.ReportFile))
+	}
+	// Исключающий дайджест используется только для внутренней детекции
+	// мутации workspace (junit report — объявленный side-effect). В сам Result
+	// пишется полный WorkspaceDigest: верификаторы (delivery_auth, VerifyCheck
+	// Evidence) пересчитывают полный fingerprint текущего workspace и требуют
+	// равенство по обоим полям (V0-6).
+	beforeExclude, err := r.workspaceDigestExcluding(reportExclude)
 	if err != nil {
 		result.Status, result.Reason = StatusFailed, "workspace baseline: "+err.Error()
 		return result, err
 	}
 	defer func() {
-		after, digestErr := WorkspaceDigest(r.TargetDir)
+		afterExclude, digestErr := r.workspaceDigestExcluding(reportExclude)
 		if digestErr != nil {
 			result.Status = StatusFailed
 			result.Reason = "workspace verification: " + digestErr.Error()
 			returnErr = errors.Join(returnErr, digestErr)
 		} else {
-			result.WorkspaceDigestAfter = after
-			if result.WorkspaceDigestBefore != after {
+			if beforeExclude != afterExclude {
 				result.Status = StatusFailed
 				result.Reason = "check изменил workspace; verification commands должны быть read-only"
 				returnErr = errors.Join(returnErr, &RequiredFailureError{Check: definition.Name, Cause: result.Reason})
 			}
+		}
+		full, fullErr := WorkspaceDigest(r.TargetDir)
+		if fullErr != nil {
+			result.Status = StatusFailed
+			result.Reason = "workspace verification: " + fullErr.Error()
+			returnErr = errors.Join(returnErr, fullErr)
+		} else {
+			result.WorkspaceDigestBefore = full
+			result.WorkspaceDigestAfter = full
 		}
 		result.EvidenceDigest = resultDigest(result)
 	}()
@@ -242,10 +286,14 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 	}
 	stdout, stderr := &limitedBuffer{limit: maxCapturedOutput}, &limitedBuffer{limit: maxCapturedOutput}
 	var structured *goTestCollector
-	var stdoutWriter io.Writer = stdout
-	if definition.NormalizedAdapter() == AdapterGoTest {
+	var junitReportPath string
+	stdoutWriter := io.Writer(stdout)
+	switch definition.NormalizedAdapter() {
+	case AdapterGoTest:
 		structured = newGoTestCollector()
 		stdoutWriter = io.MultiWriter(stdout, structured)
+	case AdapterJUnit:
+		junitReportPath = filepath.Join(workingDir, filepath.FromSlash(definition.ReportFile))
 	}
 	command := exec.Command(toolPath, definition.Command[1:]...)
 	command.Dir = workingDir
@@ -258,8 +306,16 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 	result.Truncated = stdout.truncated || stderr.truncated
 	if runErr == nil {
 		result.ExitCode = 0
-		if evidenceErr := validateStructuredEvidence(definition, &result, structured); evidenceErr != nil {
+		if evidenceErr := validateStructuredEvidence(definition, &result, structured, junitReportPath); evidenceErr != nil {
 			result.Status, result.Reason = StatusFailed, evidenceErr.Error()
+			if definition.Policy == PolicyRequired {
+				return result, &RequiredFailureError{Check: definition.Name, Cause: result.Reason}
+			}
+			return result, nil
+		}
+		if junitReportPath != "" && result.FailedTests > 0 {
+			result.Status = StatusFailed
+			result.Reason = fmt.Sprintf("JUnit report: %d failures, %d errors", result.FailedTests, result.ErroredTests)
 			if definition.Policy == PolicyRequired {
 				return result, &RequiredFailureError{Check: definition.Name, Cause: result.Reason}
 			}
@@ -273,6 +329,13 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 		result.ExitCode = exitErr.ExitCode()
 	}
 	result.Status = StatusFailed
+	// JUnit report остаётся evidence даже при ненулевом exit code команды:
+	// maven/gradle могут вернуть 0 при падении тестов — counts обязаны быть
+	// в Result для verify. Ошибка парсинга при падении команды не меняет
+	// статус failed, но попадает в Summary Reason.
+	if junitReportPath != "" {
+		_ = readJUnitEvidence(&result, junitReportPath, definition.ReportFile)
+	}
 	switch {
 	case errors.Is(checkCtx.Err(), context.DeadlineExceeded):
 		result.Reason = "timeout: " + definition.Timeout
@@ -317,7 +380,7 @@ func IsTestEvidence(result Result) bool {
 		result.Adapter != AdapterCommand && result.DiscoveredTests > 0 && result.PassedTests > 0
 }
 
-func validateStructuredEvidence(definition Definition, result *Result, collector *goTestCollector) error {
+func validateStructuredEvidence(definition Definition, result *Result, collector *goTestCollector, junitReportPath string) error {
 	switch definition.NormalizedAdapter() {
 	case AdapterCommand:
 		return nil
@@ -326,9 +389,40 @@ func validateStructuredEvidence(definition Definition, result *Result, collector
 			return fmt.Errorf("go test JSON collector отсутствует")
 		}
 		return collector.Finish(result)
+	case AdapterJUnit:
+		return readJUnitEvidence(result, junitReportPath, definition.ReportFile)
 	default:
 		return fmt.Errorf("unsupported adapter %q", definition.Adapter)
 	}
+}
+
+// readJUnitEvidence читает строгим bounded parser JUnit XML отчёт, который
+// command записала в reportPath, и дигирует сырой файл как evidence (V0-6).
+// Zero-test и zero-passed отчёты — ошибка: они не являются test evidence.
+func readJUnitEvidence(result *Result, reportPath, reportRel string) error {
+	if reportPath == "" {
+		return errors.New("junit report path отсутствует")
+	}
+	data, err := safeio.ReadRegularFile(reportPath, maxStructuredOutput)
+	if err != nil {
+		return fmt.Errorf("junit report %s: %w", reportRel, err)
+	}
+	report, err := junit.Parse(data)
+	if err != nil {
+		return fmt.Errorf("junit report %s: %w", reportRel, err)
+	}
+	result.StructuredOutputBytes = int64(len(data))
+	sum := sha256.Sum256(data)
+	result.StructuredOutputSHA256 = hex.EncodeToString(sum[:])
+	result.DiscoveredTests = report.Tests
+	result.FailedTests = report.Failures + report.Errors
+	result.ErroredTests = report.Errors
+	result.SkippedTests = report.Skipped
+	result.PassedTests = report.Passed()
+	if report.Tests == 0 || report.Passed() == 0 {
+		return fmt.Errorf("junit report не содержит ни одного успешно выполненного test case")
+	}
+	return nil
 }
 
 type goTestEvent struct {
@@ -583,6 +677,29 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 		fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
 	}
 	return files, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// workspaceDigestExcluding — канонический fingerprint workspace с
+// исключением declared side-effect файлов (junit report), которые обязаны
+// появляться в результате выполнения проверки.
+func (r Runner) workspaceDigestExcluding(exclude string) (string, error) {
+	files, _, err := WorkspaceFileDigests(r.TargetDir, DefaultIgnoreDirs())
+	if err != nil {
+		return "", err
+	}
+	if exclude != "" {
+		delete(files, filepath.ToSlash(exclude))
+	}
+	paths := make([]string, 0, len(files))
+	for relative := range files {
+		paths = append(paths, relative)
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, relative := range paths {
+		fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // WorkspaceDigest is the canonical source-tree digest used to bind checks to

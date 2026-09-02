@@ -11,7 +11,7 @@ updates:
       day: "monday"
     open-pull-requests-limit: 10
     target-branch: "master"
-    versioning-strategy: increase
+    versioning-strategy: increase-if-necessary
     version-comment: "# v"
     labels:
       - "dependencies"

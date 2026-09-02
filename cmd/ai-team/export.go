@@ -63,6 +63,9 @@ func cmdExport() {
 		fatal("Ошибка загрузки конфига: %v", cfgErr)
 	}
 	policy := redactionPolicy(cfg)
+	// SF3: include/exclude glob'ы документированы repository-relative — матчим
+	// их от корня репозитория, а не от суженного корня (каталог одного run).
+	policy.RepoRoot = absolute
 	scanRoot := runDir
 	report, redactErr := redact.Verify(scanRoot, policy)
 	if redactErr != nil {

@@ -50,3 +50,66 @@ func TestExportRefusesSecretsUsesPolicy(t *testing.T) {
 		t.Fatal("ожидалась зарегистрированная violation при выключенном блокере")
 	}
 }
+
+// TestRedactCommandRedactsHappyPath — CLI-путь `redact redact` через
+// applyRedact (Policy.MaxBytes==0 по умолчанию) должен работать: файл с
+// секретом даёт redaction-копию, чистый файл копируется без изменений.
+func TestRedactCommandRedactsHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "evidence")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "secret.txt"),
+		[]byte("GITHUB_TOKEN="+"ghp_"+strings.Repeat("1", 36)+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "clean.txt"),
+		[]byte("обычный текст\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(dir, "redacted")
+	if err := applyRedact(source, out, redact.Policy{}); err != nil {
+		t.Fatalf("applyRedact: %v", err)
+	}
+
+	secretOut, err := os.ReadFile(filepath.Join(out, "secret.txt"))
+	if err != nil {
+		t.Fatalf("ожидалась redaction-копия secret.txt: %v", err)
+	}
+	if strings.Contains(string(secretOut), "ghp_") {
+		t.Errorf("секрет не был заменён в копии: %q", secretOut)
+	}
+	if !strings.Contains(string(secretOut), "[REDACTED:github token]") {
+		t.Errorf("ожидался маркер замены, got: %q", secretOut)
+	}
+	cleanOut, err := os.ReadFile(filepath.Join(out, "clean.txt"))
+	if err != nil {
+		t.Fatalf("ожидалась копия clean.txt: %v", err)
+	}
+	if string(cleanOut) != "обычный текст\n" {
+		t.Errorf("чистый файл должен копироваться без изменений, got %q", cleanOut)
+	}
+}
+
+// TestApplyRedactRejectsOutInsideSource — SF4: --out внутри источника должен
+// отклоняться сразу (иначе WalkDir спиралит по создаваемой копии).
+func TestApplyRedactRejectsOutInsideSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "evidence")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "x.txt"),
+		[]byte("GITHUB_TOKEN="+"ghp_"+strings.Repeat("2", 36)+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(source, "redacted")
+	if err := os.MkdirAll(out, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyRedact(source, out, redact.Policy{}); err == nil {
+		t.Fatal("applyRedact должен вернуть ошибку при out внутри source")
+	}
+}

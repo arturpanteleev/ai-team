@@ -80,8 +80,11 @@ func TestClaudeParseUsageTokensAndCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.TokensInput != 1150 || usage.TokensOutput != 2000 {
-		t.Errorf("usage = %+v, want input=1150 output=2000", usage)
+	if usage.TokensInput != 1000 || usage.TokensOutput != 2000 {
+		t.Errorf("usage = %+v, want input=1000 output=2000", usage)
+	}
+	if usage.CachedInputTokens != 150 {
+		t.Errorf("CachedInputTokens = %d, want 150 (не суммируется с TokensInput)", usage.CachedInputTokens)
 	}
 	if usage.CostUSD != 0.42 || usage.Currency != "USD" {
 		t.Errorf("cost = %v %s, want 0.42 USD", usage.CostUSD, usage.Currency)

@@ -41,6 +41,7 @@ func (a *ClaudeAdapter) Describe() Descriptor {
 			CapSessionIsolation,
 			CapUsageReported,
 		},
+		PromptViaStdin: true,
 	}
 }
 
@@ -100,7 +101,9 @@ const claudeSettingsJSON = `{
       "Bash(**)", "PowerShell(**)", "WebFetch(**)", "WebSearch", "Task(**)", "Agent(**)", "Skill(**)", "LSP(*)",
       "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(**/.env)", "Read(**/.env.*)",
       "Read(.env)", "Read(.env.*)", "Read(**/.git/**)", "Read(.git/**)",
-      "Edit(**/.git/**)", "Edit(.git/**)", "Edit(**/.ai-team/**)", "Edit(.ai-team/**)"
+      "Edit(**/.git/**)", "Edit(.git/**)", "Edit(**/.ai-team/**)", "Edit(.ai-team/**)",
+      "Edit(//**)", "Write(//**)",
+      "Edit(~/**)", "Write(~/**)"
     ]
   }
 }
@@ -191,7 +194,8 @@ func (a *ClaudeAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 	}
 	usage := &Usage{Currency: "USD", Attested: true}
 	if result.Usage != nil {
-		usage.TokensInput = result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+		usage.TokensInput = result.Usage.InputTokens
+		usage.CachedInputTokens = result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
 		usage.TokensOutput = result.Usage.OutputTokens
 	}
 	if result.TotalCostUSD != nil {

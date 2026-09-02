@@ -119,7 +119,7 @@ func mapRun(run string) (checks.Definition, bool) {
 			Name:    "go-vet",
 			Class:   "lint",
 			Adapter: checks.AdapterCommand,
-			Command: []string{"go", "vet"},
+			Command: strings.Fields(cmd),
 			Policy:  checks.PolicyOptional,
 		}, true
 	case strings.HasPrefix(cmd, "go build"):
@@ -127,7 +127,7 @@ func mapRun(run string) (checks.Definition, bool) {
 			Name:    "go-build",
 			Class:   "build",
 			Adapter: checks.AdapterCommand,
-			Command: []string{"go", "build"},
+			Command: strings.Fields(cmd),
 			Policy:  checks.PolicyOptional,
 		}, true
 	case strings.HasPrefix(cmd, "go test"):

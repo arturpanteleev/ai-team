@@ -97,6 +97,45 @@ jobs:
 	}
 }
 
+func TestImportPreservesVetBuildArgs(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "ci.yml", `
+name: CI
+on: [push]
+jobs:
+  vet:
+    steps:
+      - run: go vet ./... -v
+  build:
+    steps:
+      - run: go build ./... -race
+`)
+	imp, err := Import(dir, FormatGitHubActions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argsByName := map[string][]string{}
+	for _, d := range imp.Definitions {
+		argsByName[d.Name] = d.Command
+	}
+	for name, want := range map[string][]string{
+		"go-vet":   {"go", "vet", "./...", "-v"},
+		"go-build": {"go", "build", "./...", "-race"},
+	} {
+		got := argsByName[name]
+		if len(got) != len(want) {
+			t.Errorf("%s: command = %v, want %v", name, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s: command = %v, want %v", name, got, want)
+				break
+			}
+		}
+	}
+}
+
 func TestImportDedupeAndDeterministicFingerprint(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "a.yml", `

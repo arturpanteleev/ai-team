@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
@@ -39,6 +40,8 @@ type Config struct {
 	Containment    *ContainmentConfig `yaml:"containment,omitempty"`
 	TreeHash       *TreeHashConfig    `yaml:"tree_hash,omitempty"`
 	Budget         *BudgetConfig      `yaml:"budget,omitempty"`
+	Redaction      *RedactionConfig   `yaml:"redaction,omitempty"`
+	Retention      *RetentionConfig   `yaml:"retention,omitempty"`
 }
 
 // BudgetConfig — глобальные жёсткие лимиты run (P1-7): total wall-time и
@@ -91,6 +94,93 @@ func (bc *BudgetConfig) Validate() error {
 		return fmt.Errorf("budget.max_attempts не может быть отрицательным")
 	}
 	return nil
+}
+
+// RedactionConfig — privacy-контракт (P1-6): полевая классификация, secrets
+// scanner, include/exclude policy и fail-closed блок экспорта. raw_logs —
+// opt-in сохранение raw вывода; без явного true raw logs не считаются
+// разрешёнными. Блок экспорта по секретам включён ПО УМОЛЧАНИЮ (fail-closed):
+// отключить можно только явным disable_export_block: true. Никаких обещаний
+// legal compliance.
+//
+// ScanSensitiveFields и RawLogs — зарезервированные future knobs: сейчас
+// `scan`/`verify` работают по ключам событий через ClassifyField, а raw-вывод
+// никогда не пишется в evidence. Поля принимаются конфигом без ошибки, но
+// эффект появится вместе с соответствующими фичами; менять семантику по
+// умолчанию они не должны.
+type RedactionConfig struct {
+	ScanSensitiveFields bool     `yaml:"scan_sensitive_fields,omitempty"`
+	Include             []string `yaml:"include,omitempty"`
+	Exclude             []string `yaml:"exclude,omitempty"`
+	RawLogs             bool     `yaml:"raw_logs,omitempty"`
+	DisableExportBlock  bool     `yaml:"disable_export_block,omitempty"`
+}
+
+func (rc *RedactionConfig) Validate() error {
+	if rc == nil {
+		return nil
+	}
+	policy := redact.Policy{Include: rc.Include, Exclude: rc.Exclude}
+	return policy.Validate()
+}
+
+// EffectiveFailExportOnSecrets — эффект fail-closed блока экспорта
+// (включён по умолчанию; отключается только явным disable_export_block).
+func (rc *RedactionConfig) EffectiveFailExportOnSecrets() bool {
+	if rc == nil {
+		return true
+	}
+	return !rc.DisableExportBlock
+}
+
+// RetentionConfig — настраиваемая retention (P1-6): дефолты для `ai-team gc`
+// без обещания legal compliance (это техническая уборка, не obligations-контракт).
+type RetentionConfig struct {
+	OlderThan string `yaml:"older_than,omitempty"`
+	KeepLast  int    `yaml:"keep_last,omitempty"`
+	PruneRuns bool   `yaml:"prune_runs,omitempty"`
+}
+
+// Канонические дефолты retention.
+const (
+	DefaultRetentionOlderThan = "720h"
+	DefaultRetentionKeepLast  = 20
+)
+
+func (rc *RetentionConfig) Validate() error {
+	if rc == nil {
+		return nil
+	}
+	if rc.OlderThan != "" {
+		if _, err := time.ParseDuration(rc.OlderThan); err != nil {
+			return fmt.Errorf("retention.older_than %q не парсится (пример: 720h)", rc.OlderThan)
+		}
+	}
+	if rc.KeepLast < 0 {
+		return fmt.Errorf("retention.keep_last не может быть отрицательным")
+	}
+	return nil
+}
+
+// EffectiveOlderThanDuration — распарсенный older_than (0 — канонический
+// дефолт 720h).
+func (rc *RetentionConfig) EffectiveOlderThanDuration() (time.Duration, error) {
+	if rc == nil || rc.OlderThan == "" {
+		d, err := time.ParseDuration(DefaultRetentionOlderThan)
+		if err != nil {
+			return 0, err
+		}
+		return d, nil
+	}
+	return time.ParseDuration(rc.OlderThan)
+}
+
+// EffectiveKeepLast возвращает keep_last или дефолт.
+func (rc *RetentionConfig) EffectiveKeepLast() int {
+	if rc == nil || rc.KeepLast <= 0 {
+		return DefaultRetentionKeepLast
+	}
+	return rc.KeepLast
 }
 
 // TreeHashConfig — project-specific настройки tree hashing (OPS-2).
@@ -168,20 +258,22 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "workflow": true, "containment": true,
-		"tree_hash": true, "budget": true,
+		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
 	}, "config"); err != nil {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion int             `yaml:"schema_version"`
-		Pipeline      yaml.Node       `yaml:"pipeline"`
-		CLI           string          `yaml:"cli"`
-		Model         string          `yaml:"model"`
-		Effort        string          `yaml:"effort"`
-		StageTimeout  string          `yaml:"stage_timeout"`
-		Workflow      *WorkflowConfig `yaml:"workflow"`
-		TreeHash      *TreeHashConfig `yaml:"tree_hash"`
-		Budget        *BudgetConfig   `yaml:"budget"`
+		SchemaVersion int              `yaml:"schema_version"`
+		Pipeline      yaml.Node        `yaml:"pipeline"`
+		CLI           string           `yaml:"cli"`
+		Model         string           `yaml:"model"`
+		Effort        string           `yaml:"effort"`
+		StageTimeout  string           `yaml:"stage_timeout"`
+		Workflow      *WorkflowConfig  `yaml:"workflow"`
+		TreeHash      *TreeHashConfig  `yaml:"tree_hash"`
+		Budget        *BudgetConfig    `yaml:"budget"`
+		Redaction     *RedactionConfig `yaml:"redaction"`
+		Retention     *RetentionConfig `yaml:"retention"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -199,6 +291,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Workflow = raw.Workflow
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
+	c.Redaction = raw.Redaction
+	c.Retention = raw.Retention
 
 	if raw.Pipeline.Kind == 0 {
 		return fmt.Errorf("config: pipeline is required")
@@ -502,6 +596,16 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if c.Budget != nil {
 		if err := c.Budget.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.Redaction != nil {
+		if err := c.Redaction.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.Retention != nil {
+		if err := c.Retention.Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

@@ -4,10 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/retention"
 )
@@ -33,6 +35,35 @@ func cmdGC() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absTarget)
+
+	// P1-6: retention-контракт настраивается в config (retention).
+	// Явные CLI-флаги имеют приоритет над конфигом. Отсутствие config.yaml —
+	// канонические дефолты.
+	cfg, cfgErr := config.Load(filepath.Join(absTarget, ".ai-team", "config.yaml"))
+	if cfgErr != nil {
+		if _, statErr := os.Stat(filepath.Join(absTarget, ".ai-team", "config.yaml")); !os.IsNotExist(statErr) {
+			fatal("Ошибка загрузки конфига: %v", cfgErr)
+		}
+		cfg = &config.Config{}
+	}
+	if err := cfg.Retention.Validate(); err != nil {
+		fatal("Ошибка retention-конфига: %v", err)
+	}
+	flagVisited := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { flagVisited[f.Name] = true })
+	if !flagVisited["older-than"] {
+		d, err := cfg.Retention.EffectiveOlderThanDuration()
+		if err != nil {
+			fatal("retention.older_than: %v", err)
+		}
+		*olderThan = d
+	}
+	if !flagVisited["keep-last"] {
+		*keepLast = cfg.Retention.EffectiveKeepLast()
+	}
+	if cfg.Retention != nil && cfg.Retention.PruneRuns {
+		*pruneRuns = true
+	}
 
 	// gc мутирует control-каталог — как pipeline, он обязан держать
 	// workspace lock и отказываться работать при параллельном run.

@@ -11,6 +11,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/export"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
+	"github.com/arturpanteleev/ai-team/pkg/redact"
 )
 
 // cmdExport собирает проверенный portable bundle терминального run (V0-4):
@@ -51,6 +52,32 @@ func cmdExport() {
 	runDir := filepath.Join(absolute, ".ai-team", "runs", runID)
 	if _, err := os.Stat(filepath.Join(runDir, "anchor.json")); err != nil {
 		fatal("run %s не является терминальным (нет anchor.json): %v", runID, err)
+	}
+
+	// P1-6: обязательный fail-closed блокер перед внешней публикацией bundle.
+	// Secrets-скан evidence run'а; при находках (и политике по умолчанию)
+	// экспорт отклоняется. From config: redaction.include/exclude +
+	// redaction.disable_export_block. Отсутствие конфига — default-политика.
+	cfg, cfgErr := loadPolicyConfig(absolute)
+	if cfgErr != nil {
+		fatal("Ошибка загрузки конфига: %v", cfgErr)
+	}
+	policy := redactionPolicy(cfg)
+	// SF3: include/exclude glob'ы документированы repository-relative — матчим
+	// их от корня репозитория, а не от суженного корня (каталог одного run).
+	policy.RepoRoot = absolute
+	scanRoot := runDir
+	report, redactErr := redact.Verify(scanRoot, policy)
+	if redactErr != nil {
+		fmt.Fprintf(os.Stderr, "✗ Export blocked: evidence run %s содержит секреты: %v\n", runID, redactErr)
+		logging.Emit(logging.Record{Level: "error", Command: "export", Type: "redact_block",
+			Message: redactErr.Error(), Data: map[string]any{"run_id": runID, "blocked": true}})
+		fatal("Экспорт заблокирован: redaction не прошла (см. ai-team redact verify --run %s)", runID)
+	}
+	if len(report.Violations) > 0 {
+		logging.Emit(logging.Record{Level: "warn", Command: "export", Type: "redact_findings",
+			Message: "Секреты найдены, но политика разрешает экспорт",
+			Data:    map[string]any{"run_id": runID, "violations": len(report.Violations)}})
 	}
 
 	outDir := *out

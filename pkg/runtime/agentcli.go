@@ -67,7 +67,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		return fmt.Errorf("агент %s: временный prompt: %w", agent.Name, err)
 	}
 	defer cleanupPrompt()
-	args, err := adapter.Command(cli, agent.Model, promptFile)
+	args, err := adapter.Command(cli, launch, promptFile)
 	if err != nil {
 		return err
 	}
@@ -83,10 +83,28 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	}
 	defer closeLog()
 
+	// Кап-буферы для классификации ошибок (если адаптер это умеет): всегда
+	// teем вывод в границы, не читая произвольный объём harness-вывода.
+	var capturedStdout, capturedStderr strings.Builder
+	stdout = io.MultiWriter(stdout, &boundedBuilder{Builder: &capturedStdout, limit: 2 << 20})
+	stderr = io.MultiWriter(stderr, &boundedBuilder{Builder: &capturedStderr, limit: 2 << 20})
+
 	cmd := exec.Command(cli, args...)
 	cmd.Dir = targetDir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	// Промпт в stdin подаётся только адаптерам, объявляющим PromptViaStdin
+	// (codex exec -). Opencode получает промпт только через argv --file: иначе
+	// промпт дублировался бы (argv + stdin).
+	if adapter.Describe().PromptViaStdin {
+		stdin, err := os.Open(promptFile)
+		if err != nil {
+			return fmt.Errorf("агент %s: открыть промпт для stdin: %w", agent.Name, err)
+		}
+		defer stdin.Close()
+		cmd.Stdin = stdin
+	}
+
 	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, task, inputs...)
 	if err != nil {
 		return fmt.Errorf("агент %s: изоляция сессии: %w", agent.Name, err)
@@ -95,8 +113,18 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	cmd.Env = isolatedEnv
 
 	if err := process.Run(ctx, cmd); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		// Отмена/deadline не зависят от harness-вывода: пробрасываем их ДО
+		// классификатора, иначе context.Canceled/DeadlineExceeded маскируется
+		// под CodexErrorUnknown/ClaudeErrorUnknown.
+		if ctx.Err() != nil {
 			return fmt.Errorf("агент %s: %w", agent.Name, ctx.Err())
+		}
+		if classifier, ok := adapter.(interface{ ClassifyError(output string) error }); ok {
+			output := capturedStdout.String()
+			if capturedStderr.Len() > 0 {
+				output += "\n" + capturedStderr.String()
+			}
+			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
 		}
 		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, err)
 	}
@@ -111,7 +139,7 @@ func AgentCLIArgs(cli, model, promptFile string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return adapter.Command(cli, model, promptFile)
+	return adapter.Command(cli, Launch{Model: model}, promptFile)
 }
 
 // OpenCodeIsolationEnvironment — совместимая обёртка над opencode-адаптером.
@@ -237,6 +265,24 @@ func (r *AgentCLIRuntime) buildPrompt(agent *Agent, task *Task, inputs []Artifac
 	prompt += serviceSection(agent, task)
 
 	return prompt, nil
+}
+
+// boundedBuilder ограничивает накапливаемый текст, не позволяя переполнять
+// память произвольным объёмом вывода харнесса (используется только для
+// классификации ошибок адаптером).
+type boundedBuilder struct {
+	*strings.Builder
+	limit int
+}
+
+func (b *boundedBuilder) Write(value []byte) (int, error) {
+	if remaining := b.limit - b.Len(); remaining > 0 {
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		_, _ = b.Builder.Write(value)
+	}
+	return len(value), nil
 }
 
 func sortedMapKeys(values map[string]string) []string {

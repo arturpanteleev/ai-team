@@ -210,11 +210,16 @@ func (b *limitedBuffer) Write(value []byte) (int, error) {
 func allowedCredentialNames() []string {
 	seen := make(map[string]bool)
 	var names []string
-	for _, raw := range strings.Split(os.Getenv("AI_TEAM_OPENCODE_ENV_ALLOW"), ",") {
-		name := strings.TrimSpace(raw)
-		if name != "" && !seen[name] {
-			seen[name] = true
-			names = append(names, name)
+	for _, raw := range []string{
+		os.Getenv(runtime.HarnessEnvAllowVar),
+		os.Getenv(runtime.HarnessEnvAllowLegacyVar),
+	} {
+		for _, entry := range strings.Split(raw, ",") {
+			name := strings.TrimSpace(entry)
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
 		}
 	}
 	sort.Strings(names)

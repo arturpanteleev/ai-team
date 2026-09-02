@@ -16,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -57,7 +58,7 @@ func cmdGate() {
 
 	cfg, usedConfig := loadGateConfig(*target, *configPath)
 	if usedConfig != "" {
-		fmt.Printf("Gate config: %s\n", usedConfig)
+		logging.Printf("Gate config: %s\n", usedConfig)
 	}
 
 	if *out == "" {
@@ -87,6 +88,20 @@ func cmdGate() {
 		}
 	}
 	printGateSummary(result, *out)
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Emit(logging.Record{
+			Level: "ok", Command: "gate", Type: "gate",
+			Message: "Gate вердикт",
+			Data: map[string]any{
+				"status":        result.Status,
+				"policy":        result.PolicyVerdict,
+				"bundle_sha256": result.BundleSHA256,
+				"bundle":        *out,
+				"signed":        false,
+			},
+			Exit: gate.ExitCode(result),
+		})
+	}
 	os.Exit(gate.ExitCode(result))
 }
 
@@ -154,53 +169,53 @@ func printGateSummary(result *gate.Result, outDir string) {
 	if result.Status != "passed" {
 		mark, status = "✗", "FAIL"
 	}
-	fmt.Printf("\n%s Gate %s (exit %d) — %s\n", mark, status, gate.ExitCode(result), strings.Join(parts, ", "))
+	logging.Printf("\n%s Gate %s (exit %d) — %s\n", mark, status, gate.ExitCode(result), strings.Join(parts, ", "))
 
 	candidateRef := result.Candidate
 	if result.CandidateCommit != "" {
 		candidateRef = result.CandidateCommit
 	}
-	fmt.Printf("  base %s → %s (%s)\n", abbrev12(result.BaseCommit), abbrev12(candidateRef), result.DiffPolicy)
+	logging.Printf("  base %s → %s (%s)\n", abbrev12(result.BaseCommit), abbrev12(candidateRef), result.DiffPolicy)
 
 	switch result.PolicyVerdict {
 	case gate.VerdictPassed:
-		fmt.Printf("  diff-policy: PASS — test_modify=%s, test change покрывает source\n", result.DiffPolicy)
+		logging.Printf("  diff-policy: PASS — test_modify=%s, test change покрывает source\n", result.DiffPolicy)
 	case gate.VerdictViolated:
-		fmt.Printf("  diff-policy: FAIL — изменение source без тестов (test_modify=%s):\n", result.DiffPolicy)
+		logging.Printf("  diff-policy: FAIL — изменение source без тестов (test_modify=%s):\n", result.DiffPolicy)
 		for _, violation := range result.PolicyViolations {
-			fmt.Printf("    - %s (%s)\n", violation.Path, violation.Kind)
+			logging.Printf("    - %s (%s)\n", violation.Path, violation.Kind)
 		}
 	case gate.VerdictWarning:
-		fmt.Printf("  diff-policy: WARNING — изменение source без тестов (test_modify=warning, не блокирует):\n")
+		logging.Printf("  diff-policy: WARNING — изменение source без тестов (test_modify=warning, не блокирует):\n")
 		for _, violation := range result.PolicyViolations {
-			fmt.Printf("    - %s (%s)\n", violation.Path, violation.Kind)
+			logging.Printf("    - %s (%s)\n", violation.Path, violation.Kind)
 		}
 	case gate.VerdictSkipped:
-		fmt.Printf("  diff-policy: disabled\n")
+		logging.Printf("  diff-policy: disabled\n")
 	}
 
 	if len(result.Checks) == 0 {
-		fmt.Printf("  checks: не заданы\n")
+		logging.Printf("  checks: не заданы\n")
 	}
 	for _, check := range result.Checks {
 		statusMark := "✓"
 		if check.Status != checks.StatusPassed {
 			statusMark = "✗"
 		}
-		fmt.Printf("  check %-16s %-8s %s (%s)\n", check.Name, statusMark, check.Status, time.Duration(check.Duration).Round(time.Millisecond))
+		logging.Printf("  check %-16s %-8s %s (%s)\n", check.Name, statusMark, check.Status, time.Duration(check.Duration).Round(time.Millisecond))
 	}
 
 	sig := result.Signals
-	fmt.Printf("  signals: +%d/-%d lines, %d→%d files, tests=%d, checks=%d failed=%d",
+	logging.Printf("  signals: +%d/-%d lines, %d→%d files, tests=%d, checks=%d failed=%d",
 		sig.AddedLines, sig.RemovedLines, sig.AddedFiles+sig.ModifiedFiles, sig.RemovedFiles, sig.TestChanges, sig.ChecksRun, sig.FailedChecks)
 	if len(sig.SensitivePaths) > 0 {
 		paths := make([]string, 0, len(sig.SensitivePaths))
 		for _, entry := range sig.SensitivePaths {
 			paths = append(paths, entry.Path)
 		}
-		fmt.Printf("; sensitive: %s", strings.Join(paths, ", "))
+		logging.Printf("; sensitive: %s", strings.Join(paths, ", "))
 	}
 	fmt.Println()
 
-	fmt.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
+	logging.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
 }

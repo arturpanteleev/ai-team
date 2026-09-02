@@ -299,4 +299,22 @@ func TestRunEvidenceSkippedOnUnverifiedOrMalformedExport(t *testing.T) {
 	if actions := actionsFor(plan, CategoryRuns); len(actions) != 0 {
 		t.Fatalf("malformed export не даёт права на удаление, получено %+v", actions)
 	}
+
+	f = newFixture(t)
+	base = filepath.Join(f.target, ".ai-team", "state", "exports", oldTerminalRunID+".json")
+	// verified=true с пустым bundle_sha256 — запись без проверяемого bundle:
+	// fail-closed, право на удаление не выдаётся.
+	if err := os.WriteFile(base, []byte(`{"schema_version":1,"run_id":"`+oldTerminalRunID+`","verified":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan = f.build(t, true)
+	if actions := actionsFor(plan, CategoryRuns); len(actions) != 0 {
+		t.Fatalf("verified export с пустым bundle_sha256 не даёт права на удаление, получено %+v", actions)
+	}
+	for _, skipped := range plan.Skipped {
+		if strings.HasSuffix(skipped.Path, oldTerminalRunID+".json") && strings.Contains(skipped.Reason, "bundle_sha256") {
+			return
+		}
+	}
+	t.Fatalf("ожидали Skipped с причиной bundle_sha256, got %+v", plan.Skipped)
 }

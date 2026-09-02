@@ -60,9 +60,9 @@ func (p *planner) loadVerifiedExports() error {
 			continue
 		}
 		runID := strings.TrimSuffix(name, ".json")
-		if record.RunID != runID || record.SchemaVersion != ExportSchema || !record.Verified {
+		if record.RunID != runID || record.SchemaVersion != ExportSchema || !record.Verified || record.BundleSHA256 == "" {
 			p.plan.Skipped = append(p.plan.Skipped, Skipped{
-				Path: path, Reason: "export-запись не verified или не соответствует run_id",
+				Path: path, Reason: "export-запись не verified, не соответствует run_id или bundle_sha256 пуст",
 			})
 			continue
 		}

@@ -40,19 +40,37 @@ func loadPolicyConfig(target string) (*config.Config, error) {
 
 // cmdRedact — P1-6 privacy-контракт:
 //
-//	ai-team redact verify --target <dir> [--run <id>] [-json listed]
+//	ai-team redact verify --target <dir> [--run <id>]
 //	ai-team redact scan   --target <dir> [--path <rel>]
 //	ai-team redact redact --target <dir> --out <dir> [--path <rel>]
+//
+// Подкоманда (verify|scan|redact) — первый позиционный аргумент; её нужно
+// вынуть ДО flag.Parse, иначе Go-flag остановится на первом не-флаге и
+// задокументированная форма `redact verify --target <dir>` не разберёт флаги.
 func cmdRedact() {
+	sub := ""
+	rest := os.Args[2:]
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		sub = rest[0]
+		rest = rest[1:]
+	}
+
 	redactFlags := flag.NewFlagSet("redact", flag.ExitOnError)
 	target := redactFlags.String("target", ".", "Путь к целевому проекту")
 	runID := redactFlags.String("run", "", "Ограничить скан одним run (run_id)")
 	pathArg := redactFlags.String("path", "", "Ограничить скан repository-относительным путём")
 	outDir := redactFlags.String("out", ".ai-team/redacted", "Каталог для redaction-копии (для redact)")
-	redactFlags.Parse(os.Args[2:])
+	if err := redactFlags.Parse(rest); err != nil {
+		fatal("Ошибка аргументов redact: %v", err)
+	}
+	if redactFlags.NArg() != 0 {
+		fatal("Неожиданные аргументы redact: %s", strings.Join(redactFlags.Args(), " "))
+	}
 
-	if redactFlags.NArg() != 1 {
-		fatal("Использование: ai-team redact < verify | scan | redact > [--target <dir>] [--run <id>] [--path <rel>]")
+	switch sub {
+	case "verify", "scan", "redact":
+	default:
+		fatal("Использование: ai-team redact < verify | scan | redact > [--target <dir>] [--run <id>] [--path <rel>] [--out <dir>]")
 	}
 	absolute, err := absoluteTarget(*target)
 	if err != nil {
@@ -66,6 +84,9 @@ func cmdRedact() {
 		fatal("Ошибка загрузки конфига: %v", err)
 	}
 	policy := redactionPolicy(cfg)
+	// SF3: include/exclude glob'ы документированы repository-relative — матчим
+	// их от корня репозитория, а не от суженного корня сканирования.
+	policy.RepoRoot = *target
 
 	scanRoot, err := redactRoot(*target)
 	if err != nil {
@@ -81,7 +102,16 @@ func cmdRedact() {
 		scanRoot = filepath.Join(scanRoot, strings.TrimPrefix(filepath.FromSlash(*pathArg), "./"))
 	}
 
-	switch redactFlags.Arg(0) {
+	// SF4: относительный --out резолвится от target, а не от CWD (match README);
+	// default .ai-team/redacted — каталог внутри target, но вне evidence-корня.
+	if *outDir == "" {
+		fatal("redact: --out обязателен для подкоманды redact")
+	}
+	if !filepath.IsAbs(*outDir) {
+		*outDir = filepath.Join(*target, *outDir)
+	}
+
+	switch sub {
 	case "verify":
 		report, err := redact.Verify(scanRoot, policy)
 		if err != nil {
@@ -113,28 +143,39 @@ func cmdRedact() {
 			Message: fmt.Sprintf("Scan: %d files, %d findings", scanned, len(report.Violations)),
 			Data:    redactReportData(&report), Exit: exitOK})
 	case "redact":
-		applyRedact(scanRoot, *outDir, policy)
-	default:
-		fatal("Неизвестная подкоманда redact: %s", redactFlags.Arg(0))
+		if err := applyRedact(scanRoot, *outDir, policy); err != nil {
+			fatal("redact: %v", err)
+		}
 	}
 }
 
-func applyRedact(source, out string, policy redact.Policy) {
+func applyRedact(source, out string, policy redact.Policy) error {
 	if _, err := os.Stat(source); err != nil {
-		fatal("redact: источник не найден: %v", err)
+		return fmt.Errorf("источник не найден: %v", err)
 	}
+	absSource, err := filepath.Abs(source)
+	if err != nil {
+		return fmt.Errorf("source path: %v", err)
+	}
+	source = absSource
 	if !filepath.IsAbs(out) {
 		abs, err := filepath.Abs(out)
 		if err != nil {
-			fatal("redact: out path: %v", err)
+			return fmt.Errorf("out path: %v", err)
 		}
 		out = abs
 	}
+	// SF4: запретить out внутри source — иначе WalkDir рекурсивно спиралит по
+	// создаваемой redacted-копии (излюбленный путь к бесконечному циклу).
+	rel, err := filepath.Rel(source, out)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("--out (%s) не может лежать внутри источника (%s)", out, source)
+	}
 	if _, err := os.Stat(out); err == nil {
-		fatal("redact: целевой каталог уже существует: %s", out)
+		return fmt.Errorf("целевой каталог уже существует: %s", out)
 	}
 	if err := os.MkdirAll(out, 0755); err != nil {
-		fatal("redact: создание out: %v", err)
+		return fmt.Errorf("создание out: %v", err)
 	}
 	var files, redacted, total int64
 	walkErr := filepath.WalkDir(source, func(p string, entry fs.DirEntry, walkErr error) error {
@@ -151,7 +192,13 @@ func applyRedact(source, out string, policy redact.Policy) {
 		if entry.Type()&fs.ModeSymlink != 0 || entry.Type()&(fs.ModeDevice|fs.ModeNamedPipe|fs.ModeSocket) != 0 {
 			return nil
 		}
-		if !policy.Applies(filepath.ToSlash(rel)) {
+		// SF3: include/exclude — repository-relative (от policy.RepoRoot),
+		// а не от суженного корня сканирования.
+		matcherRel, matcherErr := redact.PolicyRel(policy.RepoRoot, source, p)
+		if matcherErr != nil {
+			return matcherErr
+		}
+		if !policy.Applies(matcherRel) {
 			return nil
 		}
 		findings, err := redact.ScanFile(p, policy.MaxBytes)
@@ -175,12 +222,13 @@ func applyRedact(source, out string, policy redact.Policy) {
 		return nil
 	})
 	if walkErr != nil {
-		fatal("redact: %v", walkErr)
+		return walkErr
 	}
 	fmt.Printf("✓ Redacted %s → %s (%d файлов, из них redacted %d)\n", source, out, files, redacted)
 	logging.Emit(logging.Record{Level: "ok", Command: "redact", Type: "redact_apply",
 		Message: "Redaction применена", Data: map[string]any{"source": source, "out": out,
 			"files": files, "redacted": redacted, "bytes": total}, Exit: exitOK})
+	return nil
 }
 
 func copyRegular(src, dst string) error {

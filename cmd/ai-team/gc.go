@@ -46,6 +46,9 @@ func cmdGC() {
 		}
 		cfg = &config.Config{}
 	}
+	if err := cfg.Retention.Validate(); err != nil {
+		fatal("Ошибка retention-конфига: %v", err)
+	}
 	flagVisited := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { flagVisited[f.Name] = true })
 	if !flagVisited["older-than"] {

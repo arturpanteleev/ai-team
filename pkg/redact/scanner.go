@@ -133,6 +133,28 @@ func compileSecretRules() []secretRule {
 	return secretRe
 }
 
+// beginPrivateKeyRe / endPrivateKeyRe — границы PEM-блока private key.
+// RedactFile вырезает весь блок (BEGIN … END), а не только BEGIN-строку:
+// иначе base64-тело ключа оставалось бы в redacted-копии.
+var (
+	beginPrivateKeyOnce  sync.Once
+	beginPrivateKeyReVal *regexp.Regexp
+	endPrivateKeyReVal   *regexp.Regexp
+)
+
+func beginPrivateKeyRe() *regexp.Regexp {
+	beginPrivateKeyOnce.Do(func() {
+		beginPrivateKeyReVal = regexp.MustCompile(`(?m)^[ \t]*-----BEGIN [A-Z ]*PRIVATE KEY-----$`)
+		endPrivateKeyReVal = regexp.MustCompile(`(?m)^[ \t]*-----END [A-Z ]*PRIVATE KEY-----$`)
+	})
+	return beginPrivateKeyReVal
+}
+
+func endPrivateKeyRe() *regexp.Regexp {
+	beginPrivateKeyRe()
+	return endPrivateKeyReVal
+}
+
 // likelySecretValue фильтрует ложные срабатывания secret assignment:
 // значения-плейсхолдеры, vault/env-ссылки и короткие слова без верхнего
 // регистра и цифр не считаются секретом.
@@ -223,8 +245,12 @@ func IsBinary(data []byte) bool {
 }
 
 // ScanFile читает regular file (no-follow, через канонический safeio лимит)
-// и сканирует его. Возвращает nil, nil для бинарных файлов.
+// и сканирует его. Возвращает nil, nil для бинарных файлов. maxBytes<=0
+// означает канонический дефолт MaxScanFileBytes (как и в ScanDir/Verify).
 func ScanFile(path string, maxBytes int64) ([]Finding, error) {
+	if maxBytes <= 0 {
+		maxBytes = MaxScanFileBytes
+	}
 	data, err := safeio.ReadRegularFile(path, maxBytes)
 	if err != nil {
 		return nil, err

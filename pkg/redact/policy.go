@@ -26,6 +26,11 @@ type Policy struct {
 	MaxBytes int64
 	// SkipBinary — не сканировать бинарные файлы.
 	SkipBinary bool
+	// RepoRoot — корень репозитория: протокол-относительный glob'ы
+	// include/exclude резолвятся от него, а не от суженного корня сканирования
+	// (.ai-team/runs или каталог одного run). Пустое значение = корнем служит
+	// сам корень сканирования (совместимость с узкими вызовами).
+	RepoRoot string
 }
 
 func (p Policy) withDefaults() Policy {

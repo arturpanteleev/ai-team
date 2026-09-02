@@ -69,6 +69,42 @@ func TestRedactReplacesFindings(t *testing.T) {
 	}
 }
 
+// TestRedactAlignsWithScanFilter — RedactFile применяет тот же
+// likelySecretValue-фильтр к secret assignment, что и Scan: бенign-значение
+// не режется (иначе scan и redact расходились бы по контракту P1-6).
+func TestRedactAlignsWithScanFilter(t *testing.T) {
+	input := []byte("password=0123456789abcdef\npassword=A1b2C3d4E5f6G7h8\n")
+	redacted := string(RedactFile(input))
+	if !strings.Contains(redacted, "password=0123456789abcdef") {
+		t.Errorf("бенign-значение (без верхнего регистра) не должно резаться: %q", redacted)
+	}
+	if strings.Contains(redacted, "A1b2C3d4E5f6G7h8") {
+		t.Errorf("высокоэнтропийное значение должно быть вырезано: %q", redacted)
+	}
+}
+
+// TestRedactBlanksPrivateKeyBody — RedactFile вырезает ВЕСЬ PEM-блок private
+// key (BEGIN … тело base64 … END), а не только BEGIN-строку.
+func TestRedactBlanksPrivateKeyBody(t *testing.T) {
+	header := "-----BEGIN RSA " + "PRIVATE KEY-----"
+	footer := "-----END RSA " + "PRIVATE KEY-----"
+	body := "MIIEpAIBAAKCAQEA" + strings.Repeat("A", 40)
+	input := []byte("before\n" + header + "\n" + body + "\n" + footer + "\nafter\n")
+	redacted := string(RedactFile(input))
+	if strings.Contains(redacted, body) {
+		t.Errorf("тело private key осталось в redacted-копии: %q", redacted)
+	}
+	if strings.Contains(redacted, "MIIE") {
+		t.Errorf("BEGIN/тело блока не полностью вырезаны: %q", redacted)
+	}
+	if !strings.Contains(redacted, "before") || !strings.Contains(redacted, "after") {
+		t.Errorf("контекст повреждён: %q", redacted)
+	}
+	if strings.Count(redacted, "[REDACTED:private key]") < 3 {
+		t.Errorf("ожидались 3+ маркера (begin/body/end): %q", redacted)
+	}
+}
+
 func TestClassifyField(t *testing.T) {
 	for name, want := range map[string]FieldClass{
 		"run_id":           FieldPublic,

@@ -448,6 +448,13 @@ func (c *Config) Validate(reg AgentLookup) error {
 	if len(errs) > 0 {
 		return fmt.Errorf("невалидный config.yaml:\n  - %s", strings.Join(errs, "\n  - "))
 	}
+	// OPS-2: регистрируем project-specific ignore dirs в каноническом tree
+	// hash'е как процесс-глобальный набор. Регистрация происходит только
+	// после строгой валидации (TreeHash.Validate выше), поэтому
+	// недопустимые имена не могут попасть в глобальный ignore-list.
+	if c.TreeHash != nil {
+		checks.SetExtraIgnoreDirs(c.TreeHash.IgnoreDirs)
+	}
 	return nil
 }
 

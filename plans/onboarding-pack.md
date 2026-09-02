@@ -1,7 +1,7 @@
 # Onboarding pack (туториал, демо-репо, troubleshooting)
 
 Статус: идея
-Источник: TECHNICAL_AUDIT «Documentation coherence 4/10»
+Источник: docs/audits/2026-08-05-technical-audit.md «Documentation coherence 4/10»
 
 ## Задача
 

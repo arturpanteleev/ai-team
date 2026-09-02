@@ -1,7 +1,7 @@
 # Tree hashing performance (перформанс хеширования)
 
 Статус: идея
-Источник: AUDIT M-05; SCOPE_REVIEW корзина 3
+Источник: AUDIT.md M-05; docs/audits/2026-07-25-scope-review.md корзина 3
 
 ## Задача
 

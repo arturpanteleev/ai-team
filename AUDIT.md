@@ -5,7 +5,8 @@
 > approvals с RBAC (частично H-02), graph workflow v4, web write API с
 > session/CSRF, RunEngine с persisted resume. Описания «live workspace» и
 > «нет candidate identity» устарели — см. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-> и более свежий `docs/audits/2026-08-05-technical-audit.md`. Разделы про OS-sandbox
+> и более свежий [docs/audits/2026-08-05-technical-audit.md](docs/audits/2026-08-05-technical-audit.md).
+> Разделы про OS-sandbox
 > (C-01) и внешнее anchor'ирование event log (H-04) остаются актуальными.
 
 Дата среза: 2026-07-20. Область: локальный Go control plane, agent runtime,

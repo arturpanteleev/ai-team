@@ -5,7 +5,7 @@
 > approvals/RBAC, RunEngine, web write API, WebSocket bridge, scheduler,
 > candidate worktree. Статус конкретных пунктов не отслеживается здесь —
 > актуальное состояние см. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) и
-> `docs/audits/2026-08-05-technical-audit.md`.
+> [docs/audits/2026-08-05-technical-audit.md](docs/audits/2026-08-05-technical-audit.md).
 
 ## 1. Целевая концепция
 

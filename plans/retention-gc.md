@@ -1,7 +1,7 @@
 # Retention & GC (политика хранения)
 
 Статус: идея
-Источник: TECHNICAL_AUDIT P2
+Источник: docs/audits/2026-08-05-technical-audit.md P2
 
 ## Задача
 

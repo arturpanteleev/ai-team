@@ -109,3 +109,7 @@ JUNIT_CODE="$(sed -n 's/^junit=//p' "$WORK/codes")"
 echo "✓ Демо завершено: pass=${PASS_CODE} (0), policy-fail=${POLICY_CODE} (1), junit-fail=${JUNIT_CODE} (1)"
 echo "  Все bundle прошли самодостаточную verify — см. docs/demo/README.md и ci-gate-demo.yaml"
 echo "  ai-team закреплён за ревизией ${AI_TEAM_REF}"
+if [ "${PASS_CODE}" != "0" ] || [ "${POLICY_CODE}" != "1" ] || [ "${JUNIT_CODE}" != "1" ]; then
+  echo "✗ Демо НЕ прошло assertion: ожидались pass=0, policy=1, junit=1" >&2
+  exit 1
+fi

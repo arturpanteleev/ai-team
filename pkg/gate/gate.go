@@ -614,6 +614,16 @@ func VerifyBundle(bundleDir string) (string, error) {
 	if err := strictDecode(gateData, &verdict); err != nil {
 		return "", fmt.Errorf("verify gate bundle: gate.json: %v", err)
 	}
+	// Cross-check: index.json обязан совпадать с идентичностью вердикта из
+	// gate.json — иначе index описывает чужой bundle, а не лежащий на диске.
+	candidate := verdict.CandidateCommit
+	if candidate == "" {
+		candidate = verdict.Candidate
+	}
+	if index.Base != verdict.BaseCommit || index.Candidate != candidate {
+		return "", fmt.Errorf("verify gate bundle: index.json identity (base=%s candidate=%s) не совпадает с gate.json (base=%s candidate=%s)",
+			index.Base, index.Candidate, verdict.BaseCommit, candidate)
+	}
 	if verdict.BundleSHA256 != "" && verdict.BundleSHA256 != digest {
 		return "", fmt.Errorf("verify gate bundle: заявленный bundle_sha256 %q не равен digest %q",
 			verdict.BundleSHA256, digest)

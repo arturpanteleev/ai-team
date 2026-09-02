@@ -356,6 +356,11 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 		"missing record": func(bundleDir string) {
 			os.Remove(filepath.Join(bundleDir, "checks", "001-go-test.json"))
 		},
+		"index identity diverges from gate.json": func(bundleDir string) {
+			path := filepath.Join(bundleDir, "index.json")
+			indexData, _ := os.ReadFile(path)
+			os.WriteFile(path, bytes.Replace(indexData, []byte("aabb"), []byte("0000"), 1), 0644)
+		},
 	}
 	for name, mutate := range tamperCases {
 		fresh := t.TempDir()

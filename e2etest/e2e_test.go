@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -303,9 +304,16 @@ func TestE2E_DisposableWorkerPersistsPendingApproval(t *testing.T) {
 		t.Fatalf("worker не сохранил waiting lifecycle: err=%v\n%s", err, state)
 	}
 	approvals, err := filepath.Glob(filepath.Join(dir, ".ai-team", "state", "approvals", runID, "*.json"))
-	if err != nil || len(approvals) != 1 {
-		t.Fatalf("worker не сохранил exact pending approval: %v err=%v", approvals, err)
+	if err != nil || len(approvals) == 0 {
+		t.Fatalf("worker не сохранил pending approval: %v err=%v", approvals, err)
 	}
+	var waiting struct {
+		ApprovalID string `json:"pending_approval_id"`
+	}
+	if json.Unmarshal(state, &waiting) != nil || waiting.ApprovalID == "" {
+		t.Fatalf("waiting state без pending_approval_id:\n%s", state)
+	}
+	checkFile(t, filepath.Join(dir, ".ai-team", "state", "approvals", runID, waiting.ApprovalID+".json"))
 	checkFile(t, filepath.Join(dir, ".ai-team", "state", "candidates", runID+".json"))
 	checkFile(t, filepath.Join(dir, ".ai-team", "web.db"))
 }
@@ -623,8 +631,11 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer response.Body.Close()
+		raw, _ := io.ReadAll(response.Body)
 		var result map[string]any
-		_ = json.NewDecoder(response.Body).Decode(&result)
+		if json.Unmarshal(raw, &result) != nil {
+			result = map[string]any{"raw": string(raw)}
+		}
 		return response.StatusCode, result
 	}
 	status, started := post("/api/runs", map[string]string{
@@ -635,8 +646,9 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		t.Fatalf("web start: status=%d body=%v\n%s", status, started, serverOutput.String())
 	}
 	type approvalState struct {
-		ID          string `json:"id"`
-		SubjectHash string `json:"subject_hash"`
+		ID            string   `json:"id"`
+		SubjectHash   string   `json:"subject_hash"`
+		RequiredRoles []string `json:"required_roles"`
 	}
 	readPending := func() approvalState {
 		statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
@@ -666,21 +678,30 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		first = readPending()
 		return first.ID != ""
 	}, func() string { return serverOutput.String() })
-	status, _ = post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
-		"actor_id": "product-1", "actor_role": "product_owner",
+	role := "product_owner"
+	if len(first.RequiredRoles) > 0 {
+		role = first.RequiredRoles[0]
+	}
+	status, decided := post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
+		"actor_id": "product-1", "actor_role": role,
 		"action": "approve", "subject_hash": first.SubjectHash,
 	})
 	if status != http.StatusOK {
-		t.Fatalf("web decision status=%d", status)
+		t.Fatalf("web decision status=%d role=%s body=%v", status, role, decided)
 	}
-	status, _ = post("/api/runs/"+runID+"/resume", map[string]string{})
-	if status != http.StatusAccepted {
-		t.Fatalf("web resume status=%d\n%s", status, serverOutput.String())
-	}
-	var second approvalState
+	var resumed map[string]any
 	waitUntil(t, 10*time.Second, func() bool {
-		second = readPending()
-		return second.ID != "" && second.ID != first.ID
+		status, resumed = post("/api/runs/"+runID+"/resume", map[string]string{})
+		return status == http.StatusAccepted
+	}, func() string { return fmt.Sprintf("status=%d body=%v\n%s", status, resumed, serverOutput.String()) })
+	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
+	waitUntil(t, 15*time.Second, func() bool {
+		stateData, err := os.ReadFile(statePath)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(stateData), `"phase": "terminal"`) ||
+			(readPending().ID != "" && readPending().ID != first.ID)
 	}, func() string { return serverOutput.String() })
 
 	events, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"))

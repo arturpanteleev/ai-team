@@ -66,6 +66,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		result := rs.runStage(ctx, index, current)
 		rs.results = append(rs.results, result)
 		rs.visits[current]++
+		if err := rs.enforceTestMutationPolicy(current, result); err != nil {
+			return err
+		}
 		if err := rs.afterAttempt(ctx); err != nil {
 			return err
 		}

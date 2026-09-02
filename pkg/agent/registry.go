@@ -138,6 +138,14 @@ func validateDefinition(dirName string, a *Agent) error {
 	if a.Mutation != "source" && a.Mutation != "tests" && len(a.AllowedPaths) > 0 {
 		return fmt.Errorf("агент %s: allowed_paths разрешён только для mutation source или tests", dirName)
 	}
+	switch a.TestModifyPolicy {
+	case "", "required", "warn", "off":
+	default:
+		return fmt.Errorf("агент %s: неизвестный test_modify_policy %q (required, warn или off)", dirName, a.TestModifyPolicy)
+	}
+	if a.TestModifyPolicy != "" && a.Mutation != "source" && a.Mutation != "tests" {
+		return fmt.Errorf("агент %s: test_modify_policy разрешён только для mutation source или tests", dirName)
+	}
 	for _, pattern := range a.AllowedPaths {
 		if err := scope.Validate(pattern); err != nil {
 			return fmt.Errorf("агент %s: %w", dirName, err)

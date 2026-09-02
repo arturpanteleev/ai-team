@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/scope"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 type filesystemSnapshot struct {
@@ -158,6 +160,30 @@ func changedSnapshotPaths(before, after filesystemSnapshot) []string {
 	}
 	sort.Strings(changed)
 	return changed
+}
+
+// classifyMutationChanges атрибутирует каждый changed path режимом изменения
+// (added/modified/removed относительно baseline этапа) и классом пути
+// (V0-1). Работает на тех же снапшотах, что и changedSnapshotPaths: digest
+// отсутствует на стороне базовой или конечной — значит файл добавлен или
+// удалён соответственно.
+func classifyMutationChanges(before, after filesystemSnapshot, changed []string) []workflow.MutationChange {
+	changes := make([]workflow.MutationChange, 0, len(changed))
+	for _, changedPath := range changed {
+		_, existedBefore := before.Files[changedPath]
+		_, existsAfter := after.Files[changedPath]
+		kind := workflow.MutationModified
+		switch {
+		case !existedBefore:
+			kind = workflow.MutationAdded
+		case !existsAfter:
+			kind = workflow.MutationRemoved
+		}
+		changes = append(changes, workflow.MutationChange{
+			Path: changedPath, Kind: kind, Class: scope.ClassifyMutation(changedPath),
+		})
+	}
+	return changes
 }
 
 func gitOutput(dir string, args ...string) ([]byte, error) {

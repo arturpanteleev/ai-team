@@ -24,6 +24,39 @@ func TestRegistry_Load(t *testing.T) {
 	}
 }
 
+func TestRegistry_TestModifyPolicyDefaults(t *testing.T) {
+	load := func(t *testing.T, yaml string) *Agent {
+		t.Helper()
+		registry := NewFS(fstest.MapFS{
+			"sample/def.yaml":  &fstest.MapFile{Data: []byte(yaml)},
+			"sample/prompt.md": &fstest.MapFile{Data: []byte("test")},
+		})
+		a, err := registry.Load("sample")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"source default fail-closed", "name: sample\nruntime: agentcli\nprompt_file: prompt.md\nmutation: source\nallowed_paths: ['**']\n", "required"},
+		{"tests default off", "name: sample\nruntime: agentcli\nprompt_file: prompt.md\nmutation: tests\nallowed_paths: ['**/*_test.go']\n", "off"},
+		{"source explicit warn", "name: sample\nruntime: agentcli\nprompt_file: prompt.md\nmutation: source\nallowed_paths: ['**']\ntest_modify_policy: warn\n", "warn"},
+		{"source explicit off", "name: sample\nruntime: agentcli\nprompt_file: prompt.md\nmutation: source\nallowed_paths: ['**']\ntest_modify_policy: off\n", "off"},
+		{"explicit required", "name: sample\nruntime: agentcli\nprompt_file: prompt.md\nmutation: tests\nallowed_paths: ['**/*_test.go']\ntest_modify_policy: required\n", "required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := load(t, tc.yaml).EffectiveTestModifyPolicy(); got != tc.want {
+				t.Fatalf("EffectiveTestModifyPolicy()=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRegistry_Load_NotFound(t *testing.T) {
 	r := NewFS(os.DirFS("../../e2etest/agents"))
 	_, err := r.Load("nonexistent")
@@ -124,6 +157,9 @@ func TestRegistry_RejectsUnsafeOrInconsistentDefinitions(t *testing.T) {
 		{"verdict without markdown", "name: sample\nruntime: agentcli\nmutation: none\nverdict:\n  required: true\n  marker: Result\n  values: [PASS, FAIL]\noutputs: {}\n", "markdown output"},
 		{"optional verdict", "name: sample\nruntime: agentcli\nmutation: none\nverdict:\n  marker: Verdict\n  values: [APPROVED]\noutputs:\n  report: report.md\n", "required должен быть true"},
 		{"marker values mismatch", "name: sample\nruntime: agentcli\nmutation: none\nverdict:\n  required: true\n  marker: Result\n  values: [APPROVED]\noutputs:\n  report: report.md\n", "несовместимо"},
+		{"unknown test_modify_policy", "name: sample\nruntime: agentcli\nmutation: source\nallowed_paths: ['**']\ntest_modify_policy: maybe\n", "неизвестный test_modify_policy"},
+		{"test_modify_policy on non-mutating agent", "name: sample\nruntime: agentcli\nmutation: none\ntest_modify_policy: warn\n", "test_modify_policy разрешён только"},
+		{"unknown field in test_modify_policy", "name: sample\nruntime: agentcli\nmutation: source\nallowed_paths: ['**']\ntest_modify_policy_y: required\n", "field test_modify_policy_y not found"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

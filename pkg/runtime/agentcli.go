@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,12 +16,25 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
 )
 
+// DefaultCLI — бинарник харнесса по умолчанию (первый зарегистрированный
+// адаптер с этим именем — opencode).
+const DefaultCLI = "opencode"
+
+// AgentCLIRuntime — тонкий оркестратор: harvesting промпта, временного файла,
+// запуска процесса и логирования. Путь к харнессу и изоляция выбираются из
+// реестра адаптеров по имени бинарника (CLI). Никакой opencode-специфики в
+// этом типе нет — только контракт RuntimeAdapter.
 type AgentCLIRuntime struct{}
 
 func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error {
 	cli := agent.CLI
 	if cli == "" {
-		cli = "opencode"
+		cli = DefaultCLI
+	}
+
+	adapter, err := Adapter(filepath.Base(cli))
+	if err != nil {
+		return err
 	}
 
 	if _, err := exec.LookPath(cli); err != nil {
@@ -32,6 +44,17 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	prompt, err := r.buildPrompt(agent, task, inputs)
 	if err != nil {
 		return fmt.Errorf("ошибка сборки промпта: %w", err)
+	}
+
+	launch := Launch{
+		Model:            agent.Model,
+		Effort:           agent.Effort,
+		Interactive:      task.Interactive,
+		AskQuestions:     agent.AskQuestions,
+		RequireIsolation: true,
+	}
+	if err := adapter.Validate(launch); err != nil {
+		return fmt.Errorf("агент %s: %w", agent.Name, err)
 	}
 
 	targetDir := task.TargetDir
@@ -44,7 +67,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		return fmt.Errorf("агент %s: временный prompt: %w", agent.Name, err)
 	}
 	defer cleanupPrompt()
-	args, err := AgentCLIArgs(cli, agent.Model, promptFile)
+	args, err := adapter.Command(cli, agent.Model, promptFile)
 	if err != nil {
 		return err
 	}
@@ -64,9 +87,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	cmd.Dir = targetDir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	isolatedEnv, cleanupEnv, err := OpenCodeIsolationEnvironment(agent, task, inputs...)
+	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, task, inputs...)
 	if err != nil {
-		return fmt.Errorf("агент %s: OpenCode isolation: %w", agent.Name, err)
+		return fmt.Errorf("агент %s: изоляция сессии: %w", agent.Name, err)
 	}
 	defer cleanupEnv()
 	cmd.Env = isolatedEnv
@@ -81,189 +104,45 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	return nil
 }
 
-// opencodeIsolationEnvironment denies effectful OpenCode tools by default.
-// The controller remains the only component allowed to run commands, access
-// the network and perform delivery. File edits are narrowed to the stage's
-// declared source scopes and immutable artifact contract.
-// questionPermission разрешает инструмент question только агентам с
-// ask_questions в интерактивном режиме; иначе deny (вопрос в non-TTY повис
-// бы до таймаута).
-func questionPermission(agent *Agent, task *Task) string {
-	if agent != nil && agent.AskQuestions && task != nil && task.Interactive {
-		return "allow"
-	}
-	return "deny"
-}
-
-func OpenCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) ([]string, func(), error) {
-	for _, relative := range []string{"opencode.json", "opencode.jsonc", filepath.Join(".opencode", "plugins"), filepath.Join(".opencode", "tools")} {
-		if info, err := os.Lstat(filepath.Join(task.TargetDir, relative)); err == nil && (info.IsDir() || info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
-			return nil, func() {}, fmt.Errorf("project execution surface %s запрещена; плагины и custom tools входят в trusted controller, а не в agent runtime", relative)
-		} else if err != nil && !os.IsNotExist(err) {
-			return nil, func() {}, fmt.Errorf("проверка %s: %w", relative, err)
-		}
-	}
-
-	editRules := map[string]string{"*": "deny", ".ai-team/**": "deny", ".git/**": "deny"}
-	target, err := filepath.Abs(task.TargetDir)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	editRules[filepath.ToSlash(filepath.Join(target, ".ai-team"))+"/**"] = "deny"
-	editRules[filepath.ToSlash(filepath.Join(target, ".git"))+"/**"] = "deny"
-	readRules := map[string]string{
-		"*": "allow", ".git/**": "deny", ".ai-team/**": "deny",
-		".env": "deny", ".env.*": "deny", "**/.env": "deny", "**/.env.*": "deny",
-	}
-	readRules[filepath.ToSlash(filepath.Join(target, ".ai-team"))+"/**"] = "deny"
-	readRules[filepath.ToSlash(filepath.Join(target, ".git"))+"/**"] = "deny"
-	for _, input := range inputs {
-		inputPath, pathErr := filepath.Abs(input.Path)
-		if pathErr != nil {
-			return nil, func() {}, pathErr
-		}
-		readRules[filepath.ToSlash(inputPath)] = "allow"
-		if info, statErr := os.Lstat(inputPath); statErr == nil && info.IsDir() {
-			readRules[filepath.ToSlash(inputPath)+"/**"] = "allow"
-		}
-	}
-	if agent.Mutation == "source" || agent.Mutation == "tests" {
-		for _, pattern := range agent.AllowedPaths {
-			editRules[filepath.ToSlash(pattern)] = "allow"
-			editRules[filepath.ToSlash(filepath.Join(target, filepath.FromSlash(pattern)))] = "allow"
-		}
-	}
-	var artifactPaths []string
-	for _, output := range agent.Outputs {
-		artifactPaths = append(artifactPaths, ReplaceVars(output, task.Feature))
-	}
-	artifactPaths = append(artifactPaths,
-		filepath.ToSlash(filepath.Join(task.Feature, "status", agent.Name+".md")),
-		filepath.ToSlash(filepath.Join(task.Feature, ".stage-summary", agent.Name+".md")),
-	)
-	artifactRoot, err := filepath.Abs(task.ArtifactRoot)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	for _, artifactPath := range artifactPaths {
-		fullPath := filepath.Join(artifactRoot, filepath.FromSlash(artifactPath))
-		relative, relErr := filepath.Rel(target, fullPath)
-		if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return nil, func() {}, fmt.Errorf("artifact output %s находится вне target", fullPath)
-		}
-		relative = filepath.ToSlash(relative)
-		editRules[relative] = "allow"
-		editRules[relative+"/**"] = "allow"
-		editRules[filepath.ToSlash(fullPath)] = "allow"
-		editRules[filepath.ToSlash(fullPath)+"/**"] = "allow"
-	}
-
-	permission := map[string]any{
-		"*":                  "deny",
-		"bash":               "deny",
-		"edit":               editRules,
-		"external_directory": "deny",
-		"glob":               "allow",
-		"grep":               "allow",
-		"list":               "allow",
-		"lsp":                "deny",
-		"question":           questionPermission(agent, task),
-		"read":               readRules,
-		"skill":              "deny",
-		"task":               "deny",
-		"webfetch":           "deny",
-		"websearch":          "deny",
-	}
-	permissionJSON, err := json.Marshal(permission)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	configJSON, err := json.Marshal(map[string]any{
-		"permission": permission,
-		"plugin":     []string{},
-		"share":      "disabled",
-	})
-	if err != nil {
-		return nil, func() {}, err
-	}
-	configHome, err := os.MkdirTemp("", "ai-team-opencode-config-*")
-	if err != nil {
-		return nil, func() {}, err
-	}
-	if err := os.Chmod(configHome, 0700); err != nil {
-		_ = os.RemoveAll(configHome)
-		return nil, func() {}, err
-	}
-	cleanup := func() { _ = os.RemoveAll(configHome) }
-	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())
-	env = append(env,
-		"OPENCODE_PERMISSION="+string(permissionJSON),
-		"OPENCODE_CONFIG_CONTENT="+string(configJSON),
-		"OPENCODE_DISABLE_DEFAULT_PLUGINS=true",
-		"OPENCODE_DISABLE_LSP_DOWNLOAD=true",
-		"OPENCODE_DISABLE_CLAUDE_CODE=true",
-		"XDG_CONFIG_HOME="+configHome,
-	)
-	sort.Strings(env)
-	return env, cleanup, nil
-}
-
-// baselineOpenCodeEnvironmentKeys are variable names passed through to the
-// opencode subprocess unconditionally: they're standard OS/locale/session
-// plumbing, not credentials, and opencode cannot run at all without at
-// least PATH and HOME resolving correctly.
-var baselineOpenCodeEnvironmentKeys = []string{
-	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD",
-	"LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
-}
-
-// allowedEnvironmentKeys returns the set of environment variable names
-// permitted to reach the opencode subprocess: the fixed baseline above, plus
-// any names the project or user explicitly opts in via
-// AI_TEAM_OPENCODE_ENV_ALLOW (comma-separated). This replaces passing the
-// full parent environment minus a short deny-list: by default nothing beyond
-// standard OS/locale plumbing crosses into the subprocess, and any provider
-// credential (e.g. an LLM API key opencode itself needs to authenticate)
-// must be named explicitly rather than leaking implicitly.
-func allowedEnvironmentKeys() map[string]bool {
-	allowed := make(map[string]bool, len(baselineOpenCodeEnvironmentKeys))
-	for _, key := range baselineOpenCodeEnvironmentKeys {
-		allowed[key] = true
-	}
-	for _, extra := range strings.Split(os.Getenv("AI_TEAM_OPENCODE_ENV_ALLOW"), ",") {
-		if key := strings.TrimSpace(extra); key != "" {
-			allowed[key] = true
-		}
-	}
-	return allowed
-}
-
-// withAllowedEnvironmentKeys builds a subprocess environment containing only
-// the explicitly allowed variable names from the parent environment.
-func withAllowedEnvironmentKeys(environment []string, allowed map[string]bool) []string {
-	filtered := make([]string, 0, len(allowed))
-	for _, item := range environment {
-		key := strings.SplitN(item, "=", 2)[0]
-		if allowed[key] {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-// AgentCLIArgs is the explicit adapter for the documented OpenCode CLI.
-// The large prompt is attached as a 0600 file, avoiding ARG_MAX and accidental
-// continuation of an unrelated previous session.
+// AgentCLIArgs — совместимая обёртка над opencode-адаптером (используется
+// eval и внешними вызовами). Новый код должен идти через реестр адаптеров.
 func AgentCLIArgs(cli, model, promptFile string) ([]string, error) {
-	if filepath.Base(cli) != "opencode" {
-		return nil, fmt.Errorf("CLI %q не поддерживается: требуется явный adapter вместо guessed arguments", cli)
+	adapter, err := Adapter("opencode")
+	if err != nil {
+		return nil, err
 	}
-	args := []string{"run"}
-	if model != "" && model != "auto" {
-		args = append(args, "-m", model)
+	return adapter.Command(cli, model, promptFile)
+}
+
+// OpenCodeIsolationEnvironment — совместимая обёртка над opencode-адаптером.
+func OpenCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) ([]string, func(), error) {
+	adapter, err := Adapter("opencode")
+	if err != nil {
+		return nil, func() {}, err
 	}
-	args = append(args, "--file", promptFile, "Выполни все инструкции из прикреплённого workflow-файла.")
-	return args, nil
+	return adapter.Environment(agent, task, inputs...)
+}
+
+// CheckCLI валидирует, что бинарник CLI относится к зарегистрированному
+// адаптеру и доступен в PATH. Неизвестный адаптер — ошибка (fail-closed).
+func CheckCLI(cli string) error {
+	if cli == "" {
+		return fmt.Errorf("CLI не задан: выберите один из адаптеров (%s)", strings.Join(AdapterNames(), ", "))
+	}
+	adapter, err := Adapter(filepath.Base(cli))
+	if err != nil {
+		return err
+	}
+	if pathAbility, ok := adapter.(interface{ LookPath(string) error }); ok {
+		if err := pathAbility.LookPath(cli); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := exec.LookPath(cli); err != nil {
+		return fmt.Errorf("%s: команда не найдена в PATH", cli)
+	}
+	return nil
 }
 
 func writePromptFile(prompt string) (string, func(), error) {
@@ -387,16 +266,6 @@ func serviceSection(agent *Agent, task *Task) string {
 	s += fmt.Sprintf("- В конце работы запиши краткое резюме этапа (2–5 строк: что сделано, ключевые решения) в файл `%s`.\n", summaryPath)
 	s += "- " + verdict.BlockedInstruction(task.ArtifactRoot, task.Feature, agent.Name) + "\n"
 	return s
-}
-
-func CheckCLI(cli string) error {
-	if filepath.Base(cli) != "opencode" {
-		return fmt.Errorf("CLI %q не поддерживается: реализован только явный adapter opencode", cli)
-	}
-	if _, err := exec.LookPath(cli); err != nil {
-		return fmt.Errorf("%s: команда не найдена в PATH (https://opencode.ai)", cli)
-	}
-	return nil
 }
 
 func NewRuntime(runtimeType string) (Runtime, error) {

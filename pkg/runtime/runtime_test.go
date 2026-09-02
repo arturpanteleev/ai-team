@@ -14,7 +14,7 @@ func TestCheckCLI_RejectsUnknownAdapter(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unsupported CLI")
 	}
-	if !strings.Contains(err.Error(), "не поддерживается") {
+	if !strings.Contains(err.Error(), "неизвестный adapter") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

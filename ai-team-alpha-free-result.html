@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-team — база знаний (Alpha Free Result)</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d212d; --text: #e2e6f0;
+    --muted: #9aa3b5; --accent: #6ea8fe; --green: #7ee787; --red: #ff7b72;
+    --yellow: #e3b341; --border: #2a3040; --code-bg: #12151d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
+  h1 { font-size: 30px; margin: 8px 0 4px; }
+  h2 { font-size: 22px; margin-top: 48px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 18px; margin-top: 32px; color: var(--accent); }
+  h4 { font-size: 15px; margin: 20px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  p, li { color: var(--text); }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px;
+         padding: 1px 6px; font: 13.5px ui-monospace, "SF Mono", Menlo, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+        padding: 14px 16px; overflow-x: auto; font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  .tag { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px;
+         font-weight: 600; margin-left: 8px; vertical-align: middle; white-space: nowrap; }
+  .tag.done  { background: rgba(126,231,135,.15); color: var(--green); border: 1px solid rgba(126,231,135,.4); }
+  .tag.part  { background: rgba(227,179,65,.12); color: var(--yellow); border: 1px solid rgba(227,179,65,.4); }
+  .tag.open  { background: rgba(255,123,114,.12); color: var(--red); border: 1px solid rgba(255,123,114,.4); }
+  .tag.idea  { background: rgba(154,163,181,.12); color: var(--muted); border: 1px solid rgba(154,163,181,.35); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+          padding: 18px 22px; margin: 16px 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 14px; margin: 16px 0; }
+  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; }
+  .kpi b { display:block; font-size: 22px; }
+  .kpi span { color: var(--muted); font-size: 13px; }
+  .toc { columns: 2; column-gap: 40px; font-size: 14.5px; }
+  .toc li { margin: 3px 0; break-inside: avoid; }
+  .meta { color: var(--muted); font-size: 13.5px; }
+  blockquote { border-left: 3px solid var(--accent); margin: 14px 0; padding: 4px 18px;
+               color: var(--muted); background: rgba(110,168,254,.05); border-radius: 0 8px 8px 0; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="meta">Срез знаний: 24 августа 2026 · репозиторий <code>arturpanteleev/ai-team</code> ·
+локальная копия <code>~/Projects/ai-team</code> · ветка master HEAD = <code>2e48ecc</code> (#40) ·
+рабочая ветка <code>chore/docs-audits-and-questions</code> = открытый PR <a href="https://github.com/arturpanteleev/ai-team/pull/45">#45</a></div>
+
+<h1>ai-team — база знаний проекта</h1>
+<p class="muted">Рабочее название сборки: <b>Alpha Free Result</b>. Это черновик-компендиум: всё знание о проекте,
+собранное из кода, документации, трёх аудитов, истории PR и бэклога планов. Из него дальше делается «нормальная»
+документация.</p>
+
+<h2 id="toc">Содержание</h2>
+<ol class="toc">
+  <li><a href="#summary">Резюме: что это и зачем</a></li>
+  <li><a href="#value">Проблема и ценность</a></li>
+  <li><a href="#surfaces">Поверхности работы: CLI / Web / API / MCP</a></li>
+  <li><a href="#pipeline">Конвейер и роли агентов</a></li>
+  <li><a href="#features">Фичи: подробный разбор</a></li>
+  <li><a href="#config">Конфигурация и запуск</a></li>
+  <li><a href="#scenarios">Сценарии использования</a></li>
+  <li><a href="#dev">Разработка самого ai-team</a></li>
+  <li><a href="#maturity">Зрелость: аудиты и что исправлено</a></li>
+  <li><a href="#roadmap">Дорожная карта и бэклог (38 планов)</a></li>
+  <li><a href="#history">История PR (волны развития)</a></li>
+  <li><a href="#limits">Ограничения и подводные камни</a></li>
+  <li><a href="#sources">Источники</a></li>
+</ol>
+
+<!-- ================================================================ -->
+<h2 id="summary">1. Резюме: что это и зачем</h2>
+
+<div class="card">
+<p><b>ai-team</b> — локальный control plane (Go CLI + веб-дашборд) для решения IT-задач цепочкой AI-агентов.
+LLM-агенты создают содержательные артефакты — proposal, design, код, тесты, ревью — и предлагают вердикты.
+Но переходы между этапами, проверки, mutation scopes, evidence (неизменяемые доказательства) и итоговую
+доставку в git исполняет <b>детерминированный Go-контроллер, а не LLM</b>.</p>
+<p>Ключевая идея одной фразой: <i>модель думает — код решает</i>. Ни один вердикт LLM не является фактом:
+фактами (какой diff, какие тесты реально запускались, какой exit code, какие байты закоммичены) владеет
+только контроллер.</p>
+</div>
+
+<div class="grid">
+  <div class="kpi"><span>Язык / стек ядра</span><b style="font-size:17px">Go 1.26.5 + SQLite (pure-Go, без cgo)</b></div>
+  <div class="kpi"><span>Фронтенд дашборда</span><b style="font-size:17px">React + TypeScript (Vite), встроен в бинарник через go:embed</b></div>
+  <div class="kpi"><span>LLM runtime</span><b style="font-size:17px">OpenCode CLI (внешняя зависимость)</b></div>
+  <div class="kpi"><span>Delivery</span><b style="font-size:17px">git commit/push + GitHub PR через gh CLI</b></div>
+  <div class="kpi"><span>Версия</span><b style="font-size:17px">v0.1.0 (2026-08-23), лицензия Apache-2.0</b></div>
+  <div class="kpi"><span>Объём</span><b style="font-size:17px">~29 пакетов pkg/, 62 OpenSpec-капабилити</b></div>
+</div>
+
+<h4>Статус позиционирования (честная самооценка проекта)</h4>
+<ul>
+  <li><b>Подходит сейчас:</b> доверенный локальный репозиторий одного разработчика/маленькой команды; агент и проверки работают с правами вашего OS-пользователя.</li>
+  <li><b>Не подходит (пока):</b> недоверенный/сторонний код, секреты рядом с агентом, production delivery без человека. Это <b>не hermetic sandbox</b> — OS-level изоляции нет (открытый риск C-01 из аудита).</li>
+  <li>Typed test-адаптер реализован только для <b>Go</b>; delivery для Rust/Python/Node заблокирован до появления адаптеров.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="value">2. Проблема и ценность</h2>
+
+<h3>Какую проблему решает</h3>
+<p>Обычный «AI-кодинг» сегодня — это агент с терминалом, который сам себе хозяин: сам пишет, сам «проверяет»,
+сам коммитит. Проблемы этого подхода:</p>
+<ul>
+  <li><b>False green:</b> агент заявляет «тесты прошли», хотя ничего не исполнялось или исполнилось не то.</li>
+  <li><b>Нет ответственности за границы этапов:</b> непонятно, кто одобрил переход от дизайна к коду.</li>
+  <li><b>Недоверие к доставке:</b> агенту страшно давать права на <code>git push</code>.</li>
+  <li><b>Нулевая наблюдаемость:</b> что происходило в прогоне, сколько это стоило, где застряло — неизвестно.</li>
+</ul>
+<p>ai-team отвечает на это архитектурно: контроллер владеет переходами, гейтами, проверками и side effects,
+а каждое человеческое решение фиксируется как типизированный approval по точному SHA-256 предмета.</p>
+
+<h3>Ценность по ролям пользователя</h3>
+<table>
+<tr><th>Кто</th><th>Что получает</th></tr>
+<tr><td>Индивидуальный разработчик</td><td>Пайплайн «задача → PR» без риска, что агент сам сделает push: доставка всегда требует подтверждения точного плана. Профиль <code>fast</code> сводит число остановок к минимуму.</td></tr>
+<tr><td>Команда</td><td>Role-based approvals (Product Owner / Architect / Developer / Reviewer / QA / Security / Release Manager): каждый значимый переход санкционирует человек в правильной роли, quorum настраивается.</td></tr>
+<tr><td>Регулируемый процесс</td><td>Профиль <code>regulated</code>: согласие всех ролей на ключевых рёбрах, неизменяемый evidence с якорем целостности (<code>ai-team verify</code>).</td></tr>
+<tr><td>Руководитель / наблюдатель</td><td>Веб-дашборд: все прогоны, статусы этапов, pending approvals, логи, артефакты — из браузера, без терминала.</td></tr>
+</table>
+
+<blockquote>Замысел автора (из openspec/project.md): простой цикл разработки; этапы делают разные агенты независимо;
+workflow задаётся конфигом как граф; веб-интерфейс — главная поверхность, CLI — равноправный транспорт;
+каждое значимое решение санкционирует человек через exact-subject approval.</blockquote>
+
+<!-- ================================================================ -->
+<h2 id="surfaces">3. Поверхности работы: CLI / Web / API / MCP</h2>
+
+<h3>3.1 CLI — команды</h3>
+<p>Бинарник один, устанавливается <code>go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest</code>.
+Актуальный список команд (на master):</p>
+<table>
+<tr><th>Команда</th><th>Назначение</th></tr>
+<tr><td><code>init [--target dir] [--write-gitignore] [--profile fast|standard|regulated]</code></td><td>Создать <code>.ai-team/config.yaml</code>, каталоги artifacts/reports/logs. По умолчанию исключает <code>.ai-team/</code> через <code>.git/info/exclude</code> (workspace остаётся чистым!), <code>--write-gitignore</code> — если правило нужно в репозитории. Автоматически включает typed Go-проверки (<code>go test -json -count=1</code> + <code>go vet</code>), если найден <code>go.mod</code>.</td></tr>
+<tr><td><code>run --feature &lt;name&gt; --task "&lt;desc&gt;" [--target] [--resume run_id] [--approve-gates] [--approve-plan sha256]</code></td><td>Провести фичу через конвейер. Умеет останавливаться на approvals и resume-ить тот же run. Exit-коды: <b>0</b> completed/warnings, <b>1</b> ошибка или негативный вердикт, <b>2</b> BLOCKED, <b>3</b> остановка на checkpoint / перед delivery.</td></tr>
+<tr><td><code>decision --run &lt;id&gt; --approval &lt;id&gt; --actor &lt;id&gt; --role &lt;role&gt; --action &lt;action&gt; --subject &lt;sha256&gt;</code></td><td>Записать точное решение человека по pending approval (CLI-транспорт решения; то же самое можно сделать из веба).</td></tr>
+<tr><td><code>list</code></td><td>Список агентов с указанием источника в layered registry (project → env path → user config → built-in). Показывает load failures вместо молчаливого пропуска.</td></tr>
+<tr><td><code>usage &lt;run_id&gt;</code></td><td>Usage-сводка завершённого run: этапы, попытки, время (PR #42).</td></tr>
+<tr><td><code>verify &lt;run_id&gt;</code></td><td>Проверить tamper-evident anchor журнала событий завершённого run (PR #43).</td></tr>
+<tr><td><code>gc [--dry-run] [--older-than] [--keep-last N] [--prune-runs]</code></td><td>Уборка растущих артефактов <code>.ai-team</code>: worktrees, mutable state, опционально immutable runs (PR #44).</td></tr>
+<tr><td><code>eval --agent &lt;name&gt; --artifact &lt;path&gt; [--samples N]</code></td><td>Независимая LLM-оценка артефакта (advisory, не gate). Пишет samples/median/mean/stddev в <code>.ai-team/evals/</code>.</td></tr>
+<tr><td><code>web [--target] [--port 8080] [--host 127.0.0.1] [--worker-command path] [--scheduler-db path] [--dist dir]</code></td><td>Локальный dashboard и control plane. Подробности ниже.</td></tr>
+<tr><td><code>auth-token --actor &lt;id&gt; --roles &lt;csv&gt; [--ttl 1h]</code></td><td>Выпустить короткоживущий подписанный HMAC token для cloud/self-hosted web.</td></tr>
+<tr><td><code>worker --target &lt;dir&gt; --db &lt;path&gt;</code></td><td>Исполнить один strict worker job из stdin (вызывается launcher-ом).</td></tr>
+<tr><td><code>scheduler-worker --scheduler-db ... --artifact-store ... --worker-command ...</code></td><td>Один-shot platform job или loop poller для распределённого режима.</td></tr>
+<tr><td><code>version</code> / <code>help</code></td><td>Версия (git-тег; без тега печатает <code>dev</code>) / usage.</td></tr>
+</table>
+
+<h3>3.2 Веб-версия (dashboard)</h3>
+<p><code>ai-team web</code> поднимает локальный сервер: REST API + WebSocket + React SPA, встроенная в бинарник
+(<code>--dist</code> позволяет подменить локальной сборкой фронта). Использует тот же <b>RunEngine</b>, что и CLI:
+из дашборда можно создать run, принять approval, выполнить resume/cancel. Команды возвращаются сразу,
+статусы приходят через SQLite/WebSocket projection.</p>
+
+<h4>Страницы фронтенда</h4>
+<table>
+<tr><th>Страница</th><th>Что показывает</th></tr>
+<tr><td><code>Dashboard.tsx</code></td><td>Лента всех ранов со статусами (PipelineCard, StatusBadge, StageRow).</td></tr>
+<tr><td><code>PipelineDetail.tsx</code></td><td>Детали run: позиция в workflow graph, policies, checks/mutations/delivery как typed JSON, карточки pending approvals с payload (включая canonical delivery plan и action→target), live-лог активного attempt (хвост до 64 KiB, короткий polling).</td></tr>
+<tr><td><code>ArtifactViewer.tsx</code></td><td>Просмотр артефактов (proposal, design, review, test-report и т.д.) из разрешённых корней.</td></tr>
+<tr><td><code>Login.tsx</code></td><td>Вход по bearer token в cloud-режиме.</td></tr>
+</table>
+
+<h4>REST API (маршруты pkg/web/server.go)</h4>
+<pre><code># Чтение (требуют session в защищённых режимах)
+GET /api/auth/config        — конфигурация аутентификации
+GET /api/session            — текущая browser-session
+GET /api/auth/me            — текущий principal: actor ID + роли
+GET /api/pipelines          — список ранов
+GET /api/pipelines/{id}     — детали рана
+GET /api/pipelines/{id}/artifacts
+GET /api/artifacts/*        — файл артефакта (bounded, без symlink traversal)
+GET /api/runs/{runID}/artifacts/*
+GET /api/runs/{runID}/logs/{attemptID}   — хвост лога attempt
+GET /api/runs/{runID}/workflow           — immutable snapshot исполненного графа
+GET /api/preflight          — отчёт готовности окружения
+
+# Запись (session + CSRF)
+POST /api/runs                                        — создать и запустить run
+POST /api/runs/{runID}/resume                         — продолжить после approval
+POST /api/runs/{runID}/cancel                         — отменить
+POST /api/runs/{runID}/approvals/{approvalID}/decisions — записать решение
+
+GET /*   — SPA (React, go:embed)</code></pre>
+<p class="meta">WebSocket bridge передаёт lifecycle events с cursor/replay (stream identity защищает от игнорирования
+событий после сброса БД); polling остался recovery-fallback. SQLite <code>.ai-team/web.db</code> — восстанавливаемая
+projection, не источник истины.</p>
+
+<h3>3.3 MCP — статус: план, не реализовано</h3>
+<div class="card">
+<p><span class="tag idea">идея</span> Read-only MCP-сервер — план <code>plans/mcp-server.md</code> (№14 в приоритете).
+Замысел: внешний агент (Claude Desktop, другая сессия кодинг-агента, любой MCP-клиент) узнаёт состояние ai-team —
+раны, этапы, ожидающие решения, результаты проверок. <b>Управляющих операций нет вообще</b> — инвариант
+«конвейер управляет только человеком через web/CLI» сохраняется на уровне контракта.</p>
+<p class="muted">Черновик инструментов: <code>list_runs</code>, <code>get_run</code>, <code>get_timeline</code>,
+<code>list_pending_approvals</code>, <code>get_artifact/get_report</code> (bounded, без секретов). Транспорт: stdio первым.
+Данные переиспользуют read-API слоя web — «другой транспорт к тем же данным, не новая логика». Сегодня единственный
+способ дать внешнему агенту контекст — файлы <code>.ai-team/runs/&lt;id&gt;/</code> на свой страх и риск.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="pipeline">4. Конвейер и роли агентов</h2>
+
+<h3>4.1 Конвейер по умолчанию</h3>
+<pre><code>analyst → architect → coder → reviewer → tester → verifier → deployer</code></pre>
+<p>Это не жёсткий порядок в коде, а дефолтный граф в конфиге schema v4: вершины объявляются в <code>pipeline:</code>,
+маршрут и approval-политики — в <code>workflow.edges</code>. Реально AI-driven ролей — шесть; deployer никогда
+не вызывает LLM.</p>
+
+<h3>4.2 Роли (agents/{name}/def.yaml + prompt.md, встроены через embed_agents.go)</h3>
+<table>
+<tr><th>Агент</th><th>Тип</th><th>Mutation scope</th><th>Inputs</th><th>Outputs</th><th>Verdict</th></tr>
+<tr><td><b>analyst</b></td><td>agentcli (opencode)</td><td>none</td><td>task.md</td><td>proposal.md, specs/product/spec.md</td><td>—</td></tr>
+<tr><td><b>architect</b></td><td>agentcli</td><td>none</td><td>specs/</td><td>design.md, tasks.md</td><td>—</td></tr>
+<tr><td><b>coder</b></td><td>agentcli</td><td>source, allowed_paths ['**'], require_diff</td><td>design.md, tasks.md</td><td>изменения в candidate worktree</td><td>—</td></tr>
+<tr><td><b>reviewer</b></td><td>agentcli</td><td>none</td><td>specs, controller-owned review-candidate.json</td><td>review.md</td><td>APPROVED / CHANGES_REQUESTED / REJECTED</td></tr>
+<tr><td><b>tester</b></td><td>agentcli</td><td>tests (только *_test.go, testdata, test/** и т.п.)</td><td>specs, review, reviewed-candidate</td><td>test-report.md</td><td>PASS / FAIL (Result marker)</td></tr>
+<tr><td><b>verifier</b></td><td>agentcli</td><td>none</td><td>proposal, specs, review, test-report, verification-candidate.json</td><td>verification.md</td><td>APPROVED / CHANGES_REQUESTED</td></tr>
+<tr><td><b>deployer</b></td><td><b>kind: delivery</b> (без LLM)</td><td>external</td><td>review, test-report, verification (+preconditions на маркеры)</td><td>delivery-plan.json → git commit/push/PR</td><td>—</td></tr>
+</table>
+<p class="meta">Важные детали: coder имеет allowed_paths ['**'] — реальная защита не в предотвращении, а в последующих
+гейтах (review/tests/delivery). Tester только пишет тесты; фактический typed execution делает контроллер.
+Артефакты между агентами заворачиваются как untrusted data в промптах (защита от prompt injection, PR #22).</p>
+
+<h3>4.3 Человеческие роли (RBAC)</h3>
+<p>Approvals привязаны не к стадиям, а к рёбрам графа и требуют роль: <code>product_owner</code>,
+<code>architect</code>, <code>developer</code>, <code>reviewer</code>, <code>qa</code>, <code>security</code>,
+<code>release_manager</code>. Политика <code>quorum: any|all</code> — достаточно одной роли или нужны все.
+В вебе: Product Owner и Architect могут создавать runs; Product Owner и Release Manager — отменять; approval
+принимается только ролью, которая есть и у principal, и в policy ребра.</p>
+
+<!-- ================================================================ -->
+<h2 id="features">5. Фичи: подробный разбор</h2>
+<p class="muted">Формат каждой фичи: что это → как работает → как настроить → бизнес-ценность. Статус-теги:
+<span class="tag done">готово</span> в master, <span class="tag part">частично</span>, <span class="tag open">открытые вопросы</span>,
+<span class="tag idea">план</span>.</p>
+
+<h3>F1. Инициализация проекта — <code>ai-team init</code> <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> создаёт строгий config schema v4, каталоги artifacts/reports/logs. Исключает <code>.ai-team/</code> через <code>.git/info/exclude</code> — первый запуск гарантированно не ломается на baseline-guard «чистого workspace» (историческая находка Н-1 исправлена).</li>
+<li><b>Настройка:</b> <code>--target dir</code>, <code>--write-gitignore</code>, <code>--profile fast|standard|regulated</code> (см. F15). Детектирует <code>go.mod</code> и сразу прописывает required check <code>go-test-json</code>. Для стеков без адаптера — warning, delivery запрещён до ручной настройки check.</li>
+<li><b>Ценность:</b> time-to-first-run близок к нулю; идемпотентен (повторный init не перезаписывает config).</li>
+</ul>
+
+<h3>F2. Оркестрация конвейера агентов <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> RunEngine исполняет граф: на каждом этапе вызывает opencode с промптом агента и typed inputs предыдущих артефактов; парсит verdict; запускает deterministic checks; проверяет mutation scope; пишет evidence; вычисляет исход (outcome) и идёт по соответствующему ребру графа.</li>
+<li><b>Loopback (петля review→revise):</b> негативный вердикт reviewer создаёт ребро назад к coder. Работает и в non-TTY: run переходит в <code>waiting_for_approval</code> с действиями <code>return_to_coder / override_approve / reject</code> — после решения человека <code>--resume</code> продолжает тот же run. Каждое обратное ребро создаёт новые attempt IDs и инвалидирует downstream-ветку. Ограничение — <code>max_visits</code>.</li>
+<li><b>Настройка:</b> весь маршрут — в <code>workflow:</code> конфига; дефолт — 7 ролей, профили — см. F15.</li>
+<li><b>Ценность:</b> автоматический цикл «код → ревью → доработка» без потери контроля: петлю санкционирует человек, а не модель.</li>
+</ul>
+
+<h3>F3. Workflow graph v4 <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> schema v4 разделяет определения узлов (<code>pipeline</code>) и маршрут (<code>workflow</code>): entry, уникальные рёбра (from, outcome), terminal targets, edge approval policies, max_visits. Компилятор до первого LLM-вызова проверяет references, достижимость, terminal path и циклы (каждый узел цикла обязан иметь положительный max_visits). Выбранное ребро пишется событием <code>transition_selected</code> в evidence и WebSocket projection; resolved workflow.json — immutable snapshot фактически исполненного графа.</li>
+<li><b>Fail-closed валидация:</b> unknown/duplicate поля YAML, несколько документов, неоднозначные edges, недостижимые узлы, неограниченные циклы — отклоняются до запуска. Поддерживается только schema v4; v1–v3 отклоняются с подсказкой о миграции.</li>
+<li><b>Ценность:</b> процесс — данные, а не код: кастомный pipeline собирается YAML-ом без форка движка; невалидный процесс невозможно запустить.</li>
+</ul>
+
+<h3>F4. Human approvals + RBAC <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> каждое non-terminal ребро графа требует typed approval: subject = SHA-256 конкретного предмета (план перехода, design, candidate, delivery plan). Решение — отдельная сущность в <code>.ai-team/state/approvals/&lt;run_id&gt;/&lt;approval_id&gt;.json</code>: actor, role, action, comment, timestamp. Non-TTY запуск переводит run в <code>waiting_for_approval</code> (никогда — неявное согласие). Stale/conflicting решение отклоняется: если предмет изменился, старый hash не подходит. Конкурентные CLI/web-решения сериализуются in-process mutex + flock на каталоге run.</li>
+<li><b>Настройка:</b> на каждом ребре — <code>roles</code>, <code>quorum: any|all</code>, <code>actions</code> (action→target map, включая <code>$stop</code>). <code>--approve-gates</code> — совместимый transport для скриптов: на каждой достигнутой точке создаёт те же exact request/decision, не обходя модель.</li>
+<li><b>Ценность:</b> аудируемое «кто, в какой роли и по какому именно предмету разрешил»; защита от одобрения устаревшего материала; одинаково работает через терминал, веб и API.</li>
+</ul>
+
+<h3>F5. Delivery: canonical delivery plan + двухфазное подтверждение <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> deployer — не исполнитель команд LLM. Контроллер строит строгий JSON-план только из файлов, изменённых в рамках текущего run, затем проверяет 7 условий: (1) review APPROVED, (2) test-report PASS, (3) verifier APPROVED, (4) успешный required typed test check, (5) approval точного SHA-256 плана ролью release_manager, (6) пустой staged index, (7) защита базовой ветки. Только потом — exact-file commit, push, PR через gh. До commit повторно сверяются staged paths/blob SHA/modes, после — parent/tree/blobs/modes. Crash-safe recovery: если процесс убит между commit и push, retry принимает существующий commit только после полной пересверки — дублей не будет.</li>
+<li><b>Как использовать:</b> первый прогон доходит до deployer и останавливается (exit 3), печатая план + SHA-256; второй запуск — <code>--resume &lt;run_id&gt; --approve-plan &lt;sha256&gt;</code> (или решение из веба, потом просто resume). Изменился план — старый SHA не подходит ни одним путём.</li>
+<li><b>Ценность:</b> главный страх «доверить агенту push» снят архитектурно: подтверждение одноразовое, привязано к конкретному набору байт; всё доставленное = ровно то, что прошло review/tests/verifier.</li>
+</ul>
+
+<h3>F6. Candidate worktree (изоляция кандидата) <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> для Git-проекта контроллер создаёт отдельный detached worktree от exact baseline commit. Все AI-этапы, checks, review и delivery работают внутри candidate; ветка, HEAD и live checkout не меняются. Metadata с base commit/tree и workspace hash хранится и проверяется при resume. Human approval содержит exact candidate hash — после любой мутации решение становится stale.</li>
+<li><b>Ценность:</b> live workspace никогда не повреждается экспериментами агента; «проверено то, что доставлено» становится доказуемым; retry/resume опираются на неизменяемую идентичность.</li>
+</ul>
+
+<h3>F7. Deterministic checks <span class="tag done">готово</span> <span class="tag open">Go-only адаптер</span></h3>
+<ul>
+<li><b>Как работает:</b> required/optional проверки запускаются argv-массивом без shell, с confined working dir, timeout, process-group kill, bounded stdout/stderr, tool path/version fingerprint, exit code, timestamps. Падение required check переопределяет любой позитивный LLM verdict. Отсутствующий optional tool виден как skipped/warning и не маскируется под pass. Typed adapter <code>go-test-json</code> парсит JSON Go-тестов и доказывает discovered/passed cases; zero-tests = failure.</li>
+<li><b>Настройка:</b> checks задаются в def.yaml агента и per-stage в конфиге; policy: required/optional; классы unit/integration.</li>
+<li><b>Ценность:</b> «тесты зелёные» означает «контроллер реально исполнил тесты и распарсил результат», а не «LLM так сказал».</li>
+</ul>
+
+<h3>F8. Mutation scopes + baseline guard <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> каждый агент объявляет разрешение на изменение файлов (glob с <code>*</code>/<code>?</code>/<code>**</code>, запрет выхода за workspace, нельзя трогать .git/.ai-team). Baseline фиксируется перед попыткой; изменения вне scope проваливают guard. Read-only этап с любой source mutation падает; <code>require_diff</code> без фактической delta падает. Delivery получает только нормализованные разрешённые пути.</li>
+<li><b>Ценность:</b> tester физически не может «подправить продовый код», analyst — код вообще; guard детективный, но связка с candidate worktree делает последствия откатываемыми.</li>
+</ul>
+
+<h3>F9. Verdict-контракт + BLOCKED <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> reviewer/tester/verifier обязаны записать ровно один канонический маркер (<code>**Verdict:** APPROVED</code> / <code>CHANGES_REQUESTED</code> / REJECTED, <code>**Result:** PASS/FAIL</code>) в свой отчёт. Missing/unknown/duplicate маркер — ошибка контроллера, fail-closed (парсер line-anchored; покрыт contract-тестом, связывающим инструкцию в промпте с парсером). Любой этап может сигнализировать BLOCKED через status-файл с обязательной причиной — pipeline останавливается с exit 2.</li>
+<li><b>Ценность:</b> вердикт — машиночитаемый сигнал, а не свободный текст; модель не может «рекомендательно» пройти этап.</li>
+</ul>
+
+<h3>F10. Evidence, tamper-evident журнал, <code>ai-team verify</code> <span class="tag done">готово</span> <span class="tag part">внешний якорь — план</span></h3>
+<ul>
+<li><b>Как работает:</b> живые артефакты в <code>.ai-team/artifacts/{feature}/</code>, доказательство — immutable layout <code>.ai-team/runs/{run_id}/</code>: run.json (schema v6: snapshots config/workflow, SHA-256 бинарника контроллера, Go/VCS identity), events.jsonl (append-only hash chain, проверяется перед каждым append — splice/reorder чужой цепочки обнаруживается), attempts/{id}/manifest.json (execution/decision/outcome, blocker, SHA-256/provenance артефактов, checks, mutations, delivery result), logs, reports. Публикация attempt атомарна. Mutable execution checkpoint отдельно в state/runs; resume сохраняет исходный run_id, добавляет run_resumed.</li>
+<li><b>Новое (PR #43):</b> при terminal-завершении создаётся <code>anchor.json</code> — отпечаток всего журнала (кол-во событий, хеш последнего события, дайджест манифестов). <code>ai-team verify &lt;run_id&gt;</code> проигрывает журнал, пересчитывает и сверяет с якорем. Ловит: случайную порчу, усечение, подмену события, полную пересборку цепочки с новыми хешами (без обновления якоря).</li>
+<li><b>Ценность:</b> спор «агент этого не делал» решается командой, а не разбором файлов на глаз; фундамент для внешних якорей/подписей (план event-log-anchoring: вопрос «владелец файлов может подделать оба файла» остаётся открытым — см. раздел открытых вопросов).</li>
+</ul>
+
+<h3>F11. Метрики прогона: usage envelope + <code>ai-team usage</code> <span class="tag done">готово</span> <span class="tag open">токены unknown</span></h3>
+<ul>
+<li><b>Как работает:</b> каждый run автоматически собирает <code>usage.json</code>: длительность всего прогона и каждого этапа, попытки по агентам, количество loopbacks, итоговый исход. <code>ai-team usage &lt;run_id&gt;</code> печатает таблицу. Токены пока <code>TokensUnknown</code> — CLI-хосты не отдают их в интерфейсе (ждёт adapters-layer).</li>
+<li><b>Ценность:</b> видно, какой этап самый дорогой, растут ли переделки, сколько живёт типовая фича. Фундамент для model-routing, evals-регрессий и бюджетных лимитов.</li>
+</ul>
+
+<h3>F12. Retention и уборка: <code>ai-team gc</code> <span class="tag done">готово</span> <span class="tag open">дефолты обсуждаются</span></h3>
+<ul>
+<li><b>Как работает:</b> чистит candidate worktrees завершённых ранов (и сироты), mutable state старых ранов; immutable runs — только с явным <code>--prune-runs</code>, только terminal и старше срока, последние N всегда остаются. Активный run не трогает (workspace lock). <code>--dry-run</code> показывает план в байтах. Дефолты: <code>--older-than 720h</code>, <code>--keep-last 20</code>.</li>
+<li><b>Ценность:</b> предсказуемый диск при постоянной работе; безопасность по умолчанию (без флагов удаляется только заведомо лишнее).</li>
+</ul>
+
+<h3>F13. Workflow profiles: fast / standard / regulated <span class="tag done">готово</span> <span class="tag open">решения по дизайну</span></h3>
+<ul>
+<li><b>Как работает:</b> <code>ai-team init --profile ...</code>. <b>fast</b> — 5 этапов вместо 7: отдельного verifier нет, reviewer совмещает ревью+верификацию (для чего init кладёт project-local override reviewer'а в <code>.ai-team/agents/</code>). <b>standard</b> — прежние 7 этапов. <b>regulated</b> — те же 7, ключевые переходы требуют согласия всех ролей (quorum all), повторные попытки ограничены 2.</li>
+<li><b>Ключевой дизайн:</b> профиль — способ сгенерировать явный конфиг, а не скрытый механизм рантайма; после init на диске обычный schema v4, читаемый и версонируемый.</li>
+<li><b>Ценность:</b> дефолт требовал ~6 человеческих решений на мелкую задачу — люди бросали инструмент или выключали гарантии целиком. Один флаг: личные задачи → fast, команда → standard, критичные изменения → regulated.</li>
+</ul>
+
+<h3>F14. Evals (advisory LLM-оценка артефактов) <span class="tag done">готово</span> <span class="tag part">нет калиброванного корпуса</span></h3>
+<ul>
+<li><b>Как работает:</b> <code>ai-team eval</code> гоняет независимые LLM-оценки артефакта в изолированном временном каталоге, сохраняет samples/median/mean/stddev в <code>.ai-team/evals/</code>. Явно advisory: нормативные гарантии дают только deterministic checks. Hard suite failures возвращают error.</li>
+<li><b>Ценность:</b> сигнал качества промптов/артефактов; полноценным benchmark станет после golden corpus и human-labelled калибровки (план evals-harness).</li>
+</ul>
+
+<h3>F15…F16. Веб-дашборд и облачный режим <span class="tag done">готово</span></h3>
+<p>Разобраны в разделе 3 (поверхности). Дополнительно про cloud/self-hosted режим:</p>
+<ul>
+<li><b>Auth:</b> два режима. Zero-config loopback (по умолчанию; случайная HttpOnly SameSite session-cookie + X-CSRF-Token поверх fixed Host/Origin policy) и cloud mode: общий secret ≥32 байт (<code>AI_TEAM_AUTH_SECRET</code>), <code>auth-token</code> выпускает versioned HMAC token с immutable actor ID, ролями и bounded expiry; token обменивается на персональную browser-session и нигде не хранится. RBAC policies на start/cancel/approve. TLS — снаружи на ingress/reverse proxy.</li>
+<li><b>Worker isolation:</b> <code>--worker-command</code> — HTTP-процесс перестаёт исполнять runs сам и сериализует strict job schema v1 через stdin subprocess-у того же бинарника (reference launcher; в production — disposable container/job с mount и лимитами инфраструктуры).</li>
+<li><b>Scheduler (несколько workers):</b> <code>--scheduler-db</code> превращает control plane в постановщик очереди: persistent SQLite queue, idempotent active identity, bounded lease с heartbeat, global/per-target concurrency, cancel через queue. После execution immutable run tree архивируется в SHA-256 CAS (content-addressed store) с проверяемым restore. SQLite/CAS — reference backends, заменяемые managed queue/object storage по тем же контрактам.</li>
+<li><b>Preflight:</b> перед созданием run dashboard показывает runtime preflight (OpenCode/version, model/provider, credential allow-list без значений, Git; для delivery — origin remote, gh, gh auth status). Тот же gate повторно применяется при Start — fail-closed.</li>
+</ul>
+
+<h3>F17. Layered agent registry (кастомизация агентов) <span class="tag done">готово</span></h3>
+<ul>
+<li><b>Как работает:</b> резолюция слоями: project <code>.ai-team/agents/</code> → каталоги из <code>AI_TEAM_AGENT_PATH</code> → user config → built-in. Невалидный override НЕ маскируется fallback-слоем — registry возвращает ошибку (осознанно: тихий fallback означал бы запуск не того кода). <code>list</code> показывает победивший источник и load failures.</li>
+<li><b>Ценность:</b> безопасная кастомизация под проект/команду без форка; предсказуемость «какой именно промпт исполнился».</li>
+</ul>
+
+<h3>F18. Безопасностные механизмы (сквозные) <span class="tag done">готово</span> <span class="tag open">OS-sandbox нет</span></h3>
+<table>
+<tr><th>Механизм</th><th>Что даёт</th></tr>
+<tr><td>Subprocess env allow-list</td><td>opencode получает только разрешённые переменные (PATH, HOME, USER, LANG, TMPDIR, TERM…); расширение — <code>AI_TEAM_OPENCODE_ENV_ALLOW=VAR</code>. Секреты из окружения не протекают в агент (PR #20).</td></tr>
+<tr><td>DNS rebinding protection</td><td>Все web-роуты отвергают non-loopback Host/Origin (PR #21).</td></tr>
+<tr><td>Session + CSRF</td><td>Write-роуты требуют случайную HttpOnly cookie + независимый X-CSRF-Token.</td></tr>
+<tr><td>Untrusted data wrapping</td><td>Межагентные артефакты оборачиваются как данные в промптах — инструкции внутри артефакта не должны управлять downstream-агентом (PR #22).</td></tr>
+<tr><td>safeio (no-follow)</td><td>Файловые примитивы отвергают symlinks; артефакты отдаются только из разрешённых корней без traversal.</td></tr>
+<tr><td>Process supervision</td><td>Process-group kill (Unix/Windows/plan9): timeout/cancel не оставляет потомков.</td></tr>
+<tr><td>Workspace lock</td><td>flock + staleness recovery; конкурентные runs против одного target невозможны.</td></tr>
+<tr><td>Чего НЕТ</td><td>OS-level sandbox: агент и проверки работают с правами текущего пользователя. Открытый риск C-01; профиль trusted-local только. План plans/sandbox.md.</td></tr>
+</table>
+
+<h3>F19. Analyst question tool <span class="tag done">готово (interactive TTY)</span></h3>
+<ul>
+<li><b>Как работает:</b> def.yaml агента может объявить <code>ask_questions</code> — тогда в интерактивном TTY аналитику разрешён инструмент question (уточняющие вопросы пользователю вместо немедленного BLOCKED). Non-TTY — fail-closed deny (иначе вопрос завис бы до таймаута).</li>
+<li><b>Ценность:</b> снял внутреннее противоречие «промпт требует задавать вопросы, runtime денял инструмент» — качество требований растёт там, где есть человек у терминала.</li>
+</ul>
+
+<h3>F20. Отчёты и уведомления (периферия) <span class="tag part">базово</span> <span class="tag idea">упрощение запланировано</span></h3>
+<ul>
+<li>HTML-отчёты по завершённым run (<code>pkg/report</code>), консольный UI с цветом/прогрессом (<code>pkg/ui</code>), notifier chain (<code>pkg/notifier</code>). По scope-review это дублирующие поверхности (~1670 строк), запланированы к срезке после того, как фронт научится рисовать чеки; notifiers как подписка Slack/email — отдельный план №13.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="config">6. Конфигурация и запуск</h2>
+
+<h3>6.1 Пример конфига (schema v4, генерируется init)</h3>
+<pre><code>schema_version: 4
+pipeline:
+  - name: analyst
+  - name: architect
+  - name: coder
+  - name: reviewer
+  - name: tester
+    checks:
+      - name: go-test
+        class: unit
+        adapter: go-test-json
+        command: [go, test, -json, -count=1, ./...]
+        policy: required
+        timeout: 20m
+  - name: verifier
+  - name: deployer
+workflow:
+  entry: analyst
+  max_visits: {coder: 3, reviewer: 3, tester: 3, verifier: 3}
+  edges:
+    - from: analyst
+      outcome: passed
+      to: architect
+      approval:
+        roles: [product_owner]
+        quorum: any
+        actions: {approve: architect, reject: $stop}
+    # остальные passed edges аналогично
+    - from: reviewer
+      outcome: rejected
+      to: coder
+      approval:
+        roles: [reviewer]
+        quorum: any
+        actions:
+          return_to_coder: coder
+          override_approve: tester
+          reject: $stop
+cli: opencode
+effort: medium
+stage_timeout: 30m</code></pre>
+
+<h3>6.2 Ключевые переменные окружения</h3>
+<table>
+<tr><th>Переменная</th><th>Назначение</th></tr>
+<tr><td><code>AI_TEAM_AUTH_SECRET</code></td><td>Общий signing secret (≥32 байт) для выпуска/проверки HMAC токенов cloud web.</td></tr>
+<tr><td><code>AI_TEAM_AGENT_PATH</code></td><td>Дополнительные каталоги override-агентов (слой между project и user config).</td></tr>
+<tr><td><code>AI_TEAM_OPENCODE_ENV_ALLOW</code></td><td>Расширение allow-list переменных, передаваемых в opencode (например, ANTHROPIC_API_KEY).</td></tr>
+</table>
+
+<h3>6.3 Зависимости</h3>
+<table>
+<tr><th>Зависимость</th><th>Зачем</th><th>Проверка</th></tr>
+<tr><td>Go 1.26.5+</td><td>Сборка и запуск</td><td><code>go version</code></td></tr>
+<tr><td>OpenCode CLI в PATH</td><td>LLM runtime, вызываемый агентами; нужен настроенный провайдер</td><td><code>opencode --version</code></td></tr>
+<tr><td>gh CLI (авторизован)</td><td>Только для шага delivery (pr create/view)</td><td><code>gh auth status</code></td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="scenarios">7. Сценарии использования</h2>
+
+<h3>Сценарий A. Быстрый старт (личная задача, fast-профиль)</h3>
+<pre><code>cd /my-project
+ai-team init --profile fast
+ai-team run --feature add-jwt-auth --task "Реализовать JWT авторизацию" \
+  --approve-gates                 # фаза 1: до deployer, exit 3, печать plan + SHA256
+ai-team run --resume &lt;run_id&gt; \
+  --approve-gates --approve-plan &lt;sha256&gt;   # фаза 2: commit/push/PR</code></pre>
+
+<h3>Сценарий B. Командный процесс (standard, решения из веба)</h3>
+<pre><code>ai-team web                       # дашборд на 127.0.0.1:8080
+# создать run из UI; на каждом переходе — карточка approval:
+# посмотреть diff/план → решить (return_to_coder / approve / reject)
+# CLI-альтернатива решения: ai-team decision --run ... --approval ... --role ... --subject ...
+ai-team run --resume &lt;run_id&gt;     # после записи решения</code></pre>
+
+<h3>Сценарий C. Cloud/self-hosted с несколькими воркерами</h3>
+<pre><code>export AI_TEAM_AUTH_SECRET='&lt;случайный секрет ≥32 байт&gt;'
+ai-team auth-token --actor architect-1 --roles architect,reviewer --ttl 1h
+ai-team web --host 0.0.0.0 --worker-command /opt/ai-team/bin/ai-team \
+  --scheduler-db .ai-team/scheduler.db
+ai-team scheduler-worker --scheduler-db .ai-team/scheduler.db \
+  --artifact-store .ai-team/cloud-artifacts --worker-command /opt/ai-team/bin/ai-team</code></pre>
+<p class="meta">TLS завершать на внешнем ingress/reverse proxy. Reference backends (SQLite queue + local CAS)
+заменяются managed-инфраструктурой по тем же контрактам.</p>
+
+<h3>Сценарий D. Наблюдаемость и гигиена</h3>
+<pre><code>ai-team list                      # какие агенты и откуда
+ai-team usage &lt;run_id&gt;            # время/попытки по этапам
+ai-team verify &lt;run_id&gt;           # целостность evidence
+ai-team gc --dry-run              # что можно почистить
+ai-team gc                        # убрать worktrees и устаревший state</code></pre>
+
+<!-- ================================================================ -->
+<h2 id="dev">8. Разработка самого ai-team</h2>
+<ul>
+<li><b>Spec-first через OpenSpec:</b> любая поведенческая фича проходит цикл explore → propose → design → specs → tasks → apply → archive с gate-rule («следующий артефакт — только после явного ок»). <code>make specs</code> — строгая валидация всех капабилити (62 шт.).</li>
+<li><b>Make-таргеты:</b> <code>build</code>, <code>test</code>, <code>test-coverage</code> (gate 60% агрегатно + per-package полы 50–75% с правилом «только повышать» — PR #38), <code>test-e2e</code> (subprocess-level сценарии на mock-opencode), <code>verify</code> (specs + mod verify + vet + govulncheck + race + frontend audit/lint/test/build + сверка встроенного dist с исходниками).</li>
+<li><b>CI (8 jobs):</b> build, specs, lint (gofmt+vet), unit-tests, race-tests, e2e-tests, frontend, security. После PR #38: actions запинены по commit SHA, least-privilege permissions.</li>
+<li><b>E2E:</b> <code>e2etest/mock-opencode.sh</code> — mock LLM-runtime для прогонов без платных вызовов; доказывается вплоть до реального subprocess environment.</li>
+<li><b>Процесс самого автора:</b> CLAUDE.md + .opencode/commands (opsx-цикл), dev-task-* skills для работы с задачами.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="maturity">9. Зрелость: аудиты и что исправлено</h2>
+
+<h3>9.1 Хронология аудитов</h3>
+<table>
+<tr><th>Аудит</th><th>Дата / срез</th><th>Главный вывод</th></tr>
+<tr><td><b>AUDIT.md</b> (самоаудит)</td><td>2026-07-20</td><td>«Заметно усилена, но не high-assurance»: блокеры — отсутствие OS-sandbox (C-01), live-workspace вместо candidate (C-02, исправлен), нет end-to-end «проверено то, что доставлено» (C-03), event log без внешнего якоря (H-04). Positioning: trusted-local prototype.</td></tr>
+<tr><td><b>Независимый аудит</b> (docs/audits/2026-07-23)</td><td>2026-07-23, commit 7f0e91b</td><td>«Не набор промптов» — разделение controller/LLM реально, подтверждено живыми прогонами и mutation-testing (5/8 инвариантов ловятся). Ключевые находки: branch protection на master пустой (CI ничего не блокирует), 3 security-примитива без regression-тестов (approve-plan compare, event-chain link, RejectSymlink), make verify ≠ CI, DNS rebinding, deny-list env.</td></tr>
+<tr><td><b>Scope review</b> (2026-07-25)</td><td>2026-07-25, 5bc99f0</td><td>«Центр тяжести сместился»: задумывался движок workflow — построен криптографический контур доставки. Инвентарь: ядро замысла ~500 строк против ~4200 строк обвязки гарантий и 11590 строк markdown. Находки Н-1…Н-11 (init→run сломан, петля только в TTY, WebSocket мёртв, веб read-only и т.д.). Рекомендация: хирургия вперёд (approvals → RunEngine → write API → граф → схлопывание ролей), а не откат.</td></tr>
+<tr><td><b>Technical audit</b> (2026-08-05)</td><td>2026-08-05, rev 24ea968</td><td>«Сильное ядро, незамкнутый cloud-контур». Мaturity: Local trusted Go 7/10, deterministic architecture 8/10, web control plane 5/10, cloud operations 3/10, documentation coherence 4/10. P0 (web не мог завершить delivery approval; конкурентная потеря approvals) и P1-3/4/5 исправлены в PR #34; P1-6 (Go-only delivery) — открыт.</td></tr>
+</table>
+
+<h3>9.2 Что уже исправлено (выжимка)</h3>
+<ul>
+<li>Candidate worktree изоляция, graph workflow v4, RunEngine с persisted resume, web write API c session/CSRF, unified approvals с exact-subject и RBAC (PR #33, #34).</li>
+<li>Regression-тесты на три security-примитива (PR #16, #17, #19); make verify синхронизирован с CI (#18); DNS rebinding fix (#21); env allow-list (#20); untrusted data wrapping (#22); метаданно-driven loopback target (#23); surface agent load failures (#30); non-Unix locks/process kill (#25).</li>
+<li>Cloud-контур закрыт: persisted delivery approval с payload и Release Manager round-trip, транзакционные approvals, семантический backward-detection при resume, sync admission async-команд, stream identity WebSocket cursor (PR #34).</li>
+<li>Supply chain CI: pin by SHA, permissions, per-package coverage gates (#38). Release basics: LICENSE Apache-2.0, CHANGELOG, SemVer, versioned builds (#39).</li>
+<li>Wave 2026-08-24 (см. историю PR): profiles, metrics, anchoring, gc, tree hashing perf, analyst questions, strictjson.</li>
+</ul>
+
+<h3>9.3 Открытые риски (актуальные)</h3>
+<table>
+<tr><th>Риск</th><th>Суть</th><th>План</th></tr>
+<tr><td><b>C-01 OS-sandbox</b></td><td>Агент и verification commands работают с правами пользователя; вредоносный test/build script может читать HOME/секреты/сеть. Не запускать на недоверенном коде.</td><td>plans/sandbox.md (№36 в приоритете)</td></tr>
+<tr><td><b>H-04 внешний якорь</b></td><td>anchor.json лежит рядом с журналом — владелец файлов может переписать оба. Ловится порча, не сговор владельца.</td><td>plans/event-log-anchoring.md (внешний якорь/подпись); открытые вопросы №12–13</td></tr>
+<tr><td><b>P1-6 Go-only delivery</b></td><td>Controller принимает только adapters command/go-test-json; generic command не признаётся delivery evidence → delivery фактически Go-only.</td><td>plans/adapters-layer.md (pytest/Jest/Cargo)</td></tr>
+<tr><td>Scheduler hardening</td><td>Остатки: readiness/heartbeat семантика, archiver failures, typed enqueue conflicts.</td><td>plans/scheduler-hardening.md</td></tr>
+<tr><td>Web hardening</td><td>Sessions janitor, Secure cookie, scoped reconcile SQLite.</td><td>plans/web-hardening.md</td></tr>
+<tr><td>Log redaction</td><td>stdout/stderr агентов может содержать чувствительное; нет redaction/retention политики.</td><td>plans/log-redaction.md (№5)</td></tr>
+<tr><td>Branch protection</td><td>По аудиту 07-23 required checks на master были пустыми (правила существуют структурно, но не требуют ничего). Статус на текущий момент не перепроверялся — стоит проверить в настройках GitHub.</td><td>GitHub settings</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="roadmap">10. Дорожная карта и бэклог</h2>
+
+<h3>10.1 Приоритетный бэклог — plans/PRIORITY.md (38 позиций)</h3>
+<p class="meta">Статусы: PR = merged/открыт волной 2026-08-24; идея — план написан, не начат.</p>
+<table>
+<tr><th>#</th><th>Фича</th><th>Суть</th><th>Статус</th></tr>
+<tr><td>1</td><td>Analyst question tool</td><td>Вопросы аналитика в интерактивном режиме</td><td><span class="tag done">PR #36</span></td></tr>
+<tr><td>2</td><td>Workflow profiles</td><td>fast/standard/regulated одним полем</td><td><span class="tag done">PR #40</span></td></tr>
+<tr><td>3</td><td>Metrics &amp; usage</td><td>Токены/время/ретраи/исходы на этапе</td><td><span class="tag done">PR #42</span></td></tr>
+<tr><td>4</td><td>Evals harness</td><td>Golden traces + негативные сценарии</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>5</td><td>Log redaction</td><td>Редакция секретов в логах/отчётах</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>6</td><td>Retention &amp; GC</td><td>Политики хранения, ai-team gc</td><td><span class="tag done">PR #44</span></td></tr>
+<tr><td>7</td><td>Adapters layer</td><td>Provider-neutral runtime (CLI-хосты)</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>8</td><td>Model routing</td><td>Классы моделей, этап→модель</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>9</td><td>Budget guard</td><td>Лимиты токенов/времени, fail-closed</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>10</td><td>Task templates</td><td>Workflow-пресеты одной командой</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>11</td><td>Review mesh</td><td>Панель ревьюеров с ролями/quorum</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>12</td><td>Context checkpoints</td><td>Типизированный event log + кросс-рановая память</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>13</td><td>Notifiers</td><td>Slack + email подписки на события</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>14</td><td><b>MCP server (read-only)</b></td><td>Статус ранов для внешних агентов (Claude Desktop и др.)</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>15</td><td>Progress bridge</td><td>Публичный контракт статуса lifecycle</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>16</td><td>Dry-run</td><td>Планирование прогона без исполнения и трат</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>17</td><td>Forge adapters</td><td>Delivery: GitHub/GitLab/Gitea/bare-remote</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>18</td><td>Tree hashing perf</td><td>Меньше полных проходов хеширования</td><td><span class="tag done">PR #41</span></td></tr>
+<tr><td>19</td><td>Pipeline refactoring</td><td>Доразрезать runStage/RunWithResult</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>20</td><td>Strict-decode helper</td><td>Один строгий JSON-парсер (pkg/strictjson)</td><td><span class="tag done">PR #37</span></td></tr>
+<tr><td>21</td><td>Role consolidation</td><td>AI-роли 7→5 (tester/verifier → reviewer после checks)</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>22</td><td>Surface pruning</td><td>Удалить pkg/report и дублирующий консольный UI</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>23</td><td>Write-only evidence</td><td>ControllerIdentity/snapshots: дать читателей или убрать</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>24</td><td>Structured logging</td><td>slog + --quiet/--json</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>25</td><td>AC trace</td><td>Машинная трасса acceptance criteria → evidence</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>26</td><td>Prompt fingerprinting</td><td>Хеши промптов/хоста в manifest, drift detection</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>27</td><td>Event log anchoring</td><td>Root hash терминального манифеста (+ внешний якорь позже)</td><td><span class="tag done">PR #43</span></td></tr>
+<tr><td>28</td><td>Web hardening</td><td>Sessions janitor, Secure cookie, scoped reconcile</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>29</td><td>Scheduler hardening</td><td>Typed conflicts, archive retry, cancellable cancel</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>30</td><td>Specs pruning</td><td>Спеки 62→~10, одна копия opsx на инструмент</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>31</td><td>OpenSpec errata</td><td>Архив append-only, исправления через errata</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>32</td><td>CI supply chain</td><td>Pin SHA, permissions, coverage gates</td><td><span class="tag done">PR #38</span></td></tr>
+<tr><td>33</td><td>Release basics</td><td>LICENSE, CHANGELOG, теги, сборка бинарников</td><td><span class="tag done">PR #39</span></td></tr>
+<tr><td>34</td><td>Onboarding pack</td><td>Tutorial, демо-репо, troubleshooting</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>35</td><td>Windows support</td><td>Заявить поддержку или честно ограничить macOS/Linux</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>36</td><td>Sandbox</td><td>OS-containment: fs/network/process/env receipts</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>37</td><td>Multi-repo</td><td>Одна задача — несколько репозиториев</td><td><span class="tag idea">идея</span></td></tr>
+<tr><td>38</td><td>Parallel DAG</td><td>Конкурентное исполнение независимых узлов</td><td><span class="tag idea">идея</span></td></tr>
+</table>
+
+<h3>10.2 Открытые вопросы владельца (docs/plans-open-questions.md, по волне #38–#44)</h3>
+<p>16 вопросов, требующих решения, например: поднимать ли coverage-полы агрессивно; подключать ли Dependabot
+для пинов; устраивает ли Apache-2.0; ставить ли первый тег v0.1.0 (уже поставлен 2026-08-23); приемлем ли
+project-local override reviewer'а в fast-профиле; осознанна ли жертва verifier'а в fast; не слишком ли жёсток
+quorum all в regulated; выносить ли ignore-list хеширования в конфиг; парсить ли usage токенов из вывода opencode
+сейчас или ждать adapters-layer; нужна ли вкладка метрик в вебе; принимать ли локальный якорь как промежуточный шаг;
+включать ли автопроверку якоря при resume; дефолты gc (--older-than 720h / --keep-last 20); auto-gc после прогона;
+убрать ли опасный <code>--prune-runs</code> до появления экспорта/архивации.</p>
+
+<!-- ================================================================ -->
+<h2 id="history">11. История PR (волны развития)</h2>
+
+<h3>Волна 1 — каркас (июнь 2026): #1–#8</h3>
+<p class="muted">CI/E2E/mock-opencode/eval (#1), embedding агентов (#4), artifact verification со строгими input/output
+чеками (#5), фиксы вызова opencode (#6), summary table (#7), reports/notifier/progress bar/colors/role config/retry-from (#8).</p>
+
+<h3>Волна 2 — гейты и веб read-only (19 июля): #9(closed)/#10</h3>
+<p class="muted">Pipeline gates, agent updates, web UI, тестовая инфраструктура.</p>
+
+<h3>Волна 3 — control-plane-hardening (21–23 июля): #11–#32</h3>
+<p class="muted">Verdict/evidence/delivery/checks/workflow (#11), архивирование OpenSpec change (#12),
+proposal strict-sandbox-and-candidate-isolation (#13), серия security/fix/test PR после независимого аудита
+(#15–#28: approve-plan regression test, RejectSymlink test, event splice test, env allow-list, DNS rebinding,
+untrusted data wrapping, metadata-driven loopback, init warnings, non-Unix locks, agent load failures,
+onboarding restructure — README/ARCHITECTURE/CONTRIBUTING, OpenCode isolation proof), dead code cleanup (#27).</p>
+
+<h3>Волна 4 — human-controlled cloud workflow (29 июля): #33</h3>
+<p class="muted">Approvals/RBAC, RunEngine, candidate worktree, web write API, worker/scheduler, CAS artifact store.</p>
+
+<h3>Волна 5 — unify approvals (23 авг): #34</h3>
+<p class="muted">Закрыл P0/P1 технического аудита: persisted delivery approval с payload, транзакционные approvals
+(mutex+flock), семантический resume/invalidation, sync admission, recorder resilience, WS stream identity,
+декомпозиция pipeline, синхронизация документации, заполнение Purpose у спек.</p>
+
+<h3>Волна 6 — продуктовая (23–24 авг): #35–#45</h3>
+<p class="muted">Backlog 38 планов (#35), analyst question tool (#36), strictjson (#37), CI supply chain (#38),
+release basics (#39), workflow profiles (#40), tree hashing perf (#41), metrics usage envelope (#42),
+tamper-evident anchor + verify (#43), retention gc (#44). <b>Открыт</b> #45 — docs: перенести аудиты в docs/audits +
+регистр открытых вопросов (это текущая локальная ветка).</p>
+
+<!-- ================================================================ -->
+<h2 id="limits">12. Ограничения и подводные камни</h2>
+<ul>
+<li><b>Trusted-local only:</b> нет OS-sandbox. Недоверенный код — только во внешнем container/VM.</li>
+<li><b>Go-only delivery:</b> другие стеки не доходят до delivery (нет typed адаптеров). Init честно предупреждает.</li>
+<li><b>Токены не меряются:</b> usage.json содержит TokensUnknown до появления adapters-layer.</li>
+<li><b>README на master отстаёт от кода:</b> новые команды <code>usage/verify/gc</code> и <code>init --profile</code>
+описаны в PR-описаниях и планах, но ещё не попали в README (мастер = 2e48ecc). При написании документации это учесть.</li>
+<li><b>MCP нет:</b> только план; внешним агентам доступен лишь сырой <code>.ai-team/runs/</code>.</li>
+<li><b>Windows/Plan9:</b> кросс-компиляция есть, runtime CI только Linux; поведение не-Unix платформ формально не формализовано (план windows-support).</li>
+<li><b>Branch protection:</b> по аудиту от 07-23 правила на master не требовали ни проверок, ни ревью — стоит проверить актуальное состояние.</li>
+<li><b>Спеки:</b> 62 капабилити, часть с историческим мусором; pruning запланирован (30–31).</li>
+<li><b>Стоимость человеческих решений:</b> standard-профиль требует ~6 approvals на фичу — для одиночки выбирать fast.</li>
+<li><b>Anchor и владелец файлов:</b> verify ловит порчу/пересборку журнала, но не сговор владельца файлов (нужен внешний якорь).</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="sources">13. Источники</h2>
+<ul>
+<li>Код: <code>~/Projects/ai-team</code> — README.md, docs/ARCHITECTURE.md, CONTRIBUTING.md, CODEX-PLAN.MD, AUDIT.md, openspec/project.md, agents/*/def.yaml, pkg/web/server.go, cmd/ai-team/main.go (master).</li>
+<li>Аудиты: docs/audits/2026-07-23-independent-audit.md, 2026-07-25-scope-review.md, 2026-08-05-technical-audit.md.</li>
+<li>Планы: origin/master:plans/ (38 файлов, PRIORITY.md), docs/plans-open-questions.md.</li>
+<li>GitHub: gh pr list/view — PR #1–#45 (44 merged/closed, 1 open: #45); CHANGELOG.md v0.1.0.</li>
+</ul>
+
+<hr>
+<p class="meta">Документ собран автоматически (ox-alpha) 24.08.2026 как рабочая база знаний «Alpha Free Result»
+для дальнейшей переработки в пользовательскую документацию. Файл лежит вне репозитория:
+<code>~/Projects/ai-team-alpha-free-result.html</code>.</p>
+
+</div>
+</body>
+</html>

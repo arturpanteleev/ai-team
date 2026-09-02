@@ -8,7 +8,40 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	aiteamruntime "github.com/arturpanteleev/ai-team/pkg/runtime"
 )
+
+// testJudgeAdapter — test-only RuntimeAdapter: позволяет unit-тестам eval
+// гонять детерминированного judge без opencode. Прод-путь eval всегда
+// использует зарегистрированные адаптеры (opencode); произвольные CLI
+// отклоняются fail-closed, как и требуют P1-1.
+type testJudgeAdapter struct{}
+
+func (testJudgeAdapter) Name() string { return "judge" }
+
+func (testJudgeAdapter) Describe() aiteamruntime.Descriptor {
+	return aiteamruntime.Descriptor{
+		Name: "judge", Binary: "judge",
+		Capabilities: []aiteamruntime.Capability{aiteamruntime.CapPromptFile, aiteamruntime.CapSessionIsolation},
+	}
+}
+
+func (a testJudgeAdapter) Validate(launch aiteamruntime.Launch) error {
+	return aiteamruntime.ValidateLaunch(a, launch)
+}
+
+func (testJudgeAdapter) Command(cli, model, promptFile string) ([]string, error) {
+	return []string{"run", promptFile}, nil
+}
+
+func (testJudgeAdapter) Environment(agent *aiteamruntime.Agent, task *aiteamruntime.Task, inputs ...aiteamruntime.Artifact) ([]string, func(), error) {
+	return nil, func() {}, nil
+}
+
+func init() {
+	aiteamruntime.RegisterAdapter(testJudgeAdapter{})
+}
 
 func TestNewEval(t *testing.T) {
 	e := New("test-agent", "/tmp/artifact.md", []string{"полнота", "качество"})

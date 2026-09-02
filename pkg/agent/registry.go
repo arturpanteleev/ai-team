@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/scope"
 	"gopkg.in/yaml.v3"
 )
@@ -220,8 +221,8 @@ func validateDefinition(dirName string, a *Agent) error {
 		if a.RuntimeType != "agentcli" {
 			return fmt.Errorf("агент %s: поддерживается только runtime agentcli; %q недоступен", dirName, a.RuntimeType)
 		}
-		if a.CLI != "" && a.CLI != "opencode" {
-			return fmt.Errorf("агент %s: поддерживается только cli opencode", dirName)
+		if a.CLI != "" && !runtime.AdapterExists(a.CLI) {
+			return fmt.Errorf("агент %s: неизвестный runtime adapter %q (доступны: %s)", dirName, a.CLI, strings.Join(runtime.AdapterNames(), ", "))
 		}
 		if a.PromptFile == "" {
 			return fmt.Errorf("агент %s: prompt_file обязателен для agent runtime", dirName)

@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AITM: позиционирование и честный обзор 15 оркестраторов</title>
+<style>
+  :root{--bg:#0f1117;--panel:#171a23;--panel2:#1d212d;--text:#e2e6f0;--muted:#9aa3b5;
+  --accent:#6ea8fe;--green:#7ee787;--red:#ff7b72;--yellow:#e3b341;--border:#2a3040;--code:#12151d;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.68 -apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1140px;margin:0 auto;padding:32px 24px 120px}
+  h1{font-size:29px;margin:8px 0 6px;letter-spacing:-.3px}
+  h2{font-size:23px;margin-top:52px;padding-bottom:9px;border-bottom:1px solid var(--border)}
+  h3{font-size:19px;margin-top:32px;color:var(--accent)}
+  h4{font-size:16px;margin:22px 0 6px}
+  p,li{color:var(--text)}
+  .muted{color:var(--muted)}
+  a{color:var(--accent);text-decoration:none}
+  code{background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font:13.5px ui-monospace,"SF Mono",monospace}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:var(--panel2)}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .tag{display:inline-block;border-radius:999px;padding:1px 9px;font-size:11px;font-weight:600;margin-left:6px;white-space:nowrap}
+  .a{background:rgba(126,231,135,.15);color:var(--green);border:1px solid rgba(126,231,135,.4)}
+  .t{background:rgba(110,168,254,.14);color:var(--accent);border:1px solid rgba(110,168,254,.4)}
+  .y{background:rgba(227,179,65,.14);color:var(--yellow);border:1px solid rgba(227,179,65,.4)}
+  .r{background:rgba(255,123,114,.13);color:var(--red);border:1px solid rgba(255,123,114,.4)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.two{grid-template-columns:1fr}}
+  blockquote{border-left:3px solid var(--yellow);margin:16px 0;padding:8px 18px;color:var(--muted);background:rgba(227,179,65,.06);border-radius:0 8px 8px 0}
+  .rank{font-weight:800;color:var(--yellow)}
+  .bad{color:var(--red)} .good{color:var(--green)}
+  pre{background:var(--code);border:1px solid var(--border);border-radius:10px;padding:14px;overflow-x:auto;font:13px/1.55 ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="meta muted">Документ AITM · подготовлен 29.08.2026 · две части:
+<b>A)</b> глубокий технический разбор Auto-Company и что можно заимствовать ·
+<b>B)</b> честный обзор 15 оркестраторов workflow/agent pipeline с критическим рейтингом ai-team.</div>
+
+<h1>AITM — куда развивать: deep-dive по Auto-Company + обзор рынка (15 инструментов)</h1>
+<p class="muted">Вся оценка намеренно критичная и без рекламных клише. Где у нас хорошо — отмечу, где плохо — напишу
+плохо. Никакого «твой проект лучший». Цель — решиться, что взять с рынка и что закрыть в ai-team.</p>
+
+<h2 id="toc">Содержание</h2>
+<ol>
+  <li><b>Часть A</b> — Auto-Company глубоко: как устроены переходы и контроль (и что заимствовать)</li>
+  <li><b>Часть B</b> — Рынок: категория, 15 инструментов, критерии, рейтинг</li>
+</ol>
+
+<hr>
+
+<!-- ================================================================ -->
+<h1 style="font-size:24px">ЧАСТЬ A · Auto-Company: переходы, контроль «кто что сделал», что заимствовать</h1>
+
+<h2>A.0 TL;DR по части A</h2>
+<p><b>Никаких «переходов между уровнями» в коде у Auto-Company нет.</b> Всё управление — это:
+<code>backup → run engine → validate skeleton → restore on fail</code>. «Уровни» (brainstorm→validate→ship)
+существуют только как <b>проза в PROMPT.md</b> и держатся на послушности модели. Контроль «кто что сделал»
+реализован самым грубым способом — файлы в папках + один Markdown-файл <code>consensus.md</code>,
+без immutable evidence, без атрибуции к агенту, без крипто-якоря.</p>
+<p>Вывод для нас: <b>как реализован контроль — у Auto-Company хуже, чем у нас</b> (это берётся обеими руками
+из ai-team). Но <b>что именно оно оркестрирует</b> (бизнес-цель, автономный 24/7 цикл, сопротивление
+«обсуждению ради обсуждения», персоны-мышление, мягкий ручной steering файлом) — это ценные примитивы,
+которых у нас нет. Ниже — честно по механизмам.</p>
+
+<h2>A.1 Как устроены «переходы» в auto-loop.sh</h2>
+<p>Единственный цикл — <code>while true</code> в <code>scripts/core/auto-loop.sh</code> (743 строки). Разберу
+жизненный цикл одного цикла (строки 630–743):</p>
+<pre>loop_count++
+1. backup_consensus            # cp consensus.md consensus.md.bak
+2. snapshot_gitignore          # cp .gitignore в mktemp
+3. собрать FULL_PROMPT = PROMPT.md + guardrails + состояние consensus
+4. run_engine_cycle "$FULL_PROMPT"  # claude -p ...  или  codex exec ...
+5. echo OUTPUT &gt; cycle-XXXX.log
+6. cleanup_accidental_root_artifacts   # rm файлов '=*' и '口径说明*' (0 байт)
+7. restore_gitignore_if_changed         # вернуть .gitignore, если мутировал
+8. extract_cycle_metadata               # parse cost, type, type через jq
+9. классификация: timed-out? exit!=0? validate_consensus?
+   → OK / FAIL / SOFT_TIMEOUT
+10. FAIL: restore_consensus (откат) + circuit breaker + usage-limit backoff
+11. sleep LOOP_INTERVAL
+</pre>
+<p><b>Что это значит технически:</b></p>
+<ul>
+<li><b>Состояние-батон:</b> весь контекст между запусками — один файл <code>memories/consensus.md</code>.
+Новый процесс получает его через инъекцию в промпт («pre-loaded, do NOT re-read»). Фактически — это «память»
+агентессы, передаваемая строго файлом.</li>
+<li><b>«Переход» между каким-то уровнями не является графом.</b> Код не знает про brainstorm/validate/ship.
+Эти фазы — текст в <code>PROMPT.md</code> (Cycle 1/2/3+), и их соблюдение полностью на совести модели. Если модель
+«забудет» фазы — код этого не заметит. Это и есть слабое место: <b>корректность процесса не кодифицирована,</b>
+только подсказана.</li>
+<li><b>Soft-timeout (умно!):</b> если цикл убит по таймеру, но <code>consensus.md</code> успел измениться
+(<code>cycle_soft_timeout=1</code>), это <b>НЕ</b> считается ошибкой — прогресс сохранён. Хорошая идея.</li>
+<li><b>Circuit breaker:</b> 5 подряд ошибок → cooldown 300с; usage-limit → backoff 3600с. Это честные runtime-примитивы.</li>
+</ul>
+
+<h3>Чего тут НЕТ (и это важно сравнить с нами)</h3>
+<ul>
+<li><b>Нет никакого машинного подтверждения «сделано».</b> Успех цикла = exit code 0 + валиден скелет consensus.
+Если модель пишет «я всё сделал» и ставит exit 0 — это успех. Никто не проверяет, что код исполняется/собран.</li>
+<li><b>Нет атрибуции.</b> Нет записи «какой агент создал этот diff/файл». Есть только папки <code>docs/&lt;role&gt;/</code>,
+куда агенты кладут свои «отчёты» — по договорённости в промпте, а не по контракту.</li>
+<li><b>Нет неизменяемости/криптографии.</b> consensus.md — обычный текст с <code>.bak</code>. Никакого hash-chain, якоря.</li>
+<li><b>Валидация консенсуса — скелетная:</b> только grep на <code># Auto Company Consensus</code>,
+<code>## Next Action</code>, <code>## Company State</code>. Семантика не проверяется вообще.</li>
+</ul>
+
+<h2>A.2 Контроль «кто что сделал» — как это устроено и насколько честно</h2>
+<p>У Auto-Company НЕТ слоя, который бы связывал действие с агентом и проверял его. Есть три «механизма
+припоминания», все файловые:</p>
+<table>
+<tr><th>Механизм</th><th>Что хранит</th><th>Сила</th><th>Слабость</th></tr>
+<tr><td><code>logs/cycle-XXXX.log</code></td><td>сырой stdout каждого цикла</td><td>полный вывод</td><td>текст, нет структуры, ротируется (MAX_LOGS=200)</td></tr>
+<tr><td><code>docs/&lt;role&gt;/</code></td><td>«отчёты» ролей (по договорённости)</td><td>читаемо</td><td>не гарантировано кодом; роль может не писать</td></tr>
+<tr><td><code>memories/consensus.md</code></td><td>итог/Next Action</td><td>батон между циклами</td><td>одна точка, семантика не валидируется</td></tr>
+</table>
+<p>Фактически: <b>«кто что сделал» здесь не контролируется — только припоминается по логам.</b> Если агент
+молча не записал отчёт, но записал код в <code>projects/</code> — следов авторства нет. Это полный контраст
+с ai-team:</p>
+<ul>
+<li>У нас каждый агент — отдельный процесс, который пишет в <b>immutable run/attempt manifest</b>.</li>
+<li>События — append-only, хэш-цепочечные, с якорем (<code>ai-team anchor</code>) и проверкой (<code>ai-team verify</code>).</li>
+<li>«Кто сделал» we фиксируем директорией <code>agents/{role}/</code> и вердикт-контрактом с
+<code>BLOCKED</code>-протоколом. Спор «это он делал» закрывается проверяемо.</li>
+<li>Переходы между стадиями (analyst→architect→coder→reviewer→tester→verifier→deployer) — <b>граф в
+<code>pkg/workflow</code></b> с <code>max_visits</code>, loopback, enforcement вердиктов — то есть фазы реально
+существуют в коде, а не в прозе.</li>
+</ul>
+<blockquote><b>Вывод:</b> по «кто что сделал» ai-team в разы сильнее. Auto-Company по-настоящему «не контролирует»,
+а лишь «помнит в логге». Заимствовать тут нам — нечего (это скорее их бор).</blockquote>
+
+<h2>A.3 Что РЕАЛЬНО заимствовать (технические примитивы, которых у нас нет)</h2>
+<p>Критично: берём именно <i>механики</i>, а не философию «модель сама решает». Вот честный список:</p>
+
+<h3>A.3.1 Soft-timeout с сохранением прогресса <span class="tag good">реально ценно</span></h3>
+<p>Идея: цикл/узел убит по таймеру, но <b>если состояние продвинулось — это не ошибка</b> (строки 690–707).
+У нас сейчас убийство по контексту — фатально (return error). Для длинных дорогих гейтов (analyst/architect/coder)
+это критично: модель может «успеть» записать план, но не «завершить». Стоит ввести «частичный успех, если есть
+неизменяемый след» — у нас есть evidence именно для этого.</p>
+
+<h3>A.3.2 Circuit breaker + usage-limit backoff <span class="tag good">заимствуемо</span></h3>
+<p>У Auto-Company: <code>MAX_CONSECUTIVE_ERRORS=5</code> → cooldown; <code>429/billing/quota</code> → длинный
+backoff. У нас есть kill по таймауту, но <b>нет счётчика последовательных ошибок с остыванием</b> и нет
+специальной обработки лимитов API/цены. Добавить: (а) падение на N подряд → пауза; (б) распознавание
+rate-limit/стоимости в ответе движка → backoff. Это дешёвое, но сильно повышает надёжность фоновых задач.</p>
+
+<h3>A.3.3 Gitignore/артефакт-гард <span class="tag good">полезно</span></h3>
+<p>Auto-Company делает снапшот <code>.gitignore</code> до цикла и восстанавливает его, если агент мутировал,
+плюс убирает случайные битые файлы (мальформированные redirect-артефакты). Это защита «метаданных репозитория»
+от агента. У нас есть scope-policy на пути мутаций, но <b>защита именно мета-файлов (не связанных с задачей) —
+стоит усилить</b>: снапшот до прогона, восстановление после.</p>
+
+<h3>A.3.4 «Обязан ship» / анти-бесконечное обсуждение <span class="tag good">перенос в граф</span></h3>
+<p>Авто-дисциплина из PROMPT.md: Cycle 3+ обязан выдать результат, а не рассуждать; повтор одного Next Action
+2 цикла = «застрял». У нас в графе это частично есть — <code>max_visits</code> и rule «rejected → return_to_coder».
+Но нет <b>бизнес-уровня «validate → GO/NO-GO → ship»</b> и нет эвристики «то же самое действие 2 раза подряд =
+стоп». Можно добавить как edge-политику в workflow-граф: «N_identical_actions → escalate/fail».</p>
+
+<h3>A.3.5 Steering через файл (мягкий человеческий вход) <span class="tag y">спорно, но рассмотреть</span></h3>
+<p>У Auto-Company человек «рулит» правкой поля <code>Next Action</code> в consensus.md — без обязательных
+approval на каждом ребре. У нас жёсткий RBAC-approval на значимых переходах. Для <b>профиля <code>fast</code></b>
+можно добавить «steer-файл»: оператор меняет поле, и контроллер учитывает его как необязательный вход,
+но при <code>fast</code> без подтверждения — при этом всё равно immutable evidence. Это снизит порог для соло-пользователя.</p>
+
+<h3>A.3.6 Персоны-мышление (ментальные модели) <span class="tag y">мягко заимствовать</span></h3>
+<p>У Auto-Company агенты — не «функциональные контракты», а «личности» (Munger-критик, Bezos-CEO). Плюс:
+качество решения растёт за счёт подражания мышлению роли. У нас роли сухие и функциональные. <b>Но</b> у нас
+роль = проверяемый контракт, это сильнее. Заимствовать точечно: добавить к reviewer «Reverse-Review по Munger»
+(список когнитивных ловушек) как опциональный чек-лист, не ломая контракт. Получим «роль + персона» без потери детерминизма.</p>
+
+<h2>A.4 Итог по части A — сводная таблица «контроль и переходы»</h2>
+<table>
+<tr><th>Аспект</th><th>Auto-Company</th><th>ai-team</th><th>Кому заимствовать</th></tr>
+<tr><td>Переходы между уровнями</td><td>Проза в PROMPT (модель сама)</td><td>Граф в коде + max_visits + loopback</td><td>→ у нас лучше</td></tr>
+<tr><td>Память/состояние</td><td>consensus.md (текст, .bak)</td><td>immutable evidence + hash-chain + anchor</td><td>→ у нас лучше</td></tr>
+<tr><td>Атрибуция «кто сделал»</td><td>папки+логи (не гарантировано)</td><td>manifests + verdict-контракт + BLOCKED</td><td>→ у нас лучше</td></tr>
+<tr><td>Верификация «сделано»</td><td>нет (exit code + скелет)</td><td>детерминированные checks + verdict</td><td>→ у нас лучше</td></tr>
+<tr><td>Soft-timeout сохраняет прогресс</td><td>да</td><td>нет (фатально)</td><td>← взять к нам</td></tr>
+<tr><td>Circuit breaker / usage backoff</td><td>да</td><td>нет</td><td>← взять к нам</td></tr>
+<tr><td>Gitignore/мета-гARD</td><td>да</td><td>частично (scope)</td><td>← усилить</td></tr>
+<tr><td>«Обязан ship» анти-дискуссия</td><td>да</td><td>частично</td><td>← edge-политика</td></tr>
+<tr><td>Мягкий steering файлом</td><td>да</td><td>нет (только approval)</td><td>← для профиля fast</td></tr>
+<tr><td>Персоны-мышление</td><td>да</td><td>нет (роли-контракты)</td><td>← точечно</td></tr>
+<tr><td>Автономный 24/7 daemon</td><td>да (launchd/systemd)</td><td>схедьюлер/worker есть</td><td>частично</td></tr>
+</table>
+
+<p class="muted">См. также первый файл <code>ai-team-vs-auto-company-compare.html</code> (контекст, философия,
+риски). Здесь — только глубокая техническая часть и заимствуемое.</p>
+
+<hr>
+
+<!-- ================================================================ -->
+<h1 style="font-size:24px">ЧАСТЬ B · Рынок: категория, 15 инструментов, честный рейтинг</h1>
+
+<h2>B.0 Как назвать класс — категория</h2>
+<p>Рынок называет это по-разному, консенсус (Delphi/Стэнфорд/вендоры) сейчас такой: общее — <b>«agent
+orchestration»</b> (координационный слой: декомпозиция, делегирование, роутинг, память, восстановление).
+Внутри выделяют подтипы, использующие «workflow/pipeline»:</p>
+<ul>
+<li><b>Graph workflow</b> — явный граф состояний (LangGraph, Google ADK).</li>
+<li><b>Role-based teams (crew/company)</b> — роли-личности, «команда» (CrewAI, MetaGPT, AutoGen).</li>
+<li><b>Handoff-driven loop</b> — лёгкий цикл «вызвал тул, решил дальше» (OpenAI Agents SDK, Smolagents).</li>
+<li><b>Visual/low-code builder</b> — визуальные воркфлоу (Dify, Langflow, n8n, Flowise).</li>
+<li><b>Autonomous coding agent</b> — агент «инженер», исполняющий доставку (OpenHands, Cline).</li>
+</ul>
+<p><b>ai-team попадает сюда как…</b> гибрид <b>role-based + graph workflow с жёстким детерминированным
+контроллером и human-in-the-loop</b>, ограниченный SDLC/доставкой кода. Ближайшие концептуальные кузены —
+<b>MetaGPT</b> (роли-«софт-компания», но без проверки/контроля) и <b>Auto-Company</b> (автономный цикл, но без
+контроля). Так и сформулируем нишу.</p>
+
+<h2>B.1 Метод оценки — критерии (честный набор)</h2>
+<p>Оцениваю не «кто лучше вообще», а по тому, что реально важно для инструмента типа «агентский orchestration
+для продуктивной/доверенной работы»:</p>
+<ol>
+<li><b>Популярность/экосистема</b> — звёзды GitHub, downloads/mo, активность (сигнал доверия, но не качества).</li>
+<li><b>Модель оркестрации</b> — граф / роли / handoff / low-code; выразительность и предсказуемость.</li>
+<li><b>Контроль исполнения (кто что сделал, verify)</b> — насколько система реально проверяет действия агента.</li>
+<li><b>Human-in-the-loop</b> — approvals, прерываемость, RTÉ-строгость.</li>
+<li><b>Состояние/память/durable execution</b> — checkpointing, восстановление, наблюдаемость.</li>
+<li><b>Экосистема моделей/тулзов/MCP</b> — провайдеры, интеграции.</li>
+<li><b>Кривая входа/документация</b> — насколько быстро разобраться.</li>
+<li><b>Зрелость/риски/поддержка</b> — статус (active/maintenance), лицензия, безопасность по умолчанию.</li>
+</ol>
+
+<h2>B.2 Отбор 14 самых популярных</h2>
+<p>Отобрано по звёздам GitHub (июль–август 2026) и упоминаниям в отраслевой прессе. Итог — 14 + ai-team = 15.
+Звёзды беру «на момент оценки», это рыночный сигнал, а не суждение о качестве.</p>
+<table>
+<tr><th>#</th><th>Инструмент</th><th>⭐ (около, 2026)</th><th>Класс</th><th>Статус</th></tr>
+<tr><td>1</td><td>n8n</td><td>190 000+</td><td>low-code workflow + AI-ноды</td><td>active (fair-code)</td></tr>
+<tr><td>2</td><td>AutoGPT</td><td>184 000+</td><td>автономный агент-general</td><td>в основном исторические звёзды</td></tr>
+<tr><td>3</td><td>Langflow</td><td>145 000+</td><td>визуальный builder (DataStax)</td><td>active</td></tr>
+<tr><td>4</td><td>Dify</td><td>144 000+</td><td>low-code AI-платформа</td><td>active</td></tr>
+<tr><td>5</td><td>MetaGPT</td><td>70 000+</td><td>роли-«софт-компания» (SOP)</td><td>пониженная активность (last 2025)</td></tr>
+<tr><td>6</td><td>OpenHands</td><td>85 000+</td><td>автономный coding агент</td><td>active</td></tr>
+<tr><td>7</td><td>AutoGen / Agent Framework</td><td>58 000+</td><td>conversation/роли (MS)</td><td><span class="r">maintenance</span> → MAF 1.x</td></tr>
+<tr><td>8</td><td>CrewAI</td><td>52 000+</td><td>роли-команды</td><td>active 1.x</td></tr>
+<tr><td>9</td><td>LlamaIndex (Workflows)</td><td>49 000+</td><td>event-driven агент-workflow</td><td>active</td></tr>
+<tr><td>10</td><td>Agno (ex-Phidata)</td><td>40 000+</td><td>агент-платформа (team/memory)</td><td>active</td></tr>
+<tr><td>11</td><td>LangGraph</td><td>33 000+</td><td>graph state machine</td><td>active 1.x <span class="good">prod-default</span></td></tr>
+<tr><td>12</td><td>Semantic Kernel</td><td>27 000+</td><td>agent-фреймворк .NET/Python</td><td>active (ниша enterprise)</td></tr>
+<tr><td>13</td><td>OpenAI Agents SDK</td><td>26 000+</td><td>handoff-driven loop</td><td>0.x, очень популярен по downloads</td></tr>
+<tr><td>14</td><td>Haystack</td><td>25 000+</td><td>LLM-pipelines (RAG-pro)</td><td>active</td></tr>
+<tr><td>15</td><td><b>ai-team</b></td><td><span class="bad">0 (нет публичности)</span></td><td>роли+граф+детерминированный контроллер (SDLC)</td><td>v0.1.0, соло-автор</td></tr>
+</table>
+<p class="muted">Честная оговорка: полный список «топ-15 по звёздам» был бы иным (туда попали бы smolagents,
+Mastra, Pydantic AI, Letta, Flowise, Vercel AI SDK и т.д.). Я выбрал 14, которые (а) реально популярны и
+(б) релевантны классу «оркестрация workflow/агентов», не разбавляя чисто-демо или чисто-RAG-инструментами.
+Это оценочный выбор, не ранкинг «наилучших».</p>
+
+<h2>B.3 Индивидуальный разбор 15 инструментов</h2>
+
+<!-- ============ 1 ============ -->
+<div class="card"><h3 style="margin-top:0">1. n8n · workflow automation с AI-нодами</h3>
+<p class="muted">⭐ ~190k · TypeScript · fair-code · низкий код, self-host/cloud, 400+ интеграций</p>
+<p><b>Что умеет:</b> визуальный конструктор пайплайнов: «когда X → вызов LLM → сделать Y + интеграции». Добавил нативные AI-ноды, агентские шаги, MCP-ноды. Огромная библиотека коннекторов (Slack, Gmail, БД, API).</p>
+<p><b>Плюсы:</b> минимальный порог входа; богатейшая интеграционная база; отличный self-host; визуальная отладка шагов.</p>
+<p><b>Минусы:</b> это не «контроль исполнения агента», а автоматизация шагов с LLM-нодами — предсказуемо, но не «агентно» в смысле сложных многоцикловых рассуждений; fair-code (есть закрытые Enterprise-части); нет детерминированной проверки результатов LLM.</p>
+</div>
+
+<!-- ============ 2 ============ -->
+<div class="card"><h3>2. AutoGPT · автономный general-агент</h3>
+<p class="muted">⭐ ~184k · Python · MIT · автономный цикл «цель→план→действие»</p>
+<p><b>Что умеет:</b> исторический пионер автономных агентов: сам ставит подзадачи, вызывает тулы, крутится до цели. Позже стал платформой/визуальными агентами.</p>
+<p><b>Плюсы:</b> знаковый бренд; большая база звёзд; сформировал жанр «autonomous». Отличный ориентир по UX-формату для «агентных» продуктов.</p>
+<p><b>Минусы:</b> <b>звёзды на 90% исторические</b> (основной всплеск 2023); реальная продуктизация не взлетела; качество «селф-планирования» слабое без интеграций; отсутствует проверка/доказательства действий; сейчас вторичен на фоне специализированных framework.</p>
+</div>
+
+<!-- ============ 3 ============ -->
+<div class="card"><h3>3. Langflow · визуальный builder агентов и RAG</h3>
+<p class="muted">⭐ ~145k · Python · (DataStax) · low-code визуальный граф</p>
+<p><b>Что умеет:</b> drag-and-drop построение агентных и RAG-пайплайнов, экспорт в API/MCP-сервер, много интеграций.</p>
+<p><b>Плюсы:</b> быстрое прототипирование без кода; RAG-first; DataStax-бэк; разворачивается self-host.</p>
+<p><b>Минусы:</b> визуально сложные воркфлоу загромождаются; меньше «контроля выполнения» чем у графа-кода; звёзды раздуты распространённостью UI-продуктов; enterprise-глубина хуже LangGraph.</p>
+</div>
+
+<!-- ============ 4 ============ -->
+<div class="card"><h3>4. Dify · low-code AI-платформа</h3>
+<p class="muted">⭐ ~144k · Python/TS · активен · workflow + RAG + агенты, cloud/VPC/self-host, SOC2 enterprise</p>
+<p><b>Что умеет:</b> визуальный оркестратор: LLM-apps, RAG-pipelines, агентный режим, инструменты, деплой.</p>
+<p><b>Плюсы:</b> самый тираж; enterprise-режим с SOC2; полный стек продуктовых приложений; команда-не-разработчики могут.</p>
+<p><b>Минусы:</b> это платформа «приложение поверх LLM», не низкоуровневый контроль агентов; гибкость ниже кодовых framework; нет детерминированной верификации действий; vendor-lock на платформу.</p>
+</div>
+
+<!-- ============ 5 ============ -->
+<div class="card"><h3>5. MetaGPT · «AI software company» (ролевые SOP)</h3>
+<p class="muted">⭐ ~70k · Python · MIT · роли: PM, архитектор, инженер, QA; лозунг Code = SOP(Team)</p>
+<p><b>Что умеет:</b> из одной строки требований генерирует PRD → архитектуру → дизайн данных/API → код → тесты. Роль-специфичные промпты; структурированный обмен сообщениями (SOP). Есть Data Interpreter.</p>
+<p><b>Плюсы:</b> <b>наиболее близкий к ai-team по концепции</b> (ролевая «софт-компания»); продуцирует документы-артефакты; исследовательская база (ICLR papers) хорошая.</p>
+<p><b>Минусы:</b> <b>активность сошла на нет</b> (last commit ~2025, no releases за ~17 мес); нет детерминированного контроля/верификации — код «доверяется»; качество генерируемого кода неровное; длина Python 3.9–3.11; это демо-research, не production-контроллер.</p>
+<p class="muted"><b>Как сравнивать с ai-team:</b> у ai-team та же ролевая идея, но доведённая до контролируемого production: у нас фазы исполняются контроллером, а не «на веру»; у MetaGPT фаз нет enforcement — что и делает его уязвимым.</p>
+</div>
+
+<!-- ============ 6 ============ -->
+<div class="card"><h3>6. OpenHands (ex-OpenDevin) · автономный coding агент</h3>
+<p class="muted">⭐ ~85k · (TS+Python) · MIT · «AI software engineer»</p>
+<p><b>Что умеет:</b> агент сам исследует репо, пишет код, запускает команды, делает PR. Sandboxed execution (docker), интерфейс-IDE/CLI/SDK, плагины.</p>
+<p><b>Плюсы:</b> реальный автономный delivery; <b>sandbox-изоляция исполнения</b> (этого не хватает ai-team!); тесты/бенчмарки (SWE-bench); активное ядро.</p>
+<p><b>Минусы:</b> один агент верхнего уровня (нет богатой ролевой структуры как у нас/MetaGPT); контроль = «сделай PR» без жёстких immutable-evidence гейтов; надёжность зависит от модели; no детерминированных проверок паттернов.</p>
+<p class="muted"><b>Как сравнивать с ai-team:</b> у него — то, чего у нас нет: <b>sandboxed-исполнение кода</b> и «агент-инженер» для реального внешнего мира. У нас — то, чего нет у него: <b>детерминированные гейты, immutable evidence, approvals</b>.</p>
+</div>
+
+<!-- ============ 7 ============ -->
+<div class="card"><h3>7. AutoGen / Microsoft Agent Framework</h3>
+<p class="muted">⭐ ~58k (AutoGen) · MIT/CC · <span class="tag r">AutoGen в maintenance</span> → MAF 1.x</p>
+<p><b>Что умеет:</b> многоагентная conversation-оркестрация (дебаты, консенсус, GroupChat, инструменты). MAF 1.x = слияние AutoGen+Semantic Kernel, Python+.NET, durable execution, human-in-the-loop approvals на уровне инструментов.</p>
+<p><b>Плюсы:</b> концептуальный вклад (conversation-first); инструментальные approvals (human-in-the-loop); большой enterprise-путь.</p>
+<p><b>Минусы:</b> <b>AutoGen официально в maintenance</b> (новые проекты не стоит) — фрагментация (AG2 форк, MAF); исторические звёзды не отражают текущую силу; сложность/порог у MAF.</p>
+</div>
+
+<!-- ============ 8 ============ -->
+<div class="card"><h3>8. CrewAI · ролевые «команды»</h3>
+<p class="muted">⭐ ~52k · Python · MIT · 5.2M downloads/mo · активен 1.x</p>
+<p><b>Что умеет:</b> роли-агенты (role, goal, backstory), задачи, Flows (граф), компиляция команд. Быстрейший прототип «команды экспертов».</p>
+<p><b>Плюсы:</b> минимальный код до рабочего multi-agent; огромная популярность; Flows добавляют контроль над последовательностью.</p>
+<p><b>Минусы:</b> <b>жалобы на зрелость</b> (нет прозрачной observability, непонятно какие промпты идут в LLM, потеря контроля на абстракциях); CrewAI использует в ~3 раза больше токенов/латентности на простых задачах (бенчмарки); нет детерминированной проверки результатов; абстракции мешают переносить в production-графы.</p>
+</div>
+
+<!-- ============ 9 ============ -->
+<div class="card"><h3>9. LlamaIndex Workflows · event-driven агент-workflows</h3>
+<p class="muted">⭐ ~49k · Python · MIT · RAG-first + агентные in-process-schema workflows</p>
+<p><b>Что умеет:</b> легковесные event-driven workflow (шаги-функции, события, стейт), Agent-Workflows, глубокая интеграция с данными/RAG, наблюдаемость/эвалы.</p>
+<p><b>Плюсы:</b> отличный RAG/данные-first; Python-native, типизированные шаги; быстрее для RAG-центричных задач.</p>
+<p><b>Минусы:</b> не «полный оркестратор» для доставки кода/системных действий; фокус на данные, а не на human-in-the-loop/approvals; проигрывает по долгоживущему durable graph (LangGraph).</p>
+</div>
+
+<!-- ============ 10 ============ -->
+<div class="card"><h3>10. Agno (ex-Phidata) · агент-платформа</h3>
+<p class="muted">⭐ ~40k · Python · MIT · активен</p>
+<p><b>Что умеет:</b> лёгкий, model-agnostic; агенты, teams, memory, MCP-тулы; встроенный control plane для деплоя; агенты для ботов/knowledge-base.</p>
+<p><b>Плюсы:</b> быстрый старт; типобезопасность; хороший выбор для реальных ботов и знаний; активно развивается.</p>
+<p><b>Минусы:</b> меньше «тяжёлого» графа/durability чем LangGraph; фокус на разговорные/бот-сценарии, не на доставку/верификацию; экосистема меньше чем LangChain/CrewAI.</p>
+</div>
+
+<!-- ============ 11 ============ -->
+<div class="card"><h3>11. LangGraph · graph state machine (production default)</h3>
+<p class="muted">⭐ ~33k · Python/JS/TS · MIT · 34.5M downloads/mo · активен 1.x</p>
+<p><b>Что умеет:</b> явный directed graph, conditional edges, циклы/retries, state + checkpointing, time-travel отладка, durable execution, human-in-the-loop (interrupt), MCP-интеграции, LangSmith observability.</p>
+<p><b>Плюсы:</b> самый production-внедряемый фреймворк (Klarna, Replit, Elastic, Cisco, Uber, LinkedIn, BlackRock, JPMorgan); лучшая предсказуемость/транспарентность переходов; мощный HITL; огромное комьюнити.</p>
+<p><b>Минусы:</b> <b>крутая кривая входа</b> (низкоуровневый, много кода); «контроль» — это управление графом, <b>но не детерминированная проверка того, что агент сделал</b> (верификация делегируется LangSmith/эвалам, а не жёстким гейтам); требует Python/JS.</p>
+<p class="muted"><b>Как сравнивать с ai-team:</b> LangGraph даёт <b>гибкую graph-оркестрацию</b> (шире нашего SDLC-графа), но <b>не гарантирует, что результат доставлен проверяемо</b> — это решение оставляется разработчику. Где ai-team реально сильнее — в обязательном, контроллер-подвластном исполнении и immutable evidence.</p>
+</div>
+
+<!-- ============ 12 ============ -->
+<div class="card"><h3>12. Semantic Kernel · enterprise agent SDK (.NET)</h3>
+<p class="muted">⭐ ~27k · C#/Python · MIT · активен</p>
+<p><b>Что умеет:</b> интеграция LLM в .NET-приложения; агенты, планирование, инструменты, human-in-the-loop на уровне вызовов тулов.</p>
+<p><b>Плюсы:</b> зрелая enterprise-интеграция для C#; строгие типы; подход «embedded agents» в корпоративных приложениях.</p>
+<p><b>Минусы:</b> Microsoft теперь направляет основной фокус на Agent Framework; niшa (C#); не «оркестратор-платформа», а SDK; меньше общего охвата multi-agent.</p>
+</div>
+
+<!-- ============ 13 ============ -->
+<div class="card"><h3>13. OpenAI Agents SDK (ex-Swarm)</h3>
+<p class="muted">⭐ ~26k · Python · 10.3M downloads/mo · 0.x</p>
+<p><b>Что умеет:</b> лёгкий agent loop, handoffs (передача управления между агентами), guardrails, встроенный tracing, MCP-тулы.</p>
+<p><b>Плюсы:</b> минимальный оверхед, максимальная гибкость; огромные downloads; простой API; отличные трассировки.</p>
+<p><b>Минусы:</b> легковесен: <b>нет durable execution/состояния/восстановления как в LangGraph</b>; меньше предсказуемость на масштабе; <b>привязка к OpenAI-стеку</b> (хотя provider-agnostic заявлен); «голый» цикл — тяжело поддерживать сложные уставы.</p>
+</div>
+
+<!-- ============ 14 ============ -->
+<div class="card"><h3>14. Haystack · production LLM-pipelines</h3>
+<p class="muted">⭐ ~25k · Python · Apache-2.0 · активен</p>
+<p><b>Что умеет:</b> компонентные пайплайны, конвейеры с тестируемостью, агенты, глубокая разработка поиска/RAG, контроль контекста.</p>
+<p><b>Плюсы:</b> максимальный контроль разработчика; production-ориентирован; хорошие пайплайны RAG/поиска; чистая архитектура.</p>
+<p><b>Минусы:</b> сложнее старт; фокус больше на поиск/RAG, чем на «swarm-оркестрацию» с HITL; меньше широкого multi-agent-хлус базового.</p>
+</div>
+
+<!-- ============ 15 ============ -->
+<div class="card"><h3 style="margin-top:0">15. ai-team (наш проект) — критический разбор</h3>
+<p class="muted">⭐ 0 (без публичной активности) · Go · Apache-2.0 · v0.1.0 · соло-автор · 45 PR, 3 аудита, детерминированный контроллер</p>
+<p><b>Что умеет:</b> роль−+граф SDLC (analyst→architect→coder→reviewer→tester→verifier→deployer) с контроллером-владельцем исполнения. Детерминированные checks (Go-test adapter + command, без shell), immutable evidence (run/attempt manifests, hash-chain, anchor+verify), approvals с RBAC и точным SHA-256, scope-политика мутаций, safeio no-follow, process-group kill, crash-safe доставка (7 гейтов), web-дашборд (Go+SQLite+React+WebSocket), cloud/scheduler/worker, CAS-артефакты.</p>
+<p><b class="good">СИЛЬНОЕ (честно, где мы уникальны):</b></p>
+<ul class="good">
+<li><b>Контроллер-владеет исполнением</b>: side effects (checks + доставка + evidence) у нас делает код, а не модель. <b>В этом списке так не делает ни один инструмент.</b></li>
+<li><b>Immutable доказательная база</b> (hash-chain + anchor + verify): проблема «кто что сделал» решается проверяемо. Конкуренты её либо не решают (MetaGPT, Auto-Company, CrewAI), либо оставляют разработчику (LangGraph/Smith).</li>
+<li><b>Детерминированная верификация</b>, а не «самоотчёт модели»: verdict-контракт, BLOCKED-протокол, Go-test adapter.</li>
+<li><b>Human-in-the-loop с точностью до байта</b>: одобрение конкретного SHA-256 плана — сильнее, чем мягкие «approve tool» у MAF/CrewAI.</li>
+</ul>
+<p><b class="bad">СЛАБОЕ (честно, где плохо):</b></p>
+<ul class="bad">
+<li><b>Тотальный ноль экосистемы/доверия рынка</b>: 0 звёзд, 0 пользователей, соло-автор. Для «позиции на рынке» это решающий минус на сегодня: любой популярный конкурент масштабнее и проверен чужими проектами.</li>
+<li><b>Очень узкий скоуп</b>: только локальный trusted-repo + Git/GitHub delivery, Go-only checks. Нет MCP (лишь план), нет мульти-провайдеров LLM, нет внешнего мира (деплой, маркетинг).</li>
+<li><b>Тяжёлые гейты</b>: ~6 approvals на фичу — дорого для соло/скорости; нет профиля «fast» с мягким steering (мы только обсуждаем).</li>
+<li><b>Это не «фреймворк», а монолит-CLI/контроллер</b>: не встраивается в чужие приложения как библиотека, нет package для сторонних.</li>
+<li><b>Документация отстаёт от кода</b> (README не описывает usage/verify/gc/profiles), спецификаций много, но «нашей» онбординг-истории снаружи нет.</li>
+<li><b>Зависит от OpenCode CLI как движка</b> (не абстрагирован по моделям); нет OS-sandbox (риск C-01) для недоверенного исполнения.</li>
+</ul>
+</div>
+
+<h2>B.4 Честный итоговый рейтинг (позиции)</h2>
+<p>Сразу оговорка: <b>«рейтинг» в этом классе неоднозначен</b> — инструменты решают разные подзадачи. Дам два
+честных среза: (1) <b>пригодность как production-оркестратора общего назначения</b> и (2) <b>сила именно в
+безопасной/доказательной доставке кода</b> (наша компетенция). ai-team честно оценю в обоих.</p>
+
+<h3>Срез 1 · Production-готовность / общий оркестратор</h3>
+<table>
+<tr><th>Место</th><th>Инструмент</th><th>Комментарий (честно)</th></tr>
+<tr><td class="rank">1</td><td>LangGraph</td><td>стандарт де-факто: durable graph, HITL, огромное внедрение</td></tr>
+<tr><td class="rank">2</td><td>OpenAI Agents SDK</td><td>лёгкость + downloads, но хрупкий на сложном</td></tr>
+<tr><td class="rank">3</td><td>CrewAI</td><td>быстрый старт ролей, но зрелость/контроль ниже</td></tr>
+<tr><td class="rank">4</td><td>Dify / Langflow / n8n</td><td>low-code: скорость для нетехнических, слабый контроль</td></tr>
+<tr><td class="rank">5</td><td>LlamaIndex Workflows</td><td>сильны в данных/RAG</td></tr>
+<tr><td class="rank">6</td><td>MAF (Agent Framework)</td><td>enterprise путь MS, но фрагментация после AutoGen</td></tr>
+<tr><td class="rank">7–11</td><td>Agno, Haystack, OpenHands, Sem. Kernel, MetaGPT</td><td>нишево/зрелость-вопрос</td></tr>
+<tr><td class="rank">12</td><td>AutoGPT</td><td>звёзды исторические, продуктизация не взлетела</td></tr>
+<tr><td class="rank r">13–15</td><td><b>ai-team</b></td><td>в общем смысле — не конкурент: 0 экосистемы, узкий скоуп, монолит, не «фреймворк». По production-охвату сегодня <b>последний</b>.</td></tr>
+</table>
+
+<h3>Срез 2 · Сила в «безопасной и доказуемой доставке кода» (наша ниша)</h3>
+<table>
+<tr><th>Место</th><th>Инструмент</th><th>Комментарий</th></tr>
+<tr><td class="rank">1</td><td><b>ai-team</b></td><td><b>честно лидирует</b>: единственный с контроллер-owned execution, immutable evidence, verify, RBAC-approval по SHA-256. Никто в списке не проверяет «что сделал агент» так, как мы.</td></tr>
+<tr><td class="rank">2</td><td>OpenHands</td><td>реальный автономный delivery + sandbox (то, чего нет у нас), но без жёстких evidence-гейтов</td></tr>
+<tr><td class="rank">3</td><td>LangGraph(+Smith)</td><td>контроль графа/HITL, но verify — на совести разработчика</td></tr>
+<tr><td class="rank">4–8</td><td>MetaGPT, CrewAI, Auto-Company, MAF, AutoGen</td><td>роли/конверсации есть, детерминированной проверки нет</td></tr>
+</table>
+
+<blockquote><b>Итог — где мы на самом деле.</b> В координатах «общего рынка» ai-team — <span class="bad">низ конкурентов
+по популярности, охвату и maturity</span> (по-честному, 14–15 из 15 в общем production-ранкинге). Но в
+<span class="good">узкой нише «доказательная безопасная доставка кода с человеческим контролем»</span> —
+пока <b>объективно сильнейший</b> в этой выборке. Это и есть реальное позиционирование: <b>не «ещё один агентональный
+framework», а «контроллер доверия над агентами»</b> — редкая и сложная ниша, где конкурентов почти нет,
+но и рынок/traction — нулевые.</blockquote>
+
+<h2>B.5 Что из обзора рынка брать в ai-team (приоритизировано)</h2>
+<table>
+<tr><th>Приоритет</th><th>Заимствуемое</th><th>Откуда</th><th>Почему</th></tr>
+<tr><td class="good">1</td><td><b>OS-sandbox для исполнения</b> (docker/изоляция)</td><td>OpenHands</td><td>закрывает наш риск C-01; позволяет безопасно запускать недоверенный код</td></tr>
+<tr><td class="good">2</td><td><b>Durable execution / time-travel отладка</b> на уровне графа</td><td>LangGraph</td><td>переживание падений, откат к точке, переигрывание — усилит наш runtime</td></tr>
+<tr><td class="good">3</td><td><b>Circuit breaker + usage-limit backoff + soft-timeout</b></td><td>Auto-Company</td><td>надёжность фоновых/долгих задач (детально в части A)</td></tr>
+<tr><td class="good">4</td><td><b>Edge-политика «обязан ship» / анти-зацикливание</b></td><td>Auto-Company + LangGraph</td><td>лечит «обсуждение ради обсуждения» в pipeline</td></tr>
+<tr><td class="y">5</td><td><b>MCP</b> (read-only статус + инструменты)</td><td>стандарт + LangGraph/SDK</td><td>уже в планах (#14) — приоритизировать как мост к внешним агентам</td></tr>
+<tr><td class="y">6</td><td><b>Профиль «fast» с мягким steering-файлом</b></td><td>Auto-Company</td><td>снизить порог для соло; всё равно с evidence</td></tr>
+<tr><td class="y">7</td><td><b>Персона-мышление для reviewer</b> (когнитивные ловушки)</td><td>Auto-Company (Munger)</td><td>роль+персона без потери контракта</td></tr>
+<tr><td class="bad">8</td><td><b>Публичная история продукта</b>: README, сценарии, release</td><td>—</td><td>без неё «0 звёзд» останется; это барьер, а не техподдержка</td></tr>
+</table>
+
+<h2>B.6 Открытые решения</h2>
+<ol>
+<li>Цель по продукту: остаться «контроллером доверия» (ниша, где мы #1, но рынок мал) или расширяться в
+«полноценный автономный агент-инженер с sandbox» (OpenHands-направление), сохраняя evidence? Тут нужны твоя
+бизнес-потребность и целевая аудитория.</li>
+<li>Приоритет тракции: <b>снаружи ничего не видно</b> (README, публичный репо, демо, релиз). Без этого
+«0 звёзд vs 190k» — и рынок просто не узнает про нашу уникальную нишу.</li>
+<li>«Платформize» vs «монолит»: делать ли из ai-team встраиваемую библиотеку/пакет, чтобы другие могли
+использовать наш контроллер внутри своих pipeline (как LangGraph), или оставить CLI-инструментом?</li>
+</ol>
+
+<p class="muted">Данные по звёздам — оценка на август 2026 из открытых источников (Presenc/Citadel/relatedrepos и др.);
+числа дрейфуют. Качественные оценки — экспертные, честные, без предвзятости к любому инструменту.</p>
+
+</div>
+</body>
+</html>

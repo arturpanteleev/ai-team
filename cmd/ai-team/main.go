@@ -78,6 +78,8 @@ func main() {
 		cmdExport()
 	case "verify":
 		cmdVerify()
+	case "gate":
+		cmdGate()
 	case "eval":
 		cmdEval()
 	case "web":
@@ -114,6 +116,8 @@ func printUsage() {
   ai-team verify [--target <dir>] <run_id>
                                    Проверить evidence терминального run (anchor, chain, попытки, attestation)
   ai-team verify <bundle-dir>      Проверить portable bundle самодостаточно (без repo и .ai-team)
+  ai-team gate                     Deterministic diff-policy gate для trusted local
+                                   base/candidate (typed checks + attestation bundle)
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
   ai-team gc                       Уборка растущих артефактов .ai-team
@@ -135,6 +139,18 @@ func printUsage() {
   --prune-runs              Разрешить удаление immutable run evidence (.ai-team/runs),
                             но только для run с verified-записью state/exports (V0-4 guard;
                             пока нет экспорта — флаг безопасно не удаляет evidence)
+
+Флаги gate:
+  --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+  --base <ref>              Базовый ref, только trusted local (по умолчанию HEAD)
+  --candidate <ref|WORKTREE> Кандидат: локальный ref или WORKTREE (по умолчанию)
+  --config <path>           Gate config (по умолчанию gate.yaml в target, затем
+                            .ai-team/gate.yaml; иначе — дефолты: test_modify required)
+  --out <path>              Каталог attestation bundle (по умолчанию
+                            <target>/.ai-team/gates/<ts> или gate-out/<ts>)
+
+Exit-коды gate: 0 — PASS, 1 — FAIL (diff-policy/required checks), 2 — BLOCKED
+                (конфиг, отсутствующий/нелокальный ref, untrusted — запрещён до P1-4)
 
 Флаги run:
   --feature <name>          Имя фичи (буквы, цифры, "-", "_", ".")

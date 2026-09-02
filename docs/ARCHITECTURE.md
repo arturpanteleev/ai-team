@@ -211,6 +211,20 @@ attempt_count/provenance. Только после успешной verify пиш
 .ai-team; `ai-team verify <run_id>` — та же full-свёртка live evidence.
 Экспорт отказастся от non-terminal run и от run без attestation.json.
 
+gate MVP (V0-5): `pkg/gate` + `ai-team gate` — deterministic diff-policy гейт
+для trusted local base/candidate без .ai-team и без runtime. Диф между двумя
+локальными ref'ами (или ref и WORKTREE) парсится в типизированные мутации
+(kinds added/modified/removed сразу с V0-1 классификацией через scope),
+политика test_modify (required/warning/off) отклоняет изменение source без
+сопутствующих изменённых/добавленных тестов. Typed checks переиспользуют
+pkg/checks Runner (evidence digests, workspace immutability). Вердикт пишется
+в самодостаточный attestation bundle (gate.json + checks/*.json + детерминиро-
+ванный index.json; BundleDigest — sha256 канонического индекса; каждый record
+связан со своим sha256 в индексе). Стабильные exit codes:
+0 PASS, 1 FAIL (policy/required checks), 2 BLOCKED. Fail-closed по умолчанию:
+ref, который не разрешается в локальный объект, или --allow-untrusted дают
+BLOCKED — untrusted mode запрещён до P1-4.
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

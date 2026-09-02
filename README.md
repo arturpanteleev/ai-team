@@ -354,6 +354,9 @@ project/plugin/user/built-in слоями и что происходит с inva
 Система пока не является hermetic sandbox. OpenCode получает app-level deny
 для shell/network/tasks, ограниченные edit/read rules и отдельный config home,
 но сам процесс агента и команды проверок работают с правами текущего OS-user.
+Containment receipt (`containment.json`) честно фиксирует уровень каждой оси
+(fs/net/proc/env): trusted-local → PARTIAL (app-level mitigations, не OS-enforced),
+strict без OS backend → UNAVAILABLE (fail-closed, gate блокирует untrusted).
 Поэтому текущий профиль допустим только для доверенного локального проекта;
 секреты и недоверенный код должны запускаться во внешнем container/VM sandbox.
 Полный список открытых рисков и release gates — в [AUDIT.md](AUDIT.md).

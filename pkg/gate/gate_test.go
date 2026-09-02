@@ -215,6 +215,16 @@ func TestBlockedOnUnknownRefAndUntrusted(t *testing.T) {
 		AllowUntrusted: true, Receipt: &unavail}); code != ExitBlocked || err == nil {
 		t.Fatalf("untrusted с UNAVAILABLE receipt: code=%d err=%v", code, err)
 	}
+
+	// untrusted + zero-value receipt (nil Axes, пустой Profile) → блокируется
+	// (P1-4 R2 fail-closed): пустой receipt не должен пропускать untrusted
+	// через vacuous HasUnavailable.
+	empty := containment.Receipt{}
+	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
+		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
+		AllowUntrusted: true, Receipt: &empty}); code != ExitBlocked || err == nil {
+		t.Fatalf("untrusted с zero-value receipt: code=%d err=%v", code, err)
+	}
 }
 
 func TestBlockedOnNonGitTarget(t *testing.T) {

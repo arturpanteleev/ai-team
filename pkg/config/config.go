@@ -102,6 +102,12 @@ func (bc *BudgetConfig) Validate() error {
 // разрешёнными. Блок экспорта по секретам включён ПО УМОЛЧАНИЮ (fail-closed):
 // отключить можно только явным disable_export_block: true. Никаких обещаний
 // legal compliance.
+//
+// ScanSensitiveFields и RawLogs — зарезервированные future knobs: сейчас
+// `scan`/`verify` работают по ключам событий через ClassifyField, а raw-вывод
+// никогда не пишется в evidence. Поля принимаются конфигом без ошибки, но
+// эффект появится вместе с соответствующими фичами; менять семантику по
+// умолчанию они не должны.
 type RedactionConfig struct {
 	ScanSensitiveFields bool     `yaml:"scan_sensitive_fields,omitempty"`
 	Include             []string `yaml:"include,omitempty"`

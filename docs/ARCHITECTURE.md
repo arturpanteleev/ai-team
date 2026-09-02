@@ -116,9 +116,19 @@ lifecycle transitions, terminal status, invalidations и exact digest каждо
 
 Изменяемый execution checkpoint хранится отдельно в
 `.ai-team/state/runs/<run_id>.json`. `RunEngine` атомарно обновляет его на
-границах stages и может после restart открыть проверенную evidence chain для
+ границах stages и может после restart открыть проверенную evidence chain для
 append. Resume сохраняет исходный `run_id`, добавляет `run_resumed` и
 продолжает ordinal sequence попыток; terminal state возобновить нельзя.
+
+Resume перед продолжением выполняет fail-closed проверку применимой evidence
+(OPS-3): `evidence.VerifyResumeEvidence` сверяет manifest identity/schema,
+digest config/workflow snapshot'ов против manifest, целостность event hash
+chain и digest attempt manifest'ов по replayed chain. Любое расхождение
+отклоняет resume со структурированной причиной (`ResumeEvidenceError` +
+`ErrResumeEvidence`), а при аппендабельном логе фиксирует событие
+`resume_blocked` с полем `reason`, — чтобы причина отказа осталась в
+tamper-evident evidence, а не только в стд-ошибке.
+
 
 Человеческое решение о переходе — отдельная typed сущность в
 `.ai-team/state/approvals/<run_id>/<approval_id>.json`. Она привязана к

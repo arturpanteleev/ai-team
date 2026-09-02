@@ -20,6 +20,16 @@ type StageMetrics struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 
+// Usage — aggregated attested usage из adapters-layer (P1-7). Поля принимаются
+// ТОЛЬКО от адаптера с capability usage-reported (runtime.UsageSource);
+// Attested=true фиксирует этот источник аттестации.
+type Usage struct {
+	Attested     bool    `json:"attested"`
+	TokensInput  int64   `json:"tokens_input,omitempty"`
+	TokensOutput int64   `json:"tokens_output,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+}
+
 // UsageEnvelope — attempt-independent usage-сводка одного run.
 type UsageEnvelope struct {
 	SchemaVersion   int            `json:"schema_version"`
@@ -30,15 +40,22 @@ type UsageEnvelope struct {
 	TotalDurationMS int64          `json:"total_duration_ms"`
 	Stages          []StageMetrics `json:"stages"`
 	LoopbackCycles  int            `json:"loopback_cycles"`
-	// TokensUnknown — заготовка для adapters-layer: заполняется когда хост
-	// начнёт отдавать usage (токены сейчас недоступны через runtime interface).
-	TokensUnknown bool   `json:"tokens_unknown"`
-	Outcome       string `json:"outcome"`
+	// TokensUnknown — true, пока харнесс/адаптер не отдаёт attested usage.
+	TokensUnknown bool `json:"tokens_unknown"`
+	// UsageReported — true, когда хотя бы один адаптер аттестовал usage.
+	UsageReported bool `json:"usage_reported,omitempty"`
+	// TokensInput/TokensOutput/CostUSD — суммарные attested usage одного run.
+	TokensInput  int64   `json:"tokens_input,omitempty"`
+	TokensOutput int64   `json:"tokens_output,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+	Outcome      string  `json:"outcome"`
 }
 
 // Build агрегирует фиксированные результаты этапов в usage envelope.
 // Superseded попытки исключаются; этапы упорядочены по первому появлению.
-func Build(runID, feature string, startedAt, finishedAt time.Time, results []workflow.StageResult, loopbackCycles int, outcome string) UsageEnvelope {
+// usage — суммарный attested usage (P1-7); если Attested=false — usage
+// остаётся unknown.
+func Build(runID, feature string, startedAt, finishedAt time.Time, results []workflow.StageResult, loopbackCycles int, outcome string, usage Usage) UsageEnvelope {
 	index := make(map[string]int)
 	stages := make([]StageMetrics, 0)
 	for _, result := range results {
@@ -58,7 +75,7 @@ func Build(runID, feature string, startedAt, finishedAt time.Time, results []wor
 	if !startedAt.IsZero() && !finishedAt.IsZero() && !finishedAt.Before(startedAt) {
 		total = finishedAt.Sub(startedAt).Milliseconds()
 	}
-	return UsageEnvelope{
+	envelope := UsageEnvelope{
 		SchemaVersion:   SchemaVersion,
 		RunID:           runID,
 		Feature:         feature,
@@ -67,9 +84,14 @@ func Build(runID, feature string, startedAt, finishedAt time.Time, results []wor
 		TotalDurationMS: total,
 		Stages:          stages,
 		LoopbackCycles:  loopbackCycles,
-		TokensUnknown:   true, // заполняется когда хост начнёт отдавать usage
+		TokensUnknown:   !usage.Attested,
+		UsageReported:   usage.Attested,
+		TokensInput:     usage.TokensInput,
+		TokensOutput:    usage.TokensOutput,
+		CostUSD:         usage.CostUSD,
 		Outcome:         outcome,
 	}
+	return envelope
 }
 
 // TotalAttempts возвращает суммарное число не-superseded попыток.

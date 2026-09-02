@@ -25,7 +25,7 @@ func TestBuildExcludesSupersededAndAggregates(t *testing.T) {
 		fixedResult("coder", "run-1-004-coder", 30*time.Second, false),
 		fixedResult("reviewer", "run-1-005-reviewer", 5*time.Second, false),
 	}
-	envelope := Build("run-1", "feature-x", started, finished, results, 2, "completed")
+	envelope := Build("run-1", "feature-x", started, finished, results, 2, "completed", Usage{Attested: true, TokensInput: 123, TokensOutput: 45, CostUSD: 0.42})
 
 	if envelope.SchemaVersion != SchemaVersion {
 		t.Fatalf("schema_version = %d, хочу %d", envelope.SchemaVersion, SchemaVersion)
@@ -33,8 +33,14 @@ func TestBuildExcludesSupersededAndAggregates(t *testing.T) {
 	if envelope.RunID != "run-1" || envelope.Feature != "feature-x" {
 		t.Fatalf("identity: %+v", envelope)
 	}
-	if !envelope.TokensUnknown {
-		t.Fatal("tokens_unknown должен быть true, пока хост не отдаёт usage")
+	if envelope.TokensUnknown {
+		t.Fatal("tokens_unknown должен быть false при attested usage")
+	}
+	if !envelope.UsageReported {
+		t.Fatal("usage_reported должен быть true при attested usage")
+	}
+	if envelope.TokensInput != 123 || envelope.TokensOutput != 45 || envelope.CostUSD != 0.42 {
+		t.Fatalf("attested usage: %+v", envelope)
 	}
 	if envelope.Outcome != "completed" || envelope.LoopbackCycles != 2 {
 		t.Fatalf("outcome/loops: %+v", envelope)
@@ -58,12 +64,15 @@ func TestBuildExcludesSupersededAndAggregates(t *testing.T) {
 }
 
 func TestBuildZeroTimesOmitsTotalDuration(t *testing.T) {
-	envelope := Build("run-2", "f", time.Time{}, time.Time{}, nil, 0, "failed")
+	envelope := Build("run-2", "f", time.Time{}, time.Time{}, nil, 0, "failed", Usage{})
 	if envelope.TotalDurationMS != 0 {
 		t.Fatalf("total_duration_ms = %d при нулевых временах", envelope.TotalDurationMS)
 	}
 	if len(envelope.Stages) != 0 {
 		t.Fatalf("stages = %+v, хочу пусто", envelope.Stages)
+	}
+	if !envelope.TokensUnknown || envelope.UsageReported {
+		t.Fatalf("без attested usage envelope должен быть unknown: %+v", envelope)
 	}
 }
 
@@ -72,7 +81,7 @@ func TestFormatTable(t *testing.T) {
 	envelope := Build("run-1", "feature-x", started, started.Add(35*time.Second), []workflow.StageResult{
 		fixedResult("analyst", "a", 10*time.Second, false),
 		fixedResult("coder", "b", 20*time.Second, false),
-	}, 1, "completed")
+	}, 1, "completed", Usage{})
 	var out strings.Builder
 	if err := envelope.Format(&out); err != nil {
 		t.Fatalf("format: %v", err)

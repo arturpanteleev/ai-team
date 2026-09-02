@@ -164,6 +164,8 @@ type scriptedRuntime struct {
 	onExec    func(agentName string, inputs []runtime.Artifact)
 	calls     map[string]int
 	targetDir string
+	usage     *runtime.Usage
+	usagePer  map[string]*runtime.Usage
 }
 
 func newScripted() *scriptedRuntime {
@@ -180,10 +182,16 @@ func newScripted() *scriptedRuntime {
 
 func (r *scriptedRuntime) factory(string) (runtime.Runtime, error) { return r, nil }
 
+// Usage — UsageReporter для тестов (P1-7): имитирует attested usage.
+func (r *scriptedRuntime) Usage() *runtime.Usage { return r.usage }
+
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
 	r.calls[a.Name]++
 	r.targetDir = task.TargetDir
+	if r.usagePer != nil {
+		r.usage = r.usagePer[a.Name]
+	}
 	if r.onExec != nil {
 		r.onExec(a.Name, inputs)
 	}
@@ -1900,11 +1908,33 @@ func TestRun_StageTimeout(t *testing.T) {
 	rt := newScripted()
 	rt.waitCtx["analyst"] = true
 
-	err, _ := runPipeline(t, dir,
-		cfgFor(config.AgentConfig{Name: "analyst", Timeout: "50ms"}),
-		rt, &scriptedPrompter{})
-	if err == nil || !strings.Contains(err.Error(), "превысил таймаут") {
-		t.Fatalf("ожидалась ошибка таймаута, got: %v", err)
+	cfg := cfgFor(config.AgentConfig{Name: "analyst", Timeout: "50ms"})
+	p := New(cfg, testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ApproveGates: true,
+	})
+	if err == nil {
+		t.Fatal("ожидалась ошибка таймаута стадии")
+	}
+	// stage-timeout — resumable sentinel, а НЕ превышение run budget:
+	if !errors.Is(err, ErrStageTimeout) {
+		t.Fatalf("ожидался ErrStageTimeout, got: %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stage-timeout не должен матчить context.DeadlineExceeded: %v", err)
+	}
+	if strings.Contains(err.Error(), "run budget") {
+		t.Fatalf("stage-timeout не должен превращаться в бюджет-ошибку: %v", err)
+	}
+	// resume сохраняет run identity (resumable, а не терминальный бюджет).
+	if result.RunID == "" {
+		t.Fatalf("stage-timeout должен быть resumable: %+v err=%v", result, err)
+	}
+	stateStore, _ := lifecycle.NewStore(dir)
+	state, loadErr := stateStore.Load(result.RunID)
+	if loadErr != nil || state.Phase != lifecycle.PhaseResumable {
+		t.Fatalf("stage-timeout должен перевести run в resumable: %+v err=%v", state, loadErr)
 	}
 }
 

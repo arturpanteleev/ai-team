@@ -38,6 +38,59 @@ type Config struct {
 	StageTimeout   string             `yaml:"stage_timeout,omitempty"`
 	Containment    *ContainmentConfig `yaml:"containment,omitempty"`
 	TreeHash       *TreeHashConfig    `yaml:"tree_hash,omitempty"`
+	Budget         *BudgetConfig      `yaml:"budget,omitempty"`
+}
+
+// BudgetConfig — глобальные жёсткие лимиты run (P1-7): total wall-time и
+// суммарное число попыток. Лимиты применяются ВСЕГДА (даже без секции —
+// канонические дефолты), это контракт: run не может превысить wall-time или
+// attempts бюджета.
+type BudgetConfig struct {
+	MaxWallTime string `yaml:"max_wall_time,omitempty"`
+	MaxAttempts int    `yaml:"max_attempts,omitempty"`
+}
+
+// Канонические дефолты бюджета (применяются при отсутствии явного budget).
+const (
+	DefaultBudgetMaxWallTime = "24h"
+	DefaultBudgetMaxAttempts = 100
+)
+
+// EffectiveMaxWallTime возвращает wall-time лимит: явный или канонический
+// дефолт. Значение валидно (Validate вызывается до запуска).
+func (bc *BudgetConfig) EffectiveMaxWallTime() (time.Duration, string) {
+	if bc == nil || strings.TrimSpace(bc.MaxWallTime) == "" {
+		return time.Duration(0), DefaultBudgetMaxWallTime
+	}
+	d, err := time.ParseDuration(bc.MaxWallTime)
+	if err != nil {
+		return time.Duration(0), bc.MaxWallTime
+	}
+	return d, bc.MaxWallTime
+}
+
+// EffectiveMaxAttempts возвращает лимит попыток: явный или дефолт.
+func (bc *BudgetConfig) EffectiveMaxAttempts() int {
+	if bc == nil || bc.MaxAttempts <= 0 {
+		return DefaultBudgetMaxAttempts
+	}
+	return bc.MaxAttempts
+}
+
+func (bc *BudgetConfig) Validate() error {
+	if bc == nil {
+		return nil
+	}
+	if bc.MaxWallTime != "" {
+		d, err := time.ParseDuration(bc.MaxWallTime)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("budget.max_wall_time %q не парсится (пример: 2h)", bc.MaxWallTime)
+		}
+	}
+	if bc.MaxAttempts < 0 {
+		return fmt.Errorf("budget.max_attempts не может быть отрицательным")
+	}
+	return nil
 }
 
 // TreeHashConfig — project-specific настройки tree hashing (OPS-2).
@@ -115,7 +168,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "workflow": true, "containment": true,
-		"tree_hash": true,
+		"tree_hash": true, "budget": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -128,6 +181,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		StageTimeout  string          `yaml:"stage_timeout"`
 		Workflow      *WorkflowConfig `yaml:"workflow"`
 		TreeHash      *TreeHashConfig `yaml:"tree_hash"`
+		Budget        *BudgetConfig   `yaml:"budget"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -144,6 +198,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.StageTimeout = raw.StageTimeout
 	c.Workflow = raw.Workflow
 	c.TreeHash = raw.TreeHash
+	c.Budget = raw.Budget
 
 	if raw.Pipeline.Kind == 0 {
 		return fmt.Errorf("config: pipeline is required")
@@ -442,6 +497,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if c.TreeHash != nil {
 		if err := c.TreeHash.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.Budget != nil {
+		if err := c.Budget.Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

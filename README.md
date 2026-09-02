@@ -351,7 +351,23 @@ project/plugin/user/built-in слоями и что происходит с inva
 
 ## Граница безопасности
 
-Система пока не является hermetic sandbox. OpenCode получает app-level deny
+### integrity vs authenticity
+
+- **Integrity (гарантируется):** и run-, и gate-bundle перепроверяются цепочкой
+  хэшей — `ai-team verify` подтверждает, что ни одна запись не изменена после
+  создания, и работает самодостаточно (без repo и `.ai-team`).
+- **Authenticity (P1-5, DSSE):** bundle могут быть подписаны автором через
+  DSSE-envelope (ed25519, stdlib-only, PAE по спецификации in-toto). `ai-team
+  export --sign-key <priv>` и `ai-team gate --sign-key <priv>` подписывают
+  детерминированный `BundleDigest` и пишут `dsse.json` в bundle. `ai-team
+  verify --verify-key <pub>` проверяет подпись fail-closed: задан ключ → подпись
+  обязана быть и совпадать; нет ключа → integrity-only проверка как раньше.
+  Digest остаётся контролем целостности («не изменено»), подпись добавляет
+  доказательство авторства («кто создал»). Ключи передаются через CLI-файлы и
+  никогда не попадают в evidence.
+
+### Граница для недоверенного кода
+ OpenCode получает app-level deny
 для shell/network/tasks, ограниченные edit/read rules и отдельный config home,
 но сам процесс агента и команды проверок работают с правами текущего OS-user.
 Containment receipt (`containment.json`) честно фиксирует уровень каждой оси

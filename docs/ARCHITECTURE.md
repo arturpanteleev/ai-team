@@ -211,6 +211,21 @@ attempt_count/provenance. Только после успешной verify пиш
 .ai-team; `ai-team verify <run_id>` — та же full-свёртка live evidence.
 Экспорт отказастся от non-terminal run и от run без attestation.json.
 
+Signed bundle (P1-5, DSSE): `pkg/dsse` реализует минимальный DSSE-envelope на
+stdlib-only (PAE — Pre-Authentication Encoding `"DSSEv1"` с длинами payloadType
+и payload + ed25519 sign/verify из `crypto/ed25519`; ноль внешних зависимостей).
+`export.SignBundle` и `gate.SignBundle` подписывают детерминированный
+`BundleDigest` (sha256 канонического index.json) и пишут `dsse.json` в bundle
+(рядом с index.json); сам signature-файл не попадает в index.Records, чтобы не
+влиять на детерминизм. Ключи загружаются из файлов каждая команда через
+`--sign-key <path>` (PEM PKCS8 ed25519 или raw), никогда не коммитятся и не
+попадают в evidence. Верификация fail-closed: `ai-team verify --verify-key
+<pub>` требует наличия и валидности подписи для каждого проверяемого bundle
+(export/gate `VerifyBundle` принимают variadic verify-key); без ключа —
+integrity-only как раньше, с ключом при отсутствии/несовпадении подписи —
+ошибка. Подпись связывает digest с автором («кто создал») поверх integrity
+(«не изменено»), поддерживая future audit.
+
 gate MVP (V0-5): `pkg/gate` + `ai-team gate` — deterministic diff-policy гейт
 для trusted local base/candidate без .ai-team и без runtime. Диф между двумя
 локальными ref'ами (или ref и WORKTREE) парсится в типизированные мутации
@@ -223,7 +238,52 @@ pkg/checks Runner (evidence digests, workspace immutability). Вердикт п�
 связан со своим sha256 в индексе). Стабильные exit codes:
 0 PASS, 1 FAIL (policy/required checks), 2 BLOCKED. Fail-closed по умолчанию:
 ref, который не разрешается в локальный объект, или --allow-untrusted дают
-BLOCKED — untrusted mode запрещён до P1-4.
+BLOCKED — untrusted mode запрещён до P1-4. Bundles проверяются самодостаточно:
+`gate.VerifyBundle` перечитывает каждый record и сверяет digest с index.json,
+реагирует на лишние файлы (за пределами checks/*+gate.json), на отсутствующие
+records и на расхождение заявленного bundle_sha256; `ai-team verify <dir>`
+автоматически различает run-bundle (V0-4) и gate-bundle по наличию gate.json.
+WORKTREE-кандидат идентифицируется в index как ref "WORKTREE" (commit пуст).
+
+Demo + CI action + truthful README (V0-7): `docs/demo/` — самодостаточное демо
+`gate → bundle → verify` на не-Go репозитории. `run-demo.sh` строит изолирован-
+ный Python-репозиторий и прогоняет три сценария (PASS / test_modify violation /
+JUnit failure при exit code команды 0), каждый со своим bundle и verify;
+`ci-gate-demo.yaml` — один version-pinned workflow (ai-team по зафиксированному
+SHA, actions по SHA), который на PR считает merge-base, выполняет gate, затем в
+любом случае verify и upload bundle артефактом. README честно разделяет run и
+gate, integrity (гарантируется цепочкой хэшей) и authenticity (P1-5: DSSE-ed25519
+подпись BundleDigest через `--sign-key`/`--verify-key`, см. ниже), а также фиксирует отсутствие
+OS sandbox. Внешняя верификация «три человека проходят демо» — за владельцем.
+
+Risk-signals (V0-8): `pkg/risk` — детерминированный классификатор
+чувствительных путей (env / secrets / credentials: `.env*`, ключи и
+cert-расширения, id_*/secret-каталоги, credentials файлы; `.env.example` —
+шаблон, не сигнал). `gate.Result.Signals` собирает в bundle измеренные
+signals: размер diff (added/removed lines через `git diff --numstat`, файловый
+разбив added/modified/removed), количество тестовых изменений (class tests ×
+added/modified), чувствительные пути, `checks_run` и `failed_checks`. Сигналы
+записываются как данные и НЕ маршрутизируют pipeline (никакого
+автоматического решения на их основе); routing придёт отдельно в P2-1/P2-2
+вместе с продуктовым решением владельца. CLI summary печатает однострочный
+срез signals; в index.json и gate.json сигналы входят в record digest.
+
+JUnit XML typed adapter (V0-6): `pkg/junit` — bounded strict parser JUnit-отчётов
+(корни testsuite/testsuites, вложенные suite). Counts suites/testcases/
+failures/errors/skips выводятся только из реальных `<testcase>` элементов, а не
+из атрибутов-агрегатов (jest/maven/gradle заполняют их непоследовательно);
+zero-test/zero-passed отчёты отклоняются (не evidence). DOCTYPE/entity и
+прочие processing instructions запрещены, глубина ≤32, размер ≤64 MiB. В
+pkg/checks новый adapter `junit-xml` с `report_file` (repo-relative обязательный
+путь внутри target): command запускается в confined workingDir и пишет отчёт,
+adapter читает его строгим parser'ом и дигирует сырой файл (StructuredOutput-
+Bytes/SHA256), #тестов (discovered/passed/failed/errored/skipped) попадают в
+Result. Семантика Maven/Gradle: exit code команды не является авторитетным —
+failure/error в XML фейлит required check даже при `sh` exit 0. report_file —
+объявленный side-effect проверки и исключается из workspace-immutability
+детекции; всё остальное остаётся read-only. Golden fixtures: pytest, Jest,
+Gradle, Maven (плюс zero/doctype/entity). Снимает ограничение «только Go» для
+демо (V0-7) — проверки любых языковых флотов работают с одним adapter.
 
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.

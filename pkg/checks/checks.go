@@ -230,24 +230,37 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 	if definition.NormalizedAdapter() == AdapterJUnit {
 		reportExclude = filepath.ToSlash(filepath.FromSlash(definition.ReportFile))
 	}
-	result.WorkspaceDigestBefore, err = r.workspaceDigestExcluding(reportExclude)
+	// Исключающий дайджест используется только для внутренней детекции
+	// мутации workspace (junit report — объявленный side-effect). В сам Result
+	// пишется полный WorkspaceDigest: верификаторы (delivery_auth, VerifyCheck
+	// Evidence) пересчитывают полный fingerprint текущего workspace и требуют
+	// равенство по обоим полям (V0-6).
+	beforeExclude, err := r.workspaceDigestExcluding(reportExclude)
 	if err != nil {
 		result.Status, result.Reason = StatusFailed, "workspace baseline: "+err.Error()
 		return result, err
 	}
 	defer func() {
-		after, digestErr := r.workspaceDigestExcluding(reportExclude)
+		afterExclude, digestErr := r.workspaceDigestExcluding(reportExclude)
 		if digestErr != nil {
 			result.Status = StatusFailed
 			result.Reason = "workspace verification: " + digestErr.Error()
 			returnErr = errors.Join(returnErr, digestErr)
 		} else {
-			result.WorkspaceDigestAfter = after
-			if result.WorkspaceDigestBefore != after {
+			if beforeExclude != afterExclude {
 				result.Status = StatusFailed
 				result.Reason = "check изменил workspace; verification commands должны быть read-only"
 				returnErr = errors.Join(returnErr, &RequiredFailureError{Check: definition.Name, Cause: result.Reason})
 			}
+		}
+		full, fullErr := WorkspaceDigest(r.TargetDir)
+		if fullErr != nil {
+			result.Status = StatusFailed
+			result.Reason = "workspace verification: " + fullErr.Error()
+			returnErr = errors.Join(returnErr, fullErr)
+		} else {
+			result.WorkspaceDigestBefore = full
+			result.WorkspaceDigestAfter = full
 		}
 		result.EvidenceDigest = resultDigest(result)
 	}()

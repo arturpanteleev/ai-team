@@ -48,6 +48,21 @@ func TestJUnitAdapterPassingReport(t *testing.T) {
 	if !IsTestEvidence(result) {
 		t.Fatalf("прошедший junit required unit check должен быть test evidence")
 	}
+	// V0-6 should-fix: в записи обязан быть полный WorkspaceDigest (равный
+	// полному fingerprint текущего workspace с report на диске), а не
+	// excluding-дайджест. Верификаторы пересчитывают полный digest и требуют
+	// равенство по обоим полям.
+	full, err := WorkspaceDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkspaceDigestBefore != full || result.WorkspaceDigestAfter != full {
+		t.Fatalf("digest в записи = before %q after %q, ожидался полный %q",
+			result.WorkspaceDigestBefore, result.WorkspaceDigestAfter, full)
+	}
+	if !VerifyResultDigest(result) {
+		t.Fatalf("evidence digest не самосогласован: %+v", result)
+	}
 }
 
 func TestJUnitAdapterFailingReportFailsOnExitZero(t *testing.T) {

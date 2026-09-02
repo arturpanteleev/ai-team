@@ -76,7 +76,7 @@
 | 18 | P1-4 | P1 | review | p1-4-containment-profile-v1 | Containment profile v1 + receipt (OS-sandbox backend — V2) |
 | 19 | P1-9 | P1 | review | p1-9-coder-stage-independence | Contract test: coder не видит будущее ревью |
 | 20 | P1-5 | P1 | review | [PR #62](https://github.com/arturpanteleev/ai-team/pull/62) · v0-p15-dsse-signed-bundle | Signed bundle через DSSE (ed25519, stdlib-only) |
-| 21 | P1-6 | P1 | review | p1-6-redaction-retention-contract | PR #69 |
+| 21 | P1-6 | P1 | review | p1-6-redaction-retention-contract | PR #69; ревью-фиксы: оба Blocker закрыты (MaxBytes дефолт + подкоманда до flag), should-fix: PEM-блок, assignment-фильтр, repo-relative include + guard 0 файлов, --out вне source, gc Validate; комментарий-ответ на PR |
 | 22 | P1-7 | P1 | review | p1-7-budget-guard-usage-truthfulness | PR #68 |
 | 23 | P1-8 | P1 | review | p1-8-ci-parity-check-import | PR #67 |
 | 24 | OPS-8 | P1 | open | — | Data/control separation remainder |

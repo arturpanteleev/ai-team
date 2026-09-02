@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,6 +48,18 @@ const (
 	RecordAttemptManifest  = "attempt_manifest"
 )
 
+// validRecordType — допускаемый whitelisted тип record bundle'а. Неизвестные
+// типы отклоняются fail-closed, чтобы произвольный index.json не мог объявить
+// любые файлы частью доказательного bundle.
+func validRecordType(t string) bool {
+	switch t {
+	case RecordRunManifest, RecordConfigSnapshot, RecordWorkflowSnapshot,
+		RecordEventLog, RecordAnchor, RecordAttestation, RecordAttemptManifest:
+		return true
+	}
+	return false
+}
+
 const (
 	maxRunManifestSize  = 1 << 20
 	maxIndexSize        = 1 << 20
@@ -74,15 +87,26 @@ type Index struct {
 	Records       []Record `json:"records"`
 }
 
-// BundleDigest — deterministic содержимость identity bundle'а: sha256
-// канонического index.json (всегда одинаков для одинакового evidence).
-func BundleDigest(index *Index) string {
-	data, err := json.Marshal(index)
+// indexBytes — те байты index.json, что пишутся на диск (единственный источник
+// истины для BundleDigest, чтобы внешний проверяющий воспроизвёл bundle_sha256
+// как sha256-файла index.json).
+func indexBytes(index *Index) ([]byte, error) {
+	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	return append(data, '\n'), nil
+}
+
+// BundleDigest — deterministic содержимость identity bundle'а: sha256 ровно тех
+// байтов index.json, что пишутся на диск (всегда одинаков для одинакового
+// evidence и равен sha256 файла index.json).
+func BundleDigest(index *Index) (string, error) {
+	data, err := indexBytes(index)
+	if err != nil {
+		return "", err
+	}
+	return sha256Bytes(data), nil
 }
 
 func sha256Bytes(data []byte) string {
@@ -141,11 +165,11 @@ func Build(runDir, outDir string) (*Index, error) {
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
 	index := &Index{SchemaVersion: BundleSchema, Type: BundleType, RunID: manifest.RunID, Records: records}
-	data, err := json.MarshalIndent(index, "", "  ")
+	data, err := indexBytes(index)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, indexFileName), append(data, '\n'), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(outDir, indexFileName), data, 0644); err != nil {
 		return nil, err
 	}
 	return index, nil
@@ -240,6 +264,9 @@ func VerifyBundle(bundleDir string) error {
 	}
 	seen := make(map[string]bool, len(index.Records))
 	for _, record := range index.Records {
+		if !validRecordType(record.Type) {
+			return fmt.Errorf("verify: record %q имеет не-whitelisted тип %q", record.Path, record.Type)
+		}
 		if err := safePath(filepath.FromSlash(record.Path)); err != nil {
 			return fmt.Errorf("verify: record %q небезопасен", record.Path)
 		}
@@ -255,10 +282,38 @@ func VerifyBundle(bundleDir string) error {
 			return fmt.Errorf("verify: record %s %s не совпадает со своим sha256 (evidence подменён)", record.Type, record.Path)
 		}
 	}
+	if err := ensureNoExtraneousFiles(bundleDir, &index); err != nil {
+		return err
+	}
 	if err := verifyCore(bundleDir, index.RunID, index.Records); err != nil {
 		return err
 	}
 	return nil
+}
+
+// ensureNoExtraneousFiles — bundle не должен содержать файлов вне index.json:
+// любой лишний файл вне whitelisted records — повод для подозрения, отклоняется.
+func ensureNoExtraneousFiles(bundleDir string, index *Index) error {
+	seen := make(map[string]bool, len(index.Records))
+	for _, record := range index.Records {
+		seen[filepath.FromSlash(record.Path)] = true
+	}
+	return filepath.WalkDir(bundleDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(bundleDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == indexFileName || seen[rel] {
+			return nil
+		}
+		return fmt.Errorf("verify: неизвестный файл %q вне index.json (лишние файлы не допускаются)", rel)
+	})
 }
 
 // VerifyEvidence — полная semantic-проверка live run evidence (та же логика,

@@ -77,7 +77,10 @@ func cmdExport() {
 	}
 	committed = true
 
-	bundleSHA := export.BundleDigest(index)
+	bundleSHA, err := export.BundleDigest(index)
+	if err != nil {
+		fatal("Не удалось вычислить bundle_sha256: %v", err)
+	}
 	if err := export.PublishVerified(filepath.Join(absolute, ".ai-team"), runID, outDir, bundleSHA, time.Now().UTC()); err != nil {
 		fatal("Не удалось записать verified-запись state/exports: %v", err)
 	}

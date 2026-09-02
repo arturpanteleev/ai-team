@@ -1,7 +1,10 @@
 package export
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,11 +129,29 @@ func TestBundleBuildVerifyAndDeterminism(t *testing.T) {
 	if err := VerifyBundle(bundleB); err != nil {
 		t.Fatalf("VerifyBundle(B): %v", err)
 	}
-	if BundleDigest(indexA) != BundleDigest(indexB) {
+	digestA, err := BundleDigest(indexA)
+	if err != nil {
+		t.Fatalf("BundleDigest(A): %v", err)
+	}
+	digestB, err := BundleDigest(indexB)
+	if err != nil {
+		t.Fatalf("BundleDigest(B): %v", err)
+	}
+	if digestA != digestB {
 		t.Fatal("BundleDigest должен быть детерминированным для одинакового evidence")
 	}
-	if BundleDigest(indexA) == "" {
+	if digestA == "" {
 		t.Fatal("пустой BundleDigest")
+	}
+	// BundleDigest обязан равняться sha256 файла index.json на диске (контракт,
+	// чтобы внешний проверяющий воспроизвёл bundle_sha256 без Go).
+	diskData, readErr := os.ReadFile(filepath.Join(bundleA, indexFileName))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	sum := sha256.Sum256(diskData)
+	if digestA != hex.EncodeToString(sum[:]) {
+		t.Fatal("BundleDigest != sha256(файла index.json)")
 	}
 	if indexA.RunID != testRunID || indexA.SchemaVersion != BundleSchema || indexA.Type != BundleType {
 		t.Fatalf("index identity: %+v", indexA)
@@ -206,6 +227,28 @@ func TestVerifyBundleDetectsTampering(t *testing.T) {
 		}},
 		{"лишний attempt manifest", func(dir string) error {
 			return os.MkdirAll(filepath.Join(dir, "attempts", "x-fake"), 0755)
+		}},
+		{"лишний файл вне index", func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "leaked-secret.txt"), []byte("x"), 0644)
+		}},
+		{"record с не-whitelisted типом", func(dir string) error {
+			var idx Index
+			raw, err := os.ReadFile(filepath.Join(dir, indexFileName))
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(raw, &idx); err != nil {
+				return err
+			}
+			if len(idx.Records) == 0 {
+				return fmt.Errorf("нет records")
+			}
+			idx.Records = append(idx.Records, Record{Type: "rm -rf /", Path: idx.Records[0].Path, SHA256: idx.Records[0].SHA256})
+			out, err := json.MarshalIndent(idx, "", "  ")
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, indexFileName), append(out, '\n'), 0644)
 		}},
 	}
 	for _, tc := range cases {

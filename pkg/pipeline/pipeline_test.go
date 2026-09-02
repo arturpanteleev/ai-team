@@ -92,11 +92,27 @@ inputs:
   review: '{feature}/review.md'
 outputs: {}
 `),
+		"verifier/def.yaml": def(`name: verifier
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED]
+inputs:
+  proposal: '{feature}/proposal.md'
+  review: '{feature}/review.md'
+  test-report: '{feature}/test-report.md'
+outputs:
+  verification: '{feature}/verification.md'
+`),
 		"analyst/prompt.md":  def("test"),
 		"coder/prompt.md":    def("test"),
 		"tester/prompt.md":   def("test"),
 		"reviewer/prompt.md": def("test"),
 		"deployer/prompt.md": def("test"),
+		"verifier/prompt.md": def("test"),
 	})
 }
 
@@ -1400,6 +1416,264 @@ func TestRun_StaleOutputRejected(t *testing.T) {
 }
 
 // --- Loopback -------------------------------------------------------------------
+
+// TestForwardPass_CoderDoesNotSeeFutureReview — contract test P1-9: на прямом
+// forward-проходе во входы coder не должен попадать ни один будущий artifact
+// ревью/теста/верификации, даже если он физически существует на диске. Канал
+// доставки вердикт-артефактов в coder — ТОЛЬКО явное loopback-ребро.
+func TestForwardPass_CoderDoesNotSeeFutureReview(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package retry\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	rt.content["tester"] = map[string]string{"report": "tests ok\n\n**Result:** PASS\n"}
+	rt.content["reviewer"] = map[string]string{"review": "# Ревью\n\nвсё ок\n\n**Verdict:** APPROVED\n"}
+
+	var coderInputs [][]string
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name == "coder" {
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"), []byte("package retry\nconst Revision = 1\n"), 0644)
+			var names []string
+			for _, in := range inputs {
+				names = append(names, in.Name)
+			}
+			coderInputs = append(coderInputs, names)
+		}
+	}
+
+	err, _ := runPipeline(t, dir,
+		cfgFor(config.AgentConfig{Name: "analyst"},
+			config.AgentConfig{Name: "coder"},
+			config.AgentConfig{Name: "tester"},
+			config.AgentConfig{Name: "reviewer"},
+			config.AgentConfig{Name: "deployer"}),
+		rt, &scriptedPrompter{interactive: true, answers: []string{"y"}})
+	if err != nil {
+		t.Fatalf("forward-проход должен завершиться успехом: %v", err)
+	}
+
+	if rt.calls["coder"] != 1 {
+		t.Fatalf("coder на прямом проходе должен выполниться ровно один раз, calls=%d", rt.calls["coder"])
+	}
+	if len(coderInputs) != 1 {
+		t.Fatalf("ожидалось одно собрание входов coder, got %d", len(coderInputs))
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "review.md")); statErr != nil {
+		t.Fatalf("review.md должен существовать после reviewer: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "test-report.md")); statErr != nil {
+		t.Fatalf("test-report.md должен существовать после tester: %v", statErr)
+	}
+
+	forbidden := []string{"review", "report", "verification", "test-report"}
+	for _, name := range coderInputs[0] {
+		for _, bad := range forbidden {
+			if name == bad {
+				t.Fatalf("coder получил будущий artifact %q во входах на прямом проходе: %v", bad, coderInputs[0])
+			}
+		}
+	}
+	joined := strings.Join(coderInputs[0], ",")
+	if joined != "proposal" {
+		t.Fatalf("входы coder на прямом проходе должны быть ровно [proposal], got [%s]", joined)
+	}
+}
+
+// TestForwardPass_VerifierStageIsolation — contract test P1-9 на пути стадии
+// verifier (R2 should-fix: раньше покрывались только coder→reviewer и
+// coder→tester→reviewer). Полный standard-профиль c verifier: coder не видит
+// будущий verification, а сам verifier получает входами ровно свой
+// декларированный набор и не видит будущих артефактов deployer.
+func TestForwardPass_VerifierStageIsolation(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package retry\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	rt.content["tester"] = map[string]string{"report": "tests ok\n\n**Result:** PASS\n"}
+	rt.content["reviewer"] = map[string]string{"review": "# Ревью\n\nвсё ок\n\n**Verdict:** APPROVED\n"}
+	rt.content["verifier"] = map[string]string{"verification": "verified\n\n**Verdict:** APPROVED\n"}
+
+	var coderInputs [][]string
+	var verifierInputs [][]string
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		var names []string
+		for _, in := range inputs {
+			names = append(names, in.Name)
+		}
+		switch name {
+		case "coder":
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"), []byte("package retry\nconst Revision = 1\n"), 0644)
+			coderInputs = append(coderInputs, names)
+		case "verifier":
+			verifierInputs = append(verifierInputs, names)
+		}
+	}
+
+	err, _ := runPipeline(t, dir,
+		cfgFor(config.AgentConfig{Name: "analyst"},
+			config.AgentConfig{Name: "coder"},
+			config.AgentConfig{Name: "reviewer"},
+			config.AgentConfig{Name: "tester"},
+			config.AgentConfig{Name: "verifier"},
+			config.AgentConfig{Name: "deployer"}),
+		rt, &scriptedPrompter{interactive: true, answers: []string{"y"}})
+	if err != nil {
+		t.Fatalf("standard-профиль c verifier должен завершиться успехом: %v", err)
+	}
+	if rt.calls["verifier"] != 1 {
+		t.Fatalf("verifier должен выполниться ровно один раз, calls=%d", rt.calls["verifier"])
+	}
+	if rt.calls["coder"] != 1 {
+		t.Fatalf("coder должен выполниться ровно один раз, calls=%d", rt.calls["coder"])
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "verification.md")); statErr != nil {
+		t.Fatalf("verification.md должен существовать после verifier: %v", statErr)
+	}
+
+	// coder не видит будущий verification (как review/report/test-report).
+	joined := strings.Join(coderInputs[0], ",")
+	if joined != "proposal" {
+		t.Fatalf("входы coder на прямом проходе должны быть ровно [proposal], got [%s]", joined)
+	}
+	for _, name := range coderInputs[0] {
+		switch name {
+		case "review", "report", "verification", "test-report":
+			t.Fatalf("coder получил будущий artifact %q на проходе с verifier: %v", name, coderInputs[0])
+		}
+	}
+
+	// verifier получает ровно свой декларированный набор, без будущих
+	// артефактов deployer (не prepend-артефактов чужих стадий).
+	if len(verifierInputs) != 1 {
+		t.Fatalf("verifier запусков: %d", len(verifierInputs))
+	}
+	set := make(map[string]bool, len(verifierInputs[0]))
+	for _, name := range verifierInputs[0] {
+		set[name] = true
+		if !isVerifierDeclaredInput(name) {
+			t.Fatalf("verifier получил недекларированный вход %q: %v", name, verifierInputs[0])
+		}
+	}
+	for _, want := range []string{"proposal", "review", "test-report"} {
+		if !set[want] {
+			t.Fatalf("verifier должен получить вход %q, got %v", want, verifierInputs[0])
+		}
+	}
+}
+
+// isVerifierDeclaredInput — declared input names стадии verifier в testRegistry.
+func isVerifierDeclaredInput(name string) bool {
+	switch name {
+	case "proposal", "review", "test-report":
+		return true
+	}
+	return false
+}
+
+// TestCoderSeesReviewOnlyAfterLoopback — бинарность канала (P1-9): на прямом
+// проходе coder НЕ видит review, а после approved loopback-ребра видит. Пара к
+// положительным loopback-тестам закрепляет «loopback — единственный канал».
+func TestCoderSeesReviewOnlyAfterLoopback(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package retry\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+	rt := newScripted()
+	rt.contentFn["reviewer"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"review": "исправь\n\n**Verdict:** REJECTED\n"}
+		}
+		return map[string]string{"review": "теперь ок\n\n**Verdict:** APPROVED\n"}
+	}
+	rt.content["tester"] = map[string]string{"report": "tests ok\n\n**Result:** PASS\n"}
+
+	var coderInputs [][]string
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name == "coder" {
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"), []byte(fmt.Sprintf("package retry\nconst Revision = %d\n", rt.calls["coder"])), 0644)
+			var names []string
+			for _, in := range inputs {
+				names = append(names, in.Name)
+			}
+			coderInputs = append(coderInputs, names)
+		}
+	}
+
+	pr := &scriptedPrompter{interactive: true, answers: []string{"y"}}
+	err, _ := runPipeline(t, dir,
+		cfgForGraph(func(wf *config.WorkflowConfig) {
+			wf.MaxVisits["coder"] = 3
+			wf.MaxVisits["tester"] = 3
+			wf.MaxVisits["reviewer"] = 3
+			wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+		},
+			config.AgentConfig{Name: "analyst"},
+			config.AgentConfig{Name: "coder"},
+			config.AgentConfig{Name: "tester"},
+			config.AgentConfig{Name: "reviewer"},
+			config.AgentConfig{Name: "deployer"},
+		),
+		rt, pr)
+	if err != nil {
+		t.Fatalf("loopback должен завершиться успехом: %v", err)
+	}
+	if rt.calls["coder"] != 2 {
+		t.Fatalf("coder должен выполниться дважды, calls=%d", rt.calls["coder"])
+	}
+	if len(coderInputs) != 2 {
+		t.Fatalf("coder запусков: %d", len(coderInputs))
+	}
+	first := strings.Join(coderInputs[0], ",")
+	if strings.Contains(first, "review") {
+		t.Fatalf("coder на прямом проходе не должен видеть review: %s", first)
+	}
+	if first != "proposal" {
+		t.Fatalf("forward входы coder должны быть ровно [proposal], got [%s]", first)
+	}
+	second := strings.Join(coderInputs[1], ",")
+	if !strings.Contains(second, "review") {
+		t.Fatalf("на retry coder должен получить review во входах: %s", second)
+	}
+}
 
 func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 	dir := env(t)

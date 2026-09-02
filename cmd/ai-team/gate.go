@@ -174,5 +174,3 @@ func printGateSummary(result *gate.Result, outDir string) {
 
 	fmt.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
 }
-
-

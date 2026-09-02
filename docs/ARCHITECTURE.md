@@ -195,6 +195,22 @@ _type/predicateType/schema_version) — compatibility policy; `Digest` даёт
 стабильный sha256 statement'а. За рамки warning/usage не утверждает ничего,
 что не может вычислить deterministically (subject пуст вне Git).
 
+export/verify (V0-4): `pkg/export` собирает самодостаточный deterministic
+portable bundle терминального run в `ai-team export <run_id>` (whitelisted
+typed records — run/config/workflow snapshots, hash-chained event log, anchor,
+attestation v1, attempt manifests; без raw logs/stdout). index.json несёт sha256
+каждого record без тайм-меток — identical evidence даёт байт-в-байт одинаковый
+bundle (BundleDigest). Перед публикацией bundle обязан пройти полную verify:
+records против своих sha256, run identity/schema, config/workflow snapshots
+против run manifest, event chain + anchor (VerifyAnchor), attempt manifests
+против manifest_sha256 в attempt_finished событиях (файлы↔events связка, которой
+VerifyAnchor не даёт), attestation v1 против events/config/workflow/
+attempt_count/provenance. Только после успешной verify пишется verified-запись
+в state/exports/<runID>.json (контракт V0-0), открывающая право `gc --prune-runs`.
+`ai-team verify <bundle-dir>` проверяет bundle самодостаточно без repo и
+.ai-team; `ai-team verify <run_id>` — та же full-свёртка live evidence.
+Экспорт отказастся от non-terminal run и от run без attestation.json.
+
 Локальный `RunController` связывает HTTP с тем же `RunEngine`, резервирует
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают

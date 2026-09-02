@@ -53,6 +53,14 @@ func TestSensitiveEntries(t *testing.T) {
 			want:  nil,
 		},
 		{
+			name:  "docker config",
+			paths: []string{".docker/config.json", ".docker/config.json.bak"},
+			want: []Entry{
+				{Path: ".docker/config.json", Kind: KindCredentials},
+				{Path: ".docker/config.json.bak", Kind: KindCredentials},
+			},
+		},
+		{
 			name:  "dedup and sort",
 			paths: []string{"z.key", ".env", "z.key"},
 			want: []Entry{

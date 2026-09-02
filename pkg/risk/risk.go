@@ -38,13 +38,13 @@ var sensitiveExtensions = map[string]string{
 }
 
 // sensitiveBases — имена файлов, признаваемых чувствительными по имени.
+// Путь .docker/config.json матчится через sensitiveSegments (сегмент ".docker"),
+// а не здесь, т.к. path.Base возвращает "config.json".
 var sensitiveBases = map[string]string{
 	".npmrc":                               KindCredentials,
 	".pypirc":                              KindCredentials,
 	".netrc":                               KindCredentials,
 	".htpasswd":                            KindCredentials,
-	".aws/credentials":                     KindCredentials,
-	".docker/config.json":                  KindCredentials,
 	"credentials.json":                     KindCredentials,
 	"service-account.json":                 KindCredentials,
 	"service_account.json":                 KindCredentials,
@@ -52,11 +52,13 @@ var sensitiveBases = map[string]string{
 }
 
 // sensitiveSegments — каталоги, содержимое которых чувствительно.
+// .docker содержит config.json с registry credentials (V0-8 should-fix).
 var sensitiveSegments = map[string]string{
 	"secrets":     KindSecrets,
 	".ssh":        KindSecrets,
 	".gnupg":      KindSecrets,
 	".aws":        KindCredentials,
+	".docker":     KindCredentials,
 	"credentials": KindCredentials,
 }
 

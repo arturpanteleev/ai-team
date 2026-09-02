@@ -79,7 +79,7 @@
 | 21 | P1-6 | P1 | review | p1-6-redaction-retention-contract | PR #69; ревью-фиксы: оба Blocker закрыты (MaxBytes дефолт + подкоманда до flag), should-fix: PEM-блок, assignment-фильтр, repo-relative include + guard 0 файлов, --out вне source, gc Validate; комментарий-ответ на PR |
 | 22 | P1-7 | P1 | review | p1-7-budget-guard-usage-truthfulness | PR #68 |
 | 23 | P1-8 | P1 | review | p1-8-ci-parity-check-import | PR #67 |
-| 24 | OPS-8 | P1 | open | — | Data/control separation remainder |
+| 24 | OPS-8 | P1 | review | ops-8-data-control-separation-remainder | PR #70 |
 | 25 | OPS-3 | P1 | review | ops3-fail-closed-resume | PR #65 |
 | 26 | OPS-2 | P1 | review | ops2-configurable-tree-hash-ignore | PR #66 |
 | 27 | OPS-10 | P1 | review | ops10-dependabot-sha-pinned | Dependabot для SHA-pinned Actions |

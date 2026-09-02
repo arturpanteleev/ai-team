@@ -129,7 +129,11 @@ func printGateSummary(result *gate.Result, outDir string) {
 	}
 	fmt.Printf("\n%s Gate %s (exit %d) — %s\n", mark, status, gate.ExitCode(result), strings.Join(parts, ", "))
 
-	fmt.Printf("  base %s → %s (%s)\n", result.BaseCommit[:12], result.Candidate[:12], result.DiffPolicy)
+	candLabel := result.Candidate
+	if result.CandidateCommit != "" {
+		candLabel = shortSHA(result.CandidateCommit)
+	}
+	fmt.Printf("  base %s → %s (%s)\n", shortSHA(result.BaseCommit), candLabel, result.DiffPolicy)
 
 	switch result.PolicyVerdict {
 	case gate.VerdictPassed:
@@ -160,4 +164,13 @@ func printGateSummary(result *gate.Result, outDir string) {
 	}
 
 	fmt.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
+}
+
+// shortSHA — безопасный короткий префикс SHA для вывода: не паникует на
+// коротких/пустых строках (например, WORKTREE-кандидат без commit).
+func shortSHA(s string) string {
+	if len(s) < 12 {
+		return s
+	}
+	return s[:12]
 }

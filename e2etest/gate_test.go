@@ -93,6 +93,22 @@ func TestE2E_GateBundleAndExitCodes(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("gate unknown ref: exit=%d, ожидалось 2 (BLOCKED); out:\n%s", code, out)
 	}
+
+	// 4. Дефолтный WORKTREE-кандидат (source + tests изменены в рабочем дереве)
+	// не должен паниковать на коротком Candidate (регрессия Candidate[:12]).
+	gateWrite(t, repo, map[string]string{
+		"src/app.go":        "package app\n// worktree change\n",
+		"tests/app_test.go": "package app\n\nfunc TestApp(t *testing.T) {}\n",
+	})
+	outDir3 := filepath.Join(t.TempDir(), "bundle3")
+	code, out = runAI(t, bin, t.TempDir(), nil, "gate",
+		"--target", repo, "--base", base, "--out", outDir3)
+	if code != 0 {
+		t.Fatalf("gate default WORKTREE: exit=%d, ожидалось 0 (PASS); out:\n%s", code, out)
+	}
+	if !strings.Contains(out, "PASS") {
+		t.Fatalf("gate WORKTREE PASS output: %s", out)
+	}
 }
 
 // assertGateBundle проверяет структуру attestation bundle: индекс с типом,

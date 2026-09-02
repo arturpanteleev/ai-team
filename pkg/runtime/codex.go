@@ -39,6 +39,7 @@ func (a *CodexAdapter) Describe() Descriptor {
 			CapSessionIsolation,
 			CapUsageReported,
 		},
+		PromptViaStdin: true,
 	}
 }
 
@@ -152,9 +153,10 @@ func (a *CodexAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 		}
 		if event.Type == "turn.completed" && event.Usage != nil {
 			usage = &Usage{
-				TokensInput:  event.Usage.InputTokens + event.Usage.CachedInputTokens,
-				TokensOutput: event.Usage.OutputTokens,
-				Attested:     true,
+				TokensInput:       event.Usage.InputTokens,
+				CachedInputTokens: event.Usage.CachedInputTokens,
+				TokensOutput:      event.Usage.OutputTokens,
+				Attested:          true,
 			}
 		}
 	}

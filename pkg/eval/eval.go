@@ -132,12 +132,14 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 	cmd.Stdout = &out
 	stderr := cappedBuffer{limit: 256 << 10}
 	cmd.Stderr = &stderr
-	stdin, err := os.Open(promptPath)
-	if err != nil {
-		return nil, err
+	if adapter.Describe().PromptViaStdin {
+		stdin, err := os.Open(promptPath)
+		if err != nil {
+			return nil, err
+		}
+		defer stdin.Close()
+		cmd.Stdin = stdin
 	}
-	defer stdin.Close()
-	cmd.Stdin = stdin
 	environment, cleanupEnvironment, envErr := adapter.Environment(
 		&runtime.Agent{Name: "eval-judge", Mutation: "none"},
 		&runtime.Task{TargetDir: isolatedDir, ArtifactRoot: filepath.Join(isolatedDir, "artifacts"), Feature: "eval"},

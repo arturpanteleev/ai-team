@@ -86,8 +86,11 @@ func TestCodexParseUsageLastTurnWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.TokensInput != 260 || usage.TokensOutput != 40 {
-		t.Errorf("usage = %+v, want input=260 output=40 (последний turn)", usage)
+	if usage.TokensInput != 200 || usage.TokensOutput != 40 {
+		t.Errorf("usage = %+v, want input=200 output=40 (последний turn)", usage)
+	}
+	if usage.CachedInputTokens != 60 {
+		t.Errorf("CachedInputTokens = %d, want 60 (не суммируется с TokensInput)", usage.CachedInputTokens)
 	}
 	if !usage.Attested {
 		t.Error("codex usage должен быть attested (токены из JSONL харнесса)")

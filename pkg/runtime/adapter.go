@@ -73,6 +73,11 @@ type Descriptor struct {
 	Name         string       `json:"name"`
 	Binary       string       `json:"binary"`
 	Capabilities []Capability `json:"capabilities"`
+	// PromptViaStdin — харнесс читает промпт из stdin (codex exec -).
+	// True: оркестратор направляет promptFile в cmd.Stdin. False (opencode):
+	// промпт передаётся только через argv --file, stdin остаётся не тронутым
+	// (иначе opencode получил бы промпт дважды).
+	PromptViaStdin bool `json:"prompt_via_stdin,omitempty"`
 }
 
 // Launch — harness-neutral запрос на запуск этапа. Политика этапа маппится
@@ -92,11 +97,16 @@ type Launch struct {
 // от адаптера, аттестующего источник данных (see CapUsageReported / P1-7);
 // контроллер никогда не угадывает usage сам.
 type Usage struct {
-	TokensInput  int64   `json:"tokens_input,omitempty"`
-	TokensOutput int64   `json:"tokens_output,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
-	Currency     string  `json:"currency,omitempty"`
-	Attested     bool    `json:"attested"`
+	TokensInput int64   `json:"tokens_input,omitempty"`
+	// CachedInputTokens — доля входных токенов, прочитанных из кэша харнесса.
+	// По конвенции OpenAI кэшированные входные токены уже входят в
+	// TokensInput; это поле ведётся отдельно для учёта скидки cache-read
+	// при расчёте cost, но НЕ суммируется с TokensInput.
+	CachedInputTokens int64   `json:"cached_input_tokens,omitempty"`
+	TokensOutput      int64   `json:"tokens_output,omitempty"`
+	CostUSD           float64 `json:"cost_usd,omitempty"`
+	Currency          string  `json:"currency,omitempty"`
+	Attested          bool    `json:"attested"`
 }
 
 // UsageSource — опциональный интерфейс адаптера: разбирает usage из

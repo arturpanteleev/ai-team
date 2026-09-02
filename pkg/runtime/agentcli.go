@@ -93,14 +93,17 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	cmd.Dir = targetDir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Промпт направляется и в argv-флаг (opencode --file), и в stdin: адаптеры,
-	// принимающие промпт из stdin (codex exec -), потребляют его оттуда.
-	stdin, err := os.Open(promptFile)
-	if err != nil {
-		return fmt.Errorf("агент %s: открыть промпт для stdin: %w", agent.Name, err)
+	// Промпт в stdin подаётся только адаптерам, объявляющим PromptViaStdin
+	// (codex exec -). Opencode получает промпт только через argv --file: иначе
+	// промпт дублировался бы (argv + stdin).
+	if adapter.Describe().PromptViaStdin {
+		stdin, err := os.Open(promptFile)
+		if err != nil {
+			return fmt.Errorf("агент %s: открыть промпт для stdin: %w", agent.Name, err)
+		}
+		defer stdin.Close()
+		cmd.Stdin = stdin
 	}
-	defer stdin.Close()
-	cmd.Stdin = stdin
 
 	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, task, inputs...)
 	if err != nil {
@@ -110,7 +113,10 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	cmd.Env = isolatedEnv
 
 	if err := process.Run(ctx, cmd); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		// Отмена/deadline не зависят от harness-вывода: пробрасываем их ДО
+		// классификатора, иначе context.Canceled/DeadlineExceeded маскируется
+		// под CodexErrorUnknown/ClaudeErrorUnknown.
+		if ctx.Err() != nil {
 			return fmt.Errorf("агент %s: %w", agent.Name, ctx.Err())
 		}
 		if classifier, ok := adapter.(interface{ ClassifyError(output string) error }); ok {

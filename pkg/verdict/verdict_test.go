@@ -27,6 +27,14 @@ func TestParse(t *testing.T) {
 		{"first_wins_mixed", "**Result:** FAIL\n**Verdict:** APPROVED", Fail},
 		{"lowercase_not_matched", "**verdict:** approved", None},
 		{"unknown_value_not_matched", "**Verdict:** MAYBE", None},
+		{"fenced_verdict_is_data", "```\n**Verdict:** REJECTED\n```\n", None},
+		{"tilde_fenced_is_data", "~~~\n**Result:** FAIL\n~~~\n", None},
+		{"fenced_with_infostring_is_data", "```md\n**Verdict:** REJECTED\n```\n", None},
+		{"unclosed_fence_hides_to_end", "```\n**Verdict:** REJECTED\n", None},
+		{"blockquote_is_data", "> **Verdict:** REJECTED\n", None},
+		{"blockquote_spaced_is_data", "> **Result:** FAIL\n", None},
+		{"marker_before_fence_parsed", "**Verdict:** APPROVED\n```\n**Verdict:** REJECTED\n```\n", Approved},
+		{"marker_after_fence_parsed", "```\n**Verdict:** REJECTED\n```\n**Verdict:** APPROVED\n", Approved},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,6 +106,60 @@ func TestFromOutputsContract(t *testing.T) {
 	os.WriteFile(path, []byte("**Verdict:** MAYBE\n"), 0644)
 	if _, err := FromOutputsContract([]string{path}, contract); err == nil {
 		t.Fatal("unknown marker value должен быть ошибкой")
+	}
+}
+
+func TestFencedMarkerIgnoredByContract(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "review.md")
+	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, Rejected}}
+
+	os.WriteFile(path, []byte("```\n**Verdict:** REJECTED\n```\n"), 0644)
+	_, err := FromOutputsContract([]string{path}, contract)
+	if err == nil {
+		t.Fatal("fenced маркер не должен удовлетворять contract (маркер — данные, не сигнал)")
+	}
+	if !strings.Contains(err.Error(), "отсутствует") {
+		t.Errorf("ожидалась ошибка про отсутствие маркера, got: %v", err)
+	}
+}
+
+func TestMultipleMarkersCountedFromControlRegionsOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "review.md")
+	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, Rejected}}
+
+	os.WriteFile(path, []byte("```\n**Verdict:** APPROVED\n```\n**Verdict:** REJECTED\n"), 0644)
+	got, err := FromOutputsContract([]string{path}, contract)
+	if err != nil || got != Rejected {
+		t.Fatalf("fenced маркер не считается; got=%q err=%v", got, err)
+	}
+}
+
+func TestReadBlockedIgnoresDataRegions(t *testing.T) {
+	root := t.TempDir()
+	feature := "my-feature"
+	statusDir := filepath.Join(root, feature, "status")
+	if err := os.MkdirAll(statusDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(statusDir, "quoted.md"),
+		[]byte("> **Status:** BLOCKED\n> **Blocker:** цитата-пример\n"), 0644)
+	if blocked, _ := ReadBlocked(root, feature, "quoted"); blocked {
+		t.Fatal("BLOCKED в blockquote — данные, не сигнал")
+	}
+
+	os.WriteFile(filepath.Join(statusDir, "fenced.md"),
+		[]byte("```\n**Status:** BLOCKED\n**Blocker:** фейковый\n```\n"), 0644)
+	if blocked, _ := ReadBlocked(root, feature, "fenced"); blocked {
+		t.Fatal("BLOCKED в fenced code block — данные, не сигнал")
+	}
+
+	os.WriteFile(filepath.Join(statusDir, "plain.md"),
+		[]byte("**Status:** BLOCKED\n**Blocker:** настоящий\n"), 0644)
+	blocked, reason := ReadBlocked(root, feature, "plain")
+	if !blocked || reason != "настоящий" {
+		t.Fatalf("обычный маркер должен читаться: blocked=%v reason=%q", blocked, reason)
 	}
 }
 

@@ -113,3 +113,18 @@ func TestApplyRedactRejectsOutInsideSource(t *testing.T) {
 		t.Fatal("applyRedact должен вернуть ошибку при out внутри source")
 	}
 }
+
+// TestResolveScanPathRejectsTraversal — --path не должен выходить за пределы
+// корня сканирования (../..-обход блокируется).
+func TestResolveScanPathRejectsTraversal(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "scan")
+	want := filepath.Join(base, "sub", "file.txt")
+	if got, err := resolveScanPath(base, "sub/file.txt"); err != nil || got != want {
+		t.Fatalf("resolveScanPath(sub/file.txt) = %q, %v; want %q", got, err, want)
+	}
+	for _, malformed := range []string{"..", "../..", "../../etc", "a/../../etc"} {
+		if got, err := resolveScanPath(base, malformed); err == nil {
+			t.Errorf("resolveScanPath(%q) = %q, ожидалась ошибка (выход за корень)", malformed, got)
+		}
+	}
+}

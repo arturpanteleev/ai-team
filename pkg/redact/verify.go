@@ -177,13 +177,13 @@ func redactByLines(lines []string) []byte {
 			if endPrivateKeyRe().MatchString(line) {
 				inKeyBody = false
 			}
-			builder.WriteString(cleaned)
+			builder.WriteString(preserveEOL(line, cleaned))
 			continue
 		}
 		if beginPrivateKeyRe().MatchString(line) {
 			cleaned = "[REDACTED:private key]"
 			inKeyBody = !endPrivateKeyRe().MatchString(line)
-			builder.WriteString(cleaned)
+			builder.WriteString(preserveEOL(line, cleaned))
 			continue
 		}
 		for _, rule := range compileSecretRules() {
@@ -209,6 +209,16 @@ func redactByLines(lines []string) []byte {
 		builder.WriteString(cleaned)
 	}
 	return []byte(builder.String())
+}
+
+// preserveEOL восстанавливает завершающий \n строки, если вырезающий
+// маркер (например [REDACTED:private key]) заменил её и утерял перевод
+// строки — иначе маркеры блока склеивались бы в одну строку.
+func preserveEOL(original, replacement string) string {
+	if strings.HasSuffix(original, "\n") && !strings.HasSuffix(replacement, "\n") {
+		return replacement + "\n"
+	}
+	return replacement
 }
 
 // relPath проверяет, что full лежит внутри root, и возвращает относительный

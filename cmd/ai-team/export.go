@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"

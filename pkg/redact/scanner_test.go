@@ -103,6 +103,12 @@ func TestRedactBlanksPrivateKeyBody(t *testing.T) {
 	if strings.Count(redacted, "[REDACTED:private key]") < 3 {
 		t.Errorf("ожидались 3+ маркера (begin/body/end): %q", redacted)
 	}
+	if strings.Count(redacted, "\n") != strings.Count(string(input), "\n") {
+		t.Errorf("число переводов строк не сохранилось: redacted=%q", redacted)
+	}
+	if strings.Contains(redacted, "]"+header) || strings.Contains(redacted, "]"+footer) {
+		t.Errorf("несколько маркеров склеены в одну строку (потерян \\n): %q", redacted)
+	}
 }
 
 func TestClassifyField(t *testing.T) {

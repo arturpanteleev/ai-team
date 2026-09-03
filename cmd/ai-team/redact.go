@@ -38,6 +38,18 @@ func loadPolicyConfig(target string) (*config.Config, error) {
 	return config.Load(cfgPath)
 }
 
+// resolveScanPath резолвит repository-относительный --path внутри корня
+// сканирования и проверяет, что результат не выходит за его пределы
+// (контентный guard, аналог validRunID для --run — защита от ../..-обхода).
+func resolveScanPath(base, pathArg string) (string, error) {
+	joined := filepath.Join(base, strings.TrimPrefix(filepath.FromSlash(pathArg), "./"))
+	rel, err := filepath.Rel(base, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("--path %q выходит за пределы корня сканирования", pathArg)
+	}
+	return joined, nil
+}
+
 // cmdRedact — P1-6 privacy-контракт:
 //
 //	ai-team redact verify --target <dir> [--run <id>]
@@ -99,7 +111,10 @@ func cmdRedact() {
 		scanRoot = filepath.Join(scanRoot, *runID)
 	}
 	if *pathArg != "" {
-		scanRoot = filepath.Join(scanRoot, strings.TrimPrefix(filepath.FromSlash(*pathArg), "./"))
+		scanRoot, err = resolveScanPath(scanRoot, *pathArg)
+		if err != nil {
+			fatal("%v", err)
+		}
 	}
 
 	// SF4: относительный --out резолвится от target, а не от CWD (match README);

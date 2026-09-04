@@ -63,6 +63,60 @@ make specs
 запускает `openspec validate --all --strict --no-interactive` — строгую
 проверку структуры и формата всех capability-спек.
 
+## Локальная разработка
+
+### Предварительные требования
+
+| Инструмент | Минимально | Зачем |
+|---|---|---|
+| Go | 1.26.5+ | сборка и тесты ядра |
+| Node.js + npm | 22+ (npm 10+) | сборка/тест web-фронтенда (`web/`) |
+| OpenSpec CLI | через `npx` автоматически | строгая валидация specs (`make specs`) |
+| `opencode` | в `PATH` | только для запуска полного `ai-team run` (LLM-артефакты) |
+
+Go-модуль и веб-фронтенд — два независимых сопрягаемых блока:
+`cmd/` + `pkg/` собираются как обычный Go-бинарник, а `web/` — отдельный
+npm-проект, чья прод-сборка (`web/dist`) встраивается в бинарник через
+`go:embed` (`embed_agents.go` встраивает и `agents/`).
+
+### Быстрый старт разработчика
+
+```bash
+# 1. Ядро
+make build                  # go build -o bin/ai-team ./cmd/ai-team
+make test                   # go test ./...
+make test-coverage          # с coverage-гейтом 60%
+
+# 2. Отдельно — только один пакет (быстрее итераций)
+go test ./pkg/pipeline/...
+go test -run TestRun_Loopback ./pkg/pipeline/...
+
+# 3. Web-фронтенд (отредактировали web/src → пересоберите dist)
+cd web && npm ci
+npm run lint && npm test && npm run build
+
+# 4. Полная проверка (всё, что гоняет CI локально)
+make verify
+```
+
+> После изменения `web/src` обязательно выполните `npm run build` и
+> закоммитьте обновлённый `web/dist` — CI проверяет, что встроенный dist
+> соответствует свежей сборке (`git diff --exit-code -- dist` в job `frontend`).
+
+### E2E-тесты через mock-opencode
+
+`e2etest/` запускает реальные subprocess-сценарии поверх `mock-opencode.sh`
+(фейковый LLM), поэтому не требует API-ключей:
+
+```bash
+make test-e2e              # go test -run TestE2E ./e2etest/...
+```
+
+> Используйте `go test -count=1 ./...`, а не голый `go test ./...`: некоторые
+> пакеты (`e2etest`) не импортируют движок напрямую, и Go-кэш тестов не
+> инвалидируется автоматически при изменении `pkg/runtime` и т.п. — только
+> `-count=1` форсирует реальный перезапуск.
+
 ## Make-таргеты
 
 ```bash

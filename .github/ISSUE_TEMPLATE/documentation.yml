@@ -1,0 +1,34 @@
+name: Documentation
+description: Report a gap, error, or broken link in the docs
+labels: [documentation, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us keep the documentation accurate. Search existing issues first.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the docs does this concern?
+      options:
+        - README.md
+        - docs/ARCHITECTURE.md
+        - CONTRIBUTING.md
+        - docs/demo
+        - CLI help / error messages
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing?
+      description: Clear description of the gap, error, or broken link.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Optional concrete fix or wording.

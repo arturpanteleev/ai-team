@@ -398,6 +398,7 @@ make build          # сборка bin/ai-team
 make test           # go test ./...
 make test-e2e       # mock-opencode E2E
 make specs          # строгая OpenSpec-валидация
+make docs           # генерация сайта документации в docs/_site
 make verify         # полная проверка (как CI)
 ```
 
@@ -413,3 +414,10 @@ verification, vet, govulncheck, race tests, coverage gate 60% (`make
 test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
 проверкой, что встроенный dist соответствует исходникам фронта. CI повторяет
 те же проверки отдельными job'ами.
+
+Публичный сайт документации строится генератором
+[`docsgen/`](docsgen/) из тех же Markdown-источников (`README.md`, `docs/`,
+`CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, ...) и публикуется на
+GitHub Pages при push в `master` (`.github/workflows/pages.yaml`). Релиз
+бинарников для нескольких платформ создаётся автоматически по push тега
+`v*` через `.github/workflows/release.yaml` (`make release-binaries`).

@@ -1,11 +1,21 @@
 # ai-team
 
 [![CI](https://github.com/arturpanteleev/ai-team/actions/workflows/ci.yaml/badge.svg)](https://github.com/arturpanteleev/ai-team/actions/workflows/ci.yaml)
+[![Docs](https://img.shields.io/badge/docs-site-blue)](https://arturpanteleev.github.io/ai-team/)
+[![Release](https://img.shields.io/github/v/release/arturpanteleev/ai-team)](https://github.com/arturpanteleev/ai-team/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/arturpanteleev/ai-team)](https://go.dev/dl/)
+[![License](https://img.shields.io/github/license/arturpanteleev/ai-team)](LICENSE)
 
 Локальный control plane для решения IT-задач цепочкой AI-агентов. LLM создаёт
 артефакты (proposal, design, код, тесты, review) и предлагает вердикты;
 переходы между этапами, проверки, mutation scopes, evidence и delivery
-исполняет детерминированный Go-контроллер — не LLM.
+исполняет детерминированный Go-контроллер — **не LLM**.
+
+AI-агенты — это «мозг», но не «руки»: всё, что меняет репозиторий или выходит
+за его пределы (commit, push, PR), выполняется только после детерминированных
+проверок и явного подтверждения человеком точного delivery-плана.
+
+Публичный сайт документации: **<https://arturpanteleev.github.io/ai-team/>**
 
 Если вы новый читатель, читайте разделы по порядку: этот README проведёт вас
 от установки до первой поставленной фичи. Глубокое описание внутреннего
@@ -50,6 +60,8 @@ go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest
 
 ## Быстрый старт
 
+Подготовка проекта — **один вызов**:
+
 ```bash
 cd /my-project
 ai-team init
@@ -65,14 +77,28 @@ Node, неизвестный) `init` выводит warning: delivery остаё
 вы не настроите required unit/integration check вручную (см.
 [«Конфигурация»](#конфигурация)).
 
+Запустите фичу: от идеи до готового к доставке кода — **два запуска**, и между
+ними вы осознанно читаете и подтверждаете план.
+
 ```bash
+# 1. Провести фичу по конвейеру: аналитик → архитектор → кодер → ревьюер →
+#    тестер → верификатор → deployer. Контроллер останавливается перед
+#    delivery и печатает canonical plan + его SHA-256 (exit code 3).
 ai-team run --feature add-jwt-auth --task "Реализовать JWT авторизацию"
 ```
 
-Это самый частый способ запуска. Переходы между смысловыми AI-этапами требуют
-решения человека с подходящей ролью. В TTY контроллер спрашивает решение
-сразу; без TTY сохраняет pending approval и тот же run можно продолжить после
-записи решения.
+```bash
+# 2. Подтвердить именно тот план, который показал контроллер (другой SHA-256
+#    не подойдёт), — и только тогда будет создан commit/push/PR.
+ai-team run --resume <run_id> --approve-plan <sha256-из-шага-1>
+```
+
+В интерактивном терминале checkpoints спрашивают ваше решение сами, без
+флагов `--approve-*`. После доставки результат виден на дашборде
+(`ai-team web`) или в директории `.ai-team/runs/<run_id>/`.
+
+Полный путь с пояснением каждого шага — в разделе
+[«Как поставить фичу от начала до конца»](#как-поставить-фичу-от-начала-до-конца).
 
 ## Как поставить фичу от начала до конца
 

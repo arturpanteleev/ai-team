@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.6'
+          check-latest: true
+
+      - name: Build release binaries
+        run: make release-binaries
+
+      - name: Package binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for binary in bin/ai-team-*; do
+            [ -e "$binary" ] || continue
+            base=$(basename "$binary")
+            platform=${base#ai-team-}
+            tar -czf "dist/${base}.tar.gz" -C "$(dirname "$binary")" "$base"
+          done
+          ls -la dist/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          assets=()
+          for f in dist/*.tar.gz; do
+            assets+=("$f")
+          done
+          gh release create "$TAG" "${assets[@]}" \
+            --title "$TAG" \
+            --generate-notes \
+            --repo "$GITHUB_REPOSITORY"

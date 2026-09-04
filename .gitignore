@@ -17,6 +17,9 @@ web/dist/*.map
 # OpenSpec
 openspec/changes/*/.openspec.yaml
 
+# Generated docs site
+/docs/_site/
+
 # IDE
 .idea/
 .vscode/

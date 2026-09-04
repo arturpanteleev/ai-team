@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a bug in ai-team
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue with ai-team.
+        Before filing, please search [existing issues](https://github.com/arturpanteleev/ai-team/issues) for a duplicate.
+  - type: input
+    id: version
+    attributes:
+      label: ai-team version
+      description: Output of `ai-team version` (or the git commit you built from).
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      description: e.g. macOS 14 arm64, Ubuntu 22.04 amd64.
+      placeholder: macOS 14 arm64
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behaviour in a few sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: Describe the expected behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands/configuration that trigger the bug.
+      placeholder: |
+        1. `ai-team init` in a fresh repo
+        2. `ai-team run --feature x --task "..." --approve-gates`
+        3. See error...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / logs
+      description: Relevant `ai-team` output, exit codes, or files under `.ai-team/runs/`. Omit secrets.
+      render: shell
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant part of `.ai-team/config.yaml` (redact credentials).
+      render: yaml
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Sensitive data
+      description: By submitting, you confirm you have not included any credentials or secrets and disclosed any security concern via the private route (see SECURITY.md).
+      options:
+        - label: I confirm no secrets/credentials are included and any security issue is reported privately.
+          required: true

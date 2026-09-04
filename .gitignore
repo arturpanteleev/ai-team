@@ -2,16 +2,23 @@
 *.exe
 *.test
 *.out
-*.test
 /tmp/
 /bin/
 /ai-team
+/tmp/
+
+# ai-team target artifacts
+.ai-team/
+
+# Web
+web/node_modules/
+web/dist/*.map
 
 # OpenSpec
 openspec/changes/*/.openspec.yaml
 
-# ai-team target artifacts
-.ai-team/
+# Generated docs site
+/docs/_site/
 
 # IDE
 .idea/

@@ -20,8 +20,8 @@ verification-команды (тесты, vet, линтеры) выполняют
 
 **Не подходит (пока):** недоверенный или сторонний код, секреты, к которым
 агент не должен иметь доступ, production delivery без человеческого review.
-Система пока не является hermetic sandbox — подробности и открытые риски в
-[AUDIT.md](AUDIT.md).
+Система пока не является hermetic sandbox: см. раздел
+[«Граница безопасности»](#граница-безопасности).
 
 ## Предварительные требования и установка
 
@@ -377,24 +377,47 @@ Containment receipt (`containment.json`) честно фиксирует уро�
 strict без OS backend → UNAVAILABLE (fail-closed, gate блокирует untrusted).
 Поэтому текущий профиль допустим только для доверенного локального проекта;
 секреты и недоверенный код должны запускаться во внешнем container/VM sandbox.
-Полный список открытых рисков и release gates — в [AUDIT.md](AUDIT.md).
+Открытые ограничения и направление работ перечислены в
+[SECURITY.md](SECURITY.md).
 
 ## Разработка
 
 Проект использует OpenSpec (спецификации в `openspec/specs/`, активные
 изменения — в `openspec/changes/`) и приветствует контрибьюторов — процесс
-целиком описан в [CONTRIBUTING.md](CONTRIBUTING.md).
+целиком описан в [CONTRIBUTING.md](CONTRIBUTING.md), а правила безопасного
+раскрытия уязвимостей — в [SECURITY.md](SECURITY.md).
+
+### Локальная сборка и тесты
+
+Требуются Go 1.26+ (ядро) и Node 22+ (web-фронтенд). См. раздел
+«[Локальная разработка](CONTRIBUTING.md#локальная-разработка)»
+в CONTRIBUTING.md.
 
 ```bash
-make build
-make test
-make test-e2e
-make specs
-make verify
+make build          # сборка bin/ai-team
+make test           # go test ./...
+make test-e2e       # mock-opencode E2E
+make specs          # строгая OpenSpec-валидация
+make docs           # генерация сайта документации в docs/_site
+make verify         # полная проверка (как CI)
 ```
+
+### Сообщение об ошибках и предложения
+
+- **Ошибки и фичи** — через [GitHub Issues](https://github.com/arturpanteleev/ai-team/issues)
+  (используйте шаблоны).
+- **Уязвимости** — приватно, через [SECURITY.md](SECURITY.md), не в публичный issue.
+- **Изменения поведения** — spec-first через OpenSpec (см. CONTRIBUTING.md).
 
 `make verify` выполняет gofmt-проверку, строгую OpenSpec-валидацию, module
 verification, vet, govulncheck, race tests, coverage gate 60% (`make
 test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
 проверкой, что встроенный dist соответствует исходникам фронта. CI повторяет
 те же проверки отдельными job'ами.
+
+Публичный сайт документации строится генератором
+[`docsgen/`](docsgen/) из тех же Markdown-источников (`README.md`, `docs/`,
+`CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, ...) и публикуется на
+GitHub Pages при push в `master` (`.github/workflows/pages.yaml`). Релиз
+бинарников для нескольких платформ создаётся автоматически по push тега
+`v*` через `.github/workflows/release.yaml` (`make release-binaries`).

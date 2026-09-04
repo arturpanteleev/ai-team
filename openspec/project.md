@@ -36,14 +36,11 @@ evidence и delivery исполняет детерминированный Go-к
 - Не hermetic sandbox: доверенный локальный проект, права текущего OS-user.
 - Typed test adapters реализованы для Go; delivery для других стеков
   заблокирован до появления адаптеров.
-- Позиционирование «strict/secure/hermetic» запрещено до закрытия P0-рисков
-  из AUDIT.md (OS-sandbox, external anchoring).
+- Позиционирование «strict/secure/hermetic» запрещено до закрытия
+  P0-рисков (OS-sandbox, external anchoring).
 
 ## Карта документов
 
 - [README.md](../README.md) — установка, быстрый старт, CLI.
 - [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — внутреннее устройство,
   единственный точный навигационный документ.
-- [AUDIT.md](../AUDIT.md) — исторический аудит 2026-07-20 (см. баннер).
-- [docs/audits/2026-08-05-technical-audit.md](../docs/audits/2026-08-05-technical-audit.md) —
-  свежайший независимый аудит.

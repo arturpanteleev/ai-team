@@ -2,10 +2,13 @@ TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
 
-.PHONY: build test test-short test-e2e test-coverage specs verify clean release-binaries
+.PHONY: build test test-short test-e2e test-coverage specs verify docs clean release-binaries
 
 build:
 	go build -o bin/ai-team ./cmd/ai-team
+
+docs:
+	go run ./docsgen/cmd/docsgen --out docs/_site
 
 test:
 	go test ./...

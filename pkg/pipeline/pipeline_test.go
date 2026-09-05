@@ -145,7 +145,18 @@ preconditions:
 outputs:
   plan: '{feature}/delivery-plan.json'
 `),
+		"coder/def.yaml": def(`name: coder
+runtime: agentcli
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+require_diff: true
+inputs:
+  task: tasks/{feature}/task.md
+outputs: {}
+`),
 		"approver/prompt.md": def("test"),
+		"coder/prompt.md":    def("test"),
 	})
 }
 
@@ -261,6 +272,20 @@ func (f *fakeDeliveryService) Execute(_ context.Context, request delivery.Reques
 	f.calls++
 	hash, _ := request.Plan.Hash()
 	return delivery.Result{PlanHash: hash, CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PRURL: "https://example.test/pr/1"}, nil
+}
+
+// capturingDeliveryService фиксирует TargetDir каждого delivery request
+// (AUD-05: retry должен исполняться в candidate worktree, а не control target).
+type capturingDeliveryService struct {
+	calls   int
+	targets []string
+}
+
+func (f *capturingDeliveryService) Execute(_ context.Context, request delivery.Request) (delivery.Result, error) {
+	f.calls++
+	f.targets = append(f.targets, request.TargetDir)
+	hash, _ := request.Plan.Hash()
+	return delivery.Result{PlanHash: hash, CommitSHA: strings.Repeat("a", 40), PRURL: "https://example.test/pr/1"}, nil
 }
 
 func prepareDelivery(t *testing.T, dir string) string {
@@ -961,6 +986,213 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 		}
 	}
 	// Повторная доставка теперь блокируется (однократная запись).
+	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir); err == nil {
+		t.Fatal("повторная доставка после успеха должна быть отклонена")
+	}
+}
+
+// TestRun_CompletedWithWarningsRunsPostTerminalDelivery — AUD-06: post-terminal
+// deferred доставка должна выполняться не только для completed, но и для
+// completed_with_warnings (необязательный check на stage дал warning). Итог
+// фиксируется в terminal delivery record; сбой hook-а при warnings не
+// маскируется успехом run (exit 0).
+func TestRun_CompletedWithWarningsRunsPostTerminalDelivery(t *testing.T) {
+	warningCheck := config.AgentConfig{
+		Name: "approver",
+		Checks: []checks.Definition{{
+			Name: "optional-neta", Class: "security",
+			Command: []string{"ai-team-tool-that-does-not-exist"}, Policy: checks.PolicyOptional,
+		}},
+	}
+
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	service := &fakeDeliveryService{}
+	p := New(cfgFor(warningCheck, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
+	})
+	if err != nil {
+		t.Fatalf("completed_with_warnings run обязан выполнить post-terminal delivery: %v", err)
+	}
+	if result.Outcome != workflow.RunCompletedWithWarnings {
+		t.Fatalf("ожидался outcome %q, got %q", workflow.RunCompletedWithWarnings, result.Outcome)
+	}
+	if service.calls != 1 {
+		t.Fatalf("post-terminal delivery должен выполняться и при warnings, calls=%d", service.calls)
+	}
+	runDir := onlyRunDir(t, dir)
+	record, ok, readErr := delivery.ReadTerminalRecord(runDir)
+	if readErr != nil || !ok {
+		t.Fatalf("terminal delivery record не записан: err=%v ok=%v", readErr, ok)
+	}
+	if record.CommitSHA == "" || record.PlanHash != approvedPlanHash {
+		t.Fatalf("terminal record не согласован: %+v", record)
+	}
+
+	// Сбой доставки при warnings не должен маскироваться успехом run.
+	dir2 := env(t)
+	approvedPlanHash2 := prepareDelivery(t, dir2)
+	rt2 := newScripted()
+	rt2.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	failing := &gracefulDeliveryService{}
+	p2 := New(cfgFor(warningCheck, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt2.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(failing))
+	if err := p2.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir2, ApproveGates: true, ApprovePlanHash: approvedPlanHash2,
+	}); err == nil {
+		t.Fatal("сбой post-terminal delivery при warnings обязан вернуть ошибку (exit 0 не маскирует delivery result)")
+	}
+}
+
+// TestDeliverDeferredRetriesFailedHookFromCandidateWorktree — AUD-05: retry
+// доставки Git-run'а обязан резолвить candidate worktree из state_path
+// delivery_deferred event, а не читать prepared plan в control target (decoy).
+// Сбой post-terminal хука → DeliverDeferred(runDir, "", controlRoot) продолжает
+// exact candidate: тот же approved plan, тот же workspace, без чтения decoy
+// плана и без нового LLM-вызова (delivery — controller-owned).
+func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git недоступен")
+	}
+	dir := env(t)
+	gitInit(t, dir)
+	for name, content := range map[string]string{
+		".gitignore":     ".ai-team/\n",
+		"go.mod":         "module example.test/retry\n\ngo 1.26\n",
+		"change_test.go": "package change\n\nimport \"testing\"\n\nfunc TestPrepared(t *testing.T) {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{
+		{"add", "."},
+		{"commit", "-qm", "init"},
+		{"branch", "-M", "main"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		if name == "coder" {
+			// Мутация пишется в candidate worktree (rt.targetDir), как вёл бы
+			// себя реальный agent CLI в worktree Git-run'а.
+			if err := os.WriteFile(filepath.Join(rt.targetDir, "change.go"), []byte("package change\n"), 0644); err != nil {
+				t.Fatalf("coder mutation: %v", err)
+			}
+		}
+	}
+	service := &gracefulDeliveryService{}
+	p := New(cfgFor(
+		config.AgentConfig{Name: "coder", Checks: []checks.Definition{{
+			Name: "candidate-tests", Class: "unit", Adapter: checks.AdapterGoTest,
+			Command: []string{"go", "test", "-json", "-count=1", "./..."}, Policy: checks.PolicyRequired,
+		}}},
+		config.AgentConfig{Name: "approver"},
+		config.AgentConfig{Name: "deployer"},
+	), deliveryRegistry(), WithRuntimeFactory(rt.factory),
+		WithPrompter(&scriptedPrompter{interactive: true, answers: []string{"y"}}),
+		WithDeliveryService(service))
+	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+	if err == nil {
+		t.Fatal("post-terminal хук упал — Run обязан вернуть ошибку")
+	}
+	// Decoy plan — рукам подготовка плана в control target (feature "feat").
+	// После run: candidate уже создан, clean-workspace требования нет. Hash
+	// decoy заведомо отличается от in-run плана candidate worktree: старая
+	// реализация читала control root и падала бы на hash mismatch.
+	prepareDelivery(t, dir)
+	runDir := onlyRunDir(t, dir)
+	runID := filepath.Base(runDir)
+	if _, ok, readErr := delivery.ReadTerminalRecord(runDir); readErr != nil || ok {
+		t.Fatalf("terminal record не должен существовать при сбойном хуке: ok=%v err=%v", ok, readErr)
+	}
+
+	// Workspace из delivery_deferred event — candidate worktree run'а.
+	var marker struct {
+		PlanHash  string `json:"plan_hash"`
+		StatePath string `json:"state_path"`
+	}
+	events, readEventsErr := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
+	if readEventsErr != nil {
+		t.Fatal(readEventsErr)
+	}
+	foundMarker := false
+	for _, line := range strings.Split(string(events), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Type string            `json:"type"`
+			Data map[string]string `json:"data"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Type != "delivery_deferred" {
+			continue
+		}
+		marker.PlanHash, marker.StatePath = ev.Data["plan_hash"], ev.Data["state_path"]
+		foundMarker = true
+		break
+	}
+	if !foundMarker || marker.StatePath == "" {
+		t.Fatalf("delivery_deferred маркер должен содержать state_path: found=%v marker=%+v", foundMarker, marker)
+	}
+	worktree := filepath.FromSlash(filepath.Dir(filepath.Dir(filepath.Dir(marker.StatePath))))
+	expectedWorktree := filepath.Join(canonicalPath(dir), ".ai-team", "worktrees", runID)
+	if worktree != expectedWorktree {
+		t.Fatalf("ожидался candidate worktree %s, got %s (state_path=%s)", expectedWorktree, worktree, marker.StatePath)
+	}
+
+	okService := &capturingDeliveryService{}
+	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir)
+	if err != nil {
+		t.Fatalf("DeliverDeferred из control target: %v", err)
+	}
+	if okService.calls != 1 || len(okService.targets) != 1 || okService.targets[0] != worktree {
+		t.Fatalf("доставка выполнена не в candidate worktree: calls=%d targets=%v", okService.calls, okService.targets)
+	}
+	if record.CommitSHA == "" || record.PlanHash != marker.PlanHash {
+		t.Fatalf("terminal record не согласован с approved plan: %+v vs %s", record, marker.PlanHash)
+	}
+	if len(record.Trailers) != 3 {
+		t.Fatalf("expected 3 trailers, got %v", record.Trailers)
+	}
+	for _, trailer := range record.Trailers {
+		switch {
+		case strings.HasPrefix(trailer, delivery.TrailerRunID+": "):
+			if trailer != delivery.TrailerRunID+": "+runID {
+				t.Fatalf("run id trailer mismatch: %q", trailer)
+			}
+		case strings.HasPrefix(trailer, delivery.TrailerRuntime+": "):
+			if record.RuntimeIdentity == "" {
+				t.Fatalf("runtime identity пустая")
+			}
+		case strings.HasPrefix(trailer, delivery.TrailerAttestation+": "):
+			if record.AttestationSHA256 == "" || !strings.Contains(trailer, record.AttestationSHA256) {
+				t.Fatalf("attestation trailer mismatch: %q", trailer)
+			}
+		}
+	}
+	// Нет нового LLM-вызова: deployer controller-owned, run исполнял только
+	// coder и approver.
+	if rt.calls["deployer"] != 0 || len(rt.executed) != 2 {
+		t.Fatalf("не должно быть LLM-вызовов при repeat доставки: executed=%v calls=%v", rt.executed, rt.calls)
+	}
+	// Prepared plan существует в candidate worktree (decoy в control target,
+	// куда его положил prepareDelivery, — не читался).
+	if _, found, loadErr := delivery.LoadPreparedPlan(worktree, "feat"); loadErr != nil || !found {
+		t.Fatalf("prepared plan в worktree обязан существовать: found=%v err=%v", found, loadErr)
+	}
+	// Повторная доставка блокируется (однократная запись).
 	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir); err == nil {
 		t.Fatal("повторная доставка после успеха должна быть отклонена")
 	}

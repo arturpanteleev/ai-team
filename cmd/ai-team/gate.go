@@ -17,6 +17,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
+	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -77,15 +78,19 @@ func cmdGate() {
 		os.Exit(code)
 	}
 
-	if err := gate.WriteBundle(*out, result); err != nil {
+	// AUD-11: privacy guard обязателен ДО публикации и подписи bundle —
+	// gate-записи содержат captured Stdout/Stderr проверок, которые могут
+	// нести credential. Политика та же fail-closed, что и у export.
+	policyCfg, cfgErr := loadPolicyConfig(*target)
+	if cfgErr != nil {
+		fatal("Ошибка загрузки конфига: %v", cfgErr)
+	}
+	policy := redactionPolicy(policyCfg)
+	policy.RepoRoot = *target
+
+	if err := publishGateBundle(*out, result, policy, privKey); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Gate bundle: %v\n", err)
 		os.Exit(exitBlocked)
-	}
-	if privKey != nil {
-		if err := gate.SignBundle(*out, privKey); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ Gate bundle подпись: %v\n", err)
-			os.Exit(exitBlocked)
-		}
 	}
 	printGateSummary(result, *out)
 	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
@@ -97,12 +102,52 @@ func cmdGate() {
 				"policy":        result.PolicyVerdict,
 				"bundle_sha256": result.BundleSHA256,
 				"bundle":        *out,
-				"signed":        false,
+				"signed":        privKey != nil,
 			},
 			Exit: gate.ExitCode(result),
 		})
 	}
 	os.Exit(gate.ExitCode(result))
+}
+
+// publishGateBundle записывает attestation bundle в staging-каталог, прогоняет
+// privacy scan (fail-closed, AUD-11) по сериализованным records и только при
+// чистом вердикте подписывает и атомарно публикует в outDir. Сигнатура (DSSE)
+// всегда вычисляется по окончательным безопасным records; при секретах ничего
+// не публикуется. Существующий outDir отклоняется (bundle immutable).
+func publishGateBundle(outDir string, result *gate.Result, policy redact.Policy, privKey ed25519.PrivateKey) error {
+	if _, err := os.Stat(outDir); err == nil {
+		return fmt.Errorf("bundle %s уже существует", outDir)
+	}
+	if err := os.MkdirAll(filepath.Dir(outDir), 0755); err != nil {
+		return fmt.Errorf("staging каталог: %w", err)
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(outDir), ".gate-bundle-")
+	if err != nil {
+		return fmt.Errorf("staging каталог: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	if err := gate.WriteBundle(tmp, result); err != nil {
+		return err
+	}
+	report, redactErr := redact.Verify(tmp, policy)
+	if redactErr != nil {
+		return fmt.Errorf("bundle содержит секреты: %w", redactErr)
+	}
+	if len(report.Violations) > 0 {
+		logging.Emit(logging.Record{Level: "warn", Command: "gate", Type: "redact_findings",
+			Message: "Секреты найдены, но политика разрешает публикацию",
+			Data:    map[string]any{"violations": len(report.Violations)}})
+	}
+	if privKey != nil {
+		if err := gate.SignBundle(tmp, privKey); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, outDir); err != nil {
+		return fmt.Errorf("публикация bundle: %w", err)
+	}
+	return nil
 }
 
 // loadGateConfig загружает gate config: заданный --config, либо gate.yaml в

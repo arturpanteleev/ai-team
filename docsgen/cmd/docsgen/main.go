@@ -24,6 +24,7 @@ import (
 func main() {
 	out := flag.String("out", "docs/_site", "output directory for the generated site")
 	basePath := flag.String("base-path", "", "site base path, e.g. /ai-team for a GitHub Pages project site")
+	githubRepo := flag.String("github-repo", "arturpanteleev/ai-team", "owner/repo used to rewrite directory links to GitHub tree URLs")
 	flag.Parse()
 
 	root, err := os.Getwd()
@@ -38,6 +39,7 @@ func main() {
 		Version:     version(),
 		BasePath:    *basePath,
 		CleanOutput: true,
+		GitHubRepo:  *githubRepo,
 		Sources: []docsgen.SourcedPage{
 			{Source: "README.md", Title: "Overview", Section: "Guide", Weight: 0, URL: "/"},
 			{Source: "docs/ARCHITECTURE.md", Title: "Architecture", Section: "Reference", Weight: 0, URL: "/architecture/"},
@@ -51,6 +53,9 @@ func main() {
 
 	if err := docsgen.Build(cfg); err != nil {
 		log.Fatalf("build docs: %v", err)
+	}
+	if err := docsgen.CheckLinksWithBase(cfg.Output, cfg.BasePath); err != nil {
+		log.Fatalf("link check: %v", err)
 	}
 	fmt.Printf("docs site built to %s\n", cfg.Output)
 }

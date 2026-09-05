@@ -11,8 +11,10 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -67,6 +69,9 @@ type Config struct {
 	BasePath    string
 	CleanOutput bool
 	Sources     []SourcedPage
+	// GitHubRepo is the "owner/repo" used to rewrite directory links to
+	// GitHub blob URLs (e.g. "arturpanteleev/ai-team").
+	GitHubRepo string
 }
 
 // Build renders all configured Markdown sources into HTML under Output.
@@ -98,6 +103,7 @@ func Build(cfg Config) error {
 		pathMap[abs] = joinBase(site.BasePath, url)
 	}
 
+	var nonPage []nonPageLink
 	for _, sp := range cfg.Sources {
 		srcPath := filepath.Join(cfg.Root, filepath.FromSlash(sp.Source))
 
@@ -109,16 +115,31 @@ func Build(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("read source %s: %w", sp.Source, err)
 		}
-		page, err := renderPage(sp, content, absSrc, pathMap)
+		url := sp.URL
+		if url == "" {
+			url = slugify(sp.Source)
+		}
+		tr := &linkTransformer{
+			baseDir:    filepath.Dir(absSrc),
+			pathMap:    pathMap,
+			pageURL:    url,
+			githubRepo: cfg.GitHubRepo,
+		}
+		page, err := renderPage(tr, sp, content)
 		if err != nil {
 			return fmt.Errorf("render %s: %w", sp.Source, err)
 		}
+		nonPage = append(nonPage, tr.nonPageLinks...)
 		site.Pages = append(site.Pages, page)
 	}
 
 	sortPages(site.Pages)
 
 	if err := writeLayoutAssets(cfg.Output); err != nil {
+		return err
+	}
+
+	if err := copyAssets(dedupeNonPage(nonPage), cfg.Output); err != nil {
 		return err
 	}
 
@@ -148,10 +169,9 @@ func Build(cfg Config) error {
 }
 
 // renderPage converts Markdown bytes into a Page with a body and TOC.
-// absSrc is the repository-absolute path of the source file; pathMap maps
-// repository-absolute Markdown paths to site URLs for cross-link rewriting.
-func renderPage(sp SourcedPage, content []byte, absSrc string, pathMap map[string]string) (*Page, error) {
-	tr := &linkTransformer{baseDir: filepath.Dir(absSrc), pathMap: pathMap}
+// tr carries the transformation configuration (baseDir, pathMap, pageURL and
+// githubRepo) and accumulates any non-page relative links it finds.
+func renderPage(tr *linkTransformer, sp SourcedPage, content []byte) (*Page, error) {
 	md := goldmark.New(
 		goldmark.WithExtensions(
 			extension.GFM,
@@ -255,10 +275,21 @@ func slugifyID(s string) string {
 
 // linkTransformer rewrites Markdown cross-links that point at other .md files
 // in the repository so they resolve to the generated site pages instead of
-// missing raw files.
+// missing raw files. It also collects non-page relative links (assets,
+// non-page markdown files) for copying into the output directory.
 type linkTransformer struct {
-	baseDir string
-	pathMap map[string]string
+	baseDir      string
+	pathMap      map[string]string
+	pageURL      string // site URL of the page being rendered (e.g. "/contributing/")
+	githubRepo   string
+	nonPageLinks []nonPageLink
+}
+
+// nonPageLink tracks a relative link to a repository file that is not among
+// the rendered pages and needs to be copied into the site output.
+type nonPageLink struct {
+	resolved string // absolute repo path of the target file
+	outPath  string // relative path within the output directory
 }
 
 func (t *linkTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
@@ -293,7 +324,7 @@ func (t *linkTransformer) Transform(node *ast.Document, reader text.Reader, pc p
 }
 
 func (t *linkTransformer) rewrite(dest string) (string, bool) {
-	// Only touch links to repository Markdown files.
+	// Split off the fragment so non-page assets keep their anchors.
 	idx := strings.Index(dest, "#")
 	pathPart := dest
 	fragment := ""
@@ -301,22 +332,300 @@ func (t *linkTransformer) rewrite(dest string) (string, bool) {
 		pathPart = dest[:idx]
 		fragment = dest[idx:]
 	}
-	if !strings.HasSuffix(pathPart, ".md") && !strings.HasSuffix(pathPart, ".md/") {
-		return "", false
-	}
-	// Skip absolute/external URLs.
+	// Skip absolute/external URLs and anchor-only links.
 	if strings.HasPrefix(pathPart, "http://") || strings.HasPrefix(pathPart, "https://") ||
 		strings.HasPrefix(pathPart, "//") || strings.HasPrefix(pathPart, "mailto:") {
 		return "", false
 	}
-
-	resolved := filepath.Clean(filepath.Join(t.baseDir, filepath.FromSlash(strings.TrimPrefix(pathPart, "/"))))
-	target, ok := t.pathMap[resolved]
-	if !ok {
-		// Unknown target: leave as-is (may be a local anchor or external).
+	if pathPart == "" {
 		return "", false
 	}
-	return target + fragment, true
+
+	// Links to repository Markdown pages are mapped to generated pages.
+	if strings.HasSuffix(pathPart, ".md") || strings.HasSuffix(pathPart, ".md/") {
+		resolved := filepath.Clean(filepath.Join(t.baseDir, filepath.FromSlash(strings.TrimPrefix(pathPart, "/"))))
+		target, ok := t.pathMap[resolved]
+		if !ok {
+			// A .md file that is not a rendered page: copy it if it exists so
+			// the relative link still resolves on the site.
+			if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+				t.nonPageLinks = append(t.nonPageLinks, t.nonPageLinkFor(resolved))
+			}
+			// Unknown/absent target: leave as-is (may be an anchor or external).
+			return "", false
+		}
+		return target + fragment, true
+	}
+
+	// Directory links (e.g. "docsgen/") resolve to GitHub tree URLs so they
+	// don't 404 on the site.
+	dirCandidate := filepath.Join(t.baseDir, filepath.FromSlash(strings.TrimSuffix(strings.TrimPrefix(pathPart, "/"), "/")))
+	if info, err := os.Stat(dirCandidate); err == nil && info.IsDir() && t.githubRepo != "" {
+		return "https://github.com/" + t.githubRepo + "/tree/" + slashRelRepoTarget(t, dirCandidate) + fragment, true
+	}
+
+	// Non-page files (assets, LICENSE, YAML, ...) are copied into the output
+	// directory so the relative link resolves without a GitHub round-trip.
+	resolved := filepath.Clean(filepath.Join(t.baseDir, filepath.FromSlash(strings.TrimPrefix(pathPart, "/"))))
+	if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+		t.nonPageLinks = append(t.nonPageLinks, t.nonPageLinkFor(resolved))
+	}
+	// Leave the link as-is: the copied file matches the original relative path.
+	return "", false
+}
+
+// nonPageLinkFor computes the output path for a resolved repo file. The page
+// renders at pageURL (e.g. "/contributing/"), so a relative link resolves at
+// the page's output directory depth.
+func (t *linkTransformer) nonPageLinkFor(resolved string) nonPageLink {
+	relDir, err := filepath.Rel(t.baseDir, filepath.Dir(resolved))
+	if err != nil || relDir == "." {
+		relDir = ""
+	}
+	return nonPageLink{
+		resolved: resolved,
+		outPath:  filepath.Join(filepath.FromSlash(strings.Trim(strings.TrimPrefix(t.pageURL, "/"), "/")), relDir, filepath.Base(resolved)),
+	}
+}
+
+// slashRelRepoTarget computes the repo-root-relative path of a resolved file,
+// used to build GitHub blob/tree URLs.
+func slashRelRepoTarget(t *linkTransformer, resolved string) string {
+	rel, err := filepath.Rel(t.baseDir, resolved)
+	if err != nil {
+		return filepath.Base(resolved)
+	}
+	return filepath.ToSlash(rel)
+}
+
+// dedupeNonPage drops duplicate copy targets (the same file linked from more
+// than one page), keeping the first occurrence. Copying is idempotent, so this
+// only avoids redundant stat/write work.
+func dedupeNonPage(links []nonPageLink) []nonPageLink {
+	seen := make(map[string]bool, len(links))
+	out := links[:0]
+	for _, l := range links {
+		key := l.outPath
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, l)
+	}
+	return out
+}
+
+// copyAssets copies repository files referenced by relative links into the
+// matching locations of the output directory so the links resolve on the
+// deployed site.
+func copyAssets(links []nonPageLink, output string) error {
+	for _, l := range links {
+		outPath := filepath.Join(output, filepath.FromSlash(l.outPath))
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return fmt.Errorf("mkdir asset %s: %w", outPath, err)
+		}
+		data, err := os.ReadFile(l.resolved)
+		if err != nil {
+			return fmt.Errorf("read asset %s: %w", l.resolved, err)
+		}
+		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			return fmt.Errorf("write asset %s: %w", outPath, err)
+		}
+	}
+	return nil
+}
+
+// CheckLinks is CheckLinksWithBase with an empty base path (site hosted at "/").
+func CheckLinks(output string) error {
+	return CheckLinksWithBase(output, "")
+}
+
+// CheckLinksWithBase validates that every internal href/src in the generated
+// site resolves to an existing output file and that fragments point to an
+// element present in the target page. basePath is the site base path (e.g.
+// "/ai-team") used by the rendered URLs and stripped before matching against
+// the output file tree. Fragment-only, mailto: and absolute (http://, https://,
+// //) URLs are skipped. It returns a human-readable error listing the broken
+// links, or nil when the site is fully linked.
+//
+// CheckLinksWithBase deliberately scans the rendered HTML files, not the
+// Markdown sources, so it catches both raw links and links produced by layout
+// templates.
+func CheckLinksWithBase(output, basePath string) error {
+	if output == "" {
+		return fmt.Errorf("output directory is empty")
+	}
+	base := normalizeBasePath(basePath)
+	files, err := listHTML(output)
+	if err != nil {
+		return err
+	}
+	content := make(map[string]string, len(files))
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(output, rel))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", rel, err)
+		}
+		content[rel] = string(data)
+	}
+
+	dirWithIndex := func(d string) bool {
+		_, ok := content[filepath.ToSlash(filepath.Join(d, "index.html"))]
+		return ok
+	}
+	// resolveFile maps a URL path from page pageRel to a concrete output file
+	// path (empty when nothing matches). Root-relative URLs (leading "/") are
+	// resolved against the site root; page-relative ones against the page's
+	// output directory.
+	resolveFile := func(pageRel, pathPart string) string {
+		p := pathPart
+		if base != "" {
+			if p == base {
+				p = "/"
+			} else if strings.HasPrefix(p, base+"/") {
+				p = p[len(base):]
+			}
+		}
+		rootRel := strings.HasPrefix(p, "/")
+		baseDir := ""
+		if !rootRel {
+			baseDir = pageRel
+		}
+		target := strings.Trim(strings.TrimPrefix(p, "/"), "/")
+		candidate := filepath.ToSlash(filepath.Join(baseDir, filepath.FromSlash(target)))
+		if _, ok := content[candidate]; ok {
+			return candidate
+		}
+		if dirWithIndex(candidate) {
+			return filepath.ToSlash(filepath.Join(candidate, "index.html"))
+		}
+		if info, err := os.Stat(filepath.Join(output, candidate)); err == nil && !info.IsDir() {
+			return candidate
+		}
+		return ""
+	}
+
+	seen := make(map[string]string) // url -> first page that reported it
+	report := func(url, from string) {
+		if seen[url] == "" {
+			seen[url] = from
+		}
+	}
+	idRe := regexp.MustCompile(`id="([^"]*)"`)
+
+	for _, rel := range files {
+		pageDir := filepath.ToSlash(filepath.Dir(rel))
+		if pageDir == "." {
+			pageDir = ""
+		}
+		for _, m := range hrefRe.FindAllStringSubmatch(content[rel], -1) {
+			url := m[1]
+			if url == "" || !needsCheck(url) {
+				continue
+			}
+			pathPart, frag := url, ""
+			if i := strings.Index(url, "#"); i >= 0 {
+				pathPart, frag = url[:i], url[i+1:]
+			}
+			if frag != "" {
+				frag = unescapeFragment(frag)
+			}
+			if pathPart != "" {
+				targetFile := resolveFile(pageDir, pathPart)
+				if targetFile == "" {
+					report(url, rel)
+					continue
+				}
+				if frag != "" {
+					if ids := idRe.FindAllStringSubmatch(content[targetFile], -1); !hasID(ids, frag) {
+						report(url, rel)
+					}
+				}
+				continue
+			}
+			// Fragment-only link must target a heading in the same page.
+			if frag != "" {
+				if ids := idRe.FindAllStringSubmatch(content[rel], -1); !hasID(ids, frag) {
+					report(url, rel)
+				}
+			}
+		}
+	}
+
+	if len(seen) == 0 {
+		return nil
+	}
+	unique := make([]string, 0, len(seen))
+	for url := range seen {
+		unique = append(unique, url)
+	}
+	sort.Strings(unique)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d broken link(s) in generated site:\n", len(unique))
+	for _, url := range unique {
+		fmt.Fprintf(&b, "  %s (linked from %s)\n", url, seen[url])
+	}
+	return fmt.Errorf("%s", strings.TrimSpace(b.String()))
+}
+
+// hasID reports whether frag appears among the id attributes extracted from a
+// page.
+func hasID(ids [][]string, frag string) bool {
+	for _, m := range ids {
+		if m[1] == frag {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeFragment decodes percent-encoded bytes in a URL fragment (goldmark
+// encodes non-ASCII hrefs) so it can be compared with raw id attributes.
+func unescapeFragment(frag string) string {
+	if !strings.Contains(frag, "%") {
+		return frag
+	}
+	if decoded, err := url.PathUnescape(frag); err == nil {
+		return decoded
+	}
+	return frag
+}
+
+// hrefRe matches href/src attributes on anchors and images.
+var hrefRe = regexp.MustCompile(`(?:href|src)="([^"]*)"`)
+
+// needsCheck reports whether a URL is an internal link that must resolve on
+// the generated site (skips fragments, external and protocol-relative URLs).
+func needsCheck(url string) bool {
+	if strings.HasPrefix(url, "#") {
+		return false
+	}
+	return !(strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") ||
+		strings.HasPrefix(url, "//") || strings.HasPrefix(url, "mailto:") ||
+		strings.HasPrefix(url, "tel:") || strings.HasPrefix(url, "data:"))
+}
+
+// listHTML returns all HTML files under dir with forward-slash paths relative
+// to dir.
+func listHTML(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) == ".html" {
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return files, err
 }
 
 // firstHeading extracts the first ATX heading (# Foo) from Markdown bytes.

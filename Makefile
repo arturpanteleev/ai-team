@@ -8,7 +8,7 @@ build:
 	go build -o bin/ai-team ./cmd/ai-team
 
 docs:
-	go run ./docsgen/cmd/docsgen --out docs/_site
+	go run ./docsgen/cmd/docsgen --out docs/_site --github-repo arturpanteleev/ai-team
 
 test:
 	go test ./...

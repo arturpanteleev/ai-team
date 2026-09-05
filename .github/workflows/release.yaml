@@ -5,21 +5,72 @@ on:
     tags:
       - 'v*'
 
+# Release gating policy (AUD-13):
+# A tag is published only after (1) it is a valid semantic version and
+# (2) the exact tagged commit passes the quality checks that CI runs. CI runs
+# on master/PR only, so the release job re-runs the essential checks itself
+# against the tagged checkout: a commit with failing checks can never become a
+# release.
+#
+# The default token is read-only. Only the final publish job opts into
+# contents: write, and even there solely to create the GitHub Release from the
+# already-verified artifacts.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  verify-and-build:
+    name: Verify and build
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.refs.outputs.tag }}
+      sha: ${{ steps.refs.outputs.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Full history so `git describe --tags` (used by the Makefile and
+          # docsgen version) resolves the exact tag.
           fetch-depth: 0
+
+      # Gate 1: the push tag must be a valid semantic version. Non-semver tags
+      # (e.g. experimental v1beta or v-vnext) abort the job before any build.
+      - name: Validate tag is a semantic version
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::tag '$TAG' is not a valid semantic version (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "tag '$TAG' is a valid semantic version"
+
+      # Gate 2: record the exact commit the tag points to. actions/checkout
+      # pins the workspace to the triggering ref (the tag), so this SHA is the
+      # commit that the checks below certify and the release will be built from.
+      - name: Record tag and exact commit SHA
+        id: refs
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          SHA=$(git rev-parse HEAD)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "gating release ${TAG} on exact commit ${SHA}"
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.26.6'
           check-latest: true
+
+      # Gate 3: the quality checks. These mirror what CI runs on master/PR and
+      # are executed inline so the exact tag SHA is verified in this workflow.
+      # Any failure stops the job here, before assets are built or published.
+      - name: Gate - build
+        run: go build ./...
+      - name: Gate - vet
+        run: go vet ./...
+      - name: Gate - tests
+        run: go test ./...
 
       - name: Build release binaries
         run: make release-binaries
@@ -36,17 +87,51 @@ jobs:
           done
           ls -la dist/
 
+      # Checksums let users verify downloads independently of the per-asset
+      # digests GitHub already exposes through the Releases API.
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: verify-and-build
+    runs-on: ubuntu-latest
+    # contents: write only for creating the GitHub Release; it is deliberately
+    # absent from verify-and-build (top-level permissions is contents: read).
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: release-assets
+          path: dist
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=${GITHUB_REF#refs/tags/}
+          TAG=${{ needs.verify-and-build.outputs.tag }}
+          SHA=${{ needs.verify-and-build.outputs.sha }}
           assets=()
           for f in dist/*.tar.gz; do
             assets+=("$f")
           done
+          assets+=("dist/sha256sums.txt")
           gh release create "$TAG" "${assets[@]}" \
             --title "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --generate-notes \
-            --repo "$GITHUB_REPOSITORY"
+            --notes "**Quality gates passed on exact tag commit \`${SHA}\`** (tag ${TAG}): \`go build ./...\`, \`go vet ./...\`, \`go test ./...\`. Build run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Verify archive integrity with the attached \`sha256sums.txt\`."

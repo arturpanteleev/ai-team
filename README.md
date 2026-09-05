@@ -11,9 +11,17 @@
 переходы между этапами, проверки, mutation scopes, evidence и delivery
 исполняет детерминированный Go-контроллер — **не LLM**.
 
-AI-агенты — это «мозг», но не «руки»: всё, что меняет репозиторий или выходит
-за его пределы (commit, push, PR), выполняется только после детерминированных
-проверок и явного подтверждения человеком точного delivery-плана.
+AI-агенты — это «мозг» с ограниченными «руками», а delivery контролирует
+контроллер. Здесь три разных зоны ответственности:
+
+1. **Candidate и артефакты** агенты (coder/tester и др.) записывают в рамках
+   разрешённого mutation scope *до* человеческого подтверждения; результаты
+   затем проходят review, тесты и verification.
+2. **Проверки и evidence** исполняет детерминированный контроллер: scope guard,
+   typed checks, immutable records — не LLM.
+3. **Delivery (commit/push/PR)** — controller-owned: оно выполняется только
+   после детерминированных проверок и явного подтверждения человеком точного
+   canonical delivery-плана по его SHA-256.
 
 Публичный сайт документации: **<https://arturpanteleev.github.io/ai-team/>**
 
@@ -38,25 +46,70 @@ verification-команды (тесты, vet, линтеры) выполняют
 | Зависимость | Зачем | Проверка |
 |---|---|---|
 | Go 1.26.5+ | сборка и запуск `ai-team` | `go version` |
-| [OpenCode](https://opencode.ai) CLI в `PATH` | LLM runtime, который вызывают агенты | `opencode --version` |
+| Один из CLI-рантаймов в `PATH` (opencode / codex / claude) | LLM runtime, который вызывают агенты | `opencode --version` / `codex --version` / `claude --version` |
 | [`gh`](https://cli.github.com) CLI, авторизованный (`gh auth login`) | deployer использует его для `pr create`/`pr view` | `gh auth status` |
 
-OpenCode устанавливается независимо от ai-team, например:
+Рантайм выбирается полем `cli` в `.ai-team/config.yaml` (`opencode` — значение
+по умолчанию). Каждый рантайм устанавливается и настраивается независимо от
+ai-team:
 
-```bash
-curl -fsSL https://opencode.ai/install | bash
-```
+- **OpenCode** — [opencode.ai/install](https://opencode.ai/install) (например,
+  `curl -fsSL https://opencode.ai/install | bash`) + настройка минимум одного
+  LLM-провайдера, см. [opencode.ai/docs](https://opencode.ai/docs).
+- **Codex** — OpenAI Codex CLI: [github.com/openai/codex](https://github.com/openai/codex).
+- **Claude Code** — [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code).
 
-и должен быть настроен как минимум с одним LLM-провайдером — см.
-[opencode.ai/docs](https://opencode.ai/docs). `gh` нужен только на шаге
-delivery (последний агент, `deployer`); если вы не планируете, чтобы
-контроллер сам открывал PR, шаги до этого работают без него.
+Как передать provider credentials в изолированный runtime — в разделе
+[«Runtime и credentials»](#runtime-и-credentials).
+
+`gh` нужен только на шаге delivery (последний агент, `deployer`); если вы не
+планируете, чтобы контроллер сам открывал PR, шаги до этого работают без
+него.
 
 Установка `ai-team`:
 
 ```bash
 go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest
 ```
+
+## Runtime и credentials
+
+Агентный runtime запускается в **изолированном окружении**: у каждого рантайма
+свой временный config home (у OpenCode — `XDG_CONFIG_HOME`, у Codex —
+`CODEX_HOME`, у Claude — `CLAUDE_CONFIG_DIR`), создаваемый на время запуска.
+В субпроцесс передаются только базовые OS/locale переменные (`PATH`, `HOME`,
+`LANG`, `TMPDIR`, ...) плюс **имена** переменных, явно разрешённых opt-in.
+
+Поэтому наличие API-ключа в вашем shell-окружении **не означает**, что агент
+его увидит: если имя переменной не добавлено в allow-list, run оборвётся на
+auth, хотя standalone CLI в том же shell работает. Чтобы передать провайдерский
+credential, разрешите его **по имени** через `AI_TEAM_HARNESS_ENV_ALLOW`
+(список имён через запятую):
+
+```bash
+export ANTHROPIC_API_KEY='<YOUR_API_KEY_HERE>'
+AI_TEAM_HARNESS_ENV_ALLOW=ANTHROPIC_API_KEY ai-team run --feature add-jwt-auth --task "…"
+```
+
+Значение переменной никуда не пробрасывается автоматически: в субпроцесс
+попадает только сам факт «переменная с разрешённым именем существует в
+окружении родителя». Значение никогда не логируется и не пишется в evidence —
+гарантию даёт allow-list по имени, а не публикация секрета. Устаревший алиас
+`AI_TEAM_OPENCODE_ENV_ALLOW` работает так же ради обратной совместимости.
+
+Per-runtime заметки:
+
+| Рантайм | CLI-бинарник (config `cli:`) | Выбор модели | Ожидаемый preflight |
+|---|---|---|---|
+| OpenCode | `opencode` (по умолчанию) | `-m <model>` / `auto` | `opencode --version`, наличие provider-credentials и их allow-list, Git-repository |
+| Codex | `codex` | `-m <model>` / `auto` | `codex --version`; аутентификация Codex (access token / `CODEX_API_KEY`), sandbox `workspace-write` |
+| Claude Code | `claude` | `--model <model>` / `auto` | `claude --version`; `ANTHROPIC_API_KEY` (или подписка), `--permission-mode acceptEdits` |
+
+Точные флаги запуска и политики изоляции каждого адаптера — в
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) и в исходниках `pkg/runtime/{opencode,codex,claude}.go`.
+Если у run нет авторизованного provider (или вы просто хотите попробовать без
+LLM), прогоните no-LLM demo: `bash docs/demo/run-demo.sh` — см.
+[docs/demo/README.md](docs/demo/README.md).
 
 ## Быстрый старт
 
@@ -77,34 +130,53 @@ Node, неизвестный) `init` выводит warning: delivery остаё
 вы не настроите required unit/integration check вручную (см.
 [«Конфигурация»](#конфигурация)).
 
-Запустите фичу: от идеи до готового к доставке кода — **два запуска**, и между
-ними вы осознанно читаете и подтверждаете план.
+Запустите фичу: от идеи до готового к доставке кода. Количество запусков
+зависит от окружения:
+
+- **Non-TTY** (CI, скрипт): контроллер останавливается перед delivery с exit
+  code `3`, печатая canonical plan и его SHA-256; подтверждение — отдельный
+  `--resume` со строкой `--approve-plan` того же SHA-256.
+- **Интерактивный TTY**: `authorizeDelivery` спрашивает «Продолжить commit/
+  push/PR? [y/N]» и после `y` доставляет в том же первом процессе — exit `3`
+  перед delivery не возникает. Отказ (`n`) останавливает run (delivery
+  отклонён человеком).
+
+Оба пути подтверждают **ровно тот** canonical plan, который показал контроллер
+(другой SHA-256 не подойдёт), — и только тогда будут созданы commit/push/PR.
 
 ```bash
-# 1. Провести фичу по конвейеру: аналитик → архитектор → кодер → ревьюер →
-#    тестер → верификатор → deployer. Контроллер останавливается перед
-#    delivery и печатает canonical plan + его SHA-256 (exit code 3).
+# Non-TTY: первый запуск проводит фичу по конвейеру, останавливается перед
+# delivery и печатает canonical plan + его SHA-256 (exit code 3).
 ai-team run --feature add-jwt-auth --task "Реализовать JWT авторизацию"
 ```
 
 ```bash
-# 2. Подтвердить именно тот план, который показал контроллер (другой SHA-256
-#    не подойдёт), — и только тогда будет создан commit/push/PR.
+# Non-TTY: подтвердить именно тот план, что показал контроллер (другой
+# SHA-256 не подойдёт), — и только тогда будет создан commit/push/PR.
 ai-team run --resume <run_id> --approve-plan <sha256-из-шага-1>
 ```
 
 В интерактивном терминале checkpoints спрашивают ваше решение сами, без
-флагов `--approve-*`. После доставки результат виден на дашборде
-(`ai-team web`) или в директории `.ai-team/runs/<run_id>/`.
+флагов `--approve-*`.
+
+Обратите внимание на **forward approvals**: профиль по умолчанию `standard`
+(как и `fast`) *откладывает* подтверждения на смысловых рёбрах конвейера до
+момента delivery — вы подтверждаете их одним consolidated delivery-решением.
+Только профиль `regulated` спрашивает approval на каждом checkpoint пошагово.
+После доставки результат виден на дашборде (`ai-team web`) или в директории
+`.ai-team/runs/<run_id>/`.
 
 Полный путь с пояснением каждого шага — в разделе
 [«Как поставить фичу от начала до конца»](#как-поставить-фичу-от-начала-до-конца).
 
 ## Как поставить фичу от начала до конца
 
-Полный путь одной фичи через `run` — два запуска, а не один: контроллер
-намеренно останавливается перед любым внешним эффектом (commit/push/PR) и ждёт
-явного подтверждения именно того плана, который он показал.
+Ключевой момент: **delivery подтверждается отдельно и всегда** — commit/push/PR
+выполняет только контроллер после явного подтверждения человеком точного
+canonical plan (SHA-256). Как именно записывается подтверждение, зависит от
+окружения.
+
+**Сценарий A — non-TTY (CI, скрипт): два запуска.**
 
 1. **Первый запуск** проводит фичу через весь конвейер до `deployer` и
    останавливается перед delivery с exit code `3`, напечатав canonical delivery
@@ -112,13 +184,8 @@ ai-team run --resume <run_id> --approve-plan <sha256-из-шага-1>
 
    ```bash
    ai-team run --feature add-jwt-auth \
-     --task "Реализовать JWT авторизацию" \
-     --approve-gates
+     --task "Реализовать JWT авторизацию"
    ```
-
-   (`--approve-gates` нужен только в non-interactive среде — например, в CI
-   или скрипте; в интерактивном терминале checkpoints спросят подтверждение
-   сами, без флага.)
 
 2. **Прочитайте план.** Он перечисляет ровно те файлы, которые будут
    закоммичены, ветку и сообщение коммита. Это единственный момент, где стоит
@@ -129,18 +196,34 @@ ai-team run --resume <run_id> --approve-plan <sha256-из-шага-1>
    candidate-worktree:
 
    ```bash
-   ai-team run --resume <run_id> \
-     --approve-gates --approve-plan <sha256-из-шага-1>
+   ai-team run --resume <run_id> --approve-plan <sha256-из-шага-1>
    ```
 
-   Delivery approval — обычная persisted approval с subject = SHA-256 плана
-   и ролью `release_manager`. То же решение можно записать без CLI-resume:
-   через web UI (`POST /decisions`) или командой `ai-team decision`, после
-   чего достаточно `ai-team run --resume <run_id>`. Если план изменился
-   (другой коммит поверх, другие файлы) — старый SHA-256 не подойдёт ни
-   одним из путей, и контроллер откажется выполнять delivery. Это осознанное
-   поведение, а не баг: подтверждение одноразовое и привязано к конкретному
-   плану.
+**Сценарий B — интерактивный TTY: один процесс, delivery после `y`.**
+
+Контроллер сам консолидирует deferred forward approvals и при достижении
+`deployer` печатает canonical plan и спрашивает
+«Продолжить commit/push/PR? [y/N]». Ответ `y` записывает persisted approval с
+subject = SHA-256 показанного плана и ролью `release_manager` — и delivery
+выполняется в **том же** первом процессе, без `--resume` и без exit `3`.
+Ответ `n` останавливает run: delivery отклонён человеком.
+
+В обоих сценариях delivery approval — обычная persisted approval с subject =
+SHA-256 плана и ролью `release_manager`. То же решение можно записать без
+CLI-resume: через web UI (`POST /decisions`) или командой `ai-team decision`,
+после чего достаточно `ai-team run --resume <run_id>`. Если план изменился
+(другой коммит поверх, другие файлы) — старый SHA-256 не подойдёт ни одним
+из путей, и контроллер откажется выполнять delivery. Это осознанное поведение,
+а не баг: подтверждение одноразовое и привязано к конкретному плану.
+
+`--approve-gates` (если он вам нужен) подтверждает **только** pipeline gates в
+non-interactive среде — это не delivery approval. Delivery по-прежнему требует
+отдельного подтверждения точного плана через `--approve-plan`, interactive
+`y`/`n`, web UI или `ai-team decision`. Профили `standard`/`fast` откладывают
+forward approvals до момента delivery, поэтому для них consolidated
+delivery-решение покрывает и deferred gates; профиль `regulated` спрашивает
+approval на каждом checkpoint пошагово, и `--approve-gates`/интерактивные
+решения понадобятся на протяжении run до его завершения.
 
 4. **Проверьте результат** — `ai-team web` открывает дашборд со статусом
    запуска, live-логом, checks/mutations/delivery по каждому этапу и
@@ -254,10 +337,10 @@ SHA-256 CAS; manifest содержит exact path/digest/size/mode и позво
 которые можно заменить managed queue/object storage через те же contracts.
 
 Перед созданием run dashboard показывает runtime preflight. Controller
-повторяет тот же gate непосредственно при `Start`: проверяет OpenCode и его
-версию, model/provider, credential allow-list и Git repository; для workflow
-с delivery дополнительно требует `origin`, `gh` и успешный `gh auth status`.
-Значения credentials никогда не попадают в report.
+повторяет тот же gate непосредственно при `Start`: проверяет выбранный CLI
+рантайм и его версию, model/provider, credential allow-list и Git repository;
+для workflow с delivery дополнительно требует `origin`, `gh` и успешный
+`gh auth status`. Значения credentials никогда не попадают в report.
 
 Exit-коды `run`: `0` — completed/completed with warnings, `1` — ошибка или
 негативный вердикт, `2` — BLOCKED, `3` — stopped на checkpoint или перед

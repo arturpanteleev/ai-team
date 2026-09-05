@@ -79,3 +79,26 @@ func TestVerifyExcludeSkipsFile(t *testing.T) {
 		t.Fatalf("excluded-файл должен быть проигнорирован: %v", err)
 	}
 }
+
+// AUD-03: секрет в JSON/JSONL поле блокирует export (fail-closed) так же, как
+// plain-текст.
+func TestVerifyBlocksJSONSecretFields(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755)
+	secret := "T0pSecretValue21k9XzW8qK2nM4"
+	payload := "{\"event\":\"created\",\"credentials\":{\"password\":\"" + secret + "\"}}\n"
+	if err := os.WriteFile(filepath.Join(dir, "runs", "x", "events.jsonl"),
+		[]byte(payload), 0644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Verify(dir, Policy{FailOnSecrets: true})
+	if err == nil {
+		t.Fatalf("fail-closed: JSON-секрет должен блокировать, report=%+v", report)
+	}
+	if report == nil || len(report.Violations) != 1 {
+		t.Fatalf("ожидалась 1 violation, got %+v", report)
+	}
+	if report.Violations[0].Path != "runs/x/events.jsonl" {
+		t.Fatalf("путь нарушения: %s", report.Violations[0].Path)
+	}
+}

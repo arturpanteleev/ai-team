@@ -205,6 +205,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if err := p.cfg.Validate(p.reg); err != nil {
 		return RunResult{}, err
 	}
+	// AUD-02 fail-closed: strict-контракт не реализован, поэтому запрос
+	// strict-профиля блокируется ДО первого обращения к runtime/checks —
+	// единая точка входа (Start и Resume идут через RunWithResult). Никакого
+	// misleading receipt в evidence не создаётся.
+	if effectiveContainmentProfile(runCfg, p.cfg) == "strict" {
+		return RunResult{}, &RunError{
+			Outcome: workflow.RunBlocked,
+			Err:     fmt.Errorf("strict containment профиль недоступен: run отклонён fail-closed (AUD-02); используйте trusted-local"),
+		}
+	}
 	compiledGraph, err := p.cfg.CompiledGraph()
 	if err != nil {
 		return RunResult{}, err

@@ -97,3 +97,90 @@ func TestReadRegularFileRejectsSymlinkAndLimit(t *testing.T) {
 		t.Fatal("symlink must fail")
 	}
 }
+
+func TestWriteRegularFileNoFollowRoundtrip(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "nested", "dir", "file")
+	if err := WriteRegularFileNoFollow(target, []byte("data"), 0644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := ReadRegularFile(target, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "data" {
+		t.Fatalf("readback=%q", got)
+	}
+}
+
+func TestWriteRegularFileNoFollowRejectsExistingFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "file")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRegularFileNoFollow(target, []byte("other"), 0444); err == nil {
+		t.Fatal("existing file: immutable write должен FAIL")
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "original" {
+		t.Fatalf("existing file перезаписан: %q", got)
+	}
+}
+
+func TestWriteRegularFileNoFollowRejectsLeafSymlink(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "outfile")
+	if err := os.Symlink(sentinel, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := WriteRegularFileNoFollow(link, []byte("evil"), 0644); err == nil {
+		t.Fatal("leaf symlink: write должен FAIL (AUD-04)")
+	}
+	if got, _ := os.ReadFile(sentinel); string(got) != "keep" {
+		t.Fatalf("sentinel изменён через leaf symlink: %q", got)
+	}
+}
+
+func TestWriteRegularFileNoFollowRejectsParentSymlink(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "0-sentinel")
+	if err := os.Mkdir(sentinel, 0755); err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(root, "cyclic") // путь ниже следует не писать
+	os.Mkdir(realDir, 0755)
+	parent := filepath.Join(root, "sub")
+	if err := os.Symlink(realDir, parent); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := WriteRegularFileNoFollow(filepath.Join(parent, "file"), []byte("x"), 0644); err == nil {
+		t.Fatal("parent symlink: write должен FAIL (AUD-04)")
+	}
+	// Запись не ушла в реальный каталог за symlink.
+	if _, err := os.Lstat(filepath.Join(realDir, "file")); !os.IsNotExist(err) {
+		t.Fatal("write попал в каталог за symlink")
+	}
+}
+
+func TestWriteRegularFileNoFollowRejectsDeepSymlinkComponent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	deep := filepath.Join(root, "bundle")
+	if err := os.Mkdir(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(deep, "checks")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := WriteRegularFileNoFollow(filepath.Join(deep, "checks", "001-x"), []byte("x"), 0644); err == nil {
+		t.Fatal("deep symlink component: write должен FAIL (AUD-04)")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("write ушёл за deep symlink: %v", entries)
+	}
+}

@@ -7,13 +7,31 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+)
+
+// jsonSecretReason — причина находки для секретных полей в JSON/JSONL.
+const jsonSecretReason = "json secret field"
+
+// jsonSecretRedacted — immutable redaction evidence (AUD-03: "password",
+// "secret", "token", "api_key", "private_key" и пр. поля, чьи значения похожи
+// на реальные секреты, должны обнаруживаться в JSON/JSONL-структурах также,
+// как и в plain-тексте).
+const jsonSecretRedacted = "[REDACTED:json secret field]"
+
+// Лимиты JSON-примеси для сканера (AUD-03): защита от злонамеренно глубоких/
+// больших JSON-документов при детерминированной сортировке evidence.
+const (
+	maxJSONScanBytes = 4 << 20 // 4 MiB
+	maxJSONDepth     = 16
 )
 
 // FieldClass — класс чувствительности поля (документированный контракт).
@@ -185,8 +203,108 @@ func likelySecretValue(value string) bool {
 	return hasUpper && hasDigit
 }
 
+// jsonFrame — контейнер в стеке dexдере. keySecret/expectKey используются
+// только для object-фреймов; для array-фреймов значим только факт вложенности.
+type jsonFrame struct {
+	isObject  bool
+	expectKey bool // в object контексте следующий string — имя ключа
+	keySecret bool // последний ключ object'а классифицирован как secret
+	keyOffset int64
+}
+
+// scanJSON детектирует секретные JSON-поля через токенную экскурсию по
+// документу (AUD-03). Finder работает структурно и не зависит от того,
+// в одну ли строку записан документ. Для не-JSON содержимого (и данных вне
+// bounds) возвращается nil — plain-сканер покрывает остальное.
+func scanJSON(data []byte) []Finding {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var stack []jsonFrame
+	var findings []Finding
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return findings
+		}
+		offset := decoder.InputOffset()
+		switch value := token.(type) {
+		case string:
+			if len(stack) > 0 && stack[len(stack)-1].isObject && !stack[len(stack)-1].expectKey {
+				// value: значение ключа top-объекта (или следующий ключ утерян —
+				// фрейм всегда хранит последний ключ до прихода его значения).
+				top := &stack[len(stack)-1]
+				if top.keySecret && top.keyOffset >= 0 && top.keyOffset < int64(len(data)) {
+					if likelySecretValue(value) {
+						findings = append(findings, Finding{
+							Reason:   jsonSecretReason,
+							Matched:  value,
+							Redacted: jsonSecretRedacted,
+							Line:     lineAt(data, top.keyOffset),
+						})
+					}
+				}
+				top.keySecret = false
+				top.expectKey = true
+			} else if len(stack) > 0 && stack[len(stack)-1].isObject {
+				// string в роли ключа: фиксируем классификацию имени поля.
+				top := &stack[len(stack)-1]
+				top.expectKey = false
+				top.keySecret = ClassifyField(value) == FieldSecret
+				top.keyOffset = offset
+			}
+		case json.Delim:
+			switch value {
+			case '{':
+				if len(stack) > 0 {
+					stack[len(stack)-1].keySecret = false
+					stack[len(stack)-1].expectKey = true
+				}
+				stack = append(stack, jsonFrame{isObject: true, expectKey: true})
+			case '[':
+				if len(stack) > 0 {
+					stack[len(stack)-1].keySecret = false
+				}
+				stack = append(stack, jsonFrame{})
+			case '}', ']':
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+				if len(stack) > 0 && stack[len(stack)-1].isObject {
+					stack[len(stack)-1].expectKey = true
+				}
+			}
+		default:
+			// bool/number/null — значение нестроковое, секрета нет.
+			if len(stack) > 0 {
+				stack[len(stack)-1].keySecret = false
+				if stack[len(stack)-1].isObject {
+					stack[len(stack)-1].expectKey = true
+				}
+			}
+		}
+		if len(stack) > maxJSONDepth {
+			return findings
+		}
+	}
+	return findings
+}
+
+// lineAt возвращает 1-based номер строки для byte offset (AUD-03).
+func lineAt(data []byte, offset int64) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(data)) {
+		offset = int64(len(data))
+	}
+	return 1 + bytes.Count(data[:int(offset)], []byte("\n"))
+}
+
 // Scan возвращает все подтверждённые секретные вхождения в data. Результат
 // стабильно упорядочен (по правилу, затем по позиции) для детерминизма.
+// Помимо line-based правил сканируются структурные JSON-поля (AUD-03).
 func Scan(data []byte) []Finding {
 	var findings []Finding
 	for lineNumber, rawLine := range bytes.Split(data, []byte("\n")) {
@@ -221,6 +339,9 @@ func Scan(data []byte) []Finding {
 				})
 			}
 		}
+	}
+	if len(data) > 0 && int64(len(data)) <= maxJSONScanBytes {
+		findings = append(findings, scanJSON(data)...)
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].Line != findings[j].Line {

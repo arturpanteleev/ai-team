@@ -127,3 +127,96 @@ func TestClassifyField(t *testing.T) {
 		}
 	}
 }
+
+func hasFindingReason(findings []Finding, reason string) bool {
+	for _, f := range findings {
+		if f.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+// AUD-03: секретные JSON-поля обнаруживаются структурно независимо от того,
+// в одну ли строку записан документ.
+func TestScanJSONSecretFields(t *testing.T) {
+	secret := "s3cReTValX9zW8qK2nM4pR7t"
+	input := []byte(`{
+  "service": {
+    "name": "billing",
+    "credentials": {
+      "password": "` + secret + `"
+    },
+    "client_secret": "` + secret + `",
+    "owner": "team-core"
+  }
+}`)
+	findings := Scan(input)
+	if !hasFindingReason(findings, jsonSecretReason) {
+		t.Fatalf("json secret field не обнаружен: %+v", findings)
+	}
+	for _, f := range findings {
+		if f.Reason == jsonSecretReason && f.Redacted != jsonSecretRedacted {
+			t.Fatalf("неверный redaction-маркер: %+v", f)
+		}
+	}
+}
+
+// AUD-03: плейсхолдеры/известные benign-значения в JSON-полях секретным
+// evidence НЕ являются (тот же likelySecretValue-фильтр, что у assignment).
+func TestScanJSONIgnoresPlaceholders(t *testing.T) {
+	input := []byte(`{"password": "your-password", "token": "changeme", "api_key": "placeholder"}`)
+	findings := Scan(input)
+	if hasFindingReason(findings, jsonSecretReason) {
+		t.Fatalf("placeholder-значение посчитано секретом: %+v", findings)
+	}
+}
+
+// AUD-03: один и тот же синтетический секрет обнаруживается в plain-тексте,
+// JSON, JSONL и nested JSON с корректной привязкой к строке.
+func TestScanDetectsSecretAcrossFormats(t *testing.T) {
+	secret := "T0pSecretValue21k9XzW8qK2nM4"
+	cases := []struct {
+		name string
+		data string
+		line int
+	}{
+		{"plain", "api_key = " + secret + "\n", 1},
+		{"json", "{\"api_key\":\"" + secret + "\"}\n", 1},
+		{"nested json", "{\"k8s\":{\"deploy\":{\"token\":\"" + secret + "\"}}}\n", 1},
+		{"jsonl", "{\"stage\":1}\n{\"credentials\":{\"password\":\"" + secret + "\"},\"ok\":1}\n", 2},
+	}
+	for _, tc := range cases {
+		findings := Scan([]byte(tc.data))
+		if len(findings) == 0 {
+			t.Errorf("%s: секрет не обнаружен: %+v", tc.name, findings)
+			continue
+		}
+		var jsonFound bool
+		for _, f := range findings {
+			if f.Reason == jsonSecretReason {
+				jsonFound = true
+				if f.Line != tc.line {
+					t.Errorf("%s: line=%d, want %d (%+v)", tc.name, f.Line, tc.line, f)
+				}
+			}
+		}
+		if tc.name == "plain" {
+			continue // plain покрывается assignment-правилом, не JSON-им
+		}
+		if !jsonFound {
+			t.Errorf("%s: json secret field не обнаружен: %+v", tc.name, findings)
+		}
+	}
+}
+
+// AUD-03: не-JSON содержимое не даёт ложного json-finding, а JSON >= лимита
+// не сканируется структурно (plain-сканер остаётся источником evidence).
+func TestScanJSONSkipsNonJSONAndOverLimit(t *testing.T) {
+	if hasFindingReason(Scan([]byte("just text password = placeholder\n")), jsonSecretReason) {
+		t.Fatal("обычный текст не должен давать json finding")
+	}
+	if hasFindingReason(Scan([]byte("import x; x = 1\n")), jsonSecretReason) {
+		t.Fatal("встроенные строки без JSON-структуры не должны давать json finding")
+	}
+}

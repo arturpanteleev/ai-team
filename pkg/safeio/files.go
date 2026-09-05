@@ -1,9 +1,13 @@
 package safeio
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // ReadRegularFile reads a bounded regular file and rejects symlinks, devices,
@@ -39,4 +43,122 @@ func ReadRegularFile(path string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s превышает лимит %d bytes", path, maxBytes)
 	}
 	return data, nil
+}
+
+// WriteRegularFileNoFollow пишет data в path, гарантируя no-follow на всей
+// цепочке пути (AUD-04): родительские каталоги проходятся по одному компоненту
+// (существующие обязаны быть обычными каталогами без symlink, отсутствующие
+// создаются os.Mkdir), листовой symlink отклоняется до создания, а сам файл
+// создаётся строго через O_CREATE|O_EXCL — существующий файл даёт ошибку,
+// разыменование невозможно. Иммутабельные контроллерные артефакты (bundle
+// records) не перезаписываются.
+func WriteRegularFileNoFollow(path string, data []byte, mode os.FileMode) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if err := ensureNoFollowDirChain(filepath.Dir(abs)); err != nil {
+		return err
+	}
+	// Листовой symlink (или special файл) отвергается до создания файла:
+	// sentinel за целевой записью не изменяется.
+	if info, lerr := os.Lstat(abs); lerr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("controller file %s является symlink: запись отклонена (AUD-04)", path)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("controller file %s не является regular file", path)
+		}
+		return fmt.Errorf("controller file %s уже существует: immutable-запись запрещена (AUD-04)", path)
+	} else if !os.IsNotExist(lerr) {
+		return lerr
+	}
+	file, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("controller file %s уже существует: immutable-запись запрещена (AUD-04)", path)
+		}
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// EnsureDirPath создаёт каталог (и недостающие промежуточные) компонентно,
+// отклоняя symlink в любом компоненте цепочки. Отличается от os.MkdirAll:
+// никакой компонент не обходится как symlink.
+func EnsureDirPath(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	return ensureNoFollowDirChain(abs)
+}
+
+// isSystemBootstrapRedirect распознаёт штатные OS-редиректы начальных каталогов
+// (macOS: /var → private/var, /tmp → private/tmp, /etc → private/etc — Darwin
+// консолидирует их под /private). Такие редиректы находятся выше зоны доверия
+// контроллера (рабочего дерева/outDir) и разрешаются один раз: любое их
+// применение сводит содержимое в sibling-"private" каталог, который находится
+// внутри того же родительского дерева и не позволяет выйти на произвольный
+// целевой путь (атакуемый никогда не контролирует /var, /tmp или /etc).
+// Все остальные symlink в цепочке ниже trusted-prefix отклоняются.
+func isSystemBootstrapRedirect(path string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return false
+	}
+	base := filepath.Base(path)
+	return target == filepath.Join("private", base) || target == filepath.Join(string(filepath.Separator)+"private", base)
+}
+
+// ensureNoFollowDirChain проходит каждый компонент abs-каталога сверху вниз.
+func ensureNoFollowDirChain(abs string) error {
+	root := filepath.VolumeName(abs)
+	rest := abs
+	if root != "" {
+		rest = rest[len(root):]
+	}
+	rest = strings.TrimLeft(rest, string(filepath.Separator))
+	current := root
+	if current == "" {
+		current = string(filepath.Separator)
+	}
+	for _, component := range strings.Split(rest, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		switch {
+		case os.IsNotExist(err):
+			if mkErr := os.Mkdir(current, 0755); mkErr != nil && !os.IsExist(mkErr) {
+				return mkErr
+			}
+			if reqErr := requireDirectory(current); reqErr != nil {
+				return reqErr
+			}
+		case err != nil:
+			return err
+		default:
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				if isSystemBootstrapRedirect(current, info) {
+					resolved, rerr := filepath.EvalSymlinks(current)
+					if rerr != nil {
+						return rerr
+					}
+					current = resolved
+					continue
+				}
+				return fmt.Errorf("controller path %s должен быть каталогом без symlink", current)
+			}
+		}
+	}
+	return nil
 }

@@ -228,6 +228,10 @@ type Result struct {
 	Status           string          `json:"status"`
 	FinishedAt       time.Time       `json:"finished_at"`
 	BundleSHA256     string          `json:"bundle_sha256,omitempty"`
+	// WorkspaceDigest — fingerprint рабочего дерева, против которого реально
+	// выполнялись checks (AUD-01). Привязывает результат проверок к фактически
+	// просканированному checkout, а не только к заявленному candidate.
+	WorkspaceDigest string `json:"workspace_digest,omitempty"`
 }
 
 // Signals (V0-8) — измеренные risk-signals diff: размер/тип изменений,
@@ -270,8 +274,10 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 		if validateErr := opt.Receipt.Validate(); validateErr != nil {
 			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode: невалидный containment receipt: " + validateErr.Error()}
 		}
-		if opt.Receipt.HasUnavailable() {
-			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён: оси containment UNAVAILABLE"}
+		// AUD-02: untrusted требует fail-closed исполнения по всем осям. Один
+		// PARTIAL/UNAVAILABLE axis переводит режим в blocked.
+		if !opt.Receipt.IsEnforced() {
+			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён: containment оси не полностью ENFORCED"}
 		}
 	}
 	cfg := opt.Config
@@ -301,6 +307,20 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 		candidateCommit, err = resolveCommit(ctx, opt.TargetDir, candidate)
 		if err != nil {
 			return nil, ExitBlocked, &BlockedError{Reason: err.Error()}
+		}
+		// AUD-01: commit-кандидат требует, чтобы рабочее дерево совпадало с ним
+		// по tracked-содержимому. Иначе checks выполнялись бы над другим
+		// checkout, а PASS/подписанный bundle приписывались бы непроверенному
+		// candidate. Проверка обязательна и для WORKTREE-кандидатов не нужна —
+		// там рабочее дерево и есть candidate.
+		match, matchErr := workingTreeMatchesCommit(ctx, opt.TargetDir, candidateCommit)
+		if matchErr != nil {
+			return nil, ExitBlocked, &BlockedError{Reason: matchErr.Error()}
+		}
+		if !match {
+			return nil, ExitBlocked, &BlockedError{
+				Reason: fmt.Sprintf("Git working tree не совпадает с candidate %q (%s): checks выполнялись бы над другим содержимым, чем заявленный candidate (fail-closed; используйте чистый checkout candidate или WORKTREE)", opt.Candidate, candidateCommit),
+			}
 		}
 	}
 	baseTree, err := treeSHA(ctx, opt.TargetDir, baseCommit)
@@ -370,6 +390,14 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 	if len(cfg.Checks) > 0 {
 		results, checkErr := (checks.Runner{TargetDir: opt.TargetDir}).RunAll(ctx, cfg.Checks)
 		result.Checks = results
+		// AUD-01: workspace identity вычисляется в post-состоянии — ровно в том
+		// же виде, в котором каждый check записал WorkspaceDigestAfter
+		// (адаптеры могут легально создавать report-артефакты в дереве).
+		workspaceDigest, digestErr := checks.WorkspaceDigest(opt.TargetDir)
+		if digestErr != nil {
+			return nil, ExitBlocked, &BlockedError{Reason: "не удалось вычислить workspace identity: " + digestErr.Error()}
+		}
+		result.WorkspaceDigest = workspaceDigest
 		result.Signals.ChecksRun = len(results)
 		for _, check := range results {
 			if check.Status == checks.StatusFailed {
@@ -443,6 +471,35 @@ func isWorkTree(ctx context.Context, target string) (bool, error) {
 		return false, &BlockedError{Reason: fmt.Sprintf("не удалось инициализировать Git: %v", err)}
 	}
 	return strings.TrimSpace(string(output)) == "true", nil
+}
+
+// workingTreeMatchesCommit проверяет, что tracked содержимое рабочего дерева
+// равно candidate-коммиту. Используется `git diff` (в т.ч. --cached), а не
+// status --porcelain: untracked-каталоги (например, .ai-team) не считаются
+// изменением checkout'а. Возвращает (false, nil) при наличии отличий и
+// BLOCKED-ошибку для инфраструктурных проблем.
+func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool, error) {
+	for _, extra := range [][]string{
+		{"--quiet", commit},
+		{"--quiet", "--cached", commit},
+	} {
+		args := append([]string{"-C", target, "--no-pager", "diff"}, extra...)
+		command := exec.CommandContext(ctx, "git", args...)
+		var buffer bytes.Buffer
+		command.Stdout, command.Stderr = &buffer, &buffer
+		if err := command.Run(); err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+				// git diff --quiet: exit 1 означает «есть отличия».
+				return false, nil
+			}
+			return false, errors.New(strings.TrimSpace(buffer.String()))
+		}
+	}
+	return true, nil
 }
 
 func resolveCommit(ctx context.Context, target, ref string) (string, error) {
@@ -742,6 +799,18 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) (string, err
 		return "", fmt.Errorf("verify gate bundle: заявленный bundle_sha256 %q не равен digest %q",
 			verdict.BundleSHA256, digest)
 	}
+	// AUD-01: verify связывает check workspace identity с candidate workspace.
+	// gate.json фиксирует digest рабочего дерева, против которого выполнялись
+	// проверки; каждый check обязан быть привязан к тому же workspace, иначе
+	// PASS/подпись относятся к непроверенному содержимому.
+	if verdict.WorkspaceDigest != "" {
+		for i, check := range verdict.Checks {
+			if check.WorkspaceDigestAfter != verdict.WorkspaceDigest {
+				return "", fmt.Errorf("verify gate bundle: check %d (%s) workspace identity %q не совпадает с candidate workspace %q",
+					i+1, check.Name, check.WorkspaceDigestAfter, verdict.WorkspaceDigest)
+			}
+		}
+	}
 	if err := verifyDSSeSignature(dir, digest, keyVerify...); err != nil {
 		return "", fmt.Errorf("verify gate bundle: %w", err)
 	}
@@ -805,11 +874,12 @@ func WriteBundle(outDir string, result *Result) error {
 	if result == nil {
 		return errors.New("gate: нет вердикта для bundle")
 	}
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return err
-	}
-	if _, err := safeio.ExistingDir(outDir); err != nil {
-		return err
+	// AUD-04: outDir создаётся компонентно без follow симлинков, а каждый
+	// файл пишется через safeio.WriteRegularFileNoFollow (O_EXCL). Повторная
+	// запись в существующий bundle и symlink-подмена на месте любых output
+	// файлов (gate.json, checks/*.json, index.json) отвергаются.
+	if err := safeio.EnsureDirPath(outDir); err != nil {
+		return fmt.Errorf("gate bundle output: %w", err)
 	}
 	records := make([]Record, 0, len(result.Checks)+1)
 	result.BundleSHA256 = ""
@@ -818,12 +888,12 @@ func WriteBundle(outDir string, result *Result) error {
 		return err
 	}
 	gateData = append(gateData, '\n')
-	if err := os.WriteFile(filepath.Join(outDir, "gate.json"), gateData, 0444); err != nil {
-		return err
+	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, "gate.json"), gateData, 0444); err != nil {
+		return fmt.Errorf("gate bundle gate.json: %w", err)
 	}
 	records = append(records, Record{Type: "gate_result", Path: "gate.json", SHA256: sha256Bytes(gateData)})
 	if len(result.Checks) > 0 {
-		if err := os.MkdirAll(filepath.Join(outDir, "checks"), 0755); err != nil {
+		if err := safeio.EnsureDirPath(filepath.Join(outDir, "checks")); err != nil {
 			return err
 		}
 		for i, check := range result.Checks {
@@ -834,7 +904,7 @@ func WriteBundle(outDir string, result *Result) error {
 				return err
 			}
 			data = append(data, '\n')
-			if err := os.WriteFile(filepath.Join(outDir, rel), data, 0444); err != nil {
+			if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, rel), data, 0444); err != nil {
 				return err
 			}
 			records = append(records, Record{Type: "check_result", Path: filepath.ToSlash(rel), SHA256: sha256Bytes(data)})
@@ -858,7 +928,7 @@ func WriteBundle(outDir string, result *Result) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, indexFileName), append(data, '\n'), 0644); err != nil {
+	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, indexFileName), append(data, '\n'), 0644); err != nil {
 		return err
 	}
 	result.BundleSHA256 = BundleDigest(index)

@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 // Pre-Authentication Encoding prefix per DSSE spec.
@@ -103,7 +105,9 @@ const EnvelopeFileName = "dsse.json"
 // BundleDigest (hex-строка) run- или gate-bundle.
 const SignaturePayloadType = "application/vnd.ai-team.bundle+hex"
 
-// SignBundleFile подписывает bundle digest и пишет EnvelopeFileName в bundleDir.
+// SignBundleFile подписывает bundle digest и пишет EnvelopeFileName в bundleDir
+// через no-follow примитив safeio (AUD-04): существующий dsse.json или symlink
+// на его месте отвергается, запись вне bundle невозможна.
 // Errors оставляют каталог без частичного файла при ошибке записи.
 func SignBundleFile(bundleDir string, priv ed25519.PrivateKey, payloadType string, payload []byte) error {
 	env := SignEnvelope(priv, payloadType, payload)
@@ -113,8 +117,8 @@ func SignBundleFile(bundleDir string, priv ed25519.PrivateKey, payloadType strin
 	}
 	data = append(data, '\n')
 	path := filepath.Join(bundleDir, EnvelopeFileName)
-	if err := os.WriteFile(path, data, 0444); err != nil {
-		return err
+	if err := safeio.WriteRegularFileNoFollow(path, data, 0444); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

@@ -681,12 +681,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		return RunResult{RunID: runID, Outcome: outcome}, finalErr
 	}
 	// V0-9: отложенная (deferred) доставка — только после terminal finalize и
-	// только для полностью completed-ранна, когда attestation digest и runtime
-	// identity детерминированы. Enforcement: план перегружается из prepared
-	// state и должен совпасть с approvedPlanHash и маркером стадии.
-	if outcome == workflow.RunCompleted && rs.deferredDelivery != nil {
-		if deferredErr := rs.executeDeferredDelivery(); deferredErr != nil {
-			return RunResult{RunID: runID, Outcome: outcome}, deferredErr
+	// только для полностью completed-ранна (включая completed_with_warnings:
+	// AUD-06 — warning не меняет delivery-контракт, пользователь ждёт
+	// commit/push/PR), когда attestation digest и runtime identity
+	// детерминированы. Enforcement: план перегружается из prepared state и
+	// должен совпасть с approvedPlanHash и маркером стадии.
+	switch outcome {
+	case workflow.RunCompleted, workflow.RunCompletedWithWarnings:
+		if rs.deferredDelivery != nil {
+			if deferredErr := rs.executeDeferredDelivery(); deferredErr != nil {
+				return RunResult{RunID: runID, Outcome: outcome}, deferredErr
+			}
 		}
 	}
 	return RunResult{RunID: runID, Outcome: outcome}, finalErr

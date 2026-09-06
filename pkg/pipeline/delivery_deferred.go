@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -100,6 +102,14 @@ func (rs *runState) executeDeferredDelivery() error {
 // перезапустить `ai-team deliver --run <id> --target <repo>`); enforcement
 // детерминированный: результат привязан к plan, зафиксированному в
 // delivery_deferred event, и к terminal статусу run.
+//
+// AUD-05: рабочий каталог (workspace) разрешается из проверенной run metadata —
+// state_path из delivery_deferred event указывает на candidate worktree
+// Git-run'а, а не на control target, который передаёт CLI.
+// targetDir остаётся только контрольным корнем для sanity-проверки.
+// Дополнительно сверяется identity workspace с attested candidate digest из
+// attestation.json, а сам retry берёт workspace lock, чтобы конкурентные
+// повторы не выполнили доставку дважды.
 func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.TerminalRecord, error) {
 	if _, err := safeio.ExistingDir(runDir); err != nil {
 		return delivery.TerminalRecord{}, err
@@ -145,6 +155,44 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 	if marker.PlanHash == "" || (marker.Feature != "" && marker.Feature != feature) {
 		return delivery.TerminalRecord{}, errors.New("deliver: delivery_deferred маркер не согласован с run")
 	}
+	// AUD-05: prepared plan и delivery выполняются в workspace, записанном в
+	// state_path (для Git-run — candidate worktree), а не в указанном CLI
+	// control target. Без state_path retry fail-closed: невозможно выбрать
+	// верный workspace.
+	workspace, err := deliveryWorkspaceFromStatePath(marker.StatePath, feature)
+	if err != nil {
+		return delivery.TerminalRecord{}, err
+	}
+	// workspace должен лежать внутри control target (или совпадать с ним),
+	// иначе cmdDeliver был вызван для чуждого репозитория. Пути канонизируем:
+	// state_path может быть записан уже через символическую ссылку
+	// (на macOS /var → /private/var), а CLI target — нет.
+	workspaceCanon, targetCanon := canonicalPath(workspace), canonicalPath(targetDir)
+	rel, relErr := filepath.Rel(targetCanon, workspaceCanon)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace %s вне control target %s", workspace, targetDir)
+	}
+
+	lock, err := evidence.AcquireWorkspaceLock(workspace)
+	if err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace lock: %w", err)
+	}
+	defer lock.Close()
+
+	// AUD-05: retry обязан исполнять доставку в тот же candidate, который был
+	// attestated в terminal finalize; проверив digest workspace — fail-closed
+	// при реконфигурации ворктри между finalize и повторной доставкой.
+	if candidateDigest, found, digestErr := candidateWorkspaceDigestOfRun(runDir); digestErr != nil {
+		return delivery.TerminalRecord{}, digestErr
+	} else if found {
+		currentDigest, wsErr := checks.WorkspaceDigest(workspace)
+		if wsErr != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace digest: %w", wsErr)
+		}
+		if currentDigest != candidateDigest {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace %s не совпадает с attested candidate %s", currentDigest, candidateDigest)
+		}
+	}
 
 	attestationDigest, err := attestationDigestOfRun(runDir)
 	if err != nil {
@@ -155,7 +203,7 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 		return delivery.TerminalRecord{}, err
 	}
 
-	plan, found, err := delivery.LoadPreparedPlan(targetDir, feature)
+	plan, found, err := delivery.LoadPreparedPlan(workspace, feature)
 	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: prepared plan: %w", err)
 	}
@@ -176,7 +224,7 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 		delivery.TrailerAttestation + ": " + attestationDigest,
 	}
 	result, err := p.delivery.Execute(context.Background(), delivery.Request{
-		TargetDir: targetDir, Feature: feature, Plan: plan, Trailers: trailers,
+		TargetDir: workspace, Feature: feature, Plan: plan, Trailers: trailers,
 	})
 	if err != nil {
 		return delivery.TerminalRecord{}, err
@@ -199,10 +247,72 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 	return record, nil
 }
 
+// deliveryWorkspaceFromStatePath выделяет корень workspace из абсолютного
+// пути delivery state (<workspace>/.ai-team/delivery/<feature>.json) и
+// валидирует его форму. Вернёт ошибку при попытке вывести стейт за пределы
+// канонической структуры.
+func deliveryWorkspaceFromStatePath(statePath, feature string) (string, error) {
+	if statePath == "" {
+		return "", errors.New("deliver: delivery_deferred маркер не содержит state_path")
+	}
+	if feature == "" || feature == "." || feature == ".." || strings.ContainsAny(feature, `/\\`) || strings.Contains(feature, "..") {
+		return "", fmt.Errorf("deliver: невалидный feature %q", feature)
+	}
+	path := filepath.Clean(filepath.FromSlash(statePath))
+	if !filepath.IsAbs(path) {
+		return "", errors.New("deliver: state_path должен быть absolute")
+	}
+	workspace := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+	if workspace == "." || workspace == "/" || !filepath.IsAbs(workspace) {
+		return "", errors.New("deliver: state_path не содержит candidate workspace")
+	}
+	expected := filepath.Join(workspace, ".ai-team", "delivery", feature+".json")
+	if expected != path {
+		return "", fmt.Errorf("deliver: state_path %q не соответствует workspace layout %q", path, expected)
+	}
+	return workspace, nil
+}
+
+// canonicalPath разрешает символические ссылки пути (для сравнения путей из
+// разных источников — state_path и CLI target могут отличаться формой одного
+// физического каталога, например /var vs /private/var на macOS).
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
+// candidateWorkspaceDigestOfRun читает attested subject 'candidate' из
+// attestation.json (digest sha256). found=false для non-Git run'ов — там
+// workspace == control target и digest верифицировать нечем.
+func candidateWorkspaceDigestOfRun(runDir string) (digest string, found bool, err error) {
+	data, readErr := safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	if readErr != nil {
+		return "", false, fmt.Errorf("deferred delivery: attestation: %w", readErr)
+	}
+	statement, parseErr := attest.Parse(data)
+	if parseErr != nil {
+		return "", false, fmt.Errorf("deferred delivery: attestation parse: %w", parseErr)
+	}
+	for _, subject := range statement.Subject {
+		if subject.Name != "candidate" {
+			continue
+		}
+		value, ok := subject.Digest["sha256"]
+		if !ok || value == "" {
+			return "", false, errors.New("deferred delivery: candidate subject не содержит sha256 digest")
+		}
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // deferredMarkerEvent — доказательство утверждённой delivery-стадии в run.
 type deferredMarkerEvent struct {
-	PlanHash string `json:"plan_hash"`
-	Feature  string `json:"feature"`
+	PlanHash  string `json:"plan_hash"`
+	Feature   string `json:"feature"`
+	StatePath string `json:"state_path"`
 }
 
 func firstDeferredMarker(runDir string) (deferredMarkerEvent, error) {

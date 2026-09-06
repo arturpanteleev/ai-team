@@ -311,3 +311,144 @@ func TestCheckLinksBasePath(t *testing.T) {
 		t.Errorf("CheckLinksWithBase failed with base path: %v", err)
 	}
 }
+
+// TestCopyAssetsRejectsPathEscapeFromNestedPage reproduces the F-6 audit's
+// repro shape: a page nested two directories deep (docs/demo/README.md,
+// rendered at the shortened URL "/demo/", exactly as cmd/docsgen configures
+// it) links upward far enough ("../../LICENSE") that the page-URL-relative
+// output placement computes a path outside the output directory entirely
+// (pageDir "demo" has only one segment, but the link needs to climb two).
+// The build must fail loudly instead of writing outside output.
+func TestCopyAssetsRejectsPathEscapeFromNestedPage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs", "demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "demo", "README.md"), []byte("[license](../../LICENSE)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("Apache-2.0 fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := t.TempDir()
+	cfg := Config{
+		Root:        root,
+		Output:      out,
+		Title:       "fixture",
+		Version:     "dev",
+		CleanOutput: true,
+		GitHubRepo:  "arturpanteleev/ai-team",
+		Sources: []SourcedPage{
+			{Source: "docs/demo/README.md", Title: "Demo", URL: "/demo/"},
+		},
+	}
+
+	err := Build(cfg)
+	if err == nil {
+		t.Fatal("expected Build to fail for an asset link escaping the output directory")
+	}
+	for _, want := range []string{"docs/demo/README.md", "LICENSE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// The escaping write would have landed one level above output, named
+	// LICENSE; confirm it was never created.
+	escaped := filepath.Join(filepath.Dir(out), "LICENSE")
+	if _, statErr := os.Stat(escaped); statErr == nil {
+		t.Errorf("asset escaped to %s outside the output directory", escaped)
+	} else if !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+}
+
+// TestCopyAssetsRejectsPathEscapeOutsideRepo is a second, independent escape
+// construction distinct from the nested-page repro above: a top-level page
+// links to a file that lives entirely outside the source root (not merely
+// outside its own page's subtree). It must be rejected the same way.
+func TestCopyAssetsRejectsPathEscapeOutsideRepo(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("[evil](../evil.txt)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "evil.txt"), []byte("outside the repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := t.TempDir()
+	cfg := Config{
+		Root:        root,
+		Output:      out,
+		Title:       "fixture",
+		Version:     "dev",
+		CleanOutput: true,
+		Sources: []SourcedPage{
+			{Source: "README.md", Title: "Overview", URL: "/"},
+		},
+	}
+
+	err := Build(cfg)
+	if err == nil {
+		t.Fatal("expected Build to fail for an asset link escaping the output directory")
+	}
+	for _, want := range []string{"README.md", "evil.txt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	escaped := filepath.Join(filepath.Dir(out), "evil.txt")
+	if _, statErr := os.Stat(escaped); statErr == nil {
+		t.Errorf("asset escaped to %s outside the output directory", escaped)
+	} else if !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+}
+
+// TestSlashRelRepoTargetUsesRepoRoot proves slashRelRepoTarget computes paths
+// relative to the actual repository root, not the rendering page's own
+// baseDir. Before the fix, a nested page's baseDir (e.g. docs/demo) was
+// reused for this purpose, producing a wrong GitHub URL for anything outside
+// that page's own subtree — e.g. LICENSE (at the repo root) would resolve to
+// "../../LICENSE" instead of "LICENSE".
+func TestSlashRelRepoTargetUsesRepoRoot(t *testing.T) {
+	root := t.TempDir()
+	tr := &linkTransformer{
+		baseDir:  filepath.Join(root, "docs", "demo"),
+		repoRoot: root,
+	}
+	got := slashRelRepoTarget(tr, filepath.Join(root, "LICENSE"))
+	if got != "LICENSE" {
+		t.Errorf("slashRelRepoTarget = %q, want %q", got, "LICENSE")
+	}
+}
+
+// TestGithubTreeURLFromNestedPageIsRepoRootRelative exercises the repoRoot
+// fix through the real rendering pipeline (directory links are the only
+// place slashRelRepoTarget currently feeds a GitHub URL): a page nested two
+// directories deep links to a directory that lives at the repo root. The
+// generated GitHub tree URL must be repo-root-relative ("docsgen"), not
+// relative to the page's own directory ("../../docsgen").
+func TestGithubTreeURLFromNestedPageIsRepoRootRelative(t *testing.T) {
+	out := fixtureSite(t, []SourcedPage{
+		{Source: "docs/demo/README.md", Title: "Demo", URL: "/demo/"},
+	}, map[string]string{
+		"docs/demo/README.md": "See [`docsgen`](../../docsgen/).\n",
+	}, []string{"docsgen"})
+
+	demo, err := os.ReadFile(filepath.Join(out, "demo", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(demo), "https://github.com/arturpanteleev/ai-team/tree/docsgen") {
+		t.Errorf("expected repo-root-relative GitHub tree URL for docsgen/, got:\n%s", string(demo))
+	}
+	if strings.Contains(string(demo), "tree/../../docsgen") {
+		t.Errorf("GitHub tree URL used page-relative baseDir instead of repo root:\n%s", string(demo))
+	}
+}

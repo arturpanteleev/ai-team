@@ -103,6 +103,15 @@ func Build(cfg Config) error {
 		pathMap[abs] = joinBase(site.BasePath, url)
 	}
 
+	// repoRoot is the actual repository root, used as the base for GitHub
+	// blob/tree URLs. It is distinct from a linkTransformer's baseDir, which
+	// is the directory of the specific page being rendered (see below) and
+	// varies per page depth.
+	repoRoot, err := filepath.Abs(cfg.Root)
+	if err != nil {
+		return fmt.Errorf("resolve repo root: %w", err)
+	}
+
 	var nonPage []nonPageLink
 	for _, sp := range cfg.Sources {
 		srcPath := filepath.Join(cfg.Root, filepath.FromSlash(sp.Source))
@@ -121,9 +130,11 @@ func Build(cfg Config) error {
 		}
 		tr := &linkTransformer{
 			baseDir:    filepath.Dir(absSrc),
+			repoRoot:   repoRoot,
 			pathMap:    pathMap,
 			pageURL:    url,
 			githubRepo: cfg.GitHubRepo,
+			sourcePage: sp.Source,
 		}
 		page, err := renderPage(tr, sp, content)
 		if err != nil {
@@ -278,18 +289,21 @@ func slugifyID(s string) string {
 // missing raw files. It also collects non-page relative links (assets,
 // non-page markdown files) for copying into the output directory.
 type linkTransformer struct {
-	baseDir      string
+	baseDir      string // directory of the page currently being rendered (varies per page)
+	repoRoot     string // actual repository root, used for GitHub blob/tree URLs
 	pathMap      map[string]string
 	pageURL      string // site URL of the page being rendered (e.g. "/contributing/")
 	githubRepo   string
+	sourcePage   string // repo-relative source path of the page being rendered, for diagnostics
 	nonPageLinks []nonPageLink
 }
 
 // nonPageLink tracks a relative link to a repository file that is not among
 // the rendered pages and needs to be copied into the site output.
 type nonPageLink struct {
-	resolved string // absolute repo path of the target file
-	outPath  string // relative path within the output directory
+	resolved   string // absolute repo path of the target file
+	outPath    string // relative path within the output directory
+	sourcePage string // repo-relative source path of the page that linked to it
 }
 
 func (t *linkTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
@@ -383,15 +397,20 @@ func (t *linkTransformer) nonPageLinkFor(resolved string) nonPageLink {
 		relDir = ""
 	}
 	return nonPageLink{
-		resolved: resolved,
-		outPath:  filepath.Join(filepath.FromSlash(strings.Trim(strings.TrimPrefix(t.pageURL, "/"), "/")), relDir, filepath.Base(resolved)),
+		resolved:   resolved,
+		outPath:    filepath.Join(filepath.FromSlash(strings.Trim(strings.TrimPrefix(t.pageURL, "/"), "/")), relDir, filepath.Base(resolved)),
+		sourcePage: t.sourcePage,
 	}
 }
 
 // slashRelRepoTarget computes the repo-root-relative path of a resolved file,
-// used to build GitHub blob/tree URLs.
+// used to build GitHub blob/tree URLs. This is always relative to the actual
+// repository root (t.repoRoot), never to the rendering page's own directory
+// (t.baseDir) — the two coincide only for pages that live at the repo root,
+// so using baseDir here would produce a wrong GitHub URL for any page nested
+// in a subdirectory (e.g. docs/demo/README.md).
 func slashRelRepoTarget(t *linkTransformer, resolved string) string {
-	rel, err := filepath.Rel(t.baseDir, resolved)
+	rel, err := filepath.Rel(t.repoRoot, resolved)
 	if err != nil {
 		return filepath.Base(resolved)
 	}
@@ -418,9 +437,27 @@ func dedupeNonPage(links []nonPageLink) []nonPageLink {
 // copyAssets copies repository files referenced by relative links into the
 // matching locations of the output directory so the links resolve on the
 // deployed site.
+//
+// A page nested deep enough in the source tree, linking far enough upward
+// (e.g. "../../LICENSE"), can compute an output path that normalizes outside
+// output entirely. This should never happen for a well-formed docs tree, so
+// every destination is verified to be contained within output before
+// anything is created; a violation is a hard build failure (naming the
+// offending source page and target), not a silent skip.
 func copyAssets(links []nonPageLink, output string) error {
+	outputAbs, err := filepath.Abs(output)
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
 	for _, l := range links {
-		outPath := filepath.Join(output, filepath.FromSlash(l.outPath))
+		outPath, err := filepath.Abs(filepath.Join(output, filepath.FromSlash(l.outPath)))
+		if err != nil {
+			return fmt.Errorf("resolve asset path %s: %w", l.outPath, err)
+		}
+		if outPath != outputAbs && !strings.HasPrefix(outPath, outputAbs+string(filepath.Separator)) {
+			return fmt.Errorf("refusing to write asset outside output directory: page %s links to %s, which resolves to %s (outside %s)",
+				l.sourcePage, l.resolved, outPath, outputAbs)
+		}
 		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 			return fmt.Errorf("mkdir asset %s: %w", outPath, err)
 		}

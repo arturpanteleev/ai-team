@@ -108,6 +108,24 @@ func newGitRepo(t *testing.T) string {
 	return dir
 }
 
+// withFakeOpenCodeInPATH кладёт исполняемый fake-opencode в начало PATH, чтобы
+// preflight-тесты, ходящие в реальный runPreflight/preflight.Check, не
+// зависели от того, установлен ли opencode на машине/в CI (F-1).
+func withFakeOpenCodeInPATH(t *testing.T) string {
+	t.Helper()
+	bin := t.TempDir()
+	script := filepath.Join(bin, "opencode")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncase \"$1\" in --version) echo \"opencode mock 1.0.0\";; esac\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	prepend := bin + string(os.PathListSeparator)
+	if current := os.Getenv("PATH"); current != "" {
+		prepend += current
+	}
+	t.Setenv("PATH", prepend)
+	return bin
+}
+
 func writeED25519Key(t *testing.T) string {
 	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
@@ -229,6 +247,7 @@ func TestRunPreflightClassifiesMissingDeliveryPrereqs(t *testing.T) {
 	registry := agent.NewFS(fstest.MapFS{
 		"ship/def.yaml": &fstest.MapFile{Data: []byte("name: ship\nkind: delivery\nmutation: external\nruntime: delivery\ninputs:\n  review: review.md\noutputs:\n  plan: plan.json\npreconditions:\n  review:\n    required: true\n    marker: Verdict\n    values: [APPROVED]\n")},
 	})
+	withFakeOpenCodeInPATH(t)
 	cfg := &config.Config{CLI: "opencode", PipelineAgents: []config.AgentConfig{{Name: "ship"}}}
 	// Read-only: CLI не блокирует run из-за отсутствующих delivery-предусловий.
 	if err := runPreflight(cfg, registry, dir); err != nil {
@@ -275,6 +294,7 @@ func TestRunPreflightSkipsDeliveryChecksWithoutDeliveryStage(t *testing.T) {
 	registry := agent.NewFS(fstest.MapFS{
 		"worker/def.yaml": &fstest.MapFile{Data: []byte("name: worker\nruntime: agentcli\nmutation: none\n")},
 	})
+	withFakeOpenCodeInPATH(t)
 	cfg := &config.Config{CLI: "opencode", PipelineAgents: []config.AgentConfig{{Name: "worker"}}}
 	report := preflight.New(cfg, registry, dir).Check(context.Background())
 	for _, check := range report.Checks {

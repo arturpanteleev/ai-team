@@ -64,9 +64,12 @@ if [[ -z "${PROMPT:-}" ]]; then
   exit 1
 fi
 
-# первая строка промпта: "# <agent>"
-AGENT=$(echo "$PROMPT" | head -1 | sed 's/^# //')
-FEATURE=$(echo "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | tail -n +2 | head -1 | xargs)
+# первая строка промпта: "# <agent>"; блок "## Фича" → следующая строка.
+# Без head/tail в раннем closing-pipe: `cat|head` под set -euo pipefail даёт
+# SIGPIPE (exit 141), когда продюсер пишет больше, чем успевает прочитать
+# потребитель (флейк на больших промптах с untrusted-артефактами).
+AGENT=$(printf '%s\n' "$PROMPT" | sed -n '1p' | sed 's/^# //')
+FEATURE=$(printf '%s\n' "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | sed -n '2p' | xargs)
 
 echo "MOCK: agent=$AGENT feature=$FEATURE mode=$MODE" >&2
 

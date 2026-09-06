@@ -143,7 +143,7 @@ func cmdExport() {
 			Message: "Экспорт выполнен",
 			Data: map[string]any{
 				"run_id": runID, "bundle": outDir,
-				"bundle_sha256": bundleSHA, "signed": false,
+				"bundle_sha256": bundleSHA, "signed": privKey != nil,
 			},
 			Exit: 0,
 		})

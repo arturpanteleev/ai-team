@@ -50,6 +50,21 @@ bash docs/demo/run-demo.sh
 4. В любом случае (`if: always()`) выполняет `ai-team verify bundle`
    (самодостаточная проверка в том же job) и загружает bundle артефактом.
 
+Gate не требует API-ключей и модели: это детерминированный
+diff-policy + typed checks слой. Настройки, которые обновляет человек вручную
+(все перечислены и в комментариях `ci-gate-demo.yaml`):
+
+- `AI_TEAM_SHA` — фиксируйте после каждого merge в ai-team;
+- `go-version` в `actions/setup-go` — соответствует сборке ai-team;
+- ваш `gate.yaml` в корне репозитория (см. [`gate.yaml`](gate.yaml)); без него
+  gate работает на дефолтах (`test_modify: required`, без checks).
+
+Фикстура JUnit-отчёта: демо-`gate.yaml` intentionally копирует статический XML
+(`pytest-pass.xml`/`pytest-fail.xml` из `docs/demo/`) в `report.xml` вместо
+запуска pytest — так демо детерминировано. В реальном проекте замените команду
+на настоящий раннер, например `python -m pytest --junitxml=report.xml -o
+junit_family=xunit2` (пример есть в комментариях `gate.yaml`).
+
 ### Как обновлять версии в CI-файле
 
 - `AI_TEAM_SHA` — фиксируйте после каждого merge в ai-team.

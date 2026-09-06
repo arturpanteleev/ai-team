@@ -15,6 +15,15 @@ REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
 WORK="$(mktemp -d /tmp/ai-team-demo.XXXXXX)"
 trap 'rm -rf "${WORK}"' EXIT
 
+# sed_in_place <file> <sed args...>: BSD (macOS) и GNU sed совместимы через
+# суффикс .bak: BSD требует суффикс у -i, GNU пишет его же; затем удаляем.
+sed_in_place() {
+  local file="$1"
+  shift
+  sed -i.bak "$@" "$file"
+  rm -f "${file}.bak"
+}
+
 GATE_YAML="$HERE/gate.yaml"
 PASS_XML="$HERE/pytest-pass.xml"
 FAIL_XML="$HERE/pytest-fail.xml"
@@ -65,7 +74,7 @@ run_gate() {
 
 echo "⟶ Сценарий 1: PASS (source + сменяющий тест, зелёный отчёт)"
 git -C "$DEMO" checkout -q -b pass-fix
-sed -i '' 's/return text.strip()/return text.strip() or ""/' "$DEMO/app.py"
+sed_in_place "$DEMO/app.py" 's/return text.strip()/return text.strip() or ""/'
 cat > "$DEMO/tests/test_app.py" <<'PY'
 from app import parse_v1
 
@@ -84,7 +93,7 @@ run_gate pass pass-fix "$BASE"
 
 echo "⟶ Сценарий 2: FAIL по test_modify (source-правка без теста)"
 git -C "$DEMO" checkout -q -b policy-fail "$BASE"
-sed -i '' 's/return text.strip()/return text.strip().lower()/' "$DEMO/app.py"
+sed_in_place "$DEMO/app.py" 's/return text.strip()/return text.strip().lower()/'
 git -C "$DEMO" add app.py
 git -C "$DEMO" commit -q -m "source-only изменение (нет тестов)"
 run_gate policy policy-fail "$BASE"

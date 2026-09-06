@@ -47,6 +47,50 @@ func TestValidateTreeRejectsNestedSymlink(t *testing.T) {
 	}
 }
 
+// F-5: поддельный вид `X -> private/X` (как у системного bootstrap redirect)
+// внутри рабочего дерева не должен пропускаться как системный redirect —
+// иначе атакующий сводит запись наружу через свой каталог private.
+func TestEnsureDirPathRejectsFakePrivateSymlinkRedirect(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	// inside/private -> outside (атакующий контролирует и inside, и private).
+	if err := os.MkdirAll(filepath.Join(root, "inside"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "inside", "private")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	// inside/out -> private/out: ровно та форма, что у системных /var,/tmp,/etc.
+	if err := os.Symlink("private/out", filepath.Join(root, "inside", "out")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := EnsureDirPath(filepath.Join(root, "inside", "out", "sink")); err == nil {
+		t.Fatal("fake private/<basename> redirect must be rejected (would escape workspace)")
+	}
+}
+
+// F-5: точный системный bootstrap redirect (корневой /var → private/var)
+// распознаётся как системный и НЕ отклоняется; внутренние копии — никогда.
+func TestSystemBootstrapRedirectOnlyRootLevel(t *testing.T) {
+	if _, ok := SystemBootstrapRedirectPaths["/var"]; !ok {
+		t.Fatal("/var должен быть в списке системных redirect-путей")
+	}
+	if _, ok := SystemBootstrapRedirectPaths["/tmp"]; !ok {
+		t.Fatal("/tmp должен быть в списке системных redirect-путей")
+	}
+	if _, ok := SystemBootstrapRedirectPaths["/etc"]; !ok {
+		t.Fatal("/etc должен быть в списке системных redirect-путей")
+	}
+	// Любой путь глубже корня не может быть системным redirect по контракту:
+	// map keyed только по корневым /var,/tmp,/etc.
+	if _, ok := SystemBootstrapRedirectPaths["/var/private/out"]; ok {
+		t.Fatal("вложенные пути не должны считаться системными redirect")
+	}
+	if _, ok := SystemBootstrapRedirectPaths["/inside/out"]; ok {
+		t.Fatal("каталоги рабочего дерева не должны считаться системными redirect")
+	}
+}
+
 func TestRejectSymlink(t *testing.T) {
 	root := t.TempDir()
 

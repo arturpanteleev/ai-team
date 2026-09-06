@@ -174,8 +174,10 @@ func endPrivateKeyRe() *regexp.Regexp {
 }
 
 // likelySecretValue фильтрует ложные срабатывания secret assignment:
-// значения-плейсхолдеры, vault/env-ссылки и короткие слова без верхнего
-// регистра и цифр не считаются секретом.
+// значения-плейсхолдеры, vault/env-ссылки и обычные слова без цифр не
+// считаются секретом. Токен обязан содержать и букву, и цифру (покрывает
+// hex/base64/lower-токены, которые раньше терялись из-за требования верхнего
+// регистра — F-7); чистые слова остаются benign.
 func likelySecretValue(value string) bool {
 	value = strings.Trim(value, "\"' ")
 	if len(value) < 16 {
@@ -191,25 +193,31 @@ func likelySecretValue(value string) bool {
 			return false
 		}
 	}
-	var hasUpper, hasDigit bool
+	var hasLetter, hasDigit bool
 	for _, r := range value {
 		switch {
 		case r >= 'A' && r <= 'Z':
-			hasUpper = true
+			hasLetter = true
+		case r >= 'a' && r <= 'z':
+			hasLetter = true
 		case r >= '0' && r <= '9':
 			hasDigit = true
 		}
 	}
-	return hasUpper && hasDigit
+	return hasLetter && hasDigit
 }
 
-// jsonFrame — контейнер в стеке dexдере. keySecret/expectKey используются
+// jsonFrame — контейнер в стеке декодера. keySecret/expectKey используются
 // только для object-фреймов; для array-фреймов значим только факт вложенности.
+// secretCtx наследуется родителем и означает, что значения этого контейнера
+// находятся в секретном дереве (значение секретного ключа или элемент
+// секретного массива) — позволяет не терять контекст на массивах (F-7).
 type jsonFrame struct {
 	isObject  bool
 	expectKey bool // в object контексте следующий string — имя ключа
 	keySecret bool // последний ключ object'а классифицирован как secret
 	keyOffset int64
+	secretCtx bool
 }
 
 // scanJSON детектирует секретные JSON-поля через токенную экскурсию по
@@ -231,11 +239,13 @@ func scanJSON(data []byte) []Finding {
 		offset := decoder.InputOffset()
 		switch value := token.(type) {
 		case string:
-			if len(stack) > 0 && stack[len(stack)-1].isObject && !stack[len(stack)-1].expectKey {
-				// value: значение ключа top-объекта (или следующий ключ утерян —
-				// фрейм всегда хранит последний ключ до прихода его значения).
-				top := &stack[len(stack)-1]
-				if top.keySecret && top.keyOffset >= 0 && top.keyOffset < int64(len(data)) {
+			if len(stack) == 0 {
+				continue
+			}
+			top := &stack[len(stack)-1]
+			if top.isObject && !top.expectKey {
+				// value: значение ключа top-объекта.
+				if (top.keySecret || top.secretCtx) && top.keyOffset >= 0 && top.keyOffset < int64(len(data)) {
 					if likelySecretValue(value) {
 						findings = append(findings, Finding{
 							Reason:   jsonSecretReason,
@@ -247,26 +257,46 @@ func scanJSON(data []byte) []Finding {
 				}
 				top.keySecret = false
 				top.expectKey = true
-			} else if len(stack) > 0 && stack[len(stack)-1].isObject {
+			} else if top.isObject {
 				// string в роли ключа: фиксируем классификацию имени поля.
-				top := &stack[len(stack)-1]
 				top.expectKey = false
 				top.keySecret = ClassifyField(value) == FieldSecret
 				top.keyOffset = offset
+			} else {
+				// элемент массива: секретный контекст наследован от ключа.
+				if top.secretCtx {
+					if likelySecretValue(value) {
+						findings = append(findings, Finding{
+							Reason:   jsonSecretReason,
+							Matched:  value,
+							Redacted: jsonSecretRedacted,
+							Line:     lineAt(data, offset),
+						})
+					}
+				}
 			}
 		case json.Delim:
 			switch value {
 			case '{':
+				inherited := false
 				if len(stack) > 0 {
-					stack[len(stack)-1].keySecret = false
-					stack[len(stack)-1].expectKey = true
+					top := &stack[len(stack)-1]
+					// объект как значение ключа или элемент объекта/массива
+					// наследует секретный контекст родителя.
+					inherited = top.keySecret || top.secretCtx
+					top.keySecret = false
+					top.expectKey = true
 				}
-				stack = append(stack, jsonFrame{isObject: true, expectKey: true})
+				stack = append(stack, jsonFrame{isObject: true, expectKey: true, secretCtx: inherited})
 			case '[':
+				inherited := false
 				if len(stack) > 0 {
-					stack[len(stack)-1].keySecret = false
+					top := &stack[len(stack)-1]
+					inherited = top.keySecret || top.secretCtx
+					top.keySecret = false
+					top.expectKey = true
 				}
-				stack = append(stack, jsonFrame{})
+				stack = append(stack, jsonFrame{secretCtx: inherited})
 			case '}', ']':
 				if len(stack) > 0 {
 					stack = stack[:len(stack)-1]

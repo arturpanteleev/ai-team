@@ -473,11 +473,18 @@ func isWorkTree(ctx context.Context, target string) (bool, error) {
 	return strings.TrimSpace(string(output)) == "true", nil
 }
 
-// workingTreeMatchesCommit проверяет, что tracked содержимое рабочего дерева
-// равно candidate-коммиту. Используется `git diff` (в т.ч. --cached), а не
-// status --porcelain: untracked-каталоги (например, .ai-team) не считаются
-// изменением checkout'а. Возвращает (false, nil) при наличии отличий и
-// BLOCKED-ошибку для инфраструктурных проблем.
+// workingTreeMatchesCommit проверяет, что рабочее дерево равно
+// candidate-коммиту:
+//   - tracked содержимое — `git diff` и `git diff --cached` (exit 1 = отличия);
+//   - untracked НЕ-ignored содержимое — `git ls-files --others
+//     --exclude-standard`. Такие файлы не входят в candidate-коммит, но
+//     выполняются в живом рабочем дереве и могут влиять на PASS, поэтому
+//     для commit-кандидата они тоже считаются несовпадением (AUD-01, F-4).
+//     Служебные untracked-каталоги (например, .ai-team) остаются разрешены:
+//     они покрыты .gitignore и отсекаются --exclude-standard.
+//
+// Возвращает (false, nil) при наличии отличий, BLOCKED-ошибку для
+// инфраструктурных проблем и (true, nil) при полном совпадении.
 func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool, error) {
 	for _, extra := range [][]string{
 		{"--quiet", commit},
@@ -498,6 +505,20 @@ func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool,
 			}
 			return false, errors.New(strings.TrimSpace(buffer.String()))
 		}
+	}
+	// untracked-файлы вне .gitignore: они не в candidate, но видны checks.
+	command := exec.CommandContext(ctx, "git", "-C", target, "ls-files", "--others", "--exclude-standard")
+	var buffer bytes.Buffer
+	command.Stdout, command.Stderr = &buffer, &buffer
+	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, errors.New("не удалось перечислить untracked-файлы: " + strings.TrimSpace(buffer.String()))
+	}
+	if untracked := strings.Fields(buffer.String()); len(untracked) > 0 {
+		sort.Strings(untracked)
+		return false, fmt.Errorf("Git working tree содержит untracked-файлы вне .gitignore (их нет в candidate %q, но они видны checks): %s", commit, strings.Join(untracked[:min(len(untracked), 8)], ", "))
 	}
 	return true, nil
 }

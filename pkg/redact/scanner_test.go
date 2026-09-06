@@ -72,11 +72,16 @@ func TestRedactReplacesFindings(t *testing.T) {
 // TestRedactAlignsWithScanFilter — RedactFile применяет тот же
 // likelySecretValue-фильтр к secret assignment, что и Scan: бенign-значение
 // не режется (иначе scan и redact расходились бы по контракту P1-6).
+// F-7: значение с буквой и цифрой (в т.ч. lowercase-hex/base64) — секрет;
+// чистое слово без цифр — benign.
 func TestRedactAlignsWithScanFilter(t *testing.T) {
-	input := []byte("password=0123456789abcdef\npassword=A1b2C3d4E5f6G7h8\n")
+	input := []byte("password=thequickbrownfoxjumpsover\npassword=0123456789abcdef\npassword=A1b2C3d4E5f6G7h8\n")
 	redacted := string(RedactFile(input))
-	if !strings.Contains(redacted, "password=0123456789abcdef") {
-		t.Errorf("бенign-значение (без верхнего регистра) не должно резаться: %q", redacted)
+	if !strings.Contains(redacted, "password=thequickbrownfoxjumpsover") {
+		t.Errorf("чистое слово без цифр не должно резаться: %q", redacted)
+	}
+	if strings.Contains(redacted, "0123456789abcdef") {
+		t.Errorf("lowercase-hex токен (буквы+цифры) должен быть вырезан: %q", redacted)
 	}
 	if strings.Contains(redacted, "A1b2C3d4E5f6G7h8") {
 		t.Errorf("высокоэнтропийное значение должно быть вырезано: %q", redacted)
@@ -169,6 +174,55 @@ func TestScanJSONIgnoresPlaceholders(t *testing.T) {
 	findings := Scan(input)
 	if hasFindingReason(findings, jsonSecretReason) {
 		t.Fatalf("placeholder-значение посчитано секретом: %+v", findings)
+	}
+}
+
+// F-7: секретный контекст не теряется на массивах и во вложенных значениях —
+// value-секреты в массивах секретных полей обнаруживаются, как и скалярные.
+func TestScanJSONSecretArrayContext(t *testing.T) {
+	secretA := "arraySecretV1x9Zq7kL4m8r"
+	secretB := "nestedValueQ2w8eR6t3y"
+	secretC := "deepTokenA5s9Df3gH"
+	input := []byte(`{
+  "issue": {
+    "tokens": ["` + secretA + `"],
+    "client_secret": [{"token": "` + secretB + `"}]
+  },
+  "api_key": ["` + secretC + `"]
+}`)
+	findings := Scan(input)
+	var jsonSec []string
+	for _, f := range findings {
+		if f.Reason == jsonSecretReason {
+			jsonSec = append(jsonSec, f.Matched)
+		}
+	}
+	for _, want := range []string{secretA, secretB, secretC} {
+		found := false
+		for _, m := range jsonSec {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("секрет %q внутри массива не обнаружен: %+v", want, jsonSec)
+		}
+	}
+}
+
+// F-7: теперь секретимы и lowercase"буквой+цифрой" токены (раньше требовался
+// верхний регистр): hex/base64-подобные токены в секретных полях режутся.
+func TestScanJSONDetectsLowerHexToken(t *testing.T) {
+	input := []byte(`{"api_key": "0123456789abcdef0123456789abcdef"}`)
+	findings := Scan(input)
+	if !hasFindingReason(findings, jsonSecretReason) {
+		t.Fatalf("lower-hex токен в секретном поле не обнаружен: %+v", findings)
+	}
+	for _, f := range findings {
+		if f.Reason == jsonSecretReason && f.Redacted != jsonSecretRedacted {
+			t.Fatalf("неверный redaction-маркер: %+v", f)
+		}
 	}
 }
 

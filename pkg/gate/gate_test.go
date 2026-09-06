@@ -579,6 +579,54 @@ func TestRunBlocksDirtyCheckoutForCommitCandidate(t *testing.T) {
 	}
 }
 
+// AUD-01 / F-4: commit-кандидат требует ровно candidate-дерево. Untracked
+// non-ignored файл не входит в candidate, но виден checks в живом рабочем
+// дереве и мог бы влиять на PASS, поэтому такой checkout блокируется.
+func TestRunBlocksUntrackedContentForCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	head := gitCmd(t, repo, "rev-parse", "HEAD")
+	writeFiles(t, repo, map[string]string{"extra/secrets.txt": "secret-data\n"})
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: head, Candidate: head, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if code != ExitBlocked || err == nil {
+		t.Fatalf("ожидался blocked (untracked non-ignored содержимое), code=%d err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "untracked") {
+		t.Fatalf("сообщение должно называть untracked-файлы: %v", err)
+	}
+	if result != nil && len(result.Checks) != 0 {
+		t.Fatalf("checks не должны выполняться при untracked содержимом: %+v", result.Checks)
+	}
+}
+
+// AUD-01 / F-4: .ai-team (gitignored untracked service-каталог) НЕ должен
+// блокировать commit-кандидат — служебное содержимое разрешено.
+func TestRunAllowGitignoredServiceDirForCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "add", ".gitignore")
+	gitCmd(t, repo, "commit", "-q", "-m", "add .gitignore")
+	head := gitCmd(t, repo, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(repo, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".ai-team", "meta.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: head, Candidate: head, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if err != nil || code != ExitPass {
+		t.Fatalf(".ai-team (gitignored) не должен блокировать commit-кандидат: code=%d err=%v", code, err)
+	}
+	if result == nil || result.Status != "passed" {
+		t.Fatalf("ожидался PASS, получено: %+v", result)
+	}
+}
+
 // AUD-01: при совпадающем checkout собственно candidate проходит checks,
 // результат привязан к workspace digest, и bundle verify согласован.
 func TestRunChecksExactlyAgainstCommitCandidate(t *testing.T) {

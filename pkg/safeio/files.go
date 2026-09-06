@@ -98,24 +98,49 @@ func EnsureDirPath(path string) error {
 	return ensureNoFollowDirChain(abs)
 }
 
+// SystemBootstrapRedirectPaths — штатные Darwin-редиректы корневых каталогов,
+// консолидируемых под /private (см. man hier, macOS): /var, /tmp, /etc и сам
+// /private на некоторых конфигурациях. Только эти пути (ровно один сегмент на
+// корневом уровне) разрешены как bootstrap redirect; любое другое вхождение
+// `X -> private/X` (например, поддельный symlink внутри рабочего дерева)
+// отклоняется как признак ухода за пределы доверенной зоны (F-5).
+var SystemBootstrapRedirectPaths = map[string]string{
+	"/var": "/private/var",
+	"/tmp": "/private/tmp",
+	"/etc": "/private/etc",
+}
+
 // isSystemBootstrapRedirect распознаёт штатные OS-редиректы начальных каталогов
 // (macOS: /var → private/var, /tmp → private/tmp, /etc → private/etc — Darwin
-// консолидирует их под /private). Такие редиректы находятся выше зоны доверия
-// контроллера (рабочего дерева/outDir) и разрешаются один раз: любое их
-// применение сводит содержимое в sibling-"private" каталог, который находится
-// внутри того же родительского дерева и не позволяет выйти на произвольный
-// целевой путь (атакуемый никогда не контролирует /var, /tmp или /etc).
-// Все остальные symlink в цепочке ниже trusted-prefix отклоняются.
+// консолидирует их под /private). Разрешается БЕЗУСЛОВНО только точный
+// системный redirect на корневом уровне: канонический префикс обязан быть
+// ровно /private/<basename>. Все копии такого вида глубже в цепочке (напр.
+// созданный атакуемым `out -> private/out` внутри рабочего дерева) НЕ
+// считаются системными и отклоняются ниже (F-5).
 func isSystemBootstrapRedirect(path string, info os.FileInfo) bool {
 	if info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	canonical, ok := SystemBootstrapRedirectPaths[path]
+	if !ok {
 		return false
 	}
 	target, err := os.Readlink(path)
 	if err != nil {
 		return false
 	}
+	// Ссылка должна указывать ровно на канонический системный каталог
+	// (private/<base> либо /private/<base>), а не на какой-то промежуточный.
 	base := filepath.Base(path)
-	return target == filepath.Join("private", base) || target == filepath.Join(string(filepath.Separator)+"private", base)
+	expected := filepath.Join(string(filepath.Separator)+"private", base)
+	if target != filepath.Join("private", base) && target != expected {
+		return false
+	}
+	resolved, rerr := filepath.EvalSymlinks(path)
+	if rerr != nil {
+		return false
+	}
+	return filepath.Clean(resolved) == canonical
 }
 
 // ensureNoFollowDirChain проходит каждый компонент abs-каталога сверху вниз.

@@ -38,6 +38,13 @@ var ValidLevels = map[Level]bool{
 	LevelENFORCED: true, LevelPARTIAL: true, LevelUNAVAILABLE: true,
 }
 
+// ValidProfiles — распознаваемые containment profiles (AUD-02). "unknown" —
+// честный маркер UnavailableReceipt() для legacy-ранов/отсутствующего backend,
+// а не доверенный профиль исполнения.
+var ValidProfiles = map[string]bool{
+	"trusted-local": true, "strict": true, "unknown": true,
+}
+
 // Receipt — per-axis containment status for a run. Profile determines which
 // mitigations are applied; Receipt captures the actual outcome.
 type Receipt struct {
@@ -57,6 +64,9 @@ func (r Receipt) Validate() error {
 	}
 	if r.Profile == "" {
 		return errors.New("containment receipt: пустой profile")
+	}
+	if !ValidProfiles[r.Profile] {
+		return fmt.Errorf("containment receipt: неизвестный profile %q", r.Profile)
 	}
 	for _, axis := range AllAxes {
 		level, ok := r.Axes[axis]
@@ -82,6 +92,17 @@ func (r Receipt) Validate() error {
 		}
 	}
 	return nil
+}
+
+// IsEnforced — true, только если все четыре оси реально ENFORCED (AUD-02).
+// PARTIAL/UNAVAILABLE/legacy-семантика не считается fail-closed исполнением.
+func (r Receipt) IsEnforced() bool {
+	for _, axis := range AllAxes {
+		if r.Axes[axis] != LevelENFORCED {
+			return false
+		}
+	}
+	return true
 }
 
 // UnmarshalJSON implements json.Unmarshaler with unknown field rejection.

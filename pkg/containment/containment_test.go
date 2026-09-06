@@ -93,3 +93,43 @@ func TestReceiptPartialDetails(t *testing.T) {
 		t.Fatal("should detect UNAVAILABLE on proc axis")
 	}
 }
+
+// AUD-02: неизвестный profile обязан валидироваться в ошибку (fail-closed).
+func TestReceiptValidationRejectsUnknownProfile(t *testing.T) {
+	r := UnavailableReceipt()
+	r.Profile = "paranoid"
+	if err := r.Validate(); err == nil {
+		t.Fatal("unknown profile must be rejected (AUD-02)")
+	}
+}
+
+// AUD-02: IsEnforced истинно только при ENFORCED по всем осям; ONE
+// PARTIAL/UNAVAILABLE axis достаточен для блокировки untrusted.
+func TestReceiptIsEnforced(t *testing.T) {
+	unavailable := UnavailableReceipt()
+	if unavailable.IsEnforced() {
+		t.Fatal("UNAVAILABLE receipt не может быть enforced")
+	}
+	trustedLocal := DefaultTrustedLocalReceipt()
+	if trustedLocal.IsEnforced() {
+		t.Fatal("PARTIAL receipt не может быть enforced")
+	}
+	mixed := Receipt{
+		Profile: "strict",
+		Axes: map[Axis]Level{
+			AxisFS: LevelENFORCED, AxisNet: LevelENFORCED, AxisProc: LevelPARTIAL, AxisEnv: LevelENFORCED,
+		},
+	}
+	if mixed.IsEnforced() {
+		t.Fatal("одна PARTIAL ось ломает IsEnforced")
+	}
+	allEnforced := Receipt{
+		Profile: "strict",
+		Axes: map[Axis]Level{
+			AxisFS: LevelENFORCED, AxisNet: LevelENFORCED, AxisProc: LevelENFORCED, AxisEnv: LevelENFORCED,
+		},
+	}
+	if !allEnforced.IsEnforced() {
+		t.Fatal("все четыре ENFORCED оси должны давать IsEnforced=true")
+	}
+}

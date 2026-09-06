@@ -203,12 +203,29 @@ func TestBlockedOnUnknownRefAndUntrusted(t *testing.T) {
 		t.Fatalf("untrusted flag: code=%d err=%v", code, err)
 	}
 
-	// untrusted + валидный receipt без UNAVAILABLE осей → не блокируется.
-	receipt := containment.DefaultTrustedLocalReceipt()
+	// untrusted + receipt с PARTIAL осями (trusted-local) → блокируется:
+	// AUD-02 требует ENFORCED по всем осям, а не только отсутствия UNAVAILABLE.
+	partial := containment.DefaultTrustedLocalReceipt()
 	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
 		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
-		AllowUntrusted: true, Receipt: &receipt}); code == ExitBlocked || err != nil {
-		t.Fatalf("untrusted с receipt: code=%d err=%v", code, err)
+		AllowUntrusted: true, Receipt: &partial}); code != ExitBlocked || err == nil {
+		t.Fatalf("untrusted с PARTIAL receipt: code=%d err=%v", code, err)
+	}
+
+	// untrusted + полностью ENFORCED receipt → разрешено (AUD-02).
+	enforced := containment.Receipt{
+		Profile: "strict",
+		Axes: map[containment.Axis]containment.Level{
+			containment.AxisFS:   containment.LevelENFORCED,
+			containment.AxisNet:  containment.LevelENFORCED,
+			containment.AxisProc: containment.LevelENFORCED,
+			containment.AxisEnv:  containment.LevelENFORCED,
+		},
+	}
+	if _, code, err = Run(context.Background(), Options{TargetDir: repo, Base: "HEAD", Candidate: "HEAD",
+		Config:         &Config{SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyOff}},
+		AllowUntrusted: true, Receipt: &enforced}); code == ExitBlocked || err != nil {
+		t.Fatalf("untrusted с ENFORCED receipt: code=%d err=%v", code, err)
 	}
 
 	// untrusted + receipt с UNAVAILABLE осью → блокируется.
@@ -518,5 +535,248 @@ func TestGateBundleSignAndVerify(t *testing.T) {
 	wrongPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	if _, err := VerifyBundle(signed, wrongPub); err == nil {
 		t.Fatal("signed wrong key должен FAIL")
+	}
+}
+
+// AUD-01: commit-кандидат должен совпадать с рабочим деревом, иначе checks
+// выполнялись бы над другим checkout'ом, а вердикт приписывался бы candidate.
+func TestRunBlocksWhenCheckoutDoesNotMatchCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n// v1\n"})
+	base := gitCmd(t, repo, "rev-parse", "HEAD")
+	feature := commitChange(t, repo, "feature", map[string]string{"src/app.go": "package app\n// v2\n"})
+	// Чистый checkout base: рабочее дерево != candidate feature.
+	gitCmd(t, repo, "checkout", "-q", "-b", "clean", base)
+
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: base, Candidate: feature, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if code != ExitBlocked || err == nil {
+		t.Fatalf("ожидался blocked (checkout != candidate), code=%d err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "не совпадает с candidate") {
+		t.Fatalf("сообщение не объясняет mismatch: %v", err)
+	}
+	if result != nil && len(result.Checks) != 0 {
+		t.Fatalf("checks не должны выполняться при mismatch checkout: %+v", result.Checks)
+	}
+}
+
+func TestRunBlocksDirtyCheckoutForCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	head := gitCmd(t, repo, "rev-parse", "HEAD")
+	writeFiles(t, repo, map[string]string{"src/app.go": "package app\n// dirty\n"})
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: head, Candidate: "HEAD", Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if code != ExitBlocked || err == nil {
+		t.Fatalf("ожидался blocked (dirty checkout), code=%d err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "не совпадает с candidate") {
+		t.Fatalf("сообщение не объясняет mismatch: %v", err)
+	}
+	if result != nil && len(result.Checks) != 0 {
+		t.Fatalf("checks не должны выполняться при dirty checkout: %+v", result.Checks)
+	}
+}
+
+// AUD-01 / F-4: commit-кандидат требует ровно candidate-дерево. Untracked
+// non-ignored файл не входит в candidate, но виден checks в живом рабочем
+// дереве и мог бы влиять на PASS, поэтому такой checkout блокируется.
+func TestRunBlocksUntrackedContentForCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	head := gitCmd(t, repo, "rev-parse", "HEAD")
+	writeFiles(t, repo, map[string]string{"extra/secrets.txt": "secret-data\n"})
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: head, Candidate: head, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if code != ExitBlocked || err == nil {
+		t.Fatalf("ожидался blocked (untracked non-ignored содержимое), code=%d err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "untracked") {
+		t.Fatalf("сообщение должно называть untracked-файлы: %v", err)
+	}
+	if result != nil && len(result.Checks) != 0 {
+		t.Fatalf("checks не должны выполняться при untracked содержимом: %+v", result.Checks)
+	}
+}
+
+// AUD-01 / F-4: .ai-team (gitignored untracked service-каталог) НЕ должен
+// блокировать commit-кандидат — служебное содержимое разрешено.
+func TestRunAllowGitignoredServiceDirForCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "add", ".gitignore")
+	gitCmd(t, repo, "commit", "-q", "-m", "add .gitignore")
+	head := gitCmd(t, repo, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(repo, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".ai-team", "meta.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: head, Candidate: head, Config: &Config{
+		SchemaVersion: SchemaVersion, DiffPolicy: DiffPolicy{TestModify: TestModifyRequired},
+	}})
+	if err != nil || code != ExitPass {
+		t.Fatalf(".ai-team (gitignored) не должен блокировать commit-кандидат: code=%d err=%v", code, err)
+	}
+	if result == nil || result.Status != "passed" {
+		t.Fatalf("ожидался PASS, получено: %+v", result)
+	}
+}
+
+// AUD-01: при совпадающем checkout собственно candidate проходит checks,
+// результат привязан к workspace digest, и bundle verify согласован.
+func TestRunChecksExactlyAgainstCommitCandidate(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n// v1\n"})
+	base := gitCmd(t, repo, "rev-parse", "HEAD")
+	feature := commitChange(t, repo, "feature", map[string]string{"src/app.go": "package app\n// v2\n"})
+
+	cfg := &Config{
+		SchemaVersion: SchemaVersion,
+		DiffPolicy:    DiffPolicy{TestModify: TestModifyOff},
+		Checks: []checks.Definition{{
+			Name: "must-fail", Class: "unit", Adapter: checks.AdapterCommand, Policy: checks.PolicyRequired,
+			Command: []string{"sh", "-c", "exit 1"},
+		}},
+	}
+	result, code, err := Run(context.Background(), Options{TargetDir: repo, Base: base, Candidate: feature, Config: cfg})
+	if err != nil || code != ExitFail {
+		t.Fatalf("clean checkout у feature-кандидата: code=%d err=%v", code, err)
+	}
+	wantDigest, digestErr := checks.WorkspaceDigest(repo)
+	if digestErr != nil {
+		t.Fatal(digestErr)
+	}
+	if result.WorkspaceDigest == "" || result.WorkspaceDigest != wantDigest {
+		t.Fatalf("workspace digest %q != просканированный checkout %q", result.WorkspaceDigest, wantDigest)
+	}
+	if len(result.Checks) != 1 || result.Checks[0].WorkspaceDigestAfter != result.WorkspaceDigest {
+		t.Fatalf("check workspace binding: digest=%q checks=%+v", result.WorkspaceDigest, result.Checks)
+	}
+
+	dir := t.TempDir()
+	if err := WriteBundle(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := VerifyBundle(dir)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if digest != result.BundleSHA256 {
+		t.Fatalf("digest %s != bundle_sha256 %s", digest, result.BundleSHA256)
+	}
+}
+
+// AUD-01: VerifyBundle обязан отклонять проверки, привязанные к другому
+// workspace identity, чем заявлен в gate.json.
+func TestVerifyBundleRejectsCheckWorkspaceMismatch(t *testing.T) {
+	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	result := &Result{
+		SchemaVersion: SchemaVersion, Base: "HEAD", Candidate: "HEAD",
+		BaseCommit: "aabb", CandidateCommit: "ccdd",
+		BaseTree: "tree-a", CandidateTree: "tree-b",
+		DiffPolicy: TestModifyRequired, PolicyVerdict: VerdictPassed,
+		Status: "passed", FinishedAt: fixed, WorkspaceDigest: "digest-A",
+		Checks: []checks.Result{{
+			Name: "go-test", Class: "unit", Adapter: checks.AdapterGoTest,
+			Command: []string{"go", "test", "-json", "./..."}, Policy: checks.PolicyRequired,
+			ExitCode: 0, Status: checks.StatusPassed,
+			StartedAt: fixed, FinishedAt: fixed,
+			WorkspaceDigestAfter: "digest-B",
+		}},
+	}
+	dir := t.TempDir()
+	if err := WriteBundle(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBundle(dir); err == nil || !strings.Contains(err.Error(), "workspace identity") {
+		t.Fatalf("mismatch workspace identity: должен FAIL, got %v", err)
+	}
+}
+
+func TestVerifyBundleAcceptsCheckWorkspaceBinding(t *testing.T) {
+	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	result := &Result{
+		SchemaVersion: SchemaVersion, Base: "HEAD", Candidate: "HEAD",
+		BaseCommit: "aabb", CandidateCommit: "ccdd",
+		BaseTree: "tree-a", CandidateTree: "tree-b",
+		DiffPolicy: TestModifyRequired, PolicyVerdict: VerdictPassed,
+		Status: "passed", FinishedAt: fixed, WorkspaceDigest: "digest-X",
+		Checks: []checks.Result{{
+			Name: "go-test", Class: "unit", Adapter: checks.AdapterGoTest,
+			Command: []string{"go", "test", "-json", "./..."}, Policy: checks.PolicyRequired,
+			ExitCode: 0, Status: checks.StatusPassed,
+			StartedAt: fixed, FinishedAt: fixed,
+			WorkspaceDigestAfter: "digest-X",
+		}},
+	}
+	dir := t.TempDir()
+	if err := WriteBundle(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBundle(dir); err != nil {
+		t.Fatalf("привязанные checks: verify должен пройти, got %v", err)
+	}
+}
+
+// AUD-04: WriteBundle пишет immutable-артефакты no-follow — повторная запись,
+// листовой symlink и symlink-каталог отклоняются без изменения цели.
+func TestWriteBundleRejectsExistingAndSymlinks(t *testing.T) {
+	base := func() *Result {
+		fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+		return &Result{
+			SchemaVersion: SchemaVersion, Base: "HEAD", Candidate: "HEAD",
+			BaseCommit: "aabb", CandidateCommit: "ccdd",
+			BaseTree: "tree-a", CandidateTree: "tree-b",
+			DiffPolicy: TestModifyRequired, PolicyVerdict: VerdictPassed,
+			Status: "passed", FinishedAt: fixed,
+			Checks: []checks.Result{{
+				Name: "go-test", Class: "unit", Adapter: checks.AdapterGoTest,
+				Command: []string{"go", "test", "-json", "./..."}, Policy: checks.PolicyRequired,
+				ExitCode: 0, Status: checks.StatusPassed, StartedAt: fixed, FinishedAt: fixed,
+			}},
+		}
+	}
+
+	// Повторная запись bundle не перезаписывает существующие файлы.
+	first := t.TempDir()
+	if err := WriteBundle(first, base()); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := os.ReadFile(filepath.Join(first, "gate.json"))
+	if err := WriteBundle(first, base()); err == nil {
+		t.Fatal("повторная WriteBundle должна FAIL (immutable)")
+	}
+	after, _ := os.ReadFile(filepath.Join(first, "gate.json"))
+	if !bytes.Equal(original, after) {
+		t.Fatal("gate.json перезаписан второй записью")
+	}
+
+	// Листовой symlink gate.json: write должен FAIL, sentinel не меняется.
+	leaf := t.TempDir()
+	sentinel := filepath.Join(leaf, "sentinel.json")
+	os.WriteFile(sentinel, []byte("keep"), 0644)
+	os.Symlink(sentinel, filepath.Join(leaf, "gate.json"))
+	if err := WriteBundle(leaf, base()); err == nil {
+		t.Fatal("gate.json-symlink: WriteBundle должен FAIL")
+	}
+	if data, _ := os.ReadFile(sentinel); !bytes.Equal(data, []byte("keep")) {
+		t.Fatal("sentinel изменён через leaf symlink")
+	}
+
+	// Symlink-каталог checks: write должен FAIL без записи вне bundle.
+	parent := t.TempDir()
+	os.Mkdir(filepath.Join(parent, "checks"), 0755)
+	victim := t.TempDir()
+	os.Remove(filepath.Join(parent, "checks"))
+	os.Symlink(victim, filepath.Join(parent, "checks"))
+	if err := WriteBundle(parent, base()); err == nil {
+		t.Fatal("checks-symlink: WriteBundle должен FAIL")
+	}
+	if entries, _ := os.ReadDir(victim); len(entries) != 0 {
+		t.Fatalf("запись ушла через symlink в %s: %v", victim, entries)
 	}
 }

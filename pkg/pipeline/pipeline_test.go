@@ -493,31 +493,30 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRun_StrictProfileReceiptIsUnavailable(t *testing.T) {
+func TestRun_StrictProfileBlockedBeforeExecution(t *testing.T) {
+	// AUD-02 fail-closed: strict-контракт в V1 не реализован, поэтому запрос
+	// strict-профиля блокируется ДО первого обращения к runtime и ДО записи
+	// какого-либо evidence (никакого misleading UNAVAILABLE receipt).
 	dir := env(t)
 	rt := newScripted()
 	rt.content["reviewer"] = map[string]string{"review": "# Ревью\n\nвсё ок\n\n**Verdict:** APPROVED\n"}
 
 	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}, config.AgentConfig{Name: "deployer"}),
 		testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
-	err := p.Run(context.Background(), RunConfig{
+	result, err := p.RunWithResult(context.Background(), RunConfig{
 		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ContainmentProfile: "strict", ApproveGates: true,
 	})
-	if err != nil {
-		t.Fatalf("ожидался успех, got: %v", err)
+	var runErr *RunError
+	if !errors.As(err, &runErr) || runErr.Outcome != workflow.RunBlocked {
+		t.Fatalf("strict: ожидался RunBlocked (fail-closed), result=%+v err=%v", result, err)
 	}
-	runDir := onlyRunDir(t, dir)
-	receiptData, readErr := os.ReadFile(filepath.Join(runDir, "containment.json"))
-	if readErr != nil {
-		t.Fatalf("containment.json не записан: %v", readErr)
+	if len(rt.calls) != 0 {
+		t.Fatalf("strict: runtime не должен вызываться, calls=%+v", rt.calls)
 	}
-	var receipt containment.Receipt
-	if err := json.Unmarshal(receiptData, &receipt); err != nil {
-		t.Fatalf("повреждённый containment.json: %v", err)
-	}
-	// strict без OS backend (V1) → все оси UNAVAILABLE (fail-closed).
-	if receipt.Profile != "strict" || !receipt.HasUnavailable() {
-		t.Fatalf("strict receipt: profile=%q unavailable=%v", receipt.Profile, receipt.HasUnavailable())
+	if _, listErr := os.Stat(filepath.Join(dir, ".ai-team", "runs")); listErr == nil {
+		if dirs, _ := os.ReadDir(filepath.Join(dir, ".ai-team", "runs")); len(dirs) != 0 {
+			t.Fatalf("strict: run evidence не должен писаться, найден: %v", dirs)
+		}
 	}
 }
 

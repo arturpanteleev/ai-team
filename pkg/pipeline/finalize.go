@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -153,20 +154,33 @@ func (rs *runState) writeContainmentReceipt() error {
 
 // containmentReceipt строит receipt для текущего run. trusted-local профиль —
 // все оси PARTIAL (application-level mitigations). strict без OS backend в V1
-// не поддерживается: отсутствующий/иной профиль → честный UNAVAILABLE.
+// не поддерживается (RunWithResult блокирует fail-closed); незнакомый/legacy
+// профиль → честный UNAVAILABLE.
 func (rs *runState) containmentReceipt() containment.Receipt {
-	profile := "trusted-local"
-	if rs.runCfg.ContainmentProfile != "" {
-		profile = rs.runCfg.ContainmentProfile
+	profile := effectiveContainmentProfile(rs.runCfg, rs.p.cfg)
+	if profile != "trusted-local" {
+		// strict недостижим (fail-closed), незнакомый профиль → UNAVAILABLE.
+		base := containment.UnavailableReceipt()
+		base.Profile = profile
+		return base
 	}
 	base := containment.DefaultTrustedLocalReceipt()
-	base.Profile = profile
-	if profile != "trusted-local" {
-		// strict (или незнакомый) без OS backend V1 → все оси UNAVAILABLE.
-		base = containment.UnavailableReceipt()
-		base.Profile = profile
-	}
+	base.Profile = "trusted-local"
 	return base
+}
+
+// effectiveContainmentProfile возвращает фактический профиль исполнения:
+// RunConfig.ContainmentProfile (run-level override) → p.cfg.Containment.Profile
+// → trusted-local. Единственный источник истины для run-уровневого решения в
+// RunWithResult и финализирующего receipt'а.
+func effectiveContainmentProfile(runCfg RunConfig, cfg *config.Config) string {
+	if runCfg.ContainmentProfile != "" {
+		return runCfg.ContainmentProfile
+	}
+	if cfg != nil && cfg.Containment != nil && cfg.Containment.Profile != "" {
+		return cfg.Containment.Profile
+	}
+	return "trusted-local"
 }
 
 // writeAttestation публикует in-toto compatible attestation statement v1

@@ -1,10 +1,10 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
@@ -264,8 +265,9 @@ func isUserStopped(err error) bool {
 }
 
 func (rs *runState) printSummary() {
-	fmt.Println()
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	var buf bytes.Buffer
+
+	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 
 	title := fmt.Sprintf("=== ИТОГ ПАЙПЛАЙНА: %s ===", rs.runCfg.Feature)
 	fmt.Fprintf(w, "%s\n", ui.Colorize(title, ui.ColorBold))
@@ -327,7 +329,7 @@ func (rs *runState) printSummary() {
 	)
 
 	w.Flush()
-	fmt.Println()
+	logging.Printf("\n%s\n", buf.String())
 }
 
 func shortenError(err error) string {

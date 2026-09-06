@@ -2,9 +2,9 @@ package notifier
 
 import (
 	"context"
-	"fmt"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 )
 
@@ -45,7 +45,7 @@ func (n *ConsoleNotifier) Notify(ctx context.Context, stage StageResult) error {
 		detail = " " + ui.Colorize(string(stage.Verdict), ui.ColorCyan)
 	}
 
-	fmt.Printf("%s [%s] %s%s (%v)\n",
+	logging.Printf("%s [%s] %s%s (%v)\n",
 		ui.Colorize("ai-team", ui.ColorBold+ui.ColorCyan),
 		ui.Colorize(stage.Name, ui.ColorYellow),
 		status, detail, duration,

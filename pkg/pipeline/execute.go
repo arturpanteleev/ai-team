@@ -14,6 +14,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -88,8 +89,8 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			rs.p.recorder.StageFinished(result)
 		}
 		if result.Status == notifier.StatusBlocked {
-			fmt.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
-			fmt.Printf("  Для исправления уточните задачу и запустите заново: ai-team run --feature %s --task \"<описание>\"\n",
+			logging.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
+			logging.Printf("  Для исправления уточните задачу и запустите заново: ai-team run --feature %s --task \"<описание>\"\n",
 				rs.runCfg.Feature)
 		}
 

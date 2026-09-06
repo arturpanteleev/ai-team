@@ -2,10 +2,10 @@ package pipeline
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/mattn/go-isatty"
 )
 
@@ -35,8 +35,8 @@ func (p *ConsolePrompter) Interactive() bool {
 }
 
 func (p *ConsolePrompter) Ask(question string) string {
-	fmt.Println(question)
-	fmt.Print("> ")
+	logging.Printf("%s\n", question)
+	logging.Printf("> ")
 	text, err := p.reader.ReadString('\n')
 	if err != nil {
 		// fail-closed: ошибка чтения трактуется как отказ, а не согласие

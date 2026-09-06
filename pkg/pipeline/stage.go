@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -134,7 +135,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if rs.p.recorder != nil {
 		rs.p.recorder.StageStarted(rs.runID, attemptID, name, i+1, stageStart.UTC())
 	}
-	fmt.Printf("\n%s %s\n",
+	logging.Printf("\n%s %s\n",
 		ui.Colorize("▶", ui.ColorCyan),
 		ui.Colorize(name, ui.ColorBold+ui.ColorYellow))
 
@@ -489,7 +490,7 @@ func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifa
 			return nil, all, fmt.Errorf("агент %s: вход %s (%s) не найден: %w", name, inName, fullPath, err)
 		}
 
-		fmt.Printf("  %s %s %s(%s, %d байт)\n",
+		logging.Printf("  %s %s %s(%s, %d байт)\n",
 			ui.Colorize("→", ui.ColorBlue),
 			inName,
 			ui.Colorize(fullPath, ui.ColorBlue),
@@ -514,7 +515,7 @@ func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifa
 		if err := validateExistingArtifactPath(validationRoot, extra.Path); err != nil {
 			return nil, all, fmt.Errorf("агент %s: loopback input %s небезопасен: %w", name, extra.Name, err)
 		}
-		fmt.Printf("  %s %s %s(loopback)\n",
+		logging.Printf("  %s %s %s(loopback)\n",
 			ui.Colorize("→", ui.ColorYellow), extra.Name, ui.Colorize(extra.Path, ui.ColorBlue))
 		promptInputs = append(promptInputs, extra)
 		all = append(all, extra)
@@ -551,7 +552,7 @@ func (rs *runState) collectOutputs(a *agent.Agent, name string) ([]runtime.Artif
 
 		art := runtime.Artifact{Name: outName, Path: fullPath, Size: info.Size(), ModTime: info.ModTime()}
 		outputs = append(outputs, art)
-		fmt.Printf("  %s %s %s(%s, %d байт)\n",
+		logging.Printf("  %s %s %s(%s, %d байт)\n",
 			ui.Colorize("✓", ui.ColorGreen),
 			ui.Colorize(outName, ui.ColorBold),
 			ui.Colorize(fullPath, ui.ColorBlue),

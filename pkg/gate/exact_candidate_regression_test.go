@@ -2,14 +2,18 @@ package gate
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 )
 
 // Regression A1 (AUD-01, task-AUD-14): candidate-worktree статус gate обязан
 // соответствовать ТОЛЬКО точному candidate-коммиту. Когда кандидат — явный
 // commit, идентичность CandidateCommit/CandidateTree берётся из дерева именно
-// этого коммита, а НЕ из текущего checkout: перевод рабочей копии на другой
-// коммит не должен подменять candidate'а, менять diff или вердикт.
+// этого коммита, а НЕ из текущего checkout. После слияния fail-closed guards
+// (#95, F-4) перевод рабочей копии на другой коммит больше не даёт PASS —
+// gate обязан BLOКировать запуск с явным сообщением о несовпадении, а не
+// подменять кандидата, менять diff или вердикт (F-3).
 func TestCandidateCommitIdentityIndependentOfWorktree(t *testing.T) {
 	repo := newRepo(t, map[string]string{
 		"src/app.go":        "package app\n",
@@ -29,30 +33,33 @@ func TestCandidateCommitIdentityIndependentOfWorktree(t *testing.T) {
 	if err != nil || code != ExitPass {
 		t.Fatalf("Run (worktree == candidate): code=%d err=%v", code, err)
 	}
+	if matching.CandidateCommit != candidate || matching.CandidateTree != candidateTree {
+		t.Fatalf("candidate identity: commit=%q (want %q) tree=%q (want %q)",
+			matching.CandidateCommit, candidate, matching.CandidateTree, candidateTree)
+	}
 
-	// Рабочая копия переведена на base — она больше НЕ соответствует кандидату.
+	// Рабочая копия переведена на base — содержимое больше НЕ равно кандидату.
+	// Fail-closed guard (workingTreeMatchesCommit) обязан заблокировать запуск
+	// и назвать candidate-коммит, а не подменить identity рабочим деревом.
 	gitCmd(t, repo, "checkout", "-q", base)
-	mismatched, code, err := Run(context.Background(), Options{
+	blocked, code, err := Run(context.Background(), Options{
 		TargetDir: repo, Base: base, Candidate: candidate, Config: cfg,
 	})
-	if err != nil || code != ExitPass {
-		t.Fatalf("Run (worktree != candidate): code=%d err=%v", code, err)
+	if blocked != nil {
+		t.Fatalf("Run (worktree != candidate) должен вернуть nil-результат (BLOCKED), got %+v", blocked)
 	}
-	if mismatched.CandidateCommit != candidate {
-		t.Fatalf("candidate identity подменён рабочим деревом: %q != %q", mismatched.CandidateCommit, candidate)
+	if code != ExitBlocked {
+		t.Fatalf("Run (worktree != candidate): code=%d, want ExitBlocked=%d", code, ExitBlocked)
 	}
-	if mismatched.CandidateTree != candidateTree {
-		t.Fatalf("candidate tree подменён рабочим деревом: %q != %q", mismatched.CandidateTree, candidateTree)
+	if err == nil {
+		t.Fatal("Run (worktree != candidate): блокировка без ошибки")
 	}
-	if mismatched.CandidateTree == workingTreeSHA(context.Background(), repo) {
-		t.Fatal("candidate tree не должен быть stat-меткой рабочего дерева")
+	var blockedErr *BlockedError
+	if !errors.As(err, &blockedErr) {
+		t.Fatalf("Run (worktree != candidate): ожидался BlockedError, got %T: %v", err, err)
 	}
-	if len(mismatched.Mutations) != len(matching.Mutations) {
-		t.Fatalf("diff изменился от состояния рабочего дерева: %+v -> %+v", matching.Mutations, mismatched.Mutations)
-	}
-	if mismatched.PolicyVerdict != matching.PolicyVerdict || mismatched.Status != matching.Status {
-		t.Fatalf("вердикт изменился от состояния рабочего дерева: %s/%s -> %s/%s",
-			matching.PolicyVerdict, matching.Status, mismatched.PolicyVerdict, mismatched.Status)
+	if !strings.Contains(blockedErr.Reason, candidate) {
+		t.Fatalf("блокирующее сообщение не ссылается на candidate-коммит: %q", blockedErr.Reason)
 	}
 }
 

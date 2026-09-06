@@ -54,6 +54,83 @@ func TestDeliveryRequiresGitHubAuthentication(t *testing.T) {
 	}
 }
 
+// TestDeliveryRemoteMissingIsRequiredForDeliveryWorkflow — AUD-09: отсутствие
+// remote origin в delivery-workflow классифицируется как required failure
+// (delivery_remote). Это единая классификация для CLI, web-контроллера и
+// worker — все три ходят в один и тот же pkg/preflight Checker.
+func TestDeliveryRemoteMissingIsRequiredForDeliveryWorkflow(t *testing.T) {
+	checker := testChecker(t, true)
+	checker.run = func(_ context.Context, name string, args ...string) (string, error) {
+		if filepath.Base(name) == "opencode" {
+			return "opencode 1.2.3", nil
+		}
+		if filepath.Base(name) == "git" {
+			switch strings.Join(args, " ") {
+			case "-C " + checker.target + " rev-parse --show-toplevel":
+				return checker.target, nil
+			case "-C " + checker.target + " branch --show-current":
+				return "main", nil
+			}
+		}
+		return "", os.ErrPermission
+	}
+	report := checker.Check(context.Background())
+	if report.Ready {
+		t.Fatal("delivery workflow без origin не должен быть ready")
+	}
+	for _, check := range report.Checks {
+		if check.ID == "delivery_remote" {
+			if check.Status != StatusFailed || !check.Required {
+				t.Fatalf("delivery_remote должен быть required failed, получено: %s required=%v", check.Status, check.Required)
+			}
+			if !strings.Contains(check.Message, "origin") {
+				t.Fatalf("delivery_remote диагностика должна называть origin: %q", check.Message)
+			}
+			return
+		}
+	}
+	t.Fatal("классификация missing origin отсутствует (delivery_remote check не найден)")
+}
+
+// TestModelDiagnosticNamesSelectedRuntime — AUD-09: диагностика model не
+// хардкодит OpenCode: при cli=codex/claude сообщение называет фактический
+// рантайм из конфига (или DefaultCLI, если поле пустое).
+func TestModelDiagnosticNamesSelectedRuntime(t *testing.T) {
+	for _, test := range []struct {
+		cli  string
+		want string
+	}{
+		{cli: "codex", want: "codex"},
+		{cli: "claude", want: "claude"},
+		{cli: "opencode", want: "opencode"},
+		{cli: "", want: "opencode"}, // runtime.DefaultCLI
+	} {
+		checker := testChecker(t, false)
+		checker.config.CLI = test.cli
+		checker.config.Model = "auto"
+		checker.run = func(_ context.Context, name string, args ...string) (string, error) {
+			if filepath.Base(name) == "git" {
+				return checker.target, nil
+			}
+			return "version ok", nil
+		}
+		report := checker.Check(context.Background())
+		var message string
+		for _, check := range report.Checks {
+			if check.ID == "model" {
+				message = check.Message
+				break
+			}
+		}
+		if !strings.Contains(message, test.want) {
+			t.Errorf("cli=%q: модель диагностики должна называть %q, получено %q", test.cli, test.want, message)
+		}
+		if strings.Contains(message, "OpenCode") && test.want != "opencode" {
+			t.Errorf("cli=%q: диагностика не должна хардкодить OpenCode: %q", test.cli, message)
+		}
+	}
+}
+
 func testChecker(t *testing.T, delivery bool) *Checker {
 	t.Helper()
 	target := t.TempDir()

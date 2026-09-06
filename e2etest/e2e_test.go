@@ -162,6 +162,122 @@ func checkDir(t *testing.T, parts ...string) {
 	}
 }
 
+// runAIJSON запускает бинарник с РАЗДЕЛЁННЫМИ stdout/stderr: stdout обязан
+// быть чистым JSONL (F-2), stderr — человеческий прогресс. Возвращает
+// stdout, stderr и exit-код.
+func runAIJSON(t *testing.T, binPath, dir string, envs []string, args ...string) (string, string, int) {
+	t.Helper()
+	cmd := exec.Command(binPath, args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, envs...)
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			t.Fatalf("run %v: %v", args, err)
+		}
+	}
+	return stdout.String(), stderr.String(), code
+}
+
+// parseJSONLStdout — контракт AUD-19/F-2: весь stdout `run --json` обязан
+// быть построчно парсимым JSONL, без пустых и человекочитаемых строк.
+func parseJSONLStdout(t *testing.T, stdout string) []map[string]any {
+	t.Helper()
+	trailing := strings.TrimRight(stdout, "\n")
+	if trailing == "" {
+		t.Fatalf("stdout пуст: machine-режим обязан давать JSONL-записи")
+	}
+	var records []map[string]any
+	for index, line := range strings.Split(trailing, "\n") {
+		if strings.TrimSpace(line) == "" {
+			t.Fatalf("строка %d JSONL пустая (human text примешан к stdout)", index+1)
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("строка %d stdout не JSON: %v — %q", index+1, err, line)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+func TestE2E_RunJSONColonContract_PureJSONL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	pathEnv := setupMock(t)
+	setupDeliveryGit(t, dir)
+
+	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
+		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
+	}
+
+	// Первый run: останавливается на точном delivery-approval (exit 3).
+	stdout, stderr, code := runAIJSON(t, bin, dir, []string{pathEnv},
+		"run", "--feature", "jsonl-contract", "--task", "JSONL contract", "--approve-gates", "--json")
+	if code != 3 {
+		t.Fatalf("first run must stop for exact delivery approval (exit 3), got %d.\nstdout:\n%s", code, stdout)
+	}
+	records := parseJSONLStdout(t, stdout)
+	for _, rec := range records {
+		if _, ok := rec["exit_code"]; !ok {
+			t.Fatalf("JSONL record без exit_code (нарушение контракта AUD-19): %+v", rec)
+		}
+	}
+
+	planHash, resumeCmd := extractMachineHints(t, stderr)
+
+	// Возобновление с явным одобрением canonical plan: exit 0, stdout чистый JSONL.
+	stdout2, stderr2, code2 := runAIJSON(t, bin, dir, []string{pathEnv},
+		"run", "--resume", resumeCmd, "--approve-gates", "--approve-plan", planHash, "--json")
+	if code2 != 0 {
+		t.Fatalf("approved delivery retry failed (%d).\nstdout:\n%s\nstderr:\n%s", code2, stdout2, stderr2)
+	}
+	records2 := parseJSONLStdout(t, stdout2)
+	if len(records2) == 0 {
+		t.Fatal("resume run не выдал JSONL-записи")
+	}
+	for _, rec := range records2 {
+		level, _ := rec["level"].(string)
+		if level == "" {
+			t.Fatalf("JSONL record без level: %+v", rec)
+		}
+	}
+	// parseJSONLStdout уже доказал, что stdout — чистый JSONL без человеческого
+	// прогресса (пустых/non-JSON строк). Дополнительно подтверждаем, что
+	// завершение run реально произошло (message вне структуры было бы
+	// человеческой строкой в stderr) и summary-текст ушёл в stderr.
+	if !strings.Contains(stderr2, "Пайплайн") {
+		t.Fatal("человеческий прогресс должен идти в stderr в JSON-режиме")
+	}
+	checkFile(t, artifactsDir(dir, "jsonl-contract", "delivery-plan.json"))
+}
+
+// extractMachineHints извлекает из stderr (человеческий канал JSON-режима)
+// SHA-256 canonical delivery plan и resume-команду для второго run.
+func extractMachineHints(t *testing.T, stderr string) (planHash, resumeCmd string) {
+	t.Helper()
+	hashMatch := regexp.MustCompile(`Plan SHA-256: ([a-f0-9]{64})`).FindStringSubmatch(stderr)
+	if len(hashMatch) != 2 {
+		t.Fatalf("canonical delivery plan hash missing in stderr:\n%s", stderr)
+	}
+	resumeMatch := regexp.MustCompile(`ai-team run --resume ([^ ]+) --approve-plan`).FindStringSubmatch(stderr)
+	if len(resumeMatch) != 2 {
+		t.Fatalf("resume command missing in stderr:\n%s", stderr)
+	}
+	return hashMatch[1], resumeMatch[1]
+}
+
 func TestE2E_SuccessfulPipeline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")

@@ -840,6 +840,20 @@ func cmdRun() {
 	}
 	cfg := loadValidatedConfig(*target, reg)
 
+	// Read-only preflight ДО старта run, как у web-контроллера и worker
+	// (AUD-09): та же классификация отсутствующих runtime/gh/origin, чтобы
+	// CLI не откладывал обнаружение delivery-предусловий на поздние этапы.
+	if err := runPreflight(cfg, reg, *target); err != nil {
+		fmt.Fprintf(os.Stderr, "%s Preflight: %v\n", ui.Colorize("✗", ui.ColorRed), err)
+		if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+			logging.Emit(logging.Record{
+				Level: "error", Command: "run", Type: "preflight",
+				Message: err.Error(), Exit: exitBlocked,
+			})
+		}
+		os.Exit(exitBlocked)
+	}
+
 	if *resumeRunID != "" {
 		// Resume загружает task/feature после получения workspace lock.
 	} else {
@@ -878,8 +892,13 @@ func cmdRun() {
 		})
 	}
 	if err != nil {
+		code := exitCodeFor(err)
 		fmt.Fprintf(os.Stderr, "%s Пайплайн остановлен: %v\n", ui.Colorize("✗", ui.ColorRed), err)
-		os.Exit(exitCodeFor(err))
+		logging.Emit(logging.Record{
+			Level: "error", Command: "run", Type: "run",
+			Message: "Пайплайн остановлен: " + err.Error(), Exit: code,
+		})
+		os.Exit(code)
 	}
 
 	if string(runResult.Outcome) == "completed_with_warnings" {
@@ -898,6 +917,47 @@ func cmdRun() {
 			},
 			Exit: exitOK,
 		})
+	}
+}
+
+// runPreflight выполняет read-only preflight ДО старта run (AUD-09): тот же
+// pkg/preflight, что использует web-контроллер (control.WithPreflight) и
+// worker, чтобы CLI/web/worker одинаково классифицировали отсутствующие
+// runtime/gh/origin до runtime. Выбранное различие (зафиксировано в README,
+// "Контроллер и preflight"): CLI показывает отчёт read-only и блокирует
+// только невозможность запустить runtime вовсе (check "cli"); git/gh/origin
+// — предусловия поздних стадий (delivery), которые и так fail-closed
+// проверяются на самой стадии, поэтому CLI не отказывает в run из-за них.
+func runPreflight(cfg *config.Config, reg *agent.Registry, target string) error {
+	report := preflight.New(cfg, reg, target).Check(context.Background())
+	printPreflightReport(report)
+	for _, check := range report.Checks {
+		if check.ID == "cli" && check.Required && check.Status == preflight.StatusFailed {
+			return fmt.Errorf("preflight failed: cli: %s", check.Message)
+		}
+	}
+	return nil
+}
+
+// printPreflightReport печатает read-only отчёт preflight (runtime и
+// delivery-предусловия) БДО старта дорогого run. Идёт через logging.Printf,
+// чтобы в JSON-режиме stdout оставался чистым, а в quiet — подавлялся.
+func printPreflightReport(report preflight.Report) {
+	for _, check := range report.Checks {
+		var label string
+		switch check.Status {
+		case preflight.StatusPassed:
+			label = ui.ColoredStatus(true)
+		case preflight.StatusWarning:
+			label = ui.Colorize("!", ui.ColorYellow)
+		case preflight.StatusFailed:
+			label = ui.ColoredStatus(false)
+		}
+		required := ""
+		if check.Required {
+			required = " (required)"
+		}
+		logging.Printf("  %s %s%s: %s\n", label, check.ID, required, check.Message)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
@@ -117,7 +118,7 @@ func (rs *runState) authorizeTransition(
 				strings.Join(actions, "/"),
 			))
 			if answer == "diff" {
-				fmt.Println(gitDiffOutput(rs.sourceDir()))
+				logging.Printf("%s\n", gitDiffOutput(rs.sourceDir()))
 				continue
 			}
 			if answer == "" || answer == "y" {
@@ -129,7 +130,7 @@ func (rs *runState) authorizeTransition(
 				action = answer
 				break
 			}
-			fmt.Printf("  неизвестный ответ: %s\n", answer)
+			logging.Printf("  неизвестный ответ: %s\n", answer)
 		}
 	}
 	if action == "" {

@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -92,7 +93,7 @@ func (rs *runState) executeDeferredDelivery() error {
 	if err := delivery.WriteTerminalRecord(rs.evidence.RunDir(), record); err != nil {
 		return fmt.Errorf("deferred delivery: запись terminal record: %w", err)
 	}
-	fmt.Printf("\n%s delivery по run %s: commit=%s pr=%s\n",
+	logging.Printf("\n%s delivery по run %s: commit=%s pr=%s\n",
 		ui.Colorize("✓", ui.ColorGreen), rs.runID, result.CommitSHA, result.PRURL)
 	return nil
 }

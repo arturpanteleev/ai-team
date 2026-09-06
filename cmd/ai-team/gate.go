@@ -75,6 +75,12 @@ func cmdGate() {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Gate: %v\n", err)
+		if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+			logging.Emit(logging.Record{
+				Level: "error", Command: "gate", Type: "gate",
+				Message: err.Error(), Exit: code,
+			})
+		}
 		os.Exit(code)
 	}
 
@@ -157,7 +163,7 @@ func loadGateConfig(target, explicit string) (*gate.Config, string) {
 	if explicit != "" {
 		cfg, err := gate.LoadConfig(explicit)
 		if err != nil {
-			fatal("Gate config %s: %v", explicit, err)
+			fatalGateConfig("Gate config %s: %v", explicit, err)
 		}
 		return cfg, explicit
 	}
@@ -168,13 +174,28 @@ func loadGateConfig(target, explicit string) (*gate.Config, string) {
 		if _, err := os.Stat(candidate); err == nil {
 			cfg, err := gate.LoadConfig(candidate)
 			if err != nil {
-				fatal("Gate config %s: %v", candidate, err)
+				fatalGateConfig("Gate config %s: %v", candidate, err)
 			}
 			return cfg, candidate
 		}
 	}
 	fmt.Fprintln(os.Stderr, "⚠ Gate config не найден; используются дефолты: diff_policy test_modify=required, checks не заданы")
 	return &gate.Config{SchemaVersion: gate.SchemaVersion, DiffPolicy: gate.DiffPolicy{TestModify: gate.TestModifyRequired}}, ""
+}
+
+// fatalGateConfig аварийно завершает gate на malformed/невалидном конфиге
+// (bad YAML, неизвестный adapter, неверная schema) с кодом BLOCKED — exit 2,
+// а не 1 (AUD-19): help-контракт описывает config-ошибку как BLOCKED.
+// В machine-режиме дополнительно пишет JSON-запись об ошибке на stdout.
+func fatalGateConfig(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Emit(logging.Record{
+			Level: "error", Command: "gate", Type: "gate_config",
+			Message: fmt.Sprintf(format, args...), Exit: exitBlocked,
+		})
+	}
+	os.Exit(exitBlocked)
 }
 
 func defaultGateOut(target string) string {
@@ -260,7 +281,7 @@ func printGateSummary(result *gate.Result, outDir string) {
 		}
 		logging.Printf("; sensitive: %s", strings.Join(paths, ", "))
 	}
-	fmt.Println()
+	logging.Printf("\n")
 
 	logging.Printf("  bundle: %s\n  bundle digest: %s\n", outDir, result.BundleSHA256)
 }

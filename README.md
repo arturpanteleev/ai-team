@@ -32,9 +32,33 @@ AI-агенты — это «мозг» с ограниченными «рука
 
 ## Для кого этот инструмент
 
-**Подходит:** доверенный локальный репозиторий, где вы согласны, что агент и
-verification-команды (тесты, vet, линтеры) выполняются с правами вашего
-текущего OS-пользователя.
+**Основной пользователь** — соло-maintainer или небольшая команда (1–5
+человек), которая ведёт один доверенный репозиторий и хочет, чтобы каждое
+изменение проходило детерминированный путь с явным человеческим approval:
+идея → proposal → код → тесты/review → верификация → delivery. Обычная боль,
+которую закрывает ai-team: при использовании coding-агента трудно быть
+уверенным, что между «агент написал код» и «код попал в main» действительно
+был строгий review и проверки, а не доверие «похоже, ок». ai-team превращает
+это в обязательный протокол.
+
+Один узкий **pain→result** сценарий:
+
+- **Боль:** вы даёте кодирующему агенту задачу, и он напрямую коммитит с
+  частично проверенным кодом; отдельной стадии ревью, тестов и верификации по
+  контракту нет.
+- **Результат с ai-team:** агент проходит `analyst → architect → coder →
+  reviewer → tester → verifier`, каждая смысловая стадия фиксирует verdict
+  marker, `deployer` не исполняет произвольные команды — он выполняет ровно
+  **canonical delivery plan**, который контроллер построил сам, и только после
+  того, как вы подтвердили точный SHA-256 этого плана через `--approve-plan`.
+  Доставка (commit/push/PR) выполняется контроллером, а не LLM.
+- **Ожидаемый результат:** PR открыт с проверенным артефактом; evidence
+  каждого этапа лежит в `.ai-team/runs/<run_id>/`.
+- **Границы (что НЕ делает):** ai-team не является sandbox — агент и команды
+  проверок исполняются с правами вашего OS-пользователя (см.
+  [«Граница безопасности»](#граница-безопасности)); он не проверяет общее
+  качество кода за вас и не является benchmark-сравнением со скоростью или
+  качеством других инструментов — это control plane для утверждённого процесса.
 
 **Не подходит (пока):** недоверенный или сторонний код, секреты, к которым
 агент не должен иметь доступ, production delivery без человеческого review.
@@ -242,7 +266,7 @@ non-interactive режиме: он сохраняет запрос решени�
 
 | Команда | Назначение |
 |---|---|
-| `ai-team init [--target <dir>] [--write-gitignore]` | создать `.ai-team/config.yaml`, каталоги artifacts/reports/logs; по умолчанию использовать локальный Git exclude |
+| `ai-team init [--target <dir>] [--write-gitignore] [--profile fast\|standard\|regulated]` | создать `.ai-team/config.yaml`, каталоги artifacts/reports/logs; по умолчанию использовать локальный Git exclude; профиль по умолчанию — `standard` (см. [«Профили init»](#профили-init)) |
 | `ai-team run --feature <name> --task "<desc>" [...]` | провести фичу через конвейер |
 | `ai-team decision --run <id> --approval <id> --actor <id> --role <role> --action <action> --subject <sha256>` | записать точное решение человека |
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
@@ -342,6 +366,25 @@ SHA-256 CAS; manifest содержит exact path/digest/size/mode и позво
 для workflow с delivery дополнительно требует `origin`, `gh` и успешный
 `gh auth status`. Значения credentials никогда не попадают в report.
 
+### Контроллер и preflight
+
+CLI `run`, web-контроллер и worker используют один и тот же классификатор
+preflight (`pkg/preflight`) и одинаково именуют отсутствующие prerequisites
+(`cli`, `model`, `credentials`, `git_repository`, `git_branch`,
+`delivery_remote`, `github_auth`); модель для диагностики берётся из
+фактически сконфигурированного CLI-рантайма, а не захардкожена. Отличается
+только жёсткость применения (зафиксированное различие):
+
+- **web-контроллер (dashboard) и worker** — жёсткий gate: при `Start`
+  отсутствие любого `required` checks (в т.ч. `origin`/`gh` для delivery)
+  останавливает run до создания артефактов.
+- **CLI `run`** — read-only: печатает тот же полный отчёт (runtime и
+  delivery-предусловия) до старта дорогого run, но блокирует только
+  невозможность запустить runtime вовсе (`cli` check failed). Git/`origin`/`gh`
+  — предусловия поздних стадий (delivery), и они fail-closed проверяются на
+  самой   delivery-стадии, поэтому CLI не отказывает в локальном run из-за их
+  отсутствия. Так `gh` остаётся нужным только на шаге delivery.
+
 Exit-коды `run`: `0` — completed/completed with warnings, `1` — ошибка или
 негативный вердикт, `2` — BLOCKED, `3` — stopped на checkpoint или перед
 delivery.
@@ -368,7 +411,66 @@ SHA-256 (см. [«Как поставить фичу»](#как-поставит
 ## Конфигурация
 
 `ai-team init` создаёт строгий schema v4 config. Узлы остаются в `pipeline`,
-а маршрут и обязательные человеческие approvals принадлежат рёбрам:
+а маршрут и обязательные человеческие approvals принадлежат рёбрам.
+
+> ⚠️ **Пример, а не полный default.** YAML ниже — сокращённый иллюстративный
+> фрагмент, чтобы показать структуру графа и role-based approvals.
+> Полный конфиг, который реально создаёт `init`, обычно длиннее: он содержит
+> approval-политику **(включая `deferred: true` на forward edges для профилей
+> `standard`/`fast`)** для **каждого** passed-ребра (не только `analyst` и
+> `reviewer`), loopback-рёбра и `max_visits`. Считайте фактический
+> `.ai-team/config.yaml` после `init` единственным источником истины.
+
+### Профили init
+
+`--profile <name>` определяет, с какой частотой человеческого review
+собирается workflow и как подтверждаются forward-переходы. Все публичные флаги
+`init` — `--target`, `--write-gitignore` и `--profile` — совпадают со справочной
+справкой подкоманды (`ai-team init --help`); таблица выше показывает, какой
+профиль выбрать для какой задачи.
+
+| Профиль | Стадии | Forward-approvals | Когда выбирать |
+|---|---|---|---|
+| `standard` (по умолчанию) | полный конвейер `analyst → architect → coder → reviewer → tester → verifier → deployer` | **отложенные (deferred):** все forward-гейты подтверждаются **одним consolidated delivery-решением** в конце, `quorum: any` | сбалансированный режим по умолчанию: одно решение человека на фичу, минимум кликов |
+| `fast` | без `verifier` — `reviewer` совмещает ревью и верификацию | **отложенные (deferred):** те же consolidated approvals, меньше стадий и `max_visits` | прототипы и внутренние фичи, где хочется быстрее, но delivery всё равно контролируется человеком |
+| `regulated` | полный конвейер как `standard` | **пошаговые (не deferred):** каждый смысловой переход спрашивает человека отдельно, `quorum: all` на рёбрах | рискованные workflow, где нужен review на **каждом** смысловом ребре — один человек на переход, а не одно consolidated решение на всю фичу |
+
+Разница между `consolidated` и `пошаговым` подтверждением принципиальна:
+в `standard`/`fast` forward-переходы не паузят run — их approvals откладываются
+и разрешаются одним `--approve-plan <sha256>` (или эквивалентным web/decision
+решением) вместе с delivery. В `regulated` каждый forward-переход требует
+отдельного решения человека до продолжения. `loopback`-рёбра (например,
+`reviewer rejected → coder`, `tester → coder`) не откладываются ни в одном
+профиле.
+
+Хотите пошаговый контроль — выберите `regulated`:
+
+```bash
+ai-team init --profile regulated
+```
+
+Сгенерированный `standard`-конфиг помечает свои forward edges `deferred: true`
+(`pkg/config/load.go`):
+
+```yaml
+edges:
+  - from: analyst
+    outcome: passed
+    to: architect
+    approval:
+      roles: [product_owner]
+      quorum: any
+      actions: {approve: architect, reject: $stop}
+      deferred: true   # forward-гейт: подтверждается одним consolidated delivery-решением
+```
+
+`fast` также объявляет forward edges `deferred: true`; `regulated` — нет
+(они остаются пошаговыми, с `quorum: all`). Полный перечень профилей и их
+поведения — в [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Ниже — **сокращённый иллюстративный пример** структуры конфига (см. предупреждение
+в начале раздела): узел-граф остаётся в `pipeline`, а маршрут и обязательные
+человеческие approvals принадлежат рёбрам:
 
 ```yaml
 schema_version: 4
@@ -456,9 +558,13 @@ project/plugin/user/built-in слоями и что происходит с inva
 - **canonical delivery plan** — точный JSON-план (файлы, ветка, сообщение
   коммита), который контроллер строит перед delivery. Подтверждается только
   по точному SHA-256 — не общим "да, делай commit".
-- **attempt / run** — `run` — один вызов `ai-team run` для фичи; `attempt` —
-  одна попытка конкретного этапа внутри run (loopback создаёт новый attempt, а
-  не переиспользует старый).
+- **attempt / run** — `run` — это **идентичность одного pipeline-выполнения под
+  одним `run_id`**, а не буквально один запуск команды: run может быть
+  приостановлен перед delivery (non-TTY exit code `3`) и **продолжен с тем же
+  `run_id`** через `--resume`, поэтому «один run» охватывает и первый запуск, и
+  последующие `--resume` того же идентификатора. `attempt` — одна попытка
+  конкретного этапа внутри run (loopback создаёт новый attempt, а не
+  переиспользует старый).
 
 ## Граница безопасности
 
@@ -517,6 +623,39 @@ make verify         # полная проверка (как CI)
   (используйте шаблоны).
 - **Уязвимости** — приватно, через [SECURITY.md](SECURITY.md), не в публичный issue.
 - **Изменения поведения** — spec-first через OpenSpec (см. CONTRIBUTING.md).
+
+#### Минимальный fork → branch → PR для внешнего контрибьютора
+
+Полный процесс описан в [CONTRIBUTING.md](CONTRIBUTING.md) (spec-first). Самый
+быстрый безопасный путь для небольшой правки:
+
+```bash
+# 1. Fork репозитория на GitHub, затем клонируйте свой fork и добавьте upstream
+git clone git@github.com:<you>/ai-team.git
+cd ai-team
+git remote add upstream https://github.com/arturpanteleev/ai-team.git
+
+# 2. Отдельная ветка от актуального upstream/master
+git fetch upstream
+git checkout -b fix/my-change upstream/master
+
+# 3. Изменяйте и прогоняйте проверки (языковая правка — только docs; код — см. CONTRIBUTING)
+# 4. Push ветки в ваш fork и откройте PR в upstream
+git push -u origin fix/my-change
+```
+
+Если правка меняет наблюдаемое поведение продукта, она должна сопровождаться
+OpenSpec-delta (см. CONTRIBUTING.md) — иначе PR не будет принят.
+
+#### Контакты и владелец
+
+Проект ведётся на GitHub-репозитории
+[`arturpanteleev/ai-team`](https://github.com/arturpanteleev/ai-team). Вопросы и
+предложения — через [GitHub Issues](https://github.com/arturpanteleev/ai-team/issues);
+спрашивайте там, а не по приватным каналам, чтобы ответ видело больше людей.
+Уязвимости — только приватно через [SECURITY.md](SECURITY.md). Проект на ранней
+стадии относится к обратной связи бережно; подробное «как помочь» — в
+[CONTRIBUTING.md](CONTRIBUTING.md), включая `onboarding`-процесс в нём же.
 
 `make verify` выполняет gofmt-проверку, строгую OpenSpec-валидацию, module
 verification, vet, govulncheck, race tests, coverage gate 60% (`make

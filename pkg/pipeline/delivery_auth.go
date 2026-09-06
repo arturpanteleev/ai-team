@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
@@ -109,7 +110,7 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		return err
 	}
 	showPipelineSummary(rs.results)
-	fmt.Printf("\n%s\n%s\nPlan SHA-256: %s\n", ui.Colorize("Canonical delivery plan:", ui.ColorBold), canonical, planHash)
+	logging.Printf("\n%s\n%s\nPlan SHA-256: %s\n", ui.Colorize("Canonical delivery plan:", ui.ColorBold), canonical, planHash)
 	recordApproval := func(mode string) error {
 		rs.approvedPlanHash = planHash
 		return rs.evidence.Append(evidence.Event{Type: "delivery_plan_approved", AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
@@ -181,9 +182,9 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		if err := rs.saveWaiting(name, value.ID); err != nil {
 			return err
 		}
-		fmt.Printf("Решение: ai-team decision --run %s --approval %s --actor <id> --role %s --action approve|reject --subject %s\n",
+		logging.Printf("Решение: ai-team decision --run %s --approval %s --actor <id> --role %s --action approve|reject --subject %s\n",
 			rs.runID, value.ID, deliveryApprovalRole, planHash)
-		fmt.Printf("Для продолжения с явным подтверждением плана: ai-team run --resume %s --approve-plan %s\n",
+		logging.Printf("Для продолжения с явным подтверждением плана: ai-team run --resume %s --approve-plan %s\n",
 			rs.runID, planHash)
 		return &ApprovalRequiredError{
 			Checkpoint: "delivery перед " + name, RunID: rs.runID,

@@ -1,7 +1,16 @@
 # ci-gate-demo.yaml — один version-pinned CI-файл для публичного демо
 # `gate → bundle → verify` (V0-7). Использование: положите этот workflow в
-# ваш репозиторий (например `.github/workflows/gate.yaml`) и замените
-# AI_TEAM_SHA ниже на конкретную ревизию ai-team (version-pinned).
+# ваш репозиторий (например `.github/workflows/gate.yaml`) и добавьте рядом
+# свой `gate.yaml` (см. docs/demo/gate.yaml) — gate загружает его из корня
+# target; без конфига используются дефолты (test_modify: required).
+#
+# Что настраивается ВРУЧНУЮ (обновляется человеком, всё явно перечислено):
+#   1. AI_TEAM_SHA — version-pinned ревизия ai-team (заменяется SHA-коммитом,
+#      никогда "latest"); см. «Как обновлять» в docs/demo/README.md.
+#   2. go-version в actions/setup-go — должна соответствовать ai-team.
+#   3. gate.yaml вашего проекта.
+# API-ключей и переменных модели здесь НЕТ и не требуется: gate — это
+# детерминированный diff-policy + typed checks слой без LLM.
 #
 # Семантика exit codes: 0 = PASS, 1 = FAIL (политика/checks), 2 = BLOCKED.
 # Bundle пишется всегда — и для FAIL, и для PASS — и всегда проходит verify,
@@ -14,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  # version-pinned: после каждого merge обновляйте на зафиксированную ревизию.
+  # version-pinned: после каждого merge в ai-team обновляйте на новую ревизию.
   AI_TEAM_SHA: '0000000000000000000000000000000000000000'
 
 jobs:
@@ -25,6 +34,11 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+
+      - name: Set up Go (для сборки ai-team по SHA)
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.6'
 
       - name: Resolve base commit
         id: base
@@ -40,6 +54,9 @@ jobs:
           (cd /tmp/ai-team && go build -o "$HOME/.local/bin/ai-team" ./cmd/ai-team)
         env:
           GOFLAGS: '-mod=mod'
+
+      - name: Put ai-team on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Gate (gate → bundle)
         id: gate
@@ -57,6 +74,8 @@ jobs:
           path: bundle
           if-no-files-found: error
 
-      - name: Fail on non-zero gate (кроме уже отражённого FAIL)
+      - name: Fail job on gate FAIL/BLOCKED (exit 1/2)
         if: steps.gate.outcome == 'failure'
-        run: exit 1
+        run: |
+          echo "gate вернул FAIL (1) или BLOCKED (2); bundle уже загружен артефактом."
+          exit 1

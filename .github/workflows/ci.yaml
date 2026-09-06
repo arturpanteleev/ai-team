@@ -62,20 +62,20 @@ jobs:
         with:
           go-version: '1.26.6'
           check-latest: true
+      # Параллель `make test`: полный `./...` (cmd/, pkg/, docs/, docsgen/, e2etest/).
       - name: Unit tests
-        run: go test ./pkg/...
+        run: go test ./...
+      # Параллель `make test-coverage` (см. Makefile): coverage по всем пакетам,
+      # общий 60% floor и per-package floors из scripts/coverage-gate.sh +
+      # scripts/coverage-floors.env — единый источник истины для локального
+      # запуска и CI (scope и floors менять только в coverage-gate.sh/Makefile).
       - name: Coverage gate
         run: |
-          go test -coverprofile=coverage.out ./pkg/...
+          go test -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
           COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
           awk -v coverage="$COVERAGE" 'BEGIN { if (coverage < 60.0) { printf "coverage %.1f%% is below 60.0%%\n", coverage; exit 1 } }'
-      - name: Safety package coverage floor
-        run: |
-          for package in checks delivery evidence pipeline runtime safeio; do
-            go test -coverprofile="coverage-${package}.out" "./pkg/${package}"
-            coverage=$(go tool cover -func="coverage-${package}.out" | awk '/^total:/ {gsub("%", "", $3); print $3}')
-            awk -v package="$package" -v coverage="$coverage" 'BEGIN { if (coverage < 50.0) { printf "%s coverage %.1f%% is below 50.0%%\n", package, coverage; exit 1 } }'
-          done
+          bash scripts/coverage-gate.sh coverage.out
 
   race-tests:
     needs: build
@@ -86,8 +86,9 @@ jobs:
         with:
           go-version: '1.26.6'
           check-latest: true
+      # Параллель `make verify` (go test -race ./...): весь модуль, включая cmd/.
       - name: Race detector
-        run: go test -race ./pkg/...
+        run: go test -race ./...
 
   e2e-tests:
     needs: unit-tests

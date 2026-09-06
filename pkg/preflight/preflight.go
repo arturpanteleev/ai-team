@@ -101,7 +101,9 @@ func (c *Checker) Check(ctx context.Context) Report {
 
 	model := strings.TrimSpace(c.config.Model)
 	if model == "" || model == "auto" {
-		add(Check{ID: "model", Status: StatusWarning, Message: "model/provider выбирает OpenCode"})
+		// Диагностика ссылается на фактически выбранный CLI-рантайм из
+		// конфига (AUD-09): не хардкодим "OpenCode", если cli=codex/claude.
+		add(Check{ID: "model", Status: StatusWarning, Message: "model/provider выбирает " + filepath.Base(cli)})
 	} else {
 		add(Check{ID: "model", Status: StatusPassed, Message: model})
 	}

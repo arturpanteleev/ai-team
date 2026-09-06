@@ -1,20 +1,56 @@
-# Dependabot для SHA-pinned GitHub Actions (OPS-10).
-# CI закрепляет Actions по полному SHA с комментарием вида "# v<semver>"
-# (см. .github/workflows/ci.yaml). version-comment: "# v" велит Dependabot
-# обновлять и SHA, и этот комментарий согласованно, не откатывая к mutable tag.
 version: 2
+# Policy обновления зависимостей ai-team:
+# - все PR создаёт Dependabot на target-branch master; SHA-пины действий
+#   обновляются вместе с human-readable comment (# vX.Y.Z) в одном PR.
+#   version-comment (частная недокументированная опция) НЕ используется.
+# - gomod покрывает Go-модули корня (cmd/, pkg/, e2etest/, docsgen/),
+#   npm — фронтенд dashboard (web/); отдельные экосистемы — отдельные PR.
+# - версии обновляются только на совместимые (versioning-strategy
+#   increase-if-necessary): мажорные/хрупкие апгрейды остаются на человека.
 updates:
+  # GitHub Actions: обновление SHA-пинов workflows. После обновления SHA
+  # в том же PR заменяется и читаемый комментарий (# vX.Y.Z).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
-    target-branch: "master"
-    versioning-strategy: increase-if-necessary
-    version-comment: "# v"
+    target-branch: master
     labels:
-      - "dependencies"
-      - "ci"
+      - dependencies
+      - ci
     commit-message:
       prefix: "chore(ci)"
+
+  # Go-модули корня репозитория (описываются корневым go.mod/go.sum).
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    target-branch: master
+    versioning-strategy: increase-if-necessary
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "chore(go)"
+
+  # npm-зависимости фронтенд dashboard (web/package.json + package-lock.json).
+  # Ограниченный лимит, чтобы большие транзитивные апдейты не смешивались
+  # с Go и Actions PR.
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    open-pull-requests-limit: 5
+    target-branch: master
+    versioning-strategy: increase-if-necessary
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "chore(frontend)"

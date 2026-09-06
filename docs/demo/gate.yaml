@@ -1,8 +1,14 @@
 # ai-team gate config для демо на не-Go стеке (Python/питоновские тесты).
 # Diff-policy: изменение source без изменения тестов блокирует gate (required).
-# Typed check junit-xml читает отчёт тестов и дигирует исходный файл —
-# для CI-демо отчёт генерируется статическим фикстуром; в реальном проекте
-# здесь была бы команда, запускающая настоящий pytest и пишущая report.xml.
+# Typed check junit-xml читает отчёт тестов и дигирует исходный файл.
+#
+# ВАЖНО ПРО ФИКСТУРУ: в этом демо команда НЕ запускает настоящий pytest, а
+# намеренно копирует статический JUnit-XML-фикстур
+# (docs/demo/pytest-pass.xml / pytest-fail.xml) в report.xml. Так демо остаётся
+# детерминированным без окружения. В реальном проекте замените фикстуру на
+# настоящий тест-раннер, пишущий report.xml, например:
+#   command: ["bash", "-c", "python -m pytest --junitxml=report.xml -o junit_family=xunit2"]
+# (JUnit adapter оценивает XML, а не exit code command — см. report_file.)
 schema_version: 1
 diff_policy:
   test_modify: required

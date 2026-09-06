@@ -16,9 +16,9 @@ import (
 // статусам run: completed и completed_with_warnings (см. delivery_deferred.go
 // switch terminalStatus). Успешная delivery-стадия и одинаковый approved plan
 // дают одинаковый deferred-маркер и доставку независимо от статуса run.
-// Примечание: автоматический post-terminal хук (pipeline.go, outcome ==
-// RunCompleted) пока ограничен чистым completed; parity здесь фиксируется на
-// уровне DeliverDeferred — контроллерном пути enforcement.
+// Автоматический post-terminal хук (pipeline.go) после AUD-06 исполняет
+// доставку для обоих статусов: падение сервиса доставки — ошибка Run, а
+// повторная ручная доставка (DeliverDeferred) применяет утверждённый plan.
 func TestDeliverDeferredPolicyParityCompletedAndWithWarnings(t *testing.T) {
 	t.Run("completed", func(t *testing.T) {
 		dir := env(t)
@@ -64,8 +64,8 @@ func TestDeliverDeferredPolicyParityCompletedAndWithWarnings(t *testing.T) {
 			WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(&gracefulDeliveryService{}))
 		if err := p.Run(context.Background(), RunConfig{
 			Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
-		}); err != nil {
-			t.Fatalf("run с warning должен завершиться успешно: %v", err)
+		}); err == nil {
+			t.Fatal("AUD-06: auto post-terminal доставка падает и для warnings — Run обязан вернуть ошибку")
 		}
 		runDir := onlyRunDir(t, dir)
 		if got := runFinishedStatus(t, runDir); got != string(workflow.RunCompletedWithWarnings) {

@@ -93,9 +93,12 @@ func TestDeferredDeliveryResolvesRealPreparedState(t *testing.T) {
 	}
 
 	// Чужой target не выдумывает state: подготовленное state берётся только из
-	// реального расположения (или явный fail-closed).
+	// реального расположения (или явный fail-closed). После AUD-05 (PR #96)
+	// workspace резолвится из state_path маркера и до попадания в
+	// "prepared plan отсутствует" уже отклоняется как чужой: "вне control
+	// target". Оба — fail-closed одного смысла.
 	wrongTarget := t.TempDir()
-	if _, err := New(nil, nil).DeliverDeferred(runDir, "", wrongTarget); err == nil || !strings.Contains(err.Error(), "prepared plan отсутствует") {
+	if _, err := New(nil, nil).DeliverDeferred(runDir, "", wrongTarget); err == nil || !(strings.Contains(err.Error(), "prepared plan отсутствует") || strings.Contains(err.Error(), "вне control target")) {
 		t.Fatalf("чужим target должен быть fail-closed, got: %v", err)
 	}
 

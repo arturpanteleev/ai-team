@@ -74,13 +74,10 @@ func cmdGate() {
 		Config: cfg, AllowUntrusted: *allowUntrusted,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "✗ Gate: %v\n", err)
-		if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
-			logging.Emit(logging.Record{
-				Level: "error", Command: "gate", Type: "gate",
-				Message: err.Error(), Exit: code,
-			})
-		}
+		logging.Fail(logging.Record{
+			Level: "error", Command: "gate", Type: "gate",
+			Message: err.Error(), Exit: code,
+		}, "✗ Gate: %v", err)
 		os.Exit(code)
 	}
 
@@ -188,13 +185,10 @@ func loadGateConfig(target, explicit string) (*gate.Config, string) {
 // а не 1 (AUD-19): help-контракт описывает config-ошибку как BLOCKED.
 // В machine-режиме дополнительно пишет JSON-запись об ошибке на stdout.
 func fatalGateConfig(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
-		logging.Emit(logging.Record{
-			Level: "error", Command: "gate", Type: "gate_config",
-			Message: fmt.Sprintf(format, args...), Exit: exitBlocked,
-		})
-	}
+	logging.Fail(logging.Record{
+		Level: "error", Command: "gate", Type: "gate_config",
+		Message: fmt.Sprintf(format, args...), Exit: exitBlocked,
+	}, format, args...)
 	os.Exit(exitBlocked)
 }
 

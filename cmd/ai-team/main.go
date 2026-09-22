@@ -1281,6 +1281,16 @@ func cmdList() {
 	if err != nil {
 		fatal("Ошибка target: %v", err)
 	}
+	// Сам каталог target обязан существовать, иначе опечатка в пути молча
+	// выдала бы built-in реестр за реестр указанного проекта. Отсутствие
+	// .ai-team внутри — законный случай (показываем только built-in слой),
+	// несуществующий каталог — нет.
+	if _, err := safeio.ExistingDir(target); err != nil {
+		if os.IsNotExist(err) {
+			fatal("Каталог target не существует: %s", target)
+		}
+		fatal("Недоступный target: %v", err)
+	}
 	if _, statErr := os.Lstat(filepath.Join(target, ".ai-team")); statErr == nil {
 		if _, err := safeio.ExistingDir(target, ".ai-team"); err != nil {
 			fatal("Небезопасный control root: %v", err)

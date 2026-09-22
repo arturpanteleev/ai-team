@@ -95,3 +95,46 @@ func TestListRejectsPositionalArgument(t *testing.T) {
 		t.Fatalf("ожидалась подсказка по использованию, получено: %q", stderr)
 	}
 }
+
+// TestListRejectsMissingTarget — несуществующий `--target` обязан падать, а
+// не печатать built-in реестр, выдавая его за реестр указанного проекта:
+// это ровно тот режим отказа, против которого заводился issue #105.
+// Каталог без `.ai-team` при этом остаётся законным случаем.
+func TestListRejectsMissingTarget(t *testing.T) {
+	t.Run("nonexistent-dir", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "definitely-not-here")
+		stdout, code, stderr := runCLI(t, "list", "--target", missing)
+		if code == 0 {
+			t.Fatalf("несуществующий --target должен давать ненулевой exit; stdout:\n%s", stdout)
+		}
+		if !strings.Contains(stderr, missing) {
+			t.Fatalf("диагностика должна называть отсутствующий путь, получено: %q", stderr)
+		}
+		if strings.Contains(stdout, "coder") {
+			t.Fatalf("built-in реестр не должен печататься для несуществующего target:\n%s", stdout)
+		}
+	})
+
+	t.Run("dir-without-control-root", func(t *testing.T) {
+		stdout, code, stderr := runCLI(t, "list", "--target", t.TempDir())
+		if code != 0 {
+			t.Fatalf("каталог без .ai-team законен, ожидался exit 0, получен %d; stderr: %s", code, stderr)
+		}
+		if !strings.Contains(stdout, "coder") {
+			t.Fatalf("для каталога без .ai-team должен показываться built-in слой:\n%s", stdout)
+		}
+	})
+}
+
+// TestListRejectsTargetWithoutValue — покрытие сценария «Флаги list» в
+// openspec/specs/cli-interface/spec.md: отсутствующее значение флага тоже
+// обязано давать ненулевой exit.
+func TestListRejectsTargetWithoutValue(t *testing.T) {
+	_, code, stderr := runCLI(t, "list", "--target")
+	if code == 0 {
+		t.Fatalf("--target без значения должен давать ненулевой exit; stderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "target") {
+		t.Fatalf("диагностика должна называть флаг target, получено: %q", stderr)
+	}
+}

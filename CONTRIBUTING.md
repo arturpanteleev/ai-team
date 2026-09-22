@@ -173,7 +173,10 @@ gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-вал
 > 1. этот список шагов против настоящего тела target-а `verify` в `Makefile`;
 > 2. минимальная версия Go в документах (`README.md`, этот файл,
 >    `docs/demo/README.md`, `docs/demo/run-demo.sh`) против `go.mod`, а точный
->    пин в `.tool-versions` — против `go-version:` в `.github/workflows/*`.
+>    пин в `.tool-versions` — против `go-version:` во ВСЕХ местах, где он
+>    продублирован: `.github/workflows/*` и `docs/demo/ci-gate-demo.yaml`
+>    (последний лежит вне каталога workflow, но `docs/demo/README.md` прямо
+>    требует, чтобы он соответствовал сборке, — его легче всего пропустить).
 >
 > Автоматический сторож на эти два пункта пробовали строить разбором Markdown,
 > YAML и Makefile регулярками — получился источник ложных срабатываний и

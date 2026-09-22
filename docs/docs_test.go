@@ -113,9 +113,13 @@ var dispatcherAliases = map[string]bool{"--help": true, "-h": true}
 
 // cliCommandRe якорится на начало фрагмента: команда считается
 // задокументированной, только если ячейка (или её вариант после «/») с неё
-// НАЧИНАЕТСЯ. Без якоря упоминание `ai-team gc` в описании чужой строки
-// закрывало бы требование, и удалённая строка проходила бы незамеченной.
-var cliCommandRe = regexp.MustCompile("^\\s*`ai-team ([a-z][a-z-]*)")
+// НАЧИНАЕТСЯ. Без якоря упоминание `ai-team gc` в середине описания чужой
+// строки закрывало бы требование, и удалённая строка проходила бы незамеченной.
+//
+// Имя команды — [a-z] и далее буквы, цифры, «-» и «_»: диспетчер цифры
+// допускает, и запрет на них делал бы тест неисправимо красным для команды
+// вроде `gc2`, описанной везде корректно.
+var cliCommandRe = regexp.MustCompile("^\\s*`ai-team ([a-z][a-z0-9_-]*)")
 
 const mainSourcePath = "../cmd/ai-team/main.go"
 
@@ -149,7 +153,6 @@ func parseMainSource(t *testing.T) (*token.FileSet, *ast.File) {
 // отступов и переносов.
 func dispatcherCommands(t *testing.T) map[string]bool {
 	t.Helper()
-	const sourcePath = mainSourcePath
 	fileSet, file := parseMainSource(t)
 
 	// Диспетчер опознаём по выражению switch, а не по позиции в файле.
@@ -170,14 +173,14 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 	})
 	switch len(dispatchers) {
 	case 0:
-		t.Fatalf("%s: не найден switch по os.Args[1]", sourcePath)
+		t.Fatalf("%s: не найден switch по os.Args[1]", mainSourcePath)
 	case 1:
 	default:
 		lines := make([]int, 0, len(dispatchers))
 		for _, candidate := range dispatchers {
 			lines = append(lines, fileSet.Position(candidate.Pos()).Line)
 		}
-		t.Fatalf("%s: найдено несколько switch по os.Args[1] (строки %v) — неясно, какой из них диспетчер", sourcePath, lines)
+		t.Fatalf("%s: найдено несколько switch по os.Args[1] (строки %v) — неясно, какой из них диспетчер", mainSourcePath, lines)
 	}
 	dispatcher := dispatchers[0]
 
@@ -193,11 +196,11 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 				// Не строковый литерал — сторож не может решить, команда это
 				// или нет, поэтому падаем, а не пропускаем молча.
 				t.Fatalf("%s:%d: ветка диспетчера не является строковым литералом: %s",
-					sourcePath, fileSet.Position(expression.Pos()).Line, types.ExprString(expression))
+					mainSourcePath, fileSet.Position(expression.Pos()).Line, types.ExprString(expression))
 			}
 			value, unquoteErr := strconv.Unquote(literal.Value)
 			if unquoteErr != nil {
-				t.Fatalf("%s: не разобрать литерал %s: %v", sourcePath, literal.Value, unquoteErr)
+				t.Fatalf("%s: не разобрать литерал %s: %v", mainSourcePath, literal.Value, unquoteErr)
 			}
 			if dispatcherAliases[value] {
 				continue
@@ -206,15 +209,20 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 		}
 	}
 	if len(commands) == 0 {
-		t.Fatalf("%s: не удалось извлечь ни одной команды из диспетчера", sourcePath)
+		t.Fatalf("%s: не удалось извлечь ни одной команды из диспетчера", mainSourcePath)
 	}
 	return commands
 }
 
-// readmeCLICommands собирает команды из первой колонки таблицы раздела
-// «CLI-справочник». Читаем только строки таблицы: прозаические упоминания
+// readmeCLICommands собирает команды из первой колонки строк раздела
+// «CLI-справочник», начинающихся с «|». Прозаические упоминания
 // (`ai-team run --resume ...` ниже по тексту) не считаются документированием
 // команды в справочнике.
+//
+// Что именно считается строкой таблицы: любая строка секции, начинающаяся с
+// «|», — разметка не отслеживается, поэтому такая же строка внутри fenced-блока
+// ``` в этой секции тоже была бы прочитана как строка таблицы. Полноценный
+// Markdown-разбор сюда не заводим: это тот же класс задач, что и #139.
 func readmeCLICommands(t *testing.T) map[string]bool {
 	t.Helper()
 	readme := readRepoFile(t, "../README.md")
@@ -236,6 +244,11 @@ func readmeCLICommands(t *testing.T) map[string]bool {
 		// Одна строка таблицы может законно документировать пару команд через
 		// «/» (`ai-team version` / `ai-team help`), поэтому ячейка режется на
 		// варианты, и каждый обязан НАЧИНАТЬСЯ с имени команды.
+		//
+		// Остаток исходной дыры: перекрёстная ссылка после «/» в ЧУЖОЙ ячейке
+		// («… / см. также `ai-team gc`») тоже закроет требование, и строку про
+		// команду можно будет удалить незаметно. Отличить документирование от
+		// ссылки текстом нельзя — нужен разбор таблицы (#139).
 		for _, alternative := range strings.Split(cells[0], "/") {
 			if match := cliCommandRe.FindStringSubmatch(alternative); match != nil {
 				commands[match[1]] = true
@@ -275,15 +288,43 @@ func TestReadmeCLIReferenceMatchesDispatcher(t *testing.T) {
 	}
 }
 
-// usageCommandRe — строка блока справки, начинающаяся с имени команды.
-// Якорь на начало строки важен так же, как в таблице README: упоминание
-// «ai-team run --resume ...» внутри описания флага не должно засчитываться
-// за документирование команды.
-var usageCommandRe = regexp.MustCompile(`(?m)^\s*ai-team ([a-z][a-z-]*)`)
+// usageCommandRe — строка справки, НАЧИНАЮЩАЯСЯ с имени команды.
+//
+// Что якорь даёт и чего не даёт: он отсекает упоминания в середине строки
+// («…продолжите: ai-team run --resume …»), но НЕ отличает блок списка команд
+// от примера, который сам начинается с новой строки, — строка вида
+// «  ai-team gc --dry-run» в разделе флагов засчиталась бы как документирование
+// команды. Разбор справки на секции сюда не заводим: это тот же класс задач,
+// что и #139.
+//
+// Имя команды — [a-z] и далее буквы, цифры, «-» и «_»: диспетчер цифры
+// допускает, и запрет на них делал бы тест неисправимо красным для команды
+// вроде `gc2`, описанной везде корректно.
+var usageCommandRe = regexp.MustCompile(`(?m)^\s*ai-team ([a-z][a-z0-9_-]*)`)
 
-// usageCommands извлекает команды из текста, который печатает printUsage.
-// Текст берётся из AST того же main.go — это строковый литерал, а не результат
-// запуска бинарника, поэтому сторож не зависит от сборки.
+// isFmtPrintCall — вызов вида fmt.Print*/fmt.Fprint*; только его аргументы и
+// попадают в вывод справки.
+func isFmtPrintCall(call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	packageName, ok := selector.X.(*ast.Ident)
+	if !ok || packageName.Name != "fmt" {
+		return false
+	}
+	return strings.HasPrefix(selector.Sel.Name, "Print") || strings.HasPrefix(selector.Sel.Name, "Fprint")
+}
+
+// usageCommands собирает строковые литералы, которые printUsage передаёт в
+// вызовы fmt.Print/Printf/Println (и их F-варианты), — то есть ровно то, что
+// уходит в вывод. Литерал внутри printUsage, который никуда не печатается, не
+// считается: иначе сторож засчитывал бы команду, которой пользователь в
+// `ai-team help` не увидит.
+//
+// Текст берётся из AST, а не из запуска бинарника, поэтому сторож не зависит
+// от сборки. Цена — он не исполняет код: команда, собранная в рантайме из
+// частей или напечатанная не через fmt, останется вне поля зрения (#139).
 func usageCommands(t *testing.T) map[string]bool {
 	t.Helper()
 	_, file := parseMainSource(t)
@@ -297,16 +338,22 @@ func usageCommands(t *testing.T) map[string]bool {
 		}
 		found = true
 		ast.Inspect(function, func(node ast.Node) bool {
-			literal, ok := node.(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || !isFmtPrintCall(call) {
 				return true
 			}
-			value, err := strconv.Unquote(literal.Value)
-			if err != nil {
-				t.Fatalf("%s: не разобрать литерал справки: %v", mainSourcePath, err)
+			for _, argument := range call.Args {
+				literal, ok := argument.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					continue
+				}
+				value, err := strconv.Unquote(literal.Value)
+				if err != nil {
+					t.Fatalf("%s: не разобрать литерал справки: %v", mainSourcePath, err)
+				}
+				usage.WriteString(value)
+				usage.WriteString("\n")
 			}
-			usage.WriteString(value)
-			usage.WriteString("\n")
 			return true
 		})
 	}

@@ -212,8 +212,12 @@ func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *r
 	}
 	if reason, ok := r.blocked[a.Name]; ok {
 		path := verdict.StatusFilePath(task.ArtifactRoot, task.Feature, a.Name)
-		os.MkdirAll(filepath.Dir(path), 0755)
-		os.WriteFile(path, []byte("**Status:** BLOCKED\n**Blocker:** "+reason+"\n"), 0644)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte("**Status:** BLOCKED\n**Blocker:** "+reason+"\n"), 0644); err != nil {
+			return err
+		}
 		return nil
 	}
 	if err := r.execErr[a.Name]; err != nil {
@@ -1579,10 +1583,16 @@ func TestRun_StaleBlockedMarkerIgnored(t *testing.T) {
 	dir := env(t)
 	root := filepath.Join(dir, ".ai-team", "artifacts")
 	path := verdict.StatusFilePath(root, "feat", "analyst")
-	os.MkdirAll(filepath.Dir(path), 0755)
-	os.WriteFile(path, []byte("**Status:** BLOCKED\n**Blocker:** старый блокер\n"), 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("**Status:** BLOCKED\n**Blocker:** старый блокер\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	old := time.Now().Add(-time.Hour)
-	os.Chtimes(path, old, old)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	rt := newScripted()
 	err, _ := runPipeline(t, dir, cfgFor(config.AgentConfig{Name: "analyst"}), rt, &scriptedPrompter{})
@@ -1641,10 +1651,16 @@ func TestRun_OutputCleanupRefusesSymlinkTraversal(t *testing.T) {
 func TestRun_StaleOutputRejected(t *testing.T) {
 	dir := env(t)
 	proposal := filepath.Join(dir, ".ai-team", "artifacts", "feat", "proposal.md")
-	os.MkdirAll(filepath.Dir(proposal), 0755)
-	os.WriteFile(proposal, []byte("старый output"), 0644)
+	if err := os.MkdirAll(filepath.Dir(proposal), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(proposal, []byte("старый output"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	old := time.Now().Add(-time.Hour)
-	os.Chtimes(proposal, old, old)
+	if err := os.Chtimes(proposal, old, old); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	rt := newScripted()
 	rt.skipWrite["analyst"] = true
@@ -2190,13 +2206,19 @@ func TestRun_GitGuard_NoChangesFails(t *testing.T) {
 	dir := env(t)
 	gitInit(t, dir)
 	// .ai-team не должен считаться изменением кодера
-	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = dir
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	cmd = exec.Command("git", "commit", "-qm", "init")
 	cmd.Dir = dir
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	rt := newScripted() // coder ничего не меняет
 
@@ -2211,18 +2233,26 @@ func TestRun_GitGuard_NoChangesFails(t *testing.T) {
 func TestRun_GitGuard_WithChangesPasses(t *testing.T) {
 	dir := env(t)
 	gitInit(t, dir)
-	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = dir
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	cmd = exec.Command("git", "commit", "-qm", "init")
 	cmd.Dir = dir
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	rt := newScripted()
 	rt.onExec = func(name string, _ []runtime.Artifact) {
 		if name == "coder" {
-			os.WriteFile(filepath.Join(rt.targetDir, "new.go"), []byte("package main\n"), 0644)
+			if err := os.WriteFile(filepath.Join(rt.targetDir, "new.go"), []byte("package main\n"), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		}
 	}
 

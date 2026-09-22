@@ -91,7 +91,8 @@ func captureGitMetadataSnapshot(dir string) (snapshot gitMetadataSnapshot, avail
 
 	h := sha256.New()
 	writePart := func(label string, data []byte) {
-		fmt.Fprintf(h, "%s\x00%d\x00", label, len(data))
+		// запись в hash.Hash: по контракту hash.Hash.Write никогда не возвращает ошибку.
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00", label, len(data))
 		_, _ = h.Write(data)
 	}
 

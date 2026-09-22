@@ -88,7 +88,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	absRoot, err := filepath.Abs(artifactRoot)
 	if err != nil {
-		s.Close()
+		// аварийный путь инициализации: значимая ошибка возвращается вызывающему.
+		_ = s.Close()
 		return nil, err
 	}
 
@@ -117,7 +118,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	eventCursor, err := s.LatestEventCursor()
 	if err != nil {
 		cancelEvents()
-		s.Close()
+		// аварийный путь инициализации: значимая ошибка возвращается вызывающему.
+		_ = s.Close()
 		return nil, fmt.Errorf("initial event cursor: %w", err)
 	}
 	srv.eventWorkers.Add(1)
@@ -167,7 +169,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
 		if err != nil {
-			s.Close()
+			// аварийный путь инициализации: значимая ошибка возвращается вызывающему.
+			_ = s.Close()
 			return nil, err
 		}
 		srv.router.Get("/*", srv.handleFrontend)
@@ -322,7 +325,8 @@ func (s *Server) handleGetPipelines(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runs)
+	// заголовки и статус уже отправлены: ошибку кодирования клиенту не передать, она означает оборванное соединение.
+	_ = json.NewEncoder(w).Encode(runs)
 }
 
 func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +371,8 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	// заголовки и статус уже отправлены: ошибку кодирования клиенту не передать, она означает оборванное соединение.
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 type artifactInfo struct {
@@ -419,7 +424,8 @@ func (s *Server) handleGetArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(artifacts)
+	// заголовки и статус уже отправлены: ошибку кодирования клиенту не передать, она означает оборванное соединение.
+	_ = json.NewEncoder(w).Encode(artifacts)
 }
 
 // handleGetArtifact отдаёт содержимое артефакта строго внутри artifactRoot.
@@ -475,7 +481,7 @@ func (s *Server) handleGetRunLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "log unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "log unavailable", http.StatusInternalServerError)
@@ -522,7 +528,7 @@ func (s *Server) handleGetRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxArtifactSize {
 		http.Error(w, "workflow unavailable", http.StatusInternalServerError)
@@ -568,7 +574,7 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, root, rel
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "not found", http.StatusNotFound)

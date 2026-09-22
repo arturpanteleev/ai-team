@@ -559,7 +559,7 @@ func toolFingerprint(toolPath string) string {
 	if err != nil {
 		return "unavailable"
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return "unavailable"
@@ -649,7 +649,8 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 			return statErr
 		}
 		hash := sha256.New()
-		fmt.Fprintf(hash, "mode\x00%d\x00", info.Mode())
+		// запись в hash.Hash: по контракту hash.Hash.Write никогда не возвращает ошибку.
+		_, _ = fmt.Fprintf(hash, "mode\x00%d\x00", info.Mode())
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, linkErr := os.Readlink(current)
 			if linkErr != nil {
@@ -683,7 +684,8 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 	sort.Strings(paths)
 	hash := sha256.New()
 	for _, relative := range paths {
-		fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
+		// запись в hash.Hash: по контракту hash.Hash.Write никогда не возвращает ошибку.
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
 	}
 	return files, hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -706,7 +708,8 @@ func (r Runner) workspaceDigestExcluding(exclude string) (string, error) {
 	sort.Strings(paths)
 	hash := sha256.New()
 	for _, relative := range paths {
-		fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
+		// запись в hash.Hash: по контракту hash.Hash.Write никогда не возвращает ошибку.
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00", relative, files[relative])
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

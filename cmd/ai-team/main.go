@@ -237,7 +237,8 @@ func cmdAuthToken() {
 	roleValues := flags.String("roles", "", "Список ролей через запятую")
 	ttl := flags.Duration("ttl", time.Hour, "Срок token")
 	secretEnv := flags.String("secret-env", "AI_TEAM_AUTH_SECRET", "Env с signing secret")
-	flags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = flags.Parse(os.Args[2:])
 	if strings.TrimSpace(*actorID) == "" || strings.TrimSpace(*roleValues) == "" {
 		fatal("--actor и --roles обязательны")
 	}
@@ -264,7 +265,8 @@ func cmdWorker() {
 	flags := flag.NewFlagSet("worker", flag.ExitOnError)
 	targetValue := flags.String("target", "", "Exact mounted repository target")
 	dbPath := flags.String("db", "", "SQLite projection path")
-	flags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = flags.Parse(os.Args[2:])
 	if *targetValue == "" {
 		fatal("worker требует --target")
 	}
@@ -391,7 +393,8 @@ func cmdSchedulerWorker() {
 	leaseDuration := flags.Duration("lease", 30*time.Second, "Worker lease duration")
 	maxConcurrent := flags.Int("max-concurrent", 4, "Global concurrency limit")
 	perTarget := flags.Int("per-target", 1, "Concurrency limit одного target")
-	flags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = flags.Parse(os.Args[2:])
 	target, err := absoluteTarget(*targetValue)
 	if err != nil {
 		fatal("Scheduler worker target: %v", err)
@@ -419,7 +422,7 @@ func cmdSchedulerWorker() {
 	if err != nil {
 		fatal("Scheduler queue: %v", err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
 	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB)
 	if err != nil {
 		fatal("Scheduler ProcessEngine: %v", err)
@@ -784,7 +787,8 @@ func appendIgnoreRule(path string) error {
 		return err
 	}
 	if _, err := file.WriteString(prefix + "# ai-team\n.ai-team/\n"); err != nil {
-		file.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = file.Close()
 		return err
 	}
 	return file.Close()
@@ -814,7 +818,8 @@ func cmdRun() {
 	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме (forward-гейты default-профилей отложены до delivery-решения, APF-1)")
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan (ratify-ит отложенные гейты run'а)")
 
-	runFlags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = runFlags.Parse(os.Args[2:])
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
@@ -1032,7 +1037,8 @@ func openRecorder(target string) (pipeline.Recorder, func()) {
 		fmt.Fprintf(os.Stderr, "⚠ web store: %v — запись запусков отключена\n", err)
 		return nil, nil
 	}
-	return web.NewStoreRecorder(s), func() { s.Close() }
+	// web store — best-effort проекция дашборда (выше уже есть degrade-путь): ошибка закрытия на выходе ни на что не влияет.
+	return web.NewStoreRecorder(s), func() { _ = s.Close() }
 }
 
 func cmdEval() {
@@ -1045,7 +1051,8 @@ func cmdEval() {
 	samples := evalFlags.Int("samples", 1, "Число независимых LLM-оценок (1-20)")
 	jsonOut := evalFlags.String("json-out", "", "Путь JSON evidence")
 
-	evalFlags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = evalFlags.Parse(os.Args[2:])
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
@@ -1092,7 +1099,8 @@ func cmdCIImport() {
 	target := ciFlags.String("target", ".", "Путь к проекту")
 	format := ciFlags.String("format", string(ciimport.DefaultImportFormat),
 		"Adopter-формат CI (github-actions)")
-	ciFlags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = ciFlags.Parse(os.Args[2:])
 
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
@@ -1418,7 +1426,8 @@ func cmdWeb() {
 	schedulerDB := webFlags.String("scheduler-db", "", "Persistent scheduler SQLite (включает enqueue-only mode)")
 	schedulerMax := webFlags.Int("max-concurrent", 4, "Scheduler global concurrency")
 	schedulerPerTarget := webFlags.Int("per-target", 1, "Scheduler per-target concurrency")
-	webFlags.Parse(os.Args[2:])
+	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
+	_ = webFlags.Parse(os.Args[2:])
 	target, err := absoluteTarget(*targetFlag)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
@@ -1454,7 +1463,7 @@ func cmdWeb() {
 	if err != nil {
 		fatal("Ошибка recorder store: %v", err)
 	}
-	defer recorderStore.Close()
+	defer func() { _ = recorderStore.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
 	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore))))
 	var runController *control.Controller
@@ -1469,7 +1478,7 @@ func cmdWeb() {
 		if err != nil {
 			fatal("Ошибка scheduler queue: %v", err)
 		}
-		defer schedulerQueue.Close()
+		defer func() { _ = schedulerQueue.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
 		queueEngine, queueErr := scheduler.NewQueueEngine(schedulerQueue, target)
 		if queueErr != nil {
 			fatal("Ошибка queue engine: %v", queueErr)
@@ -1503,7 +1512,7 @@ func cmdWeb() {
 	if err != nil {
 		fatal("Ошибка запуска web сервера: %v", err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
 	// Фоновые ошибки run не должны исчезать после 202: фиксируем их в
 	// SQLite projection дашборда.
 	runController.SetFailureSink(srv.RecordAdmissionFailure)
@@ -1512,7 +1521,8 @@ func cmdWeb() {
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		srv.Shutdown(context.Background())
+		// graceful shutdown best-effort: при его неудаче отложенный srv.Close() закрывает сервер принудительно.
+		_ = srv.Shutdown(context.Background())
 	}()
 
 	addr := net.JoinHostPort(*host, *port)

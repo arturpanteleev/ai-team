@@ -172,15 +172,16 @@ func (a *RunArchive) Restore(runID, destination string) error {
 			copyErr = closeErr
 		}
 		if copyErr != nil || size != entry.Size {
-			os.Remove(tempPath)
+			// temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
+			_ = os.Remove(tempPath)
 			return errors.Join(copyErr, fmt.Errorf("artifact restore size mismatch: %s", entry.Path))
 		}
 		if err := os.Chmod(tempPath, os.FileMode(entry.Mode)); err != nil {
-			os.Remove(tempPath)
+			_ = os.Remove(tempPath)
 			return err
 		}
 		if err := os.Rename(tempPath, target); err != nil {
-			os.Remove(tempPath)
+			_ = os.Remove(tempPath)
 			return err
 		}
 	}

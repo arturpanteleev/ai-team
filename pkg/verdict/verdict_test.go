@@ -63,9 +63,15 @@ func TestFromOutputs(t *testing.T) {
 	first := filepath.Join(dir, "review.md")
 	second := filepath.Join(dir, "extra.md")
 	other := filepath.Join(dir, "data.json")
-	os.WriteFile(first, []byte("нет вердикта"), 0644)
-	os.WriteFile(second, []byte("**Verdict:** APPROVED\n"), 0644)
-	os.WriteFile(other, []byte("**Verdict:** REJECTED\n"), 0644)
+	if err := os.WriteFile(first, []byte("нет вердикта"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(second, []byte("**Verdict:** APPROVED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("**Verdict:** REJECTED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	if got := FromOutputs([]string{first, second, other}); got != Approved {
 		t.Errorf("FromOutputs() = %q, want APPROVED (json игнорируется, пустой md пропускается)", got)
@@ -83,27 +89,37 @@ func TestFromOutputsContract(t *testing.T) {
 	path := filepath.Join(dir, "review.md")
 	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, Rejected}}
 
-	os.WriteFile(path, []byte("**Verdict:** APPROVED\n"), 0644)
+	if err := os.WriteFile(path, []byte("**Verdict:** APPROVED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	got, err := FromOutputsContract([]string{path}, contract)
 	if err != nil || got != Approved {
 		t.Fatalf("valid contract: got=%q err=%v", got, err)
 	}
 
-	os.WriteFile(path, []byte("нет маркера\n"), 0644)
+	if err := os.WriteFile(path, []byte("нет маркера\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if _, err := FromOutputsContract([]string{path}, contract); err == nil {
 		t.Fatal("missing marker должен быть ошибкой")
 	}
 
-	os.WriteFile(path, []byte("**Verdict:** REJECTED\n**Verdict:** APPROVED\n"), 0644)
+	if err := os.WriteFile(path, []byte("**Verdict:** REJECTED\n**Verdict:** APPROVED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if _, err := FromOutputsContract([]string{path}, contract); err == nil {
 		t.Fatal("multiple markers должны быть ошибкой")
 	}
-	os.WriteFile(path, []byte("**Verdict:** APPROVED\n**Result:** FAIL\n"), 0644)
+	if err := os.WriteFile(path, []byte("**Verdict:** APPROVED\n**Result:** FAIL\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if _, err := FromOutputsContract([]string{path}, contract); err == nil {
 		t.Fatal("mixed control markers must be rejected")
 	}
 
-	os.WriteFile(path, []byte("**Verdict:** MAYBE\n"), 0644)
+	if err := os.WriteFile(path, []byte("**Verdict:** MAYBE\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if _, err := FromOutputsContract([]string{path}, contract); err == nil {
 		t.Fatal("unknown marker value должен быть ошибкой")
 	}
@@ -114,7 +130,9 @@ func TestFencedMarkerIgnoredByContract(t *testing.T) {
 	path := filepath.Join(dir, "review.md")
 	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, Rejected}}
 
-	os.WriteFile(path, []byte("```\n**Verdict:** REJECTED\n```\n"), 0644)
+	if err := os.WriteFile(path, []byte("```\n**Verdict:** REJECTED\n```\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	_, err := FromOutputsContract([]string{path}, contract)
 	if err == nil {
 		t.Fatal("fenced маркер не должен удовлетворять contract (маркер — данные, не сигнал)")
@@ -129,7 +147,9 @@ func TestMultipleMarkersCountedFromControlRegionsOnly(t *testing.T) {
 	path := filepath.Join(dir, "review.md")
 	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, Rejected}}
 
-	os.WriteFile(path, []byte("```\n**Verdict:** APPROVED\n```\n**Verdict:** REJECTED\n"), 0644)
+	if err := os.WriteFile(path, []byte("```\n**Verdict:** APPROVED\n```\n**Verdict:** REJECTED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	got, err := FromOutputsContract([]string{path}, contract)
 	if err != nil || got != Rejected {
 		t.Fatalf("fenced маркер не считается; got=%q err=%v", got, err)
@@ -143,20 +163,26 @@ func TestReadBlockedIgnoresDataRegions(t *testing.T) {
 	if err := os.MkdirAll(statusDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(statusDir, "quoted.md"),
-		[]byte("> **Status:** BLOCKED\n> **Blocker:** цитата-пример\n"), 0644)
+	if err := os.WriteFile(filepath.Join(statusDir, "quoted.md"),
+		[]byte("> **Status:** BLOCKED\n> **Blocker:** цитата-пример\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if blocked, _ := ReadBlocked(root, feature, "quoted"); blocked {
 		t.Fatal("BLOCKED в blockquote — данные, не сигнал")
 	}
 
-	os.WriteFile(filepath.Join(statusDir, "fenced.md"),
-		[]byte("```\n**Status:** BLOCKED\n**Blocker:** фейковый\n```\n"), 0644)
+	if err := os.WriteFile(filepath.Join(statusDir, "fenced.md"),
+		[]byte("```\n**Status:** BLOCKED\n**Blocker:** фейковый\n```\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if blocked, _ := ReadBlocked(root, feature, "fenced"); blocked {
 		t.Fatal("BLOCKED в fenced code block — данные, не сигнал")
 	}
 
-	os.WriteFile(filepath.Join(statusDir, "plain.md"),
-		[]byte("**Status:** BLOCKED\n**Blocker:** настоящий\n"), 0644)
+	if err := os.WriteFile(filepath.Join(statusDir, "plain.md"),
+		[]byte("**Status:** BLOCKED\n**Blocker:** настоящий\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	blocked, reason := ReadBlocked(root, feature, "plain")
 	if !blocked || reason != "настоящий" {
 		t.Fatalf("обычный маркер должен читаться: blocked=%v reason=%q", blocked, reason)
@@ -172,9 +198,13 @@ func TestReadBlocked(t *testing.T) {
 	}
 
 	statusDir := filepath.Join(root, feature, "status")
-	os.MkdirAll(statusDir, 0755)
-	os.WriteFile(filepath.Join(statusDir, "analyst.md"),
-		[]byte("**Status:** BLOCKED\n**Blocker:** требования противоречивы\n"), 0644)
+	if err := os.MkdirAll(statusDir, 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(statusDir, "analyst.md"),
+		[]byte("**Status:** BLOCKED\n**Blocker:** требования противоречивы\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	blocked, reason := ReadBlocked(root, feature, "analyst")
 	if !blocked {
@@ -184,13 +214,17 @@ func TestReadBlocked(t *testing.T) {
 		t.Errorf("reason = %q", reason)
 	}
 
-	os.WriteFile(filepath.Join(statusDir, "architect.md"), []byte("**Status:** BLOCKED\n"), 0644)
+	if err := os.WriteFile(filepath.Join(statusDir, "architect.md"), []byte("**Status:** BLOCKED\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	blocked, reason = ReadBlocked(root, feature, "architect")
 	if !blocked || reason != "причина не указана" {
 		t.Errorf("blocked=%v reason=%q", blocked, reason)
 	}
 
-	os.WriteFile(filepath.Join(statusDir, "coder.md"), []byte("всё в порядке"), 0644)
+	if err := os.WriteFile(filepath.Join(statusDir, "coder.md"), []byte("всё в порядке"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if blocked, _ := ReadBlocked(root, feature, "coder"); blocked {
 		t.Error("файл без маркера BLOCKED не должен блокировать")
 	}
@@ -224,9 +258,13 @@ func TestContract_InstructionMatchesParser(t *testing.T) {
 	if !contains(instrBlocked, StatusFilePath(root, "f", "analyst")) {
 		t.Error("BlockedInstruction не содержит путь status-файла")
 	}
-	os.MkdirAll(filepath.Join(root, "f", "status"), 0755)
-	os.WriteFile(StatusFilePath(root, "f", "analyst"),
-		[]byte("**Status:** BLOCKED\n**Blocker:** тест\n"), 0644)
+	if err := os.MkdirAll(filepath.Join(root, "f", "status"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(StatusFilePath(root, "f", "analyst"),
+		[]byte("**Status:** BLOCKED\n**Blocker:** тест\n"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if blocked, reason := ReadBlocked(root, "f", "analyst"); !blocked || reason != "тест" {
 		t.Error("формат из BlockedInstruction не распознан ReadBlocked")
 	}

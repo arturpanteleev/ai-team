@@ -148,7 +148,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		agentCfg = &config.AgentConfig{Name: name}
 	}
 
-	inputs, inputArtifacts, err := rs.collectInputs(a, name)
+	// Первый результат collectInputs здесь не нужен: runtime-артефакты берутся
+	// не из него, а из immutable-снимка ниже (inputs = toRuntimeArtifacts(...)).
+	_, inputArtifacts, err := rs.collectInputs(a, name)
 	r.Inputs = inputArtifacts
 	if err != nil {
 		return fail(err)
@@ -157,7 +159,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: immutable input snapshot: %w", name, err))
 	}
-	inputs = toRuntimeArtifacts(evidenceInputs)
+	inputs := toRuntimeArtifacts(evidenceInputs)
 	preconditions, err := validateSnapshotPreconditions(name, a, inputs)
 	if err != nil {
 		return fail(err)

@@ -53,15 +53,16 @@ func (s *LocalCAS) Put(source io.Reader) (Blob, error) {
 		return Blob{}, err
 	}
 	tempPath := temporary.Name()
-	defer os.Remove(tempPath)
+	defer func() { _ = os.Remove(tempPath) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	hash := sha256.New()
 	size, err := io.Copy(io.MultiWriter(temporary, hash), source)
 	if err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return Blob{}, err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return Blob{}, err
 	}
 	if err := temporary.Close(); err != nil {
@@ -105,7 +106,7 @@ func (s *LocalCAS) WriteTo(digest string, destination io.Writer) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	hash := sha256.New()
 	size, err := io.Copy(io.MultiWriter(destination, hash), file)
 	if err != nil {
@@ -140,17 +141,18 @@ func (s *LocalCAS) WriteManifest(runID string, value []byte) error {
 		return err
 	}
 	path := temporary.Name()
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(append(reference, '\n')); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

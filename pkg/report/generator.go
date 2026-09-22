@@ -165,7 +165,7 @@ func GenerateStageReport(reportsDir, feature, attemptID string, result notifier.
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 
 	return stageTemplate.Execute(f, data)
 }
@@ -246,7 +246,7 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 
 	return finalTemplate.Execute(f, data)
 }

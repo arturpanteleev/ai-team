@@ -71,7 +71,7 @@ func cmdGC() {
 	if err != nil {
 		fatal("gc: %v", err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }() // снятие файловой блокировки на выходе: обработать ошибку негде.
 
 	options := retention.Options{
 		Target: absTarget, OlderThan: *olderThan,

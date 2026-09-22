@@ -241,7 +241,10 @@ func (t *headingIDTransformer) Transform(node *ast.Document, reader text.Reader,
 	if t.seen == nil {
 		t.seen = make(map[string]int)
 	}
-	ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	// Walker ниже возвращает только nil-ошибки, а ast.Walk других источников
+	// ошибок не имеет — проверять нечего. Transform реализует интерфейс
+	// goldmark parser.ASTTransformer и вернуть ошибку наверх не может.
+	_ = ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
@@ -249,7 +252,12 @@ func (t *headingIDTransformer) Transform(node *ast.Document, reader text.Reader,
 		if !ok {
 			return ast.WalkContinue, nil
 		}
-		base := slugifyID(string(h.Text(source)))
+		// Heading.Text устарел в goldmark, но замены с идентичным поведением
+		// нет: рекомендованные Lines()/Text.Value дают другой набор символов
+		// для заголовков со ссылками и inline-кодом, а от этой строки зависят
+		// якоря (#id) во всех опубликованных доках и перекрёстные ссылки на
+		// них. Менять их в PR про линтеры нельзя — поэтому осознанный nolint.
+		base := slugifyID(string(h.Text(source))) //nolint:staticcheck // SA1019: смена API поменяла бы уже опубликованные якоря
 		if base == "" {
 			return ast.WalkContinue, nil
 		}
@@ -307,7 +315,9 @@ type nonPageLink struct {
 }
 
 func (t *linkTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
-	ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	// Как и в headingIDTransformer: walker не возвращает ошибок, а сигнатура
+	// ASTTransformer не позволяет их пробросить.
+	_ = ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}

@@ -63,9 +63,11 @@ func TrackAndCleanup(pgid int, trackedPIDs []int) CleanupReceipt {
 		}
 	} else {
 		for _, pid := range trackedPIDs {
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				// процесс уже завершён — это нормально
-			}
+			// Ошибка Kill здесь не влияет ни на что: ESRCH означает, что процесс
+			// уже завершился (нормальный случай), а остальные ошибки всё равно
+			// не дают способа убить процесс — ниже идёт цикл ожидания с
+			// таймаутом, который и определяет итог.
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
 

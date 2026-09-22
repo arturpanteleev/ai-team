@@ -100,7 +100,8 @@ func Open(path string, options Options) (*Queue, error) {
 		 ON worker_jobs(status, created_ms, id)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
-			db.Close()
+			// аварийный путь инициализации: значимая ошибка возвращается вызывающему.
+			_ = db.Close()
 			return nil, fmt.Errorf("scheduler migration: %w", err)
 		}
 	}
@@ -161,7 +162,8 @@ func (q *Queue) Claim(ctx context.Context, owner string) (Record, bool, error) {
 	for rows.Next() {
 		var value candidate
 		if err := rows.Scan(&value.id, &value.payload); err != nil {
-			rows.Close()
+			// аварийный путь: ошибка уже возвращается, Close только освобождает курсор.
+			_ = rows.Close()
 			return Record{}, false, err
 		}
 		candidates = append(candidates, value)
@@ -311,7 +313,8 @@ func (q *Queue) ListRun(runID string) ([]Record, error) {
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			// аварийный путь: ошибка уже возвращается, Close только освобождает курсор.
+			_ = rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)

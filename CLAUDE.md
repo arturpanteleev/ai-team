@@ -67,6 +67,7 @@ Issue — короткий указатель на задачу; подробн�
 make build    # сборка
 make test     # тесты всех пакетов
 make specs    # строгая OpenSpec-валидация
+make lint     # golangci-lint: staticcheck + errcheck + ineffassign
 make verify   # полный race/security/frontend verification
 make clean    # очистка
 ```

@@ -251,7 +251,7 @@ func TestVerifyBundleDetectsTampering(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return os.WriteFile(filepath.Join(dir, indexFileName), append(out, '\n'), 0644)
+			return overwrite(filepath.Join(dir, indexFileName), append(out, '\n'))
 		}},
 	}
 	for _, tc := range cases {

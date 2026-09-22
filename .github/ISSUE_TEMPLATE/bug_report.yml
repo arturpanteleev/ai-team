@@ -8,10 +8,8 @@ body:
         Спасибо, что нашли время сообщить об ошибке в ai-team.
         Перед отправкой поищите дубликат среди [существующих issue](https://github.com/arturpanteleev/ai-team/issues).
 
-        Опишите наблюдение, а не предлагайте здесь исправление. Если исправление
-        меняет поведение, оно специфицируется в OpenSpec change внутри
-        `openspec/changes/`, а этот issue лишь ссылается на него.
-        См. [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
+        Опишите наблюдение, а не предлагайте здесь исправление — оно обсуждается
+        в PR.
   - type: input
     id: version
     attributes:
@@ -65,15 +63,6 @@ body:
       label: Конфигурация
       description: Относящаяся к делу часть `.ai-team/config.yaml` (уберите учётные данные).
       render: yaml
-  - type: input
-    id: openspec-change
-    attributes:
-      label: OpenSpec change
-      description: >-
-        Путь к change, который специфицирует исправление, когда он появится.
-        Оставьте пустым, если его ещё нет — issue получит метку `needs-change`.
-        Исправление, не меняющее наблюдаемое поведение, change не требует вовсе.
-      placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: security
     attributes:

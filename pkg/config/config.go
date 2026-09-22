@@ -30,18 +30,23 @@ type AgentConfig struct {
 }
 
 type Config struct {
-	SchemaVersion  int                `yaml:"schema_version,omitempty"`
-	PipelineAgents []AgentConfig      `yaml:"pipeline"`
-	Workflow       *WorkflowConfig    `yaml:"workflow,omitempty"`
-	CLI            string             `yaml:"cli,omitempty"`
-	Model          string             `yaml:"model,omitempty"`
-	Effort         string             `yaml:"effort,omitempty"`
-	StageTimeout   string             `yaml:"stage_timeout,omitempty"`
-	Containment    *ContainmentConfig `yaml:"containment,omitempty"`
-	TreeHash       *TreeHashConfig    `yaml:"tree_hash,omitempty"`
-	Budget         *BudgetConfig      `yaml:"budget,omitempty"`
-	Redaction      *RedactionConfig   `yaml:"redaction,omitempty"`
-	Retention      *RetentionConfig   `yaml:"retention,omitempty"`
+	SchemaVersion  int             `yaml:"schema_version,omitempty"`
+	PipelineAgents []AgentConfig   `yaml:"pipeline"`
+	Workflow       *WorkflowConfig `yaml:"workflow,omitempty"`
+	CLI            string          `yaml:"cli,omitempty"`
+	Model          string          `yaml:"model,omitempty"`
+	Effort         string          `yaml:"effort,omitempty"`
+	StageTimeout   string          `yaml:"stage_timeout,omitempty"`
+	// PreflightTimeout — бюджет одной внешней команды preflight (опрос версии
+	// CLI-рантайма, git, gh). Холодный старт CLI-рантайма на порядок дороже
+	// прогретого, поэтому бюджет вынесен в конфигурацию: слишком тесный делает
+	// работоспособный рантайм неотличимым от отсутствующего.
+	PreflightTimeout string             `yaml:"preflight_timeout,omitempty"`
+	Containment      *ContainmentConfig `yaml:"containment,omitempty"`
+	TreeHash         *TreeHashConfig    `yaml:"tree_hash,omitempty"`
+	Budget           *BudgetConfig      `yaml:"budget,omitempty"`
+	Redaction        *RedactionConfig   `yaml:"redaction,omitempty"`
+	Retention        *RetentionConfig   `yaml:"retention,omitempty"`
 }
 
 // BudgetConfig — глобальные жёсткие лимиты run (P1-7): total wall-time и
@@ -58,6 +63,26 @@ const (
 	DefaultBudgetMaxWallTime = "24h"
 	DefaultBudgetMaxAttempts = 100
 )
+
+// DefaultPreflightTimeout — бюджет одной внешней команды preflight по
+// умолчанию. Замер холодного старта opencode (рантайм по умолчанию) — 2.76 с
+// против 0.29 с прогретого; 60 с дают двадцатикратный запас и при этом не
+// превращают сломанный рантайм в долгое ожидание без диагностики.
+const DefaultPreflightTimeout = 60 * time.Second
+
+// EffectivePreflightTimeout возвращает бюджет внешней команды preflight.
+// Пустое или непарсящееся значение даёт канонический дефолт: валидация конфига
+// уже отвергает некорректные значения, поэтому здесь fallback, а не ошибка.
+func (c *Config) EffectivePreflightTimeout() time.Duration {
+	if c == nil || strings.TrimSpace(c.PreflightTimeout) == "" {
+		return DefaultPreflightTimeout
+	}
+	duration, err := time.ParseDuration(c.PreflightTimeout)
+	if err != nil || duration <= 0 {
+		return DefaultPreflightTimeout
+	}
+	return duration
+}
 
 // EffectiveMaxWallTime возвращает wall-time лимит: явный или канонический
 // дефолт. Значение валидно (Validate вызывается до запуска).
@@ -257,23 +282,25 @@ type WorkflowApprovalConfig struct {
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
-		"effort": true, "stage_timeout": true, "workflow": true, "containment": true,
+		"effort": true, "stage_timeout": true, "preflight_timeout": true,
+		"workflow": true, "containment": true,
 		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
 	}, "config"); err != nil {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion int              `yaml:"schema_version"`
-		Pipeline      yaml.Node        `yaml:"pipeline"`
-		CLI           string           `yaml:"cli"`
-		Model         string           `yaml:"model"`
-		Effort        string           `yaml:"effort"`
-		StageTimeout  string           `yaml:"stage_timeout"`
-		Workflow      *WorkflowConfig  `yaml:"workflow"`
-		TreeHash      *TreeHashConfig  `yaml:"tree_hash"`
-		Budget        *BudgetConfig    `yaml:"budget"`
-		Redaction     *RedactionConfig `yaml:"redaction"`
-		Retention     *RetentionConfig `yaml:"retention"`
+		SchemaVersion    int              `yaml:"schema_version"`
+		Pipeline         yaml.Node        `yaml:"pipeline"`
+		CLI              string           `yaml:"cli"`
+		Model            string           `yaml:"model"`
+		Effort           string           `yaml:"effort"`
+		StageTimeout     string           `yaml:"stage_timeout"`
+		PreflightTimeout string           `yaml:"preflight_timeout"`
+		Workflow         *WorkflowConfig  `yaml:"workflow"`
+		TreeHash         *TreeHashConfig  `yaml:"tree_hash"`
+		Budget           *BudgetConfig    `yaml:"budget"`
+		Redaction        *RedactionConfig `yaml:"redaction"`
+		Retention        *RetentionConfig `yaml:"retention"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -288,6 +315,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Model = raw.Model
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
+	c.PreflightTimeout = raw.PreflightTimeout
 	c.Workflow = raw.Workflow
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
@@ -543,6 +571,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	if c.StageTimeout != "" {
 		if duration, err := time.ParseDuration(c.StageTimeout); err != nil || duration <= 0 {
 			errs = append(errs, fmt.Sprintf("stage_timeout %q не парсится (пример: 30m)", c.StageTimeout))
+		}
+	}
+	if c.PreflightTimeout != "" {
+		if duration, err := time.ParseDuration(c.PreflightTimeout); err != nil || duration <= 0 {
+			errs = append(errs, fmt.Sprintf("preflight_timeout %q не парсится (пример: 60s)", c.PreflightTimeout))
 		}
 	}
 	validate(isOneOf(c.Effort, "", "low", "medium", "high"),

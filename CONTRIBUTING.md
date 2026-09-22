@@ -94,7 +94,7 @@ PR. PR закрывает issue строкой `Closes #<номер>`.
 
 | Инструмент | Минимально | Зачем |
 |---|---|---|
-| Go | 1.26.5+ | сборка и тесты ядра |
+| Go | 1.26.5+ (точный пин CI — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
 | Node.js + npm | 22+ (npm 10+) | сборка/тест web-фронтенда (`web/`) |
 | OpenSpec CLI | через `npx` автоматически | строгая валидация specs (`make specs`) |
 | `opencode` | в `PATH` | только для запуска полного `ai-team run` (LLM-артефакты) |
@@ -110,7 +110,7 @@ npm-проект, чья прод-сборка (`web/dist`) встраивает
 # 1. Ядро
 make build                  # go build -o bin/ai-team ./cmd/ai-team
 make test                   # go test ./...
-make test-coverage          # с coverage-гейтом 60%
+make test-coverage          # coverage-гейт 60% + per-package floors
 
 # 2. Отдельно — только один пакет (быстрее итераций)
 go test ./pkg/pipeline/...
@@ -147,19 +147,22 @@ make test-e2e              # go test -run TestE2E ./e2etest/...
 ```bash
 make build           # сборка cmd/ai-team
 make test            # go test ./... (все пакеты)
-make test-coverage   # go test с coverage gate 60%
+make test-coverage   # coverage gate: total 60% + per-package floors
+                     # (scripts/coverage-floors.env)
 make test-e2e        # e2etest/ — mock-opencode + subprocess-level сценарии
 make specs           # строгая OpenSpec-валидация
-make verify          # specs + mod verify + vet + govulncheck + race tests +
+make verify          # gofmt + specs + go mod verify + go vet + govulncheck +
+                     # race tests + test-coverage + test-e2e +
                      # frontend audit/lint/tests/build
 make clean           # очистка build-артефактов
 ```
 
 `make verify` — это полная проверка, как её гоняет CI: она **включает**
-gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-валидацию, `go mod
-verify`, `go vet`, `govulncheck`, race-тесты, coverage gate 60% (`make
-test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
-проверкой, что встроенный `web/dist` соответствует исходникам фронта. Перед PR
+gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-валидацию,
+`go mod verify`, `go vet`, `govulncheck`, race-тесты, coverage gate — total
+60% плюс per-package floors из `scripts/coverage-floors.env`
+(`make test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build
+с проверкой, что встроенный `web/dist` соответствует исходникам фронта. Перед PR
 достаточно прогнать локально `make verify`; если какая-то проверка не пройдена,
 именно она указывает, что доработать (команды покрыты отдельными шагами в
 [Make-таргеты](#make-таргеты)).

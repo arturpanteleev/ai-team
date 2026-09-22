@@ -4,6 +4,7 @@
 package docs
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -140,21 +141,33 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 	}
 
 	// Диспетчер опознаём по выражению switch, а не по позиции в файле.
-	var dispatcher *ast.SwitchStmt
+	// Собираем ВСЕ совпадения: при втором таком switch «побеждал бы последний»
+	// и сторож молча читал бы не тот блок, обвиняя README в несуществующем
+	// расхождении. Неоднозначность — это отказ, а не выбор наугад.
+	var dispatchers []*ast.SwitchStmt
 	ast.Inspect(file, func(node ast.Node) bool {
 		switchStmt, ok := node.(*ast.SwitchStmt)
 		if !ok || switchStmt.Tag == nil {
 			return true
 		}
 		if types.ExprString(switchStmt.Tag) == "os.Args[1]" {
-			dispatcher = switchStmt
+			dispatchers = append(dispatchers, switchStmt)
 			return false
 		}
 		return true
 	})
-	if dispatcher == nil {
+	switch len(dispatchers) {
+	case 0:
 		t.Fatalf("%s: не найден switch по os.Args[1]", sourcePath)
+	case 1:
+	default:
+		lines := make([]int, 0, len(dispatchers))
+		for _, candidate := range dispatchers {
+			lines = append(lines, fileSet.Position(candidate.Pos()).Line)
+		}
+		t.Fatalf("%s: найдено несколько switch по os.Args[1] (строки %v) — неясно, какой из них диспетчер", sourcePath, lines)
 	}
+	dispatcher := dispatchers[0]
 
 	commands := map[string]bool{}
 	for _, statement := range dispatcher.Body.List {
@@ -252,13 +265,19 @@ var (
 	// принимаем 'x', "x" и голое x: иначе сабтест стал бы вакуумным ровно
 	// в тот момент, когда кто-то переформатирует workflow.
 	workflowGoVersionRe = regexp.MustCompile(`go-version\s*:\s*["']?([0-9][^"'\s#]*)["']?`)
-	workflowGoFileRe    = regexp.MustCompile(`go-version-file\s*:\s*["']?(\S+?)["']?\s*$`)
-	workflowSetupGoRe   = regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses\s*:\s*actions/setup-go`)
+	// (?m) обязателен: без него `$` означает конец ВСЕГО файла, и пин в
+	// середине workflow не нашёлся бы никогда — ветка go-version-file была бы
+	// мёртвой, а миграция на неё (#136) падала бы с ложным «0 пинов».
+	workflowGoFileRe  = regexp.MustCompile(`(?m)^\s*go-version-file\s*:\s*["']?([^"'\s#]+)["']?`)
+	workflowSetupGoRe = regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses\s*:\s*actions/setup-go`)
 	// Минимальная версия в прозе: «Go 1.26.5+», «| Go | 1.26.5+ |»,
 	// «`go` (1.26.5+)», «Go 1.26.5+.» в комментарии шелл-скрипта. Допускаем до
 	// 12 нецифровых символов между словом и версией — это покрывает
 	// разделители таблицы, кавычки и скобки.
-	docGoMinimumRe = regexp.MustCompile(`(?i)\bgo\b[^0-9\n]{0,12}(\d+\.\d+(?:\.\d+)?)\+`)
+	//
+	// Хвостовой «+» НЕ обязателен: «требуется Go 1.20» — такое же расхождение,
+	// как «Go 1.20+», и именно его сторож с обязательным плюсом пропускал.
+	docGoMinimumRe = regexp.MustCompile(`(?i)\bgo\b[^0-9\n]{0,12}(\d+\.\d+(?:\.\d+)?)\+?`)
 )
 
 // goVersionDocs — все файлы, которые называют минимальную версию Go читателю.
@@ -359,38 +378,106 @@ func TestGoVersionsAgreeAcrossManifests(t *testing.T) {
 		}
 		checked := 0
 		for _, workflow := range workflows {
-			content := readRepoFile(t, workflow)
-			setupSteps := len(workflowSetupGoRe.FindAllString(content, -1))
-			if setupSteps == 0 {
+			pins := parseWorkflowGoPins(readRepoFile(t, workflow))
+			if pins.setupSteps == 0 {
 				continue // workflow не ставит Go — пинить нечего
 			}
 			checked++
-
-			versions := workflowGoVersionRe.FindAllStringSubmatch(content, -1)
-			files := workflowGoFileRe.FindAllStringSubmatch(content, -1)
-			// Шаг setup-go без пина берёт произвольную версию Go — это молчаливое
-			// расхождение, поэтому требуем пин на каждый шаг.
-			if len(versions)+len(files) < setupSteps {
-				t.Errorf("%s: %d шагов actions/setup-go, но только %d пинов go-version/go-version-file",
-					workflow, setupSteps, len(versions)+len(files))
-			}
-			for _, match := range versions {
-				if match[1] != pinned {
-					t.Errorf("%s: go-version %q расходится с .tool-versions (golang %s)", workflow, match[1], pinned)
-				}
-			}
-			for _, match := range files {
-				// go-version-file допустим только если указывает на манифест,
-				// который этот тест и считает источником правды.
-				if !strings.HasSuffix(match[1], ".tool-versions") && !strings.HasSuffix(match[1], "go.mod") {
-					t.Errorf("%s: go-version-file %q не ссылается ни на .tool-versions, ни на go.mod", workflow, match[1])
-				}
+			for _, problem := range workflowPinProblems(pins, pinned) {
+				t.Errorf("%s: %s", workflow, problem)
 			}
 		}
 		if checked == 0 {
 			t.Fatal("ни в одном workflow не найден шаг actions/setup-go — сторож стал вакуумным")
 		}
 	})
+}
+
+// workflowGoPins — пины Go, найденные в одном workflow.
+type workflowGoPins struct {
+	setupSteps int
+	versions   []string
+	files      []string
+}
+
+func parseWorkflowGoPins(content string) workflowGoPins {
+	pins := workflowGoPins{setupSteps: len(workflowSetupGoRe.FindAllString(content, -1))}
+	for _, match := range workflowGoVersionRe.FindAllStringSubmatch(content, -1) {
+		pins.versions = append(pins.versions, match[1])
+	}
+	for _, match := range workflowGoFileRe.FindAllStringSubmatch(content, -1) {
+		pins.files = append(pins.files, match[1])
+	}
+	return pins
+}
+
+// workflowPinProblems — чистая проверка пинов одного workflow против
+// .tool-versions. Вынесена из сабтеста, чтобы саму логику сторожа можно было
+// проверить тестом на синтетическом YAML: ветка go-version-file уже была
+// мёртвой из-за `$` без (?m), и это никак не всплывало.
+func workflowPinProblems(pins workflowGoPins, pinned string) []string {
+	var problems []string
+	// Шаг setup-go без пина берёт произвольную версию Go — это молчаливое
+	// расхождение, поэтому требуем пин на каждый шаг.
+	if len(pins.versions)+len(pins.files) < pins.setupSteps {
+		problems = append(problems, fmt.Sprintf("%d шагов actions/setup-go, но только %d пинов go-version/go-version-file",
+			pins.setupSteps, len(pins.versions)+len(pins.files)))
+	}
+	for _, version := range pins.versions {
+		if version != pinned {
+			problems = append(problems, fmt.Sprintf("go-version %q расходится с .tool-versions (golang %s)", version, pinned))
+		}
+	}
+	for _, file := range pins.files {
+		// go-version-file допустим только если указывает на манифест, который
+		// этот тест и считает источником правды.
+		if !strings.HasSuffix(file, ".tool-versions") && !strings.HasSuffix(file, "go.mod") {
+			problems = append(problems, fmt.Sprintf("go-version-file %q не ссылается ни на .tool-versions, ни на go.mod", file))
+		}
+	}
+	return problems
+}
+
+// TestWorkflowPinParsingCoversEveryPinForm — тест на сам сторож. Проверяет, что
+// распознаются все формы записи пина (кавычки любые или отсутствуют,
+// go-version-file), и что расхождение и пропуск пина действительно отвергаются.
+// Без этого ветка go-version-file год могла бы быть мёртвой, а миграция на неё
+// (#136) упиралась бы в ложное «0 пинов».
+func TestWorkflowPinParsingCoversEveryPinForm(t *testing.T) {
+	const step = "      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0\n        with:\n"
+	const pinned = "1.26.6"
+
+	cases := []struct {
+		name    string
+		content string
+		accept  bool
+	}{
+		{"одинарные кавычки", step + "          go-version: '1.26.6'\n", true},
+		{"двойные кавычки", step + "          go-version: \"1.26.6\"\n", true},
+		{"без кавычек", step + "          go-version: 1.26.6\n", true},
+		{"другая версия", step + "          go-version: '1.27.0'\n", false},
+		{"пин отсутствует", step + "          check-latest: true\n", false},
+		{"go-version-file на .tool-versions", step + "          go-version-file: .tool-versions\n", true},
+		{"go-version-file на go.mod", step + "          go-version-file: go.mod\n", true},
+		{"go-version-file на чужой файл", step + "          go-version-file: something-else\n", false},
+		{"go-version-file не в последней строке", step + "          go-version-file: .tool-versions\n          check-latest: true\n      - run: go build ./...\n", true},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pins := parseWorkflowGoPins(testCase.content)
+			if pins.setupSteps != 1 {
+				t.Fatalf("ожидался ровно один шаг actions/setup-go, найдено %d", pins.setupSteps)
+			}
+			problems := workflowPinProblems(pins, pinned)
+			if testCase.accept && len(problems) > 0 {
+				t.Errorf("форма должна приниматься, но сторож возразил: %v", problems)
+			}
+			if !testCase.accept && len(problems) == 0 {
+				t.Error("форма должна отвергаться, но сторож промолчал")
+			}
+		})
+	}
 }
 
 // verifyDescriptions возвращает два независимых описания `make verify` из
@@ -480,6 +567,11 @@ func TestContributingDescribesVerifyTarget(t *testing.T) {
 	// и человеческое имя). Проверка идёт только по тем шагам, которые в
 	// Makefile реально есть: удалили шаг — требование отпадает само, и тест не
 	// начинает требовать документировать несуществующее.
+	//
+	// Токены обязаны быть НЕПЕРЕКРЫВАЮЩИМИСЯ: голое "tests" удовлетворялось бы
+	// словами «race tests» из соседней фразы, а голое "build" — любым
+	// «go build», и требование про фронтенд становилось тавтологией. Поэтому
+	// для npm-шагов берём написания, которые может дать только сам фронтенд-шаг.
 	required := map[string][]string{
 		"verify: specs":         {"specs", "OpenSpec"},
 		"gofmt -l ":             {"gofmt"},
@@ -489,10 +581,10 @@ func TestContributingDescribesVerifyTarget(t *testing.T) {
 		"go test -race":         {"race"},
 		"$(MAKE) test-coverage": {"test-coverage"},
 		"$(MAKE) test-e2e":      {"test-e2e", "E2E"},
-		"npm audit":             {"audit"},
-		"npm run lint":          {"lint"},
-		"npm test":              {"tests"},
-		"npm run build":         {"build"},
+		"npm audit":             {"npm audit", "audit"},
+		"npm run lint":          {"npm run lint", "lint"},
+		"npm test":              {"npm test", "/tests", "тесты фронтенда", "frontend-тесты"},
+		"npm run build":         {"npm run build", "tests/build", "сборку фронтенда", "frontend build"},
 	}
 	places := make([]string, 0, len(descriptions))
 	for place := range descriptions {

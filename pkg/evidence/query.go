@@ -9,8 +9,8 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 )
 
-// DeliveredRun описывает прошлый run, доставивший фичу до конца (deployer
-// зафиксировал commit и/или создал PR).
+// DeliveredRun описывает прошлый run, доставивший фичу до конца
+// (delivery-стадия зафиксировала commit и/или создала PR).
 type DeliveredRun struct {
 	RunID     string
 	StartedAt time.Time
@@ -81,7 +81,14 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 			if jsonErr := json.Unmarshal(attemptData, &attempt); jsonErr != nil {
 				continue
 			}
-			if attempt.Stage != "deployer" || attempt.Delivery == nil {
+			// Delivery-стадию опознаём по наличию delivery-результата, а не
+			// по имени стадии: имя задаётся пользователем в конфиге, а вид
+			// агента (kind: delivery) в attempt-манифест не попадает, поэтому
+			// в evidence-слое его просто нет. Непустой Delivery этого
+			// достаточно: поле заполняет только контроллер и только для
+			// агента с kind: delivery (pkg/pipeline/stage.go), — ни один
+			// другой вид стадии его записать не может.
+			if attempt.Delivery == nil {
 				continue
 			}
 			if attempt.Delivery.CommitSHA == "" && attempt.Delivery.PRURL == "" {

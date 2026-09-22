@@ -269,10 +269,18 @@ jobs:
           **Integrity.** Verify archive digests with the attached \`sha256sums.txt\`:
 
           \`\`\`bash
-          # Scoped to the one archive you downloaded, so --ignore-missing (which
-          # returns 0 on macOS when nothing was verified) is not needed.
-          grep " ai-team-linux-amd64.tar.gz\$" sha256sums.txt | sha256sum -c -
+          # Scoped with grep to the one archive you downloaded, so the dangerous
+          # --ignore-missing is not needed. \`set -o pipefail\` is load-bearing, not
+          # decoration: if grep matches nothing (wrong platform name, archive not
+          # listed), macOS \`sha256sum -c -\` returns 0 on the empty input and the
+          # pipeline would look green without verifying anything.
+          set -o pipefail
+          ARCHIVE=ai-team-linux-amd64.tar.gz   # your platform
+          grep " \$ARCHIVE\$" sha256sums.txt | sha256sum -c -
           \`\`\`
+
+          On macOS use \`shasum -a 256 -c -\` instead of \`sha256sum -c -\`: it is the
+          one that fails closed on empty input regardless of shell options.
 
           **Authenticity.** Every archive and \`sha256sums.txt\` is signed with cosign in
           keyless mode (Sigstore, GitHub Actions OIDC); each has a matching

@@ -106,12 +106,29 @@ darwin/linux × amd64/arm64, файлом `sha256sums.txt` и **подписям
 `.github/workflows/release.yaml` этого репозитория на этом теге, а не
 подменён после публикации; она записана в публичный transparency-лог Rekor.
 
-Скачайте архив, `sha256sums.txt` и bundle к нему, затем проверьте
-**подлинность** (кто собрал) и **целостность** (не изменено):
+> **С какого релиза это работает.** Подписи появляются начиная с первого тега,
+> выпущенного после введения этого раздела. У более ранних релизов (включая
+> `v0.2.0`) нет ни `sha256sums.txt`, ни `*.cosign.bundle`: там команды ниже
+> завершатся ошибкой «no such file or directory», и это **не** признак
+> подмены — проверить такой релиз описанным способом просто нельзя.
+> Какие ассеты есть у конкретного тега:
+> `gh release view <tag> --repo arturpanteleev/ai-team --json assets`.
+
+Нужен **cosign ≥ v2.4.3**, рекомендуется v3.x. Релизы подписываются новым
+форматом bundle, а распознавать его в `verify-blob` автоматически cosign умеет
+только с v2.4.3 — более старая версия упадёт с невнятной ошибкой, которая тоже
+не означает подмену. Проверьте `cosign version`; установка — по
+[docs.sigstore.dev](https://docs.sigstore.dev/cosign/system_config/installation/).
+
+Подставьте нужный тег и проверьте **подлинность** (кто собрал) и
+**целостность** (не изменено):
 
 ```bash
-VERSION=v0.2.0
+VERSION=vX.Y.Z                       # тег нужного релиза
 REPO=arturpanteleev/ai-team
+IDENTITY="https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION"
+ISSUER=https://token.actions.githubusercontent.com
+
 gh release download "$VERSION" --repo "$REPO" \
   --pattern 'ai-team-linux-amd64.tar.gz*' \
   --pattern 'sha256sums.txt*'
@@ -119,15 +136,21 @@ gh release download "$VERSION" --repo "$REPO" \
 # 1. Подлинность: подпись сделана этим workflow на этом теге.
 cosign verify-blob \
   --bundle sha256sums.txt.cosign.bundle \
-  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
   sha256sums.txt
 
-# 2. Целостность: архив соответствует проверенному sha256sums.txt.
-sha256sum -c sha256sums.txt --ignore-missing
+# 2. Целостность: архив соответствует уже проверенному sha256sums.txt.
+sha256sum -c --ignore-missing sha256sums.txt        # Linux (и macOS 15+)
+# shasum -a 256 -c --ignore-missing sha256sums.txt  # macOS без sha256sum
 
 tar -xzf ai-team-linux-amd64.tar.gz && mv ai-team-linux-amd64 /usr/local/bin/ai-team
 ```
+
+`gh release download` возвращает 0, даже если какой-то `--pattern` ничего не
+нашёл, поэтому нехватка ассетов обнаружится только на шаге `cosign
+verify-blob`. Прежде чем трактовать это как подмену, сверьтесь с оговоркой о
+версии релиза выше.
 
 Любой отдельный архив проверяется тем же способом напрямую, без
 `sha256sums.txt` — у него есть собственный bundle:
@@ -135,16 +158,19 @@ tar -xzf ai-team-linux-amd64.tar.gz && mv ai-team-linux-amd64 /usr/local/bin/ai-
 ```bash
 cosign verify-blob \
   --bundle ai-team-linux-amd64.tar.gz.cosign.bundle \
-  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
   ai-team-linux-amd64.tar.gz
 ```
 
 `--certificate-identity` и `--certificate-oidc-issuer` — обязательная часть
 проверки: без них cosign подтвердит лишь то, что подпись кем-то сделана, но не
-кем именно. `cosign` ставится по
-[docs.sigstore.dev](https://docs.sigstore.dev/cosign/system_config/installation/).
-Ненулевой exit-код любой из команд — повод не запускать бинарник.
+кем именно. Значение identity — путь к файлу релизного workflow плюс ref тега,
+поэтому оно и собирается здесь из `$REPO` и `$VERSION`: при переименовании
+`release.yaml` identity изменится вместе с ним.
+
+Ненулевой код возврата `cosign verify-blob` или проверки контрольных сумм на
+релизе, у которого подписи есть, — повод не запускать бинарник.
 
 ## Runtime и credentials
 

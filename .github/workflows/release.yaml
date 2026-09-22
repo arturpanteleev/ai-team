@@ -21,7 +21,8 @@ on:
 # with cosign in keyless mode via the GitHub Actions OIDC token. No signing key
 # is stored or rotated; the certificate binds each signature to this workflow
 # file at this tag, and the signature is logged in the public Rekor
-# transparency log. See README «Граница безопасности» for the verify command.
+# transparency log. The verify command lives in README «Готовые бинарники и
+# проверка подписи»; it needs cosign >= v2.4.3 (new bundle format).
 #
 # The default token is read-only. `id-token: write` is granted only to the
 # build job (needed for keyless signing) and `contents: write` only to the
@@ -38,6 +39,7 @@ jobs:
     outputs:
       tag: ${{ steps.refs.outputs.tag }}
       sha: ${{ steps.refs.outputs.sha }}
+      identity: ${{ steps.refs.outputs.identity }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -60,9 +62,15 @@ jobs:
           set -euo pipefail
           TAG=${GITHUB_REF#refs/tags/}
           SHA=$(git rev-parse HEAD)
+          # The cosign certificate identity is derived here once and consumed by
+          # every job that signs or verifies, so renaming this workflow file can
+          # never leave a stale identity behind in one place.
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "identity=${IDENTITY}" >> "$GITHUB_OUTPUT"
           echo "gating release ${TAG} on exact commit ${SHA}"
+          echo "cosign certificate identity: ${IDENTITY}"
 
   # Gate 3: the full CI workflow, re-run against the tagged commit. A local
   # `uses:` resolves ci.yaml at this same commit, so the release is gated by
@@ -144,15 +152,16 @@ jobs:
           done
           ls -la dist/
 
-      # Fail closed: a bundle that does not verify here must never reach the
-      # release page. Identity is the exact workflow file at the exact tag ref.
-      - name: Verify signatures before publishing
+      # Fail closed, first half: a bundle that does not verify fails the build
+      # before anything is uploaded. The publish job verifies again after the
+      # upload/download round-trip, so an unverifiable signature cannot reach
+      # the release page through either stage.
+      - name: Verify freshly created signatures
         env:
-          TAG: ${{ needs.validate-tag.outputs.tag }}
+          IDENTITY: ${{ needs.validate-tag.outputs.identity }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
           archives=(dist/*.tar.gz)
           if [ ${#archives[@]} -eq 0 ]; then
             echo "::error::no release archives to verify"
@@ -162,7 +171,7 @@ jobs:
             echo "verifying $f"
             cosign verify-blob \
               --bundle "${f}.cosign.bundle" \
-              --certificate-identity "$identity" \
+              --certificate-identity "$IDENTITY" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$f"
           done
@@ -189,16 +198,60 @@ jobs:
           name: release-assets
           path: dist
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Fail closed, second half: verify what is actually about to be attached
+      # to the release, after the upload/download round-trip, not just what the
+      # build job produced before it. Verification needs no id-token — this job
+      # deliberately holds contents: write and nothing else.
+      #
+      # The count check is the part `shopt -s nullglob` would otherwise hide: a
+      # missing bundle glob expands to nothing and would silently publish
+      # unsigned assets under release notes claiming every asset is signed.
+      - name: Verify downloaded signatures
+        env:
+          IDENTITY: ${{ needs.validate-tag.outputs.identity }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          bundles=(dist/*.cosign.bundle)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives to publish"
+            exit 1
+          fi
+          if [ ! -f dist/sha256sums.txt ]; then
+            echo "::error::sha256sums.txt is missing"
+            exit 1
+          fi
+          # One bundle per archive, plus one for sha256sums.txt itself.
+          expected=$(( ${#archives[@]} + 1 ))
+          if [ ${#bundles[@]} -ne "$expected" ]; then
+            echo "::error::expected ${expected} cosign bundles, found ${#bundles[@]}"
+            exit 1
+          fi
+          for f in "${archives[@]}" dist/sha256sums.txt; do
+            echo "verifying $f"
+            cosign verify-blob \
+              --bundle "${f}.cosign.bundle" \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$f"
+          done
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate-tag.outputs.tag }}
           SHA: ${{ needs.validate-tag.outputs.sha }}
+          IDENTITY: ${{ needs.validate-tag.outputs.identity }}
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # Guarded by the verify step above: archives, sha256sums.txt and a
+          # matching bundle for each are known to exist and to verify.
           assets=(dist/*.tar.gz dist/sha256sums.txt dist/*.cosign.bundle)
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
           notes=$(cat <<EOF
           **Quality gates passed on exact tag commit \`${SHA}\`** (tag ${TAG}).
 
@@ -218,12 +271,14 @@ jobs:
 
           **Authenticity.** Every archive and \`sha256sums.txt\` is signed with cosign in
           keyless mode (Sigstore, GitHub Actions OIDC); each has a matching
-          \`.cosign.bundle\`. Verify with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+          \`.cosign.bundle\`. Verify with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+          **v2.4.3 or newer** (v3.x recommended) — older versions cannot read the
+          new bundle format:
 
           \`\`\`bash
           cosign verify-blob \\
             --bundle sha256sums.txt.cosign.bundle \\
-            --certificate-identity "${identity}" \\
+            --certificate-identity "${IDENTITY}" \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
             sha256sums.txt
           \`\`\`

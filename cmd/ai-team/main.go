@@ -845,13 +845,10 @@ func cmdRun() {
 	// (AUD-09): та же классификация отсутствующих runtime/gh/origin, чтобы
 	// CLI не откладывал обнаружение delivery-предусловий на поздние этапы.
 	if err := runPreflight(cfg, reg, *target); err != nil {
-		fmt.Fprintf(os.Stderr, "%s Preflight: %v\n", ui.Colorize("✗", ui.ColorRed), err)
-		if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
-			logging.Emit(logging.Record{
-				Level: "error", Command: "run", Type: "preflight",
-				Message: err.Error(), Exit: exitBlocked,
-			})
-		}
+		logging.Fail(logging.Record{
+			Level: "error", Command: "run", Type: "preflight",
+			Message: err.Error(), Exit: exitBlocked,
+		}, "%s Preflight: %v", ui.Colorize("✗", ui.ColorRed), err)
 		os.Exit(exitBlocked)
 	}
 
@@ -894,11 +891,13 @@ func cmdRun() {
 	}
 	if err != nil {
 		code := exitCodeFor(err)
-		fmt.Fprintf(os.Stderr, "%s Пайплайн остановлен: %v\n", ui.Colorize("✗", ui.ColorRed), err)
-		logging.Emit(logging.Record{
+		// Единственное место, где печатается финальная остановка run: все
+		// терминальные исходы (BLOCKED, негативный вердикт, отказ resume,
+		// отмена) приходят сюда одной ошибкой и печатаются один раз.
+		logging.Fail(logging.Record{
 			Level: "error", Command: "run", Type: "run",
 			Message: "Пайплайн остановлен: " + err.Error(), Exit: code,
-		})
+		}, "%s Пайплайн остановлен: %v", ui.Colorize("✗", ui.ColorRed), err)
 		os.Exit(code)
 	}
 
@@ -1347,8 +1346,8 @@ func cmdVerify() {
 		if gateBundleExists(arg) {
 			digest, err := gate.VerifyBundle(arg, keyVerify)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ Gate bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
-				logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "gate_bundle", Message: err.Error(), Exit: exitFailed})
+				logging.Fail(logging.Record{Level: "error", Command: "verify", Type: "gate_bundle", Message: err.Error(), Exit: exitFailed},
+					"✗ Gate bundle %s: %v", arg, ui.Colorize(err.Error(), ui.ColorRed))
 				os.Exit(exitFailed)
 			}
 			logging.Printf("✓ Gate bundle %s: OK — records согласованы, bundle_sha256 %s%s\n", arg, digest, sigNote(keyVerify))
@@ -1357,8 +1356,8 @@ func cmdVerify() {
 			return
 		}
 		if err := export.VerifyBundle(arg, keyVerify); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ Bundle %s: %v\n", arg, ui.Colorize(err.Error(), ui.ColorRed))
-			logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run_bundle", Message: err.Error(), Exit: exitFailed})
+			logging.Fail(logging.Record{Level: "error", Command: "verify", Type: "run_bundle", Message: err.Error(), Exit: exitFailed},
+				"✗ Bundle %s: %v", arg, ui.Colorize(err.Error(), ui.ColorRed))
 			os.Exit(exitFailed)
 		}
 		logging.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
@@ -1383,8 +1382,8 @@ func cmdVerify() {
 		fatal("Run %s: DSSE-подпись применима только к bundle (export/gate), а не к live run evidence; --verify-key не используется на этой ветке — отказ (fail-closed)", runID)
 	}
 	if err := export.VerifyEvidence(runDir); err != nil {
-		fmt.Fprintf(os.Stderr, "✗ Run %s: %v\n", runID, ui.Colorize(err.Error(), ui.ColorRed))
-		logging.Emit(logging.Record{Level: "error", Command: "verify", Type: "run", Message: err.Error(), Exit: exitFailed})
+		logging.Fail(logging.Record{Level: "error", Command: "verify", Type: "run", Message: err.Error(), Exit: exitFailed},
+			"✗ Run %s: %v", runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)
 	}
 	logging.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)

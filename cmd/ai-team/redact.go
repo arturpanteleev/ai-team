@@ -130,9 +130,9 @@ func cmdRedact() {
 	case "verify":
 		report, err := redact.Verify(scanRoot, policy)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "✗ Redaction %s: %v\n", scanRoot, err)
-			logging.Emit(logging.Record{Level: "error", Command: "redact", Type: "redact_verify",
-				Message: err.Error(), Data: redactReportData(report)})
+			logging.Fail(logging.Record{Level: "error", Command: "redact", Type: "redact_verify",
+				Message: err.Error(), Data: redactReportData(report)},
+				"✗ Redaction %s: %v", scanRoot, err)
 			os.Exit(exitFailed)
 		}
 		fmt.Printf("✓ Redaction %s: clean (%d файлов)\n", scanRoot, report.Files)

@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Reusable entry point: .github/workflows/release.yaml calls this workflow so
+  # the release gate is literally CI, not a hand-maintained copy of it (#102).
+  # Keep every gate in this file — anything added here automatically gates
+  # releases too.
+  workflow_call:
 
 permissions:
   contents: read
@@ -18,8 +23,10 @@ jobs:
         with:
           go-version: '1.26.6'
           check-latest: true
+      # ./... (not just ./cmd/ai-team): this job is also the release gate via
+      # workflow_call, so every package must be known to compile.
       - name: Build
-        run: go build ./cmd/ai-team
+        run: go build ./...
       - name: Verify module checksums
         run: go mod verify
 

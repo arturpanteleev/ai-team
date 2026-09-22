@@ -96,6 +96,133 @@ ai-team:
 go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest
 ```
 
+### Готовые бинарники и проверка подписи
+
+Для каждого тега `v*` публикуется релиз с архивами под
+darwin/linux × amd64/arm64, файлом `sha256sums.txt` и **подписями cosign**
+(Sigstore, keyless через OIDC GitHub Actions) — по одному файлу
+`<asset>.cosign.bundle` на каждый архив и на сам `sha256sums.txt`.
+Сертификат удостоверяет, что подпись поставлена job'ом
+`.github/workflows/release.yaml` этого репозитория на этом теге; сборка и
+подпись выполняются в одной job, поэтому подпись покрывает и происхождение
+артефакта. Подмену выявляет не наличие подписи, а её успешная проверка —
+командой ниже; запись о подписи лежит в публичном transparency-логе Rekor.
+
+> **С какого релиза это работает.** `v0.2.0` — последний релиз без подписей.
+> У него и у всего, что опубликовано раньше, нет ни `sha256sums.txt`, ни
+> `*.cosign.bundle`: команды ниже упадут с «no such file or directory», и это
+> не признак подмены, а отсутствие механизма — проверить такой релиз описанным
+> способом нельзя. **У всего, что опубликовано после `v0.2.0`, подписи обязаны
+> быть** — речь о дате публикации, а не о порядке версий: тег на старой линии,
+> выпущенный сегодня, тоже подписан. Если у такого релиза нет
+> `sha256sums.txt` или нет `.cosign.bundle` хотя бы к одному ассету — не
+> доверяйте артефактам. Причина может быть и безобидной (оборвавшаяся
+> публикация), но отличить её от подмены снаружи нельзя, а подписывается всё
+> или ничего. Посмотреть фактический список ассетов:
+> `gh release view <tag> --repo arturpanteleev/ai-team --json assets`.
+
+Нужен **cosign ≥ v2.4.2** (рекомендуется v3.x): релизы подписываются новым
+форматом bundle, и распознавать его в `verify-blob` автоматически cosign умеет
+начиная с v2.4.2. Более старая версия упадёт с невнятной ошибкой, которая тоже
+не означает подмену. Проверьте `cosign version`; установка — по
+[docs.sigstore.dev](https://docs.sigstore.dev/cosign/system_config/installation/).
+
+Подставьте нужный тег. Блок рассчитан на выполнение целиком, и `set -euo
+pipefail` в первой строке — его обязательная часть: без неё установка
+выполнится даже после провалившейся проверки. Сохраните его в файл и запустите
+`bash install.sh` — в интерактивном шелле `set -e` закроет окно вместе с
+диагностикой на первой же ошибке.
+
+```bash
+set -euo pipefail
+
+VERSION=vX.Y.Z                # тег нужного релиза
+REPO=arturpanteleev/ai-team
+IDENTITY="https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION"
+ISSUER=https://token.actions.githubusercontent.com
+
+# Платформа определяется автоматически. Подставлять имя архива руками не стоит:
+# чужой, но подлинный архив пройдёт обе проверки, и в /usr/local/bin окажется
+# бинарник не для вашей платформы.
+case "$(uname -s)" in
+  Darwin) OS=darwin; sha256check() { shasum -a 256 -c -; } ;;
+  Linux)  OS=linux;  sha256check() { sha256sum -c -; } ;;
+  *) echo "неподдерживаемая ОС: $(uname -s)" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) ARCH=arm64 ;;
+  x86_64|amd64)  ARCH=amd64 ;;
+  *) echo "неподдерживаемая архитектура: $(uname -m)" >&2; exit 1 ;;
+esac
+ARCHIVE="ai-team-${OS}-${ARCH}.tar.gz"
+
+gh release download "$VERSION" --repo "$REPO" \
+  --pattern "$ARCHIVE*" \
+  --pattern 'sha256sums.txt*'
+
+# 1. Подлинность: подпись сделана этим workflow на этом теге.
+cosign verify-blob \
+  --bundle sha256sums.txt.cosign.bundle \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
+  sha256sums.txt
+
+# 2. Целостность: сверяем ровно скачанный архив с уже проверенным sha256sums.txt.
+grep " $ARCHIVE\$" sha256sums.txt | sha256check
+
+# 3. Установка — только если обе проверки прошли.
+tar -xzf "$ARCHIVE"
+mv "${ARCHIVE%.tar.gz}" /usr/local/bin/ai-team
+```
+
+Почему именно так:
+
+- **`set -euo pipefail`.** Шаги не связаны в одну `&&`-цепочку; без этой строки
+  `tar`/`mv` выполнятся после провала `cosign verify-blob` и сверки сумм, и вы
+  установите ровно тот бинарник, от которого проверка вас отговаривала.
+- **`grep` + `-c -` вместо `-c --ignore-missing sha256sums.txt`.**
+  `sha256sums.txt` перечисляет все четыре платформы, а скачана одна, поэтому
+  проверять файл целиком пришлось бы с `--ignore-missing` — а он опасен: на
+  macOS Apple'овский `/sbin/sha256sum -c --ignore-missing` возвращает **0**,
+  когда не проверено ни одного файла, то есть даёт ложно-зелёный результат
+  ровно в сценарии «`gh release download` вернул 0, а архив не скачался».
+  `grep` сужает проверку до одной строки, и `--ignore-missing` становится не
+  нужен.
+- **`pipefail` нужен и сам по себе, не только ради `set -e`.** Если `grep`
+  ничего не нашёл (архива нет в `sha256sums.txt`, опечатка в имени), он отдаёт
+  пустой ввод, а Apple'овский `sha256sum -c -` на пустом вводе тоже возвращает
+  **0** — проверено. Код возврата конвейера берётся от `grep` только при
+  `pipefail`, поэтому **эту строку нельзя выдёргивать из блока**: вне `set -o
+  pipefail` она ложно-зелёная на macOS. GNU `sha256sum` и `shasum -a 256` на
+  пустом вводе честно возвращают 1, но полагаться на то, какой именно
+  `sha256sum` окажется в `PATH`, не стоит — блок выбирает `shasum` на macOS
+  именно поэтому.
+- **`gh release download` возвращает 0**, даже если какой-то `--pattern` ничего
+  не нашёл. Нехватка ассетов поэтому всплывает только на шаге проверки; как её
+  трактовать — по границе релизов выше.
+
+Любой отдельный архив проверяется тем же способом напрямую, без
+`sha256sums.txt` — у него есть собственный bundle:
+
+```bash
+cosign verify-blob \
+  --bundle "$ARCHIVE.cosign.bundle" \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
+  "$ARCHIVE"
+```
+
+`--certificate-identity` и `--certificate-oidc-issuer` — обязательная часть
+проверки: без них cosign подтвердит лишь то, что подпись кем-то сделана, но не
+кем именно. Значение identity — путь к файлу релизного workflow плюс ref тега;
+имя `release.yaml` захардкожено и здесь, и в самом workflow, так что при его
+переименовании эта команда сломается и раздел придётся обновить — сверьтесь с
+[актуальным `release.yaml`](.github/workflows/release.yaml), если identity не
+совпала.
+
+Ненулевой код возврата `cosign verify-blob` или проверки контрольных сумм на
+релизе, у которого подписи есть, — повод не запускать бинарник.
+
 ## Runtime и credentials
 
 Агентный runtime запускается в **изолированном окружении**: у каждого рантайма
@@ -598,6 +725,34 @@ project/plugin/user/built-in слоями и что происходит с inva
   доказательство авторства («кто создал»). Ключи передаются через CLI-файлы и
   никогда не попадают в evidence.
 
+### Authenticity релизных артефактов
+
+Та же пара гарантий действует и для бинарников, которые выпускает сам проект —
+раньше у них была только integrity:
+
+- **Integrity:** к релизу приложен `sha256sums.txt` с digest каждого архива.
+- **Authenticity:** каждый архив и сам `sha256sums.txt` подписаны cosign в
+  keyless-режиме. Подписывающий ключ не хранится и не ротируется: job
+  `build` в `.github/workflows/release.yaml` получает короткоживущий OIDC-токен
+  GitHub Actions (`permissions: id-token: write`, выданный только этой job),
+  Fulcio выдаёт по нему сертификат, привязанный к
+  `…/.github/workflows/release.yaml@refs/tags/<tag>`, а запись о подписи
+  попадает в публичный transparency-лог Rekor. Артефакт подписи —
+  self-contained `<asset>.cosign.bundle` (подпись + сертификат + Rekor-proof),
+  опубликованный рядом с архивами.
+
+Команда проверки и объяснение обязательных флагов — в разделе
+[«Готовые бинарники и проверка подписи»](#готовые-бинарники-и-проверка-подписи).
+Подпись не заменяет digest, а дополняет его: digest отвечает «не изменено»,
+подпись — «собрано именно этим релизным workflow на этом теге».
+Что подпись **не** доказывает: что содержимое бинарника безопасно или что тег
+поставил конкретный человек — она удостоверяет workflow и ref, а не автора.
+
+Тот же workflow перед сборкой прогоняет против точного commit тега полный
+CI-набор (`.github/workflows/ci.yaml` вызывается как reusable workflow), так
+что подписанный артефакт всегда происходит от коммита, прошедшего те же гейты,
+что и master.
+
 ### Граница для недоверенного кода
  OpenCode получает app-level deny
 для shell/network/tasks, ограниченные edit/read rules и отдельный config home,
@@ -684,4 +839,9 @@ test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
 `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, ...) и публикуется на
 GitHub Pages при push в `master` (`.github/workflows/pages.yaml`). Релиз
 бинарников для нескольких платформ создаётся автоматически по push тега
-`v*` через `.github/workflows/release.yaml` (`make release-binaries`).
+`v*` через `.github/workflows/release.yaml` (`make release-binaries`): тег
+сначала проверяется на semver, затем против его точного коммита прогоняется
+весь CI (`ci.yaml` вызывается как reusable workflow — отдельного, способного
+разойтись списка проверок нет), и только после этого архивы подписываются
+cosign и публикуются (см.
+[«Authenticity релизных артефактов»](#authenticity-релизных-артефактов)).

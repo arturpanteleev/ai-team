@@ -17,6 +17,27 @@
 - **Точки внедрения в `pkg/preflight`** (`WithCommandRunner`, `WithLookPath`,
   `WithTimeout`): классификацию исходов теперь можно проверять извне пакета без
   порождения настоящих процессов.
+- **Подписи релизных артефактов (cosign keyless).** Каждый архив релиза и
+  `sha256sums.txt` подписываются через Sigstore в keyless-режиме по OIDC-токену
+  GitHub Actions; рядом публикуется `<asset>.cosign.bundle` (подпись +
+  сертификат + Rekor-proof). Ключ не хранится и не ротируется, сертификат
+  привязан к `release.yaml@refs/tags/<tag>`. Перед публикацией подписи
+  проверяются дважды: в job сборки и повторно в job публикации уже над
+  скачанными артефактами, с проверкой того, что bundle есть у каждого ассета.
+  Команда проверки — в README («Готовые бинарники и проверка подписи»), нужен
+  cosign ≥ v2.4.2. `id-token: write` выдан только job сборки, `contents: write`
+  — только job публикации (#101).
+
+### Changed
+
+- **Релизный гейт равен CI.** `.github/workflows/release.yaml` больше не
+  повторяет урезанный набор проверок (`go build`/`go vet`/`go test`), а
+  вызывает `ci.yaml` как reusable workflow против точного коммита тега — то
+  есть gofmt, `go mod verify`, coverage-гейт с per-package floors, `-race`,
+  e2e, фронтенд (build + сверка встроенного `web/dist` + lint + test + audit),
+  govulncheck и строгую OpenSpec-валидацию. Заодно `go build` в CI расширен с
+  `./cmd/ai-team` до `./...`. Текст release notes приведён в соответствие с
+  тем, что действительно прогоняется (#102).
 
 ### Fixed
 

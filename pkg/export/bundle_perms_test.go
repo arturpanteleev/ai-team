@@ -11,9 +11,8 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 )
 
-// PDD-25: run bundle неизменяем целиком, поэтому все его файлы (index.json
-// наравне с скопированными records и dsse.json) записываются одинаковыми
-// правами без бита записи.
+// PDD-25: все файлы run bundle (index.json наравне со скопированными records
+// и dsse.json) записываются одинаковыми правами без бита записи.
 func TestRunBundleFilesAreReadOnly(t *testing.T) {
 	base := t.TempDir()
 	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))

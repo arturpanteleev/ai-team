@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+// ReadOnlyFileMode — права, которыми контроллер пишет immutable-артефакты
+// (файлы bundle: records, index.json, dsse.json): ни одного бита записи.
+// Единый источник для всех writer'ов, чтобы права не разошлись между
+// пакетами (PDD-25).
+const ReadOnlyFileMode os.FileMode = 0o444
+
 // ReadRegularFile reads a bounded regular file and rejects symlinks, devices,
 // FIFOs and path replacement between lstat and open.
 func ReadRegularFile(path string, maxBytes int64) ([]byte, error) {

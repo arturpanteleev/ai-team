@@ -13,10 +13,10 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 )
 
-// PDD-25: bundle неизменяем целиком, поэтому все его файлы (index.json наравне
-// с gate.json, checks/*.json и dsse.json) записываются одинаковыми правами без
-// бита записи. Неоднородность прав читалась бы как недосмотр ровно там, где
-// продукт демонстрирует аккуратность к неизменяемости.
+// PDD-25: все файлы bundle (index.json наравне с gate.json, checks/*.json и
+// dsse.json) записываются одинаковыми правами без бита записи. Неоднородность
+// прав читалась бы как недосмотр ровно там, где продукт демонстрирует
+// аккуратность к неизменяемости; фактическую неизменяемость даёт digest.
 func TestGateBundleFilesAreReadOnly(t *testing.T) {
 	fixed := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	result := &Result{

@@ -123,6 +123,7 @@ func printUsage() {
   ai-team worker                   Выполнить один disposable worker job из stdin
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list [--target <path>]   Список доступных агентов
+  ai-team ci-import                Импортировать объяснимый набор checks из project CI
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
   ai-team redact verify|scan|redact   P1-6 redaction-контракт: сеcrets-скан evidence,
                                    verify (fail-closed для экспорта) или detached-копия

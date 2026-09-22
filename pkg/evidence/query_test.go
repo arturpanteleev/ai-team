@@ -100,3 +100,35 @@ func TestFindDeliveredOnMissingRunsRootReturnsNotFound(t *testing.T) {
 		t.Fatalf("ожидалось not-found, получено: %+v", found)
 	}
 }
+
+// Имя delivery-стадии задаётся пользователем в конфиге: workflow может назвать
+// её `ship` вместо `deployer`. Запись о доставке должна находиться в обоих
+// случаях — evidence-слой не знает имён ролей.
+func TestFindDeliveredLocatesCustomNamedDeliveryStage(t *testing.T) {
+	target := t.TempDir()
+	runsRoot := filepath.Join(target, "runs")
+	artifactRoot := filepath.Join(target, "artifacts")
+
+	manifest := testRunManifest("run-ship")
+	manifest.Feature = "add-jwt-auth"
+	store, err := Start(runsRoot, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishAttempt(AttemptManifest{
+		AttemptID: "attempt-1",
+		Stage:     "ship",
+		Status:    "completed",
+		Delivery:  &delivery.Result{CommitSHA: "cafebabe", PRURL: "https://example.invalid/pr/7"},
+	}, artifactRoot, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	found, ok, err := FindDelivered(runsRoot, "add-jwt-auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found.RunID != "run-ship" || found.Delivery.CommitSHA != "cafebabe" {
+		t.Fatalf("ожидалась найденная delivery для стадии ship: found=%+v ok=%v", found, ok)
+	}
+}

@@ -272,7 +272,7 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
 | `ai-team worker --target <dir> --db <path>` | исполнить один strict worker job из stdin (обычно вызывается launcher-ом) |
 | `ai-team scheduler-worker [--target <dir>] [--scheduler-db <path>] [--db <path>] [--worker-id <id>] [--once]` | claim и исполнить job из persistent scheduler queue (lease, лимиты concurrency) |
-| `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
+| `ai-team list [--target <dir>]` | список доступных агентов (имя, runtime, источник в layered registry) для указанного проекта (по умолчанию текущая директория) |
 | `ai-team ci-import [--target <dir>] [--format github-actions]` | импортировать ограниченный объяснимый набор checks из project CI (GitHub Actions) без исполнения произвольного YAML; показывает effective suite и fingerprint перед запуском |
 | `ai-team redact <verify\|scan\|redact> [--target <dir>] [--run <id>] [--path <rel>] [--out <dir>]` | P1-6 privacy-контракт: secrets-скан evidence (subcommand — перед флагами), fail-closed verify для экспорта или detached-копия с заменой секретов на `[REDACTED:...]` (--out вне source) |
 | `ai-team gate --target <dir> --base <ref> --candidate <ref|WORKTREE> [--config <file>] [--out <dir>]` | детерминированный diff-policy вердикт + typed checks + attestation bundle; exit 0/1/2 |

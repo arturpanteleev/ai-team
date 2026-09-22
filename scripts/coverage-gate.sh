@@ -25,7 +25,10 @@ readonly OVERALL_FLOOR="60.0"
 # Ratchet: floors start at the current actual coverage and must only go up.
 # To raise a floor, edit scripts/coverage-floors.env in the same PR that
 # improves the number; lowering a value is rejected by review.
-SAFETY_PACKAGES=(pkg/approval pkg/checks pkg/delivery pkg/evidence pkg/pipeline pkg/safeio)
+# cmd/ai-team carries the whole user-facing CLI contract (flag parsing, exit
+# codes); pkg/worker executes jobs for other people's runs and pkg/artifactstore
+# holds their artifacts — all three are safety surface, not cosmetics.
+SAFETY_PACKAGES=(cmd/ai-team pkg/approval pkg/artifactstore pkg/checks pkg/delivery pkg/evidence pkg/pipeline pkg/safeio pkg/worker)
 load_floors() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,12 +43,15 @@ load_floors() {
 
 floor_for() {
     case "$1" in
-        pkg/approval)  echo "${PKG_APPROVAL_FLOOR:?}" ;;
-        pkg/checks)    echo "${PKG_CHECKS_FLOOR:?}" ;;
-        pkg/delivery)  echo "${PKG_DELIVERY_FLOOR:?}" ;;
-        pkg/evidence)  echo "${PKG_EVIDENCE_FLOOR:?}" ;;
-        pkg/pipeline)  echo "${PKG_PIPELINE_FLOOR:?}" ;;
-        pkg/safeio)    echo "${PKG_SAFEIO_FLOOR:?}" ;;
+        cmd/ai-team)        echo "${PKG_CMD_AI_TEAM_FLOOR:?}" ;;
+        pkg/approval)       echo "${PKG_APPROVAL_FLOOR:?}" ;;
+        pkg/artifactstore)  echo "${PKG_ARTIFACTSTORE_FLOOR:?}" ;;
+        pkg/checks)         echo "${PKG_CHECKS_FLOOR:?}" ;;
+        pkg/delivery)       echo "${PKG_DELIVERY_FLOOR:?}" ;;
+        pkg/evidence)       echo "${PKG_EVIDENCE_FLOOR:?}" ;;
+        pkg/pipeline)       echo "${PKG_PIPELINE_FLOOR:?}" ;;
+        pkg/safeio)         echo "${PKG_SAFEIO_FLOOR:?}" ;;
+        pkg/worker)         echo "${PKG_WORKER_FLOOR:?}" ;;
         *) echo "";;
     esac
 }

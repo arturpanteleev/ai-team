@@ -172,7 +172,9 @@ func (a *RunArchive) Restore(runID, destination string) error {
 			copyErr = closeErr
 		}
 		if copyErr != nil || size != entry.Size {
-			// temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
+			// Аварийные пути до rename: недописанный temp-файл убирается как
+			// уборка мусора, значимая ошибка возвращается следующей строкой.
+			// Если убрать не удалось, сделать с этим всё равно нечего.
 			_ = os.Remove(tempPath)
 			return errors.Join(copyErr, fmt.Errorf("artifact restore size mismatch: %s", entry.Path))
 		}

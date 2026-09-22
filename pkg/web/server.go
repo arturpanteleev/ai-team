@@ -154,6 +154,15 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 
+	// Катч-олл под /api/ регистрируется до SPA-fallback и вне блока distDir:
+	// иначе неизвестный API-путь проваливался в `/*` и отдавал HTML страницы
+	// дашборда со статусом 200, а без собранного фронтенда — text/plain от
+	// дефолтного NotFound chi. Любой автоматизированный клиент в обоих случаях
+	// получал не машиночитаемую ошибку. chi разбирает маршруты по префиксному
+	// дереву и предпочитает статические сегменты wildcard'у, поэтому все
+	// зарегистрированные выше роуты по-прежнему выигрывают у этого шаблона.
+	srv.router.Handle("/api/*", http.HandlerFunc(handleAPINotFound))
+
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
 		if err != nil {
@@ -655,6 +664,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	s.frontend.ServeHTTP(w, r)
+}
+
+// handleAPINotFound отвечает на запрос под /api/, которому не соответствует ни
+// один зарегистрированный роут.
+//
+// Почему 404, а не 405 на неподдерживаемый метод существующего пути: chi
+// приводит сюда оба случая через один и тот же катч-олл, и на этом уровне
+// список методов конкретного пути уже недоступен. RFC 9110 §15.5.6 требует,
+// чтобы ответ 405 нёс заголовок Allow с реальным набором методов; выдумывать
+// его нельзя, а 405 без Allow — некорректный ответ. Поэтому пара «метод + путь»
+// трактуется целиком: такого ресурса нет. Контракт для клиента при этом
+// выполняется — тело всегда JSON, а не HTML.
+func handleAPINotFound(w http.ResponseWriter, r *http.Request) {
+	writeJSONResponse(w, http.StatusNotFound, map[string]string{
+		"error":  "not_found",
+		"detail": fmt.Sprintf("no API route matches %s %s", r.Method, r.URL.Path),
+	})
 }
 
 func spaHandler(distDir string) http.Handler {

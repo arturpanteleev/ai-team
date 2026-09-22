@@ -692,3 +692,97 @@ func TestNewServerFallsBackToEmbeddedFrontend(t *testing.T) {
 		t.Fatalf("response does not contain embedded frontend marker: %q", response.Body.String())
 	}
 }
+
+// TestUnknownAPIRouteReturnsJSONNotFound фиксирует границу между API и
+// SPA-fallback: катч-олл фронтенда раньше отдавал HTML со статусом 200 на любой
+// несуществующий /api/-путь.
+func TestUnknownAPIRouteReturnsJSONNotFound(t *testing.T) {
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", dist, t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create test server: %v", err)
+	}
+	defer srv.Close()
+
+	assertJSONNotFound := func(t *testing.T, method, target string) {
+		t.Helper()
+		request := newLoopbackRequest(method, target, nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s %s: expected 404, got %d: %s", method, target, response.Code, response.Body.String())
+		}
+		if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Fatalf("%s %s: expected JSON content type, got %q", method, target, contentType)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatalf("%s %s: decode body: %v", method, target, err)
+		}
+		if payload["error"] == "" || payload["detail"] == "" {
+			t.Fatalf("%s %s: expected explanatory body, got %v", method, target, payload)
+		}
+	}
+
+	t.Run("unknown api path", func(t *testing.T) {
+		assertJSONNotFound(t, http.MethodGet, "/api/definitely-not-a-route")
+	})
+
+	t.Run("unknown nested api path", func(t *testing.T) {
+		assertJSONNotFound(t, http.MethodPost, "/api/runs/run-1/definitely-not-a-route")
+	})
+
+	// Неподдерживаемый метод существующего пути сознательно трактуется как 404,
+	// см. комментарий у handleAPINotFound; проверяем именно формат ответа.
+	t.Run("unsupported method on existing path", func(t *testing.T) {
+		assertJSONNotFound(t, http.MethodGet, "/api/runs")
+	})
+
+	t.Run("existing route still answers", func(t *testing.T) {
+		request := newLoopbackRequest(http.MethodGet, "/api/pipelines", nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+		}
+		var runs []any
+		if err := json.NewDecoder(response.Body).Decode(&runs); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	})
+
+	t.Run("non-api path still serves spa", func(t *testing.T) {
+		request := newLoopbackRequest(http.MethodGet, "/pipelines/123", nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", response.Code)
+		}
+		if response.Body.String() != "<html>SPA</html>" {
+			t.Fatalf("expected SPA fallback, got %q", response.Body.String())
+		}
+	})
+}
+
+// TestUnknownAPIRouteReturnsJSONWithoutFrontend: JSON-404 не должен зависеть от
+// того, собран ли фронтенд — без dist катч-олл SPA вообще не регистрируется.
+func TestUnknownAPIRouteReturnsJSONWithoutFrontend(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	request := newLoopbackRequest(http.MethodGet, "/api/definitely-not-a-route", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("expected JSON content type, got %q", contentType)
+	}
+}

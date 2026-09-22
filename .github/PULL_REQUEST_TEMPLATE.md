@@ -7,6 +7,16 @@
 
 <!-- One or two sentences: what this PR does and why. -->
 
+## Related issue
+
+<!--
+  Link the issue this PR resolves so it closes on merge, e.g. `Closes #42`.
+  The issue is a short pointer; this PR and its OpenSpec change are the source
+  of truth. Where they disagree, the change is right (see CONTRIBUTING.md).
+-->
+
+Closes #
+
 ## OpenSpec change
 
 <!--

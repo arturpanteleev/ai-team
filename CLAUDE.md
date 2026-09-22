@@ -51,6 +51,20 @@ Runtime-инвариант отдельный: approval обычных checkpoin
 delivery. Commit/push/PR выполняет только контроллер после deterministic checks и
 approval точного SHA-256 canonical plan через `--approve-plan <sha256>`.
 
+### Issue ↔ change
+
+Планирование — в GitHub Issues, проектирование — в `openspec/changes/`. Issue —
+короткий указатель: он **не повторяет** change. Нормативные формулировки,
+критерии приёмки и шаги реализации существуют только в change, поэтому
+разойтись им не на чем. При любом расхождении верен change, а не issue.
+
+Change создаётся **не при заведении issue, а когда задача берётся в работу**;
+к моменту коммита и push он обязан существовать. Один issue — один change;
+issue на отдельные пункты `tasks.md` не заводятся. Уточнение постановки
+правится в `proposal.md`, а не в тексте issue. PR закрывает issue строкой
+`Closes #<номер>`. Полное описание границы — в
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Команды
 
 ```bash

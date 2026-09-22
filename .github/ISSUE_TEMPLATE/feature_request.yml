@@ -7,31 +7,44 @@ body:
       value: |
         Thanks for proposing a feature for ai-team.
         Search [existing issues](https://github.com/arturpanteleev/ai-team/issues) first to avoid duplicates.
+
+        **Keep this issue short.** ai-team is developed spec-first: the normative
+        wording, the chosen design with its alternatives, the acceptance criteria
+        and the implementation steps all live in an OpenSpec change under
+        `openspec/changes/`, not in the issue. The issue states the problem and
+        points at the change. If the two ever disagree, the change is right.
+        See [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What problem are you trying to solve? Describe the scenario and pain point.
+      description: What problem are you trying to solve? Describe the scenario and the pain in a few sentences.
     validations:
       required: true
   - type: textarea
-    id: solution
+    id: direction
     attributes:
-      label: Proposed solution
-      description: What change would address the problem? Be concrete.
-    validations:
-      required: true
-  - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives considered
-      description: What other approaches did you consider, and why were they insufficient?
+      label: Proposed direction (optional)
+      description: >-
+        One paragraph on the direction you have in mind — enough to judge whether
+        this is worth doing. Do not write the design here: the approach, the
+        alternatives considered and the trade-offs are decided in the OpenSpec
+        change, so that there is exactly one place that can be wrong.
   - type: textarea
     id: examples
     attributes:
-      label: Example usage / CLI / config
-      description: Optional example of how the feature would be used.
+      label: Example usage / CLI / config (optional)
+      description: A short example of how the feature would be used.
       render: shell
+  - type: input
+    id: openspec-change
+    attributes:
+      label: OpenSpec change
+      description: >-
+        Path to the change that specifies this, once it exists. Leave empty if it
+        does not — the issue gets the `needs-change` label and the path is filled
+        in after the Propose step.
+      placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: acceptance
     attributes:

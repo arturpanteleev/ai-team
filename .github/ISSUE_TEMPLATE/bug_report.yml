@@ -7,6 +7,11 @@ body:
       value: |
         Thanks for taking the time to report an issue with ai-team.
         Before filing, please search [existing issues](https://github.com/arturpanteleev/ai-team/issues) for a duplicate.
+
+        Describe what you observed — do not propose the fix here. If the fix
+        changes behaviour, it is specified in an OpenSpec change under
+        `openspec/changes/`, and this issue just points at it.
+        See [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
   - type: input
     id: version
     attributes:
@@ -60,6 +65,15 @@ body:
       label: Configuration
       description: Relevant part of `.ai-team/config.yaml` (redact credentials).
       render: yaml
+  - type: input
+    id: openspec-change
+    attributes:
+      label: OpenSpec change
+      description: >-
+        Path to the change that specifies the fix, once it exists. Leave empty if
+        it does not — the issue gets the `needs-change` label, and a fix that does
+        not change observable behaviour needs no change at all.
+      placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: security
     attributes:

@@ -1097,20 +1097,31 @@ func TestInitCommandContract(t *testing.T) {
 		if err != nil || !strings.Contains(string(gitignore), ".ai-team/") {
 			t.Fatalf("--write-gitignore обязан исключать control root: %q (%v)", gitignore, err)
 		}
-		// Повторный init идемпотентен и не перезаписывает конфиг.
-		before, err := os.ReadFile(filepath.Join(target, ".ai-team", "config.yaml"))
+		// Повторный init обязан сохранить уже существующий config.yaml.
+		// Сверять байты до и после мало: конфиг сериализуется детерминированно,
+		// поэтому повторная запись дала бы ровно те же байты и проверка прошла
+		// бы даже со снятой защитой. Между запусками вносится правка
+		// пользователя — именно её потеря и есть тот отказ, от которого guard
+		// защищает.
+		configPath := filepath.Join(target, ".ai-team", "config.yaml")
+		generated, err := os.ReadFile(configPath)
 		if err != nil {
+			t.Fatal(err)
+		}
+		edited := append(append([]byte(nil), generated...),
+			[]byte("\n# правка пользователя: перезапись init'ом недопустима\n")...)
+		if err := os.WriteFile(configPath, edited, 0644); err != nil {
 			t.Fatal(err)
 		}
 		if _, code, stderr := runCLI(t, "init", "--target", target, "--write-gitignore"); code != 0 {
 			t.Fatalf("повторный init: exit %d; stderr: %s", code, stderr)
 		}
-		after, err := os.ReadFile(filepath.Join(target, ".ai-team", "config.yaml"))
+		after, err := os.ReadFile(configPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(before, after) {
-			t.Fatal("повторный init перезаписал существующий конфиг")
+		if !bytes.Equal(after, edited) {
+			t.Fatalf("повторный init затёр пользовательский config.yaml:\n%s", after)
 		}
 	})
 

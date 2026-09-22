@@ -122,7 +122,7 @@ func printUsage() {
   ai-team auth-token               Выпустить короткоживущий cloud access token
   ai-team worker                   Выполнить один disposable worker job из stdin
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
-  ai-team list                     Список доступных агентов
+  ai-team list [--target <path>]   Список доступных агентов
   ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
   ai-team redact verify|scan|redact   P1-6 redaction-контракт: сеcrets-скан evidence,
                                    verify (fail-closed для экспорта) или detached-копия
@@ -1267,9 +1267,29 @@ func cmdUsage() {
 }
 
 func cmdList() {
-	target, err := absoluteTarget(".")
+	listFlags := flag.NewFlagSet("list", flag.ExitOnError)
+	targetValue := listFlags.String("target", ".", "Путь к целевому проекту")
+	if err := listFlags.Parse(os.Args[2:]); err != nil {
+		fatal("Ошибка аргументов list: %v", err)
+	}
+	// Позиционные аргументы у list смысла не имеют: молча их проглатывать —
+	// значит скрывать от пользователя опечатку в команде.
+	if listFlags.NArg() != 0 {
+		fatal("Использование: ai-team list [--target <dir>]")
+	}
+	target, err := absoluteTarget(*targetValue)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
+	}
+	// Сам каталог target обязан существовать, иначе опечатка в пути молча
+	// выдала бы built-in реестр за реестр указанного проекта. Отсутствие
+	// .ai-team внутри — законный случай (показываем только built-in слой),
+	// несуществующий каталог — нет.
+	if _, err := safeio.ExistingDir(target); err != nil {
+		if os.IsNotExist(err) {
+			fatal("Каталог target не существует: %s", target)
+		}
+		fatal("Недоступный target: %v", err)
 	}
 	if _, statErr := os.Lstat(filepath.Join(target, ".ai-team")); statErr == nil {
 		if _, err := safeio.ExistingDir(target, ".ai-team"); err != nil {

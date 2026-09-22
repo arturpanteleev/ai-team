@@ -74,6 +74,13 @@ transition approval MUST NOT разрешать delivery side effects.
 ### Requirement: Layered agent list
 `list` MUST объединять project, plugin, user и built-in registry layers и показывать источник победившего определения.
 
+#### Scenario: Флаги list
+- **КОГДА** пользователь передаёт `--target <path>`
+- **ТОГДА** `list` MUST показать layered registry именно этого каталога,
+  а не текущей рабочей директории
+- **И** неизвестный флаг, отсутствующее значение или лишний позиционный
+  аргумент MUST привести к ненулевому exit code
+
 #### Scenario: Invalid project override
 - **КОГДА** project agent definition невалидна
 - **ТОГДА** registry MUST вернуть ошибку вместо fallback к built-in agent

@@ -210,7 +210,12 @@ portable bundle терминального run в `ai-team export <run_id>` (whi
 typed records — run/config/workflow snapshots, hash-chained event log, anchor,
 attestation v1, attempt manifests; без raw logs/stdout). index.json несёт sha256
 каждого record без тайм-меток — identical evidence даёт байт-в-байт одинаковый
-bundle (BundleDigest). Перед публикацией bundle обязан пройти полную verify:
+bundle (BundleDigest). Все файлы собранного bundle (records, index.json и
+dsse.json) пишутся одинаковыми правами только на чтение
+(`safeio.ReadOnlyFileMode`) — и в run-bundle, и в gate-bundle; каталоги при
+этом остаются writable владельцем, поэтому фактическую неизменяемость даёт не
+режим файлов, а digest и verify. Перед публикацией bundle обязан пройти
+полную verify:
 records против своих sha256, run identity/schema, config/workflow snapshots
 против run manifest, event chain + anchor (VerifyAnchor), attempt manifests
 против manifest_sha256 в attempt_finished событиях (файлы↔events связка, которой

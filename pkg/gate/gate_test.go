@@ -450,6 +450,8 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 		"foreign type": func(bundleDir string) {
 			path := filepath.Join(bundleDir, "index.json")
 			indexData, _ := os.ReadFile(path)
+			// index.json пишется read-only — подделка возможна только после chmod.
+			_ = os.Chmod(path, 0644)
 			os.WriteFile(path, bytes.Replace(indexData, []byte(BundleType), []byte("other-bundle"), 1), 0644)
 		},
 		"wrong declared digest": func(bundleDir string) {
@@ -471,6 +473,7 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 		"index identity diverges from gate.json": func(bundleDir string) {
 			path := filepath.Join(bundleDir, "index.json")
 			indexData, _ := os.ReadFile(path)
+			_ = os.Chmod(path, 0644)
 			os.WriteFile(path, bytes.Replace(indexData, []byte("aabb"), []byte("0000"), 1), 0644)
 		},
 	}

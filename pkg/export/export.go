@@ -172,7 +172,9 @@ func Build(runDir, outDir string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, indexFileName), data, 0644); err != nil {
+	// index.json пишется теми же read-only правами, что и records: манифест
+	// не исключение (PDD-25).
+	if err := os.WriteFile(filepath.Join(outDir, indexFileName), data, safeio.ReadOnlyFileMode); err != nil {
 		return nil, err
 	}
 	return index, nil
@@ -229,7 +231,7 @@ func copyRecord(runDir, rel, outDir, kind string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(destination, data, 0444); err != nil {
+	if err := os.WriteFile(destination, data, safeio.ReadOnlyFileMode); err != nil {
 		return "", err
 	}
 	return sha256Bytes(data), nil

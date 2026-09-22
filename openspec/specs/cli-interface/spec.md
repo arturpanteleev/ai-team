@@ -53,7 +53,7 @@ workspace lock и использовать одну immutable run_id на вес
 - **И** MUST продолжить ту же run identity после fail-closed проверок
 
 #### Scenario: Повторный run уже доставленной фичи
-- **КОГДА** пользователь запускает `run --feature F`, и прошлый run той же `F` уже довёл её до успешной deployer delivery (записанный commit и/или PR)
+- **КОГДА** пользователь запускает `run --feature F`, и прошлый run той же `F` уже довёл её до успешной delivery (записанный commit и/или PR), независимо от того, как названа delivery-стадия в конфиге
 - **ТОГДА** CLI MUST вывести non-blocking предупреждение в stderr с run_id и ссылкой на предыдущую доставку до перезаписи артефактов analyst
 - **И** MUST NOT отказать в выполнении нового run из-за одного этого условия
 
@@ -73,6 +73,13 @@ transition approval MUST NOT разрешать delivery side effects.
 
 ### Requirement: Layered agent list
 `list` MUST объединять project, plugin, user и built-in registry layers и показывать источник победившего определения.
+
+#### Scenario: Флаги list
+- **КОГДА** пользователь передаёт `--target <path>`
+- **ТОГДА** `list` MUST показать layered registry именно этого каталога,
+  а не текущей рабочей директории
+- **И** неизвестный флаг, отсутствующее значение или лишний позиционный
+  аргумент MUST привести к ненулевому exit code
 
 #### Scenario: Invalid project override
 - **КОГДА** project agent definition невалидна

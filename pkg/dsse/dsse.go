@@ -117,7 +117,7 @@ func SignBundleFile(bundleDir string, priv ed25519.PrivateKey, payloadType strin
 	}
 	data = append(data, '\n')
 	path := filepath.Join(bundleDir, EnvelopeFileName)
-	if err := safeio.WriteRegularFileNoFollow(path, data, 0444); err != nil {
+	if err := safeio.WriteRegularFileNoFollow(path, data, safeio.ReadOnlyFileMode); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

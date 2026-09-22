@@ -909,7 +909,7 @@ func WriteBundle(outDir string, result *Result) error {
 		return err
 	}
 	gateData = append(gateData, '\n')
-	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, "gate.json"), gateData, 0444); err != nil {
+	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, "gate.json"), gateData, safeio.ReadOnlyFileMode); err != nil {
 		return fmt.Errorf("gate bundle gate.json: %w", err)
 	}
 	records = append(records, Record{Type: "gate_result", Path: "gate.json", SHA256: sha256Bytes(gateData)})
@@ -925,7 +925,7 @@ func WriteBundle(outDir string, result *Result) error {
 				return err
 			}
 			data = append(data, '\n')
-			if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, rel), data, 0444); err != nil {
+			if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, rel), data, safeio.ReadOnlyFileMode); err != nil {
 				return err
 			}
 			records = append(records, Record{Type: "check_result", Path: filepath.ToSlash(rel), SHA256: sha256Bytes(data)})
@@ -949,7 +949,10 @@ func WriteBundle(outDir string, result *Result) error {
 	if err != nil {
 		return err
 	}
-	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, indexFileName), append(data, '\n'), 0644); err != nil {
+	// index.json пишется теми же read-only правами, что и остальные records:
+	// запись-в-манифест не должна выглядеть разрешённой там, где записи уже
+	// защищены (PDD-25).
+	if err := safeio.WriteRegularFileNoFollow(filepath.Join(outDir, indexFileName), append(data, '\n'), safeio.ReadOnlyFileMode); err != nil {
 		return err
 	}
 	result.BundleSHA256 = BundleDigest(index)

@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Reusable entry point: .github/workflows/release.yaml calls this workflow so
+  # the release gate is literally CI, not a hand-maintained copy of it (#102).
+  # Keep every gate in this file — anything added here automatically gates
+  # releases too.
+  workflow_call:
 
 permissions:
   contents: read

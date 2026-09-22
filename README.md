@@ -96,6 +96,56 @@ ai-team:
 go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest
 ```
 
+### Готовые бинарники и проверка подписи
+
+Для каждого тега `v*` публикуется релиз с архивами под
+darwin/linux × amd64/arm64, файлом `sha256sums.txt` и **подписями cosign**
+(Sigstore, keyless через OIDC GitHub Actions) — по одному файлу
+`<asset>.cosign.bundle` на каждый архив и на сам `sha256sums.txt`.
+Подпись доказывает, что артефакт собран именно
+`.github/workflows/release.yaml` этого репозитория на этом теге, а не
+подменён после публикации; она записана в публичный transparency-лог Rekor.
+
+Скачайте архив, `sha256sums.txt` и bundle к нему, затем проверьте
+**подлинность** (кто собрал) и **целостность** (не изменено):
+
+```bash
+VERSION=v0.2.0
+REPO=arturpanteleev/ai-team
+gh release download "$VERSION" --repo "$REPO" \
+  --pattern 'ai-team-linux-amd64.tar.gz*' \
+  --pattern 'sha256sums.txt*'
+
+# 1. Подлинность: подпись сделана этим workflow на этом теге.
+cosign verify-blob \
+  --bundle sha256sums.txt.cosign.bundle \
+  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  sha256sums.txt
+
+# 2. Целостность: архив соответствует проверенному sha256sums.txt.
+sha256sum -c sha256sums.txt --ignore-missing
+
+tar -xzf ai-team-linux-amd64.tar.gz && mv ai-team-linux-amd64 /usr/local/bin/ai-team
+```
+
+Любой отдельный архив проверяется тем же способом напрямую, без
+`sha256sums.txt` — у него есть собственный bundle:
+
+```bash
+cosign verify-blob \
+  --bundle ai-team-linux-amd64.tar.gz.cosign.bundle \
+  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ai-team-linux-amd64.tar.gz
+```
+
+`--certificate-identity` и `--certificate-oidc-issuer` — обязательная часть
+проверки: без них cosign подтвердит лишь то, что подпись кем-то сделана, но не
+кем именно. `cosign` ставится по
+[docs.sigstore.dev](https://docs.sigstore.dev/cosign/system_config/installation/).
+Ненулевой exit-код любой из команд — повод не запускать бинарник.
+
 ## Runtime и credentials
 
 Агентный runtime запускается в **изолированном окружении**: у каждого рантайма
@@ -595,6 +645,34 @@ project/plugin/user/built-in слоями и что происходит с inva
   доказательство авторства («кто создал»). Ключи передаются через CLI-файлы и
   никогда не попадают в evidence.
 
+### Authenticity релизных артефактов
+
+Та же пара гарантий действует и для бинарников, которые выпускает сам проект —
+раньше у них была только integrity:
+
+- **Integrity:** к релизу приложен `sha256sums.txt` с digest каждого архива.
+- **Authenticity:** каждый архив и сам `sha256sums.txt` подписаны cosign в
+  keyless-режиме. Подписывающий ключ не хранится и не ротируется: job
+  `build` в `.github/workflows/release.yaml` получает короткоживущий OIDC-токен
+  GitHub Actions (`permissions: id-token: write`, выданный только этой job),
+  Fulcio выдаёт по нему сертификат, привязанный к
+  `…/.github/workflows/release.yaml@refs/tags/<tag>`, а запись о подписи
+  попадает в публичный transparency-лог Rekor. Артефакт подписи —
+  self-contained `<asset>.cosign.bundle` (подпись + сертификат + Rekor-proof),
+  опубликованный рядом с архивами.
+
+Команда проверки и объяснение обязательных флагов — в разделе
+[«Готовые бинарники и проверка подписи»](#готовые-бинарники-и-проверка-подписи).
+Подпись не заменяет digest, а дополняет его: digest отвечает «не изменено»,
+подпись — «собрано именно этим релизным workflow на этом теге».
+Что подпись **не** доказывает: что содержимое бинарника безопасно или что тег
+поставил конкретный человек — она удостоверяет workflow и ref, а не автора.
+
+Тот же workflow перед сборкой прогоняет против точного commit тега полный
+CI-набор (`.github/workflows/ci.yaml` вызывается как reusable workflow), так
+что подписанный артефакт всегда происходит от коммита, прошедшего те же гейты,
+что и master.
+
 ### Граница для недоверенного кода
  OpenCode получает app-level deny
 для shell/network/tasks, ограниченные edit/read rules и отдельный config home,
@@ -680,4 +758,9 @@ test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
 `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, ...) и публикуется на
 GitHub Pages при push в `master` (`.github/workflows/pages.yaml`). Релиз
 бинарников для нескольких платформ создаётся автоматически по push тега
-`v*` через `.github/workflows/release.yaml` (`make release-binaries`).
+`v*` через `.github/workflows/release.yaml` (`make release-binaries`): тег
+сначала проверяется на semver, затем против его точного коммита прогоняется
+весь CI (`ci.yaml` вызывается как reusable workflow — отдельного, способного
+разойтись списка проверок нет), и только после этого архивы подписываются
+cosign и публикуются (см.
+[«Authenticity релизных артефактов»](#authenticity-релизных-артефактов)).

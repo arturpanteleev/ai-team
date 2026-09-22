@@ -5,35 +5,42 @@ on:
     tags:
       - 'v*'
 
-# Release gating policy (AUD-13):
+# Release gating policy (AUD-13, #102):
 # A tag is published only after (1) it is a valid semantic version and
-# (2) the exact tagged commit passes the quality checks that CI runs. CI runs
-# on master/PR only, so the release job re-runs the essential checks itself
-# against the tagged checkout: a commit with failing checks can never become a
-# release.
+# (2) the exact tagged commit passes *the same* quality checks CI runs on
+# master/PR. Parity is structural, not copied: the `ci` job below calls
+# .github/workflows/ci.yaml as a reusable workflow, so there is exactly one
+# definition of "the quality gate" and it cannot silently drift from what the
+# release certifies. Everything CI has — build, go mod verify, gofmt, vet,
+# unit tests, coverage gate with per-package floors, race detector, e2e,
+# frontend (build + embedded web/dist parity + lint + test + npm audit),
+# govulncheck and strict OpenSpec validation — runs against the tag SHA.
+# A commit with failing checks can never become a release.
 #
-# The default token is read-only. Only the final publish job opts into
-# contents: write, and even there solely to create the GitHub Release from the
-# already-verified artifacts.
+# Artifact authenticity (#101): release archives and sha256sums.txt are signed
+# with cosign in keyless mode via the GitHub Actions OIDC token. No signing key
+# is stored or rotated; the certificate binds each signature to this workflow
+# file at this tag, and the signature is logged in the public Rekor
+# transparency log. See README «Граница безопасности» for the verify command.
+#
+# The default token is read-only. `id-token: write` is granted only to the
+# build job (needed for keyless signing) and `contents: write` only to the
+# final publish job, so neither privilege is available workflow-wide.
 permissions:
   contents: read
 
 jobs:
-  verify-and-build:
-    name: Verify and build
+  # Gate 1: the pushed tag must be a valid semantic version. Non-semver tags
+  # (e.g. experimental v1beta or v-vnext) abort here, before CI or any build.
+  validate-tag:
+    name: Validate tag
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.refs.outputs.tag }}
       sha: ${{ steps.refs.outputs.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          # Full history so `git describe --tags` (used by the Makefile and
-          # docsgen version) resolves the exact tag.
-          fetch-depth: 0
 
-      # Gate 1: the push tag must be a valid semantic version. Non-semver tags
-      # (e.g. experimental v1beta or v-vnext) abort the job before any build.
       - name: Validate tag is a semantic version
         run: |
           set -euo pipefail
@@ -46,7 +53,7 @@ jobs:
 
       # Gate 2: record the exact commit the tag points to. actions/checkout
       # pins the workspace to the triggering ref (the tag), so this SHA is the
-      # commit that the checks below certify and the release will be built from.
+      # commit that the gates below certify and the release is built from.
       - name: Record tag and exact commit SHA
         id: refs
         run: |
@@ -57,20 +64,38 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "gating release ${TAG} on exact commit ${SHA}"
 
+  # Gate 3: the full CI workflow, re-run against the tagged commit. A local
+  # `uses:` resolves ci.yaml at this same commit, so the release is gated by
+  # the CI definition that shipped with the tag. Any failing CI job stops the
+  # release before assets are built or published.
+  ci:
+    name: CI parity gate
+    needs: validate-tag
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yaml
+
+  build:
+    name: Build and sign release assets
+    needs: [validate-tag, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for cosign keyless signing: lets the job mint a short-lived
+      # OIDC token that Fulcio exchanges for a signing certificate. Scoped to
+      # this job only — top-level permissions stay contents: read.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Full history so `git describe --tags` (used by the Makefile and
+          # docsgen version) resolves the exact tag.
+          fetch-depth: 0
+
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.26.6'
           check-latest: true
-
-      # Gate 3: the quality checks. These mirror what CI runs on master/PR and
-      # are executed inline so the exact tag SHA is verified in this workflow.
-      # Any failure stops the job here, before assets are built or published.
-      - name: Gate - build
-        run: go build ./...
-      - name: Gate - vet
-        run: go vet ./...
-      - name: Gate - tests
-        run: go test ./...
 
       - name: Build release binaries
         run: make release-binaries
@@ -82,7 +107,6 @@ jobs:
           for binary in bin/ai-team-*; do
             [ -e "$binary" ] || continue
             base=$(basename "$binary")
-            platform=${base#ai-team-}
             tar -czf "dist/${base}.tar.gz" -C "$(dirname "$binary")" "$base"
           done
           ls -la dist/
@@ -96,6 +120,53 @@ jobs:
           sha256sum *.tar.gz > sha256sums.txt
           cat sha256sums.txt
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless signing: cosign requests an OIDC token from the Actions
+      # provider (hence id-token: write), gets a short-lived Fulcio certificate
+      # bound to this workflow + ref, signs, and records the entry in Rekor.
+      # Each asset — every archive and sha256sums.txt itself — gets a
+      # self-contained `.cosign.bundle` (signature + certificate + Rekor proof)
+      # that `cosign verify-blob --bundle` checks offline against the log.
+      - name: Sign release assets with cosign (keyless)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives to sign"
+            exit 1
+          fi
+          for f in "${archives[@]}" dist/sha256sums.txt; do
+            echo "signing $f"
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+          done
+          ls -la dist/
+
+      # Fail closed: a bundle that does not verify here must never reach the
+      # release page. Identity is the exact workflow file at the exact tag ref.
+      - name: Verify signatures before publishing
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives to verify"
+            exit 1
+          fi
+          for f in "${archives[@]}" dist/sha256sums.txt; do
+            echo "verifying $f"
+            cosign verify-blob \
+              --bundle "${f}.cosign.bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$f"
+          done
+
       - name: Upload release assets
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
@@ -105,10 +176,10 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: verify-and-build
+    needs: [validate-tag, build]
     runs-on: ubuntu-latest
     # contents: write only for creating the GitHub Release; it is deliberately
-    # absent from verify-and-build (top-level permissions is contents: read).
+    # absent from every other job (top-level permissions is contents: read).
     permissions:
       contents: write
     steps:
@@ -121,17 +192,45 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          SHA: ${{ needs.validate-tag.outputs.sha }}
         run: |
           set -euo pipefail
-          TAG=${{ needs.verify-and-build.outputs.tag }}
-          SHA=${{ needs.verify-and-build.outputs.sha }}
-          assets=()
-          for f in dist/*.tar.gz; do
-            assets+=("$f")
-          done
-          assets+=("dist/sha256sums.txt")
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/sha256sums.txt dist/*.cosign.bundle)
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
+          notes=$(cat <<EOF
+          **Quality gates passed on exact tag commit \`${SHA}\`** (tag ${TAG}).
+
+          The complete CI workflow (\`.github/workflows/ci.yaml\`) was re-run against this
+          commit: \`go build\`, \`go mod verify\`, \`go vet\`, \`gofmt\`, unit tests,
+          coverage gate with per-package floors, \`go test -race\`, e2e tests, frontend
+          (build + embedded \`web/dist\` parity + lint + tests + \`npm audit\`),
+          \`govulncheck\`, and strict OpenSpec validation.
+
+          Build run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          **Integrity.** Verify archive digests with the attached \`sha256sums.txt\`:
+
+          \`\`\`bash
+          sha256sum -c sha256sums.txt --ignore-missing
+          \`\`\`
+
+          **Authenticity.** Every archive and \`sha256sums.txt\` is signed with cosign in
+          keyless mode (Sigstore, GitHub Actions OIDC); each has a matching
+          \`.cosign.bundle\`. Verify with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+
+          \`\`\`bash
+          cosign verify-blob \\
+            --bundle sha256sums.txt.cosign.bundle \\
+            --certificate-identity "${identity}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            sha256sums.txt
+          \`\`\`
+          EOF
+          )
           gh release create "$TAG" "${assets[@]}" \
             --title "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --generate-notes \
-            --notes "**Quality gates passed on exact tag commit \`${SHA}\`** (tag ${TAG}): \`go build ./...\`, \`go vet ./...\`, \`go test ./...\`. Build run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Verify archive integrity with the attached \`sha256sums.txt\`."
+            --notes "$notes"

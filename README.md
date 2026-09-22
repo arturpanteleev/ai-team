@@ -102,35 +102,43 @@ go install github.com/arturpanteleev/ai-team/cmd/ai-team@latest
 darwin/linux × amd64/arm64, файлом `sha256sums.txt` и **подписями cosign**
 (Sigstore, keyless через OIDC GitHub Actions) — по одному файлу
 `<asset>.cosign.bundle` на каждый архив и на сам `sha256sums.txt`.
-Подпись доказывает, что артефакт собран именно
-`.github/workflows/release.yaml` этого репозитория на этом теге, а не
-подменён после публикации; она записана в публичный transparency-лог Rekor.
+Подпись удостоверяет **происхождение**: артефакт собран именно
+`.github/workflows/release.yaml` этого репозитория на этом теге. Подмену
+выявляет не наличие подписи, а её успешная проверка — командой ниже; запись о
+подписи лежит в публичном transparency-логе Rekor.
 
-> **С какого релиза это работает.** Подписи появляются начиная с первого тега,
-> выпущенного после введения этого раздела. У более ранних релизов (включая
-> `v0.2.0`) нет ни `sha256sums.txt`, ни `*.cosign.bundle`: там команды ниже
-> завершатся ошибкой «no such file or directory», и это **не** признак
-> подмены — проверить такой релиз описанным способом просто нельзя.
-> Какие ассеты есть у конкретного тега:
+> **С какого релиза это работает.** `v0.2.0` — последний релиз без подписей.
+> У него и у более ранних тегов нет ни `sha256sums.txt`, ни `*.cosign.bundle`:
+> команды ниже упадут с «no such file or directory», и это не признак подмены,
+> а отсутствие механизма — проверить такой релиз описанным способом нельзя.
+> **У любого тега новее `v0.2.0` подписи обязаны быть.** Если у такого релиза
+> нет `sha256sums.txt` или нет `.cosign.bundle` хотя бы к одному ассету —
+> не доверяйте артефактам: подписывается всё или ничего, частичный набор
+> бандлов сам по себе является признаком подмены. Посмотреть фактический
+> список ассетов:
 > `gh release view <tag> --repo arturpanteleev/ai-team --json assets`.
 
-Нужен **cosign ≥ v2.4.3**, рекомендуется v3.x. Релизы подписываются новым
-форматом bundle, а распознавать его в `verify-blob` автоматически cosign умеет
-только с v2.4.3 — более старая версия упадёт с невнятной ошибкой, которая тоже
+Нужен **cosign ≥ v2.4.2** (рекомендуется v3.x): релизы подписываются новым
+форматом bundle, и распознавать его в `verify-blob` автоматически cosign умеет
+начиная с v2.4.2. Более старая версия упадёт с невнятной ошибкой, которая тоже
 не означает подмену. Проверьте `cosign version`; установка — по
 [docs.sigstore.dev](https://docs.sigstore.dev/cosign/system_config/installation/).
 
-Подставьте нужный тег и проверьте **подлинность** (кто собрал) и
-**целостность** (не изменено):
+Подставьте нужный тег и платформу. Блок рассчитан на копирование целиком:
+`set -euo pipefail` в первой строке — обязательная его часть, без неё установка
+выполнится даже после провалившейся проверки.
 
 ```bash
+set -euo pipefail
+
 VERSION=vX.Y.Z                       # тег нужного релиза
 REPO=arturpanteleev/ai-team
+ARCHIVE=ai-team-linux-amd64.tar.gz   # нужная платформа
 IDENTITY="https://github.com/$REPO/.github/workflows/release.yaml@refs/tags/$VERSION"
 ISSUER=https://token.actions.githubusercontent.com
 
 gh release download "$VERSION" --repo "$REPO" \
-  --pattern 'ai-team-linux-amd64.tar.gz*' \
+  --pattern "$ARCHIVE*" \
   --pattern 'sha256sums.txt*'
 
 # 1. Подлинность: подпись сделана этим workflow на этом теге.
@@ -140,34 +148,52 @@ cosign verify-blob \
   --certificate-oidc-issuer "$ISSUER" \
   sha256sums.txt
 
-# 2. Целостность: архив соответствует уже проверенному sha256sums.txt.
-sha256sum -c --ignore-missing sha256sums.txt        # Linux (и macOS 15+)
-# shasum -a 256 -c --ignore-missing sha256sums.txt  # macOS без sha256sum
+# 2. Целостность: сверяем ровно скачанный архив с уже проверенным sha256sums.txt.
+grep " $ARCHIVE\$" sha256sums.txt | shasum -a 256 -c -   # macOS
+# grep " $ARCHIVE\$" sha256sums.txt | sha256sum -c -     # Linux
 
-tar -xzf ai-team-linux-amd64.tar.gz && mv ai-team-linux-amd64 /usr/local/bin/ai-team
+# 3. Установка — только если обе проверки прошли.
+tar -xzf "$ARCHIVE"
+mv "${ARCHIVE%.tar.gz}" /usr/local/bin/ai-team
 ```
 
-`gh release download` возвращает 0, даже если какой-то `--pattern` ничего не
-нашёл, поэтому нехватка ассетов обнаружится только на шаге `cosign
-verify-blob`. Прежде чем трактовать это как подмену, сверьтесь с оговоркой о
-версии релиза выше.
+Почему именно так:
+
+- **`set -euo pipefail`.** Шаги не связаны в одну `&&`-цепочку; без этой строки
+  `tar`/`mv` выполнятся после провала `cosign verify-blob` и сверки сумм, и вы
+  установите ровно тот бинарник, от которого проверка вас отговаривала.
+- **`grep` + `-c -` вместо `-c --ignore-missing sha256sums.txt`.** `sha256sums.txt`
+  перечисляет все четыре платформы, а скачана одна, поэтому проверять файл
+  целиком пришлось бы с `--ignore-missing` — а он опасен: на macOS
+  Apple'овский `/sbin/sha256sum -c --ignore-missing` возвращает **0**, когда не
+  проверено ни одного файла, то есть даёт ложно-зелёный результат ровно в
+  сценарии «`gh release download` вернул 0, а архив не скачался». `grep`
+  сужает проверку до одной строки, `--ignore-missing` становится не нужен, и
+  пустой вывод `grep` роняет конвейер (`pipefail`). На macOS используйте
+  `shasum -a 256` — он ведёт себя корректно в любом случае.
+- **`gh release download` возвращает 0**, даже если какой-то `--pattern` ничего
+  не нашёл. Нехватка ассетов поэтому всплывает только на шаге проверки; как её
+  трактовать — по границе релизов выше: для тега новее `v0.2.0` это повод не
+  доверять артефактам, для `v0.2.0` и старше механизма там просто нет.
 
 Любой отдельный архив проверяется тем же способом напрямую, без
 `sha256sums.txt` — у него есть собственный bundle:
 
 ```bash
 cosign verify-blob \
-  --bundle ai-team-linux-amd64.tar.gz.cosign.bundle \
+  --bundle "$ARCHIVE.cosign.bundle" \
   --certificate-identity "$IDENTITY" \
   --certificate-oidc-issuer "$ISSUER" \
-  ai-team-linux-amd64.tar.gz
+  "$ARCHIVE"
 ```
 
 `--certificate-identity` и `--certificate-oidc-issuer` — обязательная часть
 проверки: без них cosign подтвердит лишь то, что подпись кем-то сделана, но не
-кем именно. Значение identity — путь к файлу релизного workflow плюс ref тега,
-поэтому оно и собирается здесь из `$REPO` и `$VERSION`: при переименовании
-`release.yaml` identity изменится вместе с ним.
+кем именно. Значение identity — путь к файлу релизного workflow плюс ref тега;
+имя `release.yaml` захардкожено и здесь, и в самом workflow, так что при его
+переименовании эта команда сломается и раздел придётся обновить — сверьтесь с
+[актуальным `release.yaml`](.github/workflows/release.yaml), если identity не
+совпала.
 
 Ненулевой код возврата `cosign verify-blob` или проверки контрольных сумм на
 релизе, у которого подписи есть, — повод не запускать бинарник.

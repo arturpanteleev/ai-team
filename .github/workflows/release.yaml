@@ -22,7 +22,8 @@ on:
 # is stored or rotated; the certificate binds each signature to this workflow
 # file at this tag, and the signature is logged in the public Rekor
 # transparency log. The verify command lives in README «Готовые бинарники и
-# проверка подписи»; it needs cosign >= v2.4.3 (new bundle format).
+# проверка подписи»; it needs cosign >= v2.4.2, the first version whose
+# verify-blob auto-detects the new bundle format.
 #
 # The default token is read-only. `id-token: write` is granted only to the
 # build job (needed for keyless signing) and `contents: write` only to the
@@ -63,8 +64,10 @@ jobs:
           TAG=${GITHUB_REF#refs/tags/}
           SHA=$(git rev-parse HEAD)
           # The cosign certificate identity is derived here once and consumed by
-          # every job that signs or verifies, so renaming this workflow file can
-          # never leave a stale identity behind in one place.
+          # every step that verifies a bundle and by the release notes, so
+          # renaming this workflow file cannot leave a stale identity behind in
+          # one of them. (The signing step itself does not need it: Fulcio fills
+          # the identity in from the OIDC token.)
           IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
@@ -266,13 +269,15 @@ jobs:
           **Integrity.** Verify archive digests with the attached \`sha256sums.txt\`:
 
           \`\`\`bash
-          sha256sum -c sha256sums.txt --ignore-missing
+          # Scoped to the one archive you downloaded, so --ignore-missing (which
+          # returns 0 on macOS when nothing was verified) is not needed.
+          grep " ai-team-linux-amd64.tar.gz\$" sha256sums.txt | sha256sum -c -
           \`\`\`
 
           **Authenticity.** Every archive and \`sha256sums.txt\` is signed with cosign in
           keyless mode (Sigstore, GitHub Actions OIDC); each has a matching
           \`.cosign.bundle\`. Verify with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
-          **v2.4.3 or newer** (v3.x recommended) — older versions cannot read the
+          **v2.4.2 or newer** (v3.x recommended) — older versions cannot read the
           new bundle format:
 
           \`\`\`bash

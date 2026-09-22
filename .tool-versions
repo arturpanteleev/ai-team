@@ -13,8 +13,14 @@
 # .github/workflows/* по-прежнему получает версию литералом, и совпадение
 # держится на ревью, а не на автоматике (см. CONTRIBUTING.md, раздел
 # «Make-таргеты»). Меняя версию здесь, пройдитесь по `go-version:` во всех
-# workflow. Перевод workflow на `go-version-file: .tool-versions` убрал бы
-# дублирование совсем — это отдельная задача (#136).
+# workflow. Автоматический сторож на это согласование — задача #139: строить
+# его надо YAML-парсером с подсчётом пинов на каждый шаг setup-go, а не
+# регуляркой по тексту workflow. Образец рабочего подхода — сторожа
+# TestReadmeCLIReferenceMatchesDispatcher и TestUsageTextMatchesDispatcher в
+# docs/docs_test.go: они разбирают cmd/ai-team/main.go через go/parser, то есть
+# смотрят на AST, а не на форматирование. Перевод workflow на
+# `go-version-file: .tool-versions` убрал бы дублирование совсем — это
+# отдельная задача (#136).
 #
 # Node намеренно не пинуется здесь: CI фиксирует только мажор (`node-version:
 # '22'`), а воспроизводимость фронтенда даёт web/package-lock.json, а не патч

@@ -13,7 +13,9 @@ records on stdout, one object per line, parseable via `encoding/json`.
 
 - **WHEN** `ai-team gate --json ...` completes
 - **THEN** stdout MUST contain a single JSON object line with fields
-  `level`, `cmd`, `type`, `message`, `data`, `exit_code`
+  `level`, `cmd`, `type`, `message` and `data`
+- **AND** `exit_code` MUST be present whenever the exit code is nonzero
+  (it is omitted on success, where its absence means zero)
 - **AND** `data` MUST include `status`, `policy` and `bundle_sha256`
 
 #### Scenario: Verify result as JSON

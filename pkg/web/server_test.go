@@ -831,7 +831,13 @@ func TestUnsupportedMethodKeepsAllowHeader(t *testing.T) {
 
 // TestAllowHeaderOnlyListsAnsweringMethods — свойство, которого не было у
 // дефолтного 405 chi: тот включал в Allow метод GET от SPA-катч-олла, хотя GET
-// по тому же пути отдаёт 404. Каждый обещанный метод обязан отвечать.
+// по тому же пути отдаёт 404. Инвариант двусторонний: каждый обещанный метод
+// обязан отвечать, а 404 не имеет права обещать что-либо вовсе.
+//
+// Percent-encoded пути здесь не экзотика: фронтенд строит их штатно через
+// encodeURIComponent (web/src/api.ts), и именно на них ответ разъезжался,
+// когда роуты искались по декодированному пути, а chi маршрутизировал по
+// сырому.
 func TestAllowHeaderOnlyListsAnsweringMethods(t *testing.T) {
 	srv := newFrontendTestServer(t)
 	// Артефакт должен существовать: 404 от artifact-хендлера означал бы
@@ -840,14 +846,38 @@ func TestAllowHeaderOnlyListsAnsweringMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, target := range []string{"/api/pipelines", "/api/runs", "/api/runs/run-1/cancel", "/api/artifacts/review.md"} {
+	targets := []string{
+		"/api/pipelines",
+		"/api/runs",
+		"/api/runs/run-1/cancel",
+		"/api/artifacts/review.md",
+		// Сырая форма не совпадает ни с одним роутом, декодированная — с
+		// `/api/runs`; отвечать надо про первую.
+		"/api/run%73",
+		"/api/pipeline%73",
+		// %2F не является разделителем сегментов: путь остаётся неизвестным.
+		"/api/pipelines%2Fx",
+		"/api%2Ftypo",
+		"/api/run%73/r1/cancel",
+	}
+	for _, target := range targets {
 		t.Run(target, func(t *testing.T) {
 			probe := newLoopbackRequest(http.MethodPatch, target, nil)
 			response := httptest.NewRecorder()
 			srv.router.ServeHTTP(response, probe)
 			allow := response.Header().Values("Allow")
+
+			if response.Code == http.StatusNotFound {
+				if len(allow) != 0 {
+					t.Fatalf("404 for %s must not advertise methods, got Allow=%v", target, allow)
+				}
+				return
+			}
+			if response.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected 404 or 405 for %s, got %d", target, response.Code)
+			}
 			if len(allow) == 0 {
-				t.Fatalf("expected Allow on %d for %s", response.Code, target)
+				t.Fatalf("405 for %s must advertise methods", target)
 			}
 
 			for _, method := range allow {
@@ -863,6 +893,34 @@ func TestAllowHeaderOnlyListsAnsweringMethods(t *testing.T) {
 	}
 }
 
+// TestEncodedPathKeepsRequestedForm: ошибка должна называть тот URL, который
+// прислал клиент, а не его декодированную форму — иначе машиночитаемый ответ
+// указывает на ресурс, которого не запрашивали.
+func TestEncodedPathKeepsRequestedForm(t *testing.T) {
+	srv := newFrontendTestServer(t)
+
+	payload := assertJSONStatus(t, srv, http.MethodGet, "/api/pipelines%2Fx", http.StatusNotFound)
+	detail, _ := payload["detail"].(string)
+	if !strings.Contains(detail, "/api/pipelines%2Fx") {
+		t.Fatalf("detail must name the requested URL, got %q", detail)
+	}
+}
+
+// TestEncodedPathReachesRealHandler сторожит обратную сторону: роуты с
+// percent-encoded сегментами, которые фронтенд строит сам, должны доходить до
+// своих хендлеров, а не подменяться fallback'ом.
+func TestEncodedPathReachesRealHandler(t *testing.T) {
+	srv := newFrontendTestServer(t)
+
+	request := newLoopbackRequest(http.MethodGet, "/api/runs/run%2Fone/logs/attempt%20one", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+
+	if strings.Contains(response.Body.String(), "no API route matches") {
+		t.Fatalf("fallback shadowed the run log handler: %q", response.Body.String())
+	}
+}
+
 // TestAPIFallbackIsConfigurationIndependent: ответ по API-пути не должен
 // зависеть от того, собран ли фронтенд, — иначе контракт держится только в
 // проде, а роут `/*` незаметно подменяет коды.
@@ -873,6 +931,9 @@ func TestAPIFallbackIsConfigurationIndependent(t *testing.T) {
 	cases := [][2]string{
 		{http.MethodGet, "/api/definitely-not-a-route"},
 		{http.MethodPost, "/api/definitely-not-a-route"},
+		{http.MethodGet, "/api/run%73"},
+		{http.MethodPost, "/api/run%73"},
+		{http.MethodGet, "/api/pipelines%2Fx"},
 		{http.MethodGet, "/api"},
 		{http.MethodGet, "/api/runs"},
 		{http.MethodDelete, "/api/pipelines"},

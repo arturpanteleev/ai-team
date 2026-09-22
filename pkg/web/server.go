@@ -154,14 +154,16 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 
-	// Катч-олл под /api/ регистрируется до SPA-fallback и вне блока distDir:
-	// иначе неизвестный API-путь проваливался в `/*` и отдавал HTML страницы
-	// дашборда со статусом 200, а без собранного фронтенда — text/plain от
-	// дефолтного NotFound chi. Любой автоматизированный клиент в обоих случаях
-	// получал не машиночитаемую ошибку. chi разбирает маршруты по префиксному
-	// дереву и предпочитает статические сегменты wildcard'у, поэтому все
-	// зарегистрированные выше роуты по-прежнему выигрывают у этого шаблона.
-	srv.router.Handle("/api/*", http.HandlerFunc(handleAPINotFound))
+	// JSON-404 для неизвестных API-путей встроен в сам fallback (handleFrontend
+	// и handleNotFound), а не зарегистрирован отдельным роутом `/api/*`.
+	// Отдельный роут перехватывал бы и промах по методу, ломая ветку 405: chi
+	// собирает разрешённые методы пути в неэкспортированном
+	// Context.methodsAllowed и передаёт их только своему дефолтному
+	// MethodNotAllowedHandler, который и выставляет заголовок Allow (mux.go).
+	// Ни кастомный хендлер, ни катч-олл этот список получить не могут, так что
+	// любой перехват промаха по методу превращает корректный `405 + Allow` в
+	// ответ без Allow. Здесь ветка 405 не трогается вовсе.
+	srv.router.NotFound(srv.handleNotFound)
 
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
@@ -662,20 +664,44 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ServeWs(s.hub, w, r)
 }
 
+// handleFrontend обслуживает SPA-fallback. Сюда chi приводит любой GET, не
+// совпавший с зарегистрированным роутом, — включая пути под /api/, которые
+// раньше получали HTML страницы дашборда со статусом 200 вместо ошибки.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
+	if isAPIPath(r.URL.Path) {
+		handleAPINotFound(w, r)
+		return
+	}
 	s.frontend.ServeHTTP(w, r)
 }
 
-// handleAPINotFound отвечает на запрос под /api/, которому не соответствует ни
+// handleNotFound закрывает конфигурацию без собранного фронтенда: роут `/*` не
+// регистрируется, и неизвестный API-путь доставался дефолтному NotFound chi с
+// ответом text/plain. Ветки 405 это не касается — chi зовёт NotFound только
+// когда путь не совпал ни с одним роутом ни при каком методе.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if isAPIPath(r.URL.Path) {
+		handleAPINotFound(w, r)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// isAPIPath отделяет API от маршрутов клиентского роутера. Корень `/api` без
+// слэша включён намеренно: это самый вероятный пробный URL автоматизированного
+// клиента, и он тоже не должен получать HTML.
+func isAPIPath(urlPath string) bool {
+	return urlPath == "/api" || strings.HasPrefix(urlPath, "/api/")
+}
+
+// handleAPINotFound отвечает на GET под /api/, которому не соответствует ни
 // один зарегистрированный роут.
 //
-// Почему 404, а не 405 на неподдерживаемый метод существующего пути: chi
-// приводит сюда оба случая через один и тот же катч-олл, и на этом уровне
-// список методов конкретного пути уже недоступен. RFC 9110 §15.5.6 требует,
-// чтобы ответ 405 нёс заголовок Allow с реальным набором методов; выдумывать
-// его нельзя, а 405 без Allow — некорректный ответ. Поэтому пара «метод + путь»
-// трактуется целиком: такого ресурса нет. Контракт для клиента при этом
-// выполняется — тело всегда JSON, а не HTML.
+// Промах по методу сюда не попадает и остаётся за chi: тот отвечает 405 с
+// заголовком Allow, как требует RFC 9110 §15.5.6. Перехватывать этот случай
+// нечем — набор методов пути живёт в неэкспортированном Context.methodsAllowed
+// и доступен только дефолтному хендлеру chi (см. комментарий у router.NotFound
+// в NewServer), поэтому любой перехват стоил бы заголовка Allow.
 func handleAPINotFound(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusNotFound, map[string]string{
 		"error":  "not_found",

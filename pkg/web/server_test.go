@@ -697,15 +697,7 @@ func TestNewServerFallsBackToEmbeddedFrontend(t *testing.T) {
 // SPA-fallback: катч-олл фронтенда раньше отдавал HTML со статусом 200 на любой
 // несуществующий /api/-путь.
 func TestUnknownAPIRouteReturnsJSONNotFound(t *testing.T) {
-	dist := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	srv, err := NewServer(":memory:", dist, t.TempDir())
-	if err != nil {
-		t.Fatalf("failed to create test server: %v", err)
-	}
-	defer srv.Close()
+	srv := newFrontendTestServer(t)
 
 	assertJSONNotFound := func(t *testing.T, method, target string) {
 		t.Helper()
@@ -733,12 +725,22 @@ func TestUnknownAPIRouteReturnsJSONNotFound(t *testing.T) {
 	})
 
 	t.Run("unknown nested api path", func(t *testing.T) {
-		assertJSONNotFound(t, http.MethodPost, "/api/runs/run-1/definitely-not-a-route")
+		assertJSONNotFound(t, http.MethodGet, "/api/runs/run-1/definitely-not-a-route")
 	})
 
-	// Неподдерживаемый метод существующего пути сознательно трактуется как 404,
-	// см. комментарий у handleAPINotFound; проверяем именно формат ответа.
-	t.Run("unsupported method on existing path", func(t *testing.T) {
+	// Корень API без завершающего слэша — самый вероятный пробный URL клиента,
+	// и он тоже не должен получать HTML.
+	t.Run("api root without slash", func(t *testing.T) {
+		assertJSONNotFound(t, http.MethodGet, "/api")
+	})
+
+	t.Run("api root with slash", func(t *testing.T) {
+		assertJSONNotFound(t, http.MethodGet, "/api/")
+	})
+
+	// GET на путь, зарегистрированный только под POST, раньше тоже проваливался
+	// в SPA-fallback и отдавал HTML.
+	t.Run("get on write-only path", func(t *testing.T) {
 		assertJSONNotFound(t, http.MethodGet, "/api/runs")
 	})
 
@@ -770,8 +772,99 @@ func TestUnknownAPIRouteReturnsJSONNotFound(t *testing.T) {
 	})
 }
 
+// TestUnsupportedMethodKeepsAllowHeader сторожит ветку 405: JSON-404 не должен
+// перехватывать промах по методу, потому что заголовок Allow умеет выставлять
+// только дефолтный MethodNotAllowedHandler chi — набор методов пути лежит в
+// неэкспортированном Context.methodsAllowed.
+func TestUnsupportedMethodKeepsAllowHeader(t *testing.T) {
+	srv := newFrontendTestServer(t)
+
+	cases := []struct {
+		method string
+		target string
+		allow  string
+	}{
+		{http.MethodDelete, "/api/pipelines", "GET"},
+		{http.MethodPost, "/api/pipelines", "GET"},
+		{http.MethodPut, "/api/artifacts/feat/review.md", "GET"},
+		{http.MethodPatch, "/api/runs/run-1/cancel", "POST"},
+		{http.MethodOptions, "/api/pipelines", "GET"},
+		{http.MethodHead, "/api/pipelines", "GET"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.method+" "+testCase.target, func(t *testing.T) {
+			request := newLoopbackRequest(testCase.method, testCase.target, nil)
+			response := httptest.NewRecorder()
+			srv.router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected 405, got %d: %s", response.Code, response.Body.String())
+			}
+			if allow := response.Header().Get("Allow"); allow != testCase.allow {
+				t.Fatalf("expected Allow %q, got %q", testCase.allow, allow)
+			}
+			if strings.Contains(response.Body.String(), "<html") {
+				t.Fatalf("405 must not carry HTML, got %q", response.Body.String())
+			}
+		})
+	}
+}
+
+// TestAPIFallbackDoesNotShadowWildcardRoutes: у артефактных роутов свои
+// wildcard-шаблоны, и fallback не должен перехватывать их до хендлера.
+func TestAPIFallbackDoesNotShadowWildcardRoutes(t *testing.T) {
+	srv := newFrontendTestServer(t)
+	if err := os.WriteFile(filepath.Join(srv.artifactRoot, "review.md"), []byte("# review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("artifact wildcard reaches handler", func(t *testing.T) {
+		request := newLoopbackRequest(http.MethodGet, "/api/artifacts/review.md", nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+		}
+		if response.Body.String() != "# review" {
+			t.Fatalf("unexpected artifact body: %q", response.Body.String())
+		}
+	})
+
+	// Промах внутри wildcard-роута должен остаться ответом его хендлера
+	// (404 от artifact-логики), а не подмениться fallback'ом.
+	t.Run("missing artifact stays with its handler", func(t *testing.T) {
+		request := newLoopbackRequest(http.MethodGet, "/api/artifacts/missing.md", nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", response.Code)
+		}
+		if strings.Contains(response.Body.String(), "no API route matches") {
+			t.Fatalf("fallback shadowed the artifact handler: %q", response.Body.String())
+		}
+	})
+
+	// Run-scoped wildcard: неизвестный run отвечает своей ошибкой, а не
+	// fallback'ом — значит роут не затенён.
+	t.Run("run artifact wildcard reaches handler", func(t *testing.T) {
+		request := newLoopbackRequest(http.MethodGet, "/api/runs/unknown-run/artifacts/review.md", nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", response.Code)
+		}
+		if strings.Contains(response.Body.String(), "no API route matches") {
+			t.Fatalf("fallback shadowed the run artifact handler: %q", response.Body.String())
+		}
+	})
+}
+
 // TestUnknownAPIRouteReturnsJSONWithoutFrontend: JSON-404 не должен зависеть от
-// того, собран ли фронтенд — без dist катч-олл SPA вообще не регистрируется.
+// того, собран ли фронтенд — без dist роут `/*` вообще не регистрируется и
+// запрос доходит до NotFound chi.
 func TestUnknownAPIRouteReturnsJSONWithoutFrontend(t *testing.T) {
 	srv, _ := newTestServer(t)
 
@@ -785,4 +878,20 @@ func TestUnknownAPIRouteReturnsJSONWithoutFrontend(t *testing.T) {
 	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
 		t.Fatalf("expected JSON content type, got %q", contentType)
 	}
+}
+
+// newFrontendTestServer поднимает сервер с минимальным собранным фронтендом,
+// чтобы SPA-fallback был зарегистрирован как в проде.
+func newFrontendTestServer(t *testing.T) *Server {
+	t.Helper()
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", dist, t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create test server: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	return srv
 }

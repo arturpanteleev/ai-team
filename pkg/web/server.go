@@ -154,6 +154,16 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 
+	// Оба промаха мимо роутов — по пути и по методу — сводятся в один
+	// respondFallback, чтобы ответ не зависел от того, какую ветку выбрал chi
+	// и собран ли фронтенд. Дефолтный MethodNotAllowedHandler chi здесь не
+	// подходит: он берёт методы из неэкспортированного Context.methodsAllowed,
+	// куда попадает и SPA-катч-олл `/*`, поэтому на API-путях обещал в Allow
+	// метод GET, который после этого фикса отдаёт 404. respondFallback считает
+	// методы сам через публичный Mux.Find и такого не обещает.
+	srv.router.NotFound(srv.respondFallback)
+	srv.router.MethodNotAllowed(srv.respondFallback)
+
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
 		if err != nil {
@@ -653,8 +663,118 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ServeWs(s.hub, w, r)
 }
 
+// handleFrontend обслуживает SPA-fallback. Сюда chi приводит любой GET, не
+// совпавший с зарегистрированным роутом, — включая пути под /api/, которые
+// раньше получали HTML страницы дашборда со статусом 200 вместо ошибки.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
+	if requestIsAPI(r) {
+		s.respondFallback(w, r)
+		return
+	}
 	s.frontend.ServeHTTP(w, r)
+}
+
+// isAPIPath отделяет API от маршрутов клиентского роутера. Корень `/api` без
+// слэша включён намеренно: это самый вероятный пробный URL автоматизированного
+// клиента, и он тоже не должен получать HTML.
+func isAPIPath(urlPath string) bool {
+	return urlPath == "/api" || strings.HasPrefix(urlPath, "/api/")
+}
+
+// requestIsAPI считает запрос API-шным, если под /api/ попадает любая из форм
+// пути — сырая или декодированная. Формы расходятся на percent-encoding, и
+// ошибаться безопаснее в сторону JSON: отдать машиночитаемую ошибку там, где
+// можно было отдать SPA, дешевле обратного.
+func requestIsAPI(r *http.Request) bool {
+	return isAPIPath(routingPath(r)) || isAPIPath(r.URL.Path)
+}
+
+// routingPath повторяет выбор пути, который делает chi.Mux.routeHTTP
+// (mux.go:450-461): RoutePath из routing-контекста, иначе RawPath, иначе
+// декодированный Path. Искать роуты по другому пути, чем маршрутизировал chi,
+// значит отвечать про чужой ресурс: на `/api/run%73` декодированная форма
+// совпадает с `/api/runs`, а сырая — ни с чем.
+func routingPath(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
+		return rctx.RoutePath
+	}
+	if r.URL.RawPath != "" {
+		return r.URL.RawPath
+	}
+	if r.URL.Path == "" {
+		return "/"
+	}
+	return r.URL.Path
+}
+
+// spaCatchAllPattern — шаблон, под которым зарегистрирован SPA-fallback.
+const spaCatchAllPattern = "/*"
+
+// fallbackProbeMethods перебираются при построении Allow. Порядок
+// алфавитный, чтобы заголовок был детерминированным; CONNECT и TRACE
+// опущены — ни один роут под ними не регистрируется.
+var fallbackProbeMethods = []string{
+	http.MethodDelete, http.MethodGet, http.MethodHead,
+	http.MethodOptions, http.MethodPatch, http.MethodPost, http.MethodPut,
+}
+
+// answeringMethods возвращает методы, которыми путь отвечает содержательно.
+// Mux.Find — публичный поиск по дереву роутов, возвращающий шаблон совпавшего
+// роута и не выполняющий хендлер.
+func (s *Server) answeringMethods(routePath string, apiPath bool) []string {
+	var methods []string
+	for _, method := range fallbackProbeMethods {
+		pattern := s.router.Find(chi.NewRouteContext(), method, routePath)
+		if pattern == "" {
+			continue
+		}
+		// Совпадение с SPA-катч-оллом на API-пути методом не считается:
+		// handleFrontend отвечает там ошибкой, а не содержимым. Иначе Allow
+		// обещал бы GET, а GET по тому же пути отдавал бы 404 — ровно та
+		// самопротиворечивая пара, которой заголовок Allow быть не должен.
+		if apiPath && pattern == spaCatchAllPattern {
+			continue
+		}
+		methods = append(methods, method)
+	}
+	return methods
+}
+
+// respondFallback отвечает на запрос, не дошедший до роута. Различие между
+// «нет такого пути» и «нет такого метода» здесь восстанавливается явно, а не
+// берётся из ветки chi, поэтому ответ одинаков при любой конфигурации: путь,
+// не отвечающий ни на один метод, получает 404, а промах по методу — 405 с
+// Allow из методов, которые этот путь действительно обслуживает.
+func (s *Server) respondFallback(w http.ResponseWriter, r *http.Request) {
+	apiPath := requestIsAPI(r)
+	// В теле ответа путь называется в той же форме, в какой его прислал
+	// клиент: декодированный r.URL.Path сообщал бы про ресурс, которого тот
+	// не запрашивал.
+	requested := r.URL.EscapedPath()
+	if methods := s.answeringMethods(routingPath(r), apiPath); len(methods) > 0 {
+		for _, method := range methods {
+			w.Header().Add("Allow", method)
+		}
+		if !apiPath {
+			// Вне /api/ тело не нужно: так же отвечал дефолтный хендлер chi.
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSONResponse(w, http.StatusMethodNotAllowed, map[string]any{
+			"error":   "method_not_allowed",
+			"detail":  fmt.Sprintf("%s is not supported for %s", r.Method, requested),
+			"allowed": methods,
+		})
+		return
+	}
+	if !apiPath {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSONResponse(w, http.StatusNotFound, map[string]string{
+		"error":  "not_found",
+		"detail": fmt.Sprintf("no API route matches %s %s", r.Method, requested),
+	})
 }
 
 func spaHandler(distDir string) http.Handler {

@@ -928,6 +928,16 @@ func cmdRun() {
 // только невозможность запустить runtime вовсе (check "cli"); git/gh/origin
 // — предусловия поздних стадий (delivery), которые и так fail-closed
 // проверяются на самой стадии, поэтому CLI не отказывает в run из-за них.
+// runPreflight печатает read-only отчёт готовности и блокирует запуск только
+// тогда, когда runtime невозможно запустить вовсе (check "cli").
+//
+// Различие с web-контроллером и worker, которые отклоняют Start при любой
+// непройденной обязательной проверке, зафиксировано намеренно: Git, origin и
+// gh — предусловия стадии доставки, и они fail-closed проверяются на ней самой.
+// Локальный прогон, который остановится раньше доставки (отклонённое ревью,
+// упавшие тесты, BLOCKED), законен и не должен требовать настроенного remote,
+// авторизованного gh или даже Git-репозитория: вне Git контроллер использует
+// полный hash snapshot (docs/ARCHITECTURE.md).
 func runPreflight(cfg *config.Config, reg *agent.Registry, target string) error {
 	report := preflight.New(cfg, reg, target).Check(context.Background())
 	printPreflightReport(report)

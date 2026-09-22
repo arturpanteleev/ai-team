@@ -81,6 +81,19 @@ func TestContributingCoversOpenSpecCycle(t *testing.T) {
 	contributing := readRepoFile(t, "../CONTRIBUTING.md")
 	assertContainsAll(t, contributing, "CONTRIBUTING.md", []string{
 		"Explore", "Propose", "Design", "Specs", "Tasks", "Apply", "Archive",
-		"Gate rule",
+	})
+}
+
+// TestContributingKeepsOpenSpecOptional — OpenSpec является инструментом, а не
+// обязанностью, и это должно быть сказано явно: без такой формулировки
+// контрибьютор читает раздел про цикл как предписание. Отдельно проверяется,
+// что единственное сохранившееся обязательство (специфицированное поведение не
+// расходится с openspec/specs) из документа не пропало.
+func TestContributingKeepsOpenSpecOptional(t *testing.T) {
+	contributing := readRepoFile(t, "../CONTRIBUTING.md")
+	assertContainsAll(t, contributing, "CONTRIBUTING.md", []string{
+		"инструмент, а не обязанность",
+		"Что остаётся обязательным",
+		"openspec/specs",
 	})
 }

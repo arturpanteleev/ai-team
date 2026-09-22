@@ -8,12 +8,9 @@ body:
         Спасибо за предложение по ai-team.
         Перед отправкой поищите дубликат среди [существующих issue](https://github.com/arturpanteleev/ai-team/issues).
 
-        **Пишите коротко.** ai-team разрабатывается spec-first: нормативные
-        формулировки, выбранный подход с альтернативами, критерий приёмки и шаги
-        реализации живут в OpenSpec change внутри `openspec/changes/`, а не в
-        issue. Issue описывает проблему и ссылается на change. При любом
-        расхождении верен change.
-        См. [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
+        **Пишите коротко.** Issue описывает проблему; подробная проработка, если
+        она вообще понадобится, живёт в PR или в OpenSpec change. Заводить change
+        необязательно — см. [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
   - type: textarea
     id: problem
     attributes:
@@ -36,15 +33,6 @@ body:
       label: Пример использования, CLI или конфигурации (необязательно)
       description: Короткий пример того, как возможность будет применяться.
       render: shell
-  - type: input
-    id: openspec-change
-    attributes:
-      label: OpenSpec change
-      description: >-
-        Путь к change, который это специфицирует, когда он появится. Оставьте
-        пустым, если его ещё нет — issue получит метку `needs-change`, а путь
-        проставляется после шага Propose.
-      placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: acceptance
     attributes:

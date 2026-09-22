@@ -18,7 +18,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
 
-const commandTimeout = 5 * time.Second
 const maxCommandOutput = 4096
 
 type Status string
@@ -62,18 +61,66 @@ func (r Report) Error() error {
 	return fmt.Errorf("preflight failed: %s", strings.Join(failed, "; "))
 }
 
-type commandRunner func(context.Context, string, ...string) (string, error)
+// CommandRunner исполняет внешнюю команду и возвращает её объединённый вывод.
+// Экспортирован, чтобы тесты вне пакета проверяли классификацию исходов, не
+// порождая настоящих процессов: иначе результат зависит от загрузки машины, а
+// не от проверяемой логики.
+type CommandRunner func(context.Context, string, ...string) (string, error)
+
+// LookPath резолвит имя команды в путь.
+type LookPath func(string) (string, error)
 
 type Checker struct {
 	config   *config.Config
 	registry *agent.Registry
 	target   string
-	run      commandRunner
-	lookPath func(string) (string, error)
+	run      CommandRunner
+	lookPath LookPath
+	timeout  time.Duration
 }
 
-func New(cfg *config.Config, registry *agent.Registry, target string) *Checker {
-	return &Checker{config: cfg, registry: registry, target: target, run: runCommand, lookPath: exec.LookPath}
+// Option настраивает Checker. Опции применяются после значений из конфига,
+// поэтому явно заданный timeout в тесте перекрывает конфигурационный.
+type Option func(*Checker)
+
+// WithCommandRunner подменяет исполнение внешних команд.
+func WithCommandRunner(runner CommandRunner) Option {
+	return func(c *Checker) {
+		if runner != nil {
+			c.run = runner
+		}
+	}
+}
+
+// WithLookPath подменяет резолвинг команд в PATH.
+func WithLookPath(lookPath LookPath) Option {
+	return func(c *Checker) {
+		if lookPath != nil {
+			c.lookPath = lookPath
+		}
+	}
+}
+
+// WithTimeout задаёт бюджет одной внешней команды в обход конфигурации.
+// Неположительное значение игнорируется: бюджет не может быть отключён.
+func WithTimeout(timeout time.Duration) Option {
+	return func(c *Checker) {
+		if timeout > 0 {
+			c.timeout = timeout
+		}
+	}
+}
+
+func New(cfg *config.Config, registry *agent.Registry, target string, options ...Option) *Checker {
+	checker := &Checker{
+		config: cfg, registry: registry, target: target,
+		run: runCommand, lookPath: exec.LookPath,
+		timeout: cfg.EffectivePreflightTimeout(),
+	}
+	for _, option := range options {
+		option(checker)
+	}
+	return checker
 }
 
 func (c *Checker) Check(ctx context.Context) Report {
@@ -160,7 +207,7 @@ func (c *Checker) Check(ctx context.Context) Report {
 }
 
 func (c *Checker) command(parent context.Context, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(parent, commandTimeout)
+	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 	return c.run(ctx, name, args...)
 }

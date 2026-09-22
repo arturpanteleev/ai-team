@@ -1,18 +1,18 @@
 <!--
-  Thanks for contributing to ai-team.
-  Search existing PRs first to avoid duplicates.
+  Спасибо за вклад в ai-team.
+  Сначала поищите похожие PR, чтобы не создавать дубликат.
 -->
 
-## Summary
+## Суть
 
-<!-- One or two sentences: what this PR does and why. -->
+<!-- Одно-два предложения: что делает этот PR и зачем. -->
 
-## Related issue
+## Связанный issue
 
 <!--
-  Link the issue this PR resolves so it closes on merge, e.g. `Closes #42`.
-  The issue is a short pointer; this PR and its OpenSpec change are the source
-  of truth. Where they disagree, the change is right (see CONTRIBUTING.md).
+  Укажите issue, который закрывает этот PR, например `Closes #42`.
+  Issue — короткий указатель; источник истины — этот PR и его OpenSpec change.
+  При расхождении верен change (см. CONTRIBUTING.md).
 -->
 
 Closes #
@@ -20,27 +20,27 @@ Closes #
 ## OpenSpec change
 
 <!--
-  ai-team is developed spec-first through OpenSpec. If this PR changes
-  observable behaviour, it must reference a change in openspec/ (proposal,
-  design, specs, tasks). Pure fixes/tests/docs that do not change behaviour
-  need no formal change (see CONTRIBUTING.md).
+  ai-team разрабатывается spec-first через OpenSpec. Если PR меняет наблюдаемое
+  поведение, он обязан ссылаться на change в `openspec/changes/` (proposal,
+  design, specs, tasks). Правки, не меняющие поведение — исправления, тесты,
+  документация — formal change не требуют (см. CONTRIBUTING.md).
 -->
 
-- [ ] No behavioural change (test / refactor / docs / typo).
-- [ ] Behavioural change — linked change in `openspec/changes/`.
+- [ ] Поведение не меняется (тест / рефакторинг / документация / опечатка).
+- [ ] Поведение меняется — связанный change в `openspec/changes/`.
 
-## Testing
+## Проверка
 
-<!-- How was this verified? Include commands and expected results. -->
+<!-- Как это проверено? Укажите команды и ожидаемый результат. -->
 
 - [ ] `make build`
-- [ ] `make test` (or targeted `go test ./pkg/...`)
+- [ ] `make test` (или точечно `go test ./pkg/...`)
 - [ ] `make specs`
-- [ ] `make verify` / CI checks pass
-- [ ] e2e / frontend affected — `make test-e2e`, `npm run lint`, `npm test`
+- [ ] `make verify` / проверки CI проходят
+- [ ] Затронуты e2e или фронтенд — `make test-e2e`, `npm run lint`, `npm test`
 
-## Checklist
+## Чеклист
 
-- [ ] Code formatted (`gofmt -l .` shows nothing).
-- [ ] No secrets or credentials committed.
-- [ ] Docs updated where behaviour/CLI changed (README, ARCHITECTURE).
+- [ ] Код отформатирован (`gofmt -l .` ничего не выводит).
+- [ ] Секреты и учётные данные не закоммичены.
+- [ ] Документация обновлена там, где изменилось поведение или CLI (README, ARCHITECTURE).

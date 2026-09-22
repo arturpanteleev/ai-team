@@ -1,53 +1,53 @@
-name: Feature request
-description: Propose a new feature or improvement for ai-team
+name: Предложить доработку
+description: Новая возможность или улучшение в ai-team
 labels: [enhancement, triage]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for proposing a feature for ai-team.
-        Search [existing issues](https://github.com/arturpanteleev/ai-team/issues) first to avoid duplicates.
+        Спасибо за предложение по ai-team.
+        Перед отправкой поищите дубликат среди [существующих issue](https://github.com/arturpanteleev/ai-team/issues).
 
-        **Keep this issue short.** ai-team is developed spec-first: the normative
-        wording, the chosen design with its alternatives, the acceptance criteria
-        and the implementation steps all live in an OpenSpec change under
-        `openspec/changes/`, not in the issue. The issue states the problem and
-        points at the change. If the two ever disagree, the change is right.
-        See [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
+        **Пишите коротко.** ai-team разрабатывается spec-first: нормативные
+        формулировки, выбранный подход с альтернативами, критерий приёмки и шаги
+        реализации живут в OpenSpec change внутри `openspec/changes/`, а не в
+        issue. Issue описывает проблему и ссылается на change. При любом
+        расхождении верен change.
+        См. [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What problem are you trying to solve? Describe the scenario and the pain in a few sentences.
+      label: Проблема
+      description: Какую задачу вы решаете? Опишите сценарий и в чём боль, в нескольких предложениях.
     validations:
       required: true
   - type: textarea
     id: direction
     attributes:
-      label: Proposed direction (optional)
+      label: Предполагаемое направление (необязательно)
       description: >-
-        One paragraph on the direction you have in mind — enough to judge whether
-        this is worth doing. Do not write the design here: the approach, the
-        alternatives considered and the trade-offs are decided in the OpenSpec
-        change, so that there is exactly one place that can be wrong.
+        Один абзац о направлении, которое вы имеете в виду — достаточно, чтобы
+        оценить, стоит ли это делать. Не описывайте здесь дизайн: подход,
+        рассмотренные альтернативы и компромиссы решаются в OpenSpec change,
+        чтобы существовало ровно одно место, которое может оказаться неверным.
   - type: textarea
     id: examples
     attributes:
-      label: Example usage / CLI / config (optional)
-      description: A short example of how the feature would be used.
+      label: Пример использования, CLI или конфигурации (необязательно)
+      description: Короткий пример того, как возможность будет применяться.
       render: shell
   - type: input
     id: openspec-change
     attributes:
       label: OpenSpec change
       description: >-
-        Path to the change that specifies this, once it exists. Leave empty if it
-        does not — the issue gets the `needs-change` label and the path is filled
-        in after the Propose step.
+        Путь к change, который это специфицирует, когда он появится. Оставьте
+        пустым, если его ещё нет — issue получит метку `needs-change`, а путь
+        проставляется после шага Propose.
       placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: acceptance
     attributes:
-      label: Contribution
+      label: Участие
       options:
-        - label: I am willing to implement this feature (or help test it).
+        - label: Готов реализовать это самостоятельно (или помочь с проверкой).

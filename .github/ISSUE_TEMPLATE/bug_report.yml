@@ -1,84 +1,84 @@
-name: Bug report
-description: Report a bug in ai-team
+name: Сообщить об ошибке
+description: Ошибка в работе ai-team
 labels: [bug, triage]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report an issue with ai-team.
-        Before filing, please search [existing issues](https://github.com/arturpanteleev/ai-team/issues) for a duplicate.
+        Спасибо, что нашли время сообщить об ошибке в ai-team.
+        Перед отправкой поищите дубликат среди [существующих issue](https://github.com/arturpanteleev/ai-team/issues).
 
-        Describe what you observed — do not propose the fix here. If the fix
-        changes behaviour, it is specified in an OpenSpec change under
-        `openspec/changes/`, and this issue just points at it.
-        See [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
+        Опишите наблюдение, а не предлагайте здесь исправление. Если исправление
+        меняет поведение, оно специфицируется в OpenSpec change внутри
+        `openspec/changes/`, а этот issue лишь ссылается на него.
+        См. [CONTRIBUTING.md](https://github.com/arturpanteleev/ai-team/blob/master/CONTRIBUTING.md).
   - type: input
     id: version
     attributes:
-      label: ai-team version
-      description: Output of `ai-team version` (or the git commit you built from).
+      label: Версия ai-team
+      description: Вывод `ai-team version` (или коммит, из которого собирали).
       placeholder: v0.1.0
     validations:
       required: true
   - type: input
     id: os
     attributes:
-      label: OS / platform
-      description: e.g. macOS 14 arm64, Ubuntu 22.04 amd64.
+      label: ОС и платформа
+      description: Например, macOS 14 arm64 или Ubuntu 22.04 amd64.
       placeholder: macOS 14 arm64
     validations:
       required: true
   - type: textarea
     id: what
     attributes:
-      label: What happened?
-      description: Describe the unexpected behaviour in a few sentences.
+      label: Что произошло
+      description: Опишите неожиданное поведение в нескольких предложениях.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: What did you expect?
-      description: Describe the expected behaviour.
+      label: Что вы ожидали
+      description: Опишите ожидаемое поведение.
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
-      label: Steps to reproduce
-      description: Minimal commands/configuration that trigger the bug.
+      label: Как воспроизвести
+      description: Минимальный набор команд и конфигурации, приводящий к ошибке.
       placeholder: |
-        1. `ai-team init` in a fresh repo
+        1. `ai-team init` в чистом репозитории
         2. `ai-team run --feature x --task "..." --approve-gates`
-        3. See error...
+        3. Возникает ошибка...
     validations:
       required: true
   - type: textarea
     id: evidence
     attributes:
-      label: Evidence / logs
-      description: Relevant `ai-team` output, exit codes, or files under `.ai-team/runs/`. Omit secrets.
+      label: Вывод и логи
+      description: Относящийся к делу вывод `ai-team`, коды выхода или файлы из `.ai-team/runs/`. Без секретов.
       render: shell
   - type: textarea
     id: config
     attributes:
-      label: Configuration
-      description: Relevant part of `.ai-team/config.yaml` (redact credentials).
+      label: Конфигурация
+      description: Относящаяся к делу часть `.ai-team/config.yaml` (уберите учётные данные).
       render: yaml
   - type: input
     id: openspec-change
     attributes:
       label: OpenSpec change
       description: >-
-        Path to the change that specifies the fix, once it exists. Leave empty if
-        it does not — the issue gets the `needs-change` label, and a fix that does
-        not change observable behaviour needs no change at all.
+        Путь к change, который специфицирует исправление, когда он появится.
+        Оставьте пустым, если его ещё нет — issue получит метку `needs-change`.
+        Исправление, не меняющее наблюдаемое поведение, change не требует вовсе.
       placeholder: openspec/changes/<name>/
   - type: checkboxes
     id: security
     attributes:
-      label: Sensitive data
-      description: By submitting, you confirm you have not included any credentials or secrets and disclosed any security concern via the private route (see SECURITY.md).
+      label: Чувствительные данные
+      description: Отправляя issue, вы подтверждаете, что не приложили учётных данных и секретов, а вопросы безопасности раскрыли приватно (см. SECURITY.md).
       options:
-        - label: I confirm no secrets/credentials are included and any security issue is reported privately.
+        - label: Подтверждаю, что секретов и учётных данных нет, а проблема безопасности сообщается приватно.
           required: true

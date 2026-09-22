@@ -94,7 +94,7 @@ PR. PR закрывает issue строкой `Closes #<номер>`.
 
 | Инструмент | Минимально | Зачем |
 |---|---|---|
-| Go | 1.26.5+ | сборка и тесты ядра |
+| Go | 1.26.5+ (точный пин сборки — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
 | Node.js + npm | 22+ (npm 10+) | сборка/тест web-фронтенда (`web/`) |
 | OpenSpec CLI | через `npx` автоматически | строгая валидация specs (`make specs`) |
 | `opencode` | в `PATH` | только для запуска полного `ai-team run` (LLM-артефакты) |
@@ -110,7 +110,7 @@ npm-проект, чья прод-сборка (`web/dist`) встраивает
 # 1. Ядро
 make build                  # go build -o bin/ai-team ./cmd/ai-team
 make test                   # go test ./...
-make test-coverage          # с coverage-гейтом 60%
+make test-coverage          # coverage-гейт 60% + per-package floors
 
 # 2. Отдельно — только один пакет (быстрее итераций)
 go test ./pkg/pipeline/...
@@ -147,22 +147,53 @@ make test-e2e              # go test -run TestE2E ./e2etest/...
 ```bash
 make build           # сборка cmd/ai-team
 make test            # go test ./... (все пакеты)
-make test-coverage   # go test с coverage gate 60%
+make test-coverage   # coverage gate: total 60% + per-package floors
+                     # (scripts/coverage-floors.env)
 make test-e2e        # e2etest/ — mock-opencode + subprocess-level сценарии
 make specs           # строгая OpenSpec-валидация
-make verify          # specs + mod verify + vet + govulncheck + race tests +
+make verify          # gofmt + specs + go mod verify + go vet + govulncheck +
+                     # race tests + test-coverage + test-e2e +
                      # frontend audit/lint/tests/build
 make clean           # очистка build-артефактов
 ```
 
 `make verify` — это полная проверка, как её гоняет CI: она **включает**
-gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-валидацию, `go mod
-verify`, `go vet`, `govulncheck`, race-тесты, coverage gate 60% (`make
-test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build с
-проверкой, что встроенный `web/dist` соответствует исходникам фронта. Перед PR
+gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-валидацию,
+`go mod verify`, `go vet`, `govulncheck`, race-тесты, coverage gate — total
+60% плюс per-package floors из `scripts/coverage-floors.env`
+(`make test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build
+с проверкой, что встроенный `web/dist` соответствует исходникам фронта. Перед PR
 достаточно прогнать локально `make verify`; если какая-то проверка не пройдена,
 именно она указывает, что доработать (команды покрыты отдельными шагами в
 [Make-таргеты](#make-таргеты)).
+
+> **Что здесь держится на ревью, а не на автоматике.** Два согласования
+> проверяются только глазами рецензента:
+>
+> 1. этот список шагов против настоящего тела target-а `verify` в `Makefile`;
+> 2. минимальная версия Go в документах (`README.md`, этот файл,
+>    `docs/demo/README.md`, `docs/demo/run-demo.sh`) против `go.mod`, а точный
+>    пин в `.tool-versions` — против `go-version:` во ВСЕХ местах, где он
+>    продублирован: `.github/workflows/*` и `docs/demo/ci-gate-demo.yaml`
+>    (последний лежит вне каталога workflow, но `docs/demo/README.md` прямо
+>    требует, чтобы он соответствовал сборке, — его легче всего пропустить).
+>
+> Автоматический сторож на эти два пункта пробовали строить разбором Markdown,
+> YAML и Makefile регулярками — получился источник ложных срабатываний и
+> незамеченных дыр (пустая строка в рецепте, закомментированный пин, кавычки
+> вокруг `uses:`). Делать это надо иначе: workflow — YAML-парсером, а состав
+> `verify` — из `make -n verify`, а не чтением Makefile глазами. Это отдельная
+> работа со своими тестами:
+> [#139](https://github.com/arturpanteleev/ai-team/issues/139), где перечислены
+> все подтверждённые дыры с мутациями. Пока задача не сделана — правя
+> `Makefile` или версию Go, пройдитесь по списку выше руками.
+>
+> Как выглядит рабочий подход, видно на соседних сторожах:
+> `TestReadmeCLIReferenceMatchesDispatcher` и `TestUsageTextMatchesDispatcher`
+> (`docs/docs_test.go`) сверяют таблицу README и текст `ai-team help` с
+> диспетчером команд, разбирая `cmd/ai-team/main.go` через `go/parser`. Они
+> смотрят на AST, а не на форматирование, и поэтому выдержали три круга
+> мутационных проверок. Сторожа из #139 имеет смысл строить так же.
 
 Один пакет или один тест:
 

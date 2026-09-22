@@ -4,6 +4,10 @@
 package docs
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -108,11 +112,7 @@ func TestContributingKeepsOpenSpecOptional(t *testing.T) {
 // в проверку по умолчанию (fail-closed), а не молча выпадала из неё.
 var dispatcherAliases = map[string]bool{"--help": true, "-h": true}
 
-var (
-	caseLabelRe   = regexp.MustCompile(`^\tcase (.+):$`)
-	quotedValueRe = regexp.MustCompile(`"([^"]+)"`)
-	cliCommandRe  = regexp.MustCompile("`ai-team ([a-z][a-z-]*)")
-)
+var cliCommandRe = regexp.MustCompile("`ai-team ([a-z][a-z-]*)")
 
 // dispatcherCommands извлекает множество команд из самого диспетчера
 // cmd/ai-team/main.go.
@@ -124,34 +124,64 @@ var (
 // есть делает документационный тест зависимым от сборки и медленным, а
 // печатаемая справка — это тоже текст, который может отстать от switch.
 // Диспетчер же — единственное место, где команда становится исполнимой.
+//
+// ПОЧЕМУ go/parser, а не регулярка по строкам: регулярка вида `^\tcase (.+):$`
+// молча не видит gofmt-чистые формы — `case "x": // комментарий` и case-список,
+// перенесённый на несколько строк, — то есть сторож был бы fail-open ровно для
+// новой команды, ради которой написан. AST видит их одинаково и не зависит от
+// отступов и переносов.
 func dispatcherCommands(t *testing.T) map[string]bool {
 	t.Helper()
-	source := readRepoFile(t, "../cmd/ai-team/main.go")
-	const switchHeader = "switch os.Args[1] {"
-	start := strings.Index(source, switchHeader)
-	if start < 0 {
-		t.Fatalf("cmd/ai-team/main.go: не найден диспетчер %q", switchHeader)
+	const sourcePath = "../cmd/ai-team/main.go"
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, sourcePath, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("разбор %s: %v", sourcePath, err)
 	}
-	commands := map[string]bool{}
-	for _, line := range strings.Split(source[start:], "\n") {
-		// gofmt гарантирует, что switch верхнего уровня внутри main()
-		// закрывается строкой ровно из одного таба и скобки — это конец блока.
-		if line == "\t}" {
-			break
+
+	// Диспетчер опознаём по выражению switch, а не по позиции в файле.
+	var dispatcher *ast.SwitchStmt
+	ast.Inspect(file, func(node ast.Node) bool {
+		switchStmt, ok := node.(*ast.SwitchStmt)
+		if !ok || switchStmt.Tag == nil {
+			return true
 		}
-		label := caseLabelRe.FindStringSubmatch(line)
-		if label == nil {
+		if types.ExprString(switchStmt.Tag) == "os.Args[1]" {
+			dispatcher = switchStmt
+			return false
+		}
+		return true
+	})
+	if dispatcher == nil {
+		t.Fatalf("%s: не найден switch по os.Args[1]", sourcePath)
+	}
+
+	commands := map[string]bool{}
+	for _, statement := range dispatcher.Body.List {
+		clause, ok := statement.(*ast.CaseClause)
+		if !ok || clause.List == nil { // default — не команда
 			continue
 		}
-		for _, value := range quotedValueRe.FindAllStringSubmatch(label[1], -1) {
-			if dispatcherAliases[value[1]] {
+		for _, expression := range clause.List {
+			literal, ok := expression.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				// Не строковый литерал — сторож не может решить, команда это
+				// или нет, поэтому падаем, а не пропускаем молча.
+				t.Fatalf("%s:%d: ветка диспетчера не является строковым литералом: %s",
+					sourcePath, fileSet.Position(expression.Pos()).Line, types.ExprString(expression))
+			}
+			value, unquoteErr := strconv.Unquote(literal.Value)
+			if unquoteErr != nil {
+				t.Fatalf("%s: не разобрать литерал %s: %v", sourcePath, literal.Value, unquoteErr)
+			}
+			if dispatcherAliases[value] {
 				continue
 			}
-			commands[value[1]] = true
+			commands[value] = true
 		}
 	}
 	if len(commands) == 0 {
-		t.Fatal("cmd/ai-team/main.go: не удалось извлечь ни одной команды из диспетчера")
+		t.Fatalf("%s: не удалось извлечь ни одной команды из диспетчера", sourcePath)
 	}
 	return commands
 }
@@ -216,14 +246,39 @@ func TestReadmeCLIReferenceMatchesDispatcher(t *testing.T) {
 }
 
 var (
-	goModVersionRe      = regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)$`)
-	toolVersionsGoRe    = regexp.MustCompile(`(?m)^golang (\d+\.\d+(?:\.\d+)?)$`)
-	workflowGoVersionRe = regexp.MustCompile(`go-version:\s*'([^']+)'`)
+	goModVersionRe   = regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)$`)
+	toolVersionsGoRe = regexp.MustCompile(`(?m)^golang (\d+\.\d+(?:\.\d+)?)$`)
+	// Кавычки в YAML необязательны и стиль может смениться, поэтому
+	// принимаем 'x', "x" и голое x: иначе сабтест стал бы вакуумным ровно
+	// в тот момент, когда кто-то переформатирует workflow.
+	workflowGoVersionRe = regexp.MustCompile(`go-version\s*:\s*["']?([0-9][^"'\s#]*)["']?`)
+	workflowGoFileRe    = regexp.MustCompile(`go-version-file\s*:\s*["']?(\S+?)["']?\s*$`)
+	workflowSetupGoRe   = regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses\s*:\s*actions/setup-go`)
 	// Минимальная версия в прозе: «Go 1.26.5+», «| Go | 1.26.5+ |»,
-	// «`go` (1.26.5+)». Допускаем до 12 нецифровых символов между словом и
-	// версией, чтобы покрыть разделители таблицы, кавычки и скобки.
+	// «`go` (1.26.5+)», «Go 1.26.5+.» в комментарии шелл-скрипта. Допускаем до
+	// 12 нецифровых символов между словом и версией — это покрывает
+	// разделители таблицы, кавычки и скобки.
 	docGoMinimumRe = regexp.MustCompile(`(?i)\bgo\b[^0-9\n]{0,12}(\d+\.\d+(?:\.\d+)?)\+`)
 )
+
+// goVersionDocs — все файлы, которые называют минимальную версию Go читателю.
+// Список включает не только Markdown: `docs/demo/run-demo.sh` объявляет
+// требования в шапке скрипта и уже успел разойтись с go.mod именно потому, что
+// сторожа смотрели только на .md.
+var goVersionDocs = []string{
+	"../README.md",
+	"../CONTRIBUTING.md",
+	"demo/README.md",
+	"demo/run-demo.sh",
+}
+
+// goVersionWorkflowGlobs — все места, где версия Go пинится для CI. Демо-workflow
+// лежит вне .github/workflows, но это такой же пин, и он уже был четвёртой
+// копией версии.
+var goVersionWorkflowGlobs = []string{
+	"../.github/workflows/*.y*ml",
+	"demo/*.y*ml",
+}
 
 func parseVersion(t *testing.T, raw string) []int {
 	t.Helper()
@@ -262,7 +317,7 @@ func TestGoVersionsAgreeAcrossManifests(t *testing.T) {
 	minimum := goModMatch[1]
 
 	t.Run("документы называют минимум из go.mod", func(t *testing.T) {
-		for _, path := range []string{"../README.md", "../CONTRIBUTING.md", "demo/README.md"} {
+		for _, path := range goVersionDocs {
 			content := readRepoFile(t, path)
 			matches := docGoMinimumRe.FindAllStringSubmatch(content, -1)
 			if len(matches) == 0 {
@@ -291,22 +346,116 @@ func TestGoVersionsAgreeAcrossManifests(t *testing.T) {
 	})
 
 	t.Run("CI использует тот же пин", func(t *testing.T) {
-		workflows, err := filepath.Glob("../.github/workflows/*.y*ml")
-		if err != nil {
-			t.Fatalf("поиск workflow-файлов: %v", err)
+		var workflows []string
+		for _, pattern := range goVersionWorkflowGlobs {
+			matched, err := filepath.Glob(pattern)
+			if err != nil {
+				t.Fatalf("поиск workflow по %q: %v", pattern, err)
+			}
+			workflows = append(workflows, matched...)
 		}
 		if len(workflows) == 0 {
-			t.Fatal("не найдено ни одного workflow в .github/workflows")
+			t.Fatal("не найдено ни одного workflow-файла")
 		}
+		checked := 0
 		for _, workflow := range workflows {
 			content := readRepoFile(t, workflow)
-			for _, match := range workflowGoVersionRe.FindAllStringSubmatch(content, -1) {
+			setupSteps := len(workflowSetupGoRe.FindAllString(content, -1))
+			if setupSteps == 0 {
+				continue // workflow не ставит Go — пинить нечего
+			}
+			checked++
+
+			versions := workflowGoVersionRe.FindAllStringSubmatch(content, -1)
+			files := workflowGoFileRe.FindAllStringSubmatch(content, -1)
+			// Шаг setup-go без пина берёт произвольную версию Go — это молчаливое
+			// расхождение, поэтому требуем пин на каждый шаг.
+			if len(versions)+len(files) < setupSteps {
+				t.Errorf("%s: %d шагов actions/setup-go, но только %d пинов go-version/go-version-file",
+					workflow, setupSteps, len(versions)+len(files))
+			}
+			for _, match := range versions {
 				if match[1] != pinned {
-					t.Errorf("%s: go-version '%s' расходится с .tool-versions (golang %s)", workflow, match[1], pinned)
+					t.Errorf("%s: go-version %q расходится с .tool-versions (golang %s)", workflow, match[1], pinned)
+				}
+			}
+			for _, match := range files {
+				// go-version-file допустим только если указывает на манифест,
+				// который этот тест и считает источником правды.
+				if !strings.HasSuffix(match[1], ".tool-versions") && !strings.HasSuffix(match[1], "go.mod") {
+					t.Errorf("%s: go-version-file %q не ссылается ни на .tool-versions, ни на go.mod", workflow, match[1])
 				}
 			}
 		}
+		if checked == 0 {
+			t.Fatal("ни в одном workflow не найден шаг actions/setup-go — сторож стал вакуумным")
+		}
 	})
+}
+
+// verifyDescriptions возвращает два независимых описания `make verify` из
+// CONTRIBUTING: комментарий в блоке «Make-таргеты» и абзац прозой. Оба обязаны
+// быть полными — именно неполный комментарий при полном абзаце и был issue
+// #115, поэтому проверяются они по отдельности, а не объединением.
+//
+// ПОЧЕМУ именно эти два фрагмента, а не весь раздел: в разделе есть
+// самостоятельные строки `make test-coverage`, `make test-e2e`, `make specs`,
+// и поиск токенов по всему разделу удовлетворялся бы ими — сторож проходил бы,
+// даже если описание verify вообще удалить. Пробелы и переносы схлопываются,
+// чтобы обычный reflow Markdown («go mod\nverify») не красил тест.
+func verifyDescriptions(t *testing.T, contributing string) map[string]string {
+	t.Helper()
+	const section = "## Make-таргеты"
+	sectionStart := strings.Index(contributing, section)
+	if sectionStart < 0 {
+		t.Fatalf("CONTRIBUTING.md: не найден раздел %q", section)
+	}
+	body := contributing[sectionStart:]
+	if next := strings.Index(body[len(section):], "\n## "); next >= 0 {
+		body = body[:len(section)+next]
+	}
+
+	var comment []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "make verify") {
+			comment = append(comment, line)
+			continue
+		}
+		if len(comment) == 0 {
+			continue
+		}
+		// Продолжение многострочного комментария к той же цели.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			comment = append(comment, line)
+			continue
+		}
+		break
+	}
+	if len(comment) == 0 {
+		t.Fatal("CONTRIBUTING.md, раздел «Make-таргеты»: в блоке команд нет строки `make verify`")
+	}
+
+	prose := ""
+	if start := strings.Index(body, "`make verify`"); start >= 0 {
+		prose = body[start:]
+		if end := strings.Index(prose, "\n\n"); end >= 0 {
+			prose = prose[:end]
+		}
+	}
+	if prose == "" {
+		t.Fatal("CONTRIBUTING.md, раздел «Make-таргеты»: нет абзаца, описывающего `make verify`")
+	}
+
+	return map[string]string{
+		"комментарий в блоке команд": normalizeSpace(strings.Join(comment, " ")),
+		"абзац прозой":               normalizeSpace(prose),
+	}
+}
+
+// normalizeSpace схлопывает пробелы и переносы: мягкий перенос Markdown не
+// должен превращать «go mod verify» в ненайденный токен.
+func normalizeSpace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // TestContributingDescribesVerifyTarget — описание `make verify` в CONTRIBUTING
@@ -319,50 +468,60 @@ func TestContributingDescribesVerifyTarget(t *testing.T) {
 	if start < 0 {
 		t.Fatal("Makefile: не найден target verify")
 	}
-	body := makefile[start+1:]
-	if end := strings.Index(body, "\n\n"); end >= 0 {
-		body = body[:end]
+	target := makefile[start+1:]
+	if end := strings.Index(target, "\n\n"); end >= 0 {
+		target = target[:end]
 	}
 
-	// Сверяем не весь документ, а раздел «Make-таргеты»: именно он описывает
-	// состав verify (комментарий в code block + абзац прозой). Слово «lint»
-	// встречается и в других разделах, поэтому глобальный поиск по файлу
-	// пропустил бы ровно то расхождение, ради которого написан этот тест.
-	contributing := readRepoFile(t, "../CONTRIBUTING.md")
-	const section = "## Make-таргеты"
-	sectionStart := strings.Index(contributing, section)
-	if sectionStart < 0 {
-		t.Fatalf("CONTRIBUTING.md: не найден раздел %q", section)
-	}
-	described := contributing[sectionStart:]
-	if next := strings.Index(described[len(section):], "\n## "); next >= 0 {
-		described = described[:len(section)+next]
-	}
+	descriptions := verifyDescriptions(t, readRepoFile(t, "../CONTRIBUTING.md"))
 
-	// Ключ — токен тела target-а verify в Makefile, значение — то, что обязано
-	// быть названо в разделе CONTRIBUTING. Проверка идёт только по тем шагам,
-	// которые в Makefile реально есть: удалили шаг — требование отпадает само,
-	// и тест не начинает требовать документировать несуществующее.
-	required := map[string]string{
-		"verify: specs":         "specs",
-		"gofmt -l ":             "gofmt",
-		"go mod verify":         "go mod verify",
-		"go vet ./...":          "go vet",
-		"govulncheck":           "govulncheck",
-		"go test -race":         "race",
-		"$(MAKE) test-coverage": "test-coverage",
-		"$(MAKE) test-e2e":      "test-e2e",
-		"npm audit":             "audit",
-		"npm run lint":          "lint",
-		"npm test":              "tests",
-		"npm run build":         "build",
+	// Ключ — токен тела target-а verify в Makefile, значение — допустимые
+	// написания в документе (достаточно любого: у шага может быть и командное,
+	// и человеческое имя). Проверка идёт только по тем шагам, которые в
+	// Makefile реально есть: удалили шаг — требование отпадает само, и тест не
+	// начинает требовать документировать несуществующее.
+	required := map[string][]string{
+		"verify: specs":         {"specs", "OpenSpec"},
+		"gofmt -l ":             {"gofmt"},
+		"go mod verify":         {"go mod verify"},
+		"go vet ./...":          {"go vet"},
+		"govulncheck":           {"govulncheck"},
+		"go test -race":         {"race"},
+		"$(MAKE) test-coverage": {"test-coverage"},
+		"$(MAKE) test-e2e":      {"test-e2e", "E2E"},
+		"npm audit":             {"audit"},
+		"npm run lint":          {"lint"},
+		"npm test":              {"tests"},
+		"npm run build":         {"build"},
 	}
-	for makefileToken, docToken := range required {
-		if !strings.Contains(body, makefileToken) {
+	places := make([]string, 0, len(descriptions))
+	for place := range descriptions {
+		places = append(places, place)
+	}
+	sort.Strings(places)
+
+	makefileTokens := make([]string, 0, len(required))
+	for makefileToken := range required {
+		makefileTokens = append(makefileTokens, makefileToken)
+	}
+	sort.Strings(makefileTokens)
+
+	for _, makefileToken := range makefileTokens {
+		if !strings.Contains(target, makefileToken) {
 			continue
 		}
-		if !strings.Contains(described, docToken) {
-			t.Errorf("CONTRIBUTING.md, раздел «Make-таргеты»: описание `make verify` не упоминает %q (в Makefile есть %q)", docToken, makefileToken)
+		for _, place := range places {
+			mentioned := false
+			for _, docToken := range required[makefileToken] {
+				if strings.Contains(descriptions[place], docToken) {
+					mentioned = true
+					break
+				}
+			}
+			if !mentioned {
+				t.Errorf("CONTRIBUTING.md, %s: описание `make verify` не упоминает ни одно из %v (в Makefile есть %q)",
+					place, required[makefileToken], makefileToken)
+			}
 		}
 	}
 }

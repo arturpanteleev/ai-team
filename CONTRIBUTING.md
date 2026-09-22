@@ -94,7 +94,7 @@ PR. PR закрывает issue строкой `Closes #<номер>`.
 
 | Инструмент | Минимально | Зачем |
 |---|---|---|
-| Go | 1.26.5+ (точный пин CI — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
+| Go | 1.26.5+ (точный пин сборки — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
 | Node.js + npm | 22+ (npm 10+) | сборка/тест web-фронтенда (`web/`) |
 | OpenSpec CLI | через `npx` автоматически | строгая валидация specs (`make specs`) |
 | `opencode` | в `PATH` | только для запуска полного `ai-team run` (LLM-артефакты) |

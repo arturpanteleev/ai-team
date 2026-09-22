@@ -6,7 +6,7 @@
 #   3) FAIL junit  — тест есть, но JUnit-отчёт содержит failure
 # Каждый сценарий строит self-contained bundle, который потом проходит verify.
 #
-# Требования: bash, git, Go 1.26+. Запуск из корня ai-team:
+# Требования: bash, git, Go 1.26.5+. Запуск из корня ai-team:
 #   bash docs/demo/run-demo.sh
 set -euo pipefail
 

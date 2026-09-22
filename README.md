@@ -271,7 +271,7 @@ non-interactive режиме: он сохраняет запрос решени�
 | `ai-team decision --run <id> --approval <id> --actor <id> --role <role> --action <action> --subject <sha256>` | записать точное решение человека |
 | `ai-team auth-token --actor <id> --roles <csv> [--ttl 1h]` | выпустить короткоживущий подписанный token для cloud web |
 | `ai-team worker --target <dir> --db <path>` | исполнить один strict worker job из stdin (обычно вызывается launcher-ом) |
-| `ai-team scheduler-worker --target <dir> [--scheduler-db <path>] [--db <path>] [--worker-id <id>] [--once]` | claim и исполнить job из persistent scheduler queue (lease, лимиты concurrency) |
+| `ai-team scheduler-worker [--target <dir>] [--scheduler-db <path>] [--db <path>] [--worker-id <id>] [--once]` | claim и исполнить job из persistent scheduler queue (lease, лимиты concurrency) |
 | `ai-team list` | список доступных агентов (имя, runtime, источник в layered registry) |
 | `ai-team ci-import [--target <dir>] [--format github-actions]` | импортировать ограниченный объяснимый набор checks из project CI (GitHub Actions) без исполнения произвольного YAML; показывает effective suite и fingerprint перед запуском |
 | `ai-team redact <verify\|scan\|redact> [--target <dir>] [--run <id>] [--path <rel>] [--out <dir>]` | P1-6 privacy-контракт: secrets-скан evidence (subcommand — перед флагами), fail-closed verify для экспорта или detached-копия с заменой секретов на `[REDACTED:...]` (--out вне source) |
@@ -619,8 +619,8 @@ strict без OS backend → UNAVAILABLE (fail-closed, gate блокирует u
 
 ### Локальная сборка и тесты
 
-Требуются Go 1.26.5+ (ядро) и Node 22+ (web-фронтенд); точные
-версии toolchain закреплены в [`.tool-versions`](.tool-versions). См. раздел
+Требуются Go 1.26.5+ (ядро) и Node 22+ (web-фронтенд); точная версия
+Go-toolchain для сборки закреплена в [`.tool-versions`](.tool-versions). См. раздел
 «[Локальная разработка](CONTRIBUTING.md#локальная-разработка)»
 в CONTRIBUTING.md.
 

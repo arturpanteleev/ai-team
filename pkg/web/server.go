@@ -154,16 +154,15 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 
-	// JSON-404 для неизвестных API-путей встроен в сам fallback (handleFrontend
-	// и handleNotFound), а не зарегистрирован отдельным роутом `/api/*`.
-	// Отдельный роут перехватывал бы и промах по методу, ломая ветку 405: chi
-	// собирает разрешённые методы пути в неэкспортированном
-	// Context.methodsAllowed и передаёт их только своему дефолтному
-	// MethodNotAllowedHandler, который и выставляет заголовок Allow (mux.go).
-	// Ни кастомный хендлер, ни катч-олл этот список получить не могут, так что
-	// любой перехват промаха по методу превращает корректный `405 + Allow` в
-	// ответ без Allow. Здесь ветка 405 не трогается вовсе.
-	srv.router.NotFound(srv.handleNotFound)
+	// Оба промаха мимо роутов — по пути и по методу — сводятся в один
+	// respondFallback, чтобы ответ не зависел от того, какую ветку выбрал chi
+	// и собран ли фронтенд. Дефолтный MethodNotAllowedHandler chi здесь не
+	// подходит: он берёт методы из неэкспортированного Context.methodsAllowed,
+	// куда попадает и SPA-катч-олл `/*`, поэтому на API-путях обещал в Allow
+	// метод GET, который после этого фикса отдаёт 404. respondFallback считает
+	// методы сам через публичный Mux.Find и такого не обещает.
+	srv.router.NotFound(srv.respondFallback)
+	srv.router.MethodNotAllowed(srv.respondFallback)
 
 	if distDir != "" {
 		srv.frontend, err = frontendHandler(distDir)
@@ -669,22 +668,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // раньше получали HTML страницы дашборда со статусом 200 вместо ошибки.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	if isAPIPath(r.URL.Path) {
-		handleAPINotFound(w, r)
+		s.respondFallback(w, r)
 		return
 	}
 	s.frontend.ServeHTTP(w, r)
-}
-
-// handleNotFound закрывает конфигурацию без собранного фронтенда: роут `/*` не
-// регистрируется, и неизвестный API-путь доставался дефолтному NotFound chi с
-// ответом text/plain. Ветки 405 это не касается — chi зовёт NotFound только
-// когда путь не совпал ни с одним роутом ни при каком методе.
-func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	if isAPIPath(r.URL.Path) {
-		handleAPINotFound(w, r)
-		return
-	}
-	http.NotFound(w, r)
 }
 
 // isAPIPath отделяет API от маршрутов клиентского роутера. Корень `/api` без
@@ -694,15 +681,67 @@ func isAPIPath(urlPath string) bool {
 	return urlPath == "/api" || strings.HasPrefix(urlPath, "/api/")
 }
 
-// handleAPINotFound отвечает на GET под /api/, которому не соответствует ни
-// один зарегистрированный роут.
-//
-// Промах по методу сюда не попадает и остаётся за chi: тот отвечает 405 с
-// заголовком Allow, как требует RFC 9110 §15.5.6. Перехватывать этот случай
-// нечем — набор методов пути живёт в неэкспортированном Context.methodsAllowed
-// и доступен только дефолтному хендлеру chi (см. комментарий у router.NotFound
-// в NewServer), поэтому любой перехват стоил бы заголовка Allow.
-func handleAPINotFound(w http.ResponseWriter, r *http.Request) {
+// spaCatchAllPattern — шаблон, под которым зарегистрирован SPA-fallback.
+const spaCatchAllPattern = "/*"
+
+// fallbackProbeMethods перебираются при построении Allow. Порядок
+// алфавитный, чтобы заголовок был детерминированным; CONNECT и TRACE
+// опущены — ни один роут под ними не регистрируется.
+var fallbackProbeMethods = []string{
+	http.MethodDelete, http.MethodGet, http.MethodHead,
+	http.MethodOptions, http.MethodPatch, http.MethodPost, http.MethodPut,
+}
+
+// answeringMethods возвращает методы, которыми путь отвечает содержательно.
+// Mux.Find — публичный поиск по дереву роутов, возвращающий шаблон совпавшего
+// роута и не выполняющий хендлер.
+func (s *Server) answeringMethods(urlPath string) []string {
+	apiPath := isAPIPath(urlPath)
+	var methods []string
+	for _, method := range fallbackProbeMethods {
+		pattern := s.router.Find(chi.NewRouteContext(), method, urlPath)
+		if pattern == "" {
+			continue
+		}
+		// Совпадение с SPA-катч-оллом на API-пути методом не считается:
+		// handleFrontend отвечает там ошибкой, а не содержимым. Иначе Allow
+		// обещал бы GET, а GET по тому же пути отдавал бы 404 — ровно та
+		// самопротиворечивая пара, которой заголовок Allow быть не должен.
+		if apiPath && pattern == spaCatchAllPattern {
+			continue
+		}
+		methods = append(methods, method)
+	}
+	return methods
+}
+
+// respondFallback отвечает на запрос, не дошедший до роута. Различие между
+// «нет такого пути» и «нет такого метода» здесь восстанавливается явно, а не
+// берётся из ветки chi, поэтому ответ одинаков при любой конфигурации: путь,
+// не отвечающий ни на один метод, получает 404, а промах по методу — 405 с
+// Allow из методов, которые этот путь действительно обслуживает.
+func (s *Server) respondFallback(w http.ResponseWriter, r *http.Request) {
+	apiPath := isAPIPath(r.URL.Path)
+	if methods := s.answeringMethods(r.URL.Path); len(methods) > 0 {
+		for _, method := range methods {
+			w.Header().Add("Allow", method)
+		}
+		if !apiPath {
+			// Вне /api/ тело не нужно: так же отвечал дефолтный хендлер chi.
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSONResponse(w, http.StatusMethodNotAllowed, map[string]any{
+			"error":   "method_not_allowed",
+			"detail":  fmt.Sprintf("%s is not supported for %s", r.Method, r.URL.Path),
+			"allowed": methods,
+		})
+		return
+	}
+	if !apiPath {
+		http.NotFound(w, r)
+		return
+	}
 	writeJSONResponse(w, http.StatusNotFound, map[string]string{
 		"error":  "not_found",
 		"detail": fmt.Sprintf("no API route matches %s %s", r.Method, r.URL.Path),

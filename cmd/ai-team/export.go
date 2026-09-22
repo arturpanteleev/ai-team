@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/ed25519"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -69,9 +68,9 @@ func cmdExport() {
 	scanRoot := runDir
 	report, redactErr := redact.Verify(scanRoot, policy)
 	if redactErr != nil {
-		fmt.Fprintf(os.Stderr, "✗ Export blocked: evidence run %s содержит секреты: %v\n", runID, redactErr)
-		logging.Emit(logging.Record{Level: "error", Command: "export", Type: "redact_block",
-			Message: redactErr.Error(), Data: map[string]any{"run_id": runID, "blocked": true}})
+		logging.Fail(logging.Record{Level: "error", Command: "export", Type: "redact_block",
+			Message: redactErr.Error(), Data: map[string]any{"run_id": runID, "blocked": true}},
+			"✗ Export blocked: evidence run %s содержит секреты: %v", runID, redactErr)
 		fatal("Экспорт заблокирован: redaction не прошла (см. ai-team redact verify --run %s)", runID)
 	}
 	if len(report.Violations) > 0 {

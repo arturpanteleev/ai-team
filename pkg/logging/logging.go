@@ -90,6 +90,26 @@ func Emit(r Record) {
 	}
 }
 
+// Fail печатает терминальную ошибку команды: человеческую строку — ровно один
+// раз в stderr, machine-readable record — только в JSON-режиме на stdout.
+//
+// Зачем отдельно от Emit: Emit в не-JSON режимах сам печатает Message человеку
+// (префикс "✗ "), поэтому связка «fmt.Fprintf(os.Stderr, ...) + Emit(...)» на
+// одном и том же событии давала две одинаковые строки подряд. Fail разводит
+// роли: человеческий текст (с цветом и контекстом команды) формирует
+// вызывающий, а structured record нужен только потребителю JSON, где он к тому
+// же уходит в другой поток и дублированием не является.
+func Fail(r Record, humanFormat string, args ...interface{}) {
+	mu.Lock()
+	out, errWriter, mode := emitter.out, emitter.err, emitter.mode
+	mu.Unlock()
+	fmt.Fprintf(errWriter, humanFormat+"\n", args...)
+	if mode == ModeJSON {
+		data, _ := json.Marshal(r)
+		fmt.Fprintln(out, string(data))
+	}
+}
+
 // Printf печатает человеко-читаемое сообщение (ранее fmt.Printf в stdout) в
 // поток, зависящий от режима, чтобы в JSON-режиме stdout содержал только
 // структурированные records, а в quiet — вообще ничего, кроме критичного

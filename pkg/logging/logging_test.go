@@ -114,3 +114,57 @@ func TestEmitUsesConfiguredStreams(t *testing.T) {
 		t.Fatalf("error должен идти в emitter.err, got err=%q", errBuf.String())
 	}
 }
+
+// Fail — единственный вывод терминальной ошибки команды: человеческая строка
+// печатается ровно один раз в любом режиме, а JSON-record добавляется только
+// в JSON-режиме и только в stdout (issue #112).
+func TestFailPrintsHumanLineOnce(t *testing.T) {
+	orig := emitter
+	defer func() { emitter = orig }()
+
+	for _, testCase := range []struct {
+		name        string
+		mode        Mode
+		wantRecords int
+	}{
+		{"default", ModeDefault, 0},
+		{"quiet", ModeQuiet, 0},
+		{"json", ModeJSON, 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			emitter = &Emitter{out: out, err: errBuf, mode: testCase.mode}
+
+			Fail(Record{Level: "error", Command: "run", Type: "run",
+				Message: "Пайплайн остановлен: boom", Exit: 1}, "✗ Пайплайн остановлен: %v", "boom")
+
+			humanLines := 0
+			for _, line := range strings.Split(strings.TrimRight(errBuf.String(), "\n"), "\n") {
+				if strings.Contains(line, "Пайплайн остановлен") {
+					humanLines++
+				}
+			}
+			if humanLines != 1 {
+				t.Fatalf("человеческая строка напечатана %d раз(а), ожидалась 1: %q", humanLines, errBuf.String())
+			}
+
+			records := 0
+			for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var rec Record
+				if err := json.Unmarshal([]byte(line), &rec); err != nil {
+					t.Fatalf("stdout должен содержать только JSON-records, got %q", line)
+				}
+				if rec.Exit != 1 {
+					t.Fatalf("record должен нести exit_code=1: %+v", rec)
+				}
+				records++
+			}
+			if records != testCase.wantRecords {
+				t.Fatalf("JSON-records: got %d, want %d (stdout=%q)", records, testCase.wantRecords, out.String())
+			}
+		})
+	}
+}

@@ -9,6 +9,15 @@ CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `versi
 - **КОГДА** передана неизвестная команда
 - **ТОГДА** CLI MUST вывести usage и завершиться ненулевым кодом
 
+#### Scenario: Terminal error printed once
+- **КОГДА** run завершается терминальной ошибкой (BLOCKED, негативный вердикт,
+  отказ resume, отмена, грязный workspace)
+- **ТОГДА** CLI MUST напечатать человеческую строку `✗ Пайплайн остановлен: …`
+  в stderr ровно один раз, включая режим `--quiet`
+- **И** machine-readable record о той же ошибке MUST печататься только в режиме
+  `--json` и только в stdout
+- **И** exit-код MUST остаться прежним
+
 ### Requirement: Init
 `ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и
 logs directories. В Git repository команда MUST обеспечить ignore

@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/config"
 )
 
 func readRepoFile(t *testing.T, relPath string) string {
@@ -71,6 +74,24 @@ func TestReadmeLinksToCompanionDocs(t *testing.T) {
 		"CONTRIBUTING.md",
 		"SECURITY.md",
 	})
+}
+
+// README называет конкретные дефолты лимитов времени и попыток. Именно
+// расхождение документации/комментария с кодом породило #143 (объявленный
+// дефолт 24h не применялся), поэтому числа сверяются с константами пакета
+// config, а не живут в README сами по себе.
+func TestReadmeBudgetDefaultsMatchCode(t *testing.T) {
+	readme := readRepoFile(t, "../README.md")
+	assertContainsAll(t, readme, "README.md", []string{
+		"| `budget.max_wall_time` | `" + config.DefaultBudgetMaxWallTime + "` |",
+		"| `budget.max_attempts` | `" + strconv.Itoa(config.DefaultBudgetMaxAttempts) + "` |",
+		"| `stage_timeout` | `30m` |",
+	})
+	// 30m в таблице выше — человеческая запись той же константы:
+	// DefaultStageTimeout.String() даёт "30m0s", поэтому сверяем значением.
+	if config.DefaultStageTimeout != 30*time.Minute {
+		t.Errorf("DefaultStageTimeout = %v, а README обещает 30m", config.DefaultStageTimeout)
+	}
 }
 
 func TestArchitectureDocCoversReferencedAnchors(t *testing.T) {

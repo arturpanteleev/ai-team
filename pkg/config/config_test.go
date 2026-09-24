@@ -359,6 +359,39 @@ func TestAgentConfig_Defaults(t *testing.T) {
 	}
 }
 
+// Конфиг, написанный руками (не через `ai-team init`), не содержит
+// stage_timeout — и до QS-09 шёл вообще без бюджета стадии.
+func TestStageTimeoutFor_DefaultsWithoutConfiguredValue(t *testing.T) {
+	cfg := &Config{PipelineAgents: []AgentConfig{{Name: "a"}}}
+	ac := cfg.AgentConfig("a")
+	d, err := ac.StageTimeoutFor()
+	if err != nil {
+		t.Fatalf("StageTimeoutFor(): %v", err)
+	}
+	if d != DefaultStageTimeout {
+		t.Fatalf("отсутствующий stage_timeout -> %v, ожидался дефолт %v", d, DefaultStageTimeout)
+	}
+	if d <= 0 {
+		t.Fatalf("нулевой таймаут оставляет стадию без верхней границы")
+	}
+
+	var nilAgent *AgentConfig
+	if d, err = nilAgent.StageTimeoutFor(); err != nil || d != DefaultStageTimeout {
+		t.Fatalf("nil agent -> (%v, %v), ожидался дефолт", d, err)
+	}
+}
+
+// Неположительный таймаут — не «без таймаута», а ошибка: молча подменить
+// написанное пользователем значение другим бюджетом хуже, чем остановиться.
+func TestStageTimeoutFor_RejectsNonPositive(t *testing.T) {
+	for _, raw := range []string{"-5m", "0s", "не длительность"} {
+		ac := &AgentConfig{Name: "a", Timeout: raw}
+		if d, err := ac.StageTimeoutFor(); err == nil {
+			t.Errorf("timeout=%q принят как %v", raw, d)
+		}
+	}
+}
+
 func TestMarshalRoundTrip(t *testing.T) {
 	src := Default()
 	data, err := src.Marshal()

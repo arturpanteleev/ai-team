@@ -32,7 +32,9 @@ func TestPolicyValidateRejectsTraversal(t *testing.T) {
 
 func TestVerifyFailClosedOnSecrets(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755)
+	if err := os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "runs", "x", "events.jsonl"),
 		[]byte("GITHUB_TOKEN="+"ghp_"+strings.Repeat("2", 36)+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -53,7 +55,9 @@ func TestVerifyFailClosedOnSecrets(t *testing.T) {
 
 func TestVerifyCleanPasses(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755)
+	if err := os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "runs", "x", "events.jsonl"),
 		[]byte("{\"stage\":\"review\",\"verdict\":\"APPROVED\"}\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -69,7 +73,9 @@ func TestVerifyCleanPasses(t *testing.T) {
 
 func TestVerifyExcludeSkipsFile(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "meta"), 0755)
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "meta", "tokens.txt"),
 		[]byte("GITHUB_TOKEN="+"ghp_"+strings.Repeat("3", 36)+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -84,7 +90,9 @@ func TestVerifyExcludeSkipsFile(t *testing.T) {
 // plain-текст.
 func TestVerifyBlocksJSONSecretFields(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755)
+	if err := os.MkdirAll(filepath.Join(dir, "runs", "x"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	secret := "T0pSecretValue21k9XzW8qK2nM4"
 	payload := "{\"event\":\"created\",\"credentials\":{\"password\":\"" + secret + "\"}}\n"
 	if err := os.WriteFile(filepath.Join(dir, "runs", "x", "events.jsonl"),

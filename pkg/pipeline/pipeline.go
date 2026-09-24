@@ -847,13 +847,14 @@ func copyTaskToCandidate(controlTarget, candidateTarget, feature string) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	if err := temporary.Chmod(0644); err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

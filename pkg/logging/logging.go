@@ -66,7 +66,8 @@ func Emit(r Record) {
 	mu.Lock()
 	if emitter.mode == ModeJSON {
 		data, _ := json.Marshal(r)
-		fmt.Fprintln(emitter.out, string(data))
+		// вывод в консоль: сообщать об ошибке записи некуда — это и есть канал сообщений.
+		_, _ = fmt.Fprintln(emitter.out, string(data))
 		mu.Unlock()
 		return
 	}
@@ -84,9 +85,10 @@ func Emit(r Record) {
 		prefix = "• "
 	}
 	if r.Level == "ok" && emitter.mode != ModeQuiet {
-		fmt.Fprintf(emitter.out, "%s%s\n", prefix, r.Message)
+		// вывод в консоль: сообщать об ошибке записи некуда — это и есть канал сообщений.
+		_, _ = fmt.Fprintf(emitter.out, "%s%s\n", prefix, r.Message)
 	} else if r.Level != "ok" {
-		fmt.Fprintf(emitter.err, "%s%s\n", prefix, r.Message)
+		_, _ = fmt.Fprintf(emitter.err, "%s%s\n", prefix, r.Message)
 	}
 }
 
@@ -103,10 +105,12 @@ func Fail(r Record, humanFormat string, args ...interface{}) {
 	mu.Lock()
 	out, errWriter, mode := emitter.out, emitter.err, emitter.mode
 	mu.Unlock()
-	fmt.Fprintf(errWriter, humanFormat+"\n", args...)
+	// Ошибка записи не важна: получатель — stderr терминала или уже закрытый
+	// поток, и сообщить о сбое печати некуда, кроме того же потока.
+	_, _ = fmt.Fprintf(errWriter, humanFormat+"\n", args...)
 	if mode == ModeJSON {
 		data, _ := json.Marshal(r)
-		fmt.Fprintln(out, string(data))
+		_, _ = fmt.Fprintln(out, string(data))
 	}
 }
 
@@ -125,11 +129,12 @@ func Printf(format string, args ...interface{}) {
 	mu.Unlock()
 	switch mode {
 	case ModeJSON:
-		fmt.Fprintf(err, format, args...)
+		// вывод в консоль: сообщать об ошибке записи некуда — это и есть канал сообщений.
+		_, _ = fmt.Fprintf(err, format, args...)
 	case ModeQuiet:
 		// подавляем второстепенный человеческий прогресс
 	default:
-		fmt.Fprintf(out, format, args...)
+		_, _ = fmt.Fprintf(out, format, args...)
 	}
 }
 

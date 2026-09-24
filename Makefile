@@ -2,7 +2,12 @@ TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
 
-.PHONY: build test test-short test-e2e test-coverage specs verify docs clean release-binaries
+# Версия статического анализатора пинится здесь — единственный источник истины
+# для локального `make lint` и CI-job `lint` (.github/workflows/ci.yaml вызывает
+# ровно эту цель, чтобы локальный и CI-гейт не разъезжались).
+GOLANGCI_LINT_VERSION ?= v2.13.2
+
+.PHONY: build test test-short test-e2e test-coverage specs lint verify docs clean release-binaries
 
 build:
 	go build -o bin/ai-team ./cmd/ai-team
@@ -29,6 +34,11 @@ test-coverage:
 specs:
 	npx --yes @fission-ai/openspec@1.4.1 validate --all --strict --no-interactive
 
+# Блокирующий статический анализ: staticcheck + errcheck + ineffassign.
+# Набор анализаторов и исключения — в .golangci.yaml.
+lint:
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+
 verify: specs
 	@UNFORMATTED=$$(gofmt -l .); \
 	if [ -n "$$UNFORMATTED" ]; then \
@@ -38,6 +48,7 @@ verify: specs
 	fi
 	go mod verify
 	go vet ./...
+	$(MAKE) lint
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 	go test -race ./...
 	$(MAKE) test-coverage

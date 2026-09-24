@@ -199,17 +199,18 @@ func (m *Manager) save() error {
 		return err
 	}
 	tempPath := temporary.Name()
-	defer os.Remove(tempPath)
+	defer func() { _ = os.Remove(tempPath) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

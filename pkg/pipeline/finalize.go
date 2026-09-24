@@ -270,14 +270,15 @@ func (rs *runState) printSummary() {
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 
 	title := fmt.Sprintf("=== ИТОГ ПАЙПЛАЙНА: %s ===", rs.runCfg.Feature)
-	fmt.Fprintf(w, "%s\n", ui.Colorize(title, ui.ColorBold))
+	// вывод в консоль: сообщать об ошибке записи некуда — это и есть канал сообщений.
+	_, _ = fmt.Fprintf(w, "%s\n", ui.Colorize(title, ui.ColorBold))
 
-	fmt.Fprintf(w, "%s\t%s\t\t%s\n",
+	_, _ = fmt.Fprintf(w, "%s\t%s\t\t%s\n",
 		ui.Colorize("Этап", ui.ColorCyan),
 		ui.Colorize("Статус", ui.ColorCyan),
 		ui.Colorize("Результат", ui.ColorCyan),
 	)
-	fmt.Fprintf(w, "───\t───\t\t───\n")
+	_, _ = fmt.Fprintf(w, "───\t───\t\t───\n")
 
 	for _, r := range rs.results {
 		var status string
@@ -316,19 +317,19 @@ func (rs *runState) printSummary() {
 			}
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t\t%s\n",
 			ui.Colorize(r.Name, ui.ColorYellow),
 			status,
 			resultStr,
 		)
 	}
 
-	fmt.Fprintf(w, "\n%s  %s\n",
+	_, _ = fmt.Fprintf(w, "\n%s  %s\n",
 		ui.Colorize("📄", ui.ColorBold),
 		ui.Colorize("Report: "+filepath.Join(rs.reportsDir, rs.runCfg.Feature, "index.html"), ui.ColorCyan),
 	)
 
-	w.Flush()
+	_ = w.Flush()
 	logging.Printf("\n%s\n", buf.String())
 }
 

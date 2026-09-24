@@ -69,7 +69,7 @@ func TestHub_BroadcastEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Wait for registration
 	time.Sleep(50 * time.Millisecond)
@@ -83,7 +83,7 @@ func TestHub_BroadcastEvent(t *testing.T) {
 	hub.BroadcastEventContext(context.Background(), event)
 
 	// Read the message
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("failed to read message: %v", err)
@@ -123,7 +123,7 @@ func TestHub_MultipleClients(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to dial client %d: %v", i, err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		conns = append(conns, conn)
 	}
 
@@ -142,13 +142,15 @@ func TestHub_MultipleClients(t *testing.T) {
 
 	// All 3 should receive
 	for i, conn := range conns {
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("client %d failed to read: %v", i, err)
 		}
 		var ev Event
-		json.Unmarshal(msg, &ev)
+		if err := json.Unmarshal(msg, &ev); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
 		if ev.Data["agent"] != "broadcast-test" {
 			t.Errorf("client %d: expected 'broadcast-test', got %q", i, ev.Data["agent"])
 		}
@@ -181,7 +183,7 @@ func TestHub_Unregister(t *testing.T) {
 	}
 
 	// Close the connection — readPump should unregister
-	conn.Close()
+	_ = conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
 	hub.mu.RLock()
@@ -238,7 +240,7 @@ func TestWebSocketReplaysAfterCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	now := time.Now().UTC()
 	first := &store.Event{RunID: "run-replay", Sequence: 1, Type: "run_started", Timestamp: now, DataJSON: `{"feature":"replay"}`}
 	second := &store.Event{RunID: "run-replay", Sequence: 2, Type: "run_finished", Timestamp: now.Add(time.Second), DataJSON: `{"status":"completed"}`}
@@ -256,8 +258,8 @@ func TestWebSocketReplaysAfterCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
 	}
-	defer connection.Close()
-	connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer func() { _ = connection.Close() }()
+	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var event Event
 	if err := connection.ReadJSON(&event); err != nil {
 		t.Fatal(err)
@@ -272,14 +274,14 @@ func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	httpServer := httptest.NewServer(server.router)
 	defer httpServer.Close()
 	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws", nil)
 	if err != nil {
 		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 
 	stored := &store.Event{
 		RunID: "run-live", Sequence: 1, Type: "run_started",
@@ -288,7 +290,7 @@ func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
 	if err := server.Store().AppendEvent(stored); err != nil {
 		t.Fatal(err)
 	}
-	connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = connection.SetReadDeadline(time.Now().Add(3 * time.Second))
 	var event Event
 	if err := connection.ReadJSON(&event); err != nil {
 		t.Fatal(err)

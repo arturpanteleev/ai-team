@@ -197,7 +197,9 @@ func TestWriteRegularFileNoFollowRejectsParentSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	realDir := filepath.Join(root, "cyclic") // путь ниже следует не писать
-	os.Mkdir(realDir, 0755)
+	if err := os.Mkdir(realDir, 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	parent := filepath.Join(root, "sub")
 	if err := os.Symlink(realDir, parent); err != nil {
 		t.Skipf("symlink unsupported: %v", err)

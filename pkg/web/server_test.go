@@ -58,7 +58,7 @@ func TestPreflightEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, newLoopbackRequest(http.MethodGet, "/api/preflight", nil))
 	if writer.Code != http.StatusOK {
@@ -144,7 +144,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatalf("failed to create test server: %v", err)
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	return srv, artifactRoot
 }
 
@@ -181,7 +181,7 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	noSession := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
 	writer := httptest.NewRecorder()
@@ -208,7 +208,7 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача"}`)
 	writer := httptest.NewRecorder()
@@ -254,7 +254,7 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, newLoopbackRequest("GET", "/api/pipelines", nil))
@@ -322,18 +322,22 @@ func TestGetPipelines_Empty(t *testing.T) {
 func TestGetPipelines_WithData(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	srv.Store().CreatePipelineRun(&store.PipelineRun{
+	if err := srv.Store().CreatePipelineRun(&store.PipelineRun{
 		Feature:   "test-feat",
 		Status:    "running",
 		StartedAt: time.Now(),
-	})
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	req := newLoopbackRequest("GET", "/api/pipelines", nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
 	var runs []map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&runs)
+	if err := json.NewDecoder(w.Body).Decode(&runs); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	if len(runs) != 1 {
 		t.Fatalf("expected 1 run, got %d", len(runs))
@@ -370,7 +374,9 @@ func TestGetPipelineByID(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	run := &store.PipelineRun{Feature: "detail-test", Status: "completed", StartedAt: time.Now()}
-	srv.Store().CreatePipelineRun(run)
+	if err := srv.Store().CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	req := newLoopbackRequest("GET", "/api/pipelines/1", nil)
 	w := httptest.NewRecorder()
@@ -381,7 +387,9 @@ func TestGetPipelineByID(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	if resp["run"] == nil {
 		t.Error("expected 'run' in response")
@@ -419,11 +427,17 @@ func TestGetArtifacts_ListsFeatureFiles(t *testing.T) {
 	srv, root := newTestServer(t)
 
 	run := &store.PipelineRun{Feature: "feat-x", Status: "completed", StartedAt: time.Now()}
-	srv.Store().CreatePipelineRun(run)
+	if err := srv.Store().CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	featureDir := filepath.Join(root, "feat-x")
-	os.MkdirAll(featureDir, 0755)
-	os.WriteFile(filepath.Join(featureDir, "proposal.md"), []byte("# P"), 0644)
+	if err := os.MkdirAll(featureDir, 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(featureDir, "proposal.md"), []byte("# P"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	req := newLoopbackRequest("GET", "/api/pipelines/1/artifacts", nil)
 	w := httptest.NewRecorder()
@@ -433,7 +447,9 @@ func TestGetArtifacts_ListsFeatureFiles(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var artifacts []map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&artifacts)
+	if err := json.NewDecoder(w.Body).Decode(&artifacts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if len(artifacts) != 1 {
 		t.Fatalf("expected 1 artifact, got %d", len(artifacts))
 	}
@@ -493,13 +509,19 @@ func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 func TestGetArtifact_ConfinedToRoot(t *testing.T) {
 	srv, root := newTestServer(t)
 
-	os.MkdirAll(filepath.Join(root, "feat"), 0755)
-	os.WriteFile(filepath.Join(root, "feat", "review.md"), []byte("# Review"), 0644)
+	if err := os.MkdirAll(filepath.Join(root, "feat"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "feat", "review.md"), []byte("# Review"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	// Файл вне корня
 	outside := filepath.Join(filepath.Dir(root), "secret.txt")
-	os.WriteFile(outside, []byte("secret"), 0644)
-	t.Cleanup(func() { os.Remove(outside) })
+	if err := os.WriteFile(outside, []byte("secret"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outside) })
 
 	t.Run("valid relative path", func(t *testing.T) {
 		req := newLoopbackRequest("GET", "/api/artifacts/feat/review.md", nil)
@@ -536,8 +558,12 @@ func TestGetArtifact_ConfinedToRoot(t *testing.T) {
 func TestGetArtifact_RejectsSymlinkOutsideRoot(t *testing.T) {
 	srv, root := newTestServer(t)
 	outside := filepath.Join(t.TempDir(), "secret.md")
-	os.WriteFile(outside, []byte("secret"), 0644)
-	os.MkdirAll(filepath.Join(root, "feat"), 0755)
+	if err := os.WriteFile(outside, []byte("secret"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "feat"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	link := filepath.Join(root, "feat", "link.md")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
@@ -561,7 +587,7 @@ func TestGetArtifact_RejectsOversizedFile(t *testing.T) {
 	if err := f.Truncate(maxArtifactSize + 1); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	req := newLoopbackRequest("GET", "/api/artifacts/large.md", nil)
 	w := httptest.NewRecorder()
@@ -642,8 +668,12 @@ func TestSameOriginMiddlewareAllowsLoopbackRequests(t *testing.T) {
 
 func TestSPAHandler(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
-	os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log('hi')"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log('hi')"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	handler := spaHandler(dir)
 
@@ -680,7 +710,7 @@ func TestNewServerFallsBackToEmbeddedFrontend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	request := newLoopbackRequest(http.MethodGet, "/pipelines/123", nil)
 	response := httptest.NewRecorder()
@@ -1051,6 +1081,6 @@ func newFrontendTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("failed to create test server: %v", err)
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	return srv
 }

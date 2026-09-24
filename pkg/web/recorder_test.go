@@ -15,7 +15,7 @@ func TestStoreRecorder_FullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	r := NewStoreRecorder(s)
 
@@ -88,7 +88,7 @@ func TestStoreRecorder_BlockedStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	r := NewStoreRecorder(s)
 	started := time.Now().UTC()
@@ -114,7 +114,7 @@ func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	started := time.Now().UTC()
 	first := NewStoreRecorder(s)
 	first.RunStarted("run-resume", "feature", "", started)

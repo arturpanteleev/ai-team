@@ -108,7 +108,7 @@ type finalStageData struct {
 
 // GenerateStageReport создаёт HTML-отчёт этапа. Вызывается для всех исходов
 // этапа (успех, ошибка, blocked).
-func GenerateStageReport(reportsDir, feature, attemptID string, result notifier.StageResult, artifactsRoot string) error {
+func GenerateStageReport(reportsDir, feature, attemptID string, result notifier.StageResult, artifactsRoot string) (err error) {
 	if attemptID == "" || filepath.Base(attemptID) != attemptID {
 		return fmt.Errorf("invalid report attempt id %q", attemptID)
 	}
@@ -165,7 +165,15 @@ func GenerateStageReport(reportsDir, feature, attemptID string, result notifier.
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Файл открыт на ЗАПИСЬ: сбой Close (ENOSPC, EIO, сетевая ФС) означает, что
+	// на диске остался усечённый отчёт. Глотать такую ошибку нельзя — иначе
+	// пайплайн отрапортует успех по битому HTML, поэтому она возвращается,
+	// если Execute не вернул более раннюю.
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	return stageTemplate.Execute(f, data)
 }
@@ -186,7 +194,7 @@ func toArtifactData(name, fullPath string, size int64, artifactsRoot string) art
 	}
 }
 
-func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResult, startTime, endTime time.Time, artifactsRoot, runStatus string) error {
+func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResult, startTime, endTime time.Time, artifactsRoot, runStatus string) (err error) {
 	dir := filepath.Join(reportsDir, feature)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -246,7 +254,13 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Файл открыт на ЗАПИСЬ — см. GenerateStageReport: ошибка Close означает
+	// усечённый отчёт на диске и обязана дойти до вызывающего.
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	return finalTemplate.Execute(f, data)
 }

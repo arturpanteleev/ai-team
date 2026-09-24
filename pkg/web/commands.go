@@ -70,11 +70,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	s.sessionMu.Lock()
-	s.sessions[sessionToken] = browserSession{
+	s.storeSession(sessionToken, browserSession{
 		CSRFToken: csrfToken, Principal: principal, ExpiresAt: time.Now().UTC().Add(browserSessionTTL),
-	}
-	s.sessionMu.Unlock()
+	})
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: sessionToken, Path: "/",
 		HttpOnly: true, Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),

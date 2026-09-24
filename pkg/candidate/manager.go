@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"io"
 	"os"
 	"os/exec"
@@ -241,7 +242,10 @@ func safeID(value string) bool {
 }
 
 func git(ctx context.Context, target string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"-C", target}, args...)...)
+	// Контроллер работает с репозиторием, который писал агент: git не
+	// должен исполнять его hooks и fsmonitor (в частности, `worktree add`
+	// запускает post-checkout).
+	command := exec.CommandContext(ctx, "git", gitsafe.Args(append([]string{"-C", target}, args...)...)...)
 	var output limitedBuffer
 	command.Stdout, command.Stderr = &output, &output
 	err := command.Run()

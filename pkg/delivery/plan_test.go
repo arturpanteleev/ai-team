@@ -490,7 +490,9 @@ type failRecordCommitRunner struct {
 }
 
 func (runner *failRecordCommitRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
-	if !runner.failed && name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+	// Аргументы git приходят с hardening-префиксом `-c key=value`, поэтому
+	// подкоманда ищется в хвосте, а не с нулевой позиции.
+	if !runner.failed && name == "git" && len(args) >= 2 && args[len(args)-2] == "rev-parse" && args[len(args)-1] == "HEAD" {
 		runner.failed = true
 		now := time.Now().UTC()
 		return StepResult{Command: append([]string{name}, args...), StartedAt: now, FinishedAt: now, ExitCode: 1, Status: StepFailed, Reason: "injected post-commit persistence gap"}

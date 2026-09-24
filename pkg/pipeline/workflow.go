@@ -3,6 +3,7 @@ package pipeline
 import (
 	"crypto/sha256"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +57,7 @@ func captureFilesystemSnapshot(root string, ignoredDirs map[string]bool) (filesy
 // separately by captureWorkspaceSnapshot so ignored files and nested targets
 // cannot disappear from mutation attribution.
 func captureGitMetadataSnapshot(dir string) (snapshot gitMetadataSnapshot, available bool, err error) {
-	rootCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	rootCmd := exec.Command("git", gitsafe.Args("rev-parse", "--show-toplevel")...)
 	rootCmd.Dir = dir
 	rootOut, rootErr := rootCmd.Output()
 	if rootErr != nil {
@@ -188,7 +189,9 @@ func classifyMutationChanges(before, after filesystemSnapshot, changed []string)
 }
 
 func gitOutput(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	// Снимки индекса снимаются в агентском репозитории — git не должен
+	// исполнять его hooks/fsmonitor.
+	cmd := exec.Command("git", gitsafe.Args(args...)...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -226,7 +229,7 @@ func findGitMetadata(dir string) string {
 }
 
 func gitDiffOutput(dir string) string {
-	cmd := exec.Command("git", "--no-pager", "diff")
+	cmd := exec.Command("git", gitsafe.Args("--no-pager", "diff", "--no-ext-diff", "--no-textconv")...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

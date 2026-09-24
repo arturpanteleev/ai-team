@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
@@ -246,6 +247,11 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		return writeState(statePath, currentState)
 	}
 	run := func(step, name string, args ...string) (StepResult, error) {
+		// Любой git-вызов контроллера идёт с hardening-overrides: репозиторий
+		// пишет агент, а git умеет исполнять заданный репозиторием код.
+		if name == "git" {
+			args = hardenedGitArgs(args...)
+		}
 		commandResult := c.Runner.Run(ctx, target, name, args...)
 		commandResult.Step = step
 		if err := record(commandResult); err != nil {
@@ -261,6 +267,10 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		return record(StepResult{Step: step, StartedAt: now, FinishedAt: now, ExitCode: 0, Status: StepSkipped, Reason: reason})
 	}
 
+	if err := recordGitExecutionSurface(ctx, target, record); err != nil {
+		return result(), err
+	}
+
 	currentBranchResult, err := run("inspect_branch", "git", "branch", "--show-current")
 	if err != nil {
 		return result(), err
@@ -270,7 +280,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		if currentBranch != "" && currentBranch != request.Plan.BaseBranch && currentBranch != "main" && currentBranch != "master" {
 			return result(), fmt.Errorf("delivery: текущая ветка %q не совпадает с plan branch %q или protected base", currentBranch, request.Plan.Branch)
 		}
-		probe := c.Runner.Run(ctx, target, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+request.Plan.Branch)
+		probe := c.Runner.Run(ctx, target, "git", hardenedGitArgs("show-ref", "--verify", "--quiet", "refs/heads/"+request.Plan.Branch)...)
 		probe.Step = "inspect_target_branch"
 		if probe.ExitCode == 1 {
 			probe.Status = StepSkipped
@@ -512,7 +522,7 @@ func verifyCommittedChange(
 	record func(StepResult) error,
 ) error {
 	run := func(step string, args ...string) (StepResult, error) {
-		result := runner.Run(ctx, target, "git", args...)
+		result := runner.Run(ctx, target, "git", hardenedGitArgs(args...)...)
 		result.Step = step
 		if err := record(result); err != nil {
 			return result, err
@@ -646,7 +656,7 @@ func parseGitEntries(output []byte, index bool) (map[string]gitTreeEntry, error)
 }
 
 func boundedGitOutput(ctx context.Context, target string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", args...)
+	command := exec.CommandContext(ctx, "git", hardenedGitArgs(args...)...)
 	command.Dir = target
 	output, err := command.Output()
 	if err != nil {
@@ -659,7 +669,7 @@ func boundedGitOutput(ctx context.Context, target string, args ...string) ([]byt
 }
 
 func hashGitBlob(ctx context.Context, target, object string) (string, error) {
-	command := exec.CommandContext(ctx, "git", "cat-file", "blob", object)
+	command := exec.CommandContext(ctx, "git", hardenedGitArgs("cat-file", "blob", object)...)
 	command.Dir = target
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -751,6 +761,9 @@ func (ExecRunner) Run(ctx context.Context, dir, name string, args ...string) Ste
 	stdout, stderr := &boundedBuffer{limit: maxCommandOutput}, &boundedBuffer{limit: maxCommandOutput}
 	command := exec.Command(name, args...)
 	command.Dir, command.Stdout, command.Stderr = dir, stdout, stderr
+	// gh сам запускает git, и `-c` туда не передать: тот же набор overrides
+	// уходит через GIT_CONFIG_*, который git наследует от родителя.
+	command.Env = gitsafe.Env(os.Environ())
 	err := process.Run(ctx, command)
 	result.FinishedAt = time.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(result.StartedAt)

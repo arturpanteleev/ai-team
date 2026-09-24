@@ -15,6 +15,7 @@
   - `pipeline/` — оркестрация, enforcement вердиктов, гейты, loopback
   - `workflow/` — доменные state/outcome типы и чистые переходы
   - `safeio/` — no-follow filesystem primitives (symlink rejection)
+  - `gitsafe/` — git-вызовы контроллера без исполнения кода репозитория
   - `process/` — process-group supervision и kill (Unix/Windows/plan9)
   - `notifier/`, `report/`, `ui/` — уведомления, HTML-отчёты, консоль
   - `web/` — HTTP API + SQLite store + StoreRecorder (дашборд)

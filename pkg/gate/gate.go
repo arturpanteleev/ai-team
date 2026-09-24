@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"io"
 	"os"
 	"os/exec"
@@ -427,7 +428,7 @@ func diffNumstatLines(ctx context.Context, target, baseCommit, candidateCommit s
 	if !worktreeMode {
 		args = append(args, candidateCommit)
 	}
-	command := exec.CommandContext(ctx, "git", args...)
+	command := exec.CommandContext(ctx, "git", gitsafe.Args(args...)...)
 	var buffer bytes.Buffer
 	command.Stdout = &buffer
 	command.Stderr = &buffer
@@ -462,7 +463,7 @@ func parseIntOrZero(value string) int64 {
 }
 
 func isWorkTree(ctx context.Context, target string) (bool, error) {
-	command := exec.CommandContext(ctx, "git", "-C", target, "rev-parse", "--is-inside-work-tree")
+	command := exec.CommandContext(ctx, "git", gitsafe.Args("-C", target, "rev-parse", "--is-inside-work-tree")...)
 	output, err := command.Output()
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -491,7 +492,7 @@ func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool,
 		{"--quiet", "--cached", commit},
 	} {
 		args := append([]string{"-C", target, "--no-pager", "diff"}, extra...)
-		command := exec.CommandContext(ctx, "git", args...)
+		command := exec.CommandContext(ctx, "git", gitsafe.Args(args...)...)
 		var buffer bytes.Buffer
 		command.Stdout, command.Stderr = &buffer, &buffer
 		if err := command.Run(); err != nil {
@@ -507,7 +508,7 @@ func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool,
 		}
 	}
 	// untracked-файлы вне .gitignore: они не в candidate, но видны checks.
-	command := exec.CommandContext(ctx, "git", "-C", target, "ls-files", "--others", "--exclude-standard")
+	command := exec.CommandContext(ctx, "git", gitsafe.Args("-C", target, "ls-files", "--others", "--exclude-standard")...)
 	var buffer bytes.Buffer
 	command.Stdout, command.Stderr = &buffer, &buffer
 	if err := command.Run(); err != nil {
@@ -524,7 +525,7 @@ func workingTreeMatchesCommit(ctx context.Context, target, commit string) (bool,
 }
 
 func resolveCommit(ctx context.Context, target, ref string) (string, error) {
-	command := exec.CommandContext(ctx, "git", "-C", target, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	command := exec.CommandContext(ctx, "git", gitsafe.Args("-C", target, "rev-parse", "--verify", "--quiet", ref+"^{commit}")...)
 	output, err := command.Output()
 	if ctx.Err() != nil {
 		return "", ctx.Err()
@@ -536,7 +537,7 @@ func resolveCommit(ctx context.Context, target, ref string) (string, error) {
 }
 
 func treeSHA(ctx context.Context, target, commit string) (string, error) {
-	command := exec.CommandContext(ctx, "git", "-C", target, "rev-parse", commit+"^{tree}")
+	command := exec.CommandContext(ctx, "git", gitsafe.Args("-C", target, "rev-parse", commit+"^{tree}")...)
 	output, err := command.Output()
 	if ctx.Err() != nil {
 		return "", ctx.Err()
@@ -552,7 +553,7 @@ func treeSHA(ctx context.Context, target, commit string) (string, error) {
 // stat-метка, детерминированная от содержимого (ls-files + checksums не
 // расширяют контракт); достаточна для attestation context run'а.
 func workingTreeSHA(ctx context.Context, target string) string {
-	command := exec.CommandContext(ctx, "git", "-C", target, "status", "--porcelain")
+	command := exec.CommandContext(ctx, "git", gitsafe.Args("-C", target, "status", "--porcelain")...)
 	output, err := command.Output()
 	if ctx.Err() != nil {
 		return "?"
@@ -575,7 +576,7 @@ func diffNameStatus(ctx context.Context, target, baseCommit, candidateCommit str
 	if !worktreeMode {
 		args = append(args, candidateCommit)
 	}
-	command := exec.CommandContext(ctx, "git", args...)
+	command := exec.CommandContext(ctx, "git", gitsafe.Args(args...)...)
 	var buffer bytes.Buffer
 	command.Stdout = &buffer
 	command.Stderr = &buffer

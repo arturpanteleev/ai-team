@@ -16,6 +16,22 @@ message and PR metadata.
 - **WHEN** attributes, filters or line-ending normalization make staged blobs differ from approved bytes
 - **THEN** the executor MUST reject delivery before commit
 
+### Requirement: Контроллер не исполняет код репозитория
+
+Каждый git-вызов контроллера в доставке MUST запрещать git исполнять команды, заданные содержимым репозитория: hooks (включая перенесённые через `core.hooksPath`), `core.fsmonitor` и `ext::` remote helper.
+
+#### Scenario: Подсаженный pre-push hook
+
+- **КОГДА** репозиторий содержит исполняемый `.git/hooks/pre-push` или `core.hooksPath`, указывающий на каталог с hooks
+- **ТОГДА** ни один hook MUST NOT быть исполнен ни на одном шаге доставки
+- **И** доставка MUST завершиться штатно
+
+#### Scenario: Поверхность исполнения зафиксирована в манифесте
+
+- **КОГДА** репозиторий содержит hooks или repo-scoped config-ключи, значение которых git способен запустить как команду
+- **ТОГДА** манифест доставки MUST содержать шаг с их именами
+- **И** значения таких ключей MUST NOT попадать в манифест
+
 ### Requirement: Protected branch safety
 The delivery executor MUST determine and reject the repository default or protected branch before push.
 

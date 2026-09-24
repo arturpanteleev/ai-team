@@ -126,7 +126,7 @@ func clonePreconditions(values map[string]PreconditionEvidence) map[string]Preco
 func finalDeltaPaths(ctx context.Context, targetDir, baselineHead string, candidates []string) ([]string, error) {
 	seen := make(map[string]bool)
 	diffArgs := append([]string{"diff", "--name-only", "-z", baselineHead, "--"}, candidates...)
-	diff := exec.CommandContext(ctx, "git", diffArgs...)
+	diff := exec.CommandContext(ctx, "git", hardenedGitArgs(diffArgs...)...)
 	diff.Dir = targetDir
 	diffOutput, err := diff.Output()
 	if err != nil {
@@ -138,7 +138,7 @@ func finalDeltaPaths(ctx context.Context, targetDir, baselineHead string, candid
 		}
 	}
 	untrackedArgs := append([]string{"ls-files", "--others", "--exclude-standard", "-z", "--"}, candidates...)
-	untracked := exec.CommandContext(ctx, "git", untrackedArgs...)
+	untracked := exec.CommandContext(ctx, "git", hardenedGitArgs(untrackedArgs...)...)
 	untracked.Dir = targetDir
 	untrackedOutput, err := untracked.Output()
 	if err != nil {
@@ -161,7 +161,7 @@ func workspaceFileDigest(ctx context.Context, targetDir, baselineHead, relative 
 	fullPath := filepath.Join(targetDir, filepath.FromSlash(relative))
 	info, err := os.Lstat(fullPath)
 	if os.IsNotExist(err) {
-		probe := exec.CommandContext(ctx, "git", "cat-file", "-e", baselineHead+":"+relative)
+		probe := exec.CommandContext(ctx, "git", hardenedGitArgs("cat-file", "-e", baselineHead+":"+relative)...)
 		probe.Dir = targetDir
 		if probe.Run() != nil {
 			return "", fmt.Errorf("delivery planner: attributed file %q отсутствует и не является deletion baseline", relative)
@@ -247,7 +247,7 @@ func detectBaseBranch(ctx context.Context, targetDir, current string) (string, e
 		}
 	}
 	for _, candidate := range []string{"main", "master"} {
-		command := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
+		command := exec.CommandContext(ctx, "git", hardenedGitArgs("show-ref", "--verify", "--quiet", "refs/heads/"+candidate)...)
 		command.Dir = targetDir
 		if command.Run() == nil {
 			return candidate, nil
@@ -260,6 +260,11 @@ func detectBaseBranch(ctx context.Context, targetDir, current string) (string, e
 }
 
 func commandOutput(ctx context.Context, dir, name string, args ...string) (string, error) {
+	// Планировщик читает тот же агентский репозиторий, что и executor, и так
+	// же не должен позволять git исполнить его содержимое.
+	if name == "git" {
+		args = hardenedGitArgs(args...)
+	}
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
 	output, err := command.Output()

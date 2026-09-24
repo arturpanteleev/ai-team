@@ -8,6 +8,7 @@ package retention
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -438,7 +439,7 @@ func insideRoot(root, path string) error {
 // removeGitWorktree отвязывает каталог от Git registry перед удалением,
 // чтобы не оставлять висячих записей в .git/worktrees.
 func removeGitWorktree(target, path string) error {
-	command := exec.Command("git", "-C", target, "worktree", "remove", "--force", path)
+	command := exec.Command("git", gitsafe.Args("-C", target, "worktree", "remove", "--force", path)...)
 	output, err := command.CombinedOutput()
 	if err == nil {
 		return os.RemoveAll(path)
@@ -455,7 +456,7 @@ func removeGitWorktree(target, path string) error {
 
 // pruneGitWorktrees — best-effort очистка stale записей Git после удаления.
 func pruneGitWorktrees(target string) error {
-	command := exec.Command("git", "-C", target, "worktree", "prune")
+	command := exec.Command("git", gitsafe.Args("-C", target, "worktree", "prune")...)
 	_, _ = command.CombinedOutput()
 	return nil
 }

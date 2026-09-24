@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"hash"
 	"io"
 	"io/fs"
@@ -259,7 +260,7 @@ func newDigestCapture(limit int) *digestCapture {
 func collectTrackedPatch(ctx context.Context, dir, baseline string) (*digestCapture, error) {
 	stdout := newDigestCapture(maxCandidatePatchBytes)
 	stderr := newDigestCapture(maxCandidateGitStderr)
-	command := exec.Command("git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", baseline, "--")
+	command := exec.Command("git", gitsafe.Args("diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", baseline, "--")...)
 	command.Dir = dir
 	command.Stdout = stdout
 	command.Stderr = stderr

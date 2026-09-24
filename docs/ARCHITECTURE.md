@@ -22,6 +22,7 @@ pkg/
 ├── delivery/        строгий canonical plan и controller-owned executor
 ├── evidence/        immutable run/attempt manifests, append-only events
 ├── safeio/          no-follow filesystem primitives (symlink rejection)
+├── gitsafe/         git-вызовы контроллера без исполнения кода репозитория
 ├── process/         process-group supervision и kill (Unix/Windows/plan9)
 ├── eval/             независимая LLM-оценка артефактов
 ├── notifier/         уведомления о событиях pipeline

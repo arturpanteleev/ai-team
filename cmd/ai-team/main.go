@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/gitsafe"
 	"io/fs"
 	"net"
 	"os"
@@ -739,7 +740,7 @@ func ensureControlIgnored(target string, writeGitignore bool) (string, error) {
 		return path, appendIgnoreRule(path)
 	}
 
-	check := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree")
+	check := exec.Command("git", gitsafe.Args("-C", target, "rev-parse", "--is-inside-work-tree")...)
 	if output, err := check.Output(); err != nil || strings.TrimSpace(string(output)) != "true" {
 		var exitErr *exec.ExitError
 		if err != nil && !errors.As(err, &exitErr) {
@@ -748,7 +749,7 @@ func ensureControlIgnored(target string, writeGitignore bool) (string, error) {
 		return "", nil
 	}
 
-	command := exec.Command("git", "-C", target, "rev-parse", "--git-path", "info/exclude")
+	command := exec.Command("git", gitsafe.Args("-C", target, "rev-parse", "--git-path", "info/exclude")...)
 	output, err := command.Output()
 	if err != nil {
 		return "", fmt.Errorf("не удалось определить Git exclude path: %w", err)

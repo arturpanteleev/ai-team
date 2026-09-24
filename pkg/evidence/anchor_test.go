@@ -140,7 +140,7 @@ func TestVerifyAnchorDetectsRebuiltChainWithoutAnchorUpdate(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	rebuilt := make([]string, 0, len(lines))
-	previous := genesisEventHash
+	previous := chainGenesis("run-anchor-rebuild")
 	for index, line := range lines {
 		var event Event
 		if err := json.Unmarshal([]byte(line), &event); err != nil {

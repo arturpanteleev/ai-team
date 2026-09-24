@@ -15,7 +15,7 @@ import (
 func syntheticRun(t *testing.T, root string) {
 	t.Helper()
 	runJSON := `{
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "r-0001",
   "feature": "feat",
   "target_dir": "/tmp/x",
@@ -46,7 +46,7 @@ func syntheticRun(t *testing.T, root string) {
 	mustWrite(t, filepath.Join(root, "workflow.json"), []byte(`{"schema_version":2}`))
 	mustWrite(t, filepath.Join(root, "events.jsonl"), []byte("events:\n"))
 	attempt := `{
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "r-0001",
   "attempt_id": "a-1",
   "stage": "coder",
@@ -133,7 +133,7 @@ func TestGoldenFixture(t *testing.T) {
     "finished_at": "2026-01-02T03:06:00Z",
     "outcome": "passed",
     "run": {
-      "evidence_schema_version": 6,
+      "evidence_schema_version": 7,
       "config_evidence": "config.json",
       "config_sha256": "c0ffee00000000000000000000000000000000000000000000c0ffee00000000",
       "event_log_sha256": "f25581677fd3d7c353152b423f05c8d022aca4afc3bc2402fc847e92798a9afc",

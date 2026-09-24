@@ -20,7 +20,9 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
-const SchemaVersion = 1
+// SchemaVersion 2 добавляет обязательный MAC контроллера (RecordIntegrity):
+// запись версии 1 не аутентифицирована и принимается быть не может.
+const SchemaVersion = 2
 
 type Status string
 
@@ -69,10 +71,16 @@ type PendingApproval struct {
 	// canonical JSON delivery plan) для осознанного решения без доступа к
 	// filesystem. Не является частью identity: subject уже зафиксирован hash.
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Integrity — MAC контроллера над всей остальной записью. Проставляется
+	// только на записи, прочитанные/записанные store'ом; в вход MAC не
+	// входит (см. canonicalRecord).
+	Integrity *RecordIntegrity `json:"integrity,omitempty"`
 }
 
 type Store struct {
 	root string
+	// key — секрет контроллера, которым аутентифицируется каждая запись.
+	key macKey
 	// mu сериализует read-modify-write циклы внутри одного процесса; между
 	// процессами сериализует lockRun (flock на run-каталоге).
 	mu sync.Mutex
@@ -83,7 +91,15 @@ func NewStore(target string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{root: root}, nil
+	keyPath, err := resolveKeyPath(target)
+	if err != nil {
+		return nil, err
+	}
+	key, err := loadOrCreateKey(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{root: root, key: key}, nil
 }
 
 // NewID возвращает стабильный идентификатор конкретного subject перехода.
@@ -152,6 +168,12 @@ func (s *Store) Load(runID, approvalID string) (PendingApproval, error) {
 	var value PendingApproval
 	if err := strictjson.Unmarshal(data, 1<<20, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", approvalID, err)
+	}
+	// Целостность проверяется раньше семантики: запись без валидного MAC
+	// контроллера не является решением человека, каким бы валидным ни
+	// выглядел её JSON.
+	if err := s.key.verify(value); err != nil {
+		return PendingApproval{}, err
 	}
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
@@ -455,6 +477,13 @@ func (s *Store) path(runID, approvalID string) (string, error) {
 
 func (s *Store) write(path string, value PendingApproval) error {
 	if err := safeio.RejectSymlink(path); err != nil {
+		return err
+	}
+	// MAC проставляется в единственной точке записи: любой путь, который
+	// сохраняет approval, проходит здесь, и запись без подписи возникнуть не
+	// может.
+	value, err := s.key.sign(value)
+	if err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(value, "", "  ")

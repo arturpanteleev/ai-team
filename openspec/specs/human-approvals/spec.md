@@ -51,6 +51,26 @@ cloud mode actor identity и доступные роли MUST поступать
 - **И** MUST завершить текущую process session с управляемым stopped status
 - **И** тот же run MUST продолжиться после внешнего decision
 
+### Requirement: Целостность persisted approval
+
+Каждая persisted approval-запись MUST быть аутентифицирована MAC ключа
+контроллера, и этот ключ MUST храниться вне target: в target пишет агент, и
+запись, подделываемая без ключа, не является решением человека. Любое чтение
+записи MUST проверять MAC до применения её семантики и MUST fail-closed
+отказывать при несовпадении.
+
+#### Scenario: Решение изменено на диске
+
+- **КОГДА** approval-запись изменена после того, как её записал контроллер
+  (например, статус переведён в resolved мимо `ai-team decision`)
+- **ТОГДА** resume MUST быть отклонён с указанием причины
+- **И** delivery MUST NOT быть выполнена
+
+#### Scenario: Запись создана мимо контроллера
+
+- **КОГДА** approval-запись не содержит MAC или подписана другим ключом
+- **ТОГДА** запись MUST быть отвергнута как неаутентифицированная
+
 ### Requirement: Approval subject привязан к candidate
 
 Subject transition approval, относящегося к source workflow, MUST включать

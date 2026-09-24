@@ -144,6 +144,20 @@ evidence. Решения сериализуются in-process mutex и flock н
 `approval_requested` и `approval_decided` входят и в immutable hash chain,
 и в SQLite/WebSocket projection.
 
+Сам файл решения лежит в target, куда пишет и агент, поэтому его
+достоверность держится не на файловых правах, а на MAC: `pkg/approval`
+подписывает каждую запись HMAC-SHA256 на ключе контроллера (поле
+`integrity`, домен `ai-team/approval-record/v1`) и проверяет подпись в
+`Load` — раньше, чем применяется семантика записи. Все пути чтения
+(`List`, `Decide`, `ResolveDeferred`, resume) идут через `Load`, а все пути
+записи — через единственный `write`, который и проставляет MAC. Ключ
+генерируется один раз в `<user-config-dir>/ai-team/secrets/approval.key`
+(права `0400`, каталог `0700`, путь переопределяется
+`AI_TEAM_APPROVAL_KEY`); ключ внутри target отклоняется на старте store.
+MAC считается по каноническому виду записи без поля `integrity` и с
+compact-payload: на диск payload уходит переиндентированным, и без
+нормализации подпись не сходилась бы после round-trip.
+
 Deferred-гейты (APF-1): для стандартного и fast профилей forward-gate рёбра
 помечаются `deferred: true` — переход не паузит и не решается по отдельности,
 а аттестуется отдельным approval с точным subject и разрешается одним

@@ -41,6 +41,38 @@ func TestUpgraderCheckOriginAllowsMissingOrigin(t *testing.T) {
 	}
 }
 
+// wsReadBudget — потолок чтения одного сообщения из уже зарегистрированного
+// клиента. Сообщение идёт через каналы внутри процесса, то есть измеряется
+// микросекундами; бюджет отличает зависший writePump от загруженной машины, а
+// не задаёт ожидаемое время.
+const wsReadBudget = 10 * time.Second
+
+// waitForClients ждёт, пока хаб придёт к ожидаемому числу зарегистрированных
+// клиентов.
+//
+// Регистрация асинхронна: ServeWs завершает handshake раньше, чем hub.Run()
+// вносит клиента в карту, а на завершение регистрации подписаться нечем.
+// Фиксированный time.Sleep здесь был скрытым дедлайном — на загруженной машине
+// 50 мс не хватает, и тест падал не из-за поведения хаба. Опрос выходит сразу
+// по факту, а бюджет остаётся аварийным потолком.
+func waitForClients(t *testing.T, hub *Hub, expected int) {
+	t.Helper()
+	const budget = 10 * time.Second
+	deadline := time.Now().Add(budget)
+	for {
+		hub.mu.RLock()
+		count := len(hub.clients)
+		hub.mu.RUnlock()
+		if count == expected {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("хаб не пришёл к %d клиентам за %s: сейчас %d", expected, budget, count)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestNewHub(t *testing.T) {
 	hub := NewHub()
 	if hub == nil {
@@ -72,7 +104,7 @@ func TestHub_BroadcastEvent(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Wait for registration
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 1)
 
 	// Broadcast an event
 	event := Event{
@@ -83,7 +115,9 @@ func TestHub_BroadcastEvent(t *testing.T) {
 	hub.BroadcastEventContext(context.Background(), event)
 
 	// Read the message
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(wsReadBudget)); err != nil {
+		t.Fatal(err)
+	}
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("failed to read message: %v", err)
@@ -127,29 +161,23 @@ func TestHub_MultipleClients(t *testing.T) {
 		conns = append(conns, conn)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
-	hub.mu.RLock()
-	clientCount := len(hub.clients)
-	hub.mu.RUnlock()
-
-	if clientCount != 3 {
-		t.Errorf("expected 3 clients, got %d", clientCount)
-	}
+	waitForClients(t, hub, 3)
 
 	// Broadcast
 	hub.BroadcastEventContext(context.Background(), Event{Version: 1, Type: "test", Data: map[string]any{"agent": "broadcast-test"}})
 
 	// All 3 should receive
 	for i, conn := range conns {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(wsReadBudget)); err != nil {
+			t.Fatal(err)
+		}
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("client %d failed to read: %v", i, err)
 		}
 		var ev Event
 		if err := json.Unmarshal(msg, &ev); err != nil {
-			t.Fatalf("setup: %v", err)
+			t.Fatalf("client %d: unmarshal: %v", i, err)
 		}
 		if ev.Data["agent"] != "broadcast-test" {
 			t.Errorf("client %d: expected 'broadcast-test', got %q", i, ev.Data["agent"])
@@ -173,25 +201,13 @@ func TestHub_Unregister(t *testing.T) {
 		t.Fatalf("failed to dial: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
-	hub.mu.RLock()
-	count := len(hub.clients)
-	hub.mu.RUnlock()
-	if count != 1 {
-		t.Fatalf("expected 1 client, got %d", count)
-	}
+	waitForClients(t, hub, 1)
 
 	// Close the connection — readPump should unregister
-	_ = conn.Close()
-	time.Sleep(100 * time.Millisecond)
-
-	hub.mu.RLock()
-	count = len(hub.clients)
-	hub.mu.RUnlock()
-	if count != 0 {
-		t.Errorf("expected 0 clients after close, got %d", count)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
 	}
+	waitForClients(t, hub, 0)
 }
 
 func TestEvent_MarshalJSON(t *testing.T) {
@@ -259,7 +275,9 @@ func TestWebSocketReplaysAfterCursor(t *testing.T) {
 		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
 	}
 	defer func() { _ = connection.Close() }()
-	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := connection.SetReadDeadline(time.Now().Add(wsReadBudget)); err != nil {
+		t.Fatal(err)
+	}
 	var event Event
 	if err := connection.ReadJSON(&event); err != nil {
 		t.Fatal(err)
@@ -282,6 +300,10 @@ func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
 		t.Fatalf("dial: %v status=%v", err, responseStatus(response))
 	}
 	defer func() { _ = connection.Close() }()
+	// Событие живой ленты рассылается только уже зарегистрированным клиентам:
+	// успешный Dial этого ещё не означает, и запись до регистрации была бы
+	// потеряна безвозвратно — ReadJSON тогда ждал бы весь свой бюджет впустую.
+	waitForClients(t, server.hub, 1)
 
 	stored := &store.Event{
 		RunID: "run-live", Sequence: 1, Type: "run_started",
@@ -290,7 +312,9 @@ func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
 	if err := server.Store().AppendEvent(stored); err != nil {
 		t.Fatal(err)
 	}
-	_ = connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if err := connection.SetReadDeadline(time.Now().Add(wsReadBudget)); err != nil {
+		t.Fatal(err)
+	}
 	var event Event
 	if err := connection.ReadJSON(&event); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package e2etest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -636,8 +638,8 @@ func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
 	waitFile := filepath.Join(t.TempDir(), "analyst-started")
 	command := exec.Command(bin, "run", "--feature", "durable-resume", "--task", "resume test", "--approve-gates")
 	command.Dir = dir
-	var output strings.Builder
-	command.Stdout, command.Stderr = &output, &output
+	output := &syncBuffer{}
+	command.Stdout, command.Stderr = output, output
 	command.Env = append(os.Environ(), pathEnv,
 		"MOCK_WAIT_AGENT=analyst",
 		"MOCK_WAIT_FILE="+waitFile,
@@ -646,21 +648,29 @@ func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(waitFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			_ = command.Process.Kill()
-			t.Fatalf("analyst не стартовал:\n%s", output.String())
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	// Wait() вызывается ровно один раз — в отдельной горутине, чтобы ожидание
+	// файла-маркера могло прерваться событием «процесс умер», а не только по
+	// таймеру. Результат Wait читается после закрытия канала, поэтому гонки
+	// за runErr нет.
+	runExited := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = command.Wait()
+		close(runExited)
+	}()
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		<-runExited
+	})
+	waitUntilOrExit(t, pipelineStageBudget, runExited, func() bool {
+		_, statErr := os.Stat(waitFile)
+		return statErr == nil
+	}, func() string { return "analyst не стартовал:\n" + output.String() })
 	if err := command.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	if err := command.Wait(); err == nil {
+	<-runExited
+	if runErr == nil {
 		t.Fatal("остановленный run должен вернуть ненулевой exit")
 	}
 
@@ -694,73 +704,14 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("init failed (%d):\n%s", code, out)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	// порт освобождается сразу: слушать его будет запускаемый ниже сервер.
-	_ = listener.Close()
-	command := exec.Command(bin, "web", "--port", port, "--dist=")
-	command.Dir = dir
-	command.Env = append(os.Environ(), pathEnv)
-	var serverOutput strings.Builder
-	command.Stdout, command.Stderr = &serverOutput, &serverOutput
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Signal(os.Interrupt)
-		_ = command.Wait()
-	})
+	server := startWebServer(t, bin, dir, []string{pathEnv})
 
-	baseURL := "http://127.0.0.1:" + port
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
-	var csrf string
-	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
-		if requestErr != nil {
-			return false
-		}
-		defer func() { _ = response.Body.Close() }()
-		var session struct {
-			CSRF string `json:"csrf_token"`
-		}
-		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
-			return false
-		}
-		csrf = session.CSRF
-		return csrf != ""
-	}, func() string { return serverOutput.String() })
-
-	post := func(path string, body any) (int, map[string]any) {
-		t.Helper()
-		data, _ := json.Marshal(body)
-		request, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-CSRF-Token", csrf)
-		response, err := client.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = response.Body.Close() }()
-		raw, _ := io.ReadAll(response.Body)
-		var result map[string]any
-		if json.Unmarshal(raw, &result) != nil {
-			result = map[string]any{"raw": string(raw)}
-		}
-		return response.StatusCode, result
-	}
-	status, started := post("/api/runs", map[string]string{
+	status, started := server.mustPost("/api/runs", map[string]string{
 		"feature": "web-control", "task": "web approval test",
 	})
 	runID, _ := started["run_id"].(string)
 	if status != http.StatusAccepted || runID == "" {
-		t.Fatalf("web start: status=%d body=%v\n%s", status, started, serverOutput.String())
+		t.Fatalf("web start: status=%d body=%v\n%s", status, started, server.output.String())
 	}
 	type approvalState struct {
 		ID            string   `json:"id"`
@@ -791,35 +742,41 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		return value
 	}
 	var first approvalState
-	waitUntil(t, 10*time.Second, func() bool {
+	waitUntilOrExit(t, pipelineStageBudget, server.exited, func() bool {
 		first = readPending()
 		return first.ID != ""
-	}, func() string { return serverOutput.String() })
+	}, func() string { return server.output.String() })
 	role := "product_owner"
 	if len(first.RequiredRoles) > 0 {
 		role = first.RequiredRoles[0]
 	}
-	status, decided := post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
+	status, decided := server.mustPost("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
 		"actor_id": "product-1", "actor_role": role,
 		"action": "approve", "subject_hash": first.SubjectHash,
 	})
 	if status != http.StatusOK {
 		t.Fatalf("web decision status=%d role=%s body=%v", status, role, decided)
 	}
+	// Resume отвергается 409-м, пока фоновый worker предыдущего этапа ещё не
+	// снял run с себя, поэтому здесь цикл. Ошибка транспорта тоже не
+	// приговор: повторяем, а не валим тест на первом же таймауте.
 	var resumed map[string]any
-	waitUntil(t, 10*time.Second, func() bool {
-		status, resumed = post("/api/runs/"+runID+"/resume", map[string]string{})
-		return status == http.StatusAccepted
-	}, func() string { return fmt.Sprintf("status=%d body=%v\n%s", status, resumed, serverOutput.String()) })
+	var resumeErr error
+	waitUntilOrExit(t, pipelineStageBudget, server.exited, func() bool {
+		status, resumed, resumeErr = server.post("/api/runs/"+runID+"/resume", map[string]string{})
+		return resumeErr == nil && status == http.StatusAccepted
+	}, func() string {
+		return fmt.Sprintf("status=%d err=%v body=%v\n%s", status, resumeErr, resumed, server.output.String())
+	})
 	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
-	waitUntil(t, 15*time.Second, func() bool {
+	waitUntilOrExit(t, pipelineStageBudget, server.exited, func() bool {
 		stateData, err := os.ReadFile(statePath)
 		if err != nil {
 			return false
 		}
 		return strings.Contains(string(stateData), `"phase": "terminal"`) ||
 			(readPending().ID != "" && readPending().ID != first.ID)
-	}, func() string { return serverOutput.String() })
+	}, func() string { return server.output.String() })
 
 	events, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"))
 	if err != nil {
@@ -850,65 +807,23 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("init failed (%d):\n%s", code, out)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	// порт освобождается сразу: слушать его будет запускаемый ниже сервер.
-	_ = listener.Close()
 	schedulerDB := filepath.Join(dir, ".ai-team", "scheduler.db")
 	artifactRoot := filepath.Join(dir, ".ai-team", "cloud-artifacts")
-	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
-	command.Dir = dir
-	command.Env = append(os.Environ(), pathEnv)
-	var serverOutput strings.Builder
-	command.Stdout, command.Stderr = &serverOutput, &serverOutput
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Signal(os.Interrupt)
-		_ = command.Wait()
-	})
+	server := startWebServer(t, bin, dir, []string{pathEnv}, "--scheduler-db", schedulerDB)
 
-	baseURL := "http://127.0.0.1:" + port
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
-	var csrf string
-	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
-		if requestErr != nil {
-			return false
-		}
-		defer func() { _ = response.Body.Close() }()
-		var session struct {
-			CSRF string `json:"csrf_token"`
-		}
-		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
-			return false
-		}
-		csrf = session.CSRF
-		return csrf != ""
-	}, func() string { return serverOutput.String() })
-	data, _ := json.Marshal(map[string]string{"feature": "scheduled", "task": "scheduled task"})
-	request, _ := http.NewRequest(http.MethodPost, baseURL+"/api/runs", bytes.NewReader(data))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-CSRF-Token", csrf)
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var started map[string]string
-	_ = json.NewDecoder(response.Body).Decode(&started)
-	_ = response.Body.Close()
-	runID := started["run_id"]
-	if response.StatusCode != http.StatusAccepted || runID == "" {
-		t.Fatalf("scheduler enqueue: status=%d body=%v\n%s", response.StatusCode, started, serverOutput.String())
+	status, started := server.mustPost("/api/runs", map[string]string{
+		"feature": "scheduled", "task": "scheduled task",
+	})
+	runID, _ := started["run_id"].(string)
+	if status != http.StatusAccepted || runID == "" {
+		t.Fatalf("scheduler enqueue: status=%d body=%v\n%s", status, started, server.output.String())
 	}
 
 	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
-	waitUntil(t, 10*time.Second, func() bool {
+	// Каждая итерация запускает настоящий `scheduler-worker --once`, то есть
+	// целый прогон пайплайна в подпроцессе: бюджет должен покрывать работу, а
+	// не типичное время одной итерации.
+	waitUntilOrExit(t, pipelineStageBudget, server.exited, func() bool {
 		poller := exec.Command(bin, "scheduler-worker",
 			"--target", dir, "--scheduler-db", schedulerDB,
 			"--artifact-store", artifactRoot, "--db", filepath.Join(dir, ".ai-team", "web.db"),
@@ -924,25 +839,298 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	}, func() string {
 		queue, openErr := scheduler.Open(schedulerDB, scheduler.Options{})
 		if openErr != nil {
-			return serverOutput.String() + "\nqueue: " + openErr.Error()
+			return server.output.String() + "\nqueue: " + openErr.Error()
 		}
 		defer func() { _ = queue.Close() }()
 		records, listErr := queue.ListRun(runID)
-		return fmt.Sprintf("%s\nqueue=%+v err=%v", serverOutput.String(), records, listErr)
+		return fmt.Sprintf("%s\nqueue=%+v err=%v", server.output.String(), records, listErr)
 	})
 	checkFile(t, filepath.Join(artifactRoot, "manifests", runID+".json"))
 	checkFile(t, filepath.Join(dir, ".ai-team", "state", "candidates", runID+".json"))
 }
 
-func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, diagnostics func() string) {
+// Бюджеты ожидания в E2E.
+//
+// Каждое ожидание ниже покрывает работу настоящих подпроцессов: `ai-team web`,
+// preflight с внешними командами, цепочку стадий пайплайна. Калибровать такой
+// бюджет по замеру на свободной машине нельзя: CI гоняет эти тесты четырежды за
+// прогон (unit, coverage, race, e2e), и на загруженном раннере подпроцесс
+// получает кратно меньше CPU. Поэтому бюджет здесь — аварийный потолок,
+// отличающий зависший процесс от медленного, а не мерило нормального времени.
+// Само ожидание событийное: выход происходит сразу по выполнению условия или
+// сразу по смерти наблюдаемого процесса, а таймер срабатывает только в аварии.
+const (
+	// httpProbeBudget — потолок одного дешёвого запроса (GET /api/session):
+	// хендлер только выпускает токены и никуда не ходит.
+	httpProbeBudget = 10 * time.Second
+
+	// httpCommandBudget — потолок одного POST, который синхронно делает
+	// работу. POST /api/runs внутри контроллера прогоняет preflight, а тот
+	// порождает до пяти внешних команд, и бюджет каждой —
+	// config.DefaultPreflightTimeout, то есть 60 с. Клиентский таймаут меньше
+	// бюджета одной такой команды означает, что тест сдаётся раньше, чем
+	// сервер вообще вправе ответить: это и был первый механизм флейка QS-15
+	// (2 с на запрос, запускающий целый пайплайн).
+	httpCommandBudget = 60 * time.Second
+
+	// webStartupBudget — от старта подпроцесса `ai-team web` до первого
+	// успешного /api/session. Полный бюджет тратится только на настоящее
+	// зависание: смерть подпроцесса прерывает ожидание сразу.
+	webStartupBudget = 60 * time.Second
+
+	// pipelineStageBudget — ожидание, внутри которого подпроцесс прогоняет
+	// стадии пайплайна до ближайшего наблюдаемого состояния. Замер на
+	// незагруженной машине — единицы секунд; бюджет даёт порядок запаса,
+	// потому что прежние 10 с при 8-секундном прогоне запаса не давали вовсе.
+	pipelineStageBudget = 90 * time.Second
+
+	// waitPollInterval — шаг опроса. Условия наблюдаются снаружи процесса
+	// (файлы состояния, HTTP), подписаться на них нечем, поэтому опрос; шаг
+	// мал, чтобы задержка обнаружения не съедала заметную долю бюджета.
+	waitPollInterval = 25 * time.Millisecond
+)
+
+// syncBuffer — потокобезопасный приёмник stdout/stderr подпроцесса. exec пишет
+// в него из собственной горутины-копировщика, а тест читает из своей, поэтому
+// strings.Builder здесь — настоящая гонка (её ловит `go test -race`).
+type syncBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *syncBuffer) Write(chunk []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(chunk)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
+}
+
+func waitUntil(t *testing.T, budget time.Duration, condition func() bool, diagnostics func() string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout ожидания:\n%s", diagnostics())
+	waitUntilOrExit(t, budget, nil, condition, diagnostics)
+}
+
+// waitUntilOrExit ждёт condition, опрашивая её каждые waitPollInterval, и
+// завершается по событию, а не по таймеру: либо условие стало истинным, либо
+// наблюдаемый подпроцесс умер и ждать больше нечего. budget — только аварийный
+// потолок на случай настоящего зависания.
+func waitUntilOrExit(
+	t *testing.T, budget time.Duration, exited <-chan struct{},
+	condition func() bool, diagnostics func() string,
+) {
+	t.Helper()
+	started := time.Now()
+	deadline := started.Add(budget)
+	// `go test -timeout` не должен превращать наше ожидание в panic-дамп без
+	// диагностики: свой бюджет ужимаем под общий дедлайн теста.
+	if testDeadline, ok := t.Deadline(); ok {
+		if reserved := testDeadline.Add(-5 * time.Second); reserved.Before(deadline) {
+			deadline = reserved
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
+	for {
+		if condition() {
+			// Фактическое время ожидания — рабочий материал для разбора
+			// будущих флейков: по нему видно, сколько бюджета съедает
+			// нагрузка, не дожидаясь падения. t.Logf молчит на зелёном
+			// прогоне без -v, поэтому шума не добавляет.
+			t.Logf("ожидание выполнено за %s (бюджет %s)",
+				time.Since(started).Round(time.Millisecond), budget)
+			return
+		}
+		processGone := false
+		select {
+		case <-exited:
+			processGone = true
+		default:
+		}
+		if processGone {
+			// Условие могло стать истинным ровно в момент выхода процесса:
+			// перепроверяем, прежде чем объявлять ожидание невыполнимым.
+			if condition() {
+				return
+			}
+			t.Fatalf("наблюдаемый процесс завершился через %s, ожидание невыполнимо:\n%s",
+				time.Since(started).Round(time.Millisecond), diagnostics())
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout ожидания: %s из бюджета %s:\n%s",
+				time.Since(started).Round(time.Millisecond), budget, diagnostics())
+		}
+		time.Sleep(waitPollInterval)
+	}
+}
+
+// webServer — подпроцесс `ai-team web` на эфемерном порту вместе с
+// HTTP-клиентом, уже получившим CSRF-сессию.
+type webServer struct {
+	t       *testing.T
+	baseURL string
+	client  *http.Client
+	csrf    string
+	output  *syncBuffer
+	// exited закрывается, когда подпроцесс завершился: это событие делает
+	// ожидания прерываемыми, не дожидаясь таймера.
+	exited chan struct{}
+}
+
+// startWebServer поднимает `ai-team web` и ждёт, пока тот начнёт отдавать
+// сессию.
+//
+// Порт приходится выбирать заранее: CLI принимает его флагом и нигде не
+// печатает фактически занятый адрес. Между закрытием пробного слушателя и
+// bind'ом подпроцесса есть окно, в которое порт может занять кто угодно
+// (TOCTOU). Отличить «порт занят» от «сервер жив, но медленный» можно
+// событийно — в первом случае подпроцесс немедленно умирает, — поэтому такой
+// старт не валит тест, а повторяется с новым портом.
+func startWebServer(t *testing.T, bin, dir string, env []string, extraArgs ...string) *webServer {
+	t.Helper()
+	const portAttempts = 5
+	var lastErr error
+	for attempt := 1; attempt <= portAttempts; attempt++ {
+		server, err := tryStartWebServer(t, bin, dir, env, extraArgs...)
+		if err == nil {
+			return server
+		}
+		lastErr = err
+		t.Logf("попытка %d поднять web сервер не удалась, повтор с новым портом: %v", attempt, err)
+	}
+	t.Fatalf("web сервер не стартовал за %d попыток: %v", portAttempts, lastErr)
+	return nil
+}
+
+func tryStartWebServer(t *testing.T, bin, dir string, env []string, extraArgs ...string) (*webServer, error) {
+	t.Helper()
+	port, err := reserveLoopbackPort()
+	if err != nil {
+		return nil, err
+	}
+	args := append([]string{"web", "--port", port, "--dist="}, extraArgs...)
+	command := exec.Command(bin, args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(), env...)
+	output := &syncBuffer{}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = command.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = command.Process.Signal(os.Interrupt)
+		<-exited
+	})
+	jar, _ := cookiejar.New(nil)
+	server := &webServer{
+		t: t, baseURL: "http://127.0.0.1:" + port,
+		// Общего Timeout у клиента нет намеренно: бюджет задаётся контекстом
+		// на каждый запрос, потому что дешёвая проба сессии и POST,
+		// запускающий пайплайн, — работа разного порядка, и один потолок на
+		// двоих неизбежно окажется либо слишком коротким, либо бесполезным.
+		client: &http.Client{Jar: jar},
+		output: output, exited: exited,
+	}
+	deadline := time.Now().Add(webStartupBudget)
+	for {
+		if csrf, ok := server.trySession(); ok {
+			server.csrf = csrf
+			return server, nil
+		}
+		select {
+		case <-exited:
+			return nil, fmt.Errorf("подпроцесс `ai-team web` завершился:\n%s", output.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("сервер не отдал сессию за %s:\n%s", webStartupBudget, output.String())
+		}
+		time.Sleep(waitPollInterval)
+	}
+}
+
+// reserveLoopbackPort отдаёт свободный порт loopback. Слушатель закрывается
+// сразу: удержать его до bind'а подпроцесса нечем, гонку за порт закрывает
+// повтор в startWebServer.
+func reserveLoopbackPort() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d", port), nil
+}
+
+func (s *webServer) trySession() (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), httpProbeBudget)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/api/session", nil)
+	if err != nil {
+		return "", false
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		return "", false
+	}
+	// тело ответа уже прочитано либо не нужно: обработать ошибку закрытия негде.
+	defer func() { _ = response.Body.Close() }()
+	var session struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
+		return "", false
+	}
+	return session.CSRF, session.CSRF != ""
+}
+
+// post отправляет команду API. Ошибку транспорта возвращает, а не валит тест:
+// часть вызовов делается внутри цикла ожидания, где сбой — повод повторить.
+func (s *webServer) post(path string, body any) (int, map[string]any, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), httpCommandBudget)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", s.csrf)
+	response, err := s.client.Do(request)
+	if err != nil {
+		return 0, nil, err
+	}
+	// тело ответа уже прочитано либо не нужно: обработать ошибку закрытия негде.
+	defer func() { _ = response.Body.Close() }()
+	raw, _ := io.ReadAll(response.Body)
+	var result map[string]any
+	if json.Unmarshal(raw, &result) != nil {
+		result = map[string]any{"raw": string(raw)}
+	}
+	return response.StatusCode, result, nil
+}
+
+// mustPost — одиночный вызов вне цикла ожидания: повторять его нельзя (старт
+// run не идемпотентен), поэтому ошибка транспорта здесь и есть приговор.
+func (s *webServer) mustPost(path string, body any) (int, map[string]any) {
+	s.t.Helper()
+	status, result, err := s.post(path, body)
+	if err != nil {
+		s.t.Fatalf("POST %s: %v\n%s", path, err, s.output.String())
+	}
+	return status, result
 }
 
 // TestE2E_OpenCodeSandboxEnvironmentReachesRealSubprocess proves the

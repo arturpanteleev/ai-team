@@ -105,10 +105,12 @@ func Fail(r Record, humanFormat string, args ...interface{}) {
 	mu.Lock()
 	out, errWriter, mode := emitter.out, emitter.err, emitter.mode
 	mu.Unlock()
-	fmt.Fprintf(errWriter, humanFormat+"\n", args...)
+	// Ошибка записи не важна: получатель — stderr терминала или уже закрытый
+	// поток, и сообщить о сбое печати некуда, кроме того же потока.
+	_, _ = fmt.Fprintf(errWriter, humanFormat+"\n", args...)
 	if mode == ModeJSON {
 		data, _ := json.Marshal(r)
-		fmt.Fprintln(out, string(data))
+		_, _ = fmt.Fprintln(out, string(data))
 	}
 }
 

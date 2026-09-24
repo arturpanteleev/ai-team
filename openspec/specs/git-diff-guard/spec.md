@@ -44,3 +44,32 @@ Baseline MUST фиксироваться непосредственно пере
 #### Scenario: Reviewer изменил исходник
 - **КОГДА** read-only reviewer меняет файл проекта
 - **ТОГДА** контроллер MUST отклонить попытку и остановить downstream execution
+
+### Requirement: Набор исключений guard'а неконфигурируем
+Per-attempt mutation guard MUST исключать из атрибуции ТОЛЬКО controller-owned
+каталоги (`.git`, `.ai-team`). Ни baseline производительности обхода, ни
+project-specific `tree_hash.ignore_dirs` MUST NOT сужать атрибуцию: иначе
+`mutation: none` перестаёт означать read-only.
+
+#### Scenario: Запись в каталог зависимостей или сборки
+- **КОГДА** этап с `mutation: none` записал файл в `node_modules`, `vendor`,
+  `dist`, `.venv` или `__pycache__`
+- **ТОГДА** guard MUST отклонить попытку
+- **И** путь MUST попасть в mutations манифеста попытки
+
+#### Scenario: Сломан вход уже пройденной обязательной проверки
+- **КОГДА** обязательная проверка прошла, читая файл из такого каталога
+- **И** следующий этап с `mutation: none` изменил этот файл
+- **ТОГДА** попытка MUST быть отклонена
+- **И** delivery plan MUST NOT быть предъявлен человеку
+
+### Requirement: Controller-owned метаданные под guard'ом
+Guard MUST сравнивать `.ai-team` до и после этапа за вычетом подкаталогов,
+которые контроллер ведёт сам, и MUST отклонять запись агента в `.ai-team` вне
+declared artifact namespace. Каталог исключён из workspace snapshot только
+потому, что туда пишет контроллер, — не потому, что он разрешён агенту.
+
+#### Scenario: Агент положил файл в `.ai-team`
+- **КОГДА** этап создал файл в `.ai-team` вне artifact namespace этапа
+- **ТОГДА** попытка MUST завершиться ошибкой
+- **И** путь MUST быть атрибутирован как mutation

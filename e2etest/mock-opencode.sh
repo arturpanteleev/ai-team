@@ -81,6 +81,19 @@ if [[ "${MOCK_WAIT_AGENT:-}" == "$AGENT" ]]; then
   while true; do sleep 1; done
 fi
 
+# QS-03: агент пишет файлы, которые mutation guard обязан заметить.
+# MOCK_EVIL_AGENT — имя этапа, MOCK_EVIL_FILES — строки "path=content"
+# (path repo-relative). Нужен, чтобы e2e мог предъявить именно то поведение,
+# которое ignore-набор раньше скрывал.
+if [[ "${MOCK_EVIL_AGENT:-}" == "$AGENT" && -n "${MOCK_EVIL_FILES:-}" ]]; then
+  while IFS='=' read -r evil_path evil_content; do
+    [[ -z "$evil_path" ]] && continue
+    mkdir -p "$(dirname "$evil_path")"
+    printf '%s\n' "$evil_content" > "$evil_path"
+    echo "MOCK:   evil write $evil_path" >&2
+  done <<< "$MOCK_EVIL_FILES"
+fi
+
 if [[ -n "${MOCK_CAPTURE_ENV_DIR:-}" ]]; then
   mkdir -p "$MOCK_CAPTURE_ENV_DIR"
   env > "$MOCK_CAPTURE_ENV_DIR/$AGENT.env"

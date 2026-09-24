@@ -19,6 +19,7 @@ func (rs *runState) enforceMutationGuard(
 	a *agent.Agent,
 	name string,
 	workspaceBefore filesystemSnapshot,
+	controlBefore filesystemSnapshot,
 	gitBefore gitMetadataSnapshot,
 	gitAvailable, guardWorkspace bool,
 	artifactBefore filesystemSnapshot,
@@ -34,7 +35,11 @@ func (rs *runState) enforceMutationGuard(
 			result.Mutations = append([]string(nil), changedPaths...)
 			result.MutationChanges = classifyMutationChanges(workspaceBefore, workspaceAfter, changedPaths)
 			if a.Mutation == "none" && workspaceBefore.Fingerprint != workspaceAfter.Fingerprint {
-				guardErrors = append(guardErrors, fmt.Errorf("агент %s нарушил mutation policy: read-only этап изменил проект", name))
+				// Пути в сообщении — не косметика: без них нарушитель ищется
+				// только в манифесте, а именно эти пути раньше терялись (QS-03).
+				guardErrors = append(guardErrors, fmt.Errorf(
+					"агент %s нарушил mutation policy: read-only этап изменил проект: %s",
+					name, summarizePaths(changedPaths)))
 			}
 			if a.Mutation == "source" || a.Mutation == "tests" {
 				var denied []string
@@ -59,6 +64,25 @@ func (rs *runState) enforceMutationGuard(
 			if a.RequireDiff && len(changedPaths) == 0 {
 				guardErrors = append(guardErrors, fmt.Errorf("агент %s не создал изменений в коде", name))
 			}
+		}
+		// Controller-owned `.ai-team` вне artifact namespace: config.yaml,
+		// локальные def'ы агентов, любой файл, положенный «мимо» контракта.
+		// Никакая mutation policy этого не разрешает, поэтому проверка общая.
+		controlAfter, controlErr := captureControlMetadataSnapshot(rs.sourceDir())
+		if controlErr != nil {
+			guardErrors = append(guardErrors, fmt.Errorf("агент %s: не удалось проверить control metadata state: %w", name, controlErr))
+		} else if controlChanged := changedSnapshotPaths(controlBefore, controlAfter); len(controlChanged) > 0 {
+			changes := classifyMutationChanges(controlBefore, controlAfter, controlChanged)
+			prefixed := make([]string, 0, len(controlChanged))
+			for i, changedPath := range controlChanged {
+				prefixed = append(prefixed, ".ai-team/"+changedPath)
+				changes[i].Path = prefixed[i]
+			}
+			result.Mutations = append(result.Mutations, prefixed...)
+			result.MutationChanges = append(result.MutationChanges, changes...)
+			guardErrors = append(guardErrors, fmt.Errorf(
+				"агент %s нарушил mutation policy: изменил controller-owned метаданные: %s",
+				name, strings.Join(prefixed, ", ")))
 		}
 		if gitAvailable {
 			gitAfter, stillAvailable, err := captureGitMetadataSnapshot(rs.sourceDir())
@@ -88,6 +112,17 @@ func (rs *runState) enforceMutationGuard(
 		}
 	}
 	return errors.Join(guardErrors...)
+}
+
+// summarizePaths — ограниченный по длине список путей для текста ошибки:
+// нарушение read-only может затронуть весь node_modules, и вываливать его в
+// консоль целиком бессмысленно.
+func summarizePaths(paths []string) string {
+	const limit = 12
+	if len(paths) <= limit {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s и ещё %d", strings.Join(paths[:limit], ", "), len(paths)-limit)
 }
 
 func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative string) bool {

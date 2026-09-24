@@ -54,6 +54,13 @@ openspec/            OpenSpec change history (specs/ + changes/)
 - Read-only этап с любой source mutation падает. `require_diff` без
   фактической delta также падает. Delivery получает только нормализованные
   разрешённые пути.
+- Атрибуция мутаций исключает только controller-owned каталоги — `.git`
+  (покрыт отдельным git metadata snapshot) и `.ai-team` (покрыт artifact
+  snapshot плюс control metadata snapshot, который ловит записи агента мимо
+  artifact namespace). Каталоги зависимостей и сборки (`node_modules`,
+  `vendor`, `dist`, …) — часть проекта: запись в них видна guard'у. Это набор,
+  который не ослабляется конфигурацией; `tree_hash.ignore_dirs` влияет только
+  на канонический workspace digest.
 - Checkpoints имеют явные политики `auto_continue`, `interactive` и
   `require_explicit`. В non-interactive режиме нет неявного согласия.
 - Перед review controller публикует candidate workspace digest, changed paths,

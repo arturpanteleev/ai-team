@@ -216,6 +216,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 
 	var workspaceBefore filesystemSnapshot
+	var controlBefore filesystemSnapshot
 	var gitBefore gitMetadataSnapshot
 	var gitAvailable bool
 	guardWorkspace := a.Kind != "delivery"
@@ -223,6 +224,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		workspaceBefore, err = captureWorkspaceSnapshot(rs.sourceDir())
 		if err != nil {
 			return fail(fmt.Errorf("агент %s: не удалось снять workspace baseline: %w", name, err))
+		}
+		controlBefore, err = captureControlMetadataSnapshot(rs.sourceDir())
+		if err != nil {
+			return fail(fmt.Errorf("агент %s: не удалось снять control metadata baseline: %w", name, err))
 		}
 		gitBefore, gitAvailable, err = captureGitMetadataSnapshot(rs.sourceDir())
 		if err != nil {
@@ -234,7 +239,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return fail(fmt.Errorf("агент %s: не удалось снять artifact baseline: %w", name, err))
 	}
 	defer func() {
-		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
+		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, controlBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
 			r.ValidationFailed = true
 			r.Err = errors.Join(r.Err, guardErr)
 			r.Status = notifier.StatusFailed

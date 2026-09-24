@@ -27,6 +27,16 @@ Mock MUST поддерживать normal, rejected, fail и blocked так, ч�
 - **КОГДА** mode=blocked
 - **ТОГДА** analyst MUST создать свежий status marker и MUST NOT создавать обычные outputs
 
+### Requirement: Нарушающая политику запись воспроизводима
+Mock MUST уметь записать произвольные repo-relative файлы от имени заданного
+этапа, не меняя остального поведения этапа. Без этого нарушения mutation
+policy нельзя предъявить end-to-end, а только смоделировать в unit-тесте.
+
+#### Scenario: Read-only этап пишет в проект
+- **КОГДА** заданы имя этапа и список `path=content`
+- **ТОГДА** mock MUST создать эти файлы до обычной обработки этапа
+- **И** этап MUST в остальном отработать как в normal mode
+
 ### Requirement: Delivery не мокается LLM
 Mock OpenCode MUST NOT выполнять commit, push или PR; delivery MUST тестироваться controller executor fixture с локальным git remote и mock `gh`.
 

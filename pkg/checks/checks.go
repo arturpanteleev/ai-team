@@ -581,23 +581,33 @@ func VerifyResultDigest(result Result) bool {
 	return result.EvidenceDigest != "" && result.EvidenceDigest == resultDigest(result)
 }
 
-// DefaultIgnoreDirs is the single canonical ignore list for workspace tree
-// hashing: controller metadata (.git, .ai-team) plus dependency/build
-// directories that are never part of a mutation contract. Directories are
-// matched by name at any depth of the walk. Project-specific additions from
-// config (OPS-2) are merged in; the canonical baseline is never removable.
+// ControllerOwnedDirs — единственное, что не считается частью проекта ни при
+// каких настройках: каталоги, которые ведёт сам контроллер. `.git` покрыт
+// отдельным git metadata snapshot (HEAD, branch, index), `.ai-team` — artifact
+// snapshot'ом и control metadata snapshot'ом. Всё остальное — проект.
+//
+// QS-03 (#154): раньше этот набор не существовал отдельно, и mutation guard
+// пользовался DefaultIgnoreDirs, куда ради скорости обхода входили
+// node_modules/vendor/dist/.venv/__pycache__. Следствие: агент с
+// `mutation: none` писал туда, а манифест показывал `mutations= None`.
+// Attribution и «что можно не обходить» — разные вопросы; набор для
+// attribution неослабляем и НЕ конфигурируется.
+func ControllerOwnedDirs() map[string]bool {
+	return map[string]bool{".git": true, ".ai-team": true}
+}
+
+// DefaultIgnoreDirs — ignore-набор канонического workspace digest (binding
+// «проверенные байты» → delivery). Это controller-owned каталоги плюс
+// project-specific имена из `tree_hash.ignore_dirs` (OPS-2): каталоги, про
+// которые проект ЯВНО заявил, что их содержимое не входит в identity сборки.
+// Имена матчатся по компоненту на любой глубине walk'а.
+//
+// Зависимостей и build-каталогов здесь больше нет по умолчанию: проект, чьи
+// проверки пишут в dist/ или node_modules/, обязан назвать эти каталоги в
+// конфиге сам — тогда исключение видно в config.yaml, а не зашито в контроллер.
 func DefaultIgnoreDirs() map[string]bool {
-	extra := loadExtraIgnoreDirs()
-	result := map[string]bool{
-		".git":         true,
-		".ai-team":     true,
-		"node_modules": true,
-		"vendor":       true,
-		"dist":         true,
-		".venv":        true,
-		"__pycache__":  true,
-	}
-	for name := range extra {
+	result := ControllerOwnedDirs()
+	for name := range loadExtraIgnoreDirs() {
 		if name == "" {
 			continue
 		}
@@ -612,6 +622,46 @@ func DefaultIgnoreDirs() map[string]bool {
 // hashed by target string, regular files by content, both prefixed with the
 // Lstat mode. ignoredDirs may be nil to exclude nothing (artifact namespace).
 func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map[string]string, fingerprint string, err error) {
+	return workspaceFileDigests(target, ignoredDirs, nil)
+}
+
+// ControlMetadataFileDigests хэширует controller-owned `.ai-team` за вычетом
+// тех подкаталогов первого уровня, которые контроллер пишет сам по ходу run'а
+// (evidence, отчёты, локи, candidate worktrees, artifact namespace — у
+// последнего собственный guard). Остаётся то, чего агент касаться не имеет
+// права ни при какой mutation policy: config.yaml, локальные определения
+// агентов, любой файл, положенный агентом «мимо» artifact namespace.
+//
+// Отсутствующий `.ai-team` — не ошибка: пустой снапшот.
+func ControlMetadataFileDigests(target string) (files map[string]string, fingerprint string, err error) {
+	root := filepath.Join(target, ".ai-team")
+	if info, statErr := os.Lstat(root); statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return nil, "", statErr
+		}
+		return map[string]string{}, "", nil
+	}
+	return workspaceFileDigests(root, nil, controllerMutableControlDirs)
+}
+
+// controllerMutableControlDirs — подкаталоги первого уровня `.ai-team`,
+// которые меняет сам контроллер во время попытки. Матчатся ТОЛЬКО на первом
+// уровне: `.ai-team/agents/state` — не контроллерский, а пользовательский.
+var controllerMutableControlDirs = map[string]bool{
+	"artifacts": true, "runs": true, "reports": true, "locks": true,
+	"state": true, "worktrees": true, "delivery": true, "exports": true,
+	"redacted": true,
+}
+
+// onlyReader прячет io.WriterTo у *os.File, чтобы io.CopyBuffer реально
+// использовал переданный буфер, а не выбрал внутренний быстрый путь с
+// собственной аллокацией.
+type onlyReader struct{ io.Reader }
+
+// workspaceFileDigests — общая реализация. ignoredAnyDepth матчится по имени
+// компонента на любой глубине; ignoredTopLevel — только по имени каталога
+// первого уровня относительно root.
+func workspaceFileDigests(target string, ignoredAnyDepth, ignoredTopLevel map[string]bool) (files map[string]string, fingerprint string, err error) {
 	root, err := filepath.Abs(target)
 	if err != nil {
 		return nil, "", err
@@ -624,6 +674,9 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 		return nil, "", fmt.Errorf("workspace root должен быть обычным каталогом без symlink")
 	}
 	files = make(map[string]string)
+	// Один переиспользуемый буфер на обход: io.Copy иначе аллоцирует 32 KiB на
+	// каждый файл, а после QS-03 дерево обходится целиком, включая node_modules.
+	copyBuffer := make([]byte, 128<<10)
 	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -637,8 +690,11 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 			return nil
 		}
 		if entry.IsDir() {
+			if !strings.Contains(relative, "/") && ignoredTopLevel[relative] {
+				return filepath.SkipDir
+			}
 			for _, component := range strings.Split(relative, "/") {
-				if ignoredDirs[component] {
+				if ignoredAnyDepth[component] {
 					return filepath.SkipDir
 				}
 			}
@@ -662,7 +718,7 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 			if openErr != nil {
 				return openErr
 			}
-			_, copyErr := io.Copy(hash, file)
+			_, copyErr := io.CopyBuffer(hash, onlyReader{file}, copyBuffer)
 			closeErr := file.Close()
 			if copyErr != nil {
 				return copyErr

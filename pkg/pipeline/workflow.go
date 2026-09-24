@@ -26,12 +26,31 @@ type gitMetadataSnapshot struct {
 	Tracked     map[string]bool
 }
 
-// captureWorkspaceSnapshot provides the same per-attempt attribution when the
-// target is not a git repository. Controller-owned metadata and dependency
-// directories from checks.DefaultIgnoreDirs are excluded; all other regular
-// files and symlinks are hashed.
+// captureWorkspaceSnapshot — основа per-attempt атрибуции мутаций. Исключается
+// ТОЛЬКО controller-owned (`.git`, `.ai-team`): всё остальное — проект, и
+// запись туда обязана быть видна независимо от того, «зависимости» это,
+// «сборка» или что проект объявил неинтересным для digest.
+//
+// QS-03 (#154): здесь стоял checks.DefaultIgnoreDirs, куда ради скорости
+// обхода входили node_modules/vendor/dist/.venv/__pycache__ плюс
+// project-specific имена. Агент с `mutation: none` писал в эти каталоги, а
+// манифест показывал `mutations= None`. Набор для скорости и набор для
+// атрибуции — разные вещи; здесь нужен второй.
 func captureWorkspaceSnapshot(root string) (filesystemSnapshot, error) {
-	return captureFilesystemSnapshot(root, checks.DefaultIgnoreDirs())
+	return captureFilesystemSnapshot(root, checks.ControllerOwnedDirs())
+}
+
+// captureControlMetadataSnapshot закрывает вторую половину QS-03: `.ai-team`
+// исключён из workspace snapshot потому, что контроллер пишет туда сам, — но
+// это ровно тот каталог, запись в который агентом мы и ловим. Снимается всё
+// `.ai-team` за вычетом подкаталогов, которые ведёт контроллер; artifact
+// namespace покрыт отдельным captureArtifactSnapshot.
+func captureControlMetadataSnapshot(root string) (filesystemSnapshot, error) {
+	files, fingerprint, err := checks.ControlMetadataFileDigests(root)
+	if err != nil {
+		return filesystemSnapshot{}, err
+	}
+	return filesystemSnapshot{Fingerprint: fingerprint, Files: files}, nil
 }
 
 // captureArtifactSnapshot attributes changes inside the controller's artifact

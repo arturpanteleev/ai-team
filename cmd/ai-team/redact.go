@@ -130,11 +130,17 @@ func cmdRedact() {
 	case "verify":
 		report, err := redact.Verify(scanRoot, policy)
 		if err != nil {
+			if report != nil {
+				printUnscanned(report.Unscanned)
+			}
 			logging.Fail(logging.Record{Level: "error", Command: "redact", Type: "redact_verify",
 				Message: err.Error(), Data: redactReportData(report)},
 				"✗ Redaction %s: %v", scanRoot, err)
 			os.Exit(exitFailed)
 		}
+		// Непросканированное печатается и при успехе: политика могла быть
+		// не fail-closed, но слепая зона от этого не перестаёт быть слепой.
+		printUnscanned(report.Unscanned)
 		fmt.Printf("✓ Redaction %s: clean (%d файлов)\n", scanRoot, report.Files)
 		logging.Emit(logging.Record{Level: "ok", Command: "redact", Type: "redact_verify",
 			Message: "Redaction clean", Data: redactReportData(report), Exit: exitOK})
@@ -144,19 +150,26 @@ func cmdRedact() {
 			fatal("Ошибка скана: %v", err)
 		}
 		report := redact.Report{Files: scanned, Bytes: total, Verdict: "clean"}
+		findings := 0
 		for _, f := range found {
-			report.Violations = append(report.Violations, redact.Violation(f))
-		}
-		if len(report.Violations) > 0 {
-			for _, v := range report.Violations {
-				for _, f := range v.Findings {
-					fmt.Printf("  %s:%d %s (%s)\n", v.Path, f.Line, f.Matched, f.Reason)
-				}
+			if len(f.Findings) > 0 {
+				report.Violations = append(report.Violations, redact.Violation{Path: f.Path, Findings: f.Findings})
+				findings += len(f.Findings)
+			}
+			if len(f.Unscanned) > 0 {
+				report.Unscanned = append(report.Unscanned, redact.UnscannedFile{Path: f.Path, Items: f.Unscanned})
 			}
 		}
+		for _, v := range report.Violations {
+			for _, f := range v.Findings {
+				fmt.Printf("  %s:%d %s (%s)\n", v.Path, f.Line, f.Matched, f.Reason)
+			}
+		}
+		printUnscanned(report.Unscanned)
 		logging.Emit(logging.Record{Level: "ok", Command: "redact", Type: "redact_scan",
-			Message: fmt.Sprintf("Scan: %d files, %d findings", scanned, len(report.Violations)),
-			Data:    redactReportData(&report), Exit: exitOK})
+			Message: fmt.Sprintf("Scan: %d files, %d findings, %d unscanned",
+				scanned, findings, countUnscanned(report.Unscanned)),
+			Data: redactReportData(&report), Exit: exitOK})
 	case "redact":
 		if err := applyRedact(scanRoot, *outDir, policy); err != nil {
 			fatal("redact: %v", err)
@@ -193,6 +206,7 @@ func applyRedact(source, out string, policy redact.Policy) error {
 		return fmt.Errorf("создание out: %v", err)
 	}
 	var files, redacted, total int64
+	var unscanned []redact.UnscannedFile
 	walkErr := filepath.WalkDir(source, func(p string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -216,12 +230,18 @@ func applyRedact(source, out string, policy redact.Policy) error {
 		if !policy.Applies(matcherRel) {
 			return nil
 		}
-		findings, err := redact.ScanFile(p, policy.MaxBytes)
+		result, err := redact.ScanFile(p, policy.MaxBytes)
 		if err != nil {
 			return err
 		}
+		// QS-08: файл с непросканированными участками копируется как есть,
+		// значит в «санированной» копии может остаться секрет. Молчать об
+		// этом нельзя — счётчик уходит в отчёт команды.
+		if len(result.Unscanned) > 0 {
+			unscanned = append(unscanned, redact.UnscannedFile{Path: rel, Items: result.Unscanned})
+		}
 		target := filepath.Join(out, rel)
-		if len(findings) == 0 {
+		if len(result.Findings) == 0 {
 			return copyRegular(p, target)
 		}
 		data, err := os.ReadFile(p)
@@ -240,10 +260,36 @@ func applyRedact(source, out string, policy redact.Policy) error {
 		return walkErr
 	}
 	fmt.Printf("✓ Redacted %s → %s (%d файлов, из них redacted %d)\n", source, out, files, redacted)
+	printUnscanned(unscanned)
 	logging.Emit(logging.Record{Level: "ok", Command: "redact", Type: "redact_apply",
 		Message: "Redaction применена", Data: map[string]any{"source": source, "out": out,
-			"files": files, "redacted": redacted, "bytes": total}, Exit: exitOK})
+			"files": files, "redacted": redacted, "bytes": total,
+			"unscanned": countUnscanned(unscanned)}, Exit: exitOK})
 	return nil
+}
+
+// printUnscanned выводит участки, которые сканер не разобрал. Пустой вывод
+// означает «просканировано всё», и только тогда «находок нет» = «секретов
+// нет» (QS-08).
+func printUnscanned(unscanned []redact.UnscannedFile) {
+	if len(unscanned) == 0 {
+		return
+	}
+	fmt.Printf("⚠ Не просканировано: %d участков в %d файлах (чистота не подтверждена)\n",
+		countUnscanned(unscanned), len(unscanned))
+	for _, u := range unscanned {
+		for _, item := range u.Items {
+			fmt.Printf("  %s:%d не просканировано (%s): %s\n", u.Path, item.Line, item.Reason, item.Detail)
+		}
+	}
+}
+
+func countUnscanned(unscanned []redact.UnscannedFile) int {
+	total := 0
+	for _, u := range unscanned {
+		total += len(u.Items)
+	}
+	return total
 }
 
 func copyRegular(src, dst string) error {
@@ -263,6 +309,9 @@ func redactReportData(report *redact.Report) map[string]any {
 		"files":      report.Files,
 		"bytes":      report.Bytes,
 		"violations": len(report.Violations),
+		// QS-08: число непросканированных участков — часть машиночитаемого
+		// вердикта, иначе «violations: 0» читается как «чисто».
+		"unscanned": countUnscanned(report.Unscanned),
 	}
 }
 

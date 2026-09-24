@@ -744,6 +744,58 @@ func verifyPullRequest(output string, plan Plan, commitSHA string) (string, erro
 	return response.URL, nil
 }
 
+// promptSuppressingEnv — переменные, которыми доставка выключает любой
+// интерактивный запрос у git и gh. Контроллер работает без терминала: запрос
+// пароля/токена здесь не может быть отвечен, он превращается в зависание
+// (QS-06). Дедлайн доставки такое зависание оборвёт, но ждать его — значит
+// ждать минуты вместо мгновенной внятной ошибки от самого git.
+var promptSuppressingEnv = [][2]string{
+	{"GIT_TERMINAL_PROMPT", "0"},   // git не спрашивает креды в терминале
+	{"GH_PROMPT_DISABLED", "1"},    // gh не открывает интерактивные prompt'ы
+	{"GH_NO_UPDATE_NOTIFIER", "1"}, // gh не ходит за новой версией мимо задачи
+}
+
+// promptSuppressingUnset — переменные, которые доставка удаляет из окружения
+// ребёнка: они уводят запрос креденшелов в сторону (GUI-askpass, ssh-askpass),
+// где GIT_TERMINAL_PROMPT=0 уже не действует и ожидание снова бесконечно.
+var promptSuppressingUnset = []string{"GIT_ASKPASS", "SSH_ASKPASS"}
+
+// NonInteractiveEnv возвращает окружение внешних команд доставки: base с
+// вычищенными askpass-хуками и принудительно неинтерактивными git/gh.
+// Пользовательские значения этих переменных намеренно перекрываются —
+// интерактивность в post-terminal доставке недопустима by design.
+func NonInteractiveEnv(base []string) []string {
+	result := make([]string, 0, len(base)+len(promptSuppressingEnv)+1)
+	blocked := make(map[string]bool, len(promptSuppressingEnv)+len(promptSuppressingUnset))
+	for _, pair := range promptSuppressingEnv {
+		blocked[pair[0]] = true
+	}
+	for _, name := range promptSuppressingUnset {
+		blocked[name] = true
+	}
+	sshCommandSet := false
+	for _, entry := range base {
+		name, _, _ := strings.Cut(entry, "=")
+		if blocked[name] {
+			continue
+		}
+		if name == "GIT_SSH_COMMAND" {
+			sshCommandSet = true
+		}
+		result = append(result, entry)
+	}
+	for _, pair := range promptSuppressingEnv {
+		result = append(result, pair[0]+"="+pair[1])
+	}
+	// Явный GIT_SSH_COMMAND пользователя уважаем: подменять его — значит ломать
+	// рабочую конфигурацию доступа. Если его нет, добавляем BatchMode, чтобы
+	// ssh не ждал ввода passphrase у отсутствующего терминала.
+	if !sshCommandSet {
+		result = append(result, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	}
+	return result
+}
+
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
@@ -751,6 +803,7 @@ func (ExecRunner) Run(ctx context.Context, dir, name string, args ...string) Ste
 	stdout, stderr := &boundedBuffer{limit: maxCommandOutput}, &boundedBuffer{limit: maxCommandOutput}
 	command := exec.Command(name, args...)
 	command.Dir, command.Stdout, command.Stderr = dir, stdout, stderr
+	command.Env = NonInteractiveEnv(os.Environ())
 	err := process.Run(ctx, command)
 	result.FinishedAt = time.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(result.StartedAt)

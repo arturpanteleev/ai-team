@@ -36,7 +36,7 @@ func TestDeliverDeferredPolicyParityCompletedAndWithWarnings(t *testing.T) {
 		if got := runFinishedStatus(t, runDir); got != string(workflow.RunCompleted) {
 			t.Fatalf("run_finished=%q, ожидали %q", got, workflow.RunCompleted)
 		}
-		record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(runDir, "", dir)
+		record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir)
 		if err != nil {
 			t.Fatalf("DeliverDeferred(completed): %v", err)
 		}
@@ -71,7 +71,7 @@ func TestDeliverDeferredPolicyParityCompletedAndWithWarnings(t *testing.T) {
 		if got := runFinishedStatus(t, runDir); got != string(workflow.RunCompletedWithWarnings) {
 			t.Fatalf("run_finished=%q, ожидали %q", got, workflow.RunCompletedWithWarnings)
 		}
-		record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(runDir, "", dir)
+		record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir)
 		if err != nil {
 			t.Fatalf("DeliverDeferred(completed_with_warnings): %v", err)
 		}

@@ -320,7 +320,7 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 	if err := ensureNoExtraneousFiles(bundleDir, &index); err != nil {
 		return err
 	}
-	if err := verifyCore(bundleDir, index.RunID, index.Records); err != nil {
+	if err := verifyCore(bundleDir, index.RunID, index.Records, false); err != nil {
 		return err
 	}
 	digest, err := BundleDigest(&index)
@@ -405,7 +405,10 @@ func VerifyEvidence(runDir string) error {
 	if err != nil {
 		return err
 	}
-	return verifyCore(runDir, manifest.RunID, records)
+	// liveRun=true: каталог run несёт архивные артефакты попыток и
+	// post-terminal записи (delivery/containment/candidate), которых в
+	// portable bundle нет.
+	return verifyCore(runDir, manifest.RunID, records, true)
 }
 
 func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record, error) {
@@ -441,9 +444,13 @@ func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record,
 }
 
 // verifyCore — semantic-свёртка evidence против каталога с run layout:
-// 1) run manifest identity; 2) hash-цепочка + anchor; 3) attempt manifests
-// ↔ events; 4) attestation v1 ↔ run/spec/events/attempts/provenance.
-func verifyCore(root, runID string, records []Record) error {
+// 1) run manifest identity; 2) hash-цепочка + anchor (anchor фиксирует digest
+// run.json); 3) attempt manifests ↔ events; 4) attestation v1 ↔
+// run/spec/events/attempts/provenance. При liveRun дополнительно сверяются
+// файлы, которых нет в portable bundle: архивные артефакты попыток против
+// digest/size в манифестах, delivery record, containment receipt и candidate
+// identity (см. runverify.go).
+func verifyCore(root, runID string, records []Record, liveRun bool) error {
 	manifest, err := readRunManifest(root)
 	if err != nil {
 		return err
@@ -553,7 +560,16 @@ func verifyCore(root, runID string, records []Record) error {
 	if predicate.Provenance.RunID != runID {
 		return fmt.Errorf("verify: attestation provenance run_id не совпадает")
 	}
-	return nil
+	// Controller identity живёт в run.json и дублируется в attestation:
+	// расхождение означает, что подменили один из двух файлов.
+	if predicate.Run.ControllerExecutableSHA != "" &&
+		predicate.Run.ControllerExecutableSHA != manifest.Controller.ExecutableSHA256 {
+		return fmt.Errorf("verify: attestation controller_executable_sha256 не совпадает с run manifest")
+	}
+	if !liveRun {
+		return nil
+	}
+	return verifyRunDirectory(root, runID, manifest, records, events, statement)
 }
 
 func fileDigest(path string, maxBytes int64) (string, error) {

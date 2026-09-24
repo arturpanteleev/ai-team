@@ -104,6 +104,14 @@ func cmdExport() {
 		}
 	}()
 
+	// QS-05/QS-23: verified-запись открывает право gc удалить live evidence,
+	// поэтому сначала проверяется сама evidence (включая архивные артефакты
+	// попыток, delivery record и containment receipt), и только потом —
+	// собранный из неё bundle. Bundle по построению не несёт артефактов, так
+	// что одной bundle-проверки для этого утверждения недостаточно.
+	if err := export.VerifyEvidence(runDir); err != nil {
+		fatal("Экспорт отклонён: evidence run %s не прошла полную проверку: %v", runID, err)
+	}
 	index, err := export.Build(runDir, tmp)
 	if err != nil {
 		fatal("Ошибка экспорта: %v", err)

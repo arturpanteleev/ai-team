@@ -220,11 +220,40 @@ records против своих sha256, run identity/schema, config/workflow sna
 против run manifest, event chain + anchor (VerifyAnchor), attempt manifests
 против manifest_sha256 в attempt_finished событиях (файлы↔events связка, которой
 VerifyAnchor не даёт), attestation v1 против events/config/workflow/
-attempt_count/provenance. Только после успешной verify пишется verified-запись
-в state/exports/<runID>.json (контракт V0-0), открывающая право `gc --prune-runs`.
+attempt_count/provenance. Перед сборкой bundle проверяется и сама live
+evidence (`export.VerifyEvidence`): verified-запись открывает право `gc
+--prune-runs` удалить оригинал, поэтому проверки одного лишь bundle, в котором
+raw-артефактов нет по построению, для неё недостаточно. Только после обеих
+проверок пишется verified-запись в state/exports/<runID>.json (контракт V0-0).
 `ai-team verify <bundle-dir>` проверяет bundle самодостаточно без repo и
-.ai-team; `ai-team verify <run_id>` — та же full-свёртка live evidence.
+.ai-team; `ai-team verify <run_id>` — та же свёртка плюс проверки, требующие
+файлов live run (артефакты попыток, delivery record, containment receipt,
+candidate identity).
 Экспорт отказастся от non-terminal run и от run без attestation.json.
+
+Что `ai-team verify <run_id>` покрывает, а что сознательно нет:
+
+| файл | как проверяется |
+| --- | --- |
+| `run.json` | sha256 файла зафиксирован в `anchor.json` (`run_manifest_sha256`, anchor schema 2) |
+| `config.json`, `workflow.json` | sha256 в run manifest |
+| `events.jsonl` | hash-цепочка + `event_count`/`chain_root_sha256` в anchor |
+| `anchor.json` | внутренняя согласованность с цепочкой и manifest'ами |
+| `attempts/*/manifest.json` | `manifest_sha256` из `attempt_finished` события |
+| `attempts/*/artifacts/**`, `attempts/*/inputs/**` | тип, размер и sha256 из `outputs[]`/`inputs[]` манифеста; файл, не покрытый ни одним record, отвергается |
+| `attestation.json` | сверка с run/spec/events/attempt_count/provenance и controller identity |
+| `delivery.json` | обязательный `record_sha256`, run identity, `plan_hash` против `delivery_deferred` события, `attestation_sha256` против attestation, `runtime_identity` против provenance в `run.json` |
+| `containment.json` | receipt детерминирован профилем и пересчитывается; переворот уровня или флага отвергается |
+| `candidate.json` | `run_id` и `workspace_sha256` против candidate subject attestation'а — перекрёстная согласованность, не привязка к цепочке |
+| `logs/*.log` | **не проверяется**: raw stdout агентов дописывается потоково, digest'а не имеет и в bundle не попадает |
+| `reports/**` | **не проверяется**: производная проекция манифестов, восстановима из них |
+| `usage.json`, `candidate-metadata.json` | **не проверяется**: производные/средовые метаданные без digest |
+| `commit_sha`, `pr_url` внутри `delivery.json` | **локально неподтверждаемы**: это внешние факты о git-remote; evidence фиксирует только то, что контроллер их записал |
+
+Anchor schema 1 (раны, созданные до появления `run_manifest_sha256`)
+отвергается fail-closed: про такую evidence нельзя сказать «проверена
+полностью», а молчаливое послабление — ровно тот дефект, который здесь
+исправляется.
 
 Signed bundle (P1-5, DSSE): `pkg/dsse` реализует минимальный DSSE-envelope на
 stdlib-only (PAE — Pre-Authentication Encoding `"DSSEv1"` с длинами payloadType
@@ -414,8 +443,17 @@ approval `delivery_plan`, в resume выполняется `--approve-plan <sha>
      `ai-team-attestation: <digest>`;
 5. исполняет реальный `delivery.Execute(context.Background(), …)` рабочей
    копии (workspace lock всё ещё удержан — хук внутри `RunWithResult`);
-6. записывает tamper-evident `{RunDir}/delivery.json` (self-integrity
-   `record_sha256`, строгая валидация, однократная запись, idempotent retry).
+6. записывает `{RunDir}/delivery.json` (self-integrity `record_sha256`,
+   строгая валидация, однократная запись, idempotent retry).
+
+Про tamper-evidence этого файла точно: `record_sha256` обязателен при чтении и
+ловит правку «на месте» (раньше поле было необязательным, и достаточно было
+удалить строку). Согласованно пересобранный record digest не ломает, поэтому
+`ai-team verify` дополнительно сверяет `plan_hash` с `delivery_deferred`
+событием цепочки, `attestation_sha256` с attestation и `runtime_identity` с
+provenance в `run.json` — всё это привязано к anchor'у. А вот сами `commit_sha`
+и `pr_url` локальной evidence не подтверждаются ничем: это утверждения о
+состоянии git-remote, и проверяются они только против репозитория.
 
 Трейлеры не входят в canonical plan и subject approval (они controller-derived,
 не из LLM). Commit message = plan.CommitMessage + trailers. Трейлеры персистятся

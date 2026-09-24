@@ -65,3 +65,56 @@ Run evidence MUST сохранять candidate metadata и актуальную 
 - **КОГДА** worktree позднее удалён
 - **ТОГДА** base identity, patch hash, changed files, checks и attempts MUST
   оставаться доступны в immutable run evidence
+
+### Requirement: Evidence verification completeness
+
+`ai-team verify <run_id>` MUST проверять каждый файл, который объявлен
+проверяемым, и MUST NOT утверждать проверку того, что не проверяет. Terminal
+anchor MUST фиксировать digest run manifest. Каждая запись `inputs[]`/
+`outputs[]` attempt manifest MUST сверяться с фактическим артефактом по типу,
+размеру и SHA-256, а файл внутри каталога попытки, не покрытый ни одной
+записью, MUST отвергаться. Файлы вне проверяемого набора (raw logs, HTML-
+отчёты, производные метрики) MUST NOT описываться как tamper-evident.
+
+#### Scenario: Подменён архивный артефакт попытки
+
+- **КОГДА** файл, на который указывает `outputs[].evidence_path`, изменён,
+  удалён или дополнен посторонним файлом
+- **ТОГДА** verify MUST завершиться ошибкой с указанием попытки и артефакта
+
+#### Scenario: Подменён run manifest
+
+- **КОГДА** изменено содержимое `run.json` (feature, target dir, controller
+  identity или provenance digests)
+- **ТОГДА** verify MUST завершиться ошибкой несовпадения с digest в anchor
+
+#### Scenario: Anchor без digest run manifest
+
+- **КОГДА** anchor создан схемой, не фиксирующей digest run manifest
+- **ТОГДА** verify MUST отказать fail-closed, а не сообщать об успешной проверке
+
+### Requirement: Post-terminal evidence records
+
+Записи после terminal anchor MUST быть проверяемы теми связями, которые у них
+есть (delivery record, containment receipt): delivery
+record MUST нести обязательный self-integrity digest и MUST сверяться с
+`delivery_deferred` событием цепочки, attestation и provenance; containment
+receipt MUST детерминированно выводиться из профиля исполнения и MUST
+пересчитываться при verify. Receipt MUST NOT содержать флагов, утверждающих
+наблюдение, которого система не делает.
+
+#### Scenario: Подменён результат доставки
+
+- **КОГДА** в `delivery.json` изменены поля или удалён `record_sha256`
+- **ТОГДА** чтение record MUST завершиться ошибкой, а verify — отказом
+
+#### Scenario: Подменён containment receipt
+
+- **КОГДА** уровень оси или флаг в `containment.json` изменён
+- **ТОГДА** verify MUST завершиться ошибкой несовпадения с каноническим receipt
+
+#### Scenario: Внешние факты доставки
+
+- **КОГДА** evidence содержит `commit_sha`/`pr_url`
+- **ТОГДА** система MUST NOT утверждать их локальную проверяемость: они
+  подтверждаются только против самого репозитория

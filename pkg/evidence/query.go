@@ -51,7 +51,17 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 		// delivery.json (deferred delivery). Attempt-манифесты stay immutable
 		// (CommitSHA пуст), поэтому сначала ищем record, и только при его
 		// отсутствии сканируем старые attempt-манифесты.
-		if record, recOK, recErr := delivery.ReadTerminalRecord(runDir); recErr == nil && recOK && record.Feature == feature {
+		record, recOK, recErr := delivery.ReadTerminalRecord(runDir)
+		if recErr != nil {
+			// QS-23: ошибка чтения канонического record (повреждение или
+			// правка руками) раньше просто отбрасывалась, и результат
+			// доставки брался из более слабого источника — attempt-манифестов.
+			// Run со сломанным delivery.json пропускается целиком: это
+			// best-effort диагностика, и молча подставлять вместо
+			// непрошедшего проверку record что-то другое нельзя.
+			continue
+		}
+		if recOK && record.Feature == feature {
 			if !ok || manifest.StartedAt.After(result.StartedAt) {
 				result = DeliveredRun{
 					RunID: manifest.RunID, StartedAt: manifest.StartedAt,

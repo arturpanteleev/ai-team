@@ -38,11 +38,32 @@
   govulncheck и строгую OpenSpec-валидацию. Заодно `go build` в CI расширен с
   `./cmd/ai-team` до `./...`. Текст release notes приведён в соответствие с
   тем, что действительно прогоняется (#102).
+- **Anchor schema 2.** Терминальный `anchor.json` несёт `run_manifest_sha256`.
+  Раны, созданные предыдущими версиями (anchor schema 1, а также containment
+  receipt с `cleanup_verified`), `ai-team verify` отвергает fail-closed: про
+  такую evidence нельзя утверждать, что она проверена полностью (#156).
 
 ### Fixed
 
 - Нестабильность `make verify`: preflight-тест зависел от реального времени
   запуска процесса и падал под нагрузкой (PDD-01).
+- **`ai-team verify` проверяет то, что обещает (#156, #173, #174).** Раньше
+  `✓ Run OK` печатался для подделанной evidence: правка `run.json`, переписанный
+  или удалённый архивный артефакт попытки (при том что манифест хранит его
+  `sha256` и `size`), подменённые `delivery.json` и `containment.json` —
+  ни один из этих случаев не детектировался. Теперь anchor фиксирует digest
+  `run.json` (anchor schema 2), каждая запись `inputs[]`/`outputs[]` манифеста
+  сверяется с файлом по типу, размеру и sha256, посторонний файл в каталоге
+  попытки отвергается, delivery record требует `record_sha256` и сверяется с
+  `delivery_deferred` событием, attestation и provenance, а containment receipt
+  пересчитывается из профиля. `ai-team export` проверяет live evidence до того,
+  как опубликует verified-запись, открывающую право `gc --prune-runs`.
+  Сообщение `verify` перечисляет, что осталось вне проверки (`logs/`,
+  `reports/`, `usage.json`, а также `commit_sha`/`pr_url` — внешние факты о
+  git-remote).
+- **`cleanup_verified` удалён из containment receipt (#174).** Флаг писался
+  литералом `true`, хотя единственная функция, способная это наблюдать
+  (`process.TrackAndCleanup`), в продакшен-пути не вызывается.
 
 ## [0.2.0] - 2026-09-04
 

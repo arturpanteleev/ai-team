@@ -17,7 +17,7 @@ type Axis string
 const (
 	AxisFS   Axis = "fs"   // filesystem: symlink reject, worktree isolation, credential deny
 	AxisNet  Axis = "net"  // network: tool deny, env isolation
-	AxisProc Axis = "proc" // process: process-group kill, cleanup verification
+	AxisProc Axis = "proc" // process: process-group kill
 	AxisEnv  Axis = "env"  // environment: allow-list, config dir isolation, credential file deny
 )
 
@@ -134,9 +134,16 @@ func DefaultTrustedLocalReceipt() Receipt {
 			AxisEnv:  LevelPARTIAL,
 		},
 		Details: map[Axis]map[string]bool{
-			AxisFS:   {"symlink_reject": true, "worktree_isolation": true, "credential_deny": true},
-			AxisNet:  {"tool_deny": true, "env_isolation": true},
-			AxisProc: {"process_group_kill": true, "cleanup_verified": true},
+			AxisFS:  {"symlink_reject": true, "worktree_isolation": true, "credential_deny": true},
+			AxisNet: {"tool_deny": true, "env_isolation": true},
+			// cleanup_verified удалён (QS-24): флаг писался литералом true,
+			// хотя единственная функция, способная это наблюдать
+			// (process.TrackAndCleanup), в продакшен-пути не вызывается.
+			// Флаг, который всегда true независимо от реальности, хуже
+			// отсутствующего — он врёт. process_group_kill остаётся: это
+			// свойство кода (process.Run ставит Setpgid и бьёт группу по
+			// отмене контекста), а не заявленное наблюдение за конкретным run.
+			AxisProc: {"process_group_kill": true},
 			AxisEnv:  {"allow_list": true, "config_dir_isolation": true, "credential_deny": true},
 		},
 		Profile: "trusted-local",
@@ -155,6 +162,46 @@ func UnavailableReceipt() Receipt {
 		},
 		Profile: "unknown",
 	}
+}
+
+// CanonicalReceipt возвращает receipt, который контроллер обязан написать для
+// профиля profile. Receipt детерминированно выводится из профиля, поэтому
+// verify пересчитывает его и сравнивает с записанным (QS-24): containment.json
+// пишется после terminal anchor и не может быть привязан к цепочке событий,
+// но подделка уровней/флагов при этом всё равно ловится.
+func CanonicalReceipt(profile string) Receipt {
+	if profile == "trusted-local" {
+		receipt := DefaultTrustedLocalReceipt()
+		receipt.Profile = profile
+		return receipt
+	}
+	receipt := UnavailableReceipt()
+	receipt.Profile = profile
+	return receipt
+}
+
+// Equal сравнивает два receipt по всем осям, флагам и профилю.
+func (r Receipt) Equal(other Receipt) bool {
+	if r.Profile != other.Profile || len(r.Axes) != len(other.Axes) || len(r.Details) != len(other.Details) {
+		return false
+	}
+	for axis, level := range r.Axes {
+		if other.Axes[axis] != level {
+			return false
+		}
+	}
+	for axis, flags := range r.Details {
+		otherFlags, ok := other.Details[axis]
+		if !ok || len(flags) != len(otherFlags) {
+			return false
+		}
+		for flag, value := range flags {
+			if otherValue, ok := otherFlags[flag]; !ok || otherValue != value {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // HasUnavailable returns true if any axis is UNAVAILABLE.

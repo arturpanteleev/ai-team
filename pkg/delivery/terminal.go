@@ -195,10 +195,22 @@ func ReadTerminalRecord(runDir string) (*TerminalRecord, bool, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return nil, false, fmt.Errorf("terminal delivery record: trailing data: %w", err)
 	}
-	if err := record.Validate(); err != nil {
+	if err := requireSelfDigest(record); err != nil {
 		return nil, false, err
 	}
 	return &record, true, nil
+}
+
+// requireSelfDigest — record_sha256 обязателен при чтении (QS-23). Поле
+// omitempty, а Validate сверяет его только когда оно непустое: без этой
+// проверки достаточно было удалить строку record_sha256, чтобы подменённый
+// record прошёл как валидный. Писатель ставит digest всегда, поэтому пустое
+// поле означает либо ручную правку, либо повреждение.
+func requireSelfDigest(record TerminalRecord) error {
+	if record.RecordSHA256 == "" {
+		return errors.New("terminal delivery record: отсутствует record_sha256 (self-integrity digest)")
+	}
+	return record.Validate()
 }
 
 // ReadTerminalRecordFile — то же, но для явного пути записи (используется
@@ -226,7 +238,7 @@ func ReadTerminalRecordFile(path string) (*TerminalRecord, bool, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return nil, false, fmt.Errorf("terminal delivery record: trailing data: %w", err)
 	}
-	if err := record.Validate(); err != nil {
+	if err := requireSelfDigest(record); err != nil {
 		return nil, false, err
 	}
 	return &record, true, nil

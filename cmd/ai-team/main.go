@@ -1368,7 +1368,8 @@ func cmdVerify() {
 				"✗ Bundle %s: %v", arg, ui.Colorize(err.Error(), ui.ColorRed))
 			os.Exit(exitFailed)
 		}
-		logging.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
+		logging.Printf("✓ Bundle %s: OK — records против своих sha256, event chain, anchor (включая digest run.json), "+
+			"attempt manifests и attestation v1 согласованы; raw-артефактов в bundle нет по построению%s\n", arg, sigNote(keyVerify))
 		logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run_bundle",
 			Message: "Bundle OK", Data: map[string]any{"target": arg}, Exit: exitOK})
 		return
@@ -1394,7 +1395,10 @@ func cmdVerify() {
 			"✗ Run %s: %v", runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)
 	}
-	logging.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
+	logging.Printf("✓ Run %s: anchor OK — run.json, event chain, manifests digest, attempt manifests с их артефактами "+
+		"(digest и размер), attestation v1, delivery record и containment receipt согласованы.\n"+
+		"  Вне проверки (не покрыто digest'ами): logs/, reports/, usage.json, а также commit_sha/pr_url —\n"+
+		"  внешние факты о git-remote, подтверждаемые только самим репозиторием.\n", runID)
 	logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run",
 		Message: "Run OK", Data: map[string]any{"run_id": runID}, Exit: exitOK})
 }

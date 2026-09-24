@@ -760,6 +760,11 @@ CI-набор (`.github/workflows/ci.yaml` вызывается как reusable 
 Containment receipt (`containment.json`) честно фиксирует уровень каждой оси
 (fs/net/proc/env): trusted-local → PARTIAL (app-level mitigations, не OS-enforced),
 strict без OS backend → UNAVAILABLE (fail-closed, gate блокирует untrusted).
+Флаги в `details` описывают применённые меры (например `process_group_kill` —
+контроллер запускает агента в отдельной process group и бьёт её по отмене), а
+не наблюдения за конкретным run: заявлять наблюдение, которого никто не делал,
+receipt не должен. `ai-team verify` пересчитывает receipt из профиля, поэтому
+подмена уровня или флага отвергается.
 Поэтому текущий профиль допустим только для доверенного локального проекта;
 секреты и недоверенный код должны запускаться во внешнем container/VM sandbox.
 Открытые ограничения и направление работ перечислены в

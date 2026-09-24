@@ -33,7 +33,7 @@ func ReadRegularFile(path string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	after, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -87,7 +87,8 @@ func WriteRegularFileNoFollow(path string, data []byte, mode os.FileMode) error 
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
-		file.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = file.Close()
 		return err
 	}
 	return file.Close()

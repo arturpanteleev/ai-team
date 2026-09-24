@@ -699,7 +699,8 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
+	// порт освобождается сразу: слушать его будет запускаемый ниже сервер.
+	_ = listener.Close()
 	command := exec.Command(bin, "web", "--port", port, "--dist=")
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
@@ -722,7 +723,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		if requestErr != nil {
 			return false
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		var session struct {
 			CSRF string `json:"csrf_token"`
 		}
@@ -746,7 +747,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		raw, _ := io.ReadAll(response.Body)
 		var result map[string]any
 		if json.Unmarshal(raw, &result) != nil {
@@ -854,7 +855,8 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
+	// порт освобождается сразу: слушать его будет запускаемый ниже сервер.
+	_ = listener.Close()
 	schedulerDB := filepath.Join(dir, ".ai-team", "scheduler.db")
 	artifactRoot := filepath.Join(dir, ".ai-team", "cloud-artifacts")
 	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
@@ -879,7 +881,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 		if requestErr != nil {
 			return false
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		var session struct {
 			CSRF string `json:"csrf_token"`
 		}
@@ -899,7 +901,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	}
 	var started map[string]string
 	_ = json.NewDecoder(response.Body).Decode(&started)
-	response.Body.Close()
+	_ = response.Body.Close()
 	runID := started["run_id"]
 	if response.StatusCode != http.StatusAccepted || runID == "" {
 		t.Fatalf("scheduler enqueue: status=%d body=%v\n%s", response.StatusCode, started, serverOutput.String())
@@ -924,7 +926,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 		if openErr != nil {
 			return serverOutput.String() + "\nqueue: " + openErr.Error()
 		}
-		defer queue.Close()
+		defer func() { _ = queue.Close() }()
 		records, listErr := queue.ListRun(runID)
 		return fmt.Sprintf("%s\nqueue=%+v err=%v", serverOutput.String(), records, listErr)
 	})

@@ -39,7 +39,7 @@ func TestQueuePersistsAndRejectsDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	record, claimed, err := queue.Claim(context.Background(), "worker-1")
 	if err != nil || !claimed || record.Job.RunID != "run-1" {
 		t.Fatalf("persistent claim: record=%+v claimed=%v err=%v", record, claimed, err)
@@ -55,7 +55,7 @@ func TestQueueTargetConcurrencyAndLeaseRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	target := t.TempDir()
 	firstID, _ := queue.Enqueue(testJob(target, "run-1"))
 	_, _ = queue.Enqueue(testJob(target, "run-2"))
@@ -81,7 +81,7 @@ func TestQueueCancelVisibleOnHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	target := t.TempDir()
 	_, _ = queue.Enqueue(testJob(target, "run-cancel"))
 	record, _, _ := queue.Claim(context.Background(), "worker-1")
@@ -107,12 +107,12 @@ func TestQueueGlobalConcurrencyAtomicAcrossConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer firstQueue.Close()
+	defer func() { _ = firstQueue.Close() }()
 	secondQueue, err := Open(path, Options{MaxConcurrent: 1, PerTarget: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer secondQueue.Close()
+	defer func() { _ = secondQueue.Close() }()
 	_, _ = firstQueue.Enqueue(testJob(t.TempDir(), "run-a"))
 	_, _ = firstQueue.Enqueue(testJob(t.TempDir(), "run-b"))
 	start := make(chan struct{})
@@ -188,7 +188,7 @@ func TestPollerPropagatesDistributedCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	jobID, _ := queue.Enqueue(testJob(target, "run-distributed-cancel"))
 	engine, _ := NewQueueEngine(queue, target)
 	executor := &cancelAwareExecutor{started: make(chan struct{})}
@@ -232,7 +232,7 @@ func TestQueueEngineAndPoller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	engine, err := NewQueueEngine(queue, target)
 	if err != nil {
 		t.Fatal(err)

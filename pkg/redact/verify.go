@@ -135,7 +135,7 @@ func buildReport(found []FileResult, scanned int, total int64) *Report {
 	violations := make([]Violation, 0, len(found))
 	totalFindings := 0
 	for _, f := range found {
-		violations = append(violations, Violation{Path: f.Path, Findings: f.Findings})
+		violations = append(violations, Violation(f))
 		totalFindings += len(f.Findings)
 	}
 	verdict := "clean"

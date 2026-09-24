@@ -178,7 +178,7 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace lock: %w", err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }() // снятие файловой блокировки: значимый результат уже посчитан.
 
 	// AUD-05: retry обязан исполнять доставку в тот же candidate, который был
 	// attestated в terminal finalize; проверив digest workspace — fail-closed

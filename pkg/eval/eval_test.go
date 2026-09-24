@@ -169,7 +169,7 @@ func TestExtractScore(t *testing.T) {
 
 func TestEvalRun_FileNotFound(t *testing.T) {
 	e := New("test", "/nonexistent/path.md", nil)
-	_, err := e.Run(nil)
+	_, err := e.Run(context.Background())
 	if err == nil {
 		t.Error("expected error for nonexistent file")
 	}
@@ -184,14 +184,18 @@ func TestEvalRun_FileNotFound(t *testing.T) {
 func TestEvalRun_OpenCodeNotFound(t *testing.T) {
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "artifact.md")
-	os.WriteFile(artifactPath, []byte("test content"), 0644)
+	if err := os.WriteFile(artifactPath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", dir)
-	defer os.Setenv("PATH", oldPath)
+	if err := os.Setenv("PATH", dir); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer func() { _ = os.Setenv("PATH", oldPath) }()
 
 	e := New("test", artifactPath, nil)
-	_, err := e.Run(nil)
+	_, err := e.Run(context.Background())
 	if err == nil {
 		t.Error("expected error when opencode not on PATH")
 	}

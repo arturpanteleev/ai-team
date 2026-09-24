@@ -188,7 +188,8 @@ func wireEvent(event store.Event) (Event, error) {
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close()
+		// закрытие websocket при завершении readPump: обработать ошибку негде.
+		_ = c.conn.Close()
 	}()
 
 	c.conn.SetReadLimit(1 << 20)
@@ -205,7 +206,7 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
-	defer c.conn.Close()
+	defer func() { _ = c.conn.Close() }() // закрытие websocket при завершении обработчика: обработать ошибку негде.
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 	for {

@@ -1,0 +1,43 @@
+# Статический анализ Go: узкий блокирующий набор.
+#
+# Включены ровно три анализатора — staticcheck, errcheck, ineffassign — и всё
+# остальное выключено явно через `default: none`. Стилевые линтеры не
+# подключаются намеренно: гейт ловит дефекты (проглоченные ошибки, мёртвые
+# присваивания, баги, которые находит staticcheck), а за оформление отвечает
+# gofmt. Baseline с замороженным долгом нет: гейт блокирующий с первого дня.
+#
+# Версия линтера пинится в Makefile (GOLANGCI_LINT_VERSION), а CI-job `lint`
+# вызывает ту же make-цель — локальный и CI-гейт не могут разъехаться.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - ineffassign
+    - staticcheck
+
+  settings:
+    staticcheck:
+      # В golangci-lint v2 в `staticcheck` влиты бывшие gosimple (S*) и
+      # stylecheck (ST*). Стилевые ST* и «quickfix» QF* выключены — остаётся
+      # только поиск дефектов: SA* (bugs) и S* (упрощения без смены поведения).
+      checks:
+        - all
+        - -ST*
+        - -QF*
+
+  exclusions:
+    generated: lax
+    # Пресетов исключений нет намеренно: пресет std-error-handling глушит
+    # errcheck на Close/fmt.Fprint*/os.Remove — ровно на том классе, ради
+    # которого линтер и включён. Законные игнорирования отмечены в коде
+    # явным `_ =` с комментарием, а не молчаливым исключением в конфиге.
+    presets: []
+
+formatters:
+  enable: []
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

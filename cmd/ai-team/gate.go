@@ -129,7 +129,7 @@ func publishGateBundle(outDir string, result *gate.Result, policy redact.Policy,
 	if err != nil {
 		return fmt.Errorf("staging каталог: %w", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // очистка временного каталога: результат гейта от неё не зависит.
 	if err := gate.WriteBundle(tmp, result); err != nil {
 		return err
 	}

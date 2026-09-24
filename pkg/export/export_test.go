@@ -52,7 +52,7 @@ func buildTerminalRun(t *testing.T, runsRoot string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(artifactRoot)
+	defer func() { _ = os.RemoveAll(artifactRoot) }()
 	attemptID := store.NewAttemptID("coder", 1)
 	err = store.PublishAttempt(evidence.AttemptManifest{
 		AttemptID: attemptID, Stage: "coder", StageIndex: 0,

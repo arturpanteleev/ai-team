@@ -110,7 +110,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		if err != nil {
 			return fmt.Errorf("агент %s: открыть промпт для stdin: %w", agent.Name, err)
 		}
-		defer stdin.Close()
+		defer func() { _ = stdin.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 		cmd.Stdin = stdin
 	}
 
@@ -236,8 +236,10 @@ func (r *AgentCLIRuntime) outputs(task *Task, agentName, attemptID string, conso
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("не удалось открыть лог %s: %w", logPath, err)
 	}
-	fmt.Fprintf(f, "\n===== %s | агент %s =====\n", time.Now().Format(time.RFC3339), agentName)
-	return io.MultiWriter(console, f), io.MultiWriter(os.Stderr, f), func() { f.Close() }, nil
+	// лог-файл агента: если заголовок не записался, прогон всё равно продолжается — сорвать его из-за строки в логе нельзя.
+	_, _ = fmt.Fprintf(f, "\n===== %s | агент %s =====\n", time.Now().Format(time.RFC3339), agentName)
+	// закрытие лог-файла в cleanup: сигнатуры для возврата ошибки нет, а os.File пишется без буфера.
+	return io.MultiWriter(console, f), io.MultiWriter(os.Stderr, f), func() { _ = f.Close() }, nil
 }
 
 func (r *AgentCLIRuntime) buildPrompt(agent *Agent, task *Task, inputs []Artifact) (string, error) {

@@ -145,7 +145,7 @@ func cmdRedact() {
 		}
 		report := redact.Report{Files: scanned, Bytes: total, Verdict: "clean"}
 		for _, f := range found {
-			report.Violations = append(report.Violations, redact.Violation{Path: f.Path, Findings: f.Findings})
+			report.Violations = append(report.Violations, redact.Violation(f))
 		}
 		if len(report.Violations) > 0 {
 			for _, v := range report.Violations {

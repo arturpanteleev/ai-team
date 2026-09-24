@@ -743,7 +743,8 @@ func hashArtifact(value string) (artifactType string, size int64, digest string,
 		if fileErr != nil {
 			return fileErr
 		}
-		fmt.Fprintf(h, "%s\x00%d\x00%s\x00", filepath.ToSlash(rel), entryInfo.Size(), fileDigest)
+		// запись в hash.Hash: по контракту hash.Hash.Write никогда не возвращает ошибку.
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%s\x00", filepath.ToSlash(rel), entryInfo.Size(), fileDigest)
 		size += entryInfo.Size()
 		return nil
 	})
@@ -758,7 +759,7 @@ func hashFile(path string) (os.FileInfo, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	info, err := f.Stat()
 	if err != nil {
 		return nil, "", err
@@ -815,7 +816,7 @@ func copyRegularFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 	info, err := sourceFile.Stat()
 	if err != nil {
 		return err

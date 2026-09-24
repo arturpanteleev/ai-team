@@ -468,17 +468,18 @@ func (s *Store) write(path string, value PendingApproval) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	if err := temporary.Chmod(0644); err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
@@ -491,6 +492,6 @@ func (s *Store) write(path string, value PendingApproval) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }() // каталог открыт исключительно ради Sync — его ошибку и возвращаем ниже.
 	return dir.Sync()
 }

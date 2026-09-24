@@ -98,7 +98,7 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("eval: isolated working directory: %w", err)
 	}
-	defer os.RemoveAll(isolatedDir)
+	defer func() { _ = os.RemoveAll(isolatedDir) }() // очистка изолированного каталога после прогона: на результат не влияет.
 	startedAt := time.Now().UTC()
 	out := cappedBuffer{limit: 1 << 20}
 	promptFile, err := os.CreateTemp("", "ai-team-eval-prompt-*.md")
@@ -106,7 +106,7 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 	promptPath := promptFile.Name()
-	defer os.Remove(promptPath)
+	defer func() { _ = os.Remove(promptPath) }() // очистка временного промпта: на результат не влияет.
 	if err := promptFile.Chmod(0600); err != nil {
 		_ = promptFile.Close()
 		return nil, err
@@ -137,7 +137,7 @@ func (e *Eval) Run(ctx context.Context) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer stdin.Close()
+		defer func() { _ = stdin.Close() }() // файл открыт на чтение: ошибка Close не меняет уже прочитанные данные.
 		cmd.Stdin = stdin
 	}
 	environment, cleanupEnvironment, envErr := adapter.Environment(
@@ -336,13 +336,14 @@ func WriteQualityResult(path string, result *QualityResult) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }() // temp-файл удаляется, только если rename не состоялся; ENOENT после успеха — норма.
 	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		temporary.Close()
+		// аварийный путь: значимая ошибка уже возвращается, Close только освобождает дескриптор.
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

@@ -62,7 +62,7 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }() // снятие файловой блокировки: значимый результат уже посчитан.
 	stateStore, err := lifecycle.NewStore(config.TargetDir)
 	if err != nil {
 		return RunResult{}, err

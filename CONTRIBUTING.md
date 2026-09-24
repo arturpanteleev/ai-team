@@ -151,18 +151,27 @@ make test-coverage   # coverage gate: total 60% + per-package floors
                      # (scripts/coverage-floors.env)
 make test-e2e        # e2etest/ — mock-opencode + subprocess-level сценарии
 make specs           # строгая OpenSpec-валидация
-make verify          # gofmt + specs + go mod verify + go vet + govulncheck +
-                     # race tests + test-coverage + test-e2e +
+make lint            # golangci-lint: staticcheck + errcheck + ineffassign
+make verify          # gofmt + specs + go mod verify + go vet + make lint +
+                     # govulncheck + race tests + test-coverage + test-e2e +
                      # frontend audit/lint/tests/build
 make clean           # очистка build-артефактов
 ```
 
+`make lint` гоняет golangci-lint с ровно тремя анализаторами — staticcheck,
+errcheck и ineffassign (набор и исключения зафиксированы в `.golangci.yaml`,
+версия линтера — в `GOLANGCI_LINT_VERSION` в Makefile). Гейт блокирующий:
+baseline с замороженным долгом нет. Если errcheck указывает на место, где
+игнорировать ошибку действительно правильно, пишите явное `_ = ...` с
+комментарием, почему ошибка не важна, а не `//nolint`.
+
 `make verify` — это полная проверка, как её гоняет CI: она **включает**
 gofmt-проверку (через `gofmt -l .`), строгую OpenSpec-валидацию,
-`go mod verify`, `go vet`, `govulncheck`, race-тесты, coverage gate — total
-60% плюс per-package floors из `scripts/coverage-floors.env`
-(`make test-coverage`), E2E (`make test-e2e`) и frontend audit/lint/tests/build
-с проверкой, что встроенный `web/dist` соответствует исходникам фронта. Перед PR
+`go mod verify`, `go vet`, статический анализ `make lint`, `govulncheck`,
+race-тесты, coverage gate — total 60% плюс per-package floors из
+`scripts/coverage-floors.env` (`make test-coverage`), E2E (`make test-e2e`) и
+frontend audit/lint/tests/build с проверкой, что встроенный `web/dist`
+соответствует исходникам фронта. Перед PR
 достаточно прогнать локально `make verify`; если какая-то проверка не пройдена,
 именно она указывает, что доработать (команды покрыты отдельными шагами в
 [Make-таргеты](#make-таргеты)).

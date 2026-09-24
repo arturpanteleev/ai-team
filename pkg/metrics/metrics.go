@@ -106,10 +106,11 @@ func (e UsageEnvelope) TotalAttempts() int {
 // Format печатает envelope как читаемую таблицу (этап, попытки, время).
 func (e UsageEnvelope) Format(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "Этап\tПопытки\tВремя\n")
+	// вывод в консоль: сообщать об ошибке записи некуда — это и есть канал сообщений.
+	_, _ = fmt.Fprintf(tw, "Этап\tПопытки\tВремя\n")
 	for _, stage := range e.Stages {
-		fmt.Fprintf(tw, "%s\t%d\t%dms\n", stage.Stage, stage.Attempts, stage.DurationMS)
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%dms\n", stage.Stage, stage.Attempts, stage.DurationMS)
 	}
-	fmt.Fprintf(tw, "ИТОГО\t%d\t%dms\n", e.TotalAttempts(), e.TotalDurationMS)
+	_, _ = fmt.Fprintf(tw, "ИТОГО\t%d\t%dms\n", e.TotalAttempts(), e.TotalDurationMS)
 	return tw.Flush()
 }

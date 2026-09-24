@@ -16,7 +16,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -62,7 +62,7 @@ func TestNewRejectsNewerSchemaVersion(t *testing.T) {
 
 	store, err := New(databasePath)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 	}
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("expected future schema rejection, got %v", err)
@@ -169,8 +169,12 @@ func TestGetPipelineRuns_Empty(t *testing.T) {
 func TestGetPipelineRuns_Ordered(t *testing.T) {
 	s := newTestStore(t)
 
-	s.CreatePipelineRun(&PipelineRun{Feature: "first", Status: "completed", StartedAt: time.Now().Add(-time.Hour)})
-	s.CreatePipelineRun(&PipelineRun{Feature: "second", Status: "running", StartedAt: time.Now()})
+	if err := s.CreatePipelineRun(&PipelineRun{Feature: "first", Status: "completed", StartedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := s.CreatePipelineRun(&PipelineRun{Feature: "second", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	runs, err := s.GetPipelineRuns()
 	if err != nil {
@@ -191,7 +195,9 @@ func TestGetPipelineRunByID(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "my-feature", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	got, err := s.GetPipelineRunByID(run.ID)
 	if err != nil {
@@ -218,7 +224,9 @@ func TestUpdatePipelineRun(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "update-test", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	now := time.Now()
 	run.Status = "completed"
@@ -240,7 +248,9 @@ func TestCreateStage(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "stage-test", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	stage := &Stage{
 		PipelineRunID: run.ID,
@@ -260,10 +270,16 @@ func TestGetStagesByPipelineRunID(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "stages-test", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
-	s.CreateStage(&Stage{PipelineRunID: run.ID, AgentName: "analyst", Status: "passed", StartedAt: time.Now(), Error: "", InputsJSON: "", OutputsJSON: ""})
-	s.CreateStage(&Stage{PipelineRunID: run.ID, AgentName: "architect", Status: "running", StartedAt: time.Now(), Error: "", InputsJSON: "", OutputsJSON: ""})
+	if err := s.CreateStage(&Stage{PipelineRunID: run.ID, AgentName: "analyst", Status: "passed", StartedAt: time.Now(), Error: "", InputsJSON: "", OutputsJSON: ""}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := s.CreateStage(&Stage{PipelineRunID: run.ID, AgentName: "architect", Status: "running", StartedAt: time.Now(), Error: "", InputsJSON: "", OutputsJSON: ""}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	stages, err := s.GetStagesByPipelineRunID(run.ID)
 	if err != nil {
@@ -281,10 +297,14 @@ func TestUpdateStage(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "update-stage", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	stage := &Stage{PipelineRunID: run.ID, AgentName: "coder", Status: "running", StartedAt: time.Now()}
-	s.CreateStage(stage)
+	if err := s.CreateStage(stage); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	now := time.Now()
 	stage.Status = "passed"
@@ -311,7 +331,9 @@ func TestCreateStage_WithJSONFields(t *testing.T) {
 	s := newTestStore(t)
 
 	run := &PipelineRun{Feature: "json-test", Status: "running", StartedAt: time.Now()}
-	s.CreatePipelineRun(run)
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	stage := &Stage{
 		PipelineRunID: run.ID,

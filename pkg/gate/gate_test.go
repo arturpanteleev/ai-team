@@ -442,17 +442,23 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
 			path := filepath.Join(bundleDir, "checks", "001-go-test.json")
 			check, _ := os.ReadFile(path)
 			_ = os.Chmod(path, 0644)
-			os.WriteFile(path, append(check, []byte("\ntampered")...), 0644)
+			if err := os.WriteFile(path, append(check, []byte("\ntampered")...), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 		"extra file": func(bundleDir string) {
-			os.WriteFile(filepath.Join(bundleDir, "sneaky.json"), []byte("{}"), 0644)
+			if err := os.WriteFile(filepath.Join(bundleDir, "sneaky.json"), []byte("{}"), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 		"foreign type": func(bundleDir string) {
 			path := filepath.Join(bundleDir, "index.json")
 			indexData, _ := os.ReadFile(path)
 			// index.json пишется read-only — подделка возможна только после chmod.
 			_ = os.Chmod(path, 0644)
-			os.WriteFile(path, bytes.Replace(indexData, []byte(BundleType), []byte("other-bundle"), 1), 0644)
+			if err := os.WriteFile(path, bytes.Replace(indexData, []byte(BundleType), []byte("other-bundle"), 1), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 		"wrong declared digest": func(bundleDir string) {
 			path := filepath.Join(bundleDir, "gate.json")
@@ -465,16 +471,22 @@ func TestVerifyBundleRoundtripAndTampering(t *testing.T) {
   "bundle_sha256": "` + fake + `"
 }`
 			}
-			os.WriteFile(path, []byte(body), 0644)
+			if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 		"missing record": func(bundleDir string) {
-			os.Remove(filepath.Join(bundleDir, "checks", "001-go-test.json"))
+			if err := os.Remove(filepath.Join(bundleDir, "checks", "001-go-test.json")); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 		"index identity diverges from gate.json": func(bundleDir string) {
 			path := filepath.Join(bundleDir, "index.json")
 			indexData, _ := os.ReadFile(path)
 			_ = os.Chmod(path, 0644)
-			os.WriteFile(path, bytes.Replace(indexData, []byte("aabb"), []byte("0000"), 1), 0644)
+			if err := os.WriteFile(path, bytes.Replace(indexData, []byte("aabb"), []byte("0000"), 1), 0644); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
 		},
 	}
 	for name, mutate := range tamperCases {
@@ -761,8 +773,12 @@ func TestWriteBundleRejectsExistingAndSymlinks(t *testing.T) {
 	// Листовой symlink gate.json: write должен FAIL, sentinel не меняется.
 	leaf := t.TempDir()
 	sentinel := filepath.Join(leaf, "sentinel.json")
-	os.WriteFile(sentinel, []byte("keep"), 0644)
-	os.Symlink(sentinel, filepath.Join(leaf, "gate.json"))
+	if err := os.WriteFile(sentinel, []byte("keep"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Symlink(sentinel, filepath.Join(leaf, "gate.json")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if err := WriteBundle(leaf, base()); err == nil {
 		t.Fatal("gate.json-symlink: WriteBundle должен FAIL")
 	}
@@ -772,10 +788,16 @@ func TestWriteBundleRejectsExistingAndSymlinks(t *testing.T) {
 
 	// Symlink-каталог checks: write должен FAIL без записи вне bundle.
 	parent := t.TempDir()
-	os.Mkdir(filepath.Join(parent, "checks"), 0755)
+	if err := os.Mkdir(filepath.Join(parent, "checks"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	victim := t.TempDir()
-	os.Remove(filepath.Join(parent, "checks"))
-	os.Symlink(victim, filepath.Join(parent, "checks"))
+	if err := os.Remove(filepath.Join(parent, "checks")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Symlink(victim, filepath.Join(parent, "checks")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	if err := WriteBundle(parent, base()); err == nil {
 		t.Fatal("checks-symlink: WriteBundle должен FAIL")
 	}

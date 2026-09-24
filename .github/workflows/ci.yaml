@@ -51,6 +51,13 @@ jobs:
           check-latest: true
       - name: Vet
         run: go vet ./...
+      # Параллель `make lint` (см. Makefile): блокирующий статический анализ
+      # staticcheck + errcheck + ineffassign. Job вызывает именно make-цель,
+      # чтобы набор анализаторов (.golangci.yaml) и пин версии линтера
+      # (GOLANGCI_LINT_VERSION в Makefile) были общими для локального запуска
+      # и CI и не могли разъехаться.
+      - name: Static analysis (golangci-lint)
+        run: make lint
       - name: Gofmt
         run: |
           UNFORMATTED=$(gofmt -l .)

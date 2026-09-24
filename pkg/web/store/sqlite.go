@@ -167,7 +167,7 @@ func (s *Store) InvalidateAttempts(pipelineRunID int64, attemptIDs []string, at 
 	if err != nil {
 		return err
 	}
-	defer transaction.Rollback()
+	defer func() { _ = transaction.Rollback() }() // Rollback после успешного Commit возвращает ErrTxDone — штатный исход этого defer.
 	for _, attemptID := range attemptIDs {
 		result, updateErr := transaction.Exec(`UPDATE stages SET status = 'invalidated', outcome = 'invalidated', completed_at = COALESCE(completed_at, ?)
 			WHERE pipeline_run_id = ? AND attempt_uid = ?`, at, pipelineRunID, attemptID)
@@ -200,7 +200,7 @@ func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // курсор освобождается на выходе; значимые ошибки чтения уже обработаны выше.
 	events := make([]Event, 0)
 	for rows.Next() {
 		var event Event
@@ -229,7 +229,7 @@ func (s *Store) GetPipelineRunsPage(limit, offset int) ([]PipelineRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // курсор освобождается на выходе; значимые ошибки чтения уже обработаны выше.
 	var runs []PipelineRun
 	for rows.Next() {
 		var run PipelineRun
@@ -275,7 +275,7 @@ func (s *Store) GetStagesByPipelineRunID(pipelineRunID int64) ([]Stage, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // курсор освобождается на выходе; значимые ошибки чтения уже обработаны выше.
 	var stages []Stage
 	for rows.Next() {
 		var stage Stage
@@ -298,7 +298,7 @@ func (s *Store) ReconcileInterrupted(at time.Time) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // Rollback после успешного Commit возвращает ErrTxDone — штатный исход этого defer.
 	if _, err := tx.Exec(`UPDATE stages SET status = 'interrupted', outcome = 'failed', completed_at = ? WHERE status = 'running'`, at); err != nil {
 		return err
 	}
@@ -313,7 +313,7 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // Rollback после успешного Commit возвращает ErrTxDone — штатный исход этого defer.
 	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
 		return err
 	}
@@ -382,7 +382,7 @@ func ensureColumn(tx *sql.Tx, table, name, declaration string) error {
 		var notNull, primaryKey int
 		var defaultValue any
 		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		exists = exists || columnName == name

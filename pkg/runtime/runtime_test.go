@@ -73,7 +73,9 @@ func TestReplaceVars(t *testing.T) {
 func TestBuildPrompt(t *testing.T) {
 	dir := t.TempDir()
 	inputFile := filepath.Join(dir, "input.md")
-	os.WriteFile(inputFile, []byte("hello world"), 0644)
+	if err := os.WriteFile(inputFile, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 
 	r := &AgentCLIRuntime{}
 	agent := &Agent{

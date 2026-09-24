@@ -28,6 +28,10 @@ type Usage struct {
 	TokensInput  int64   `json:"tokens_input,omitempty"`
 	TokensOutput int64   `json:"tokens_output,omitempty"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`
+	// Gaps — число этапов, чей расход не попал в сумму: адаптер аттестует
+	// usage, но запись в выводе не разобрана (QS-20). Ненулевое значение
+	// означает, что суммы ниже — нижняя оценка, а не полный расход.
+	Gaps int `json:"-"`
 }
 
 // UsageEnvelope — attempt-independent usage-сводка одного run.
@@ -44,6 +48,9 @@ type UsageEnvelope struct {
 	TokensUnknown bool `json:"tokens_unknown"`
 	// UsageReported — true, когда хотя бы один адаптер аттестовал usage.
 	UsageReported bool `json:"usage_reported,omitempty"`
+	// UsageGaps — число этапов, чей расход не учтён (адаптер аттестует usage,
+	// но запись не разобрана). >0 означает: суммы ниже — нижняя оценка.
+	UsageGaps int `json:"usage_gaps,omitempty"`
 	// TokensInput/TokensOutput/CostUSD — суммарные attested usage одного run.
 	TokensInput  int64   `json:"tokens_input,omitempty"`
 	TokensOutput int64   `json:"tokens_output,omitempty"`
@@ -86,6 +93,7 @@ func Build(runID, feature string, startedAt, finishedAt time.Time, results []wor
 		LoopbackCycles:  loopbackCycles,
 		TokensUnknown:   !usage.Attested,
 		UsageReported:   usage.Attested,
+		UsageGaps:       usage.Gaps,
 		TokensInput:     usage.TokensInput,
 		TokensOutput:    usage.TokensOutput,
 		CostUSD:         usage.CostUSD,

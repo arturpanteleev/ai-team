@@ -133,6 +133,7 @@ func (a *CodexAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
 	var parseErr error
+	var invalidLines int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -149,6 +150,7 @@ func (a *CodexAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 		}
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			parseErr = err
+			invalidLines++
 			continue
 		}
 		if event.Type == "turn.completed" && event.Usage != nil {
@@ -160,16 +162,20 @@ func (a *CodexAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 			}
 		}
 	}
-	if parseErr != nil {
-		return nil, fmt.Errorf("codex: невалидная JSONL-строка: %w", parseErr)
-	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if usage == nil {
-		return nil, fmt.Errorf("codex: событие turn.completed с usage не найдено в выводе")
+	// Найденная usage-запись важнее мусора рядом: харнесс волен печатать в
+	// stdout не-JSONL строки (баннеры, предупреждения), и отбрасывать из-за
+	// них уже прочитанный turn.completed значило бы терять учёт расхода.
+	// Если же записи нет — мусор попадает в текст ошибки, а не пропадает.
+	if usage != nil {
+		return usage, nil
 	}
-	return usage, nil
+	if parseErr != nil {
+		return nil, fmt.Errorf("codex: событие turn.completed с usage не найдено в выводе (невалидных JSONL-строк: %d, последняя ошибка: %v)", invalidLines, parseErr)
+	}
+	return nil, fmt.Errorf("codex: событие turn.completed с usage не найдено в выводе")
 }
 
 // ClassifyError — таксономия ошибок codex-запуска на основе захваченного

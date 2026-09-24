@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
@@ -86,6 +88,63 @@ func TestRun_AttestedUsagePersisted(t *testing.T) {
 	}
 	if envelope.TokensInput != 121 || envelope.TokensOutput != 27 || envelope.CostUSD != 1.35 {
 		t.Fatalf("usage-значения: %+v", envelope)
+	}
+}
+
+// TestRun_UnparsedUsageIsVisible (QS-20): если адаптер аттестует usage, но
+// запись не разобрана, пропуск обязан быть виден — счётчиком в usage.json и
+// событием в append-only логе, а не нулём в сумме расхода.
+func TestRun_UnparsedUsageIsVisible(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"reviewer": {Attested: true, TokensInput: 10, TokensOutput: 5, CostUSD: 0.1},
+	}
+	rt.usageErrPer = map[string]error{
+		"analyst": errors.New("codex: событие turn.completed с usage не найдено в выводе"),
+	}
+
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"})
+	err, _ := runPipeline(t, dir, cfg, rt, &scriptedPrompter{})
+	if err != nil {
+		t.Fatalf("пропуск в учёте расхода не должен валить run: %v", err)
+	}
+
+	runDir := onlyRunDir(t, dir)
+	raw, readErr := os.ReadFile(filepath.Join(runDir, "usage.json"))
+	if readErr != nil {
+		t.Fatalf("usage.json: %v", readErr)
+	}
+	var envelope metrics.UsageEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("usage.json не парсится: %v", err)
+	}
+	if envelope.UsageGaps != 1 {
+		t.Fatalf("неучтённый этап обязан попасть в usage.json: %+v", envelope)
+	}
+	if envelope.TokensInput != 10 {
+		t.Fatalf("учтённый этап должен остаться в сумме: %+v", envelope)
+	}
+
+	events, evErr := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), filepath.Base(runDir))
+	if evErr != nil {
+		t.Fatalf("event log: %v", evErr)
+	}
+	var found *evidence.Event
+	for i := range events {
+		if events[i].Type == "usage_unreported" {
+			found = &events[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("ожидалось событие usage_unreported в append-only логе")
+	}
+	if found.Stage != "analyst" {
+		t.Fatalf("событие должно называть этап: %+v", found)
+	}
+	if reason, _ := found.Data["reason"].(string); !strings.Contains(reason, "turn.completed") {
+		t.Fatalf("событие должно нести причину: %+v", found.Data)
 	}
 }
 

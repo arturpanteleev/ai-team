@@ -177,6 +177,10 @@ type scriptedRuntime struct {
 	targetDir string
 	usage     *runtime.Usage
 	usagePer  map[string]*runtime.Usage
+	// usageErrPer — причина, по которой attested usage этапа не получен
+	// (runtime.UsageDiagnostics).
+	usageErrPer map[string]error
+	usageErr    error
 }
 
 func newScripted() *scriptedRuntime {
@@ -196,12 +200,18 @@ func (r *scriptedRuntime) factory(string) (runtime.Runtime, error) { return r, n
 // Usage — UsageReporter для тестов (P1-7): имитирует attested usage.
 func (r *scriptedRuntime) Usage() *runtime.Usage { return r.usage }
 
+// UsageError — UsageDiagnostics для тестов (QS-20): причина пропуска в учёте.
+func (r *scriptedRuntime) UsageError() error { return r.usageErr }
+
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
 	r.calls[a.Name]++
 	r.targetDir = task.TargetDir
 	if r.usagePer != nil {
 		r.usage = r.usagePer[a.Name]
+	}
+	if r.usageErrPer != nil {
+		r.usageErr = r.usageErrPer[a.Name]
 	}
 	if r.onExec != nil {
 		r.onExec(a.Name, inputs)

@@ -1257,6 +1257,11 @@ func cmdUsage() {
 	if !envelope.TokensUnknown {
 		tokens = "known"
 	}
+	// Пропуск в учёте (QS-20) обязан быть виден рядом с суммой: иначе
+	// «known» читается как полный расход, хотя часть этапов в него не вошла.
+	if envelope.UsageGaps > 0 {
+		tokens += fmt.Sprintf(" (не учтено этапов: %d — суммы ниже неполны)", envelope.UsageGaps)
+	}
 	logging.Printf("Токены:   %s\n\n", tokens)
 	// Containment receipt (V0-P1-4) — если присутствует.
 	if cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20); cerr == nil {

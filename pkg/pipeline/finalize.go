@@ -128,8 +128,10 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 // writeUsageEnvelope публикует attempt-independent usage-сводку run в
 // {RunDir}/usage.json — рядом с run.json, вне attempts/.
 func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) error {
+	usage := usageToMetrics(rs.usageTotal)
+	usage.Gaps = rs.usageGaps
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
-		rs.results, rs.loopbackCycles, status, usageToMetrics(rs.usageTotal))
+		rs.results, rs.loopbackCycles, status, usage)
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
 }
 

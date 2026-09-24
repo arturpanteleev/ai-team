@@ -299,6 +299,20 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			rs.usageTotal.TokensInput += u.TokensInput
 			rs.usageTotal.TokensOutput += u.TokensOutput
 			rs.usageTotal.CostUSD += u.CostUSD
+		} else if diagnostics, ok := stageRuntime.(runtime.UsageDiagnostics); ok {
+			// QS-20: адаптер аттестует usage, но записи в выводе не нашлось.
+			// Пропуск в учёте расхода — событие, а не ноль по умолчанию.
+			if usageErr := diagnostics.UsageError(); usageErr != nil {
+				rs.usageGaps++
+				logging.Printf("⚠ %s: расход этапа не учтён: %v\n", name, usageErr)
+				if err := rs.evidence.Append(evidence.Event{
+					Type: "usage_unreported", Stage: name, AttemptID: attemptID,
+					Timestamp: time.Now().UTC(),
+					Data:      map[string]any{"reason": usageErr.Error()},
+				}); err != nil {
+					return fail(err)
+				}
+			}
 		}
 	}
 

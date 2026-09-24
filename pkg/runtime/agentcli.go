@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,7 +26,8 @@ const DefaultCLI = "opencode"
 // реестра адаптеров по имени бинарника (CLI). Никакой opencode-специфики в
 // этом типе нет — только контракт RuntimeAdapter.
 type AgentCLIRuntime struct {
-	lastUsage *Usage
+	lastUsage    *Usage
+	lastUsageErr error
 }
 
 // Usage возвращает attested usage последнего успешного Execute (nil, если
@@ -35,7 +37,19 @@ func (r *AgentCLIRuntime) Usage() *Usage {
 	return r.lastUsage
 }
 
+// UsageError возвращает причину, по которой аттестующий адаптер не отдал
+// usage последнего Execute (nil — usage разобран либо адаптер usage не
+// аттестует вовсе). Удовлетворяет UsageDiagnostics: пропуск в учёте расхода
+// обязан быть виден, а не выглядеть как «этап ничего не стоил».
+func (r *AgentCLIRuntime) UsageError() error {
+	return r.lastUsageErr
+}
+
 func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error {
+	// Результаты предыдущего Execute не должны пережить новый запуск: иначе
+	// сорвавшийся этап отчитался бы расходом соседнего.
+	r.lastUsage, r.lastUsageErr = nil, nil
+
 	cli := agent.CLI
 	if cli == "" {
 		cli = DefaultCLI
@@ -92,11 +106,17 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	}
 	defer closeLog()
 
-	// Кап-буферы для классификации ошибок (если адаптер это умеет): всегда
-	// teем вывод в границы, не читая произвольный объём harness-вывода.
-	var capturedStdout, capturedStderr strings.Builder
-	stdout = io.MultiWriter(stdout, &boundedBuilder{Builder: &capturedStdout, limit: 2 << 20})
-	stderr = io.MultiWriter(stderr, &boundedBuilder{Builder: &capturedStderr, limit: 2 << 20})
+	// diagnostics — канал контроллера к человеку (консоль + лог агента) ДО
+	// кап-буферов: служебные предупреждения не должны попадать в буфер,
+	// который читает машинный разбор.
+	diagnostics := stderr
+
+	// Кап-буферы для разбора usage и классификации ошибок: держим вывод в
+	// границах памяти, не читая произвольный объём harness-вывода. Полный
+	// вывод при этом не теряется — он уже ушёл в консоль и лог агента.
+	var capturedStdout, capturedStderr captureBuffer
+	stdout = io.MultiWriter(stdout, &capturedStdout)
+	stderr = io.MultiWriter(stderr, &capturedStderr)
 
 	cmd := exec.Command(cli, args...)
 	cmd.Dir = targetDir
@@ -129,9 +149,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 			return fmt.Errorf("агент %s: %w", agent.Name, ctx.Err())
 		}
 		if classifier, ok := adapter.(interface{ ClassifyError(output string) error }); ok {
-			output := capturedStdout.String()
+			output := capturedStdout.Text()
 			if capturedStderr.Len() > 0 {
-				output += "\n" + capturedStderr.String()
+				output += "\n" + capturedStderr.Text()
 			}
 			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
 		}
@@ -139,14 +159,28 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	}
 
 	// P1-7: usage принимается ТОЛЬКО от адаптера с attested usage-reported
-	// (UsageSource); при ошибке разбора молча пропускаем (usage остаётся
-	// unknown), не проваливая успешный run.
+	// (UsageSource). Неудача разбора не проваливает успешный run, но и не
+	// молчит (QS-20): причина уходит в лог агента и наружу через UsageError —
+	// иначе самый дорогой прогон выглядел бы бесплатным.
 	if source, ok := adapter.(UsageSource); ok {
-		output := capturedStdout.String()
-		if u, err := source.ParseUsage(strings.NewReader(output)); err == nil && u != nil && u.Attested {
-			r.lastUsage = u
-		} else {
-			r.lastUsage = nil
+		usage, parseErr := source.ParseUsage(strings.NewReader(capturedStdout.Text()))
+		switch {
+		case parseErr != nil:
+			r.lastUsageErr = parseErr
+		case usage == nil:
+			r.lastUsageErr = fmt.Errorf("%s: адаптер не вернул usage", filepath.Base(cli))
+		case !usage.Attested:
+			r.lastUsageErr = fmt.Errorf("%s: usage не аттестован источником", filepath.Base(cli))
+		default:
+			r.lastUsage = usage
+		}
+		if r.lastUsageErr != nil {
+			if dropped := capturedStdout.Dropped(); dropped > 0 {
+				r.lastUsageErr = fmt.Errorf("%w (из буфера разбора выброшено %d B середины вывода; полный вывод — в логе агента)", r.lastUsageErr, dropped)
+			}
+			// предупреждение в консоль и лог агента: если строка не записалась,
+			// прогон всё равно успешен — причина доступна через UsageError.
+			_, _ = fmt.Fprintf(diagnostics, "ai-team: расход агента %s не учтён: %v\n", agent.Name, r.lastUsageErr)
 		}
 	}
 
@@ -290,22 +324,131 @@ func (r *AgentCLIRuntime) buildPrompt(agent *Agent, task *Task, inputs []Artifac
 	return prompt, nil
 }
 
-// boundedBuilder ограничивает накапливаемый текст, не позволяя переполнять
-// память произвольным объёмом вывода харнесса (используется только для
-// классификации ошибок адаптером).
-type boundedBuilder struct {
-	*strings.Builder
-	limit int
+const (
+	// captureLimitBytes — потолок памяти на один поток вывода харнесса
+	// (stdout/stderr), который контроллер держит для машинного разбора.
+	captureLimitBytes = 2 << 20
+	// captureHeadBytes — доля потолка, отданная началу потока. Голова нужна
+	// классификации ошибок: auth/model/config харнесс печатает на старте,
+	// до какой-либо работы. Остальное отдано хвосту, потому что usage-запись
+	// и JSON-результат приходят последней строкой.
+	captureHeadBytes = 256 << 10
+)
+
+// captureBuffer — кап-буфер вывода харнесса: хранит начало потока и его
+// конец, выбрасывая середину.
+//
+// Почему не только начало (так было до QS-20): и usage-запись codex
+// (turn.completed), и JSON-результат claude приходят ПОСЛЕДНЕЙ строкой.
+// Буфер из одной головы на длинном — то есть самом дорогом — прогоне их не
+// содержал, и расход молча не учитывался. Почему не только хвост: ранние
+// фатальные ошибки харнесса (аутентификация, недоступная модель, битый
+// конфиг) печатаются в самом начале, и на них опирается ClassifyError.
+// Середина — транскрипт работы; для разбора она бесполезна, а для человека
+// сохраняется целиком в консоли и логе агента, которые буфер не ограничивает.
+type captureBuffer struct {
+	head []byte
+	// tail — кольцевой буфер: старые байты вытесняются новыми за O(1) на
+	// байт, без переаллокаций на каждую запись.
+	tail    []byte
+	start   int
+	filled  int
+	dropped int64
 }
 
-func (b *boundedBuilder) Write(value []byte) (int, error) {
-	if remaining := b.limit - b.Len(); remaining > 0 {
-		if len(value) > remaining {
-			value = value[:remaining]
+// Write никогда не возвращает короткую запись: io.MultiWriter трактует n <
+// len(p) как io.ErrShortWrite, и успешный прогон агента, перешагнувший
+// потолок буфера, падал бы с чужой ошибкой (а ClassifyError выдавал бы за
+// неё, например, отказ аутентификации).
+func (c *captureBuffer) Write(value []byte) (int, error) {
+	total := len(value)
+	if room := captureHeadBytes - len(c.head); room > 0 && len(value) > 0 {
+		if room > len(value) {
+			room = len(value)
 		}
-		_, _ = b.Builder.Write(value)
+		c.head = append(c.head, value[:room]...)
+		value = value[room:]
 	}
-	return len(value), nil
+	c.writeTail(value)
+	return total, nil
+}
+
+func (c *captureBuffer) writeTail(value []byte) {
+	capacity := captureLimitBytes - captureHeadBytes
+	if len(value) == 0 {
+		return
+	}
+	if capacity <= 0 {
+		c.dropped += int64(len(value))
+		return
+	}
+	if c.tail == nil {
+		c.tail = make([]byte, capacity)
+	}
+	if len(value) >= capacity {
+		c.dropped += int64(c.filled) + int64(len(value)-capacity)
+		copy(c.tail, value[len(value)-capacity:])
+		c.start, c.filled = 0, capacity
+		return
+	}
+	end := (c.start + c.filled) % capacity
+	written := copy(c.tail[end:], value)
+	if written < len(value) {
+		copy(c.tail, value[written:])
+	}
+	if overflow := c.filled + len(value) - capacity; overflow > 0 {
+		c.dropped += int64(overflow)
+		c.start = (c.start + overflow) % capacity
+		c.filled = capacity
+		return
+	}
+	c.filled += len(value)
+}
+
+// Dropped — сколько байт середины потока выброшено (0 — сохранён весь вывод).
+func (c *captureBuffer) Dropped() int64 { return c.dropped }
+
+// Len — сколько байт сохранено в буфере.
+func (c *captureBuffer) Len() int { return len(c.head) + c.filled }
+
+// Text — сохранённый вывод для разбора. Если середина выброшена, голова и
+// хвост подрезаются по границам строк: иначе склейка половин породила бы
+// «строку-химеру» из двух обрывков, а для codex любая невалидная JSONL-строка
+// делает разбор usage фатальным.
+func (c *captureBuffer) Text() string {
+	head, tail := c.head, c.tailBytes()
+	if c.dropped > 0 {
+		if index := bytes.LastIndexByte(head, '\n'); index >= 0 {
+			head = head[:index+1]
+		} else {
+			head = nil
+		}
+		if index := bytes.IndexByte(tail, '\n'); index >= 0 {
+			tail = tail[index+1:]
+		} else {
+			tail = nil
+		}
+	}
+	switch {
+	case len(head) == 0:
+		return string(tail)
+	case len(tail) == 0:
+		return string(head)
+	}
+	return string(head) + string(tail)
+}
+
+func (c *captureBuffer) tailBytes() []byte {
+	if c.filled == 0 {
+		return nil
+	}
+	capacity := len(c.tail)
+	if c.start+c.filled <= capacity {
+		return c.tail[c.start : c.start+c.filled]
+	}
+	out := make([]byte, 0, c.filled)
+	out = append(out, c.tail[c.start:]...)
+	return append(out, c.tail[:c.filled-(capacity-c.start)]...)
 }
 
 func sortedMapKeys(values map[string]string) []string {

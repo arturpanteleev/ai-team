@@ -178,6 +178,9 @@ type runState struct {
 	deferredDelivery *deferredDelivery
 	budgetConfig     *config.BudgetConfig
 	usageTotal       runtime.Usage
+	// usageGaps — число этапов, где адаптер аттестует usage, но запись не
+	// разобрана: расход этих этапов в сумму не вошёл (QS-20).
+	usageGaps int
 }
 
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR

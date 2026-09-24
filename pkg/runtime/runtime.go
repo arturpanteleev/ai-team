@@ -23,6 +23,14 @@ type UsageReporter interface {
 	Usage() *Usage
 }
 
+// UsageDiagnostics — опциональный интерфейс runtime: причина, по которой
+// аттестующий адаптер не отдал usage. Существует ради видимости пропуска
+// (QS-20): без неё прогон без разобранной usage-записи неотличим от прогона,
+// который ничего не стоил. nil — usage получен либо адаптер его не аттестует.
+type UsageDiagnostics interface {
+	UsageError() error
+}
+
 // Artifact is kept as a compatibility alias; the domain type lives in workflow.
 type Artifact = workflow.Artifact
 

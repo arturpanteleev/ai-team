@@ -21,7 +21,7 @@ MIIEpAIBAAKCAQEA
 ` + openaiKey + `
 ` + slackToken + `
 `)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	if len(findings) == 0 {
 		t.Fatal("секреты не обнаружены")
 	}
@@ -37,19 +37,55 @@ MIIEpAIBAAKCAQEA
 	}
 }
 
+// TestScanIgnoresBenignText — отвергать эти строки обязан фильтр
+// likelySecretValue, а не регистр ключа (#150: раньше кейсы проходили
+// вхолостую, потому что `PASSWORD=` не матчился вовсе). Поэтому все значения
+// здесь длиннее 16 символов — то есть дошли бы до фильтра, будь они похожи
+// на секрет.
 func TestScanIgnoresBenignText(t *testing.T) {
 	input := []byte(`The password manager is configured.
 value=some-value
 count=12
-# PASSWORD=example
-PASSWORD=<from-vault>
-TOKEN=your-token-here
-api_key = "changeme"
+PASSWORD=example-value-0123456789
+PASSWORD=<from-vault-secret-0123>
+TOKEN=your-token-here-0123456789
+API_KEY=${CI_API_KEY_VARIABLE_0}
+api_key = "changeme-0123456789abcdef"
+SIGNING_KEY=placeholder0123456789
 `)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	for _, f := range findings {
 		if f.Reason == "secret assignment" {
 			t.Errorf("ложное срабатывание secret assignment: %+v (line %d)", f, f.Line)
+		}
+	}
+}
+
+// TestScanDetectsUpperCaseAssignment — #150/QS-08: ключ в любом регистре.
+// Каждый кейс обязан краснеть при снятом (?i) у альтернации ключей.
+func TestScanDetectsUpperCaseAssignment(t *testing.T) {
+	const secret = "Aa1bB2cC3dD4eE5fF6gG7"
+	cases := []string{
+		"PASSWORD=" + secret,
+		"Password=" + secret,
+		"API_KEY=" + secret,
+		"Api-Key: " + secret,
+		"SECRET = " + secret,
+		"Token: " + secret,
+		"CLIENT_SECRET=" + secret,
+		"ACCESS_KEY=" + secret,
+		"AUTH_TOKEN=" + secret,
+		"SIGNING_KEY=" + secret,
+		"PASSWD=" + secret,
+		`  "PRIVATE_KEY": "` + secret + `"`,
+	}
+	for _, line := range cases {
+		findings := Scan([]byte(line + "\n")).Findings
+		if !hasFindingReason(findings, "secret assignment") {
+			t.Errorf("секрет не обнаружен в %q: %+v", line, findings)
+		}
+		if redacted := string(RedactFile([]byte(line))); strings.Contains(redacted, secret) {
+			t.Errorf("секрет уцелел в redacted-копии %q: %q", line, redacted)
 		}
 	}
 }
@@ -156,7 +192,7 @@ func TestScanJSONSecretFields(t *testing.T) {
     "owner": "team-core"
   }
 }`)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	if !hasFindingReason(findings, jsonSecretReason) {
 		t.Fatalf("json secret field не обнаружен: %+v", findings)
 	}
@@ -171,7 +207,7 @@ func TestScanJSONSecretFields(t *testing.T) {
 // evidence НЕ являются (тот же likelySecretValue-фильтр, что у assignment).
 func TestScanJSONIgnoresPlaceholders(t *testing.T) {
 	input := []byte(`{"password": "your-password", "token": "changeme", "api_key": "placeholder"}`)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	if hasFindingReason(findings, jsonSecretReason) {
 		t.Fatalf("placeholder-значение посчитано секретом: %+v", findings)
 	}
@@ -190,7 +226,7 @@ func TestScanJSONSecretArrayContext(t *testing.T) {
   },
   "api_key": ["` + secretC + `"]
 }`)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	var jsonSec []string
 	for _, f := range findings {
 		if f.Reason == jsonSecretReason {
@@ -215,7 +251,7 @@ func TestScanJSONSecretArrayContext(t *testing.T) {
 // верхний регистр): hex/base64-подобные токены в секретных полях режутся.
 func TestScanJSONDetectsLowerHexToken(t *testing.T) {
 	input := []byte(`{"api_key": "0123456789abcdef0123456789abcdef"}`)
-	findings := Scan(input)
+	findings := Scan(input).Findings
 	if !hasFindingReason(findings, jsonSecretReason) {
 		t.Fatalf("lower-hex токен в секретном поле не обнаружен: %+v", findings)
 	}
@@ -241,7 +277,7 @@ func TestScanDetectsSecretAcrossFormats(t *testing.T) {
 		{"jsonl", "{\"stage\":1}\n{\"credentials\":{\"password\":\"" + secret + "\"},\"ok\":1}\n", 2},
 	}
 	for _, tc := range cases {
-		findings := Scan([]byte(tc.data))
+		findings := Scan([]byte(tc.data)).Findings
 		if len(findings) == 0 {
 			t.Errorf("%s: секрет не обнаружен: %+v", tc.name, findings)
 			continue
@@ -264,13 +300,151 @@ func TestScanDetectsSecretAcrossFormats(t *testing.T) {
 	}
 }
 
-// AUD-03: не-JSON содержимое не даёт ложного json-finding, а JSON >= лимита
-// не сканируется структурно (plain-сканер остаётся источником evidence).
-func TestScanJSONSkipsNonJSONAndOverLimit(t *testing.T) {
-	if hasFindingReason(Scan([]byte("just text password = placeholder\n")), jsonSecretReason) {
+// AUD-03: не-JSON содержимое не даёт ложного json-finding и не порождает
+// ложного «не просканировано» — plain-сканер остаётся источником evidence.
+func TestScanJSONSkipsNonJSON(t *testing.T) {
+	if hasFindingReason(Scan([]byte("just text password = placeholder\n")).Findings, jsonSecretReason) {
 		t.Fatal("обычный текст не должен давать json finding")
 	}
-	if hasFindingReason(Scan([]byte("import x; x = 1\n")), jsonSecretReason) {
+	if hasFindingReason(Scan([]byte("import x; x = 1\n")).Findings, jsonSecretReason) {
 		t.Fatal("встроенные строки без JSON-структуры не должны давать json finding")
+	}
+}
+
+// nestJSON собирает документ глубины depth: {"a":{"a":…{"a":inner}…}}.
+func nestJSON(depth int, inner string) string {
+	doc := inner
+	for i := 0; i < depth; i++ {
+		doc = `{"a":` + doc + `}`
+	}
+	return doc
+}
+
+// QS-08 (дефект 2): документ крупнее прежнего лимита 4 MiB сканируется
+// структурно. Раньше тот же секрет давал findings=1 в 36-байтном документе
+// и findings=0 в 4-мегабайтном.
+func TestScanJSONBeyondOldSizeLimit(t *testing.T) {
+	const secret = "Aa1bB2cC3dD4eE5fF6gG7"
+	small := []byte(`{"password":"` + secret + `"}`)
+	if !hasFindingReason(Scan(small).Findings, jsonSecretReason) {
+		t.Fatal("секрет не найден в малом документе")
+	}
+	big := []byte(`{"filler":"` + strings.Repeat("x", 4<<20) + `","password":"` + secret + `"}`)
+	result := Scan(big)
+	if !hasFindingReason(result.Findings, jsonSecretReason) {
+		t.Errorf("документ %d B: секрет не найден (прежний лимит 4 MiB)", len(big))
+	}
+	if !result.Complete() {
+		t.Errorf("документ в пределах файлового лимита не должен давать пропусков: %+v", result.Unscanned)
+	}
+}
+
+// QS-08 (дефект 3): вложенность глубже лимита пропускает ПОДДЕРЕВО, а не
+// документ. Секрет на верхнем уровне после глубокого объекта обязан
+// находиться при любой глубине.
+func TestScanJSONDepthSkipsSubtreeNotDocument(t *testing.T) {
+	const secret = "Aa1bB2cC3dD4eE5fF6gG7"
+	for _, depth := range []int{5, 15, 16, 17, 20, 64} {
+		doc := `{"deep":` + nestJSON(depth, `"leaf"`) + `,"password":"` + secret + `"}`
+		result := Scan([]byte(doc))
+		if !hasFindingReason(result.Findings, jsonSecretReason) {
+			t.Errorf("depth=%d: секрет после глубокого поддерева не найден: %+v", depth, result)
+		}
+		if depth < maxJSONDepth && !result.Complete() {
+			t.Errorf("depth=%d: пропусков быть не должно: %+v", depth, result.Unscanned)
+		}
+	}
+}
+
+// QS-08: пропущенное поддерево обязано попасть в отчёт как «не
+// просканировано» — молчаливый пропуск хуже отсутствующего механизма.
+func TestScanJSONDepthReportsUnscanned(t *testing.T) {
+	const secret = "Aa1bB2cC3dD4eE5fF6gG7"
+	doc := nestJSON(maxJSONDepth+4, `{"password":"`+secret+`"}`)
+	result := Scan([]byte(doc))
+	if result.Complete() {
+		t.Fatalf("секрет глубже лимита пропущен молча: %+v", result)
+	}
+	if hasFindingReason(result.Findings, jsonSecretReason) {
+		t.Fatalf("поддерево глубже лимита не должно сканироваться: %+v", result.Findings)
+	}
+	var depthGap bool
+	for _, u := range result.Unscanned {
+		if u.Reason != unscannedJSONDepth {
+			continue
+		}
+		depthGap = true
+		if u.Line != 1 {
+			t.Errorf("строка пропуска = %d, want 1: %+v", u.Line, u)
+		}
+		if u.Detail == "" {
+			t.Errorf("пропуск без объяснения: %+v", u)
+		}
+	}
+	if !depthGap {
+		t.Errorf("нет записи %q в Unscanned: %+v", unscannedJSONDepth, result.Unscanned)
+	}
+}
+
+// QS-08: после пропуска глубокого поддерева обход продолжается — секреты
+// на соседних ветках того же уровня находятся.
+func TestScanJSONContinuesAfterDeepSubtree(t *testing.T) {
+	const secret = "Aa1bB2cC3dD4eE5fF6gG7"
+	doc := `{"a":` + nestJSON(maxJSONDepth+2, `[1,2,{"x":"y"}]`) +
+		`,"b":[` + nestJSON(maxJSONDepth+2, `"z"`) + `],"token":"` + secret + `"}`
+	result := Scan([]byte(doc))
+	if !hasFindingReason(result.Findings, jsonSecretReason) {
+		t.Fatalf("секрет после двух глубоких поддеревьев не найден: %+v", result)
+	}
+	if len(result.Unscanned) == 0 {
+		t.Fatalf("пропущенные поддеревья не попали в отчёт: %+v", result)
+	}
+}
+
+// QS-08: оборванный JSON внутри контейнера — тоже «не просканировано»:
+// документ начинался как JSON, остаток не разобран.
+func TestScanJSONTruncatedReportsUnscanned(t *testing.T) {
+	result := Scan([]byte(`{"a":{"b":1},"c":[1,2`))
+	if result.Complete() {
+		t.Fatalf("оборванный JSON должен фиксироваться как непросканированный: %+v", result)
+	}
+	if result.Unscanned[0].Reason != unscannedJSONParse {
+		t.Fatalf("причина = %q, want %q", result.Unscanned[0].Reason, unscannedJSONParse)
+	}
+}
+
+// QS-08: обычный текст, код и markdown НЕ должны порождать ложных записей
+// «не просканировано» — иначе fail-closed вердикт утонет в шуме.
+func TestScanNonJSONHasNoUnscannedNoise(t *testing.T) {
+	cases := []string{
+		"2026-09-21 10:00:00 INFO stage=review verdict=APPROVED\n",
+		"package main\n\nfunc main() {\n\tprintln(\"hi\")\n}\n",
+		"# Заголовок\n\n- пункт: значение\n- ещё: 42\n",
+		"body { color: red; }\n",
+		"key: value\nother: 12\n",
+		"",
+	}
+	for _, data := range cases {
+		if result := Scan([]byte(data)); !result.Complete() {
+			t.Errorf("ложное «не просканировано» на %q: %+v", data, result.Unscanned)
+		}
+	}
+}
+
+// QS-08: номера строк остаются верными на многострочном документе — после
+// перехода на инкрементальный lineTracker.
+func TestScanJSONLineNumbersRemainCorrect(t *testing.T) {
+	secret := "T0pSecretValue21k9XzW8qK2nM4"
+	doc := "{\n  \"a\": 1,\n  \"b\": {\n    \"token\": \"" + secret + "\"\n  },\n  \"password\": \"" + secret + "\"\n}\n"
+	lines := map[int]bool{}
+	for _, f := range Scan([]byte(doc)).Findings {
+		if f.Reason == jsonSecretReason {
+			lines[f.Line] = true
+		}
+	}
+	for _, want := range []int{4, 6} {
+		if !lines[want] {
+			t.Errorf("нет json-находки на строке %d: %v", want, lines)
+		}
 	}
 }

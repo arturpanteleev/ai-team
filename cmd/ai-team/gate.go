@@ -142,6 +142,14 @@ func publishGateBundle(outDir string, result *gate.Result, policy redact.Policy,
 			Message: "Секреты найдены, но политика разрешает публикацию",
 			Data:    map[string]any{"violations": len(report.Violations)}})
 	}
+	// QS-08: то же для непросканированного — bundle публикуется, но без
+	// подтверждённой чистоты, и это должно остаться в логе.
+	if len(report.Unscanned) > 0 {
+		logging.Emit(logging.Record{Level: "warn", Command: "gate", Type: "redact_unscanned",
+			Message: "Часть bundle не просканирована, чистота не подтверждена",
+			Data: map[string]any{"unscanned": countUnscanned(report.Unscanned),
+				"files": len(report.Unscanned)}})
+	}
 	if privKey != nil {
 		if err := gate.SignBundle(tmp, privKey); err != nil {
 			return err

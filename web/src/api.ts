@@ -53,6 +53,24 @@ export function getActivePrincipal(): Principal | null {
   return activePrincipal;
 }
 
+// consumeBootstrapToken забирает operator token из fragment адресной строки
+// (`http://127.0.0.1:8080/#token=…` — ссылку печатает `ai-team web`) и сразу
+// вычищает его оттуда. Fragment выбран намеренно: он не уходит на сервер и
+// не попадает ни в access log, ни в Referer.
+export function consumeBootstrapToken(): string {
+  if (typeof window === 'undefined') return '';
+  const hash = window.location.hash.replace(/^#/, '');
+  if (!hash) return '';
+  const params = new URLSearchParams(hash);
+  const token = (params.get('token') ?? '').trim();
+  if (!token) return '';
+  params.delete('token');
+  const rest = params.toString();
+  window.history.replaceState(null, '',
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`);
+  return token;
+}
+
 async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
   await openSession();
@@ -90,10 +108,13 @@ export function cancelRun(runId: string): Promise<{ run_id: string }> {
   return command(`/runs/${encodeURIComponent(runId)}/cancel`);
 }
 
+// decideApproval отправляет только выбор человека и exact subject. Actor и
+// роль — свойства аутентифицированной session: сервер выводит их сам и
+// отвергает тело запроса, объявляющее их за него.
 export function decideApproval(
   runId: string,
   value: Approval,
-  decision: { actor_id: string; actor_role: string; action: string; comment?: string },
+  decision: { action: string; comment?: string },
 ): Promise<Approval> {
   return command(
     `/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(value.id)}/decisions`,

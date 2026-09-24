@@ -55,6 +55,18 @@ func WithAuthenticator(verifier IdentityVerifier) ServerOption {
 	return func(server *Server) { server.authenticator = verifier }
 }
 
+// WithLocalOperator включает loopback-режим с локальным operator token.
+// Identity устанавливается тем же путём, что и в cloud mode (Bearer →
+// browser-session), но Host/Origin policy остаётся жёстко loopback-ной:
+// локальный сервер по-прежнему не должен отвечать на запрос, пришедший под
+// чужим именем хоста (DNS rebinding).
+func WithLocalOperator(verifier IdentityVerifier) ServerOption {
+	return func(server *Server) {
+		server.authenticator = verifier
+		server.localMode = true
+	}
+}
+
 type browserSession struct {
 	CSRFToken string
 	Principal cloudidentity.Principal
@@ -73,9 +85,12 @@ type Server struct {
 	eventWorkers  sync.WaitGroup
 	controller    RunController
 	authenticator IdentityVerifier
-	sessions      map[string]browserSession
-	sessionMu     sync.Mutex
-	streamID      string
+	// localMode — authenticator выдан локальным процессом (operator token),
+	// а не cloud control plane. Влияет только на Host/Origin policy.
+	localMode bool
+	sessions  map[string]browserSession
+	sessionMu sync.Mutex
+	streamID  string
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -127,7 +142,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
-	if srv.authenticator == nil {
+	if srv.authenticator == nil || srv.localMode {
 		srv.router.Use(sameOriginMiddleware)
 	} else {
 		srv.router.Use(authenticatedOriginMiddleware)

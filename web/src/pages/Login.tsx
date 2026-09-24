@@ -23,8 +23,12 @@ export function Login({ onLogin }: { onLogin: (token: string) => Promise<void> }
   return (
     <main className={styles.page}>
       <form className={styles.card} onSubmit={submit}>
-        <h1>ai-team cloud</h1>
-        <p>Введите короткоживущий access token, выданный control plane.</p>
+        <h1>ai-team</h1>
+        <p>
+          Введите access token. Локально его печатает <code>ai-team web</code>
+          при старте (строка «Локальный operator token»); в cloud-режиме его
+          выдаёт <code>ai-team auth-token</code>.
+        </p>
         <textarea aria-label="Access token" value={token}
           onChange={(event) => setToken(event.target.value)} autoFocus />
         {error && <div className={styles.error}>{error}</div>}

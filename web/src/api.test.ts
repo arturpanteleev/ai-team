@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, getActivePrincipal, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
+import { consumeBootstrapToken, decideApproval, getActivePrincipal, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -29,18 +29,34 @@ describe('write API client', () => {
       status: 'pending',
       created_at: new Date().toISOString(),
     } satisfies Approval;
-    await decideApproval('run-1', approval, {
-      actor_id: 'product-1', actor_role: 'product_owner', action: 'approve',
-    });
+    await decideApproval('run-1', approval, { action: 'approve' });
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const startOptions = fetchMock.mock.calls[1][1] as RequestInit;
     expect((startOptions.headers as Record<string, string>)['X-CSRF-Token']).toBe('csrf-1');
     const decisionOptions = fetchMock.mock.calls[2][1] as RequestInit;
-    expect(JSON.parse(String(decisionOptions.body))).toMatchObject({
-      actor_id: 'product-1',
-      subject_hash: 'a'.repeat(64),
-    });
+    const decisionBody = JSON.parse(String(decisionOptions.body));
+    expect(decisionBody).toEqual({ action: 'approve', subject_hash: 'a'.repeat(64) });
+    // Ни actor, ни роль клиент не объявляет: сервер выводит их из session.
+    expect(decisionBody).not.toHaveProperty('actor_id');
+    expect(decisionBody).not.toHaveProperty('actor_role');
+  });
+});
+
+describe('local operator bootstrap', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('забирает token из fragment и вычищает адресную строку', async () => {
+    window.history.replaceState(null, '', '/pipelines/1#token=local-secret');
+
+    expect(consumeBootstrapToken()).toBe('local-secret');
+    expect(window.location.hash).toBe('');
+    expect(window.location.pathname).toBe('/pipelines/1');
+    // Повторный вызов уже ничего не находит: token одноразовый для адреса.
+    expect(consumeBootstrapToken()).toBe('');
   });
 });
 

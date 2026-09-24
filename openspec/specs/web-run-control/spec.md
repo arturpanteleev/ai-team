@@ -23,14 +23,15 @@ Web control plane MUST запускать start, resume и cancel через о�
 ### Requirement: Browser approval command
 
 Browser decision MUST использовать общий approval store и ту же subject,
-action и quorum validation, что CLI decision. В cloud mode actor identity и
-доступные роли MUST определяться аутентифицированной browser-session.
+action и quorum validation, что CLI decision. Actor identity и роль решения
+MUST определяться аутентифицированной browser-session и `required_roles`
+самого approval, а не телом запроса.
 
 #### Scenario: Допустимое решение
 
 - **КОГДА** authenticated actor с required role отправляет допустимый action
   и exact subject
-- **ТОГДА** decision MUST быть сохранён с trusted actor/comment/timestamp
+- **ТОГДА** decision MUST быть сохранён с trusted actor/role/comment/timestamp
 - **И** run MUST стать доступен для resume
 
 #### Scenario: Stale решение
@@ -38,14 +39,26 @@ action и quorum validation, что CLI decision. В cloud mode actor identity �
 - **КОГДА** subject не совпадает с pending approval
 - **ТОГДА** API MUST отклонить решение без изменения run
 
+#### Scenario: Роль вне principal
+
+- **КОГДА** ни одна из `required_roles` approval не принадлежит session
+  principal
+- **ТОГДА** API MUST отклонить решение и MUST NOT записать его в store
+
 #### Scenario: Подмена identity
 
-- **КОГДА** command body содержит actor ID, отличный от session principal
-- **ТОГДА** это значение MUST NOT попасть в audit decision
+- **КОГДА** command body объявляет actor ID или роль
+- **ТОГДА** API MUST отклонить такой запрос, и эти значения MUST NOT попасть
+  в audit decision
 
-### Requirement: Local write protection
-Каждый web write request MUST пройти session и CSRF validation поверх
-loopback Host/Origin policy.
+### Requirement: Write protection
+Каждый web write request MUST пройти authentication, session и CSRF
+validation поверх Host/Origin policy. Write API без настроенной identity
+MUST быть недоступен (fail-closed).
+
+#### Scenario: Identity не настроена
+- **КОГДА** сервер запущен без authenticator
+- **ТОГДА** любой write request MUST быть отклонён до исполнения команды
 
 #### Scenario: Нет session
 - **КОГДА** write request не содержит выданную server-ом session-cookie

@@ -148,9 +148,32 @@ func newTestServer(t *testing.T) (*Server, string) {
 	return srv, artifactRoot
 }
 
-func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *http.Request {
+// newLocalOperatorServer поднимает сервер ровно в том режиме, в каком его
+// запускает `ai-team web` без cloud secret: loopback Host/Origin policy плюс
+// локальный operator token, выданный процессом.
+func newLocalOperatorServer(t *testing.T, options ...ServerOption) (*Server, string) {
+	t.Helper()
+	operator, token, err := cloudidentity.NewLocalOperator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), append(options, WithLocalOperator(operator))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	return srv, token
+}
+
+// openSession обменивает Bearer token на browser-session и возвращает
+// cookie с CSRF token. Пустой bearer — попытка открыть session без
+// credential.
+func openSession(t *testing.T, srv *Server, bearer string) (*http.Cookie, string) {
 	t.Helper()
 	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	if bearer != "" {
+		sessionRequest.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	sessionWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(sessionWriter, sessionRequest)
 	if sessionWriter.Code != http.StatusOK {
@@ -162,26 +185,26 @@ func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *
 	if err := json.NewDecoder(sessionWriter.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	response := sessionWriter.Result()
-	cookies := response.Cookies()
+	cookies := sessionWriter.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("session cookie отсутствует: %v", cookies)
 	}
+	return cookies[0], session.CSRFToken
+}
+
+func authorizedRequest(t *testing.T, srv *Server, method, target, body, bearer string) *http.Request {
+	t.Helper()
+	cookie, csrf := openSession(t, srv, bearer)
 	request := newLoopbackRequest(method, target, strings.NewReader(body))
-	request.AddCookie(cookies[0])
-	request.Header.Set("X-CSRF-Token", session.CSRFToken)
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
 	request.Header.Set("Content-Type", "application/json")
 	return request
 }
 
 func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	controller := &fakeRunController{}
-	artifactRoot := t.TempDir()
-	srv, err := NewServer(":memory:", "", artifactRoot, WithRunController(controller))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = srv.Close() }()
+	srv, token := newLocalOperatorServer(t, WithRunController(controller))
 
 	noSession := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
 	writer := httptest.NewRecorder()
@@ -190,11 +213,9 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 		t.Fatalf("без session: %d", writer.Code)
 	}
 
-	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
-	sessionWriter := httptest.NewRecorder()
-	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	cookie, _ := openSession(t, srv, token)
 	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
-	noCSRF.AddCookie(sessionWriter.Result().Cookies()[0])
+	noCSRF.AddCookie(cookie)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, noCSRF)
 	if writer.Code != http.StatusForbidden {
@@ -202,22 +223,89 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 }
 
-func TestWriteRunAndDecisionCommands(t *testing.T) {
-	controller := &fakeRunController{}
-	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
-	if err != nil {
+// TestLocalSessionRequiresOperatorToken: без token локальный сервер не
+// открывает session, поэтому write-контур недостижим даже до CSRF.
+func TestLocalSessionRequiresOperatorToken(t *testing.T) {
+	srv, token := newLocalOperatorServer(t, WithRunController(&fakeRunController{}))
+
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest("GET", "/api/session", nil))
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("session без token: %d %s", writer.Code, writer.Body.String())
+	}
+
+	wrong := newLoopbackRequest("GET", "/api/session", nil)
+	wrong.Header.Set("Authorization", "Bearer "+token+"x")
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, wrong)
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("session с чужим token: %d %s", writer.Code, writer.Body.String())
+	}
+
+	// Локальный режим объявляет authentication_required, иначе UI не знает,
+	// что нужно предъявить token.
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, newLoopbackRequest("GET", "/api/auth/config", nil))
+	var config struct {
+		Required bool `json:"authentication_required"`
+	}
+	if err := json.NewDecoder(writer.Body).Decode(&config); err != nil || !config.Required {
+		t.Fatalf("auth config: %+v %v", config, err)
+	}
+}
+
+// TestSessionRefreshKeepsPrincipalWithoutBearer: после reload страницы
+// вкладка теряет CSRF token, но не cookie. Повторный GET /api/session обязан
+// выдать новый CSRF для того же principal — иначе локальный UI перестал бы
+// принимать решения после каждой перезагрузки.
+func TestSessionRefreshKeepsPrincipalWithoutBearer(t *testing.T) {
+	srv, token := newLocalOperatorServer(t, WithRunController(&fakeRunController{}))
+	cookie, csrf := openSession(t, srv, token)
+
+	refresh := newLoopbackRequest("GET", "/api/session", nil)
+	refresh.AddCookie(cookie)
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, refresh)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("refresh: %d %s", writer.Code, writer.Body.String())
+	}
+	var session sessionResponse
+	if err := json.NewDecoder(writer.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = srv.Close() }()
+	if session.CSRFToken == "" || session.CSRFToken == csrf {
+		t.Fatalf("refresh не выдал новый CSRF token: %q", session.CSRFToken)
+	}
+	if session.Principal == nil || session.Principal.ActorID != cloudidentity.LocalOperatorActorID {
+		t.Fatalf("refresh потерял principal: %+v", session.Principal)
+	}
+	// Старая session отозвана: ротация не оставляет пригодных дубликатов.
+	stale := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
+	stale.AddCookie(cookie)
+	stale.Header.Set("X-CSRF-Token", csrf)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, stale)
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("ротированная session всё ещё принимается: %d", writer.Code)
+	}
+}
 
-	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача"}`)
+func TestWriteRunAndDecisionCommands(t *testing.T) {
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-1", RunID: "run-1", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"qa"}, Actions: []string{"approve", "reject"},
+		Quorum: approval.QuorumAny, Status: approval.StatusPending,
+	}}}
+	srv, token := newLocalOperatorServer(t, WithRunController(controller))
+
+	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача"}`, token)
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, start)
 	if writer.Code != http.StatusAccepted || controller.startFeature != "feat" || controller.startTask != "задача" {
 		t.Fatalf("start: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
 
-	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача","unknown":true}`)
+	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача","unknown":true}`, token)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, bad)
 	if writer.Code != http.StatusBadRequest || controller.startCalls != 1 {
@@ -226,17 +314,73 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 
 	decision := authorizedRequest(t, srv, "POST",
 		"/api/runs/run-1/approvals/approval-1/decisions",
-		`{"actor_id":"user-1","actor_role":"qa","action":"approve","comment":"проверено","subject_hash":"`+testSubjectHash+`"}`)
+		`{"action":"approve","comment":"проверено","subject_hash":"`+testSubjectHash+`"}`, token)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, decision)
 	if writer.Code != http.StatusOK || controller.runID != "run-1" ||
-		controller.approvalID != "approval-1" || controller.decision.ActorID != "user-1" {
+		controller.approvalID != "approval-1" ||
+		controller.decision.ActorID != cloudidentity.LocalOperatorActorID ||
+		controller.decision.ActorRole != "qa" {
 		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
+	}
+
+	// Старый контракт с самоназначенной ролью обязан быть отвергнут явно.
+	legacy := authorizedRequest(t, srv, "POST",
+		"/api/runs/run-1/approvals/approval-1/decisions",
+		`{"actor_id":"user-1","actor_role":"qa","action":"approve","subject_hash":"`+testSubjectHash+`"}`, token)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, legacy)
+	if writer.Code != http.StatusBadRequest {
+		t.Fatalf("actor_role в теле запроса принят: %d %s", writer.Code, writer.Body.String())
+	}
+}
+
+// TestDecisionRejectsRoleOutsidePrincipal: даже с валидной session роль,
+// которой у principal нет, не может закрыть approval.
+func TestDecisionRejectsRoleOutsidePrincipal(t *testing.T) {
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-1", RunID: "run-1", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"release_manager"}, Actions: []string{"approve"},
+		Quorum: approval.QuorumAny, Status: approval.StatusPending,
+	}}}
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := cloudidentity.NewPrincipal("qa-1", []cloudidentity.Role{cloudidentity.RoleQA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.Issue(principal, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(),
+		WithRunController(controller), WithAuthenticator(manager))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	request := authorizedRequest(t, srv, "POST",
+		"/api/runs/run-1/approvals/approval-1/decisions",
+		`{"action":"approve","subject_hash":"`+testSubjectHash+`"}`, token)
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, request)
+	if writer.Code != http.StatusForbidden {
+		t.Fatalf("qa закрыл release_manager approval: %d %s", writer.Code, writer.Body.String())
+	}
+	if controller.decision.Action != "" {
+		t.Fatalf("решение дошло до approval store: %+v", controller.decision)
 	}
 }
 
 func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
-	controller := &fakeRunController{}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-1", RunID: "run-1", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"approve", "reject"},
+		Quorum: approval.QuorumAny, Status: approval.StatusPending,
+	}}}
 	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
 	if err != nil {
 		t.Fatal(err)
@@ -287,8 +431,13 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	if response := command("/api/runs", `{"feature":"f","task":"t"}`); response.Code != http.StatusForbidden {
 		t.Fatalf("reviewer не должен создавать run: %d %s", response.Code, response.Body.String())
 	}
+	if response := command("/api/runs/run-1/approvals/approval-1/decisions",
+		`{"actor_id":"spoofed","actor_role":"reviewer","action":"approve","subject_hash":"`+testSubjectHash+`"}`,
+	); response.Code != http.StatusBadRequest {
+		t.Fatalf("self-declared identity принят: %d %s", response.Code, response.Body.String())
+	}
 	response := command("/api/runs/run-1/approvals/approval-1/decisions",
-		`{"actor_id":"spoofed","actor_role":"reviewer","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+		`{"action":"approve","subject_hash":"`+testSubjectHash+`"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("reviewer decision: %d %s", response.Code, response.Body.String())
 	}
@@ -1067,6 +1216,35 @@ func TestUnknownAPIRouteReturnsJSONWithoutFrontend(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	assertJSONStatus(t, srv, http.MethodGet, "/api/definitely-not-a-route", http.StatusNotFound)
+}
+
+// TestUnauthenticatedDecisionIsRejected воспроизводит QS-02: на сервере без
+// authenticator неаутентифицированный клиент получал session, объявлял свою
+// роль в теле запроса и утверждал delivery plan. Write-контур обязан быть
+// fail-closed: без настроенной identity запись решения невозможна.
+func TestUnauthenticatedDecisionIsRejected(t *testing.T) {
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-1", RunID: "run-1", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"release_manager"}, Actions: []string{"approve", "reject"},
+		Quorum: approval.QuorumAny, Status: approval.StatusPending,
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	request := authorizedRequest(t, srv, "POST",
+		"/api/runs/run-1/approvals/approval-1/decisions",
+		`{"action":"approve","actor_id":"anon","actor_role":"release_manager","subject_hash":"`+testSubjectHash+`"}`, "")
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, request)
+	if writer.Code < 400 {
+		t.Fatalf("самоназначенная роль утвердила план: code=%d body=%s", writer.Code, writer.Body.String())
+	}
+	if controller.decision.Action != "" {
+		t.Fatalf("решение дошло до approval store: %+v", controller.decision)
+	}
 }
 
 // newFrontendTestServer поднимает сервер с минимальным собранным фронтендом,

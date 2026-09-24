@@ -433,12 +433,35 @@ Pending approvals лежат в
 `ai-team web` использует тот же `RunEngine`: из dashboard можно создать run,
 а на detail page — принять exact approval, выполнить resume или cancel.
 Команды возвращают сразу, а выполнение и статусы приходят через
-SQLite/WebSocket. При загрузке same-origin UI сервер выдаёт случайную
-HttpOnly session-cookie и отдельный CSRF token; каждый write request требует
-оба значения.
+SQLite/WebSocket.
 
-Для cloud/self-hosted режима задайте одинаковый secret длиной не менее
-32 байт при выпуске token и запуске web:
+Дашборд никогда не работает без identity. Без cloud secret процесс при старте
+выпускает **локальный operator token** на время своей жизни и печатает ссылку
+с ним:
+
+```
+Web UI available at http://127.0.0.1:8080/#token=<operator-token>
+Локальный operator token: <operator-token>
+```
+
+Откройте эту ссылку целиком: фронтенд забирает token из fragment (на сервер
+fragment не уходит), обменивает его на HttpOnly session-cookie с отдельным
+CSRF token и вычищает адресную строку. Каждый write request требует оба
+значения, а без token сервер не открывает session вообще — ни одна команда
+не проходит. Token можно задать заранее через `AI_TEAM_WEB_TOKEN` (для
+скриптов и CI); тогда он не генерируется.
+
+Actor и роль решения — свойства аутентифицированной session: тело запроса
+`POST /api/.../decisions` содержит только `action`, `comment` и точный
+`subject_hash`. Роль выбирается сервером как пересечение ролей principal с
+`required_roles` этого approval; принять решение ролью, которой у principal
+нет, невозможно. Локальный оператор держит все канонические роли: его
+полномочия равны полномочиям того, кто и так может запустить CLI в этом
+репозитории, а гейтом является владение token.
+
+Локальный operator token допускает bind только на loopback. Для
+cloud/self-hosted режима (любой другой `--host`) задайте одинаковый secret
+длиной не менее 32 байт при выпуске token и запуске web:
 
 ```bash
 export AI_TEAM_AUTH_SECRET='<случайный-секрет-не-короче-32-байт>'

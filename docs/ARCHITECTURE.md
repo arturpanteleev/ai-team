@@ -304,8 +304,11 @@ Gradle, Maven (плюс zero/doctype/entity). Снимает ограничен�
 run ID до запуска worker goroutine и запрещает дублирующий active worker.
 `POST /api/runs`, `/resume`, `/cancel` и approval `/decisions` возвращают
 асинхронный command result; durable lifecycle остаётся источником истины после
-restart. Write routes требуют случайную HttpOnly SameSite session-cookie и
-независимый `X-CSRF-Token` поверх fixed loopback Host/Origin policy.
+restart. Write routes требуют аутентифицированный principal, случайную
+HttpOnly SameSite session-cookie и независимый `X-CSRF-Token` поверх fixed
+loopback Host/Origin policy. Режима «write без identity» не существует: при
+отсутствии authenticator write-группа отвечает 403 до разбора тела запроса
+(fail-closed).
 
 До резервирования run controller выполняет типизированный runtime preflight.
 Required checks fail closed: доступны OpenCode/version и Git repository, а
@@ -327,10 +330,27 @@ WebSocket bridge с cursor/replay; редкий polling остаётся recover
 канонические роли и bounded expiry. После проверки token заменяется
 уникальной HttpOnly browser-session; token не попадает в SQLite или evidence.
 API reads, commands и WebSocket требуют session, а write-команды —
-дополнительно session-bound CSRF. Decision всегда получает actor ID из
-server-side principal, выбранная роль обязана принадлежать principal.
-Отдельные RBAC policies защищают start и cancel. Без signing secret остаётся
-совместимый zero-config loopback mode.
+дополнительно session-bound CSRF. Отдельные RBAC policies защищают start и
+cancel.
+
+Без signing secret `ai-team web` не отключает identity, а выпускает
+`cloudidentity.LocalOperator`: один случайный token на время жизни процесса,
+напечатанный в консоль вместе с URL входа (`http://127.0.0.1:8080/#token=…`).
+Фронтенд забирает token из fragment, обменивает на ту же browser-session и
+очищает адресную строку. Principal локального оператора — actor
+`local-operator` со всеми каноническими ролями: его полномочия равны
+полномочиям того, кто может запустить CLI в этом репозитории, а гейтом
+является владение token. Host/Origin policy в этом режиме остаётся
+loopback-ной (`sameOriginMiddleware`), поэтому DNS rebinding закрыт как и
+раньше; bind на не-loopback host по-прежнему требует cloud secret.
+`AI_TEAM_WEB_TOKEN` позволяет задать token заранее (скрипты, E2E).
+
+Ни actor, ни роль решения не приходят из тела запроса — строгий декодер
+отвергает такое тело как unknown field. Actor берётся из server-side
+principal, а роль выводится как пересечение ролей principal с
+`RequiredRoles` конкретного approval по тому же правилу, что и локальный
+CLI-путь (`quorum any` — одна роль, `quorum all` — все, которые у actor
+есть). Пустое пересечение — 403.
 
 При `--worker-command` web controller использует process-backed RunEngine.
 Он сериализует строгий job schema v1 для одной операции start/resume/cancel,

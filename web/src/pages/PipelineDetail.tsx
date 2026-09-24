@@ -1,11 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from '../router';
-import type { PipelineRun, Stage, Artifact, Approval, CloudRole, WorkflowGraph, WorkflowSnapshot } from '../types';
+import type { PipelineRun, Stage, Artifact, Approval, CloudRole, Principal, WorkflowGraph, WorkflowSnapshot } from '../types';
 import { getPipelineRun, getPipelineArtifacts, getRunWorkflow, decideApproval, resumeRun, cancelRun, getActivePrincipal } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { StatusBadge } from '../components/StatusBadge';
 import { StageRow } from '../components/StageRow';
 import styles from './PipelineDetail.module.css';
+
+// decidableRoles повторяет серверное правило (pkg/web/commands.go): роль
+// решения — пересечение ролей principal с RequiredRoles перехода. UI только
+// показывает результат; авторитетным остаётся сервер.
+function decidableRoles(value: Approval, principal: Principal | null): string[] {
+  if (!principal) return [];
+  return value.required_roles.filter((role) => principal.roles.includes(role as CloudRole));
+}
 
 export function PipelineDetail() {
   const principal = getActivePrincipal();
@@ -16,7 +24,6 @@ export function PipelineDetail() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [nextStage, setNextStage] = useState('');
-  const [actor, setActor] = useState(principal?.actor_id ?? 'local-user');
   const [controlError, setControlError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -71,12 +78,12 @@ export function PipelineDetail() {
   const getArtifactsForStage = (stage: Stage) =>
     artifacts.filter((a) => a.path.includes(stage.attempt_id) || a.name.toLowerCase().includes(stage.agent_name));
 
-  const sendDecision = async (value: Approval, role: string, action: string) => {
+  // Роль и actor в запросе не передаются: сервер берёт их из
+  // аутентифицированной session и RequiredRoles самого approval.
+  const sendDecision = async (value: Approval, action: string) => {
     setControlError('');
     try {
-      await decideApproval(run.run_id, value, {
-        actor_id: actor, actor_role: role, action,
-      });
+      await decideApproval(run.run_id, value, { action });
       await fetchData();
     } catch (err) {
       setControlError(err instanceof Error ? err.message : 'Решение не принято');
@@ -112,10 +119,7 @@ export function PipelineDetail() {
       <section className={styles.controls}>
         <div className={styles.controlHeader}>
           <h2>Человеческие решения</h2>
-          {principal
-            ? <span>{principal.actor_id}</span>
-            : <input value={actor} onChange={(event) => setActor(event.target.value)}
-              aria-label="Actor identity" placeholder="actor identity" />}
+          <span>{principal?.actor_id ?? '—'}</span>
           <button onClick={() => sendRunCommand('resume')}>Resume</button>
           <button onClick={() => sendRunCommand('cancel')}>Cancel</button>
         </div>
@@ -138,14 +142,15 @@ export function PipelineDetail() {
               </details>
             )}
             <div className={styles.actions}>
-              {value.status === 'pending' && value.required_roles
-                .filter((role) => !principal || principal.roles.includes(role as CloudRole))
-                .flatMap((role) =>
+              {value.status === 'pending' && decidableRoles(value, principal).length > 0 &&
                 value.actions.map((action) => (
-                  <button key={`${role}:${action}`} onClick={() => sendDecision(value, role, action)}>
-                    {action} · {role}
+                  <button key={action} onClick={() => sendDecision(value, action)}>
+                    {action} · {decidableRoles(value, principal).join(', ')}
                   </button>
-                )))}
+                ))}
+              {value.status === 'pending' && decidableRoles(value, principal).length === 0 && (
+                <small>Нет роли для этого решения: требуются {value.required_roles.join(', ')}</small>
+              )}
             </div>
             {value.decisions?.map((decision) => (
               <small key={`${decision.actor_id}:${decision.actor_role}`}>

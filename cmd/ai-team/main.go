@@ -57,6 +57,12 @@ const (
 	exitUserStopped = 3
 )
 
+// localTokenEnv — переменная окружения, позволяющая задать локальный web
+// operator token заранее. Нужна автоматизации (скрипты, E2E), которая должна
+// знать token до старта процесса; при пустом значении token генерируется и
+// печатается в консоль.
+const localTokenEnv = "AI_TEAM_WEB_TOKEN"
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -1500,6 +1506,7 @@ func cmdWeb() {
 	}
 	serverOptions := []web.ServerOption{web.WithRunController(runController)}
 	authEnabled := false
+	localToken := ""
 	if secret := os.Getenv(*authSecretEnv); secret != "" {
 		tokenManager, managerErr := cloudidentity.NewTokenManager([]byte(secret))
 		if managerErr != nil {
@@ -1507,6 +1514,23 @@ func cmdWeb() {
 		}
 		serverOptions = append(serverOptions, web.WithAuthenticator(tokenManager))
 		authEnabled = true
+	} else {
+		// Локальный режим тоже имеет identity: без неё любой процесс,
+		// дотянувшийся до loopback-порта, объявлял свою роль в теле запроса
+		// и утверждал delivery plan (QS-02). Token живёт столько же, сколько
+		// процесс, и печатается в консоль вместе с URL входа.
+		var operator *cloudidentity.LocalOperator
+		var operatorErr error
+		if supplied := strings.TrimSpace(os.Getenv(localTokenEnv)); supplied != "" {
+			operator, operatorErr = cloudidentity.NewLocalOperatorWithToken(supplied)
+			localToken = supplied
+		} else {
+			operator, localToken, operatorErr = cloudidentity.NewLocalOperator()
+		}
+		if operatorErr != nil {
+			fatal("Ошибка локального operator token: %v", operatorErr)
+		}
+		serverOptions = append(serverOptions, web.WithLocalOperator(operator))
 	}
 	srv, err := web.NewServer(*dbPath, *distDir, *artifacts, serverOptions...)
 	if err != nil {
@@ -1527,9 +1551,18 @@ func cmdWeb() {
 
 	addr := net.JoinHostPort(*host, *port)
 	if !authEnabled && *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
-		fatal("web UI не имеет authentication и может bind только loopback host")
+		fatal("web UI с локальным operator token может bind только loopback host; для внешнего bind задайте %s", *authSecretEnv)
 	}
-	logging.Printf("Web UI available at http://%s\n", addr)
+	if localToken != "" {
+		// Token передаётся во fragment: он не попадает ни в access log
+		// reverse proxy, ни в Referer, а фронтенд забирает его из
+		// location.hash и сразу вычищает из адресной строки.
+		logging.Printf("Web UI available at http://%s/#token=%s\n", addr, localToken)
+		logging.Printf("Локальный operator token: %s\n", localToken)
+		logging.Printf("Откройте ссылку целиком: без token дашборд не примет ни одной команды.\n")
+	} else {
+		logging.Printf("Web UI available at http://%s\n", addr)
+	}
 	if err := srv.ListenAndServe(addr); err != nil {
 		fatal("Ошибка сервера: %v", err)
 	}

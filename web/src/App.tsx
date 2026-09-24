@@ -5,7 +5,7 @@ import { Dashboard } from './pages/Dashboard';
 import { PipelineDetail } from './pages/PipelineDetail';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
-import { getAuthConfig, getCurrentIdentity, openSession } from './api';
+import { consumeBootstrapToken, getAuthConfig, openSession } from './api';
 
 function RoutedApp() {
   const { pathname } = useLocation();
@@ -28,11 +28,17 @@ function App() {
     void (async () => {
       try {
         const config = await getAuthConfig();
-        if (config.authentication_required) {
-          await getCurrentIdentity();
-        } else {
+        if (!config.authentication_required) {
           await openSession();
+          setAuthState('ready');
+          return;
         }
+        // Локальный режим: token приходит во fragment ссылки, которую
+        // напечатал `ai-team web`. Cloud-режим: token вводится на экране
+        // входа. После reload вкладки token не нужен — session-cookie уже
+        // установлена, и openSession() без Bearer перевыпускает CSRF.
+        const bootstrap = consumeBootstrapToken();
+        await openSession(bootstrap || undefined);
         setAuthState('ready');
       } catch {
         setAuthState('login');

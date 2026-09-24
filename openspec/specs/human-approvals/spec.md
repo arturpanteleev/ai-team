@@ -20,9 +20,10 @@ PendingApproval/ApprovalDecision как typed сущности: exact subject ha
 ### Requirement: Audited human decision
 
 Каждое решение MUST фиксировать trusted actor identity, роль, action,
-комментарий и timestamp и MUST проходить role/action/quorum validation. В
-cloud mode actor identity и доступные роли MUST поступать из
-аутентифицированной server-side session, а не из command body.
+комментарий и timestamp и MUST проходить role/action/quorum validation. Для
+web-решения actor identity и доступные роли MUST поступать из
+аутентифицированной server-side session, а не из command body — независимо
+от того, локальный это режим или cloud.
 
 #### Scenario: Any quorum
 

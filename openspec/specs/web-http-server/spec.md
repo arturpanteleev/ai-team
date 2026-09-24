@@ -52,9 +52,16 @@ HTTP server MUST генерировать независимые случайн�
 каждого process start.
 
 #### Scenario: Same-origin bootstrap
-- **КОГДА** browser вызывает `GET /api/session` с допустимым Host/Origin
+- **КОГДА** browser вызывает `GET /api/session` с допустимым Host/Origin и
+  предъявляет действующий credential (cloud token или локальный operator
+  token)
 - **ТОГДА** server MUST установить HttpOnly SameSite=Strict session-cookie
 - **И** MUST вернуть CSRF token в JSON без permissive CORS
+
+#### Scenario: Bootstrap без credential
+- **КОГДА** `GET /api/session` вызван без credential и без действующей
+  session-cookie
+- **ТОГДА** server MUST вернуть 401 и MUST NOT установить cookie
 
 ### Requirement: Bounded command bodies
 Write handlers MUST ограничивать body и строго декодировать единственный JSON

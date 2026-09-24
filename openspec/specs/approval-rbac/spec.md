@@ -15,8 +15,8 @@ Reviewer, QA и Release Manager в нормализованном машинно
 
 ### Requirement: Trusted actor decision
 
-Cloud approval decision MUST использовать actor ID и роли
-аутентифицированного principal.
+Web approval decision MUST использовать actor ID и роли
+аутентифицированного principal — и в cloud, и в локальном режиме.
 
 #### Scenario: Подмена actor ID
 

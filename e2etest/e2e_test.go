@@ -683,6 +683,39 @@ func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
 	}
 }
 
+// webOperatorToken — локальный operator token, который `ai-team web`
+// забирает из AI_TEAM_WEB_TOKEN вместо генерации случайного. Без token
+// дашборд не открывает session и не принимает ни одной write-команды.
+const webOperatorToken = "e2e-local-operator-token-0123456789"
+
+// openWebSession обменивает operator token на browser-session и возвращает
+// CSRF token; cookie остаётся в jar клиента.
+func openWebSession(t *testing.T, client *http.Client, baseURL string, diagnostics func() string) string {
+	t.Helper()
+	var csrf string
+	waitUntil(t, 10*time.Second, func() bool {
+		request, err := http.NewRequest(http.MethodGet, baseURL+"/api/session", nil)
+		if err != nil {
+			return false
+		}
+		request.Header.Set("Authorization", "Bearer "+webOperatorToken)
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			return false
+		}
+		defer func() { _ = response.Body.Close() }()
+		var session struct {
+			CSRF string `json:"csrf_token"`
+		}
+		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
+			return false
+		}
+		csrf = session.CSRF
+		return csrf != ""
+	}, diagnostics)
+	return csrf
+}
+
 func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
@@ -703,7 +736,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	_ = listener.Close()
 	command := exec.Command(bin, "web", "--port", port, "--dist=")
 	command.Dir = dir
-	command.Env = append(os.Environ(), pathEnv)
+	command.Env = append(os.Environ(), pathEnv, "AI_TEAM_WEB_TOKEN="+webOperatorToken)
 	var serverOutput strings.Builder
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {
@@ -717,22 +750,29 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	baseURL := "http://127.0.0.1:" + port
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
-	var csrf string
-	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
-		if requestErr != nil {
-			return false
-		}
-		defer func() { _ = response.Body.Close() }()
-		var session struct {
-			CSRF string `json:"csrf_token"`
-		}
-		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
-			return false
-		}
-		csrf = session.CSRF
-		return csrf != ""
-	}, func() string { return serverOutput.String() })
+	csrf := openWebSession(t, client, baseURL, func() string { return serverOutput.String() })
+
+	// QS-02: клиент без operator token не получает session и, значит, не
+	// доходит до write-контура, даже находясь на loopback.
+	anonJar, _ := cookiejar.New(nil)
+	anonymous := &http.Client{Jar: anonJar, Timeout: 2 * time.Second}
+	anonymousSession, sessionErr := anonymous.Get(baseURL + "/api/session")
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	_ = anonymousSession.Body.Close()
+	if anonymousSession.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session без operator token: %d\n%s", anonymousSession.StatusCode, serverOutput.String())
+	}
+	anonymousStart, startErr := anonymous.Post(baseURL+"/api/runs", "application/json",
+		strings.NewReader(`{"feature":"anon","task":"anon"}`))
+	if startErr != nil {
+		t.Fatal(startErr)
+	}
+	_ = anonymousStart.Body.Close()
+	if anonymousStart.StatusCode < 400 {
+		t.Fatalf("неаутентифицированный start принят: %d", anonymousStart.StatusCode)
+	}
 
 	post := func(path string, body any) (int, map[string]any) {
 		t.Helper()
@@ -795,16 +835,13 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		first = readPending()
 		return first.ID != ""
 	}, func() string { return serverOutput.String() })
-	role := "product_owner"
-	if len(first.RequiredRoles) > 0 {
-		role = first.RequiredRoles[0]
-	}
+	// Ни actor, ни роль в теле запроса не передаются: сервер берёт их из
+	// аутентифицированной session и RequiredRoles самого approval.
 	status, decided := post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
-		"actor_id": "product-1", "actor_role": role,
 		"action": "approve", "subject_hash": first.SubjectHash,
 	})
 	if status != http.StatusOK {
-		t.Fatalf("web decision status=%d role=%s body=%v", status, role, decided)
+		t.Fatalf("web decision status=%d roles=%v body=%v", status, first.RequiredRoles, decided)
 	}
 	var resumed map[string]any
 	waitUntil(t, 10*time.Second, func() bool {
@@ -861,7 +898,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	artifactRoot := filepath.Join(dir, ".ai-team", "cloud-artifacts")
 	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
 	command.Dir = dir
-	command.Env = append(os.Environ(), pathEnv)
+	command.Env = append(os.Environ(), pathEnv, "AI_TEAM_WEB_TOKEN="+webOperatorToken)
 	var serverOutput strings.Builder
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {
@@ -875,22 +912,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	baseURL := "http://127.0.0.1:" + port
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
-	var csrf string
-	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
-		if requestErr != nil {
-			return false
-		}
-		defer func() { _ = response.Body.Close() }()
-		var session struct {
-			CSRF string `json:"csrf_token"`
-		}
-		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&session) != nil {
-			return false
-		}
-		csrf = session.CSRF
-		return csrf != ""
-	}, func() string { return serverOutput.String() })
+	csrf := openWebSession(t, client, baseURL, func() string { return serverOutput.String() })
 	data, _ := json.Marshal(map[string]string{"feature": "scheduled", "task": "scheduled task"})
 	request, _ := http.NewRequest(http.MethodPost, baseURL+"/api/runs", bytes.NewReader(data))
 	request.Header.Set("Content-Type", "application/json")

@@ -47,17 +47,32 @@ func (s *Server) handleCurrentIdentity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	var principal cloudidentity.Principal
+	previous := ""
 	if s.authenticator != nil {
 		header := strings.TrimSpace(r.Header.Get("Authorization"))
-		if !strings.HasPrefix(header, "Bearer ") {
-			http.Error(w, "требуется Bearer token", http.StatusUnauthorized)
-			return
-		}
-		var err error
-		principal, err = s.authenticator.Verify(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
-		if err != nil {
-			http.Error(w, "authentication failed", http.StatusUnauthorized)
-			return
+		if strings.HasPrefix(header, "Bearer ") {
+			var err error
+			principal, err = s.authenticator.Verify(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
+			if err != nil {
+				http.Error(w, "authentication failed", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			// Перевыпуск для уже установленной session. Bearer token
+			// предъявляется один раз, а CSRF token живёт в памяти вкладки и
+			// теряется при reload; без этой ветки после перезагрузки
+			// страницы любая write-команда падала бы на добыче CSRF.
+			// Полномочий это не добавляет: principal берётся из session,
+			// а cookie SameSite=Strict не уходит на чужой origin.
+			session, ok := s.requestSession(r)
+			if !ok {
+				http.Error(w, "требуется Bearer token", http.StatusUnauthorized)
+				return
+			}
+			principal = session.Principal
+			if cookie, err := r.Cookie(sessionCookieName); err == nil {
+				previous = cookie.Value
+			}
 		}
 	}
 	sessionToken, err := randomToken()
@@ -71,6 +86,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sessionMu.Lock()
+	if previous != "" {
+		delete(s.sessions, previous)
+	}
 	s.sessions[sessionToken] = browserSession{
 		CSRFToken: csrfToken, Principal: principal, ExpiresAt: time.Now().UTC().Add(browserSessionTTL),
 	}
@@ -89,6 +107,18 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Fail-closed (QS-02): без настроенной identity write API не
+		// существует. Раньше при authenticator == nil любой клиент,
+		// дотянувшийся до loopback-порта, объявлял свою роль в теле запроса
+		// и утверждал delivery plan. `ai-team web` всегда выдаёт себе
+		// локальный operator token, поэтому продуктовый сценарий этой ветки
+		// не касается; она защищает встраивание Server как библиотеки.
+		if s.authenticator == nil {
+			http.Error(w,
+				"web write API недоступен без authentication: запустите ai-team web (локальный operator token) или задайте cloud auth secret",
+				http.StatusForbidden)
+			return
+		}
 		session, ok := s.requestSession(r)
 		if !ok {
 			http.Error(w, "требуется web session", http.StatusUnauthorized)
@@ -136,10 +166,10 @@ func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
 	return session, true
 }
 
+// authorize разрешает команду по аутентифицированному principal. Режима без
+// principal больше нет: локальный запуск тоже устанавливает identity, поэтому
+// «нет authenticator» означает «нет полномочий», а не «всё можно».
 func (s *Server) authorize(r *http.Request, permission cloudidentity.Permission, role cloudidentity.Role) error {
-	if s.authenticator == nil {
-		return nil
-	}
 	session, ok := s.requestSession(r)
 	if !ok {
 		return errors.New("требуется web session")
@@ -211,43 +241,90 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
+// decisionCommand — тело approval-решения. Ни actor, ни роль в нём нет:
+// и то, и другое — свойства аутентифицированного субъекта. Строгий декодер
+// отвергает старую форму с "actor_id"/"actor_role" как unknown field, чтобы
+// клиент, который всё ещё их шлёт, получил явный отказ, а не молчаливое
+// игнорирование объявленной им роли.
 type decisionCommand struct {
-	ActorID     string `json:"actor_id"`
-	ActorRole   string `json:"actor_role"`
 	Action      string `json:"action"`
 	Comment     string `json:"comment,omitempty"`
 	SubjectHash string `json:"subject_hash"`
 }
 
 func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requestSession(r)
+	if !ok {
+		http.Error(w, "требуется web session", http.StatusUnauthorized)
+		return
+	}
 	var command decisionCommand
 	if err := decodeCommand(w, r, &command); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	actorID := command.ActorID
-	if s.authenticator != nil {
-		role := cloudidentity.Role(command.ActorRole)
+	runID, approvalID := chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID")
+	pending, err := s.pendingApproval(runID, approvalID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	roles := decidableRoles(session.Principal, pending)
+	if len(roles) == 0 {
+		http.Error(w, "principal не имеет ни одной роли, требуемой этим approval", http.StatusForbidden)
+		return
+	}
+	var value approval.PendingApproval
+	for _, role := range roles {
 		if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		session, _ := s.requestSession(r)
-		actorID = session.Principal.ActorID
-	}
-	value, err := s.controller.Decide(
-		chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"),
-		approval.Decision{
-			ActorID: actorID, ActorRole: command.ActorRole,
+		value, err = s.controller.Decide(runID, approvalID, approval.Decision{
+			ActorID: session.Principal.ActorID, ActorRole: string(role),
 			Action: command.Action, Comment: command.Comment,
 			SubjectHash: command.SubjectHash,
-		},
-	)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 	}
 	writeJSONResponse(w, http.StatusOK, value)
+}
+
+// pendingApproval находит approval по exact ID. Роль решения выводится из
+// его RequiredRoles, поэтому approval нужно прочитать до записи.
+func (s *Server) pendingApproval(runID, approvalID string) (approval.PendingApproval, error) {
+	values, err := s.controller.Approvals(runID)
+	if err != nil {
+		return approval.PendingApproval{}, err
+	}
+	for _, value := range values {
+		if value.ID == approvalID {
+			return value, nil
+		}
+	}
+	return approval.PendingApproval{}, errors.New("approval не найден")
+}
+
+// decidableRoles — роли, которыми principal вправе закрыть этот approval:
+// пересечение его ролей с RequiredRoles перехода. Порядок и правило выбора
+// повторяют локальный CLI-путь (pkg/pipeline/approvals.go): quorum any
+// закрывается одной ролью, quorum all — всеми, которые у actor есть.
+// Пустое пересечение означает отказ: роль нельзя ни объявить, ни выбрать
+// вне того, что подтвердила аутентификация.
+func decidableRoles(principal cloudidentity.Principal, value approval.PendingApproval) []cloudidentity.Role {
+	roles := make([]cloudidentity.Role, 0, len(value.RequiredRoles))
+	for _, required := range value.RequiredRoles {
+		if role := cloudidentity.Role(strings.TrimSpace(required)); principal.Has(role) {
+			roles = append(roles, role)
+		}
+	}
+	if value.Quorum != approval.QuorumAll && len(roles) > 1 {
+		roles = roles[:1]
+	}
+	return roles
 }
 
 func decodeCommand(w http.ResponseWriter, r *http.Request, destination any) error {

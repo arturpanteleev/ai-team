@@ -689,7 +689,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	switch outcome {
 	case workflow.RunCompleted, workflow.RunCompletedWithWarnings:
 		if rs.deferredDelivery != nil {
-			if deferredErr := rs.executeDeferredDelivery(); deferredErr != nil {
+			// QS-06: ctx, а не budgetCtx — доставка не отменяется исчерпанным
+			// бюджетом run'а, но остаётся отменяемой сигналом процессу.
+			if deferredErr := rs.executeDeferredDelivery(ctx); deferredErr != nil {
 				return RunResult{RunID: runID, Outcome: outcome}, deferredErr
 			}
 		}

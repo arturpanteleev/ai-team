@@ -909,11 +909,11 @@ func TestDeliverDaemonRejectsAlreadyDeliveredRun(t *testing.T) {
 	runID := filepath.Base(runDir)
 
 	// Повтор доставки невозможен — запись однократная.
-	if _, err := New(nil, nil).DeliverDeferred(runDir, "", dir); err == nil {
+	if _, err := New(nil, nil).DeliverDeferred(context.Background(), runDir, "", dir); err == nil {
 		t.Fatal("повтор доставки уже доставленного run должен быть отклонён")
 	}
 	// Неизвестный run id также отклоняется.
-	if _, err := New(nil, nil).DeliverDeferred(filepath.Join(dir, ".ai-team", "runs", runID+"-nope"), "", dir); err == nil {
+	if _, err := New(nil, nil).DeliverDeferred(context.Background(), filepath.Join(dir, ".ai-team", "runs", runID+"-nope"), "", dir); err == nil {
 		t.Fatal("доставка несуществующего run должна быть отклонена")
 	}
 }
@@ -963,7 +963,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	// Retry-путь CLI: DeliverDeferred разрешает evidence через Resume с
 	// корректным корнем (filepath.Dir(runDir), runID) и доставляет.
 	okService := &fakeDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred позитивный путь: %v", err)
 	}
@@ -990,7 +990,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 		}
 	}
 	// Повторная доставка теперь блокируется (однократная запись).
-	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir); err == nil {
+	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil {
 		t.Fatal("повторная доставка после успеха должна быть отклонена")
 	}
 }
@@ -1157,7 +1157,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	}
 
 	okService := &capturingDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred из control target: %v", err)
 	}
@@ -1197,7 +1197,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 		t.Fatalf("prepared plan в worktree обязан существовать: found=%v err=%v", found, loadErr)
 	}
 	// Повторная доставка блокируется (однократная запись).
-	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(runDir, "", dir); err == nil {
+	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil {
 		t.Fatal("повторная доставка после успеха должна быть отклонена")
 	}
 }

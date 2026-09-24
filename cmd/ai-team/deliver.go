@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
@@ -36,7 +39,12 @@ func cmdDeliver() {
 	requireControlRoot(absolute)
 	runDir := filepath.Join(absolute, ".ai-team", "runs", *runID)
 
-	record, err := pipeline.New(nil, nil).DeliverDeferred(runDir, *feature, absolute)
+	// QS-06: доставка ходит в сеть (push, gh) — Ctrl-C обязан её прерывать,
+	// а не оставлять зависший git/gh держать команду бесконечно.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	record, err := pipeline.New(nil, nil).DeliverDeferred(ctx, runDir, *feature, absolute)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Deliver run %s: %v\n", *runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)

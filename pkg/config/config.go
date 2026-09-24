@@ -41,12 +41,18 @@ type Config struct {
 	// CLI-рантайма, git, gh). Холодный старт CLI-рантайма на порядок дороже
 	// прогретого, поэтому бюджет вынесен в конфигурацию: слишком тесный делает
 	// работоспособный рантайм неотличимым от отсутствующего.
-	PreflightTimeout string             `yaml:"preflight_timeout,omitempty"`
-	Containment      *ContainmentConfig `yaml:"containment,omitempty"`
-	TreeHash         *TreeHashConfig    `yaml:"tree_hash,omitempty"`
-	Budget           *BudgetConfig      `yaml:"budget,omitempty"`
-	Redaction        *RedactionConfig   `yaml:"redaction,omitempty"`
-	Retention        *RetentionConfig   `yaml:"retention,omitempty"`
+	PreflightTimeout string `yaml:"preflight_timeout,omitempty"`
+	// DeliveryTimeout — бюджет всей post-terminal доставки (commit, push,
+	// gh pr view/create). Доставка одобрена человеком и исполняется после
+	// терминального finalize, поэтому её нельзя обрывать бюджетом run'а; но
+	// её внешние команды сетевые, и без собственного дедлайна зависший git/gh
+	// делает контроллер неостанавливаемым (QS-06).
+	DeliveryTimeout string             `yaml:"delivery_timeout,omitempty"`
+	Containment     *ContainmentConfig `yaml:"containment,omitempty"`
+	TreeHash        *TreeHashConfig    `yaml:"tree_hash,omitempty"`
+	Budget          *BudgetConfig      `yaml:"budget,omitempty"`
+	Redaction       *RedactionConfig   `yaml:"redaction,omitempty"`
+	Retention       *RetentionConfig   `yaml:"retention,omitempty"`
 }
 
 // BudgetConfig — глобальные жёсткие лимиты run (P1-7): total wall-time и
@@ -80,6 +86,29 @@ func (c *Config) EffectivePreflightTimeout() time.Duration {
 	duration, err := time.ParseDuration(c.PreflightTimeout)
 	if err != nil || duration <= 0 {
 		return DefaultPreflightTimeout
+	}
+	return duration
+}
+
+// DefaultDeliveryTimeout — бюджет всей доставки по умолчанию. Замер доставки
+// до живого remote — 2.90 с; 10 минут дают двухсоткратный запас (медленная
+// сеть, большой push, холодный `gh auth`) и при этом превращают зависший
+// git/gh из неостанавливаемого ожидания в ошибку с внятной причиной.
+// Отдельный бюджет на команду не вводится намеренно: шагов около двадцати,
+// а человеку важен предсказуемый потолок операции целиком.
+const DefaultDeliveryTimeout = 10 * time.Minute
+
+// EffectiveDeliveryTimeout возвращает бюджет доставки. Пустое или
+// непарсящееся значение даёт канонический дефолт: валидация конфига уже
+// отвергает некорректные значения, поэтому здесь fallback, а не ошибка.
+// Ноль здесь невозможен by design — доставка без дедлайна и есть дефект QS-06.
+func (c *Config) EffectiveDeliveryTimeout() time.Duration {
+	if c == nil || strings.TrimSpace(c.DeliveryTimeout) == "" {
+		return DefaultDeliveryTimeout
+	}
+	duration, err := time.ParseDuration(c.DeliveryTimeout)
+	if err != nil || duration <= 0 {
+		return DefaultDeliveryTimeout
 	}
 	return duration
 }
@@ -283,7 +312,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "pipeline": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
-		"workflow": true, "containment": true,
+		"delivery_timeout": true,
+		"workflow":         true, "containment": true,
 		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
 	}, "config"); err != nil {
 		return err
@@ -296,6 +326,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Effort           string           `yaml:"effort"`
 		StageTimeout     string           `yaml:"stage_timeout"`
 		PreflightTimeout string           `yaml:"preflight_timeout"`
+		DeliveryTimeout  string           `yaml:"delivery_timeout"`
 		Workflow         *WorkflowConfig  `yaml:"workflow"`
 		TreeHash         *TreeHashConfig  `yaml:"tree_hash"`
 		Budget           *BudgetConfig    `yaml:"budget"`
@@ -316,6 +347,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
 	c.PreflightTimeout = raw.PreflightTimeout
+	c.DeliveryTimeout = raw.DeliveryTimeout
 	c.Workflow = raw.Workflow
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
@@ -576,6 +608,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	if c.PreflightTimeout != "" {
 		if duration, err := time.ParseDuration(c.PreflightTimeout); err != nil || duration <= 0 {
 			errs = append(errs, fmt.Sprintf("preflight_timeout %q не парсится (пример: 60s)", c.PreflightTimeout))
+		}
+	}
+	if c.DeliveryTimeout != "" {
+		if duration, err := time.ParseDuration(c.DeliveryTimeout); err != nil || duration <= 0 {
+			errs = append(errs, fmt.Sprintf("delivery_timeout %q не парсится (пример: 10m)", c.DeliveryTimeout))
 		}
 	}
 	validate(isOneOf(c.Effort, "", "low", "medium", "high"),

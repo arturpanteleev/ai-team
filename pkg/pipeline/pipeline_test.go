@@ -177,6 +177,11 @@ type scriptedRuntime struct {
 	targetDir string
 	usage     *runtime.Usage
 	usagePer  map[string]*runtime.Usage
+	// deadline первого Execute: стадия видит min(stage timeout, run budget),
+	// поэтому по нему проверяется, что бюджет run'а реально вооружён.
+	firstDeadline    time.Time
+	firstHasDeadline bool
+	deadlineSeen     bool
 }
 
 func newScripted() *scriptedRuntime {
@@ -200,6 +205,10 @@ func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *r
 	r.executed = append(r.executed, a.Name)
 	r.calls[a.Name]++
 	r.targetDir = task.TargetDir
+	if !r.deadlineSeen {
+		r.deadlineSeen = true
+		r.firstDeadline, r.firstHasDeadline = ctx.Deadline()
+	}
 	if r.usagePer != nil {
 		r.usage = r.usagePer[a.Name]
 	}

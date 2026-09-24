@@ -64,6 +64,26 @@ const (
 	DefaultBudgetMaxAttempts = 100
 )
 
+// DefaultBudgetMaxWallTimeDuration — тот же дефолт в виде длительности.
+// Отдельная константа, а не ParseDuration в рантайме: строка нужна для
+// диагностики ("превышен max_wall_time 24h"), длительность — для таймера, и
+// расхождение между ними сторожит TestDefaultBudgetWallTimeConstantsAgree.
+//
+// Почему 24 часа. Внутри бюджета ждут не только агенты, но и человек: run
+// целиком (включая approval-гейты) исполняется под этим ctx, поэтому лимит
+// обязан переживать ночь между «запустил вечером» и «подтвердил утром».
+// Более тесный дефолт убивал бы живые run'ы, ожидающие оператора; 24 часа
+// ограничивают именно зависший run, который иначе бесконечно держит workspace
+// lock и candidate-worktree.
+const DefaultBudgetMaxWallTimeDuration = 24 * time.Hour
+
+// DefaultStageTimeout — бюджет одной стадии по умолчанию. То же значение,
+// которое `ai-team init` пишет в сгенерированный конфиг (stage_timeout: 30m);
+// здесь оно продублировано на уровне кода, потому что конфиг, написанный
+// руками, этого поля может не содержать, а стадия без таймаута — это зависший
+// CLI-рантайм без верхней границы.
+const DefaultStageTimeout = 30 * time.Minute
+
 // DefaultPreflightTimeout — бюджет одной внешней команды preflight по
 // умолчанию. Замер холодного старта opencode (рантайм по умолчанию) — 2.76 с
 // против 0.29 с прогретого; 60 с дают двадцатикратный запас и при этом не
@@ -84,15 +104,23 @@ func (c *Config) EffectivePreflightTimeout() time.Duration {
 	return duration
 }
 
-// EffectiveMaxWallTime возвращает wall-time лимит: явный или канонический
-// дефолт. Значение валидно (Validate вызывается до запуска).
+// EffectiveMaxWallTime возвращает wall-time лимит и его человекочитаемую
+// метку: явные или канонический дефолт. Нулевая длительность не возвращается
+// никогда — вызывающий вооружает таймер безусловно, иначе конфиг без секции
+// `budget` давал бы run без верхней границы времени вообще.
+//
+// Непарсящееся или неположительное значение тоже даёт дефолт, а не ноль:
+// Validate отвергает такие конфиги до запуска, так что сюда они попадают
+// только программно, и падать в «без лимита» здесь опаснее, чем подставить
+// канонический. Метка при этом возвращается дефолтная — сообщать «превышен
+// max_wall_time <мусор>» при работающем 24-часовом таймере было бы ложью.
 func (bc *BudgetConfig) EffectiveMaxWallTime() (time.Duration, string) {
 	if bc == nil || strings.TrimSpace(bc.MaxWallTime) == "" {
-		return time.Duration(0), DefaultBudgetMaxWallTime
+		return DefaultBudgetMaxWallTimeDuration, DefaultBudgetMaxWallTime
 	}
 	d, err := time.ParseDuration(bc.MaxWallTime)
-	if err != nil {
-		return time.Duration(0), bc.MaxWallTime
+	if err != nil || d <= 0 {
+		return DefaultBudgetMaxWallTimeDuration, DefaultBudgetMaxWallTime
 	}
 	return d, bc.MaxWallTime
 }
@@ -536,12 +564,27 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 	return nil
 }
 
-// StageTimeoutFor возвращает распарсенный таймаут этапа (0 — без таймаута).
+// StageTimeoutFor возвращает таймаут этапа: явный (per-agent `timeout` или
+// унаследованный глобальный `stage_timeout`) либо DefaultStageTimeout.
+// Результат всегда положителен: «без таймаута» как состояние убрано — конфиг,
+// написанный руками без stage_timeout, иначе шёл бы и без бюджета стадии, и
+// (до QS-09) без бюджета run'а, то есть без верхней границы вообще.
+//
+// Ошибка сохранена для непарсящегося значения: Validate отвергает такие
+// конфиги до запуска, и молча подменять написанное пользователем число другим
+// бюджетом — хуже, чем остановиться с явной диагностикой.
 func (ac *AgentConfig) StageTimeoutFor() (time.Duration, error) {
-	if ac.Timeout == "" {
-		return 0, nil
+	if ac == nil || strings.TrimSpace(ac.Timeout) == "" {
+		return DefaultStageTimeout, nil
 	}
-	return time.ParseDuration(ac.Timeout)
+	duration, err := time.ParseDuration(ac.Timeout)
+	if err != nil {
+		return 0, err
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("timeout %q должен быть положительным", ac.Timeout)
+	}
+	return duration, nil
 }
 
 // AgentLookup отвечает, существует ли агент (реализуется registry).

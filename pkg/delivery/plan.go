@@ -105,7 +105,7 @@ func (p Plan) Validate() error {
 			file == "." || file == ".." || strings.HasPrefix(file, "../") {
 			return fmt.Errorf("delivery plan: file %q должен быть нормализованным workspace-relative путём", file)
 		}
-		if file == ".git" || strings.HasPrefix(file, ".git/") || file == ".ai-team" || strings.HasPrefix(file, ".ai-team/") {
+		if isControlPath(file) {
 			return fmt.Errorf("delivery plan: control path %q запрещён", file)
 		}
 		if seen[file] {
@@ -219,6 +219,41 @@ func WritePlan(filePath string, plan Plan) error {
 	}
 	cleanup = false
 	return nil
+}
+
+// isControlPath запрещает плану целиться в служебные директории. Файл под
+// ".git/" — это исполнение произвольного кода у каждого, кто сделает pull
+// (хватает одного hooks/pre-commit), а ".ai-team/" — состояние самого прогона,
+// которым агент мог бы переписать собственную историю и evidence.
+//
+// ".git" запрещён на любом уровне вложенности: вложенная рабочая копия —
+// такая же control-директория, и hook из неё выполняется так же. ".ai-team"
+// проверяется только в корне: глубже это обычная директория пользователя.
+func isControlPath(file string) bool {
+	for index, segment := range strings.Split(file, "/") {
+		segment = controlSegment(segment)
+		if segment == ".git" || segment == "git~1" {
+			return true
+		}
+		if index == 0 && segment == ".ai-team" {
+			return true
+		}
+	}
+	return false
+}
+
+// controlSegment приводит компонент пути к тому имени, которое в итоге увидит
+// файловая система. Сравнение «как записано» пропускало бы любую другую запись
+// того же control path: APFS и NTFS сравнивают имена без учёта регистра
+// (".GIT/hooks/pre-commit"), Windows отбрасывает хвостовые точки и пробелы
+// (".git."), NTFS открывает саму директорию через alternate data stream
+// (".git::$INDEX_ALLOCATION") и через 8.3-имя ("git~1"). Тот же набор
+// вариантов закрывают core.protectHFS/protectNTFS в самом git.
+func controlSegment(segment string) string {
+	if index := strings.Index(segment, ":"); index >= 0 {
+		segment = segment[:index]
+	}
+	return strings.ToLower(strings.TrimRight(segment, ". "))
 }
 
 func validBranch(value string) bool {

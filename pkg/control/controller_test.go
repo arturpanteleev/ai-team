@@ -82,6 +82,36 @@ func TestControllerStartAppliesPreflightGate(t *testing.T) {
 	}
 }
 
+func TestControllerAllowsEnqueueWhenReadinessIsUnknown(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	controller, err := New(engine, t.TempDir(), WithPreflight(fakePreflight{report: preflight.Report{Unknown: true}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := controller.Start("feature", "задача")
+	if err != nil {
+		t.Fatalf("unknown readiness blocked enqueue: %v", err)
+	}
+	<-engine.started
+	close(engine.release)
+	// Start returns before the process-local worker releases the workspace lock.
+	// Wait for removal from active: run() only deletes that entry after closing
+	// the lock, so t.TempDir cannot race the asynchronous cleanup.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		controller.mu.Lock()
+		_, active := controller.active[runID]
+		controller.mu.Unlock()
+		if !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("controller worker did not finish after releasing the fake engine")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestControllerStartAndCancelActiveWorker(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	controller, err := New(engine, t.TempDir())

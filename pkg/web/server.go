@@ -35,6 +35,7 @@ const sessionCookieName = "ai_team_session"
 
 type RunController interface {
 	Start(feature, task string) (string, error)
+	StartWithAdmission(feature, task string, admit func(runID string) error) (string, error)
 	Resume(runID string) error
 	Cancel(runID string) error
 	Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
@@ -194,7 +195,9 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.controller.Preflight(r.Context()))
+	report := s.controller.Preflight(r.Context())
+	report.Readiness = preflight.ReadinessOf(report)
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -217,23 +220,60 @@ func (s *Server) ListenAndServe(addr string) error {
 func (s *Server) RecordAdmissionFailure(runID, cause string) {
 	now := time.Now().UTC()
 	existing, err := s.store.GetPipelineRunByRunID(runID)
-	if err == nil && existing != nil {
-		existing.Status = "failed"
-		existing.CompletedAt = &now
-		if updateErr := s.store.UpdatePipelineRun(existing); updateErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", updateErr)
+	if err != nil || existing == nil {
+		run := &store.PipelineRun{RunID: runID, Feature: "unknown", Status: "queued", StartedAt: now}
+		if createErr := s.store.CreatePipelineRun(run); createErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", createErr)
+			return
 		}
-		return
 	}
-	run := &store.PipelineRun{RunID: runID, Feature: "unknown", Status: "failed", StartedAt: now, CompletedAt: &now}
-	if err := s.store.CreatePipelineRun(run); err != nil {
+	changed, err := s.store.MarkRunAdmissionFailure(runID, cause, now)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", err)
 		return
 	}
-	_ = s.store.AppendEvent(&store.Event{
-		RunID: runID, Sequence: 1, Type: "run_finished", Timestamp: now,
-		DataJSON: fmt.Sprintf(`{"status":"failed","error":%q}`, cause),
-	})
+	if !changed {
+		// A scheduler recovery may already have correlated the durable queue job.
+		// Its queue state is now authoritative and must not be overwritten by a
+		// late foreground enqueue error.
+		return
+	}
+	s.appendRunEvent(runID, "queue_failed", now, map[string]any{"status": "failed", "error": cause})
+}
+
+// RecordQueuedJob connects a scheduler row to the matching visible run.
+func (s *Server) RecordQueuedJob(runID string, queueJobID int64) error {
+	if err := s.store.MarkRunQueued(runID, queueJobID); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ queue projection: %v\n", err)
+		return err
+	}
+	status := "queued"
+	if run, err := s.store.GetPipelineRunByRunID(runID); err == nil && run != nil {
+		status = run.Status
+	}
+	s.appendRunEvent(runID, "queue_updated", time.Now().UTC(), map[string]any{"queue_job_id": queueJobID, "status": status})
+	return nil
+}
+
+// RecordQueueStatus projects worker-side preflight and execution outcomes that
+// happen in a separate process after HTTP admission.
+func (s *Server) RecordQueueStatus(queueJobID int64, status, cause string) {
+	now := time.Now().UTC()
+	runID, changed, err := s.store.UpdateQueueProjection(queueJobID, status, cause, now)
+	if err != nil || runID == "" || !changed {
+		return
+	}
+	s.appendRunEvent(runID, "queue_updated", now, map[string]any{"queue_job_id": queueJobID, "status": status, "error": cause})
+}
+
+func (s *Server) appendRunEvent(runID, eventType string, at time.Time, data any) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	if err := s.store.AppendEventNext(&store.Event{RunID: runID, Type: eventType, Timestamp: at, DataJSON: string(encoded)}); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ run event projection: %v\n", err)
+	}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

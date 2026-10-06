@@ -5,9 +5,10 @@ import styles from './PipelineCard.module.css';
 
 interface PipelineCardProps {
   run: PipelineRun;
+  onCancel?: () => void;
 }
 
-export function PipelineCard({ run }: PipelineCardProps) {
+export function PipelineCard({ run, onCancel }: PipelineCardProps) {
   const navigate = useNavigate();
 
   const duration = run.completed_at
@@ -30,6 +31,11 @@ export function PipelineCard({ run }: PipelineCardProps) {
       <div className={styles.footer}>
         <span>{time}</span>
         <span className={styles.duration}>{duration}</span>
+        {run.queue_job_id ? <span>Queue #{run.queue_job_id}</span> : null}
+        {run.error ? <span role="alert">{run.error}</span> : null}
+        {run.status === 'queued' && onCancel ? <button onClick={(event) => {
+          event.stopPropagation(); onCancel();
+        }}>Отменить</button> : null}
       </div>
     </div>
   );

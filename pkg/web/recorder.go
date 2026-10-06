@@ -46,11 +46,16 @@ func (r *StoreRecorder) RunStarted(runID, feature, configSnapshot string, starte
 	run := &store.PipelineRun{
 		RunID: runID, Feature: feature, Status: "running", StartedAt: startedAt, ConfigSnapshot: configSnapshot,
 	}
-	if err := r.store.CreatePipelineRun(run); err != nil {
+	if err := r.store.StartAdmittedRun(run); err != nil {
 		r.warn("create run", err)
 		return
 	}
-	r.runID, r.runUID, r.sequence = run.ID, runID, 0
+	sequence, err := r.store.LatestRunEventSequence(runID)
+	if err != nil {
+		r.warn("start event sequence", err)
+		return
+	}
+	r.runID, r.runUID, r.sequence = run.ID, runID, sequence
 	r.event("run_started", "", startedAt, map[string]any{"feature": feature})
 }
 
@@ -211,13 +216,14 @@ func (r *StoreRecorder) RunFinished(runID, status string, completedAt time.Time)
 }
 
 func (r *StoreRecorder) event(eventType, attemptID string, timestamp time.Time, data any) {
-	r.sequence++
 	event := &store.Event{
-		RunID: r.runUID, Sequence: r.sequence, Type: eventType, AttemptID: attemptID,
+		RunID: r.runUID, Type: eventType, AttemptID: attemptID,
 		Timestamp: timestamp, DataJSON: marshalJSON(data),
 	}
-	if err := r.store.AppendEvent(event); err != nil {
+	if err := r.store.AppendEventNext(event); err != nil {
 		r.warn("append event", err)
+	} else {
+		r.sequence = event.Sequence
 	}
 }
 

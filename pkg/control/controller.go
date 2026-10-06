@@ -44,11 +44,12 @@ func WithPreflight(checker PreflightChecker) Option {
 }
 
 type Controller struct {
-	engine      runEngine
-	target      string
-	approvals   *approval.Store
-	preflight   PreflightChecker
-	failureSink FailureSink
+	engine        runEngine
+	target        string
+	approvals     *approval.Store
+	preflight     PreflightChecker
+	failureSink   FailureSink
+	admissionSink func(string, int64) error
 
 	mu     sync.Mutex
 	active map[string]*worker
@@ -73,11 +74,25 @@ func New(engine runEngine, target string, options ...Option) (*Controller, error
 }
 
 func (c *Controller) Start(feature, task string) (string, error) {
+	return c.start(feature, task, nil)
+}
+
+// StartWithAdmission persists the caller's visible admission record before a
+// worker can enqueue or execute the run. A failed admission therefore never
+// leaves a scheduler job behind a 503 response.
+func (c *Controller) StartWithAdmission(feature, task string, admit func(runID string) error) (string, error) {
+	if admit == nil {
+		return "", errors.New("admission callback обязателен")
+	}
+	return c.start(feature, task, admit)
+}
+
+func (c *Controller) start(feature, task string, admit func(runID string) error) (string, error) {
 	if !workflow.ValidFeature(feature) || strings.TrimSpace(task) == "" {
 		return "", errors.New("feature и непустой task обязательны")
 	}
 	if c.preflight != nil {
-		if report := c.Preflight(context.Background()); !report.Ready {
+		if report := c.Preflight(context.Background()); !report.Ready && !report.Unknown {
 			return "", report.Error()
 		}
 	}
@@ -91,6 +106,12 @@ func (c *Controller) Start(feature, task string) (string, error) {
 	if err != nil {
 		_ = lock.Close()
 		return "", err
+	}
+	if admit != nil {
+		if err := admit(runID); err != nil {
+			_ = lock.Close()
+			return "", fmt.Errorf("run admission: %w", err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	active := &worker{cancel: cancel, cancelRequested: make(chan struct{})}
@@ -181,7 +202,16 @@ func (c *Controller) Approvals(runID string) ([]approval.PendingApproval, error)
 }
 
 func (c *Controller) run(runID string, ctx context.Context, lock *evidence.WorkspaceLock, execute func(context.Context) (pipeline.RunResult, error)) {
-	_, execErr := execute(ctx)
+	result, execErr := execute(ctx)
+	if execErr == nil && result.QueueJobID > 0 && c.admissionSink != nil {
+		if err := c.admissionSink(runID, result.QueueJobID); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ queue identity projection for run %s: %v\n", runID, err)
+		} else if activator, ok := c.engine.(interface{ ActivateQueuedJob(int64) error }); ok {
+			if err := activator.ActivateQueuedJob(result.QueueJobID); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ queue activation for run %s: %v\n", runID, err)
+			}
+		}
+	}
 	if lock != nil {
 		_ = lock.Close()
 	}
@@ -262,3 +292,6 @@ func WithFailureSink(sink FailureSink) Option {
 // SetFailureSink доустанавливает sink после сборки (web-сервер создаёт
 // SQLite store позже контроллера).
 func (c *Controller) SetFailureSink(sink FailureSink) { c.failureSink = sink }
+
+// SetAdmissionSink links the queue's durable job identity to its run projection.
+func (c *Controller) SetAdmissionSink(sink func(string, int64) error) { c.admissionSink = sink }

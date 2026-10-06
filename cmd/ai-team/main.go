@@ -1516,9 +1516,24 @@ func cmdWeb() {
 	// Фоновые ошибки run не должны исчезать после 202: фиксируем их в
 	// SQLite projection дашборда.
 	runController.SetFailureSink(srv.RecordAdmissionFailure)
+	runController.SetAdmissionSink(srv.RecordQueuedJob)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if schedulerQueue != nil {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				reconcileSchedulerQueueOnce(recorderStore, schedulerQueue, srv, target)
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		// graceful shutdown best-effort: при его неудаче отложенный srv.Close() закрывает сервер принудительно.
@@ -1532,5 +1547,59 @@ func cmdWeb() {
 	logging.Printf("Web UI available at http://%s\n", addr)
 	if err := srv.ListenAndServe(addr); err != nil {
 		fatal("Ошибка сервера: %v", err)
+	}
+}
+
+// reconcileSchedulerQueueOnce links durable dashboard admissions to scheduler
+// jobs and projects early worker state. Keeping one reconciliation pass in a
+// function lets tests exercise the exact startup recovery path deterministically.
+func reconcileSchedulerQueueOnce(recorderStore *webstore.Store, schedulerQueue *scheduler.Queue, srv *web.Server, target string) {
+	queuedRuns, listErr := recorderStore.QueuedRunIDs()
+	if listErr != nil {
+		return
+	}
+	for _, run := range queuedRuns {
+		job, exists, getErr := schedulerQueue.Get(run.QueueJobID)
+		if getErr == nil && exists {
+			if job.Status == scheduler.StatusPending {
+				if schedulerQueue.Activate(job.ID) != nil {
+					continue
+				}
+				job, exists, getErr = schedulerQueue.Get(job.ID)
+			}
+			if getErr == nil && exists {
+				srv.RecordQueueStatus(job.ID, string(job.Status), job.Error)
+			}
+		}
+	}
+	admissions, admissionErr := recorderStore.PendingAdmissions()
+	if admissionErr != nil {
+		return
+	}
+	for _, admission := range admissions {
+		var command struct {
+			Feature string `json:"feature"`
+			Task    string `json:"task"`
+		}
+		if json.Unmarshal([]byte(admission.ConfigSnapshot), &command) != nil || command.Feature == "" || strings.TrimSpace(command.Task) == "" {
+			continue
+		}
+		jobID, ensureErr := schedulerQueue.EnsureStartJob(worker.Job{
+			SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
+			RunID: admission.RunID, TargetDir: target, Feature: command.Feature, Task: command.Task,
+		})
+		if ensureErr != nil {
+			continue
+		}
+		if srv.RecordQueuedJob(admission.RunID, jobID) != nil {
+			continue
+		}
+		if schedulerQueue.Activate(jobID) != nil {
+			continue
+		}
+		job, exists, getErr := schedulerQueue.Get(jobID)
+		if getErr == nil && exists {
+			srv.RecordQueueStatus(job.ID, string(job.Status), job.Error)
+		}
 	}
 }

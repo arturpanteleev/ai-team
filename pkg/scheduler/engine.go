@@ -38,9 +38,13 @@ func (e *QueueEngine) Start(_ context.Context, config pipeline.RunConfig) (pipel
 	if !sameTarget(config.TargetDir, e.target) {
 		return pipeline.RunResult{}, errors.New("scheduler start target mismatch")
 	}
-	_, err := e.queue.Enqueue(job)
-	return pipeline.RunResult{RunID: config.RunID}, err
+	// Recovery may have already persisted this run's pending job. Foreground
+	// admission and the reconciler must converge on the same queue identity.
+	jobID, err := e.queue.EnsureStartJob(job)
+	return pipeline.RunResult{RunID: config.RunID, QueueJobID: jobID}, err
 }
+
+func (e *QueueEngine) ActivateQueuedJob(jobID int64) error { return e.queue.Activate(jobID) }
 
 func (e *QueueEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
 	job := worker.Job{
@@ -51,8 +55,8 @@ func (e *QueueEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (p
 	if !sameTarget(config.TargetDir, e.target) {
 		return pipeline.RunResult{}, errors.New("scheduler resume target mismatch")
 	}
-	_, err := e.queue.Enqueue(job)
-	return pipeline.RunResult{RunID: config.RunID}, err
+	jobID, err := e.queue.Enqueue(job)
+	return pipeline.RunResult{RunID: config.RunID, QueueJobID: jobID}, err
 }
 
 func (e *QueueEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, error) {

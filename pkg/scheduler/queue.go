@@ -35,6 +35,7 @@ type Queue struct {
 type Status string
 
 const (
+	StatusPending   Status = "pending"
 	StatusQueued    Status = "queued"
 	StatusRunning   Status = "running"
 	StatusCompleted Status = "completed"
@@ -93,9 +94,6 @@ func Open(path string, options Options) (*Queue, error) {
 			created_ms INTEGER NOT NULL,
 			updated_ms INTEGER NOT NULL
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS worker_jobs_active_identity
-		 ON worker_jobs(run_id, operation)
-		 WHERE status IN ('queued', 'running')`,
 		`CREATE INDEX IF NOT EXISTS worker_jobs_claim
 		 ON worker_jobs(status, created_ms, id)`,
 	} {
@@ -105,12 +103,94 @@ func Open(path string, options Options) (*Queue, error) {
 			return nil, fmt.Errorf("scheduler migration: %w", err)
 		}
 	}
+	if err := ensureActiveIdentityIndex(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("scheduler queue identity migration: %w", err)
+	}
 	return &Queue{db: db, options: options}, nil
+}
+
+func ensureActiveIdentityIndex(db *sql.DB) error {
+	var definition sql.NullString
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'worker_jobs_active_identity'`).Scan(&definition)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if definition.Valid && strings.Contains(definition.String, "'pending'") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS worker_jobs_active_identity`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX worker_jobs_active_identity ON worker_jobs(run_id, operation) WHERE status IN ('pending', 'queued', 'running')`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (q *Queue) Close() error { return q.db.Close() }
 
 func (q *Queue) Enqueue(job worker.Job) (int64, error) {
+	return q.enqueue(job, string(StatusQueued))
+}
+
+// EnqueuePending persists a job without making it claimable. Admission code
+// activates it only after the visible run projection has its queue identity.
+func (q *Queue) EnqueuePending(job worker.Job) (int64, error) {
+	return q.enqueue(job, "pending")
+}
+
+// EnsureStartJob makes start admission retryable after a process crash. It
+// returns the existing durable job for this run or creates one non-claimable
+// until its projection is correlated.
+func (q *Queue) EnsureStartJob(job worker.Job) (int64, error) {
+	if job.Operation != worker.OperationStart {
+		return 0, errors.New("EnsureStartJob requires start operation")
+	}
+	if err := job.Validate(job.TargetDir); err != nil {
+		return 0, err
+	}
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return 0, err
+	}
+	now := q.options.Now().UTC().UnixMilli()
+	// The partial unique index is the serialization point shared by foreground
+	// admission and startup reconciliation. Insert first, then read the active
+	// identity in the same transaction so simultaneous callers converge on one
+	// durable queue ID instead of racing through ListRun + INSERT.
+	tx, err := q.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(
+		`INSERT INTO worker_jobs
+		 (run_id, operation, target_dir, payload_json, status, created_ms, updated_ms)
+		 VALUES (?, ?, ?, ?, 'pending', ?, ?)
+		 ON CONFLICT(run_id, operation) WHERE status IN ('pending', 'queued', 'running') DO NOTHING`,
+		job.RunID, job.Operation, job.TargetDir, string(payload), now, now,
+	); err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM worker_jobs
+		WHERE run_id = ? AND operation = ? AND status IN ('pending', 'queued', 'running')
+		ORDER BY id DESC LIMIT 1`, job.RunID, job.Operation).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (q *Queue) enqueue(job worker.Job, status string) (int64, error) {
 	if err := job.Validate(job.TargetDir); err != nil {
 		return 0, err
 	}
@@ -122,8 +202,8 @@ func (q *Queue) Enqueue(job worker.Job) (int64, error) {
 	result, err := q.db.Exec(
 		`INSERT INTO worker_jobs
 		 (run_id, operation, target_dir, payload_json, status, created_ms, updated_ms)
-		 VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
-		job.RunID, job.Operation, job.TargetDir, string(payload), now, now,
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		job.RunID, job.Operation, job.TargetDir, string(payload), status, now, now,
 	)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -132,6 +212,27 @@ func (q *Queue) Enqueue(job worker.Job) (int64, error) {
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func (q *Queue) Activate(id int64) error {
+	result, err := q.db.Exec(`UPDATE worker_jobs SET status = 'queued', updated_ms = ? WHERE id = ? AND status = 'pending'`, q.options.Now().UTC().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		var status string
+		if err := q.db.QueryRow(`SELECT status FROM worker_jobs WHERE id = ?`, id).Scan(&status); err != nil {
+			return err
+		}
+		if status != string(StatusQueued) && status != string(StatusRunning) {
+			return fmt.Errorf("scheduler job %d cannot be activated from %s", id, status)
+		}
+	}
+	return nil
 }
 
 func (q *Queue) Claim(ctx context.Context, owner string) (Record, bool, error) {

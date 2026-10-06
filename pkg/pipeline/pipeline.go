@@ -142,8 +142,9 @@ type RunConfig struct {
 }
 
 type RunResult struct {
-	RunID   string
-	Outcome workflow.RunOutcome
+	RunID      string
+	QueueJobID int64
+	Outcome    workflow.RunOutcome
 }
 
 func (p *Pipeline) Agents() []string {

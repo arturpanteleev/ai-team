@@ -78,6 +78,15 @@ func cmdExport() {
 			Message: "Секреты найдены, но политика разрешает экспорт",
 			Data:    map[string]any{"run_id": runID, "violations": len(report.Violations)}})
 	}
+	// QS-08: при отключённом блокере непросканированные участки тоже обязаны
+	// быть названы — экспорт уходит наружу без подтверждённой чистоты.
+	if len(report.Unscanned) > 0 {
+		printUnscanned(report.Unscanned)
+		logging.Emit(logging.Record{Level: "warn", Command: "export", Type: "redact_unscanned",
+			Message: "Часть evidence не просканирована, чистота не подтверждена",
+			Data: map[string]any{"run_id": runID, "unscanned": countUnscanned(report.Unscanned),
+				"files": len(report.Unscanned)}})
+	}
 
 	outDir := *out
 	if outDir == "" {

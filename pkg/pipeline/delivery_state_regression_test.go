@@ -98,11 +98,11 @@ func TestDeferredDeliveryResolvesRealPreparedState(t *testing.T) {
 	// "prepared plan отсутствует" уже отклоняется как чужой: "вне control
 	// target". Оба — fail-closed одного смысла.
 	wrongTarget := t.TempDir()
-	if _, err := New(nil, nil).DeliverDeferred(runDir, "", wrongTarget); err == nil || !(strings.Contains(err.Error(), "prepared plan отсутствует") || strings.Contains(err.Error(), "вне control target")) {
+	if _, err := New(nil, nil).DeliverDeferred(context.Background(), runDir, "", wrongTarget); err == nil || !(strings.Contains(err.Error(), "prepared plan отсутствует") || strings.Contains(err.Error(), "вне control target")) {
 		t.Fatalf("чужим target должен быть fail-closed, got: %v", err)
 	}
 
-	record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred по реальному state: %v", err)
 	}

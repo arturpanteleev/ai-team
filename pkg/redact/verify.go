@@ -28,18 +28,29 @@ func (v Violation) Error() string {
 	return fmt.Sprintf("%d secret-находок (%s)", len(v.Findings), strings.Join(kinds, ", "))
 }
 
-// FileResult — находки в одном файле относительно корня сканирования.
+// FileResult — находки в одном файле относительно корня сканирования плюс
+// участки этого файла, которые сканер не разобрал (QS-08).
 type FileResult struct {
-	Path     string    `json:"path"`
-	Findings []Finding `json:"findings"`
+	Path      string      `json:"path"`
+	Findings  []Finding   `json:"findings"`
+	Unscanned []Unscanned `json:"unscanned,omitempty"`
+}
+
+// UnscannedFile — непросканированные участки одного файла в отчёте (QS-08).
+type UnscannedFile struct {
+	Path  string      `json:"path"`
+	Items []Unscanned `json:"items"`
 }
 
 // Report — детерминированный (стабильно упорядоченный) результат проверки.
+// Unscanned — не косметика: fail-closed вердикт «clean» имеет силу только
+// при пустом Unscanned, иначе часть содержимого просто не смотрели.
 type Report struct {
-	Verdict    string      `json:"verdict"`
-	Files      int         `json:"files_scanned"`
-	Bytes      int64       `json:"bytes_scanned"`
-	Violations []Violation `json:"violations,omitempty"`
+	Verdict    string          `json:"verdict"`
+	Files      int             `json:"files_scanned"`
+	Bytes      int64           `json:"bytes_scanned"`
+	Violations []Violation     `json:"violations,omitempty"`
+	Unscanned  []UnscannedFile `json:"unscanned,omitempty"`
 }
 
 // ScanDir обходит regular файлы под root (без симлинков, без special files;
@@ -75,12 +86,19 @@ func ScanDir(root string, policy Policy) (found []FileResult, scanned int, total
 			if !policy.Applies(rel) {
 				return nil
 			}
-			findings, scanErr := ScanFile(p, policy.MaxBytes)
+			result, scanErr := ScanFile(p, policy.MaxBytes)
 			if scanErr != nil {
 				return fmt.Errorf("redact scan %s: %w", p, scanErr)
 			}
-			if len(findings) > 0 {
-				found = append(found, FileResult{Path: rel, Findings: findings})
+			// QS-08: файл попадает в результат и тогда, когда находок нет,
+			// но есть непросканированные участки — иначе слепая зона
+			// исчезает по дороге к отчёту.
+			if len(result.Findings) > 0 || len(result.Unscanned) > 0 {
+				found = append(found, FileResult{
+					Path:      rel,
+					Findings:  result.Findings,
+					Unscanned: result.Unscanned,
+				})
 			}
 			scanned++
 			if info, infoErr := entry.Info(); infoErr == nil {
@@ -125,7 +143,10 @@ func Verify(root string, policy Policy) (*Report, error) {
 	if len(policy.Include) > 0 && scanned == 0 {
 		return report, fmt.Errorf("redaction: include-глобы %q не совпали ни с одним файлом — скан пуст, блокер не может быть подтверждён", policy.Include)
 	}
-	if len(report.Violations) > 0 && policy.FailOnSecrets {
+	// QS-08: непросканированный участок при fail-closed политике — тоже
+	// отказ. «Секретов не найдено» в файле, часть которого не разобрана, —
+	// не подтверждение чистоты, а её имитация.
+	if policy.FailOnSecrets && (len(report.Violations) > 0 || len(report.Unscanned) > 0) {
 		return report, fmt.Errorf("redaction: %s", report.Verdict)
 	}
 	return report, nil
@@ -133,16 +154,30 @@ func Verify(root string, policy Policy) (*Report, error) {
 
 func buildReport(found []FileResult, scanned int, total int64) *Report {
 	violations := make([]Violation, 0, len(found))
-	totalFindings := 0
+	unscanned := make([]UnscannedFile, 0, len(found))
+	totalFindings, totalUnscanned := 0, 0
 	for _, f := range found {
-		violations = append(violations, Violation(f))
-		totalFindings += len(f.Findings)
+		if len(f.Findings) > 0 {
+			violations = append(violations, Violation{Path: f.Path, Findings: f.Findings})
+			totalFindings += len(f.Findings)
+		}
+		if len(f.Unscanned) > 0 {
+			unscanned = append(unscanned, UnscannedFile{Path: f.Path, Items: f.Unscanned})
+			totalUnscanned += len(f.Unscanned)
+		}
 	}
 	verdict := "clean"
-	if totalFindings > 0 {
+	switch {
+	case totalFindings > 0 && totalUnscanned > 0:
+		verdict = fmt.Sprintf("%d violations в %d файлах; %d непросканированных участков в %d файлах",
+			totalFindings, len(violations), totalUnscanned, len(unscanned))
+	case totalFindings > 0:
 		verdict = fmt.Sprintf("%d violations в %d файлах", totalFindings, len(violations))
+	case totalUnscanned > 0:
+		verdict = fmt.Sprintf("%d непросканированных участков в %d файлах (чистота не подтверждена)",
+			totalUnscanned, len(unscanned))
 	}
-	return &Report{Verdict: verdict, Files: scanned, Bytes: total, Violations: violations}
+	return &Report{Verdict: verdict, Files: scanned, Bytes: total, Violations: violations, Unscanned: unscanned}
 }
 
 // RedactFile возвращает копию data, где каждая находка заменена на

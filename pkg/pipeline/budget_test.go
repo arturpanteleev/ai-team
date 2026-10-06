@@ -55,6 +55,62 @@ func TestRun_BudgetWallTime(t *testing.T) {
 	}
 }
 
+// Конфиг БЕЗ секции budget: таймер wall-time всё равно вооружается. Проверка
+// через deadline, который видит стадия: per-agent timeout заведомо длиннее
+// дефолтного бюджета, поэтому наблюдаемый дедлайн может прийти только от
+// run-бюджета. Без вооружённого таймера дедлайн был бы 48h (QS-09, #143).
+func TestRun_DefaultWallTimeArmedWithoutBudgetSection(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+
+	cfg := cfgFor(config.AgentConfig{Name: "analyst", Timeout: "48h"}, config.AgentConfig{Name: "reviewer", Timeout: "48h"})
+	if cfg.Budget != nil {
+		t.Fatal("тест требует конфиг без секции budget")
+	}
+
+	start := time.Now()
+	if err, _ := runPipeline(t, dir, cfg, rt, &scriptedPrompter{}); err != nil {
+		t.Fatalf("ожидался успех, got: %v", err)
+	}
+	if !rt.firstHasDeadline {
+		t.Fatal("стадия исполнена без deadline: run не ограничен по времени вообще")
+	}
+	assertDeadlineNear(t, rt.firstDeadline.Sub(start), config.DefaultBudgetMaxWallTimeDuration)
+}
+
+// Стадия без stage_timeout и без per-agent timeout тоже ограничена: дефолт
+// применяется на уровне кода, а не только в сгенерированном `init` конфиге.
+func TestRun_DefaultStageTimeoutArmedWithoutConfiguredValue(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"})
+	if cfg.StageTimeout != "" {
+		t.Fatal("тест требует конфиг без stage_timeout")
+	}
+
+	start := time.Now()
+	if err, _ := runPipeline(t, dir, cfg, rt, &scriptedPrompter{}); err != nil {
+		t.Fatalf("ожидался успех, got: %v", err)
+	}
+	if !rt.firstHasDeadline {
+		t.Fatal("стадия исполнена без deadline")
+	}
+	assertDeadlineNear(t, rt.firstDeadline.Sub(start), config.DefaultStageTimeout)
+}
+
+// assertDeadlineNear сверяет наблюдаемый дедлайн с ожидаемым бюджетом.
+// Допуск нужен с обеих сторон: точка отсчёта теста и момент, когда пайплайн
+// вооружает таймер, расходятся на время подготовки run'а.
+func assertDeadlineNear(t *testing.T, observed, want time.Duration) {
+	t.Helper()
+	if observed < want-time.Minute || observed > want+time.Minute {
+		t.Fatalf("deadline стадии %v, ожидался бюджет ~%v", observed, want)
+	}
+}
+
 // TestRun_AttestedUsagePersisted проверяет, что usage принимается ТОЛЬКО от
 // attested источника и попадает в usage.json envelope (P1-7).
 func TestRun_AttestedUsagePersisted(t *testing.T) {

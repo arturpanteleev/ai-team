@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -18,6 +18,8 @@ type PipelineRun struct {
 	StartedAt      time.Time  `json:"started_at"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 	ConfigSnapshot string     `json:"config_snapshot,omitempty"`
+	QueueJobID     int64      `json:"queue_job_id,omitempty"`
+	Error          string     `json:"error,omitempty"`
 }
 
 type Stage struct {
@@ -97,6 +99,189 @@ func (s *Store) CreatePipelineRun(run *PipelineRun) error {
 		return err
 	}
 	run.ID, err = result.LastInsertId()
+	return err
+}
+
+// AdmitPipelineRun makes an accepted command visible before a worker claims it.
+func (s *Store) AdmitPipelineRun(run *PipelineRun) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.Exec(`INSERT INTO pipeline_runs (run_uid, feature, status, started_at, config_snapshot)
+		VALUES (?, ?, 'queued', ?, ?) ON CONFLICT DO NOTHING`, run.RunID, run.Feature, run.StartedAt, run.ConfigSnapshot)
+	if err != nil {
+		return err
+	}
+	stored, err := s.scanRun(tx.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at,
+		completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
+		FROM pipeline_runs WHERE run_uid = ?`, run.RunID))
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	*run = *stored
+	return nil
+}
+
+// MarkRunQueued correlates the durable queue identity with the dashboard row.
+func (s *Store) MarkRunQueued(runID string, queueJobID int64) error {
+	return s.MarkRunQueuedStatus(runID, queueJobID, "pending", "", time.Now().UTC())
+}
+
+func (s *Store) MarkRunQueuedStatus(runID string, queueJobID int64, status string, cause string, at time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(`UPDATE pipeline_runs SET queue_job_id = ?,
+		status = CASE
+			WHEN status = 'queued' AND ? IN ('running', 'failed', 'canceled') THEN ?
+			WHEN status = 'failed' AND COALESCE(queue_job_id, 0) = 0 AND ? IN ('pending', 'queued') THEN 'queued'
+			WHEN status = 'failed' AND COALESCE(queue_job_id, 0) = 0 AND ? = 'running' THEN 'running'
+			WHEN status = 'failed' AND COALESCE(queue_job_id, 0) = 0 AND ? IN ('failed', 'canceled') THEN ?
+			ELSE status END,
+		completed_at = CASE
+			WHEN status = 'failed' AND COALESCE(queue_job_id, 0) = 0 AND ? IN ('pending', 'queued', 'running') THEN NULL
+			WHEN ? IN ('failed', 'canceled') THEN ? ELSE completed_at END,
+		admission_error = CASE
+			WHEN status = 'failed' AND COALESCE(queue_job_id, 0) = 0 AND ? IN ('pending', 'queued', 'running') THEN ''
+			WHEN ? IN ('failed', 'canceled') THEN ?
+			WHEN status = 'queued' AND ? IN ('pending', 'queued', 'running') THEN ''
+			ELSE admission_error END
+		WHERE run_uid = ?`, queueJobID,
+		status, status, status, status, status, status,
+		status, status, at,
+		status, status, cause, status, runID)
+	if err != nil {
+		return err
+	}
+	if err := requireAffected(result, "pipeline run queue identity"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) MarkQueuedCanceled(runID string, at time.Time) (bool, error) {
+	result, err := s.db.Exec(`UPDATE pipeline_runs SET status = 'canceled', completed_at = ?
+		WHERE run_uid = ? AND status = 'queued'`, at, runID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+func (s *Store) UpdateQueueProjection(queueJobID int64, status, cause string, at time.Time) (string, bool, error) {
+	var runID string
+	var current string
+	err := s.db.QueryRow(`SELECT COALESCE(run_uid, ''), status FROM pipeline_runs WHERE queue_job_id = ?`, queueJobID).Scan(&runID, &current)
+	if err != nil {
+		return "", false, err
+	}
+	if current == status {
+		return runID, false, nil
+	}
+	var result sql.Result
+	if status == "failed" || status == "canceled" {
+		result, err = s.db.Exec(`UPDATE pipeline_runs SET status = ?, completed_at = ?, admission_error = ?
+			WHERE queue_job_id = ? AND status IN ('queued', 'running')`, status, at, cause, queueJobID)
+	} else if status == "running" {
+		result, err = s.db.Exec(`UPDATE pipeline_runs SET status = 'running', completed_at = NULL, admission_error = '' WHERE queue_job_id = ? AND status = 'queued'`, queueJobID)
+	}
+	if err != nil {
+		return runID, false, err
+	}
+	if result == nil {
+		return runID, false, nil
+	}
+	affected, err := result.RowsAffected()
+	return runID, affected > 0, err
+}
+
+func (s *Store) QueuedRunIDs() ([]struct {
+	RunID      string
+	QueueJobID int64
+}, error) {
+	rows, err := s.db.Query(`SELECT run_uid, queue_job_id FROM pipeline_runs WHERE queue_job_id > 0 AND status IN ('queued', 'running')`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var values []struct {
+		RunID      string
+		QueueJobID int64
+	}
+	for rows.Next() {
+		var value struct {
+			RunID      string
+			QueueJobID int64
+		}
+		if err := rows.Scan(&value.RunID, &value.QueueJobID); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+// PendingAdmissions are visible start requests whose queue identity has not
+// yet been correlated. The task is stored with the admission so startup can
+// safely recreate a missing scheduler job after a process crash.
+func (s *Store) PendingAdmissions() ([]PipelineRun, error) {
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at,
+		completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
+		FROM pipeline_runs WHERE status IN ('queued', 'failed') AND COALESCE(queue_job_id, 0) = 0 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var runs []PipelineRun
+	for rows.Next() {
+		var run PipelineRun
+		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt,
+			&run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Store) MarkRunAdmissionFailure(runID, cause string, at time.Time) (bool, error) {
+	result, err := s.db.Exec(`UPDATE pipeline_runs SET status = 'failed', completed_at = ?, admission_error = ?
+		WHERE run_uid = ? AND COALESCE(queue_job_id, 0) = 0 AND status IN ('queued', 'running')`, at, cause, runID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// StartAdmittedRun changes the pre-created queue projection to running, or
+// inserts a normal local run if no admission projection exists.
+func (s *Store) StartAdmittedRun(run *PipelineRun) error {
+	result, err := s.db.Exec(`INSERT INTO pipeline_runs (run_uid, feature, status, started_at, config_snapshot)
+		VALUES (?, ?, 'running', ?, ?) ON CONFLICT DO UPDATE SET
+		feature = excluded.feature, status = 'running', started_at = excluded.started_at,
+		completed_at = NULL, config_snapshot = excluded.config_snapshot, admission_error = ''`,
+		run.RunID, run.Feature, run.StartedAt, run.ConfigSnapshot)
+	if err != nil {
+		return err
+	}
+	stored, err := s.GetPipelineRunByRunID(run.RunID)
+	if err != nil {
+		return err
+	}
+	run.ID = stored.ID
+	_, err = result.RowsAffected()
 	return err
 }
 
@@ -191,6 +376,14 @@ func (s *Store) AppendEvent(event *Event) error {
 	return err
 }
 
+// AppendEventNext allocates the next per-run sequence inside one transaction,
+// so asynchronous queue projection and pipeline recorder events cannot collide.
+func (s *Store) AppendEventNext(event *Event) error {
+	return s.db.QueryRow(`INSERT INTO events(run_uid, sequence, type, attempt_uid, timestamp, data_json)
+		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ? FROM events WHERE run_uid = ? RETURNING sequence`,
+		event.RunID, event.Type, event.AttemptID, event.Timestamp, event.DataJSON, event.RunID).Scan(&event.Sequence)
+}
+
 func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 	if cursor < 0 || limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid event query cursor=%d limit=%d", cursor, limit)
@@ -224,7 +417,7 @@ func (s *Store) GetPipelineRunsPage(limit, offset int) ([]PipelineRun, error) {
 	if limit < 1 || limit > 100 || offset < 0 {
 		return nil, fmt.Errorf("invalid pagination limit=%d offset=%d", limit, offset)
 	}
-	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, '')
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
 		FROM pipeline_runs ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
@@ -233,7 +426,7 @@ func (s *Store) GetPipelineRunsPage(limit, offset int) ([]PipelineRun, error) {
 	var runs []PipelineRun
 	for rows.Next() {
 		var run PipelineRun
-		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot); err != nil {
+		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -251,16 +444,16 @@ func (s *Store) CountPipelineRuns() (int, error) {
 }
 
 func (s *Store) GetPipelineRunByID(id int64) (*PipelineRun, error) {
-	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, '') FROM pipeline_runs WHERE id = ?`, id))
+	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE id = ?`, id))
 }
 
 func (s *Store) GetPipelineRunByRunID(runID string) (*PipelineRun, error) {
-	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, '') FROM pipeline_runs WHERE run_uid = ?`, runID))
+	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE run_uid = ?`, runID))
 }
 
 func (s *Store) scanRun(row *sql.Row) (*PipelineRun, error) {
 	var run PipelineRun
-	if err := row.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot); err != nil {
+	if err := row.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
 		return nil, err
 	}
 	return &run, nil
@@ -341,6 +534,7 @@ func migrate(db *sql.DB) error {
 	}
 	columns := []struct{ table, name, declaration string }{
 		{"pipeline_runs", "run_uid", "TEXT"},
+		{"pipeline_runs", "queue_job_id", "INTEGER DEFAULT 0"}, {"pipeline_runs", "admission_error", "TEXT"},
 		{"stages", "attempt_uid", "TEXT"}, {"stages", "stage_index", "INTEGER DEFAULT 0"},
 		{"stages", "execution", "TEXT"}, {"stages", "decision", "TEXT"}, {"stages", "outcome", "TEXT"},
 		{"stages", "checks_json", "TEXT"}, {"stages", "mutations_json", "TEXT"}, {"stages", "delivery_json", "TEXT"},
@@ -360,7 +554,7 @@ func migrate(db *sql.DB) error {
 			attempt_uid TEXT, timestamp DATETIME NOT NULL, data_json TEXT,
 			UNIQUE(run_uid, sequence))`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_uid, sequence)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if _, err := tx.Exec(query); err != nil {

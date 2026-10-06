@@ -37,12 +37,25 @@ type Check struct {
 
 type Report struct {
 	Ready     bool      `json:"ready"`
+	Readiness string    `json:"readiness"`
 	CheckedAt time.Time `json:"checked_at"`
 	Checks    []Check   `json:"checks"`
 	// Unknown означает, что локальный runtime checker недоступен
 	// (например, enqueue-only scheduler mode): готовность воркеров не
 	// проверялась и не может считаться true.
 	Unknown bool `json:"unknown,omitempty"`
+}
+
+// Readiness gives API clients a stable three-state contract. Ready remains
+// available for compatibility with older clients.
+func ReadinessOf(r Report) string {
+	if r.Unknown {
+		return "unknown"
+	}
+	if r.Ready {
+		return "ready"
+	}
+	return "blocked"
 }
 
 func (r Report) Error() error {
@@ -203,6 +216,7 @@ func (c *Checker) Check(ctx context.Context) Report {
 	} else {
 		add(Check{ID: "delivery", Status: StatusPassed, Message: "delivery stage отсутствует"})
 	}
+	report.Readiness = ReadinessOf(report)
 	return report
 }
 

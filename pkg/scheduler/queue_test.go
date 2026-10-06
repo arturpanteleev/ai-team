@@ -46,6 +46,80 @@ func TestQueuePersistsAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
+func TestEnsureStartJobConvergesAcrossForegroundAndRecoveryRaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.db")
+	target := t.TempDir()
+	foregroundQueue, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = foregroundQueue.Close() }()
+	recoveryQueue, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = recoveryQueue.Close() }()
+	engine, err := NewQueueEngine(foregroundQueue, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(target, "racing-start")
+
+	// Synchronize independent queue handles to exercise the same cross-process
+	// race as the foreground controller and startup reconciler.
+	const callers = 20
+	start := make(chan struct{})
+	ids := make(chan int64, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			if i%2 == 0 {
+				id, ensureErr := recoveryQueue.EnsureStartJob(job)
+				if ensureErr != nil {
+					errs <- ensureErr
+					return
+				}
+				ids <- id
+				return
+			}
+			result, startErr := engine.Start(context.Background(), pipeline.RunConfig{
+				RunID: job.RunID, TargetDir: target, Feature: job.Feature, TaskDesc: job.Task,
+			})
+			if startErr != nil {
+				errs <- startErr
+				return
+			}
+			ids <- result.QueueJobID
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent admission failed: %v", err)
+	}
+	var expected int64
+	for id := range ids {
+		if expected == 0 {
+			expected = id
+		} else if id != expected {
+			t.Fatalf("foreground/recovery returned different queue IDs: got %d, want %d", id, expected)
+		}
+	}
+	if expected == 0 {
+		t.Fatal("no queue ID returned")
+	}
+	jobs, err := recoveryQueue.ListRun(job.RunID)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != expected || jobs[0].Status != StatusPending {
+		t.Fatalf("race created unexpected durable jobs: jobs=%+v err=%v", jobs, err)
+	}
+}
+
 func TestQueueTargetConcurrencyAndLeaseRecovery(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	queue, err := Open(filepath.Join(t.TempDir(), "scheduler.db"), Options{
@@ -240,6 +314,13 @@ func TestQueueEngineAndPoller(t *testing.T) {
 	if _, err := engine.Start(context.Background(), pipeline.RunConfig{
 		RunID: "run-poller", Feature: "feature", TaskDesc: "задача", TargetDir: target,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.ListRun("run-poller")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("queued start job: jobs=%+v err=%v", jobs, err)
+	}
+	if err := queue.Activate(jobs[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	executor := &fakeExecutor{}

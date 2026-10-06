@@ -1516,9 +1516,71 @@ func cmdWeb() {
 	// Фоновые ошибки run не должны исчезать после 202: фиксируем их в
 	// SQLite projection дашборда.
 	runController.SetFailureSink(srv.RecordAdmissionFailure)
+	runController.SetAdmissionSink(srv.RecordQueuedJob)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if schedulerQueue != nil {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				queuedRuns, listErr := recorderStore.QueuedRunIDs()
+				if listErr != nil {
+					continue
+				}
+				for _, run := range queuedRuns {
+					job, exists, getErr := schedulerQueue.Get(run.QueueJobID)
+					if getErr == nil && exists {
+						if job.Status == scheduler.Status("pending") {
+							if schedulerQueue.Activate(job.ID) != nil {
+								continue
+							}
+							job, exists, getErr = schedulerQueue.Get(job.ID)
+						}
+						if getErr == nil && exists {
+							srv.RecordQueueStatus(job.ID, string(job.Status), job.Error)
+						}
+					}
+				}
+				admissions, admissionErr := recorderStore.PendingAdmissions()
+				if admissionErr != nil {
+					continue
+				}
+				for _, admission := range admissions {
+					var command struct {
+						Feature string `json:"feature"`
+						Task    string `json:"task"`
+					}
+					if json.Unmarshal([]byte(admission.ConfigSnapshot), &command) != nil || command.Feature == "" || strings.TrimSpace(command.Task) == "" {
+						continue
+					}
+					jobID, ensureErr := schedulerQueue.EnsureStartJob(worker.Job{
+						SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
+						RunID: admission.RunID, TargetDir: target, Feature: command.Feature, Task: command.Task,
+					})
+					if ensureErr != nil {
+						continue
+					}
+					if srv.RecordQueuedJob(admission.RunID, jobID) != nil {
+						continue
+					}
+					if schedulerQueue.Activate(jobID) != nil {
+						continue
+					}
+					job, exists, getErr := schedulerQueue.Get(jobID)
+					if getErr == nil && exists {
+						srv.RecordQueueStatus(job.ID, string(job.Status), job.Error)
+					}
+				}
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		// graceful shutdown best-effort: при его неудаче отложенный srv.Close() закрывает сервер принудительно.

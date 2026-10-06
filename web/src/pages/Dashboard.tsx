@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
-import { getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
+import { cancelRun, getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
 import styles from './Dashboard.module.css';
@@ -10,6 +10,7 @@ type Filter = 'all' | PipelineStatus;
 
 const filters: Filter[] = [
   'all',
+  'queued',
   'running',
   'waiting_for_approval',
   'completed',
@@ -61,6 +62,7 @@ export function Dashboard() {
   }, [fetchRuns]);
 
   const filtered = filter === 'all' ? runs : runs.filter((r) => r.status === filter);
+  const readiness = preflight?.readiness ?? (preflight?.unknown ? 'unknown' : preflight?.ready ? 'ready' : preflight ? 'blocked' : 'unknown');
 
   const submitRun = async (event: FormEvent) => {
     event.preventDefault();
@@ -102,7 +104,7 @@ export function Dashboard() {
           <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
             placeholder="Опишите бизнес-цель, ограничения и ожидаемый результат своими словами. Аналитик уточнит недостающие детали."
             rows={4} required />
-          <button type="submit" disabled={preflight !== null && !preflight.ready}>Создать инициативу и передать аналитику</button>
+          <button type="submit" disabled={readiness === 'blocked'}>Создать инициативу и передать аналитику</button>
           <small>Ваше намерение и все последующие уточнения сохраняются в истории задачи. До начала технического планирования Product Owner согласует спецификацию.</small>
           {commandStatus && <span>{commandStatus}</span>}
         </form>
@@ -114,8 +116,8 @@ export function Dashboard() {
       )}
 
       <section className={styles.preflight}>
-        <strong>Готовность окружения: {preflight?.ready ? 'готово' : preflight ? 'есть блокеры' : 'проверяется…'}</strong>
-        {preflight?.checks.map((check) => (
+        <strong>Готовность окружения: {readiness === 'ready' ? 'готово' : readiness === 'blocked' ? 'есть блокеры' : 'неизвестна · задача может ждать worker'}</strong>
+        {(preflight?.checks ?? []).map((check) => (
           <div key={check.id} data-status={check.status}>
             <code>{check.id}</code>
             <span>{check.status}{check.required ? ' · required' : ''}</span>
@@ -131,7 +133,10 @@ export function Dashboard() {
       ) : (
         <div className={styles.pipelines}>
           {filtered.map((run) => (
-            <PipelineCard key={run.id} run={run} />
+            <PipelineCard key={run.id} run={run} onCancel={async () => {
+              try { await cancelRun(run.run_id); await fetchRuns(); }
+              catch (err) { setCommandStatus(err instanceof Error ? err.message : 'Не удалось отменить'); }
+            }} />
           ))}
         </div>
       )}

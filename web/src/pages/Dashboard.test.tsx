@@ -31,4 +31,13 @@ describe('Dashboard business intake', () => {
     expect(screen.getByText('Создать инициативу может Product Owner.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Какого результата хотите достичь?')).not.toBeInTheDocument();
   });
+
+  it('обрабатывает неизвестную готовность и checks:null, оставляя enqueue доступным', async () => {
+    session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
+    const api = await import('../api');
+    vi.mocked(api.getPreflight).mockResolvedValue({ ready: false, unknown: true, checks: null, checked_at: '' });
+    render(<Dashboard />);
+    expect(await screen.findByText(/неизвестна · задача может ждать worker/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Создать инициативу и передать аналитику' })).toBeEnabled();
+  });
 });

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,9 +18,13 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
+	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
+	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
 type fakeRunController struct {
@@ -28,10 +33,46 @@ type fakeRunController struct {
 	startCalls   int
 	resumeRunID  string
 	cancelRunID  string
+	cancelErr    error
 	decision     approval.Decision
 	approvalID   string
 	runID        string
 	approvals    []approval.PendingApproval
+}
+
+type admissionCapturingController struct {
+	*control.Controller
+	runID string
+}
+
+type persistedThenErroredEngine struct {
+	queue *scheduler.Queue
+}
+
+func (e *persistedThenErroredEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
+	_, err := e.queue.EnsureStartJob(worker.Job{
+		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart, RunID: config.RunID,
+		TargetDir: config.TargetDir, Feature: config.Feature, Task: config.TaskDesc,
+	})
+	if err != nil {
+		return pipeline.RunResult{}, err
+	}
+	return pipeline.RunResult{RunID: config.RunID}, errors.New("simulated ambiguous enqueue error after durable insert")
+}
+
+func (*persistedThenErroredEngine) Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{}, errors.New("unexpected resume")
+}
+
+func (*persistedThenErroredEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{RunID: config.RunID}, nil
+}
+
+func (c *admissionCapturingController) StartWithAdmission(feature, task string, admit func(string) error) (string, error) {
+	return c.Controller.StartWithAdmission(feature, task, func(runID string) error {
+		c.runID = runID
+		return admit(runID)
+	})
 }
 
 func TestDecisionPinsLatestImmutableArtifactRevision(t *testing.T) {
@@ -240,8 +281,14 @@ func (f *fakeRunController) Start(feature, task string) (string, error) {
 	f.startFeature, f.startTask = feature, task
 	return "run-created", nil
 }
+func (f *fakeRunController) StartWithAdmission(feature, task string, admit func(string) error) (string, error) {
+	if err := admit("run-created"); err != nil {
+		return "", err
+	}
+	return f.Start(feature, task)
+}
 func (f *fakeRunController) Resume(runID string) error { f.resumeRunID = runID; return nil }
-func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return nil }
+func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return f.cancelErr }
 func (f *fakeRunController) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
 	f.runID, f.approvalID, f.decision = runID, approvalID, decision
 	return approval.PendingApproval{ID: approvalID, RunID: runID, Status: approval.StatusResolved, ResolvedAction: decision.Action}, nil
@@ -270,6 +317,380 @@ func TestPreflightEndpoint(t *testing.T) {
 	var report preflight.Report
 	if err := json.NewDecoder(writer.Body).Decode(&report); err != nil || !report.Ready || len(report.Checks) != 1 {
 		t.Fatalf("preflight report: %+v, %v", report, err)
+	}
+}
+
+func TestQueueProjectionConnectsQueueFailureToVisibleRun(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	run := &store.PipelineRun{RunID: "queued-run", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC()}
+	if err := srv.store.AdmitPipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.RecordQueuedJob("queued-run", 41); err != nil {
+		t.Fatal(err)
+	}
+	srv.RecordQueueStatus(41, "failed", "worker preflight: CLI missing")
+	projected, err := srv.store.GetPipelineRunByRunID("queued-run")
+	if err != nil || projected.Status != "failed" || projected.QueueJobID != 41 || !strings.Contains(projected.Error, "CLI missing") {
+		t.Fatalf("queue failure not visible on run: %+v err=%v", projected, err)
+	}
+	if err := srv.RecordQueuedJob("queued-run", 41); err != nil {
+		t.Fatal(err)
+	}
+	projected, err = srv.store.GetPipelineRunByRunID("queued-run")
+	if err != nil || projected.Status != "failed" || !strings.Contains(projected.Error, "CLI missing") {
+		t.Fatalf("correlation hid a genuine terminal worker failure: %+v err=%v", projected, err)
+	}
+	events, err := srv.store.GetEventsAfter(0, 10)
+	if err != nil || len(events) != 3 || events[0].Type != "queue_updated" || events[1].Type != "queue_updated" || !strings.Contains(events[2].DataJSON, `"status":"failed"`) {
+		t.Fatalf("queue projection events missing: %+v err=%v", events, err)
+	}
+}
+
+func TestSchedulerAdmissionIsVisibleAndCancelableWithoutWorker(t *testing.T) {
+	target := t.TempDir()
+	queue, err := scheduler.Open(filepath.Join(t.TempDir(), "queue.db"), scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	engine, err := scheduler.NewQueueEngine(queue, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := control.New(engine, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	controller.SetAdmissionSink(srv.RecordQueuedJob)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task without a worker"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start: %d %s", response.Code, response.Body.String())
+	}
+	var accepted struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var projected *store.PipelineRun
+	for time.Now().Before(deadline) {
+		projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+		if err == nil && projected.QueueJobID > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil || projected == nil || projected.Status != "queued" || projected.QueueJobID == 0 {
+		t.Fatalf("run not projected with scheduler identity: %+v err=%v", projected, err)
+	}
+	jobs, err := queue.ListRun(accepted.RunID)
+	if err != nil || len(jobs) != 1 || jobs[0].Status != scheduler.StatusQueued {
+		t.Fatalf("queue state: %+v err=%v", jobs, err)
+	}
+	cancel := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+accepted.RunID+"/cancel", "")
+	response = httptest.NewRecorder()
+	srv.router.ServeHTTP(response, cancel)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("cancel: %d %s", response.Code, response.Body.String())
+	}
+	projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+	if err != nil || projected.Status != "canceled" {
+		t.Fatalf("cancel not projected: %+v err=%v", projected, err)
+	}
+}
+
+func TestPendingAdmissionRecoversQueueCorrelationAfterCrashAndRetry(t *testing.T) {
+	target := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "web.db")
+	queuePath := filepath.Join(t.TempDir(), "queue.db")
+	commandJSON := `{"feature":"feature","task":"recover after crash"}`
+	srv, err := NewServer(dbPath, "", filepath.Join(target, ".ai-team", "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.AdmitPipelineRun(&store.PipelineRun{
+		RunID: "recover-run", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.AdmitPipelineRun(&store.PipelineRun{
+		RunID: "crash-before-enqueue", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a process crash after scheduler persistence but before the web
+	// projection attaches the durable queue ID.
+	queue, err := scheduler.Open(queuePath, scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := worker.Job{SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart, RunID: "recover-run", TargetDir: target, Feature: "feature", Task: "recover after crash"}
+	jobID, err := queue.EnsureStartJob(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := queue.Claim(context.Background(), "worker-before-correlation"); err != nil || claimed {
+		t.Fatalf("uncorrelated pending job was claimable: claimed=%v err=%v", claimed, err)
+	}
+	if err := queue.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart from the admission outbox. It must find the existing job, attach
+	// it before making it claimable, and be idempotent on the next retry.
+	srv, err = NewServer(dbPath, "", filepath.Join(target, ".ai-team", "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	queue, err = scheduler.Open(queuePath, scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	admissions, err := srv.store.PendingAdmissions()
+	if err != nil || len(admissions) != 2 {
+		t.Fatalf("durable pending admission lost: %+v err=%v", admissions, err)
+	}
+	for _, admission := range admissions {
+		if admission.ConfigSnapshot != commandJSON {
+			t.Fatalf("admission task snapshot was not durable: %+v", admission)
+		}
+		var command struct {
+			Feature string `json:"feature"`
+			Task    string `json:"task"`
+		}
+		if err := json.Unmarshal([]byte(admission.ConfigSnapshot), &command); err != nil {
+			t.Fatal(err)
+		}
+		recoveredID, err := queue.EnsureStartJob(worker.Job{
+			SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart, RunID: admission.RunID,
+			TargetDir: target, Feature: command.Feature, Task: command.Task,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if admission.RunID == "recover-run" && recoveredID != jobID {
+			t.Fatalf("recovery did not reuse pending job: id=%d original=%d", recoveredID, jobID)
+		}
+		if err := srv.RecordQueuedJob(admission.RunID, recoveredID); err != nil {
+			t.Fatal(err)
+		}
+		if err := queue.Activate(recoveredID); err != nil {
+			t.Fatal(err)
+		}
+		jobs, err := queue.ListRun(admission.RunID)
+		if err != nil || len(jobs) != 1 || jobs[0].Status != scheduler.StatusQueued {
+			t.Fatalf("recovered queue state: %+v err=%v", jobs, err)
+		}
+		projected, err := srv.store.GetPipelineRunByRunID(admission.RunID)
+		if err != nil || projected.QueueJobID != recoveredID || projected.Status != "queued" {
+			t.Fatalf("recovered projection: %+v err=%v", projected, err)
+		}
+	}
+	if again, err := queue.EnsureStartJob(job); err != nil || again != jobID {
+		t.Fatalf("retry was not idempotent: id=%d err=%v", again, err)
+	}
+}
+
+func TestStartRunProjectionFailurePreventsControllerStart(t *testing.T) {
+	controller := &fakeRunController{}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	if err := srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("projection failure must not claim accepted: code=%d body=%s", response.Code, response.Body.String())
+	}
+	if controller.startCalls != 0 {
+		t.Fatalf("controller started run before durable projection: calls=%d", controller.startCalls)
+	}
+	if controller.cancelRunID != "" {
+		t.Fatalf("failed pre-start projection should not require asynchronous compensation, got cancel %q", controller.cancelRunID)
+	}
+	if strings.Contains(response.Body.String(), `"run_id"`) {
+		t.Fatalf("failed projection response must not expose a falsely accepted run: %s", response.Body.String())
+	}
+}
+
+func TestSchedulerAdmissionProjectionFailureCannotLeaveClaimableJob(t *testing.T) {
+	target := t.TempDir()
+	queue, err := scheduler.Open(filepath.Join(t.TempDir(), "queue.db"), scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	engine, err := scheduler.NewQueueEngine(queue, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseController, err := control.New(engine, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &admissionCapturingController{Controller: baseController}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	baseController.SetAdmissionSink(srv.RecordQueuedJob)
+	if err := srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("projection failure must return 503: code=%d body=%s", response.Code, response.Body.String())
+	}
+	if controller.runID == "" {
+		t.Fatal("admission callback was not reached")
+	}
+
+	// The admission callback runs before Controller launches its background
+	// worker. After the 503 there must be no persistent scheduler job to claim,
+	// even after enough time for that worker to have run if it had been started.
+	time.Sleep(25 * time.Millisecond)
+	jobs, err := queue.ListRun(controller.runID)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("failed admission left scheduler jobs: jobs=%+v err=%v", jobs, err)
+	}
+	_, claimed, err := queue.Claim(context.Background(), "admission-failure-test")
+	if err != nil || claimed {
+		t.Fatalf("failed admission job was claimable: claimed=%v err=%v", claimed, err)
+	}
+}
+
+func TestAmbiguousQueueInsertFailureConvergesThroughAdmissionRecovery(t *testing.T) {
+	target := t.TempDir()
+	queue, err := scheduler.Open(filepath.Join(t.TempDir(), "queue.db"), scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := queue.Close(); err != nil {
+			t.Errorf("close queue: %v", err)
+		}
+	}()
+	engine := &persistedThenErroredEngine{queue: queue}
+	baseController, err := control.New(engine, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(baseController))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := srv.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	}()
+	baseController.SetFailureSink(srv.RecordAdmissionFailure)
+	baseController.SetAdmissionSink(srv.RecordQueuedJob)
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"ambiguous-queue-work","task":"recover durable pending job"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start: %d %s", response.Code, response.Body.String())
+	}
+	var accepted struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var projected *store.PipelineRun
+	for time.Now().Before(deadline) {
+		projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+		if err == nil && projected.Status == "failed" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil || projected == nil || projected.Status != "failed" || projected.QueueJobID != 0 {
+		t.Fatalf("simulated ambiguous enqueue failure was not projected: %+v err=%v", projected, err)
+	}
+
+	// Startup recovery sees the failed, uncorrelated admission, reuses the
+	// already-persisted pending job, links it, and only then activates it.
+	admissions, err := srv.store.PendingAdmissions()
+	if err != nil || len(admissions) != 1 || admissions[0].RunID != accepted.RunID {
+		t.Fatalf("failed admission was not recoverable: %+v err=%v", admissions, err)
+	}
+	var command struct {
+		Feature string `json:"feature"`
+		Task    string `json:"task"`
+	}
+	if err := json.Unmarshal([]byte(admissions[0].ConfigSnapshot), &command); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := queue.EnsureStartJob(worker.Job{
+		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
+		RunID: accepted.RunID, TargetDir: target, Feature: command.Feature, Task: command.Task,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.ListRun(accepted.RunID)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != jobID || jobs[0].Status != scheduler.Status("pending") {
+		t.Fatalf("recovery did not reuse the durable pending job: %+v err=%v", jobs, err)
+	}
+	if err := srv.RecordQueuedJob(accepted.RunID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Activate(jobID); err != nil {
+		t.Fatal(err)
+	}
+	projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+	if err != nil || projected.Status != "queued" || projected.QueueJobID != jobID || projected.Error != "" || projected.CompletedAt != nil {
+		t.Fatalf("recovered admission did not return to queued state: %+v err=%v", projected, err)
+	}
+	claimed, ok, err := queue.Claim(context.Background(), "recovered-admission-test")
+	if err != nil || !ok || claimed.ID != jobID {
+		t.Fatalf("recovered queue job is not claimable: job=%+v claimed=%v err=%v", claimed, ok, err)
+	}
+	srv.RecordQueueStatus(jobID, string(scheduler.StatusRunning), "")
+	projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+	if err != nil || projected.Status != "running" || projected.QueueJobID != jobID {
+		t.Fatalf("projection did not converge to the claimed queue job: %+v err=%v", projected, err)
+	}
+	// Exercise the opposite ordering too: the old foreground error arrives
+	// after recovery has linked and a worker has claimed the job.
+	srv.RecordAdmissionFailure(accepted.RunID, "late ambiguous enqueue error")
+	projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
+	if err != nil || projected.Status != "running" || projected.QueueJobID != jobID {
+		t.Fatalf("late enqueue error overwrote recovered queue state: %+v err=%v", projected, err)
 	}
 }
 
@@ -418,6 +839,20 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	srv.router.ServeHTTP(writer, start)
 	if writer.Code != http.StatusAccepted || controller.startFeature != "feat" || controller.startTask != "задача" {
 		t.Fatalf("start: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
+	}
+	admitted, err := srv.store.GetPipelineRunByRunID("run-created")
+	if err != nil || admitted.Status != "queued" {
+		t.Fatalf("accepted run was not projected as queued: %+v err=%v", admitted, err)
+	}
+	cancel := authorizedRequest(t, srv, "POST", "/api/runs/run-created/cancel", "")
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, cancel)
+	if writer.Code != http.StatusAccepted {
+		t.Fatalf("queued cancel: %d %s", writer.Code, writer.Body.String())
+	}
+	queued, err := srv.store.GetPipelineRunByRunID("run-created")
+	if err != nil || queued.Status != "canceled" {
+		t.Fatalf("queued cancellation not projected: %+v err=%v", queued, err)
 	}
 
 	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача","unknown":true}`)

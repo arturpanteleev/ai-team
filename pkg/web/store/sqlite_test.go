@@ -244,6 +244,52 @@ func TestUpdatePipelineRun(t *testing.T) {
 	}
 }
 
+func TestStartingRunClearsStaleAdmissionError(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	run := &PipelineRun{RunID: "retry-admission", Feature: "feature", Status: "queued", StartedAt: now}
+	if err := s.AdmitPipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.MarkRunAdmissionFailure(run.RunID, "temporary queue error", now); err != nil || !changed {
+		t.Fatal(err)
+	}
+	if err := s.StartAdmittedRun(&PipelineRun{RunID: run.RunID, Feature: run.Feature, Status: "running", StartedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetPipelineRunByRunID(run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "running" || got.Error != "" || got.CompletedAt != nil {
+		t.Fatalf("retry left stale admission failure: %+v", got)
+	}
+}
+
+func TestQueueRunningProjectionClearsStaleAdmissionError(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	if err := s.AdmitPipelineRun(&PipelineRun{RunID: "queue-retry", Feature: "feature", Status: "queued", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRunQueued("queue-retry", 71); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE pipeline_runs SET admission_error = 'stale failure' WHERE run_uid = 'queue-retry'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := s.UpdateQueueProjection(71, "running", "", now.Add(time.Second)); err != nil || !changed {
+		t.Fatalf("running projection: changed=%v err=%v", changed, err)
+	}
+	got, err := s.GetPipelineRunByRunID("queue-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "running" || got.Error != "" {
+		t.Fatalf("queue recovery left stale admission failure: %+v", got)
+	}
+}
+
 func TestCreateStage(t *testing.T) {
 	s := newTestStore(t)
 

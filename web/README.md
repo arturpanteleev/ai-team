@@ -12,11 +12,18 @@ npm run dev        # dev-сервер; API ожидается на том же o
 npm run lint
 npm test           # vitest + testing-library
 npm run build      # прод-сборка в dist/
+npx playwright install chromium # один раз: установить headless Chromium
+npm run test:e2e   # браузерный тест web UI + настоящий scheduler/worker
 ```
 
 `make verify` дополнительно проверяет, что `web/dist` в репозитории
 соответствует свежей сборке — после изменений фронта выполните
 `npm run build` и закоммитьте dist.
+
+`npm run test:e2e` поднимает временный проект и настоящий `ai-team web` с
+persistent scheduler, открывает production React bundle в Chromium, проверяет
+queued → running → worker preflight failure, перезагрузку UI и отмену второй
+queued задачи. CI ставит Chromium и запускает тот же сценарий.
 
 ## Архитектура
 

@@ -1,7 +1,7 @@
 // Статусы синхронизированы с backend:
 // run: running/completed/failed/blocked/stopped (pkg/pipeline.runStatus)
 // stage: running/passed/failed/blocked (pkg/notifier.Status*)
-export type PipelineStatus = 'running' | 'waiting_for_approval' | 'completed' | 'completed_with_warnings' | 'failed' | 'blocked' | 'stopped' | 'canceled' | 'interrupted';
+export type PipelineStatus = 'queued' | 'running' | 'waiting_for_approval' | 'completed' | 'completed_with_warnings' | 'failed' | 'blocked' | 'stopped' | 'canceled' | 'interrupted';
 
 export type StageStatus = 'running' | 'passed' | 'failed' | 'blocked' | 'rejected' | 'canceled' | 'warning' | 'skipped' | 'invalidated';
 
@@ -20,6 +20,8 @@ export interface PipelineRun {
   started_at: string;
   completed_at?: string;
   config_snapshot?: string;
+  queue_job_id?: number;
+  error?: string;
 }
 
 export interface Stage {
@@ -86,8 +88,10 @@ export interface PreflightCheck {
 
 export interface PreflightReport {
   ready: boolean;
+  readiness?: 'ready' | 'blocked' | 'unknown';
+  unknown?: boolean;
   checked_at: string;
-  checks: PreflightCheck[];
+  checks?: PreflightCheck[] | null;
 }
 
 export interface WorkflowApproval {

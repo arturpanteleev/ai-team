@@ -20,6 +20,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
 func randomToken() (string, error) {
@@ -173,11 +174,31 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	runID, err := s.controller.Start(command.Feature, command.Task)
+	now := time.Now().UTC()
+	admissionSnapshot, err := json.Marshal(command)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid admission snapshot", http.StatusBadRequest)
 		return
 	}
+	admissionFailed := false
+	runID, err := s.controller.StartWithAdmission(command.Feature, command.Task, func(runID string) error {
+		if err := s.store.AdmitPipelineRun(&store.PipelineRun{
+			RunID: runID, Feature: command.Feature, Status: "queued", StartedAt: now, ConfigSnapshot: string(admissionSnapshot),
+		}); err != nil {
+			admissionFailed = true
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		status := http.StatusBadRequest
+		if admissionFailed {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued"})
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
@@ -211,6 +232,9 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	if err := s.controller.Cancel(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
+	}
+	if canceled, err := s.store.MarkQueuedCanceled(runID, time.Now().UTC()); err == nil && canceled {
+		s.appendRunEvent(runID, "run_canceled", time.Now().UTC(), map[string]any{"status": "canceled"})
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }

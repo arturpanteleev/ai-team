@@ -82,6 +82,19 @@ func TestControllerStartAppliesPreflightGate(t *testing.T) {
 	}
 }
 
+func TestControllerAllowsEnqueueWhenReadinessIsUnknown(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	controller, err := New(engine, t.TempDir(), WithPreflight(fakePreflight{report: preflight.Report{Unknown: true}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Start("feature", "задача"); err != nil {
+		t.Fatalf("unknown readiness blocked enqueue: %v", err)
+	}
+	<-engine.started
+	close(engine.release)
+}
+
 func TestControllerStartAndCancelActiveWorker(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	controller, err := New(engine, t.TempDir())

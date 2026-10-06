@@ -46,11 +46,23 @@ const (
 	Fail             Verdict = "FAIL"
 )
 
+// Разделитель между маркером и значением — только пробелы и табы одной
+// строки. `\s` здесь был бы ошибкой: в Go он матчит `\n`, из-за чего маркер
+// склеивался бы со значением на следующей строке, а маскированный
+// data-регион (строки из пробелов, см. StripDataRegions) работал бы мостом
+// через fenced-блок. Контракт, который контроллер выдаёт агенту
+// (VerdictInstruction), обещает ровно однострочное совпадение.
+// Хвост допускает `\r`, чтобы артефакт с CRLF читался так же, как с LF.
+const (
+	markerGap  = `[ \t]+`
+	markerTail = `[ \t\r]*$`
+)
+
 var (
-	verdictRe = regexp.MustCompile(`(?m)^\*\*Verdict:\*\*\s+(APPROVED|CHANGES_REQUESTED|REJECTED)\s*$`)
-	resultRe  = regexp.MustCompile(`(?m)^\*\*Result:\*\*\s+(PASS|FAIL)\s*$`)
-	blockedRe = regexp.MustCompile(`(?m)^\*\*Status:\*\*\s+BLOCKED\s*$`)
-	blockerRe = regexp.MustCompile(`(?m)^\*\*Blocker:\*\*\s+(.+)$`)
+	verdictRe = regexp.MustCompile(`(?m)^\*\*Verdict:\*\*` + markerGap + `(APPROVED|CHANGES_REQUESTED|REJECTED)` + markerTail)
+	resultRe  = regexp.MustCompile(`(?m)^\*\*Result:\*\*` + markerGap + `(PASS|FAIL)` + markerTail)
+	blockedRe = regexp.MustCompile(`(?m)^\*\*Status:\*\*` + markerGap + `BLOCKED` + markerTail)
+	blockerRe = regexp.MustCompile(`(?m)^\*\*Blocker:\*\*` + markerGap + `(.+)$`)
 )
 
 // IsNegative — вердикты, при которых enforcement останавливает пайплайн.
@@ -94,6 +106,14 @@ func parseStripped(content string) Verdict {
 // кандидатами на чтение как control-данные. Незакрытый fence считается
 // открытым до конца текста; blockquote определяется по префиксу `>` после
 // пробелов. Data/control separation: содержимое регионов — данные, не сигнал.
+//
+// Переводы строк маскирование сохраняет: маскируется только содержимое строки,
+// а сами разделители остаются (строки склеиваются обратно через "\n"). Поэтому
+// маскированный регион не может «слить» две строки в одну; мост через fenced-
+// блок возникал не здесь, а в регулярках, где `\s` матчил `\n`. Замена
+// содержимого пробелами (а не выбрасывание строк) намеренна: она сохраняет
+// байтовые смещения, а parseStripped сравнивает позиции Verdict и Result,
+// чтобы выбрать маркер, стоящий в артефакте первым.
 func StripDataRegions(src string) string {
 	lines := strings.Split(src, "\n")
 	masked := make([]string, len(lines))
@@ -199,7 +219,7 @@ func FromOutputsContract(paths []string, contract *Contract) (Verdict, error) {
 
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
-	pattern := regexp.MustCompile(`(?m)^\*\*(Verdict|Result):\*\*\s+([^\s]+)\s*$`)
+	pattern := regexp.MustCompile(`(?m)^\*\*(Verdict|Result):\*\*` + markerGap + `([^\s]+)` + markerTail)
 	type match struct {
 		path   string
 		marker string

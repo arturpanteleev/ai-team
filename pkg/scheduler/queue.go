@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -155,6 +156,11 @@ func (q *Queue) EnsureStartJob(job worker.Job) (int64, error) {
 	if err := job.Validate(job.TargetDir); err != nil {
 		return 0, err
 	}
+	canonical, err := canonicalTargetPath(job.TargetDir)
+	if err != nil {
+		return 0, err
+	}
+	job.TargetDir = canonical
 	payload, err := json.Marshal(job)
 	if err != nil {
 		return 0, err
@@ -194,6 +200,11 @@ func (q *Queue) enqueue(job worker.Job, status string) (int64, error) {
 	if err := job.Validate(job.TargetDir); err != nil {
 		return 0, err
 	}
+	canonical, err := canonicalTargetPath(job.TargetDir)
+	if err != nil {
+		return 0, err
+	}
+	job.TargetDir = canonical
 	payload, err := json.Marshal(job)
 	if err != nil {
 		return 0, err
@@ -212,6 +223,18 @@ func (q *Queue) enqueue(job worker.Job, status string) (int64, error) {
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func canonicalTargetPath(target string) (string, error) {
+	absolute, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(canonical), nil
 }
 
 func (q *Queue) Activate(id int64) error {
@@ -236,6 +259,28 @@ func (q *Queue) Activate(id int64) error {
 }
 
 func (q *Queue) Claim(ctx context.Context, owner string) (Record, bool, error) {
+	return q.claim(ctx, owner, "")
+}
+
+// ClaimForTarget restricts a worker to the exact persistent workspace it has
+// mounted. Paths are canonicalized before matching so a worker can never take
+// a job for a different project/volume.
+func (q *Queue) ClaimForTarget(ctx context.Context, owner, target string) (Record, bool, error) {
+	if strings.TrimSpace(target) == "" {
+		return Record{}, false, errors.New("scheduler worker target обязателен")
+	}
+	canonical, err := filepath.Abs(target)
+	if err != nil {
+		return Record{}, false, err
+	}
+	canonical, err = filepath.EvalSymlinks(canonical)
+	if err != nil {
+		return Record{}, false, err
+	}
+	return q.claim(ctx, owner, filepath.Clean(canonical))
+}
+
+func (q *Queue) claim(ctx context.Context, owner, target string) (Record, bool, error) {
 	if strings.TrimSpace(owner) == "" {
 		return Record{}, false, errors.New("scheduler worker owner обязателен")
 	}
@@ -251,7 +296,8 @@ func (q *Queue) Claim(ctx context.Context, owner string) (Record, bool, error) {
 	}
 	rows, err := q.db.QueryContext(ctx,
 		`SELECT id, payload_json FROM worker_jobs
-		 WHERE status = 'queued' ORDER BY created_ms, id LIMIT 32`)
+		 WHERE status = 'queued' AND (? = '' OR target_dir = ?)
+	 ORDER BY created_ms, id LIMIT 32`, target, target)
 	if err != nil {
 		return Record{}, false, err
 	}
@@ -300,31 +346,41 @@ func (q *Queue) Claim(ctx context.Context, owner string) (Record, bool, error) {
 		if affected == 0 {
 			continue
 		}
-		return q.Get(value.id)
+		record, exists, getErr := q.Get(value.id)
+		if getErr != nil || !exists {
+			return record, exists, getErr
+		}
+		// An expired start lease is not replayed as Start. Recovery is an
+		// explicit worker operation that checks durable lifecycle state first.
+		if record.Attempts > 1 && record.Job.Operation == worker.OperationStart {
+			record.Job.Operation = worker.OperationRecover
+		}
+		return record, true, nil
 	}
 	return Record{}, false, nil
 }
 
 func (q *Queue) Renew(ctx context.Context, id int64, owner, token string) (bool, error) {
 	var cancelRequested bool
+	var leaseExpires int64
 	var status, actualOwner, actualToken string
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT status, lease_owner, lease_token, cancel_requested
+		`SELECT status, lease_owner, lease_token, cancel_requested, lease_expires_ms
 		 FROM worker_jobs WHERE id = ?`, id,
-	).Scan(&status, &actualOwner, &actualToken, &cancelRequested); err != nil {
+	).Scan(&status, &actualOwner, &actualToken, &cancelRequested, &leaseExpires); err != nil {
 		return false, err
 	}
-	if status != string(StatusRunning) || actualOwner != owner || actualToken != token {
+	now := q.options.Now().UTC()
+	if status != string(StatusRunning) || actualOwner != owner || actualToken != token || leaseExpires <= now.UnixMilli() {
 		return false, ErrLeaseLost
 	}
 	if cancelRequested {
 		return true, nil
 	}
-	now := q.options.Now().UTC()
 	result, err := q.db.ExecContext(ctx,
 		`UPDATE worker_jobs SET lease_expires_ms = ?, updated_ms = ?
-		 WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
-		now.Add(q.options.LeaseDuration).UnixMilli(), now.UnixMilli(), id, owner, token,
+		 WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ? AND lease_expires_ms > ?`,
+		now.Add(q.options.LeaseDuration).UnixMilli(), now.UnixMilli(), id, owner, token, now.UnixMilli(),
 	)
 	if err != nil {
 		return false, err
@@ -348,8 +404,8 @@ func (q *Queue) Complete(id int64, owner, token string, success bool, diagnostic
 		`UPDATE worker_jobs
 		 SET status = CASE WHEN cancel_requested = 1 THEN 'canceled' ELSE ? END,
 		     error = ?, lease_owner = '', lease_token = '', lease_expires_ms = 0, updated_ms = ?
-		 WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
-		status, diagnostic, now, id, owner, token,
+		 WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ? AND lease_expires_ms > ?`,
+		status, diagnostic, now, id, owner, token, now,
 	)
 	if err != nil {
 		return err

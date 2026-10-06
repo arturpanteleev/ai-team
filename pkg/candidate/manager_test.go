@@ -35,6 +35,25 @@ func TestCreateAndLoadKeepsLiveCheckoutUnchanged(t *testing.T) {
 	}
 }
 
+func TestCreateRecoversWorktreeCreatedBeforeMetadata(t *testing.T) {
+	target := gitRepository(t)
+	base := command(t, target, "rev-parse", "HEAD")
+	worktree := filepath.Join(target, ".ai-team", "worktrees", "run-partial")
+	if err := os.MkdirAll(filepath.Dir(worktree), 0755); err != nil {
+		t.Fatal(err)
+	}
+	command(t, target, "worktree", "add", "--detach", worktree, base)
+	manager, available, err := Create(context.Background(), target, "run-partial")
+	if err != nil || !available || manager == nil {
+		t.Fatalf("recover partial worktree: available=%v manager=%v err=%v", available, manager, err)
+	}
+	loaded, err := Load(context.Background(), target, "run-partial")
+	canonicalWorktree, canonicalErr := filepath.EvalSymlinks(worktree)
+	if err != nil || canonicalErr != nil || loaded.Root() != canonicalWorktree {
+		t.Fatalf("recovered candidate metadata: manager=%v err=%v", loaded, err)
+	}
+}
+
 func TestCreateRejectsDirtyLiveWorkspace(t *testing.T) {
 	target := gitRepository(t)
 	if err := os.WriteFile(filepath.Join(target, "dirty.txt"), []byte("dirty"), 0644); err != nil {

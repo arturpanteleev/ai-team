@@ -23,6 +23,7 @@ type Poller struct {
 	executor  JobExecutor
 	archiver  RunArchiver
 	heartbeat time.Duration
+	target    string
 }
 
 func NewPoller(queue *Queue, executor JobExecutor, archiver RunArchiver) (*Poller, error) {
@@ -33,12 +34,19 @@ func NewPoller(queue *Queue, executor JobExecutor, archiver RunArchiver) (*Polle
 	if heartbeat < 100*time.Millisecond {
 		heartbeat = 100 * time.Millisecond
 	}
-	return &Poller{queue: queue, executor: executor, archiver: archiver, heartbeat: heartbeat}, nil
+	poller := &Poller{queue: queue, executor: executor, archiver: archiver, heartbeat: heartbeat}
+	worker, ok := executor.(interface{ TargetDir() string })
+	if !ok || worker.TargetDir() == "" {
+		return nil, errors.New("scheduler poller требует executor с фиксированным TargetDir")
+	}
+	poller.target = worker.TargetDir()
+	return poller, nil
 }
 
 // RunOnce возвращает claimed=false, когда очередь сейчас пуста или ограничена.
 func (p *Poller) RunOnce(ctx context.Context, owner string) (claimed bool, err error) {
-	record, claimed, err := p.queue.Claim(ctx, owner)
+	var record Record
+	record, claimed, err = p.queue.ClaimForTarget(ctx, owner, p.target)
 	if err != nil || !claimed {
 		return claimed, err
 	}

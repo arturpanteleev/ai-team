@@ -43,6 +43,13 @@ func TestProcessEnginePassesStrictJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine.TargetDir() != filepath.Clean(canonicalTarget) {
+		t.Fatalf("scheduler target must match the worker's mounted workspace: got %q, want %q", engine.TargetDir(), filepath.Clean(canonicalTarget))
+	}
 	result, err := engine.Start(context.Background(), pipeline.RunConfig{
 		RunID: "run-1", Feature: "feature", TaskDesc: "задача", TargetDir: target,
 	})
@@ -53,18 +60,41 @@ func TestProcessEnginePassesStrictJob(t *testing.T) {
 
 func TestProcessEngineHonorsContextCancellation(t *testing.T) {
 	target := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "worker-started")
+	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "wait")
 	engine, err := NewProcessEngine(
-		[]string{os.Args[0], "-test.run=TestProcessEngineHelper", "--"},
+		[]string{os.Args[0], "-test.run=TestWorkerProtocolHelper", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, runErr := engine.Start(ctx, pipeline.RunConfig{
+			RunID: "run-cancel", Feature: "feature", TaskDesc: "задача", TargetDir: target,
+		})
+		result <- runErr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, readErr := os.Stat(marker); readErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("worker process did not start before cancellation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
-	_, err = engine.Start(ctx, pipeline.RunConfig{
-		RunID: "run-cancel", Feature: "feature", TaskDesc: "задача", TargetDir: target,
-	})
+	select {
+	case err = <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker process remained alive after context cancellation")
+	}
 	if err != context.Canceled {
 		t.Fatalf("process context cancellation: %v", err)
 	}

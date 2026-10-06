@@ -56,6 +56,10 @@ func NewProcessEngine(argv []string, target, dbPath string) (*ProcessEngine, err
 	}, nil
 }
 
+// TargetDir is the mounted persistent workspace this worker is allowed to
+// execute against. Scheduler polling uses it to filter claims.
+func (e *ProcessEngine) TargetDir() string { return e.target }
+
 func (e *ProcessEngine) Start(ctx context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
 	job := Job{
 		SchemaVersion: SchemaVersion, Operation: OperationStart,
@@ -96,6 +100,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	}
 	args := append(append([]string(nil), e.argv[1:]...), "worker", "--target", e.target, "--db", e.dbPath)
 	command := exec.CommandContext(ctx, e.argv[0], args...)
+	configureWorkerProcess(command)
 	command.Stdin = bytes.NewReader(payload)
 	output := &limitedOutput{limit: maxDiagnostics}
 	command.Stdout = output

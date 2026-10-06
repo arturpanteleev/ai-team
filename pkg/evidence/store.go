@@ -271,16 +271,24 @@ func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
 	if err != nil || sha256Bytes(workflowData) != manifest.ResolvedWorkflowSHA256 {
 		return nil, RunManifest{}, ReplayedRun{}, errors.New("workflow snapshot identity mismatch")
 	}
-	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
-	if err != nil {
-		return nil, RunManifest{}, ReplayedRun{}, err
-	}
-	if !replayed.FinishedAt.IsZero() {
-		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("run %s уже terminal", runID)
-	}
 	events, err := VerifyEventLog(filepath.Join(runDir, "events.jsonl"), runID)
 	if err != nil {
 		return nil, RunManifest{}, ReplayedRun{}, err
+	}
+	var replayed ReplayedRun
+	if len(events) == 0 {
+		// Atomic evidence creation can complete before the first run_started
+		// append. Keep this empty prefix resumable so recovery can append that
+		// event before restoring lifecycle state.
+		replayed = ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
+	} else {
+		replayed, err = ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+		if err != nil {
+			return nil, RunManifest{}, ReplayedRun{}, err
+		}
+	}
+	if !replayed.FinishedAt.IsZero() {
+		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("run %s уже terminal", runID)
 	}
 	lastHash := chainGenesis(runID)
 	if len(events) > 0 {

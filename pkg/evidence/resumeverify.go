@@ -113,11 +113,17 @@ func VerifyResumeEvidence(runDir string) error {
 	if err != nil {
 		return resumeErr(ReasonEventChain, "event chain: %v", err)
 	}
+	if err := verifyAttemptManifests(runDir, replayed.Attempts); err != nil {
+		return err
+	}
 	if !replayed.FinishedAt.IsZero() {
 		return resumeErr(ReasonAlreadyTerminal, "run %s уже terminal", manifest.RunID)
 	}
+	return nil
+}
 
-	for _, attempt := range replayed.Attempts {
+func verifyAttemptManifests(runDir string, attempts []ReplayedAttempt) error {
+	for _, attempt := range attempts {
 		if attempt.ManifestSHA256 == "" {
 			continue
 		}
@@ -128,4 +134,37 @@ func VerifyResumeEvidence(runDir string) error {
 		}
 	}
 	return nil
+}
+
+// VerifyTerminalEvidence verifies the immutable manifest, snapshots, hash
+// chain, attempts, and terminal event for a run that must not be resumed.
+func VerifyTerminalEvidence(runDir, runID, targetDir string) (ReplayedRun, error) {
+	err := VerifyResumeEvidence(runDir)
+	if err != nil {
+		var resumeErr *ResumeEvidenceError
+		if !errors.As(err, &resumeErr) || resumeErr.Reason != ReasonAlreadyTerminal {
+			return ReplayedRun{}, err
+		}
+	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return ReplayedRun{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(manifestData))
+	decoder.DisallowUnknownFields()
+	var manifest RunManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return ReplayedRun{}, err
+	}
+	if manifest.SchemaVersion != SchemaVersion || manifest.RunID != runID || manifest.TargetDir != targetDir {
+		return ReplayedRun{}, errors.New("terminal evidence manifest identity mismatch")
+	}
+	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	if err != nil {
+		return ReplayedRun{}, err
+	}
+	if replayed.FinishedAt.IsZero() {
+		return ReplayedRun{}, errors.New("terminal evidence has no run_finished event")
+	}
+	return replayed, nil
 }

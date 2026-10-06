@@ -351,7 +351,12 @@ queue-backed RunEngine. Persistent SQLite queue хранит strict worker Job,
 idempotent active identity, attempts, cancel flag и случайный ownership token.
 Claim/renew/complete выполняются conditional SQL updates: global limit и
 per-target lock проверяются атомарно, истёкший lease возвращается в очередь,
-а stale worker не может завершить re-claimed job.
+а stale worker не может завершить re-claimed job. Claim ограничивается
+каноническим путём persistent workspace; после повторного claim start-job
+получает операцию `recover`, которая проверяет checkpoint и выбирает Start
+только если создание lifecycle ещё не состоялось. Поддерживаемая схема
+непрерывности и требования к общему тому описаны в [руководстве по
+восстановлению worker](guides/worker-recovery.md).
 
 `ai-team scheduler-worker` поддерживает one-shot platform job и loop poller.
 Он продлевает lease, передаёт cancel в context disposable process и после

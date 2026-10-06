@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -531,6 +532,114 @@ func TestRun_HappyPath(t *testing.T) {
 	if n.calls[0].RunID == "" || n.calls[0].AttemptID == "" || n.calls[0].RunID != n.calls[1].RunID {
 		t.Fatalf("run/attempt identity не передана в StageResult: %+v", n.calls)
 	}
+}
+
+// TestPipelineWorkerCrashRecovery kills an actual subprocess while its second
+// pipeline stage is executing, after the first stage checkpoint is durable.
+// A replacement process resumes the same run and must not replay the first
+// stage. It exercises the process boundary and evidence/lifecycle recovery;
+// external Git push/PR side effects are intentionally outside this fixture.
+// The durable queue lease/claim boundary is tested independently in
+// pkg/scheduler/queue_test.go: importing scheduler here would create a test
+// import cycle because scheduler itself depends on pipeline. The CLI package
+// separately tests OperationRecover dispatch through Poller and lifecycle
+// reconciliation in TestRecoveryDispatchCompletesQueueFromFinishedEvidenceBeforeTerminalLifecycle.
+func TestPipelineWorkerCrashRecovery(t *testing.T) {
+	target := env(t)
+	marker := filepath.Join(t.TempDir(), "reviewer-entered")
+	ledger := filepath.Join(t.TempDir(), "stage-ledger")
+	child := exec.Command(os.Args[0], "-test.run=^TestPipelineWorkerCrashHelper$")
+	child.Env = append(os.Environ(), "AI_TEAM_PIPELINE_CRASH_TARGET="+target,
+		"AI_TEAM_PIPELINE_CRASH_MARKER="+marker, "AI_TEAM_PIPELINE_CRASH_LEDGER="+ledger,
+		"AI_TEAM_PIPELINE_CRASH_MODE=start")
+	var output bytes.Buffer
+	child.Stdout, child.Stderr = &output, &output
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			t.Fatalf("pipeline child did not enter live reviewer stage: %s", output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+
+	recovery := exec.Command(os.Args[0], "-test.run=^TestPipelineWorkerCrashHelper$")
+	recovery.Env = append(os.Environ(), "AI_TEAM_PIPELINE_CRASH_TARGET="+target,
+		"AI_TEAM_PIPELINE_CRASH_MARKER="+marker, "AI_TEAM_PIPELINE_CRASH_LEDGER="+ledger,
+		"AI_TEAM_PIPELINE_CRASH_MODE=recover")
+	if data, err := recovery.CombinedOutput(); err != nil {
+		t.Fatalf("pipeline recovery process failed: %v\n%s", err, data)
+	}
+	data, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var analystCalls, reviewerCalls int
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		switch line {
+		case "analyst":
+			analystCalls++
+		case "reviewer":
+			reviewerCalls++
+		}
+	}
+	if analystCalls != 1 || reviewerCalls != 2 {
+		t.Fatalf("completed stage was replayed or interrupted stage not retried: analyst=%d reviewer=%d ledger=%q", analystCalls, reviewerCalls, data)
+	}
+}
+
+// TestPipelineWorkerCrashHelper is the disposable process used above. It
+// constructs the normal Pipeline and RunEngine with the same durable target.
+func TestPipelineWorkerCrashHelper(t *testing.T) {
+	target := os.Getenv("AI_TEAM_PIPELINE_CRASH_TARGET")
+	if target == "" {
+		return
+	}
+	marker := os.Getenv("AI_TEAM_PIPELINE_CRASH_MARKER")
+	ledger := os.Getenv("AI_TEAM_PIPELINE_CRASH_LEDGER")
+	mode := os.Getenv("AI_TEAM_PIPELINE_CRASH_MODE")
+	rt := newScripted()
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		f, err := os.OpenFile(ledger, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatalf("open stage ledger: %v", err)
+		}
+		if _, err := fmt.Fprintln(f, name); err != nil {
+			_ = f.Close()
+			t.Fatalf("write stage ledger: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close stage ledger: %v", err)
+		}
+		if name == "reviewer" && mode == "start" {
+			if err := os.WriteFile(marker, []byte("entered"), 0600); err != nil {
+				t.Fatalf("write stage marker: %v", err)
+			}
+			select {}
+		}
+	}
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}),
+		testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	engine := NewRunEngine(p)
+	if mode == "start" {
+		_, _ = engine.Start(context.Background(), RunConfig{RunID: "process-recovery", Feature: "feat", TaskDesc: "тестовая задача", TargetDir: target, ApproveGates: true})
+		return
+	}
+	if mode != "recover" {
+		t.Fatalf("unexpected helper mode %q", mode)
+	}
+	_, _ = engine.Resume(context.Background(), ResumeConfig{RunID: "process-recovery", TargetDir: target, ApproveGates: true})
 }
 
 func TestRun_StrictProfileBlockedBeforeExecution(t *testing.T) {
@@ -3162,6 +3271,86 @@ func TestRun_ResumeKeepsRunIdentity(t *testing.T) {
 	}
 	if started != 1 || resumed != 1 {
 		t.Fatalf("ожидались один start и один resume, получено start=%d resume=%d", started, resumed)
+	}
+}
+
+func TestRecoverInitialLifecycleRebuildsOnlyRunStartedCheckpoint(t *testing.T) {
+	target := env(t)
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry())
+	configSnapshot, workflowSnapshot, err := p.resolvedEvidenceSnapshots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute)
+	const runID = "run-startup-crash"
+	store, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "feat", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	// This is the durable state at the crash boundary: run.json and run_started
+	// exist, while lifecycle.Create has not yet committed.
+	if err := p.recoverInitialLifecycle(runID, target, "feat", "тестовая задача"); err != nil {
+		t.Fatalf("restore startup checkpoint: %v", err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := lifecycleStore.Load(runID)
+	if err != nil || state.Phase != lifecycle.PhaseRunning || state.NextStage != "analyst" || state.Task != "тестовая задача" {
+		t.Fatalf("restored lifecycle: state=%+v err=%v", state, err)
+	}
+	if err := p.recoverInitialLifecycle(runID, target, "feat", "тестовая задача"); err == nil {
+		t.Fatal("must reject replay after lifecycle exists")
+	}
+}
+
+func TestRecoverInitialLifecycleRebuildsRunManifestBeforeRunStarted(t *testing.T) {
+	target := env(t)
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry())
+	configSnapshot, workflowSnapshot, err := p.resolvedEvidenceSnapshots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute)
+	const runID = "run-manifest-only-crash"
+	if _, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "feat", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	taskPath := filepath.Join(target, ".ai-team", "artifacts", "tasks", "feat", "task.md")
+	if err := os.MkdirAll(filepath.Dir(taskPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(taskPath, []byte("тестовая задача"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.recoverInitialLifecycle(runID, target, "feat", "тестовая задача"); err != nil {
+		t.Fatalf("restore manifest-only startup checkpoint: %v", err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := lifecycleStore.Load(runID)
+	if err != nil || state.Phase != lifecycle.PhaseRunning || state.Task != "тестовая задача" {
+		t.Fatalf("restored lifecycle: state=%+v err=%v", state, err)
 	}
 }
 

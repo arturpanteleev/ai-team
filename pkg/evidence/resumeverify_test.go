@@ -99,3 +99,24 @@ func TestVerifyResumeEvidenceRejectsTerminalRun(t *testing.T) {
 		t.Fatalf("должен быть сентинель ErrResumeEvidence")
 	}
 }
+
+func TestVerifyTerminalEvidenceChecksAttemptManifestAfterTerminalResumeGuard(t *testing.T) {
+	runDir := buildAnchoredRun(t, "run-terminal-manifest-corruption")
+	manifestPath := filepath.Join(runDir, "attempts", "run-terminal-manifest-corruption-001-check", "manifest.json")
+	if err := os.Chmod(manifestPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	rechainEventLog(t, runDir, func(event *Event) {
+		if event.Type == "attempt_finished" && event.Data != nil {
+			event.Data["manifest_sha256"] = emptyContentSHA256
+		}
+	})
+	_, err := VerifyTerminalEvidence(runDir, "run-terminal-manifest-corruption", "")
+	var resumeErr *ResumeEvidenceError
+	if !errors.As(err, &resumeErr) || resumeErr.Reason != ReasonAttemptManifest {
+		t.Fatalf("terminal evidence verification must reject a corrupt attempt manifest, got %v", err)
+	}
+}

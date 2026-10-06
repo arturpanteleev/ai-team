@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -33,6 +34,11 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 	if err := base().Validate(target); err != nil {
 		t.Fatalf("эталонный job должен быть валиден: %v", err)
 	}
+	recovery := base()
+	recovery.Operation = OperationRecover
+	if err := recovery.Validate(target); err != nil {
+		t.Fatalf("recovery должен сохранять admission identity: %v", err)
+	}
 
 	cases := []struct {
 		name     string
@@ -49,6 +55,7 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 		{"start с недопустимой feature", func(j *Job) { j.Feature = "../escape" }, "feature и task"},
 		{"start с пустым task", func(j *Job) { j.Task = "   " }, "feature и task"},
 		{"resume с feature", func(j *Job) { j.Operation = OperationResume; j.Task = "" }, "resume"},
+		{"recover без исходной задачи", func(j *Job) { j.Operation = OperationRecover; j.Task = "" }, "recover"},
 		{"cancel с task", func(j *Job) { j.Operation = OperationCancel; j.Feature = "" }, "cancel"},
 		{"cancel с approve_plan_hash", func(j *Job) {
 			j.Operation = OperationCancel
@@ -352,6 +359,17 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		return
 	}
 	switch os.Getenv("AI_TEAM_WORKER_TEST_MODE") {
+	case "wait":
+		marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER")
+		if marker == "" {
+			t.Fatal("wait helper requires a start marker")
+		}
+		if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "no-result":
 		os.Exit(0)
 	case "fail-no-result":

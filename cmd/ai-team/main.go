@@ -33,6 +33,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/export"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -321,6 +322,8 @@ func cmdWorker() {
 			RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
 			ApprovePlanHash: job.ApprovePlanHash,
 		})
+	case worker.OperationRecover:
+		result, err = executeRecoveredJob(ctx, engine, target, job)
 	case worker.OperationCancel:
 		result, err = engine.Cancel(pipeline.CancelConfig{RunID: job.RunID, TargetDir: target})
 	}
@@ -339,6 +342,87 @@ func cmdWorker() {
 		Outcome: string(result.Outcome),
 	})
 	logging.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
+}
+
+type recoveryEngine interface {
+	Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error)
+	Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error)
+	RecoverInitialLifecycle(runID, targetDir, feature, task string) error
+	ReconcileTerminalDelivery(context.Context, string, string) error
+}
+
+func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target string, job worker.Job) (pipeline.RunResult, error) {
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		return pipeline.RunResult{}, err
+	}
+	state, err := stateStore.Load(job.RunID)
+	if errors.Is(err, fs.ErrNotExist) {
+		runDir := filepath.Join(target, ".ai-team", "runs", job.RunID)
+		if _, statErr := os.Stat(runDir); errors.Is(statErr, fs.ErrNotExist) {
+			return engine.Start(ctx, job.RunConfig())
+		} else if statErr != nil {
+			return pipeline.RunResult{}, statErr
+		}
+		if err := engine.RecoverInitialLifecycle(job.RunID, target, job.Feature, job.Task); err != nil {
+			return pipeline.RunResult{}, err
+		}
+		state, err = stateStore.Load(job.RunID)
+	}
+	if err != nil {
+		return pipeline.RunResult{}, err
+	}
+	if outcome, attemptCount, terminalErr := recoveredTerminalOutcome(target, job.RunID, state); terminalErr == nil {
+		if state.Phase != lifecycle.PhaseTerminal {
+			terminal := state
+			terminal.Phase = lifecycle.PhaseTerminal
+			terminal.NextStage = ""
+			terminal.PendingApprovalID = ""
+			terminal.AttemptOrdinal = attemptCount
+			if err := stateStore.Save(state, terminal); err != nil {
+				return pipeline.RunResult{}, fmt.Errorf("reconcile terminal lifecycle: %w", err)
+			}
+		}
+		result := pipeline.RunResult{RunID: job.RunID, Outcome: workflow.RunOutcome(outcome)}
+		if outcome == worker.OutcomeCompleted {
+			if err := engine.ReconcileTerminalDelivery(ctx, job.RunID, target); err != nil {
+				return result, fmt.Errorf("reconcile terminal delivery: %w", err)
+			}
+		}
+		if outcome == worker.OutcomeFailed {
+			return result, &pipeline.RunError{Outcome: workflow.RunFailed, Err: errors.New("recovered terminal run failed")}
+		}
+		return result, nil
+	}
+	return engine.Resume(ctx, pipeline.ResumeConfig{
+		RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
+		ApprovePlanHash: job.ApprovePlanHash,
+	})
+}
+
+func recoveredTerminalOutcome(target, runID string, state lifecycle.State) (string, int, error) {
+	if state.RunID != runID || state.TargetDir != target {
+		return "", 0, errors.New("terminal lifecycle identity mismatch")
+	}
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	replayed, err := evidence.VerifyTerminalEvidence(runDir, runID, target)
+	if err != nil {
+		return "", 0, fmt.Errorf("terminal run evidence: %w", err)
+	}
+	switch replayed.Status {
+	case workflow.RunCompleted, workflow.RunCompletedWithWarnings:
+		return worker.OutcomeCompleted, len(replayed.Attempts), nil
+	case workflow.RunFailed:
+		return worker.OutcomeFailed, len(replayed.Attempts), nil
+	case workflow.RunBlocked:
+		return worker.OutcomeBlocked, len(replayed.Attempts), nil
+	case workflow.RunStopped:
+		return worker.OutcomeStopped, len(replayed.Attempts), nil
+	case workflow.RunCanceled:
+		return worker.OutcomeCanceled, len(replayed.Attempts), nil
+	default:
+		return "", 0, fmt.Errorf("unsupported durable terminal status %q", replayed.Status)
+	}
 }
 
 func printWorkerResult(runID string, value worker.Result) {

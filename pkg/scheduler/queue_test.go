@@ -1,8 +1,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -142,11 +145,116 @@ func TestQueueTargetConcurrencyAndLeaseRecovery(t *testing.T) {
 	}
 	now = now.Add(2 * time.Second)
 	reclaimed, claimed, err := queue.Claim(context.Background(), "worker-2")
-	if err != nil || !claimed || reclaimed.ID != firstID || reclaimed.Attempts != 2 {
+	if err != nil || !claimed || reclaimed.ID != firstID || reclaimed.Attempts != 2 || reclaimed.Job.Operation != worker.OperationRecover {
 		t.Fatalf("expired lease не reclaimed: %+v claimed=%v err=%v", reclaimed, claimed, err)
 	}
 	if err := queue.Complete(first.ID, "worker-1", first.LeaseToken, true, ""); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale completion принят: %v", err)
+	}
+}
+
+func TestExpiredLeaseCannotRenewOrCompleteBeforeReclaim(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	queue, err := Open(filepath.Join(t.TempDir(), "scheduler.db"), Options{
+		LeaseDuration: time.Second,
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	jobID, err := queue.Enqueue(testJob(t.TempDir(), "run-expired-lease"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := queue.Claim(context.Background(), "old-worker")
+	if err != nil || !ok || claimed.ID != jobID {
+		t.Fatalf("claim: record=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	now = now.Add(time.Second)
+	if _, err := queue.Renew(context.Background(), jobID, "old-worker", claimed.LeaseToken); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("expired lease was renewed before reclaim: %v", err)
+	}
+	if err := queue.Complete(jobID, "old-worker", claimed.LeaseToken, true, "stale publish"); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("expired lease was completed before reclaim: %v", err)
+	}
+	stored, exists, err := queue.Get(jobID)
+	if err != nil || !exists || stored.Status != StatusRunning {
+		t.Fatalf("expired job changed before reclaim: record=%+v exists=%v err=%v", stored, exists, err)
+	}
+}
+
+func TestClaimForTargetAndKilledWorkerRecovery(t *testing.T) {
+	if db := os.Getenv("AI_TEAM_SCHEDULER_CRASH_DB"); db != "" {
+		target := os.Getenv("AI_TEAM_SCHEDULER_CRASH_TARGET")
+		marker := os.Getenv("AI_TEAM_SCHEDULER_CRASH_MARKER")
+		queue, err := Open(db, Options{LeaseDuration: 250 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = queue.Close() }()
+		if _, ok, err := queue.ClaimForTarget(context.Background(), "crash-worker", target); err != nil || !ok {
+			jobs, _ := queue.ListRun("run-crash")
+			t.Fatalf("child claim: target=%q jobs=%+v ok=%v err=%v", target, jobs, ok, err)
+		}
+		if err := os.WriteFile(marker, []byte("claimed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		select {}
+	}
+
+	dir := t.TempDir()
+	targetA, targetB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	if err := os.MkdirAll(targetA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dir, "scheduler.db")
+	queue, err := Open(db, Options{LeaseDuration: 250 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	jobID, err := queue.Enqueue(testJob(targetA, "run-crash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := queue.ClaimForTarget(context.Background(), "wrong-target", targetB); err != nil || ok {
+		t.Fatalf("worker claimed foreign target: ok=%v err=%v", ok, err)
+	}
+	marker := filepath.Join(dir, "claimed")
+	child := exec.Command(os.Args[0], "-test.run=^TestClaimForTargetAndKilledWorkerRecovery$")
+	var childOutput bytes.Buffer
+	child.Stdout, child.Stderr = &childOutput, &childOutput
+	child.Env = append(os.Environ(), "AI_TEAM_SCHEDULER_CRASH_DB="+db,
+		"AI_TEAM_SCHEDULER_CRASH_TARGET="+targetA, "AI_TEAM_SCHEDULER_CRASH_MARKER="+marker)
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = child.Process.Kill()
+			t.Fatalf("worker subprocess did not claim job: %s", childOutput.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+	time.Sleep(300 * time.Millisecond)
+	recovered, ok, err := queue.ClaimForTarget(context.Background(), "replacement", targetA)
+	if err != nil || !ok || recovered.ID != jobID || recovered.Attempts != 2 || recovered.Job.Operation != worker.OperationRecover {
+		t.Fatalf("killed process recovery: record=%+v ok=%v err=%v", recovered, ok, err)
+	}
+	if err := queue.Complete(jobID, "crash-worker", "stale-token", true, "stale publish"); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("old worker could publish after lease loss: %v", err)
 	}
 }
 
@@ -224,10 +332,13 @@ func TestQueueGlobalConcurrencyAtomicAcrossConnections(t *testing.T) {
 }
 
 type fakeExecutor struct {
-	mu   sync.Mutex
-	jobs []worker.Job
-	err  error
+	mu     sync.Mutex
+	jobs   []worker.Job
+	err    error
+	target string
 }
+
+func (f *fakeExecutor) TargetDir() string { return f.target }
 
 func (f *fakeExecutor) Execute(_ context.Context, job worker.Job) (pipeline.RunResult, error) {
 	f.mu.Lock()
@@ -240,7 +351,10 @@ type cancelAwareExecutor struct {
 	started chan struct{}
 	mu      sync.Mutex
 	jobs    []worker.Job
+	target  string
 }
+
+func (e *cancelAwareExecutor) TargetDir() string { return e.target }
 
 func (e *cancelAwareExecutor) Execute(ctx context.Context, job worker.Job) (pipeline.RunResult, error) {
 	e.mu.Lock()
@@ -265,7 +379,7 @@ func TestPollerPropagatesDistributedCancel(t *testing.T) {
 	defer func() { _ = queue.Close() }()
 	jobID, _ := queue.Enqueue(testJob(target, "run-distributed-cancel"))
 	engine, _ := NewQueueEngine(queue, target)
-	executor := &cancelAwareExecutor{started: make(chan struct{})}
+	executor := &cancelAwareExecutor{started: make(chan struct{}), target: target}
 	poller, _ := NewPoller(queue, executor, nil)
 	done := make(chan error, 1)
 	go func() {
@@ -323,7 +437,7 @@ func TestQueueEngineAndPoller(t *testing.T) {
 	if err := queue.Activate(jobs[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	executor := &fakeExecutor{}
+	executor := &fakeExecutor{target: target}
 	poller, err := NewPoller(queue, executor, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -336,5 +450,20 @@ func TestQueueEngineAndPoller(t *testing.T) {
 	defer executor.mu.Unlock()
 	if len(executor.jobs) != 1 || executor.jobs[0].Operation != worker.OperationStart {
 		t.Fatalf("poller jobs: %+v", executor.jobs)
+	}
+}
+
+func TestPollerRequiresFixedWorkerTarget(t *testing.T) {
+	target := t.TempDir()
+	queue, err := Open(filepath.Join(t.TempDir(), "scheduler.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	if _, err := NewPoller(queue, &fakeExecutor{}, nil); err == nil {
+		t.Fatal("poller must reject executors without a fixed target")
+	}
+	if _, err := NewPoller(queue, &fakeExecutor{target: target}, nil); err != nil {
+		t.Fatalf("fixed target executor rejected: %v", err)
 	}
 }

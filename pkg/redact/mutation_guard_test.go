@@ -37,7 +37,7 @@ func TestScanJSONLengthThresholdIsSoleRejectorForShortValues(t *testing.T) {
 			t.Fatalf("короткое значение %q признано секретом", value)
 		}
 		input := []byte(`{"api_key": "` + value + `", "token": "` + value + `"}`)
-		if findings := Scan(input); len(findings) != 0 {
+		if findings := Scan(input); len(findings.Findings) != 0 {
 			t.Fatalf("короткое значение %q дало находки: %+v", value, findings)
 		}
 	}
@@ -51,7 +51,7 @@ func TestScanJSONLengthThresholdIsSoleRejectorForShortValues(t *testing.T) {
 	if !likelySecretValue(long) {
 		t.Fatalf("значение %q длиной %d должно считаться секретом", long, len(long))
 	}
-	if findings := Scan([]byte(`{"api_key": "` + long + `"}`)); len(findings) == 0 {
+	if findings := Scan([]byte(`{"api_key": "` + long + `"}`)); len(findings.Findings) == 0 {
 		t.Fatalf("значение длиной %d в секретном поле должно давать находку", len(long))
 	}
 }
@@ -90,10 +90,10 @@ func TestPlaceholderFilterIsSoleRejectorForLongTemplateValues(t *testing.T) {
 				t.Fatalf("значение-плейсхолдер %q признано секретом", value)
 			}
 			// Оба пути сканера: line-based assignment и структурный JSON.
-			if findings := Scan([]byte("api_key = " + value + "\n")); len(findings) != 0 {
+			if findings := Scan([]byte("api_key = " + value + "\n")); len(findings.Findings) != 0 {
 				t.Fatalf("плейсхолдер в assignment дал находки: %+v", findings)
 			}
-			if findings := Scan([]byte(`{"api_key": "` + value + `"}`)); len(findings) != 0 {
+			if findings := Scan([]byte(`{"api_key": "` + value + `"}`)); len(findings.Findings) != 0 {
 				t.Fatalf("плейсхолдер в JSON дал находки: %+v", findings)
 			}
 		})
@@ -104,7 +104,7 @@ func TestPlaceholderFilterIsSoleRejectorForLongTemplateValues(t *testing.T) {
 	if !likelySecretValue(real) {
 		t.Fatalf("значение %q без маркера должно считаться секретом", real)
 	}
-	if findings := Scan([]byte("api_key = " + real + "\n")); len(findings) == 0 {
+	if findings := Scan([]byte("api_key = " + real + "\n")); len(findings.Findings) == 0 {
 		t.Fatal("настоящий токен в assignment должен давать находку")
 	}
 }

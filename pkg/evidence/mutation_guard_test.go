@@ -185,7 +185,7 @@ func rechainEventLog(t *testing.T, runDir string, mutate func(*Event)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := genesisEventHash
+	previous := chainGenesis(filepath.Base(runDir))
 	rebuilt := make([]string, 0, 8)
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		var event Event

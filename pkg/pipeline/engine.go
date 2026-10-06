@@ -24,6 +24,7 @@ type ResumeConfig struct {
 	TargetDir       string
 	ApproveGates    bool
 	ApprovePlanHash string
+	CancelRequested func() bool
 }
 
 type CancelConfig struct {
@@ -51,6 +52,7 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 		TargetDir:       config.TargetDir,
 		ApproveGates:    config.ApproveGates,
 		ApprovePlanHash: config.ApprovePlanHash,
+		CancelRequested: config.CancelRequested,
 	})
 }
 

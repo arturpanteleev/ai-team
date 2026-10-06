@@ -3,6 +3,7 @@ package pipeline
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,6 +42,14 @@ func (rs *runState) authorizeTransition(
 	if quorum == "" {
 		quorum = approval.QuorumAny
 	}
+	feedbackActions := make([]string, 0)
+	fromIndex := rs.graph.Index(fromStage)
+	for action, target := range targets {
+		if strings.HasPrefix(action, "return_to_") && rs.graph.Index(target) >= 0 && rs.graph.Index(target) <= fromIndex {
+			feedbackActions = append(feedbackActions, action)
+		}
+	}
+	sort.Strings(feedbackActions)
 	label := fmt.Sprintf("переход %s → %s", fromStage, toStage)
 	subjectHash, err := rs.checkpointSubjectHash(label, fromStage)
 	if err != nil {
@@ -85,7 +94,8 @@ func (rs *runState) authorizeTransition(
 		SubjectHash: subjectHash, CandidateSHA256: candidateSHA,
 		RequiredRoles: append([]string(nil), roles...),
 		Quorum:        quorum, Actions: append([]string(nil), actions...), Targets: targets,
-		Deferred: deferred, Payload: payload,
+		FeedbackActions: feedbackActions,
+		Deferred:        deferred, Payload: payload,
 	})
 	if err != nil {
 		return "", err
@@ -151,6 +161,18 @@ func (rs *runState) authorizeTransition(
 			Checkpoint: label, RunID: rs.runID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
 		}
 	}
+	returnReason := ""
+	if containsString(feedbackActions, action) && rs.p.prompter.Interactive() {
+		returnReason = strings.TrimSpace(rs.p.prompter.Ask("Причина возврата и инструкции следующей роли:"))
+		if returnReason == "n" {
+			returnReason = ""
+		}
+		if returnReason == "" {
+			return "", errors.New("для возврата требуется причина или feedback")
+		}
+	} else if containsString(feedbackActions, action) && rs.runCfg.ApproveGates {
+		returnReason = "Автоматический возврат по configured workflow (--approve-gates); учти приложенный review/test feedback."
+	}
 
 	rolesToDecide := value.RequiredRoles
 	if value.Quorum == approval.QuorumAny {
@@ -159,7 +181,7 @@ func (rs *runState) authorizeTransition(
 	for _, role := range rolesToDecide {
 		value, err = rs.approvalStore.Decide(value.RunID, value.ID, approval.Decision{
 			ActorID: "local-user", ActorRole: role, Action: action,
-			SubjectHash: value.SubjectHash,
+			SubjectHash: value.SubjectHash, Comment: returnReason,
 		})
 		if err != nil {
 			return "", err
@@ -214,8 +236,11 @@ func approvalEventData(value approval.PendingApproval) map[string]any {
 		"from_stage":       value.FromStage, "to_stage": value.ToStage,
 		"trigger": value.Trigger, "required_roles": value.RequiredRoles,
 		"quorum": value.Quorum, "actions": value.Actions,
-		"status": value.Status, "resolved_action": value.ResolvedAction,
-		"decisions": value.Decisions,
+		"feedback_actions": value.FeedbackActions,
+		"status":           value.Status, "resolved_action": value.ResolvedAction,
+		"decisions":                        value.Decisions,
+		"artifact_revisions":               value.ArtifactRevisions,
+		"artifact_revision_binding_sha256": value.ArtifactRevisionBindingSHA256,
 	}
 	if len(value.Payload) > 0 {
 		data["payload"] = value.Payload
@@ -253,17 +278,18 @@ func (rs *runState) checkpointSubjectHash(label, stage string) (string, error) {
 		SHA256 string `json:"sha256"`
 	}
 	type subject struct {
-		RunID           string                `json:"run_id"`
-		Label           string                `json:"label"`
-		AttemptID       string                `json:"attempt_id"`
-		Stage           string                `json:"stage"`
-		State           workflow.AttemptState `json:"state"`
-		Verdict         verdict.Verdict       `json:"verdict,omitempty"`
-		Artifacts       []artifactSubject     `json:"artifacts,omitempty"`
-		CheckProof      []string              `json:"check_evidence_digests,omitempty"`
-		CandidateSHA256 string                `json:"candidate_sha256,omitempty"`
+		RunID             string                `json:"run_id"`
+		Label             string                `json:"label"`
+		AttemptID         string                `json:"attempt_id"`
+		Stage             string                `json:"stage"`
+		State             workflow.AttemptState `json:"state"`
+		Verdict           verdict.Verdict       `json:"verdict,omitempty"`
+		Artifacts         []artifactSubject     `json:"artifacts,omitempty"`
+		CheckProof        []string              `json:"check_evidence_digests,omitempty"`
+		ArtifactRevisions map[string]string     `json:"artifact_revisions,omitempty"`
+		CandidateSHA256   string                `json:"candidate_sha256,omitempty"`
 	}
-	value := subject{RunID: rs.runID, Label: label, Stage: stage}
+	value := subject{RunID: rs.runID, Label: label, Stage: stage, ArtifactRevisions: rs.selectedArtifactRevisions}
 	for index := len(rs.results) - 1; index >= 0; index-- {
 		result := rs.results[index]
 		if result.Name != stage || result.Superseded {

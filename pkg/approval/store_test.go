@@ -76,6 +76,62 @@ func TestStoreRejectsStaleSubjectAndWrongRole(t *testing.T) {
 	}
 }
 
+func TestStoreExplainsForbiddenReturnRouteAndRequiresReason(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-return", AttemptID: "attempt-return", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "graph_outcome:rejected", SubjectHash: testSubject,
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"return_to_coder"}, FeedbackActions: []string{"return_to_coder"},
+		Targets: map[string]string{"return_to_coder": "coder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_analyst",
+		SubjectHash: testSubject, Comment: "requirements unclear",
+	}); err == nil || !strings.Contains(err.Error(), "запрещён возврат") {
+		t.Fatalf("expected explicit forbidden-route error, got %v", err)
+	}
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder",
+		SubjectHash: testSubject,
+	}); err == nil || !strings.Contains(err.Error(), "требуется причина") {
+		t.Fatalf("expected return-reason validation, got %v", err)
+	}
+}
+
+func TestResolvedDecisionBindsSelectedArtifactRevision(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-revision", AttemptID: "attempt-revision", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "graph_outcome:rejected", SubjectHash: testSubject,
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"return_to_coder"}, FeedbackActions: []string{"return_to_coder"},
+		Targets: map[string]string{"return_to_coder": "coder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := map[string]string{"attempts/attempt-revision/review.md": "rev-000002-example"}
+	resolved, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder", Comment: "please fix",
+		SubjectHash: testSubject, ArtifactRevisions: selection,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameRevisionSelection(resolved.ArtifactRevisions, selection) || resolved.ArtifactRevisionBindingSHA256 == "" ||
+		resolved.ArtifactRevisionBindingSHA256 != revisionBindingHash(testSubject, selection) {
+		t.Fatalf("resolved handoff is not bound to its chosen artifact revision: %+v", resolved)
+	}
+}
+
 func TestStoreAllQuorum(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

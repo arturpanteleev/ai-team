@@ -29,9 +29,10 @@ vi.mock('../api', () => ({
     }, {
       id: 'approval-spec', run_id: 'run-graph', attempt_id: 'attempt-2',
       from_stage: 'analyst', to_stage: 'architect', trigger: 'graph_outcome:passed',
-      subject_hash: 'b'.repeat(64), required_roles: ['product_owner'], quorum: 'any',
+      subject_hash: 'b'.repeat(64), required_roles: ['product_owner'], quorum: 'all',
       actions: ['approve_spec', 'reject'], targets: { approve_spec: 'architect', reject: '$stop' },
       payload: { kind: 'agreed_spec', brief_version: { id: 'brief-abcd', sha256: 'c'.repeat(64) }, artifacts: { proposal: 'd'.repeat(64), spec: 'e'.repeat(64) } },
+      artifact_revisions: { 'attempts/attempt-2/artifacts/feat/spec.md': 'rev-000001-A' },
       status: 'pending',
     }],
     next_stage: 'architect',
@@ -109,5 +110,19 @@ describe('PipelineDetail graph', () => {
 
     expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Согласовать ТЗ и передать архитектору' })).not.toBeInTheDocument();
+  });
+
+  it('повторно отправляет закреплённые human revisions вместе с голосом quorum', async () => {
+    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+
+    expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
+    expect(screen.getByText('Закреплённые версии для всех голосов')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }));
+
+    expect(vi.mocked(decideApproval)).toHaveBeenCalledWith('run-graph', expect.objectContaining({
+      id: 'approval-spec', artifact_revisions: { 'attempts/attempt-2/artifacts/feat/spec.md': 'rev-000001-A' },
+    }), expect.objectContaining({
+      action: 'approve_spec', artifact_revisions: { 'attempts/attempt-2/artifacts/feat/spec.md': 'rev-000001-A' },
+    }));
   });
 });

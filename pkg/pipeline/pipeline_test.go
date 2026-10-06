@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -980,6 +982,200 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	}
 }
 
+func TestRun_ResumeRecoversPinnedReturnInputAfterCrash(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".ai-team/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package retry\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, commandErr := command.CombinedOutput(); commandErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, commandErr, output)
+		}
+	}
+
+	rt := newScripted()
+	rt.contentFn["reviewer"] = func(int) map[string]string {
+		return map[string]string{"review": "**Verdict:** CHANGES_REQUESTED\nReview v1\n"}
+	}
+	var selectedReview, returnFeedback string
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name == "coder" {
+			for _, input := range inputs {
+				if input.Name == "review" {
+					data, readErr := os.ReadFile(input.Path)
+					if readErr != nil {
+						t.Errorf("read pinned review: %v", readErr)
+					}
+					selectedReview = string(data)
+				}
+				if input.Name == "human-return-feedback" {
+					data, readErr := os.ReadFile(input.Path)
+					if readErr != nil {
+						t.Errorf("read return feedback: %v", readErr)
+					}
+					returnFeedback = string(data)
+				}
+			}
+			_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"), []byte("package retry\nconst Revision = 1\n"), 0644)
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.Entry = "reviewer"
+		wf.MaxVisits["reviewer"] = 2
+		wf.MaxVisits["coder"] = 2
+		for index := range wf.Edges {
+			if wf.Edges[index].From == "coder" && wf.Edges[index].Outcome == "passed" {
+				wf.Edges[index].To = workflow.TerminalComplete
+				wf.Edges[index].Approval = nil
+			}
+		}
+		wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+	}, config.AgentConfig{Name: "coder"}, config.AgentConfig{Name: "reviewer"})
+	registry := agent.NewFS(fstest.MapFS{
+		"reviewer/def.yaml": def(`name: reviewer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
+inputs: {}
+outputs:
+  review: '{feature}/review.md'
+`),
+		"reviewer/prompt.md": def("review"),
+		"coder/def.yaml": def(`name: coder
+runtime: agentcli
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+require_diff: true
+inputs:
+  review: '{feature}/review.md'
+outputs: {}
+`),
+		"coder/prompt.md": def("code"),
+	})
+	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "revise review", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("expected return approval, result=%+v err=%v", first, err)
+	}
+	approvals, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, ".ai-team", "runs", first.RunID, "attempts", pending.AttemptID, "manifest.json")
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attemptManifest evidence.AttemptManifest
+	if err := json.Unmarshal(manifestData, &attemptManifest); err != nil {
+		t.Fatal(err)
+	}
+	var reviewPath string
+	for _, output := range attemptManifest.Outputs {
+		if output.Name == "review" {
+			reviewPath = output.EvidencePath
+		}
+	}
+	if reviewPath == "" {
+		t.Fatalf("review output missing: %+v", attemptManifest.Outputs)
+	}
+	source, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", first.RunID, filepath.FromSlash(reviewPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := humanStore.Append(first.RunID, reviewPath, "", fmt.Sprintf("%x", sha256.Sum256(source)),
+		"Human-pinned review vA\n", "freeze this review", "qa-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := approvals.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "qa-1", ActorRole: "reviewer", Action: "return_to_coder",
+		Comment: "Use the exact corrected review.", SubjectHash: pending.SubjectHash,
+		ArtifactRevisions: map[string]string{reviewPath: revision.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Persist the durable decision and lifecycle handoff, then simulate the
+	// coder starting and writing partial work before the process crashes.
+	evidenceStore, _, _, err := evidence.Resume(filepath.Join(dir, ".ai-team", "runs"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: decided.AttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "transition_selected", AttemptID: decided.AttemptID, Stage: "reviewer", Data: map[string]any{
+		"from": "reviewer", "outcome": "rejected", "edge_target": "coder", "action": "return_to_coder", "target": "coder",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	compiledGraph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashedCoderAttempt := evidenceStore.NewAttemptID("coder", 100)
+	if err := evidenceStore.Append(evidence.Event{Type: "attempt_started", AttemptID: crashedCoderAttempt, Stage: "coder", Timestamp: time.Now().UTC(), Data: map[string]any{
+		"stage_index": compiledGraph.Index("coder") + 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := lifecycles.Load(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := waiting
+	running.Phase, running.NextStage, running.PendingApprovalID = lifecycle.PhaseRunning, "coder", ""
+	if err := lifecycles.Save(waiting, running); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil {
+		t.Fatalf("resume after handoff crash: result=%+v err=%v", second, err)
+	}
+	if second.RunID != first.RunID || second.Outcome != workflow.RunCompletedWithWarnings {
+		t.Fatalf("wrong resumed outcome: %+v", second)
+	}
+	if !strings.Contains(selectedReview, "Human-pinned review vA") || !strings.Contains(returnFeedback, "Use the exact corrected review.") {
+		t.Fatalf("pinned handoff input lost after recovery: review=%q feedback=%q", selectedReview, returnFeedback)
+	}
+	stale, err := recoveredGraphInputApproval(approvals, first.RunID, "coder", compiledGraph, evidence.ReplayedRun{
+		Attempts: []evidence.ReplayedAttempt{{AttemptID: pending.AttemptID, Stage: "reviewer"}, {AttemptID: "later-coder-attempt", Stage: "coder", FinishedAt: time.Now().UTC(), Status: "passed"}},
+	})
+	if err != nil || stale != nil {
+		t.Fatalf("must not reuse a return approval after its target stage has started: approval=%+v err=%v", stale, err)
+	}
+}
+
 func TestRun_ResumeRejectsApprovalForMutatedCandidate(t *testing.T) {
 	dir := env(t)
 	gitInit(t, dir)
@@ -1070,6 +1266,8 @@ func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
 		return map[string]string{"review": "**Verdict:** APPROVED\n"}
 	}
 	var secondCoderInputs []string
+	var feedbackContent string
+	var revisedArtifactContent string
 	rt.onExec = func(name string, inputs []runtime.Artifact) {
 		if name != "coder" {
 			return
@@ -1077,6 +1275,19 @@ func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
 		if rt.calls["coder"] == 2 {
 			for _, input := range inputs {
 				secondCoderInputs = append(secondCoderInputs, input.Name)
+				if input.Name == "human-return-feedback" {
+					data, readErr := os.ReadFile(input.Path)
+					if readErr != nil {
+						t.Errorf("read returned feedback: %v", readErr)
+					}
+					feedbackContent = string(data)
+				} else if input.Name == "review" {
+					data, readErr := os.ReadFile(input.Path)
+					if readErr != nil {
+						t.Errorf("read selected revision: %v", readErr)
+					}
+					revisedArtifactContent = string(data)
+				}
 			}
 		}
 		_ = os.WriteFile(filepath.Join(rt.targetDir, "coder.go"),
@@ -1105,10 +1316,50 @@ func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
 		if !errors.As(runErr, &required) {
 			t.Fatalf("шаг %d: ожидался pending approval, got %v", i, runErr)
 		}
-		if _, err := store.Decide(result.RunID, required.ApprovalID, approval.Decision{
+		decision := approval.Decision{
 			ActorID: "human-1", ActorRole: step.role, Action: step.action,
 			SubjectHash: required.SubjectHash,
-		}); err != nil {
+		}
+		if strings.HasPrefix(step.action, "return_to_") {
+			decision.Comment = "Исправь замечание reviewer и пересмотри scope."
+			pending, loadErr := store.Load(result.RunID, required.ApprovalID)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			manifestData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", result.RunID, "attempts", pending.AttemptID, "manifest.json"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var manifest evidence.AttemptManifest
+			if err := json.Unmarshal(manifestData, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			var reviewPath string
+			for _, output := range manifest.Outputs {
+				if output.Name == "review" {
+					reviewPath = output.EvidencePath
+				}
+			}
+			if reviewPath == "" {
+				t.Fatalf("review output missing from manifest: %+v", manifest.Outputs)
+			}
+			humanStore, err := humanartifact.New(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", result.RunID, filepath.FromSlash(reviewPath)))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			baseSHA := fmt.Sprintf("%x", sha256.Sum256(sourceData))
+			revision, appendErr := humanStore.Append(result.RunID, reviewPath, "", baseSHA,
+				"Human-edited review: fix the missing edge case.\n", "QA correction", "product-1")
+			if appendErr != nil {
+				t.Fatal(appendErr)
+			}
+			decision.ArtifactRevisions = map[string]string{reviewPath: revision.ID}
+		}
+		if _, err := store.Decide(result.RunID, required.ApprovalID, decision); err != nil {
 			t.Fatal(err)
 		}
 		runCfg = RunConfig{ResumeRunID: result.RunID, TargetDir: dir}
@@ -1122,6 +1373,13 @@ func TestRun_NonInteractiveReviewLoopbackDecisionResume(t *testing.T) {
 	}
 	if !containsString(secondCoderInputs, "review") {
 		t.Fatalf("исправляющий coder не получил review: %v", secondCoderInputs)
+	}
+	if !containsString(secondCoderInputs, "human-return-feedback") || !strings.Contains(feedbackContent, "Исправь замечание reviewer") ||
+		!strings.Contains(feedbackContent, "review.md") || !strings.Contains(feedbackContent, "SHA-256") {
+		t.Fatalf("исправляющий coder не получил неизменяемый feedback: inputs=%v content=%q", secondCoderInputs, feedbackContent)
+	}
+	if revisedArtifactContent != "Human-edited review: fix the missing edge case.\n" {
+		t.Fatalf("coder did not consume the exact human-selected immutable revision: %q", revisedArtifactContent)
 	}
 	events, err := os.ReadFile(filepath.Join(onlyRunDir(t, dir), "events.jsonl"))
 	if err != nil || !strings.Contains(string(events), `"reason":"approved_loopback"`) {
@@ -2336,7 +2594,7 @@ func TestRun_Loopback_RetryWithReviewInput(t *testing.T) {
 		}
 	}
 
-	pr := &scriptedPrompter{interactive: true, answers: []string{"y"}}
+	pr := &scriptedPrompter{interactive: true, answers: []string{"y", "reviewer замечание: исправить неверное поведение"}}
 	err, _ := runPipeline(t, dir,
 		cfgForGraph(func(wf *config.WorkflowConfig) {
 			wf.MaxVisits["coder"] = 3
@@ -2791,6 +3049,73 @@ func TestRun_CancelledContext(t *testing.T) {
 	reportData, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "reports", "feat", "index.html"))
 	if readErr != nil || !strings.Contains(string(reportData), "Canceled") {
 		t.Fatalf("отчёт отменённого run должен иметь Canceled: err=%v", readErr)
+	}
+}
+
+func TestRun_CancelRequestWaitsForStageBoundary(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	started, release := make(chan struct{}), make(chan struct{})
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		if name == "analyst" {
+			close(started)
+			<-release // emulate an in-flight agent that must finish its mutation.
+		}
+	}
+	var requested atomic.Bool
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "coder"}), testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.RunWithResult(context.Background(), RunConfig{
+			Feature: "feat", TaskDesc: "safe cancel", TargetDir: dir,
+			CancelRequested: requested.Load,
+		})
+		done <- err
+	}()
+	<-started
+	requested.Store(true)
+	select {
+	case err := <-done:
+		t.Fatalf("run stopped inside the active agent stage: %v", err)
+	default:
+	}
+	close(release)
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel at boundary: %v", err)
+	}
+	if rt.calls["analyst"] != 1 || rt.calls["coder"] != 0 {
+		t.Fatalf("cancel should preserve the completed current attempt and prevent the next stage: %+v", rt.calls)
+	}
+}
+
+func TestSelectedHumanRevisionChangesDownstreamApprovalSubject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coder-output.md")
+	if err := os.WriteFile(path, []byte("unchanged agent output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rs := &runState{
+		runID: "run-subject", results: []notifier.StageResult{{
+			Name: "coder", AttemptID: "attempt-coder", Outputs: []runtime.Artifact{{Name: "code", Path: path}},
+		}},
+	}
+	base, err := rs.checkpointSubjectHash("transition", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs.selectedArtifactRevisions = map[string]string{"attempts/review.md": "rev-000002-first"}
+	first, err := rs.checkpointSubjectHash("transition", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs.selectedArtifactRevisions["attempts/review.md"] = "rev-000003-second"
+	second, err := rs.checkpointSubjectHash("transition", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base == first || first == second {
+		t.Fatalf("revision change reused a prior approval subject: base=%s first=%s second=%s", base, first, second)
 	}
 }
 

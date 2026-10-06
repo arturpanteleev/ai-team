@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
@@ -30,6 +32,207 @@ type fakeRunController struct {
 	approvalID   string
 	runID        string
 	approvals    []approval.PendingApproval
+}
+
+func TestDecisionPinsLatestImmutableArtifactRevision(t *testing.T) {
+	target := t.TempDir()
+	approvalValue := approval.PendingApproval{
+		ID: "approval-1", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer"},
+		Actions: []string{"return_to_coder"}, Targets: map[string]string{"return_to_coder": "coder"},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{approvalValue}}
+	artifactRoot := filepath.Join(target, ".ai-team", "artifacts")
+	srv, err := NewServer(":memory:", "", artifactRoot, WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	relative := "attempts/attempt-1/artifacts/review.md"
+	runRoot := filepath.Join(target, ".ai-team", "runs", "run-1")
+	source := []byte("source review\n")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(runRoot, relative)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, relative), source, 0644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"run_id":"run-1","attempt_id":"attempt-1","outputs":[{"name":"review","evidence_path":%q}]}`, relative)
+	if err := os.MkdirAll(filepath.Join(runRoot, "attempts", "attempt-1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, "attempts", "attempt-1", "manifest.json"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%x", sha256.Sum256(source))
+	revision, err := humanStore.Append("run-1", relative, "", base, "review corrected by QA\n", "human edit", "qa-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authorizedRequest(t, srv, "POST", "/api/runs/run-1/approvals/approval-1/decisions",
+		`{"actor_id":"qa-1","actor_role":"reviewer","action":"return_to_coder","comment":"fix it","subject_hash":"`+testSubjectHash+`"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("decision: %d %s", response.Code, response.Body.String())
+	}
+	if controller.decision.ArtifactRevisions[relative] != revision.ID {
+		t.Fatalf("handoff did not pin current immutable revision: %+v", controller.decision.ArtifactRevisions)
+	}
+	controller.approvals[0].Status = approval.StatusResolved
+	editAfterHandoff := authorizedRequest(t, srv, "POST", "/api/runs/run-1/artifact-revisions",
+		fmt.Sprintf(`{"artifact_path":%q,"base_revision":%q,"base_sha256":%q,"content":"unapproved drift","comment":"late edit"}`,
+			relative, revision.ID, revision.SHA256))
+	blocked := httptest.NewRecorder()
+	srv.router.ServeHTTP(blocked, editAfterHandoff)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("a resolved handoff must not be silently changed: %d %s", blocked.Code, blocked.Body.String())
+	}
+}
+
+func TestQuorumVotesReuseFirstPinnedArtifactRevisionAfterNewerEdit(t *testing.T) {
+	target := t.TempDir()
+	approvalValue := approval.PendingApproval{
+		ID: "approval-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "operator"},
+		Quorum: approval.QuorumAll, Actions: []string{"return_to_coder"},
+		Targets: map[string]string{"return_to_coder": "coder"},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{approvalValue}}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	relative := "attempts/attempt-1/artifacts/review.md"
+	runRoot := filepath.Join(target, ".ai-team", "runs", "run-1")
+	source := []byte("source review\n")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(runRoot, relative)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, relative), source, 0644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"run_id":"run-1","attempt_id":"attempt-1","outputs":[{"name":"review","evidence_path":%q}]}`, relative)
+	if err := os.MkdirAll(filepath.Join(runRoot, "attempts", "attempt-1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, "attempts", "attempt-1", "manifest.json"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%x", sha256.Sum256(source))
+	pinned, err := humanStore.Append("run-1", relative, "", base, "review A\n", "first voter selection", "reviewer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := authorizedRequest(t, srv, "POST", "/api/runs/run-1/approvals/approval-quorum/decisions",
+		`{"actor_id":"reviewer-1","actor_role":"reviewer","action":"return_to_coder","comment":"fix it","subject_hash":"`+testSubjectHash+`"}`)
+	firstResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusOK || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("first vote should pin revision A: code=%d selection=%v body=%s", firstResponse.Code, controller.decision.ArtifactRevisions, firstResponse.Body.String())
+	}
+	// Model the approval's durable post-vote state, then append a newer human
+	// edit before the other quorum member votes.
+	controller.approvals[0].ArtifactRevisions = map[string]string{relative: pinned.ID}
+	controller.approvals[0].Decisions = []approval.Decision{{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder",
+		ArtifactRevisions: map[string]string{relative: pinned.ID},
+	}}
+	newer, err := humanStore.Append("run-1", relative, pinned.ID, pinned.SHA256, "review B\n", "later edit", "editor-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.ID == pinned.ID {
+		t.Fatal("test setup expected a distinct newer revision")
+	}
+
+	second := authorizedRequest(t, srv, "POST", "/api/runs/run-1/approvals/approval-quorum/decisions",
+		`{"actor_id":"operator-2","actor_role":"operator","action":"return_to_coder","comment":"fix it","subject_hash":"`+testSubjectHash+`"}`)
+	secondResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusOK || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("second vote must reuse revision A after revision B exists: code=%d selection=%v body=%s", secondResponse.Code, controller.decision.ArtifactRevisions, secondResponse.Body.String())
+	}
+}
+
+func TestQuorumVotesKeepFirstEmptyArtifactRevisionSelection(t *testing.T) {
+	target := t.TempDir()
+	approvalValue := approval.PendingApproval{
+		ID: "approval-empty-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "operator"},
+		Quorum: approval.QuorumAll, Actions: []string{"return_to_coder"},
+		Targets: map[string]string{"return_to_coder": "coder"},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{approvalValue}}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	relative := "attempts/attempt-1/artifacts/review.md"
+	runRoot := filepath.Join(target, ".ai-team", "runs", "run-1")
+	source := []byte("source review\n")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(runRoot, relative)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, relative), source, 0644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"run_id":"run-1","attempt_id":"attempt-1","outputs":[{"name":"review","evidence_path":%q}]}`, relative)
+	if err := os.MkdirAll(filepath.Join(runRoot, "attempts", "attempt-1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, "attempts", "attempt-1", "manifest.json"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first := authorizedRequest(t, srv, "POST", "/api/runs/run-1/approvals/approval-empty-quorum/decisions",
+		`{"actor_id":"reviewer-1","actor_role":"reviewer","action":"return_to_coder","comment":"fix it","subject_hash":"`+testSubjectHash+`"}`)
+	firstResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusOK || len(controller.decision.ArtifactRevisions) != 0 {
+		t.Fatalf("first vote should pin an empty revision selection: code=%d selection=%v body=%s", firstResponse.Code, controller.decision.ArtifactRevisions, firstResponse.Body.String())
+	}
+	// The approval store represents an empty pinned selection as nil, so the
+	// persisted first decision is the marker that the selection is already fixed.
+	controller.approvals[0].Decisions = []approval.Decision{{
+		ActorID: "reviewer-1", ActorRole: "reviewer", Action: "return_to_coder",
+		SubjectHash: testSubjectHash, ArtifactRevisions: controller.decision.ArtifactRevisions,
+	}}
+
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%x", sha256.Sum256(source))
+	if _, err := humanStore.Append("run-1", relative, "", base, "edited after first vote\n", "later edit", "editor-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	second := authorizedRequest(t, srv, "POST", "/api/runs/run-1/approvals/approval-empty-quorum/decisions",
+		`{"actor_id":"operator-2","actor_role":"operator","action":"return_to_coder","comment":"fix it","subject_hash":"`+testSubjectHash+`"}`)
+	secondResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusOK || len(controller.decision.ArtifactRevisions) != 0 {
+		t.Fatalf("second vote must reuse the original empty selection and resolve: code=%d selection=%v body=%s", secondResponse.Code, controller.decision.ArtifactRevisions, secondResponse.Body.String())
+	}
+	var resolved approval.PendingApproval
+	if err := json.Unmarshal(secondResponse.Body.Bytes(), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != approval.StatusResolved {
+		t.Fatalf("second quorum vote did not resolve the approval: status=%q", resolved.Status)
+	}
 }
 
 func (f *fakeRunController) Start(feature, task string) (string, error) {

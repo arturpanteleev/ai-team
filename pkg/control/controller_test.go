@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,18 +19,32 @@ import (
 type fakeEngine struct {
 	mu          sync.Mutex
 	started     chan struct{}
+	release     chan struct{}
+	observed    bool
 	cancelCalls int
 }
 
-func (f *fakeEngine) Start(ctx context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
+func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
 	close(f.started)
-	<-ctx.Done()
-	return pipeline.RunResult{RunID: config.RunID}, ctx.Err()
+	<-f.release // model an agent that can finish before cancellation is observed.
+	if config.CancelRequested != nil && config.CancelRequested() {
+		f.mu.Lock()
+		f.observed = true
+		f.mu.Unlock()
+		return pipeline.RunResult{RunID: config.RunID}, context.Canceled
+	}
+	return pipeline.RunResult{RunID: config.RunID}, nil
 }
-func (f *fakeEngine) Resume(ctx context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
+func (f *fakeEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
 	close(f.started)
-	<-ctx.Done()
-	return pipeline.RunResult{RunID: config.RunID}, ctx.Err()
+	<-f.release
+	if config.CancelRequested != nil && config.CancelRequested() {
+		f.mu.Lock()
+		f.observed = true
+		f.mu.Unlock()
+		return pipeline.RunResult{RunID: config.RunID}, context.Canceled
+	}
+	return pipeline.RunResult{RunID: config.RunID}, nil
 }
 func (f *fakeEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, error) {
 	f.mu.Lock()
@@ -68,7 +83,7 @@ func TestControllerStartAppliesPreflightGate(t *testing.T) {
 }
 
 func TestControllerStartAndCancelActiveWorker(t *testing.T) {
-	engine := &fakeEngine{started: make(chan struct{})}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	controller, err := New(engine, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -81,12 +96,35 @@ func TestControllerStartAndCancelActiveWorker(t *testing.T) {
 	if err := controller.Cancel(runID); err != nil {
 		t.Fatal(err)
 	}
+	marker, markerErr := cancellationRequestPath(controller.target, runID)
+	if markerErr != nil {
+		t.Fatal(markerErr)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("cancel marker missing: %v", statErr)
+	}
+	if !cancellationRequested(controller.target, runID, make(chan struct{})) {
+		t.Fatal("safe-boundary cancellation request was not durably persisted")
+	}
+	engine.mu.Lock()
+	if engine.cancelCalls != 0 || engine.observed {
+		engine.mu.Unlock()
+		t.Fatal("cancel interrupted the active stage")
+	}
+	engine.mu.Unlock()
+	close(engine.release)
 	deadline := time.Now().Add(time.Second)
 	for {
 		engine.mu.Lock()
 		calls := engine.cancelCalls
 		engine.mu.Unlock()
 		if calls == 1 {
+			engine.mu.Lock()
+			observed := engine.observed
+			engine.mu.Unlock()
+			if !observed {
+				t.Fatal("engine did not observe cancellation at the stage boundary")
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -111,7 +149,7 @@ func TestControllerRejectsDuplicateResume(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	engine := &fakeEngine{started: make(chan struct{})}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	controller, err := New(engine, target)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +164,7 @@ func TestControllerRejectsDuplicateResume(t *testing.T) {
 	if err := controller.Cancel("run-resume"); err != nil {
 		t.Fatal(err)
 	}
+	close(engine.release)
 }
 
 func stringHex(value []byte) string {

@@ -19,6 +19,7 @@ export function PipelineDetail() {
   const [nextStage, setNextStage] = useState('');
   const [actor, setActor] = useState(principal?.actor_id ?? 'local-user');
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [controlError, setControlError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +79,8 @@ export function PipelineDetail() {
     try {
       await decideApproval(run.run_id, value, {
         actor_id: actor, actor_role: role, action, comment,
+        ...(value.artifact_revisions && Object.keys(value.artifact_revisions).length > 0
+          ? { artifact_revisions: value.artifact_revisions } : {}),
       });
       await fetchData();
     } catch (err) {
@@ -85,6 +88,10 @@ export function PipelineDetail() {
       await fetchData();
     }
   };
+
+  const requiresReturnReason = (value: Approval, action: string) => value.feedback_actions
+    ? value.feedback_actions.includes(action)
+    : action.startsWith('return_to_');
 
   const sendRunCommand = async (kind: 'resume' | 'cancel') => {
     setControlError('');
@@ -193,6 +200,28 @@ export function PipelineDetail() {
                 {Object.entries(value.targets).map(([action, target]) => `${action}→${target}`).join(', ')}
               </small>
             )}
+            {value.artifact_revisions && Object.keys(value.artifact_revisions).length > 0 && (
+              <details>
+                <summary>{value.status === 'pending' && value.quorum === 'all'
+                  ? 'Закреплённые версии для всех голосов' : 'Закреплённые версии артефактов'}</summary>
+                {value.status === 'pending' && value.quorum === 'all' && (
+                  <small>Первый голос закрепил эти версии. Остальные участники отправят тот же выбор, даже если добавлена более новая версия.</small>
+                )}
+                {Object.entries(value.artifact_revisions).map(([path, revision]) => (
+                  <code key={path}>{path} · {revision}</code>
+                ))}
+                {value.artifact_revision_binding_sha256 && <code>binding SHA-256: {value.artifact_revision_binding_sha256}</code>}
+              </details>
+            )}
+            {value.status === 'pending' && (value.feedback_actions
+              ? value.feedback_actions.length > 0
+              : value.actions.some((action) => action.startsWith('return_to_'))) && (
+              <label className={styles.question}>
+                Причина возврата и feedback для следующей роли
+                <textarea value={returnReasons[value.id] ?? ''} maxLength={16 * 1024} rows={4}
+                  onChange={(event) => setReturnReasons((current) => ({ ...current, [value.id]: event.target.value }))} />
+              </label>
+            )}
             {value.payload != null && !question && (
               <details>
                 <summary>Payload (canonical JSON)</summary>
@@ -205,8 +234,10 @@ export function PipelineDetail() {
                 .flatMap((role) =>
                 value.actions.map((action) => (
                   <button key={`${role}:${action}`}
-                    disabled={Boolean(question && action === 'answer_questions' && !(answers[value.id] ?? '').trim())}
-                    onClick={() => sendDecision(value, role, action, action === 'answer_questions' ? answers[value.id] : undefined)}>
+                    disabled={Boolean(question && action === 'answer_questions' && !(answers[value.id] ?? '').trim()) ||
+                      Boolean(requiresReturnReason(value, action) && !(returnReasons[value.id] ?? '').trim())}
+                    onClick={() => sendDecision(value, role, action, action === 'answer_questions' ? answers[value.id]
+                      : requiresReturnReason(value, action) ? returnReasons[value.id] : undefined)}>
                     {question && action === 'answer_questions' ? 'Ответить и продолжить'
                       : agreedSpec && action === 'approve_spec' ? 'Согласовать ТЗ и передать архитектору'
                         : action === 'reject' || action === 'stop' ? 'Отклонить / остановить' : `${action} · ${role}`}

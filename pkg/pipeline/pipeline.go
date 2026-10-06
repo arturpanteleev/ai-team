@@ -133,6 +133,9 @@ type RunConfig struct {
 	// что pipeline захватывает lock самостоятельно (CLI-путь).
 	WorkspaceLock        *evidence.WorkspaceLock
 	resumeDecisionAction string
+	// CancelRequested is polled only between stage attempts so cancellation
+	// never interrupts an agent while it is mutating its workspace.
+	CancelRequested func() bool
 	// ContainmentProfile — containment profile run (trusted-local | strict).
 	// Пустое значение → trusted-local. Влияет на containment receipt в evidence.
 	ContainmentProfile string
@@ -150,35 +153,36 @@ func (p *Pipeline) Agents() []string {
 // runState — состояние одного запуска (Pipeline не мутируется, можно
 // переиспользовать для нескольких запусков).
 type runState struct {
-	p                *Pipeline
-	runCfg           RunConfig
-	task             *runtime.Task
-	reportsDir       string
-	names            []string
-	results          []notifier.StageResult
-	extraInputs      map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
-	ps               *ui.PipelineStatus
-	startTime        time.Time
-	approvedPlanHash string
-	runID            string
-	evidence         *evidence.Store
-	attemptOrdinal   int
-	userOwnedPaths   map[string]bool
-	lifecycleStore   *lifecycle.Store
-	lifecycleState   lifecycle.State
-	approvalStore    *approval.Store
-	resumedApproval  *approval.PendingApproval
-	resumed          bool
-	brief            briefVersion
-	graph            workflow.Graph
-	visits           map[string]int
-	candidate        *candidate.Manager
-	sourceTarget     string
-	liveWorkspaceSHA string
-	loopbackCycles   int
-	deferredDelivery *deferredDelivery
-	budgetConfig     *config.BudgetConfig
-	usageTotal       runtime.Usage
+	p                         *Pipeline
+	runCfg                    RunConfig
+	task                      *runtime.Task
+	reportsDir                string
+	names                     []string
+	results                   []notifier.StageResult
+	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
+	ps                        *ui.PipelineStatus
+	startTime                 time.Time
+	approvedPlanHash          string
+	runID                     string
+	evidence                  *evidence.Store
+	attemptOrdinal            int
+	userOwnedPaths            map[string]bool
+	lifecycleStore            *lifecycle.Store
+	lifecycleState            lifecycle.State
+	approvalStore             *approval.Store
+	resumedApproval           *approval.PendingApproval
+	selectedArtifactRevisions map[string]string
+	resumed                   bool
+	brief                     briefVersion
+	graph                     workflow.Graph
+	visits                    map[string]int
+	candidate                 *candidate.Manager
+	sourceTarget              string
+	liveWorkspaceSHA          string
+	loopbackCycles            int
+	deferredDelivery          *deferredDelivery
+	budgetConfig              *config.BudgetConfig
+	usageTotal                runtime.Usage
 }
 
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
@@ -266,6 +270,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	var resumedState lifecycle.State
 	var resumedApproval *approval.PendingApproval
 	var recoveredClarification *approval.PendingApproval
+	var recoveredGraphApproval *approval.PendingApproval
 	var resumedTransitionData map[string]any
 	if runCfg.ResumeRunID != "" {
 		resumedState, err = lifecycleStore.Load(runCfg.ResumeRunID)
@@ -428,6 +433,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		evidenceStore, manifest, replayedRun, err = evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
+		}
+		if resumedState.Phase == lifecycle.PhaseRunning {
+			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("resume graph handoff input: %w", err)
+			}
 		}
 		configDigest := sha256.Sum256(configSnapshot)
 		workflowDigest := sha256.Sum256(workflowSnapshot)
@@ -636,9 +647,23 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			LogDir:       evidenceStore.LogDir(),
 			Interactive:  p.prompter.Interactive(),
 		},
-		reportsDir:       reportsDir,
-		names:            p.cfg.AgentNames(),
-		extraInputs:      make(map[string][]runtime.Artifact),
+		reportsDir:  reportsDir,
+		names:       p.cfg.AgentNames(),
+		extraInputs: make(map[string][]runtime.Artifact),
+		selectedArtifactRevisions: func() map[string]string {
+			selectedApproval := resumedApproval
+			if selectedApproval == nil {
+				selectedApproval = recoveredGraphApproval
+			}
+			if selectedApproval == nil || len(selectedApproval.ArtifactRevisions) == 0 {
+				return nil
+			}
+			copy := make(map[string]string, len(selectedApproval.ArtifactRevisions))
+			for path, id := range selectedApproval.ArtifactRevisions {
+				copy[path] = id
+			}
+			return copy
+		}(),
 		results:          replayedStageResults(replayedRun),
 		startTime:        runStartedAt,
 		approvedPlanHash: runCfg.ApprovePlanHash,
@@ -693,6 +718,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 	inputApproval := resumedApproval
 	if inputApproval == nil {
+		inputApproval = recoveredGraphApproval
+	}
+	if inputApproval == nil {
 		inputApproval = recoveredClarification
 	}
 	if inputApproval == nil && !rs.resumed {
@@ -741,12 +769,32 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					outcome, finalErr := rs.finalize(fmt.Errorf("approved analyst artifact %s digest mismatch", name))
 					return RunResult{RunID: runID, Outcome: outcome}, finalErr
 				}
+				input, inputErr = selectedHumanRevision(runCfg.TargetDir, runID, input, inputApproval.ArtifactRevisions)
+				if inputErr != nil {
+					outcome, finalErr := rs.finalize(inputErr)
+					return RunResult{RunID: runID, Outcome: outcome}, finalErr
+				}
 				input.Name = "approved-" + name
 				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], input)
 			}
 			rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], briefInputs(rs.brief)...)
 		} else {
+			for index := range inputs {
+				inputs[index], inputErr = selectedHumanRevision(runCfg.TargetDir, runID, inputs[index], inputApproval.ArtifactRevisions)
+				if inputErr != nil {
+					outcome, finalErr := rs.finalize(inputErr)
+					return RunResult{RunID: runID, Outcome: outcome}, finalErr
+				}
+			}
 			rs.extraInputs[runCfg.retryFrom] = inputs
+			if isBackwardTransition(rs.graph, inputApproval) {
+				feedback, feedbackErr := writeReturnFeedback(runCfg.TargetDir, *inputApproval)
+				if feedbackErr != nil {
+					outcome, finalErr := rs.finalize(feedbackErr)
+					return RunResult{RunID: runID, Outcome: outcome}, finalErr
+				}
+				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], feedback)
+			}
 		}
 	}
 

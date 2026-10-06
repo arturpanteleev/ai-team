@@ -32,13 +32,14 @@ const (
 )
 
 type Decision struct {
-	ApprovalID  string    `json:"approval_id"`
-	ActorID     string    `json:"actor_id"`
-	ActorRole   string    `json:"actor_role"`
-	Action      string    `json:"action"`
-	Comment     string    `json:"comment,omitempty"`
-	SubjectHash string    `json:"subject_hash"`
-	DecidedAt   time.Time `json:"decided_at"`
+	ApprovalID        string            `json:"approval_id"`
+	ActorID           string            `json:"actor_id"`
+	ActorRole         string            `json:"actor_role"`
+	Action            string            `json:"action"`
+	Comment           string            `json:"comment,omitempty"`
+	SubjectHash       string            `json:"subject_hash"`
+	ArtifactRevisions map[string]string `json:"artifact_revisions,omitempty"`
+	DecidedAt         time.Time         `json:"decided_at"`
 }
 
 type PendingApproval struct {
@@ -54,17 +55,20 @@ type PendingApproval struct {
 	RequiredRoles   []string          `json:"required_roles"`
 	Quorum          string            `json:"quorum"`
 	Actions         []string          `json:"actions"`
+	FeedbackActions []string          `json:"feedback_actions,omitempty"`
 	Targets         map[string]string `json:"targets"`
 	Status          Status            `json:"status"`
 	// Deferred — подтверждение перехода отложено и будет разрешено одним
 	// consolidated delivery-решением run'а (APF-1). Deferred approval не
 	// содержит per-gate человеческих решений: их роль/кворум замещаются
 	// единым delivery-контрпоинтом, subject при этом сохраняется точно.
-	Deferred       bool       `json:"deferred,omitempty"`
-	Decisions      []Decision `json:"decisions,omitempty"`
-	ResolvedAction string     `json:"resolved_action,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	ResolvedAt     time.Time  `json:"resolved_at,omitempty"`
+	Deferred                      bool              `json:"deferred,omitempty"`
+	Decisions                     []Decision        `json:"decisions,omitempty"`
+	ResolvedAction                string            `json:"resolved_action,omitempty"`
+	ArtifactRevisions             map[string]string `json:"artifact_revisions,omitempty"`
+	ArtifactRevisionBindingSHA256 string            `json:"artifact_revision_binding_sha256,omitempty"`
+	CreatedAt                     time.Time         `json:"created_at"`
+	ResolvedAt                    time.Time         `json:"resolved_at,omitempty"`
 	// Payload содержит машиночитаемое представление subject (например,
 	// canonical JSON delivery plan) для осознанного решения без доступа к
 	// filesystem. Не является частью identity: subject уже зафиксирован hash.
@@ -223,8 +227,22 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 	if decision.SubjectHash != value.SubjectHash {
 		return PendingApproval{}, errors.New("subject hash решения не совпадает с ожидаемым")
 	}
+	if strings.HasPrefix(decision.Action, "return_to_") && !contains(value.Actions, decision.Action) {
+		return PendingApproval{}, fmt.Errorf("запрещён возврат по маршруту %q: действие отсутствует в графе этого approval", decision.Action)
+	}
+	if contains(value.FeedbackActions, decision.Action) && decision.Comment == "" {
+		return PendingApproval{}, errors.New("для возврата требуется причина или feedback")
+	}
 	if decision.ActorID == "" || !contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) {
 		return PendingApproval{}, errors.New("решение содержит недопустимого actor, role или action")
+	}
+	for path, revisionID := range decision.ArtifactRevisions {
+		if strings.TrimSpace(path) == "" || strings.TrimSpace(revisionID) == "" {
+			return PendingApproval{}, errors.New("artifact revision selection contains an empty path or revision id")
+		}
+	}
+	if len(value.Decisions) > 0 && !sameRevisionSelection(value.Decisions[0].ArtifactRevisions, decision.ArtifactRevisions) {
+		return PendingApproval{}, errors.New("все участники кворума должны согласовать одну и ту же версию артефактов")
 	}
 	for _, previous := range value.Decisions {
 		if previous.ActorID == decision.ActorID && previous.ActorRole == decision.ActorRole {
@@ -245,10 +263,14 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 		}
 	}
 	value.Decisions = append(value.Decisions, decision)
+	if value.ArtifactRevisions == nil {
+		value.ArtifactRevisions = cloneRevisions(decision.ArtifactRevisions)
+	}
 	if value.Quorum == QuorumAny || coversAllRoles(value.RequiredRoles, value.Decisions) {
 		value.Status = StatusResolved
 		value.ResolvedAction = decision.Action
 		value.ResolvedAt = decision.DecidedAt
+		value.ArtifactRevisionBindingSHA256 = revisionBindingHash(value.SubjectHash, value.ArtifactRevisions)
 	}
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
@@ -358,6 +380,11 @@ func validate(value PendingApproval) error {
 			return fmt.Errorf("approval action %s не имеет target", action)
 		}
 	}
+	for _, action := range value.FeedbackActions {
+		if !contains(value.Actions, action) || !strings.HasPrefix(action, "return_to_") {
+			return fmt.Errorf("approval feedback action %q is not an allowed return route", action)
+		}
+	}
 	for _, decision := range value.Decisions {
 		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
 			decision.ActorRole == "" ||
@@ -376,6 +403,10 @@ func validate(value PendingApproval) error {
 		if !contains(value.Actions, value.ResolvedAction) || value.ResolvedAt.IsZero() || len(value.Decisions) == 0 {
 			return errors.New("resolved approval не содержит итогового решения")
 		}
+		if !sameRevisionSelection(value.ArtifactRevisions, value.Decisions[0].ArtifactRevisions) ||
+			(value.ArtifactRevisionBindingSHA256 != "" && value.ArtifactRevisionBindingSHA256 != revisionBindingHash(value.SubjectHash, value.ArtifactRevisions)) {
+			return errors.New("resolved approval revision binding mismatch")
+		}
 		if value.Quorum == QuorumAll && !value.Deferred && !coversAllRoles(value.RequiredRoles, value.Decisions) {
 			return errors.New("resolved approval не достиг quorum all")
 		}
@@ -393,7 +424,7 @@ func sameRequest(left, right PendingApproval) bool {
 		left.CandidateSHA256 == right.CandidateSHA256 &&
 		left.Deferred == right.Deferred && left.Quorum == right.Quorum &&
 		fmt.Sprint(left.RequiredRoles) == fmt.Sprint(right.RequiredRoles) &&
-		fmt.Sprint(left.Actions) == fmt.Sprint(right.Actions) && fmt.Sprint(left.Targets) == fmt.Sprint(right.Targets) &&
+		fmt.Sprint(left.Actions) == fmt.Sprint(right.Actions) && fmt.Sprint(left.FeedbackActions) == fmt.Sprint(right.FeedbackActions) && fmt.Sprint(left.Targets) == fmt.Sprint(right.Targets) &&
 		bytes.Equal(left.Payload, right.Payload)
 }
 
@@ -422,6 +453,52 @@ func uniqueNonEmpty(values []string) bool {
 		seen[value] = true
 	}
 	return true
+}
+
+func cloneRevisions(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(source))
+	for path, id := range source {
+		clone[path] = id
+	}
+	return clone
+}
+
+func sameRevisionSelection(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for path, id := range left {
+		if right[path] != id {
+			return false
+		}
+	}
+	return true
+}
+
+// revisionBindingHash binds the final human decision to the exact immutable
+// artifact versions selected with it. The original SubjectHash remains the
+// pre-decision candidate identity; this second hash is persisted alongside it.
+func revisionBindingHash(subject string, revisions map[string]string) string {
+	if len(revisions) == 0 {
+		return ""
+	}
+	paths := make([]string, 0, len(revisions))
+	for path := range revisions {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(subject))
+	for _, path := range paths {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(path))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(revisions[path]))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func contains(values []string, expected string) bool {

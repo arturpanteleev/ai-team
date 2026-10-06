@@ -22,6 +22,7 @@ import (
 	agentdata "github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
@@ -62,20 +63,21 @@ type browserSession struct {
 }
 
 type Server struct {
-	store         *store.Store
-	hub           *Hub
-	router        *chi.Mux
-	frontend      http.Handler
-	artifactRoot  string // абсолютный корень артефактов; всё вне него не отдаётся
-	runRoot       string // immutable .ai-team/runs root
-	httpServer    *http.Server
-	cancelEvents  context.CancelFunc
-	eventWorkers  sync.WaitGroup
-	controller    RunController
-	authenticator IdentityVerifier
-	sessions      map[string]browserSession
-	sessionMu     sync.Mutex
-	streamID      string
+	store          *store.Store
+	humanArtifacts *humanartifact.Store
+	hub            *Hub
+	router         *chi.Mux
+	frontend       http.Handler
+	artifactRoot   string // абсолютный корень артефактов; всё вне него не отдаётся
+	runRoot        string // immutable .ai-team/runs root
+	httpServer     *http.Server
+	cancelEvents   context.CancelFunc
+	eventWorkers   sync.WaitGroup
+	controller     RunController
+	authenticator  IdentityVerifier
+	sessions       map[string]browserSession
+	sessionMu      sync.Mutex
+	streamID       string
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -107,6 +109,11 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		artifactRoot: absRoot,
 		runRoot:      filepath.Join(filepath.Dir(absRoot), "runs"),
 		sessions:     make(map[string]browserSession),
+	}
+	srv.humanArtifacts, err = humanartifact.New(filepath.Dir(filepath.Dir(absRoot)))
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("human artifact store: %w", err)
 	}
 	for _, option := range options {
 		option(srv)
@@ -142,6 +149,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/pipelines/{id}/artifacts", srv.handleGetArtifacts)
 		router.Get("/api/artifacts/*", srv.handleGetArtifact)
 		router.Get("/api/runs/{runID}/artifacts/*", srv.handleGetRunArtifact)
+		router.Get("/api/runs/{runID}/artifact-revisions", srv.handleListArtifactRevisions)
 		router.Get("/api/runs/{runID}/logs/{attemptID}", srv.handleGetRunLog)
 		router.Get("/api/runs/{runID}/workflow", srv.handleGetRunWorkflow)
 		router.Get("/api/preflight", srv.handlePreflight)
@@ -153,6 +161,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)
 		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
+		router.Post("/api/runs/{runID}/artifact-revisions", srv.handleCreateArtifactRevision)
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 

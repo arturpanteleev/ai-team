@@ -21,7 +21,11 @@ type Operation string
 const (
 	OperationStart  Operation = "start"
 	OperationResume Operation = "resume"
-	OperationCancel Operation = "cancel"
+	// OperationRecover retries a durable start admission after a worker crash.
+	// The worker inspects lifecycle state and chooses Start only if creation
+	// never committed; otherwise it resumes the existing run.
+	OperationRecover Operation = "recover"
+	OperationCancel  Operation = "cancel"
 )
 
 type Job struct {
@@ -82,6 +86,10 @@ func (j Job) Validate(expectedTarget string) error {
 	case OperationResume:
 		if j.Feature != "" || j.Task != "" {
 			return errors.New("worker resume: feature/task загружаются из lifecycle")
+		}
+	case OperationRecover:
+		if !workflow.ValidFeature(j.Feature) || strings.TrimSpace(j.Task) == "" {
+			return errors.New("worker recover: исходные feature и task обязательны")
 		}
 	case OperationCancel:
 		if j.Feature != "" || j.Task != "" || j.ApproveGates || j.ApprovePlanHash != "" {

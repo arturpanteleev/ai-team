@@ -111,6 +111,49 @@ func TestDeferredDeliveryResolvesRealPreparedState(t *testing.T) {
 	}
 }
 
+func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *testing.T) {
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(&gracefulDeliveryService{}))
+	if err := p.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
+	}); err == nil {
+		t.Fatal("post-terminal hook failure should leave a deferred delivery obligation")
+	}
+	runDir := onlyRunDir(t, dir)
+	runID := filepath.Base(runDir)
+
+	// First write a valid delivery record for this run. Change only the plan hash,
+	// then rewrite it through the canonical record writer so this remains a
+	// structurally valid, self-checksummed record copied from a different plan.
+	if _, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir); err != nil {
+		t.Fatalf("write initial terminal record: %v", err)
+	}
+	record, found, err := delivery.ReadTerminalRecord(runDir)
+	if err != nil || !found {
+		t.Fatalf("read initial terminal record: found=%v err=%v", found, err)
+	}
+	if err := os.Remove(filepath.Join(runDir, "delivery.json")); err != nil {
+		t.Fatal(err)
+	}
+	record.PlanHash = strings.Repeat("c", 64)
+	record.RecordSHA256 = ""
+	if err := delivery.WriteTerminalRecord(runDir, *record); err != nil {
+		t.Fatalf("write valid mismatched terminal record: %v", err)
+	}
+	if _, found, err := delivery.ReadTerminalRecord(runDir); err != nil || !found {
+		t.Fatalf("fixture must remain a valid delivery record: found=%v err=%v", found, err)
+	}
+
+	err = New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir)
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("reconcile must reject valid record with a plan hash from another delivery, got: %v", err)
+	}
+}
+
 // lockProbeDeliveryService проверяет, что в момент controller.Execute run всё
 // ещё держит workspace lock: повторный захват обязан конфликтовать. Если lock
 // свободен — delivery-проба возвращает ошибку (доставка вне lock запрещена).

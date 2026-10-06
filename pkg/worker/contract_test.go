@@ -33,6 +33,11 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 	if err := base().Validate(target); err != nil {
 		t.Fatalf("эталонный job должен быть валиден: %v", err)
 	}
+	recovery := base()
+	recovery.Operation = OperationRecover
+	if err := recovery.Validate(target); err != nil {
+		t.Fatalf("recovery должен сохранять admission identity: %v", err)
+	}
 
 	cases := []struct {
 		name     string
@@ -49,6 +54,7 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 		{"start с недопустимой feature", func(j *Job) { j.Feature = "../escape" }, "feature и task"},
 		{"start с пустым task", func(j *Job) { j.Task = "   " }, "feature и task"},
 		{"resume с feature", func(j *Job) { j.Operation = OperationResume; j.Task = "" }, "resume"},
+		{"recover без исходной задачи", func(j *Job) { j.Operation = OperationRecover; j.Task = "" }, "recover"},
 		{"cancel с task", func(j *Job) { j.Operation = OperationCancel; j.Feature = "" }, "cancel"},
 		{"cancel с approve_plan_hash", func(j *Job) {
 			j.Operation = OperationCancel

@@ -72,7 +72,11 @@ func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, e
 	}
 	worktree := filepath.Join(root, runID)
 	if _, err := os.Lstat(worktree); err == nil {
-		return nil, true, fmt.Errorf("candidate worktree %s уже существует", worktree)
+		// A worker can die after `git worktree add` and before publishing the
+		// candidate metadata. Under the run's workspace lock, recover that exact
+		// detached worktree only when it still points at the current baseline.
+		manager, recoverErr := recoverCreatedWorktree(ctx, target, runID, worktree, strings.TrimSpace(baseCommit), strings.TrimSpace(baseTree))
+		return manager, true, recoverErr
 	} else if !os.IsNotExist(err) {
 		return nil, true, err
 	}
@@ -92,6 +96,47 @@ func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, e
 		return nil, true, err
 	}
 	return manager, true, nil
+}
+
+func recoverCreatedWorktree(ctx context.Context, target, runID, worktree, baseCommit, baseTree string) (*Manager, error) {
+	metadataPath := filepath.Join(target, ".ai-team", "state", "candidates", runID+".json")
+	if _, err := os.Lstat(metadataPath); err == nil {
+		return Load(ctx, target, runID)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	actualRoot, err := canonicalDirectory(worktree)
+	if err != nil || actualRoot != worktree {
+		return nil, fmt.Errorf("candidate recovery: existing worktree is unavailable or unsafe")
+	}
+	common, err := git(ctx, actualRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return nil, fmt.Errorf("candidate recovery: repository identity: %w", err)
+	}
+	actualCommon, err := filepath.EvalSymlinks(strings.TrimSpace(common))
+	if err != nil {
+		return nil, err
+	}
+	expectedCommon, err := filepath.EvalSymlinks(filepath.Join(target, ".git"))
+	if err != nil || actualCommon != expectedCommon {
+		return nil, fmt.Errorf("candidate recovery: worktree belongs to another repository")
+	}
+	head, err := git(ctx, actualRoot, "rev-parse", "--verify", "HEAD")
+	if err != nil || strings.TrimSpace(head) != baseCommit {
+		return nil, fmt.Errorf("candidate recovery: detached HEAD differs from admitted baseline")
+	}
+	manager := &Manager{metadata: Metadata{
+		SchemaVersion: metadataVersion, RunID: runID, ControlTarget: target,
+		Worktree: worktree, BaseCommit: baseCommit, BaseTree: baseTree,
+		CreatedAt: time.Now().UTC(),
+	}}
+	if err := manager.ensureArtifactRoot(); err != nil {
+		return nil, err
+	}
+	if err := manager.save(); err != nil {
+		return nil, err
+	}
+	return manager, nil
 }
 
 func Load(ctx context.Context, controlTarget, runID string) (*Manager, error) {

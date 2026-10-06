@@ -56,6 +56,21 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 	})
 }
 
+// RecoverInitialLifecycle reconstructs the lifecycle checkpoint when a worker
+// died after durable run_started evidence was written but before lifecycle
+// creation. It accepts only the exact initial evidence prefix, so later or
+// ambiguous run state is never mistaken for a fresh admission.
+func (e *RunEngine) RecoverInitialLifecycle(runID, targetDir, feature, task string) error {
+	return e.pipeline.recoverInitialLifecycle(runID, targetDir, feature, task)
+}
+
+// ReconcileTerminalDelivery verifies that a terminal run's approved deferred
+// delivery reached its durable terminal record. If delivery was interrupted,
+// it resumes through the same validated delivery state machine.
+func (e *RunEngine) ReconcileTerminalDelivery(ctx context.Context, runID, targetDir string) error {
+	return e.pipeline.ReconcileTerminalDelivery(ctx, runID, targetDir)
+}
+
 func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 	if config.RunID == "" {
 		return RunResult{}, errors.New("RunEngine.Cancel требует run_id")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -17,9 +18,12 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -928,6 +932,206 @@ func TestWorkerCommandContract(t *testing.T) {
 			t.Fatalf("относительный --db обязан отклоняться, получено: %q", stderr)
 		}
 	})
+}
+
+func TestRecoverReconcilesTerminalEvidenceWithoutResume(t *testing.T) {
+	target := t.TempDir()
+	runID := "run-terminal-recovery"
+	started := time.Now().UTC().Add(-time.Minute)
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot:   json.RawMessage(`{"schema_version":1}`),
+		WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_finished", Timestamp: started.Add(time.Second), Data: map[string]any{
+		"status": string(workflow.RunBlocked), "stage_attempts": 0,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycleStore.Create(lifecycle.State{
+		RunID: runID, Feature: "feature", TargetDir: target, Task: "task", Phase: lifecycle.PhaseTerminal,
+		ConfigSHA256: strings.Repeat("a", 64), WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := lifecycleStore.Load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, attempts, err := recoveredTerminalOutcome(target, runID, state)
+	if err != nil || outcome != worker.OutcomeBlocked || attempts != 0 {
+		t.Fatalf("terminal evidence must reconcile to blocked without resume: outcome=%q err=%v", outcome, err)
+	}
+}
+
+type recoveryQueueExecutor struct {
+	target string
+	engine recoveryEngine
+}
+
+func (e recoveryQueueExecutor) TargetDir() string { return e.target }
+func (e recoveryQueueExecutor) Execute(ctx context.Context, job worker.Job) (pipeline.RunResult, error) {
+	return executeRecoveredJob(ctx, e.engine, e.target, job)
+}
+
+type mustNotResumeEngine struct{}
+
+func (mustNotResumeEngine) Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{}, errors.New("unexpected Start")
+}
+func (mustNotResumeEngine) Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{}, errors.New("unexpected Resume")
+}
+func (mustNotResumeEngine) RecoverInitialLifecycle(string, string, string, string) error {
+	return errors.New("unexpected initial recovery")
+}
+func (mustNotResumeEngine) ReconcileTerminalDelivery(context.Context, string, string) error {
+	return nil
+}
+
+func TestRecoveryDispatchCompletesQueueFromFinishedEvidenceBeforeTerminalLifecycle(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const runID = "run-finalize-crash"
+	started := time.Now().UTC().Add(-time.Minute)
+	evidenceStore, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot:   json.RawMessage(`{"schema_version":1}`),
+		WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_finished", Timestamp: started.Add(time.Second), Data: map[string]any{
+		"status": string(workflow.RunCompleted), "stage_attempts": 0,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model the crash after run_finished append but before PhaseTerminal save.
+	if err := lifecycleStore.Create(lifecycle.State{
+		RunID: runID, Feature: "feature", TargetDir: target, Task: "task", Phase: lifecycle.PhaseRunning,
+		NextStage: "analyst", ConfigSHA256: strings.Repeat("a", 64),
+		WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := scheduler.Open(filepath.Join(t.TempDir(), "scheduler.db"), scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	job := worker.Job{SchemaVersion: worker.SchemaVersion, Operation: worker.OperationRecover,
+		RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+	jobID, err := queue.Enqueue(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller, err := scheduler.NewPoller(queue, recoveryQueueExecutor{target: target, engine: mustNotResumeEngine{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := poller.RunOnce(context.Background(), "recovery-worker")
+	if err != nil || !claimed {
+		t.Fatalf("recovery dispatch: claimed=%v err=%v", claimed, err)
+	}
+	record, found, err := queue.Get(jobID)
+	if err != nil || !found || record.Status != scheduler.StatusCompleted || record.Job.Operation != worker.OperationRecover {
+		t.Fatalf("queue completion from durable terminal evidence: record=%+v found=%v err=%v", record, found, err)
+	}
+	reconciled, err := lifecycleStore.Load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.Phase != lifecycle.PhaseTerminal || reconciled.NextStage != "" ||
+		reconciled.PendingApprovalID != "" || reconciled.AttemptOrdinal != 0 {
+		t.Fatalf("durable terminal evidence must repair lifecycle checkpoint: %+v", reconciled)
+	}
+}
+
+type failingDeliveryRecoveryEngine struct{ mustNotResumeEngine }
+
+func (failingDeliveryRecoveryEngine) ReconcileTerminalDelivery(context.Context, string, string) error {
+	return errors.New("simulated deferred delivery outage")
+}
+
+func TestRecoveryDispatchDoesNotCompleteJobBeforeDeferredDelivery(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const runID = "run-finished-before-delivery"
+	started := time.Now().UTC().Add(-time.Minute)
+	evidenceStore, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot:   json.RawMessage(`{"schema_version":1}`),
+		WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []evidence.Event{
+		{Type: "run_started", Timestamp: started},
+		{Type: "delivery_deferred", Timestamp: started.Add(time.Second), Data: map[string]any{"plan_hash": strings.Repeat("a", 64)}},
+		{Type: "run_finished", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"status": string(workflow.RunCompleted), "stage_attempts": 0}},
+	} {
+		if err := evidenceStore.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycleStore.Create(lifecycle.State{
+		RunID: runID, Feature: "feature", TargetDir: target, Task: "task", Phase: lifecycle.PhaseRunning,
+		NextStage: "analyst", ConfigSHA256: strings.Repeat("a", 64), WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := scheduler.Open(filepath.Join(t.TempDir(), "scheduler.db"), scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	jobID, err := queue.Enqueue(worker.Job{SchemaVersion: worker.SchemaVersion, Operation: worker.OperationRecover,
+		RunID: runID, TargetDir: target, Feature: "feature", Task: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller, err := scheduler.NewPoller(queue, recoveryQueueExecutor{target: target, engine: failingDeliveryRecoveryEngine{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := poller.RunOnce(context.Background(), "recovery-worker")
+	if err != nil || !claimed {
+		t.Fatalf("recovery poll: claimed=%v err=%v", claimed, err)
+	}
+	record, found, err := queue.Get(jobID)
+	if err != nil || !found || record.Status != scheduler.StatusFailed {
+		t.Fatalf("job must remain visibly failed until deferred delivery is reconciled: record=%+v found=%v err=%v", record, found, err)
+	}
 }
 
 // TestEvalCommandContract — `eval` без пары флагов не знает, что оценивать, а

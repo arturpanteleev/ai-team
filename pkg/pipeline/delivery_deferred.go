@@ -21,6 +21,8 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
+var errDeferredMarkerNotFound = errors.New("delivery_deferred event не найден")
+
 // delivery_deferred.go (V0-9): string post-terminal доставка. Git-история
 // (commit, push, PR) меняется ТОЛЬКО после terminal finalize — когда
 // attestation digest и runtime identity детерминированы. Трейлеры commit
@@ -261,6 +263,106 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	return record, nil
 }
 
+// ReconcileTerminalDelivery is used by durable worker recovery after
+// run_finished. A terminal pipeline outcome does not imply deferred delivery
+// finished: only a validated delivery.json closes that obligation.
+func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetDir string) error {
+	runDir := filepath.Join(targetDir, ".ai-team", "runs", runID)
+	if filepath.Base(runID) != runID || runID == "." || runID == ".." {
+		return fmt.Errorf("recover delivery: invalid run id %q", runID)
+	}
+	record, found, err := delivery.ReadTerminalRecord(runDir)
+	if err != nil {
+		return fmt.Errorf("recover delivery record: %w", err)
+	}
+	marker, markerErr := firstDeferredMarker(runDir)
+	if markerErr != nil {
+		if found {
+			return fmt.Errorf("recover delivery: terminal record exists without a verified delivery_deferred marker: %w", markerErr)
+		}
+		// A terminal run without a deferred-delivery marker has no delivery
+		// obligation. A marker that exists but is malformed is rejected by
+		// firstDeferredMarker, including when there is no terminal record yet.
+		if errors.Is(markerErr, errDeferredMarkerNotFound) {
+			return nil
+		}
+		return fmt.Errorf("recover delivery evidence: %w", markerErr)
+	}
+	manifest, err := readRunManifest(runDir)
+	if err != nil {
+		return fmt.Errorf("recover delivery manifest: %w", err)
+	}
+	if manifest.RunID != runID {
+		return fmt.Errorf("recover delivery: run manifest id %q does not match requested run %q", manifest.RunID, runID)
+	}
+	if manifest.Feature == "" || (marker.Feature != "" && marker.Feature != manifest.Feature) {
+		return errors.New("recover delivery: delivery_deferred marker feature does not match run manifest")
+	}
+	if marker.PlanHash == "" {
+		return errors.New("recover delivery: delivery_deferred marker has no plan hash")
+	}
+	if found {
+		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record); err != nil {
+			return fmt.Errorf("recover delivery record identity mismatch: %w", err)
+		}
+		return nil
+	}
+	if _, err := p.DeliverDeferred(ctx, runDir, manifest.Feature, targetDir); err != nil {
+		return fmt.Errorf("recover deferred delivery: %w", err)
+	}
+	return nil
+}
+
+func validateRecoveredTerminalRecord(runDir, runID, feature string, marker deferredMarkerEvent, record delivery.TerminalRecord) error {
+	if record.RunID != runID || record.Feature != feature || record.PlanHash != marker.PlanHash {
+		return fmt.Errorf("record run/feature/plan (%q, %q, %q) differs from requested run/marker (%q, %q, %q)",
+			record.RunID, record.Feature, record.PlanHash, runID, feature, marker.PlanHash)
+	}
+	if marker.StatePath == "" {
+		return errors.New("delivery_deferred marker has no state_path")
+	}
+	status, err := terminalStatusOfRun(runDir, runID)
+	if err != nil {
+		return err
+	}
+	if status != string(workflow.RunCompleted) && status != string(workflow.RunCompletedWithWarnings) {
+		return fmt.Errorf("run terminal status %q does not permit deferred delivery", status)
+	}
+	attestationDigest, err := attestationDigestOfRun(runDir)
+	if err != nil {
+		return err
+	}
+	runtimeIdentity, err := runtimeIdentityOfRun(runDir)
+	if err != nil {
+		return err
+	}
+	if record.AttestationSHA256 != attestationDigest || record.RuntimeIdentity != runtimeIdentity {
+		return errors.New("record attestation/runtime identity differs from run evidence")
+	}
+	if record.PerformedAt.IsZero() {
+		return errors.New("record performed_at is empty")
+	}
+	expected := map[string]string{
+		delivery.TrailerRunID:       runID,
+		delivery.TrailerRuntime:     runtimeIdentity,
+		delivery.TrailerAttestation: attestationDigest,
+	}
+	if len(record.Trailers) != len(expected) {
+		return fmt.Errorf("record has %d trailers; expected %d identity trailers", len(record.Trailers), len(expected))
+	}
+	for _, trailer := range record.Trailers {
+		key, value, ok := strings.Cut(trailer, ": ")
+		if !ok || expected[key] == "" || value != expected[key] {
+			return fmt.Errorf("record trailer %q does not match run evidence", trailer)
+		}
+		delete(expected, key)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("record is missing identity trailers: %v", expected)
+	}
+	return nil
+}
+
 // annotateDeliveryFailure объясняет, ПОЧЕМУ доставка оборвалась. Без этого
 // пользователь видит только «delivery push failed: context canceled» у
 // случайного шага и не может отличить зависший remote от нажатого Ctrl-C.
@@ -354,14 +456,18 @@ func firstDeferredMarker(runDir string) (deferredMarkerEvent, error) {
 		}
 		data, err := json.Marshal(event.Data)
 		if err != nil {
-			continue
+			return deferredMarkerEvent{}, fmt.Errorf("deliver: decode delivery_deferred event: %w", err)
 		}
 		var marker deferredMarkerEvent
-		if err := json.Unmarshal(data, &marker); err == nil && marker.PlanHash != "" {
-			return marker, nil
+		if err := json.Unmarshal(data, &marker); err != nil {
+			return deferredMarkerEvent{}, fmt.Errorf("deliver: decode delivery_deferred marker: %w", err)
 		}
+		if marker.PlanHash == "" || marker.StatePath == "" {
+			return deferredMarkerEvent{}, errors.New("deliver: некорректный delivery_deferred marker: отсутствует plan_hash или state_path")
+		}
+		return marker, nil
 	}
-	return deferredMarkerEvent{}, errors.New("deliver: delivery_deferred event не найден")
+	return deferredMarkerEvent{}, fmt.Errorf("deliver: %w", errDeferredMarkerNotFound)
 }
 
 func terminalStatusOfRun(runDir, runID string) (string, error) {

@@ -839,6 +839,79 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	return RunResult{RunID: runID, Outcome: outcome}, finalErr
 }
 
+func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task string) error {
+	if runID == "" || !workflow.ValidFeature(feature) || strings.TrimSpace(task) == "" {
+		return errors.New("recover initial lifecycle: run_id, feature и task обязательны")
+	}
+	targetDir, err := filepath.Abs(targetDir)
+	if err != nil {
+		return err
+	}
+	targetDir, err = filepath.EvalSymlinks(filepath.Clean(targetDir))
+	if err != nil {
+		return err
+	}
+	store, err := lifecycle.NewStore(targetDir)
+	if err != nil {
+		return err
+	}
+	if _, err := store.Load(runID); err == nil {
+		return errors.New("recover initial lifecycle: lifecycle state already exists")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	runRoot := filepath.Join(targetDir, ".ai-team", "runs")
+	evidenceStore, manifest, replayed, err := evidence.Resume(runRoot, runID)
+	if err != nil {
+		return fmt.Errorf("recover initial lifecycle: verify evidence: %w", err)
+	}
+	if manifest.Feature != feature || manifest.TargetDir != targetDir || replayed.RunID != runID ||
+		len(replayed.Attempts) != 0 || !replayed.FinishedAt.IsZero() {
+		return errors.New("recover initial lifecycle: evidence identity/state mismatch")
+	}
+	events, err := evidence.VerifyEventLog(filepath.Join(runRoot, runID, "events.jsonl"), runID)
+	if err != nil || (len(events) != 0 && (len(events) != 1 || events[0].Type != "run_started")) {
+		return errors.New("recover initial lifecycle: evidence is not the initial run_started checkpoint")
+	}
+	graph, err := p.cfg.CompiledGraph()
+	if err != nil {
+		return err
+	}
+	configSnapshot, workflowSnapshot, err := p.resolvedEvidenceSnapshots()
+	if err != nil {
+		return err
+	}
+	configDigest := sha256.Sum256(configSnapshot)
+	workflowDigest := sha256.Sum256(workflowSnapshot)
+	if fmt.Sprintf("%x", configDigest[:]) != manifest.ConfigSHA256 ||
+		fmt.Sprintf("%x", workflowDigest[:]) != manifest.ResolvedWorkflowSHA256 {
+		return errors.New("recover initial lifecycle: current config/workflow differs from run evidence")
+	}
+	// The task artifact was durably published before candidate/evidence setup.
+	// Read it through the regular resume path and compare to the immutable queue
+	// admission payload before restoring task identity into lifecycle state.
+	initial, err := prepareTaskArtifact(RunConfig{
+		TargetDir: targetDir, Feature: feature, retryFrom: graph.Entry,
+	})
+	if err != nil {
+		return err
+	}
+	if initial != task {
+		return errors.New("recover initial lifecycle: admitted task differs from durable task artifact")
+	}
+	if len(events) == 0 {
+		if err := evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: manifest.StartedAt}); err != nil {
+			return fmt.Errorf("recover initial lifecycle: restore run_started: %w", err)
+		}
+	}
+	return store.Create(lifecycle.State{
+		RunID: runID, Feature: feature, TargetDir: targetDir, Task: task,
+		Phase: lifecycle.PhaseRunning, NextStage: graph.Entry,
+		ConfigSHA256: manifest.ConfigSHA256, WorkflowSHA256: manifest.ResolvedWorkflowSHA256,
+		CreatedAt: manifest.StartedAt,
+	})
+}
+
 func (rs *runState) initializeWorkspaceOwnership() error {
 	rs.userOwnedPaths = make(map[string]bool)
 	workspace, err := captureWorkspaceSnapshot(rs.runCfg.TargetDir)

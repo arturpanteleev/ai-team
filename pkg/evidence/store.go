@@ -24,15 +24,36 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
-// SchemaVersion 6 binds each run to the exact resolved workflow, config and
-// controller executable/toolchain identity, hash-chains lifecycle events and
-// records the typed fields required for deterministic lifecycle replay.
-const SchemaVersion = 6
+// SchemaVersion 7 binds each run to the exact resolved workflow, config and
+// controller executable/toolchain identity, hash-chains lifecycle events from a
+// run-specific chain root and records the typed fields required for
+// deterministic lifecycle replay.
+const SchemaVersion = 7
 
 const (
-	genesisEventHash = "0000000000000000000000000000000000000000000000000000000000000000"
-	maxEventLogSize  = 64 << 20
+	// chainGenesisDomain — domain separator корня hash-chain событий.
+	// Версия внутри строки отделяет схему привязки от SchemaVersion: смена
+	// строки меняет все корни цепочек и потому делается только осознанно.
+	chainGenesisDomain = "ai-team/evidence/event-chain/v1"
+	maxEventLogSize    = 64 << 20
 )
+
+// chainGenesis — стартовое звено hash-chain событий, выведенное из identity
+// прогона.
+//
+// Почему не константа (QS-13): при общем для всех прогонов корне цепочка
+// доказывает лишь внутреннюю целостность лога — что события не менялись, не
+// вставлялись, не удалялись и не переставлялись. Принадлежность лога своему
+// прогону при этом держалась на одном сравнении полей (`event.RunID != runID`),
+// потому что дайджест каждого события считается по его собственному `run_id`,
+// взятому из самого события. Полный валидный лог прогона B структурно
+// неотличим от лога прогона A: достаточно перештамповать `run_id` и пересобрать
+// цепочку от общего корня, и проверка целостности проходит. Корень, выведенный
+// из run_id, делает принадлежность прогону частью самой цепочки: первое звено
+// чужого лога не сходится с ожидаемым корнем, какие бы поля в нём ни правили.
+func chainGenesis(runID string) string {
+	return sha256Bytes([]byte(chainGenesisDomain + "\x00" + runID))
+}
 
 type ControllerIdentity struct {
 	ExecutableSHA256 string `json:"executable_sha256"`
@@ -210,7 +231,7 @@ func Start(root string, manifest RunManifest) (*Store, error) {
 	}
 	cleanup = false
 	return &Store{
-		root: root, runID: manifest.RunID, lastEventHash: genesisEventHash,
+		root: root, runID: manifest.RunID, lastEventHash: chainGenesis(manifest.RunID),
 		provenance: make(map[string]ArtifactRecord),
 	}, nil
 }
@@ -261,7 +282,7 @@ func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
 	if err != nil {
 		return nil, RunManifest{}, ReplayedRun{}, err
 	}
-	lastHash := genesisEventHash
+	lastHash := chainGenesis(runID)
 	if len(events) > 0 {
 		lastHash = events[len(events)-1].SHA256
 	}
@@ -555,7 +576,7 @@ func (s *Store) Append(event Event) error {
 	if err != nil {
 		return fmt.Errorf("event log integrity: %w", err)
 	}
-	lastHash := genesisEventHash
+	lastHash := chainGenesis(s.runID)
 	if len(events) > 0 {
 		lastHash = events[len(events)-1].SHA256
 	}
@@ -604,8 +625,9 @@ func (s *Store) Append(event Event) error {
 }
 
 // VerifyEventLog validates strict JSON records, sequence and the complete hash
-// chain. Callers can deterministically detect modification, removal, insertion
-// or reordering of any persisted event.
+// chain rooted in the run's own identity. Callers can deterministically detect
+// modification, removal, insertion or reordering of any persisted event, as
+// well as substitution of an intact log that belongs to a different run.
 func VerifyEventLog(path, runID string) ([]Event, error) {
 	data, err := safeio.ReadRegularFile(path, maxEventLogSize)
 	if err != nil {
@@ -613,7 +635,7 @@ func VerifyEventLog(path, runID string) ([]Event, error) {
 	}
 	lines := bytes.Split(data, []byte{'\n'})
 	events := make([]Event, 0, len(lines))
-	previous := genesisEventHash
+	previous := chainGenesis(runID)
 	for _, line := range lines {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -633,6 +655,12 @@ func VerifyEventLog(path, runID string) ([]Event, error) {
 		if event.SchemaVersion != SchemaVersion || event.Sequence != uint64(len(events)+1) ||
 			event.RunID != runID || event.Type == "" || event.Timestamp.IsZero() {
 			return nil, fmt.Errorf("event %d identity/sequence is invalid", len(events)+1)
+		}
+		// Первое звено сверяется с корнем, выведенным из run_id: расхождение
+		// здесь означает не порчу цепочки, а лог другого прогона — отдельная
+		// диагностика, иначе подмену не отличить от битого файла.
+		if len(events) == 0 && event.PreviousSHA256 != previous {
+			return nil, fmt.Errorf("event log не принадлежит run %s: корень цепочки выведен из другого run_id", runID)
 		}
 		if event.PreviousSHA256 != previous || !validSHA256(event.SHA256) {
 			return nil, fmt.Errorf("event %d chain link is invalid", event.Sequence)

@@ -46,11 +46,106 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	if err := plan.Validate(); err == nil {
 		t.Fatal("protected branch должна быть отклонена")
 	}
-	plan = validTestPlan()
-	plan.Files = []string{".ai-team/secret"}
-	if err := plan.Validate(); err == nil {
-		t.Fatal("control files должны быть отклонены")
+}
+
+// Запрет control path — тот инвариант схемы плана, нарушение которого сразу
+// означает исполнение произвольного кода: файл, попавший в ".git/hooks/",
+// запускается у каждого, кто сделает pull, а ".ai-team/" — состояние прогона,
+// которым агент мог бы переписать собственные evidence. Проверка жила без
+// единого теста: прежняя попытка её покрыть подавала путь, отсутствующий в
+// file_digests, поэтому план отвергался на два правила раньше и удаление
+// запрета ничего не ломало.
+//
+// Поэтому здесь каждый вход валиден по всем остальным правилам Validate —
+// отвергнуть его может только запрет control path. Удаление запрета роняет
+// весь этот тест целиком.
+func TestPlanRejectsControlPaths(t *testing.T) {
+	if err := planWithFile("a.go").Validate(); err != nil {
+		t.Fatalf("заготовка теста должна быть валидна во всём, кроме пути: %v", err)
 	}
+
+	rejected := map[string]string{
+		"git directory itself":   ".git",
+		"git hook":               ".git/hooks/pre-commit",
+		"git config":             ".git/config",
+		"git deep nesting":       ".git/modules/x/hooks/post-merge",
+		"ai-team directory":      ".ai-team",
+		"ai-team run state":      ".ai-team/runs/x.json",
+		"ai-team deep nesting":   ".ai-team/runs/2026/attempt/manifest.json",
+		"git in subdirectory":    "vendor/dep/.git/hooks/pre-commit",
+		"git as nested checkout": "sub/.git/config",
+		// APFS на macOS и NTFS сравнивают имена без учёта регистра, поэтому
+		// ".GIT" открывает ту же директорию, что и ".git".
+		"git uppercase":      ".GIT/hooks/pre-commit",
+		"git mixed case":     ".Git/config",
+		"git odd case":       ".gIt/hooks/pre-commit",
+		"ai-team uppercase":  ".AI-TEAM/runs/x.json",
+		"ai-team title case": ".Ai-Team/state",
+		// Windows отбрасывает хвостовые точки и пробелы, открывает директорию
+		// через alternate data stream и знает её под 8.3-именем.
+		"git trailing dot":     ".git./hooks/pre-commit",
+		"git trailing space":   ".git /config",
+		"git as final segment": ".git.",
+		"git ntfs stream":      ".git::$INDEX_ALLOCATION/hooks/pre-commit",
+		"git ntfs short name":  "git~1/hooks/pre-commit",
+	}
+	for name, file := range rejected {
+		t.Run(name, func(t *testing.T) {
+			err := planWithFile(file).Validate()
+			if err == nil {
+				t.Fatalf("control path %q должен быть отклонён", file)
+			}
+			if !strings.Contains(err.Error(), "control path") {
+				t.Fatalf("control path %q отклонён не запретом control path, а %v", file, err)
+			}
+		})
+	}
+
+	// Обратная сторона того же запрета: он не должен задевать обычные файлы,
+	// имя которых лишь начинается с ".git", и ".ai-team" вне корня рабочей
+	// копии — там это директория пользователя, а не состояние прогона.
+	for name, file := range map[string]string{
+		"gitignore":            ".gitignore",
+		"gitattributes":        ".gitattributes",
+		"gitignore in subtree": "docs/.gitignore",
+		"github workflows":     ".github/workflows/ci.yml",
+		"ai-team prefix":       ".ai-teamrc",
+		"ai-team below root":   "examples/.ai-team/config.yaml",
+	} {
+		t.Run("allowed "+name, func(t *testing.T) {
+			if err := planWithFile(file).Validate(); err != nil {
+				t.Fatalf("обычный файл %q не должен отвергаться: %v", file, err)
+			}
+		})
+	}
+}
+
+// Плану, пришедшему на диск, control path запрещён так же, как собранному в
+// памяти: Parse — единственная дверь для внешнего JSON, и она обязана закрыть
+// тот же инвариант.
+func TestParseRejectsControlPath(t *testing.T) {
+	data, err := json.Marshal(planWithFile(".git/hooks/pre-commit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(data)
+	if err == nil {
+		t.Fatalf("Parse принял план с control path: %v", parsed.Files)
+	}
+	if !strings.Contains(err.Error(), "control path") {
+		t.Fatalf("Parse отклонил план не запретом control path, а %v", err)
+	}
+}
+
+// planWithFile строит план, валидный целиком, кроме самого пути: digest и mode
+// заведены ровно под него, поэтому отвергнуть такой план может только правило,
+// проверяющее путь.
+func planWithFile(file string) Plan {
+	plan := validTestPlan()
+	plan.Files = []string{file}
+	plan.FileDigests = map[string]string{file: strings.Repeat("a", 64)}
+	plan.FileModes = map[string]string{file: "100644"}
+	return plan
 }
 
 func TestPreparedStateRejectsPlanTampering(t *testing.T) {
@@ -347,7 +442,13 @@ func TestControllerVerifiesLargeCommittedBlob(t *testing.T) {
 	}
 }
 
-func TestControllerPreservesExecutableMode(t *testing.T) {
+// Happy-path: права исполняемого файла доезжают из workspace в commit без
+// потерь. Тест намеренно НЕ несёт веса проверок режима в executor.go — режим на
+// диске, режим в плане и режим в индексе здесь совпадают автоматически, и
+// удаление любой из этих проверок его не уронит. Вес несут
+// TestControllerRejectsStagedModeDivergingFromApprovedPlan и
+// TestControllerRejectsUnrecordedCommitWithModeDivergingFromApprovedPlan.
+func TestControllerDeliversExecutableModeEndToEnd(t *testing.T) {
 	repo, _ := setupRepository(t)
 	installFakeGH(t)
 	script := filepath.Join(repo, "run.sh")
@@ -368,6 +469,171 @@ func TestControllerPreservesExecutableMode(t *testing.T) {
 	}
 	if got := strings.Fields(git(t, repo, "ls-tree", "HEAD", "--", "run.sh"))[0]; got != "100755" {
 		t.Fatalf("committed mode=%q", got)
+	}
+}
+
+// Режим из плана сверяется с тем, что реально лежит в git index, а не с правами
+// на диске. Расхождение воспроизводится через core.fileMode=false — реальную
+// конфигурацию (Windows, FAT, часть сетевых ФС), при которой git игнорирует бит
+// исполняемости на диске и сохраняет режим из индекса. Все прочие правила вход
+// проходит: workspace digest, digest файла и его права на диске в точности
+// совпадают с планом, поэтому отвергнуть вход может только staged-проверка
+// режима.
+func TestControllerRejectsStagedModeDivergingFromApprovedPlan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("расхождение режимов воспроизводится только на Unix-правах")
+	}
+	tests := []struct {
+		name         string
+		prepare      func(t *testing.T, repo, script string)
+		approvedMode string
+		stagedMode   string
+	}{
+		{
+			// Человек утвердил исполняемый файл — git застейджил обычный.
+			name: "approved executable staged as regular",
+			prepare: func(t *testing.T, repo, script string) {
+				writeFile(t, script, "#!/bin/sh\nexit 0\n")
+				if err := os.Chmod(script, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			approvedMode: "100755",
+			stagedMode:   "100644",
+		},
+		{
+			// Сценарий из issue: человек утвердил обычный файл, а в commit
+			// поехал бы исполняемый, потому что индекс помнит +x.
+			name: "approved regular staged as executable",
+			prepare: func(t *testing.T, repo, script string) {
+				writeFile(t, script, "#!/bin/sh\nexit 0\n")
+				git(t, repo, "add", "--", "run.sh")
+				git(t, repo, "update-index", "--chmod=+x", "--", "run.sh")
+				git(t, repo, "commit", "-m", "executable baseline")
+				git(t, repo, "push", "origin", "main")
+				writeFile(t, script, "#!/bin/sh\nexit 1\n")
+			},
+			approvedMode: "100644",
+			stagedMode:   "100755",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo, _ := setupRepository(t)
+			git(t, repo, "config", "core.fileMode", "false")
+			test.prepare(t, repo, filepath.Join(repo, "run.sh"))
+			plan, err := BuildPlan(context.Background(), repo, "modes", "изменить run.sh", []string{"run.sh"}, testVerification(t, repo))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.FileModes["run.sh"] != test.approvedMode {
+				t.Fatalf("planner mode=%q, ожидался %q", plan.FileModes["run.sh"], test.approvedMode)
+			}
+
+			_, err = NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "modes", Plan: plan})
+			if err == nil || !strings.Contains(err.Error(), "staged mode") {
+				t.Fatalf("staged mode %q против approved %q должен быть отклонён: %v", test.stagedMode, test.approvedMode, err)
+			}
+			if !strings.Contains(err.Error(), test.stagedMode) || !strings.Contains(err.Error(), test.approvedMode) {
+				t.Fatalf("ошибка обязана назвать оба режима: %v", err)
+			}
+			if head := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); head != plan.BaselineHead {
+				t.Fatalf("отказ по режиму создал commit: head=%s baseline=%s", head, plan.BaselineHead)
+			}
+			if staged := strings.TrimSpace(git(t, repo, "diff", "--cached", "--name-only")); staged != "" {
+				t.Fatalf("отказ по режиму оставил staged данные: %q", staged)
+			}
+		})
+	}
+}
+
+// Проверка режима в commit достижима только через recovery-путь: в обычном
+// прогоне staged-проверка уже сверила режим, а git commit пишет ровно индекс.
+// Recovery же усыновляет чужой, никем не проверявшийся commit на tip ветки — и
+// обязан отказаться, если его tree-режим расходится с утверждённым.
+func TestControllerRejectsUnrecordedCommitWithModeDivergingFromApprovedPlan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("расхождение режимов воспроизводится только на Unix-правах")
+	}
+	repo, _ := setupRepository(t)
+	// fake gh нужен, чтобы без проверки прогон дошёл до конца и отказ нельзя
+	// было спутать с отсутствием gh в PATH.
+	installFakeGH(t)
+	git(t, repo, "config", "core.fileMode", "false")
+	script := filepath.Join(repo, "run.sh")
+	writeFile(t, script, "#!/bin/sh\nexit 0\n")
+	git(t, repo, "add", "--", "run.sh")
+	git(t, repo, "update-index", "--chmod=+x", "--", "run.sh")
+	git(t, repo, "commit", "-m", "executable baseline")
+	git(t, repo, "push", "origin", "main")
+	writeFile(t, script, "#!/bin/sh\nexit 1\n")
+	plan, err := BuildPlan(context.Background(), repo, "mode-recover", "изменить run.sh", []string{"run.sh"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.FileModes["run.sh"] != "100644" {
+		t.Fatalf("planner mode=%q, ожидался 100644", plan.FileModes["run.sh"])
+	}
+	git(t, repo, "switch", "-c", plan.Branch)
+	git(t, repo, "add", "--", "run.sh")
+	git(t, repo, "commit", "-m", FullCommitMessage(plan.CommitMessage, nil))
+	if mode := strings.Fields(git(t, repo, "ls-tree", "HEAD", "--", "run.sh"))[0]; mode != "100755" {
+		t.Fatalf("фикстура не воспроизвела расхождение: committed mode=%q", mode)
+	}
+
+	_, err = NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "mode-recover", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "committed mode") {
+		t.Fatalf("commit с чужим режимом должен быть отклонён: %v", err)
+	}
+	assertCommitNotAdopted(t, repo, "mode-recover")
+}
+
+// Байты commit'а тоже проверяются только на recovery-пути — и только там эта
+// проверка что-то гарантирует: подменённый tip ветки с правильным сообщением,
+// правильным parent и правильным набором путей не должен быть усыновлён, если
+// его blob не тот, что утверждали.
+func TestControllerRejectsUnrecordedCommitWithBytesDivergingFromApprovedPlan(t *testing.T) {
+	repo, _ := setupRepository(t)
+	// fake gh нужен, чтобы без проверки прогон дошёл до конца и отказ нельзя
+	// было спутать с отсутствием gh в PATH.
+	installFakeGH(t)
+	const approved = "package a\n// approved\n"
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+	plan, err := BuildPlan(context.Background(), repo, "bytes-recover", "изменить a", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "switch", "-c", plan.Branch)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// smuggled\n")
+	git(t, repo, "add", "--", "a.go")
+	git(t, repo, "commit", "-m", FullCommitMessage(plan.CommitMessage, nil))
+	// Одобренные байты возвращаются на диск: workspace снова совпадает с планом
+	// побайтово и по режиму, расходится только содержимое commit'а.
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+
+	_, err = NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "bytes-recover", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "committed bytes") {
+		t.Fatalf("commit с чужими байтами должен быть отклонён: %v", err)
+	}
+	assertCommitNotAdopted(t, repo, "bytes-recover")
+}
+
+func assertCommitNotAdopted(t *testing.T, repo, feature string) {
+	t.Helper()
+	statePath, err := deliveryStatePath(repo, feature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := parseState(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CommitSHA != "" || loaded.CommitVerified {
+		t.Fatalf("отклонённый commit просочился в durable state: %+v", loaded)
 	}
 }
 
@@ -467,21 +733,7 @@ func TestControllerRejectsUnrecordedCommitWithDifferentMessage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "commit message") {
 		t.Fatalf("unrecorded foreign commit must fail closed: %v", err)
 	}
-	statePath, pathErr := deliveryStatePath(repo, "reject-recovery")
-	if pathErr != nil {
-		t.Fatal(pathErr)
-	}
-	data, readErr := os.ReadFile(statePath)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	loaded, parseErr := parseState(data)
-	if parseErr != nil {
-		t.Fatal(parseErr)
-	}
-	if loaded.CommitSHA != "" || loaded.CommitVerified {
-		t.Fatalf("rejected commit leaked into durable state: %+v", loaded)
-	}
+	assertCommitNotAdopted(t, repo, "reject-recovery")
 }
 
 type failRecordCommitRunner struct {

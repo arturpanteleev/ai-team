@@ -316,6 +316,8 @@ func TestValidate(t *testing.T) {
 		{"bad stage_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, StageTimeout: "later"}},
 		{"bad preflight_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, PreflightTimeout: "скоро"}},
 		{"nonpositive preflight_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, PreflightTimeout: "0s"}},
+		{"bad delivery_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, DeliveryTimeout: "когда-нибудь"}},
+		{"nonpositive delivery_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, DeliveryTimeout: "0s"}},
 		{"unsupported schema", &Config{SchemaVersion: 99, PipelineAgents: []AgentConfig{{Name: "a"}}}},
 		{"nonpositive global timeout", &Config{SchemaVersion: 4, StageTimeout: "0s", PipelineAgents: []AgentConfig{{Name: "a"}}}},
 		{"nonpositive stage timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Timeout: "-1s"}}}},
@@ -356,6 +358,39 @@ func TestAgentConfig_Defaults(t *testing.T) {
 	d, err := ac.StageTimeoutFor()
 	if err != nil || d.Minutes() != 30 {
 		t.Errorf("StageTimeoutFor() = %v, %v", d, err)
+	}
+}
+
+// Конфиг, написанный руками (не через `ai-team init`), не содержит
+// stage_timeout — и до QS-09 шёл вообще без бюджета стадии.
+func TestStageTimeoutFor_DefaultsWithoutConfiguredValue(t *testing.T) {
+	cfg := &Config{PipelineAgents: []AgentConfig{{Name: "a"}}}
+	ac := cfg.AgentConfig("a")
+	d, err := ac.StageTimeoutFor()
+	if err != nil {
+		t.Fatalf("StageTimeoutFor(): %v", err)
+	}
+	if d != DefaultStageTimeout {
+		t.Fatalf("отсутствующий stage_timeout -> %v, ожидался дефолт %v", d, DefaultStageTimeout)
+	}
+	if d <= 0 {
+		t.Fatalf("нулевой таймаут оставляет стадию без верхней границы")
+	}
+
+	var nilAgent *AgentConfig
+	if d, err = nilAgent.StageTimeoutFor(); err != nil || d != DefaultStageTimeout {
+		t.Fatalf("nil agent -> (%v, %v), ожидался дефолт", d, err)
+	}
+}
+
+// Неположительный таймаут — не «без таймаута», а ошибка: молча подменить
+// написанное пользователем значение другим бюджетом хуже, чем остановиться.
+func TestStageTimeoutFor_RejectsNonPositive(t *testing.T) {
+	for _, raw := range []string{"-5m", "0s", "не длительность"} {
+		ac := &AgentConfig{Name: "a", Timeout: raw}
+		if d, err := ac.StageTimeoutFor(); err == nil {
+			t.Errorf("timeout=%q принят как %v", raw, d)
+		}
 	}
 }
 

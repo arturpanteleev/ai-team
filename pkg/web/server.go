@@ -58,9 +58,10 @@ func WithAuthenticator(verifier IdentityVerifier) ServerOption {
 }
 
 type browserSession struct {
-	CSRFToken string
-	Principal cloudidentity.Principal
-	ExpiresAt time.Time
+	CSRFToken    string
+	Principal    cloudidentity.Principal
+	SessionEpoch int64
+	ExpiresAt    time.Time
 }
 
 type Server struct {
@@ -143,6 +144,18 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
 	srv.router.Get("/api/session", srv.handleSession)
+	srv.router.Post("/api/team/activate", srv.handleTeamActivation)
+	srv.router.Group(func(router chi.Router) {
+		router.Use(srv.teamReadSecurity)
+		router.Get("/api/team/members", srv.handleTeamMembers)
+		router.Get("/api/team/audit", srv.handleTeamAudit)
+	})
+	srv.router.Group(func(router chi.Router) {
+		router.Use(srv.teamWriteSecurity)
+		router.Post("/api/team/invitations", srv.handleTeamInvite)
+		router.Patch("/api/team/members/{actorID}/roles", srv.handleTeamRoles)
+		router.Delete("/api/team/members/{actorID}", srv.handleTeamRevoke)
+	})
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.readSecurity)
 		router.Get("/api/pipelines", srv.handleGetPipelines)

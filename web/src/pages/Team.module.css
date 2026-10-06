@@ -1,0 +1,22 @@
+.page { max-width: 900px; margin: 0 auto; padding: 28px; }
+.page h1 { margin: 0 0 8px; }
+.page > p { color: #64748b; }
+.invite { display: grid; gap: 14px; padding: 18px; border: 1px solid #dbe3ee; border-radius: 12px; background: white; }
+.invite h2 { margin: 0; }
+.invite > label { display: grid; gap: 6px; }
+.invite input[type='email'] { max-width: 420px; padding: 9px; }
+.invite fieldset { display: flex; flex-wrap: wrap; gap: 12px; border: 1px solid #dbe3ee; border-radius: 8px; }
+.invite fieldset label { display: flex; align-items: center; gap: 5px; }
+.invite button, .members button { padding: 7px 12px; }
+.invitation { display: grid; gap: 8px; margin: 16px 0; padding: 14px; background: #eff6ff; border-radius: 10px; }
+.invitation code { overflow-wrap: anywhere; }
+.invitation small, .members small { color: #64748b; }
+.members { display: grid; gap: 8px; }
+.members article { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px; border: 1px solid #dbe3ee; border-radius: 9px; background: white; }
+.members article div:first-child { display: grid; gap: 4px; }
+.members article div:last-child { display: flex; gap: 8px; }
+.audit { display: grid; gap: 8px; padding-left: 22px; }
+.audit li { display: flex; gap: 12px; }
+.audit time { min-width: 150px; color: #64748b; }
+.error { color: #b91c1c !important; }
+@media (max-width: 600px) { .page { padding: 16px; } .members article { align-items: start; flex-direction: column; } .audit li { flex-direction: column; gap: 2px; } }

@@ -77,6 +77,38 @@ export function getActivePrincipal(): Principal | null {
   return activePrincipal;
 }
 
+export type TeamMember = { actor_id: string; email: string; roles: string[]; status: 'invited' | 'active' | 'revoked'; updated_at: string };
+export type TeamAuditEvent = { id: number; actor_id: string; action: string; target_actor_id: string; details: unknown; created_at: string };
+
+export function getTeamMembers(): Promise<{ members: TeamMember[] }> { return fetchJson('/team/members'); }
+export function getTeamAudit(): Promise<{ events: TeamAuditEvent[] }> { return fetchJson('/team/audit'); }
+export function inviteTeamMember(email: string, roles: string[]): Promise<{ actor_id: string; activation_token: string; expires_at: string }> {
+  return command('/team/invitations', { email, roles });
+}
+
+async function teamMutation<T>(url: string, method: 'PATCH' | 'DELETE', body?: unknown): Promise<T> {
+  const token = await getCsrfToken();
+  const response = await fetch(`${API_BASE}${url}`, { method, credentials: 'same-origin', headers: {
+    'Content-Type': 'application/json', 'X-CSRF-Token': token,
+  }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export function setTeamMemberRoles(actorId: string, roles: string[]): Promise<{ member: TeamMember }> {
+  return teamMutation(`/team/members/${encodeURIComponent(actorId)}/roles`, 'PATCH', { roles });
+}
+export function revokeTeamMember(actorId: string): Promise<{ actor_id: string; status: string }> {
+  return teamMutation(`/team/members/${encodeURIComponent(actorId)}`, 'DELETE');
+}
+
+export async function activateTeamInvitation(token: string): Promise<{ access_token: string }> {
+  const response = await fetch(`${API_BASE}/team/activate`, { method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+  if (!response.ok) throw await responseError(response, 'Activation failed');
+  return response.json();
+}
+
 async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
   await openSession();

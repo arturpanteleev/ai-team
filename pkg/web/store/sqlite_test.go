@@ -401,3 +401,24 @@ func TestCreateStage_WithJSONFields(t *testing.T) {
 		t.Errorf("outputs_json mismatch: %s", stages[0].OutputsJSON)
 	}
 }
+
+func TestMembershipRejectsEmptyRolesButAllowsNilRolesForRevoke(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	if err := s.InviteTeamMember("qa@example.com", "qa@example.com", nil, "token-hash", now.Add(time.Hour), now, "owner@example.com"); err != ErrTeamMemberRolesRequired {
+		t.Fatalf("empty invite roles error=%v, want ErrTeamMemberRolesRequired", err)
+	}
+	if err := s.InviteTeamMember("qa@example.com", "qa@example.com", []string{"qa"}, "token-hash", now.Add(time.Hour), now, "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTeamMember("qa@example.com", nil, true, "owner@example.com", "roles_changed", now); err != ErrTeamMemberRolesRequired {
+		t.Fatalf("empty active roles error=%v, want ErrTeamMemberRolesRequired", err)
+	}
+	member, err := s.TeamMember("qa@example.com")
+	if err != nil || member == nil || member.Status != "invited" || len(member.Roles) != 1 || member.Roles[0] != "qa" {
+		t.Fatalf("rejected role change altered member: member=%+v err=%v", member, err)
+	}
+	if err := s.SetTeamMember("qa@example.com", nil, false, "owner@example.com", "membership_revoked", now); err != nil {
+		t.Fatalf("nil roles must remain valid for revocation: %v", err)
+	}
+}

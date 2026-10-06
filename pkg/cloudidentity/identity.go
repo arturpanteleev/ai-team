@@ -52,6 +52,9 @@ func NewPrincipal(actorID string, roles []Role) (Principal, error) {
 }
 
 func ParseRoles(values []string) ([]Role, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("cloud identity: требуется хотя бы одна роль")
+	}
 	roles := make([]Role, 0, len(values))
 	for _, value := range values {
 		role := Role(strings.TrimSpace(strings.ToLower(value)))
@@ -80,6 +83,7 @@ const (
 	PermissionCancel       Permission = "run:cancel"
 	PermissionDecision     Permission = "approval:decide"
 	PermissionArtifactEdit Permission = "artifact:edit"
+	PermissionTeamManage   Permission = "team:manage"
 )
 
 func Authorize(principal Principal, permission Permission, selectedRole Role) error {
@@ -88,7 +92,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 	case PermissionStart:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect)
 	case PermissionResume:
-		allowed = len(principal.Roles) > 0
+		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect) ||
+			principal.Has(RoleDeveloper) || principal.Has(RoleQA)
 	case PermissionCancel:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleReleaseManager)
 	case PermissionDecision:
@@ -96,6 +101,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 	case PermissionArtifactEdit:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect) ||
 			principal.Has(RoleReviewer) || principal.Has(RoleQA)
+	case PermissionTeamManage:
+		allowed = principal.Has(RoleProductOwner)
 	default:
 		return fmt.Errorf("cloud RBAC: неизвестное permission %q", permission)
 	}

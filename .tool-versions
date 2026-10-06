@@ -18,7 +18,7 @@
 # на это согласование — задача #139: строить его надо YAML-парсером с
 # подсчётом пинов на каждый шаг setup-go, а не регуляркой по тексту
 # workflow. Образец рабочего подхода — сторожа
-# TestReadmeCLIReferenceMatchesDispatcher и TestUsageTextMatchesDispatcher в
+# TestCLIReferenceMatchesDispatcher и TestUsageTextMatchesDispatcher в
 # docs/docs_test.go: они разбирают cmd/ai-team/main.go через go/parser, то есть
 # смотрят на AST, а не на форматирование. Перевод workflow на
 # `go-version-file: .tool-versions` убрал бы дублирование совсем — это

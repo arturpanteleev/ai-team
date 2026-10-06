@@ -928,8 +928,8 @@ func cmdRun() {
 // runPreflight выполняет read-only preflight ДО старта run (AUD-09): тот же
 // pkg/preflight, что использует web-контроллер (control.WithPreflight) и
 // worker, чтобы CLI/web/worker одинаково классифицировали отсутствующие
-// runtime/gh/origin до runtime. Выбранное различие (зафиксировано в README,
-// "Контроллер и preflight"): CLI показывает отчёт read-only и блокирует
+// runtime/gh/origin до runtime. Выбранное различие (зафиксировано в docs/reference/cli.md,
+// «Preflight перед запуском»): CLI показывает отчёт read-only и блокирует
 // только невозможность запустить runtime вовсе (check "cli"); git/gh/origin
 // — предусловия поздних стадий (delivery), которые и так fail-closed
 // проверяются на самой стадии, поэтому CLI не отказывает в run из-за них.

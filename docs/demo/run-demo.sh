@@ -54,6 +54,9 @@ def test_clean_text():
 def test_already_clean():
     assert parse_v1("hi") == "hi"
 PY
+# report.xml пишет typed check во время gate; без .gitignore он остаётся
+# untracked, и следующий сценарий упирается в BLOCKED «грязный worktree».
+echo report.xml > "$DEMO/.gitignore"
 git -C "$DEMO" init -q
 git -C "$DEMO" config user.email demo@example.invalid
 git -C "$DEMO" config user.name "Demo"

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if eq .Current.URL "/"}}{{.Title}} — AI-агенты пишут код, вы решаете, что попадёт в репозиторий{{else}}{{.Current.Title}} — {{.Title}}{{end}}</title>
+<meta name="description" content="{{if .Current.Description}}{{.Current.Description}}{{else}}Документация ai-team: локальный контроллер, который проводит задачу через AI-агентов, детерминированные проверки и ваше подтверждение.{{end}}">
+<meta name="generator" content="ai-team docsgen">
+<link rel="stylesheet" href="{{link "/assets/site.css"}}">
+<script defer src="{{link "/assets/search-index.js"}}"></script>
+<script defer src="{{link "/assets/search.js"}}"></script>
+</head>
+<body{{if eq .Current.URL "/"}} class="home"{{end}}>
+<a class="skip-link" href="#main">К содержимому</a>
+<header class="site-header">
+  <a class="brand" href="{{link "/"}}"><span class="brand-mark" aria-hidden="true">ai</span><span>{{.Title}}</span></a>
+  <div class="search" hidden>
+    <label class="visually-hidden" for="docs-search">Поиск по документации</label>
+    <div class="search-field"><svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m13 13 4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input id="docs-search" type="search" placeholder="Поиск: approval, BLOCKED, gate…" autocomplete="off" aria-controls="search-results" aria-describedby="search-status"><kbd>/</kbd></div>
+    <div class="search-panel" hidden>
+      <p id="search-status" class="search-status" role="status" aria-live="polite"></p>
+      <ol id="search-results"></ol>
+    </div>
+  </div>
+  <nav class="topnav" aria-label="Основная навигация">
+    {{range .HeaderLinks}}<a href="{{link .URL}}">{{.Title}}</a>
+    {{end}}
+  </nav>
+</header>
+
+<div class="layout{{if eq .Current.URL "/"}} layout-home{{end}}">
+  <aside class="sidebar">
+    <details class="site-menu" open>
+      <summary>Разделы</summary>
+      <nav aria-label="Разделы документации">
+      {{- $cur := .Current -}}
+      {{range .Sections}}
+        <p class="section-label">{{.Title}}</p>
+        <ul class="sidenav">
+        {{range .Pages}}<li><a href="{{link .URL}}"{{if eq .URL $cur.URL}} class="active" aria-current="page"{{end}}>{{.Title}}</a></li>
+        {{end}}</ul>
+      {{end}}
+      </nav>
+    </details>
+    <p class="revision">Ревизия <code>{{.Version}}</code><br><a href="https://github.com/arturpanteleev/ai-team/releases">Релизы на GitHub</a></p>
+  </aside>
+
+  <main id="main" class="content" tabindex="-1">
+  {{if eq .Current.URL "/"}}
+    <section class="hero" aria-labelledby="hero-title">
+      <p class="eyebrow">Open source · локально · Go</p>
+      <h1 id="hero-title">AI-агенты пишут код.<br>Вы решаете, что попадёт в&nbsp;репозиторий.</h1>
+      <p class="hero-lead">ai-team проводит задачу через команду агентов: аналитик, архитектор, разработчик, ревьюер, тестировщик. Каждый шаг проверяет обычная программа, а не модель. Коммит и pull request появляются только после того, как вы подтвердите точный план поставки.</p>
+      <div class="hero-actions">
+        {{range $i, $a := .HeroActions}}<a class="button{{if $i}} secondary{{end}}" href="{{link $a.URL}}">{{$a.Title}}</a>
+        {{end}}
+      </div>
+      <ol class="flow" aria-label="Путь задачи">
+        <li><b>Задача</b><span>вы описываете, что сделать</span></li>
+        <li><b>Агенты</b><span>план, код, тесты, ревью</span></li>
+        <li><b>Проверки</b><span>Go-контроллер, без LLM</span></li>
+        <li><b>Ваше решение</b><span>подтверждаете план по SHA-256</span></li>
+        <li><b>Поставка</b><span>commit, push, PR</span></li>
+      </ol>
+    </section>
+    <section class="doc-map" aria-labelledby="doc-map-title">
+      <h2 id="doc-map-title">Как устроена документация</h2>
+      <div class="doc-map-grid">
+      {{range .Sections}}
+        <div class="doc-map-item">
+          <h3>{{.Title}}</h3>
+          <ul>{{range .Pages}}<li><a href="{{link .URL}}">{{.Title}}</a>{{if .Description}}<span>{{.Description}}</span>{{end}}</li>{{end}}</ul>
+        </div>
+      {{end}}
+      </div>
+    </section>
+    <article class="markdown">{{.Current.Body}}</article>
+  {{else}}
+    <p class="breadcrumb"><a href="{{link "/"}}">Документация</a> <span aria-hidden="true">/</span> {{.Current.Section}}</p>
+    <article class="markdown">{{.Current.Body}}</article>
+    {{if or .Current.Prev .Current.Next}}
+    <nav class="pager" aria-label="Соседние страницы">
+      {{with .Current.Prev}}<a class="pager-prev" href="{{link .URL}}"><span>Назад</span>{{.Title}}</a>{{end}}
+      {{with .Current.Next}}<a class="pager-next" href="{{link .URL}}"><span>Дальше</span>{{.Title}}</a>{{end}}
+    </nav>
+    {{end}}
+  {{end}}
+    <footer class="page-footer">
+      <p>Нашли ошибку или чего-то не хватает? <a href="https://github.com/arturpanteleev/ai-team/issues/new?template=documentation.yml">Напишите нам</a>{{if ne .Current.URL "/"}} или <a href="https://github.com/arturpanteleev/ai-team/edit/master/{{.Current.Source}}">поправьте страницу</a>{{end}}.</p>
+    </footer>
+  </main>
+
+  {{if and (ne .Current.URL "/") .Current.TOC}}
+  <aside class="page-toc">{{.Current.TOC}}</aside>
+  {{end}}
+</div>
+</body>
+</html>

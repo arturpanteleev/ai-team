@@ -21,8 +21,8 @@ on:
 # with cosign in keyless mode via the GitHub Actions OIDC token. No signing key
 # is stored or rotated; the certificate binds each signature to this workflow
 # file at this tag, and the signature is logged in the public Rekor
-# transparency log. The verify command lives in README «Готовые бинарники и
-# проверка подписи»; it needs cosign >= v2.4.2, the first version whose
+# transparency log. The verify command lives in docs/tutorial/install.md
+# («Вариант А: готовый бинарник»); it needs cosign >= v2.4.2, the first version whose
 # verify-blob auto-detects the new bundle format.
 #
 # The default token is read-only. `id-token: write` is granted only to the

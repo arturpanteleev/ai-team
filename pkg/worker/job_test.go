@@ -175,7 +175,9 @@ func writeMarkerAtomically(path string, data []byte) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
 
 	if err := tmp.Chmod(0600); err != nil {
 		_ = tmp.Close()

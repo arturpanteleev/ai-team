@@ -235,6 +235,57 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		session, _ := s.requestSession(r)
 		actorID = session.Principal.ActorID
 	}
+	if command.Action == "answer_questions" || command.Action == "approve_spec" || command.Action == "approve" || command.Action == "reject" {
+		approvals, listErr := s.controller.Approvals(chi.URLParam(r, "runID"))
+		if listErr != nil {
+			http.Error(w, "не удалось проверить human approval", http.StatusInternalServerError)
+			return
+		}
+		var matched *approval.PendingApproval
+		for _, pending := range approvals {
+			if pending.ID != chi.URLParam(r, "approvalID") {
+				continue
+			}
+			matched = &pending
+			break
+		}
+		if matched != nil {
+			var payload struct {
+				Kind string `json:"kind"`
+			}
+			_ = json.Unmarshal(matched.Payload, &payload)
+			if command.Action == "answer_questions" {
+				if payload.Kind != "questions" || !containsApprovalRole(matched.RequiredRoles, "product_owner") {
+					http.Error(w, "answer_questions разрешён только для Product Owner вопроса analyst", http.StatusConflict)
+					return
+				}
+				if command.ActorRole != "product_owner" {
+					http.Error(w, "на вопрос analyst может ответить только Product Owner", http.StatusForbidden)
+					return
+				}
+				if strings.TrimSpace(command.Comment) == "" || len(command.Comment) > 16<<10 {
+					http.Error(w, "ответ должен содержать от 1 до 16384 байт", http.StatusBadRequest)
+					return
+				}
+			}
+			if payload.Kind == "agreed_spec" {
+				if !containsApprovalRole(matched.RequiredRoles, "product_owner") {
+					http.Error(w, "согласование ТЗ не назначено Product Owner", http.StatusConflict)
+					return
+				}
+				if command.ActorRole != "product_owner" {
+					http.Error(w, "согласовать ТЗ может только Product Owner", http.StatusForbidden)
+					return
+				}
+			} else if command.Action == "approve_spec" {
+				http.Error(w, "approve_spec разрешён только для Product Owner согласования ТЗ", http.StatusConflict)
+				return
+			}
+		} else if command.Action == "answer_questions" || command.Action == "approve_spec" {
+			http.Error(w, "не найден соответствующий Product Owner approval", http.StatusConflict)
+			return
+		}
+	}
 	value, err := s.controller.Decide(
 		chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"),
 		approval.Decision{
@@ -248,6 +299,15 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusOK, value)
+}
+
+func containsApprovalRole(roles []string, expected string) bool {
+	for _, role := range roles {
+		if role == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeCommand(w http.ResponseWriter, r *http.Request, destination any) error {

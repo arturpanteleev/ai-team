@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
-import { getPipelineRuns, getPreflight, startRun } from '../api';
+import { getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
 import styles from './Dashboard.module.css';
@@ -22,6 +22,8 @@ const filters: Filter[] = [
 ];
 
 export function Dashboard() {
+  const principal = getActivePrincipal();
+  const canSubmitIntention = !principal || principal.roles.includes('product_owner');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [loading, setLoading] = useState(true);
@@ -91,14 +93,25 @@ export function Dashboard() {
         </div>
       </div>
 
-      <form className={styles.runForm} onSubmit={submitRun}>
-        <input value={feature} onChange={(event) => setFeature(event.target.value)}
-          placeholder="feature-name" required />
-        <input value={task} onChange={(event) => setTask(event.target.value)}
-          placeholder="Описание задачи" required />
-        <button type="submit" disabled={preflight !== null && !preflight.ready}>Новый run</button>
-        {commandStatus && <span>{commandStatus}</span>}
-      </form>
+      {canSubmitIntention ? (
+        <form className={styles.runForm} onSubmit={submitRun}>
+          <label htmlFor="feature-name">Название инициативы</label>
+          <input id="feature-name" value={feature} onChange={(event) => setFeature(event.target.value)}
+            placeholder="например, рост повторных продаж" required />
+          <label htmlFor="business-intention">Какого результата хотите достичь?</label>
+          <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
+            placeholder="Опишите бизнес-цель, ограничения и ожидаемый результат своими словами. Аналитик уточнит недостающие детали."
+            rows={4} required />
+          <button type="submit" disabled={preflight !== null && !preflight.ready}>Создать инициативу и передать аналитику</button>
+          <small>Ваше намерение и все последующие уточнения сохраняются в истории задачи. До начала технического планирования Product Owner согласует спецификацию.</small>
+          {commandStatus && <span>{commandStatus}</span>}
+        </form>
+      ) : (
+        <section className={styles.intakeNotice}>
+          <strong>Создать инициативу может Product Owner.</strong>
+          <span>Передайте бизнес-цель Product Owner. После уточнения требований он согласует спецификацию до старта архитектора.</span>
+        </section>
+      )}
 
       <section className={styles.preflight}>
         <strong>Готовность окружения: {preflight?.ready ? 'готово' : preflight ? 'есть блокеры' : 'проверяется…'}</strong>

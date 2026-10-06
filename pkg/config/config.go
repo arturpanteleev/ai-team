@@ -628,6 +628,12 @@ type pipelineValidator interface {
 	ValidatePipeline(names []string) error
 }
 
+// productSpecContractLookup exposes the analyst artifact contract to config
+// validation without coupling config to the agent registry implementation.
+type productSpecContractLookup interface {
+	HasProductSpecContract(name string) (bool, error)
+}
+
 // Validate проверяет конфиг до запуска пайплайна (fail fast).
 func (c *Config) Validate(reg AgentLookup) error {
 	if len(c.PipelineAgents) == 0 {
@@ -692,6 +698,30 @@ func (c *Config) Validate(reg AgentLookup) error {
 	if validator, ok := reg.(pipelineValidator); ok {
 		if err := validator.ValidatePipeline(c.AgentNames()); err != nil {
 			errs = append(errs, err.Error())
+		}
+	}
+	if c.Workflow != nil {
+		for _, edge := range c.Workflow.Edges {
+			if edge.From != "analyst" || edge.Approval == nil {
+				continue
+			}
+			if _, exists := edge.Approval.Actions["approve_spec"]; !exists {
+				continue
+			}
+			if reg == nil {
+				continue
+			}
+			lookup, ok := reg.(productSpecContractLookup)
+			if !ok {
+				errs = append(errs, "workflow: действие analyst.approve_spec требует registry с проверкой outputs proposal и spec; настройте контракт Product Owner approval")
+				continue
+			}
+			hasContract, err := lookup.HasProductSpecContract("analyst")
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("workflow: проверить contract analyst для approve_spec: %v", err))
+			} else if !hasContract {
+				errs = append(errs, "workflow: действие analyst.approve_spec требует outputs proposal и spec в .ai-team/agents/analyst/def.yaml; используйте обычное действие approve для analyst без этого контракта")
+			}
 		}
 	}
 	if _, err := c.CompiledGraph(); err != nil {

@@ -268,6 +268,16 @@ func (r *Registry) Exists(name string) bool {
 	return err == nil
 }
 
+// HasProductSpecContract reports whether an agent declares both artifacts
+// required by the Product Owner specification approval action.
+func (r *Registry) HasProductSpecContract(name string) (bool, error) {
+	a, err := r.Load(name)
+	if err != nil {
+		return false, err
+	}
+	return a.Outputs["proposal"] != "" && a.Outputs["spec"] != "", nil
+}
+
 // LoadFailure сообщает, что каталог агента обнаружен в одном из registry
 // layers, но не смог быть загружен целиком (невалидный def.yaml, нечитаемый
 // prompt_file и т.д.).

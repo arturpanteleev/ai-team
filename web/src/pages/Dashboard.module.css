@@ -64,18 +64,49 @@
 
 .runForm {
   display: grid;
-  grid-template-columns: 1fr 2fr auto;
+  grid-template-columns: 1fr;
   gap: 8px;
   margin-bottom: 24px;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+}
+
+.runForm label {
+  color: #cbd5e1;
+  font-size: 13px;
 }
 
 .runForm input,
+.runForm textarea,
 .runForm button {
   border: 1px solid #334155;
   border-radius: 6px;
   padding: 9px 12px;
   background: #0f172a;
   color: #e2e8f0;
+}
+
+.runForm textarea {
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.runForm small,
+.intakeNotice span {
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.intakeNotice {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 24px;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #cbd5e1;
 }
 
 .runForm span {

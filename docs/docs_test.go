@@ -91,6 +91,38 @@ func TestReferencePagesCoverRequiredSections(t *testing.T) {
 	}
 }
 
+func TestCloudPilotBlockerDocumentsEffectiveContainmentGate(t *testing.T) {
+	guide := readRepoFile(t, "guides/cloud-pilot.md")
+	assertContainsAll(t, guide, "docs/guides/cloud-pilot.md", []string{
+		"поддерживаемого изолированного cloud deployment пока нет",
+		"read-write volume",
+		"human decisions",
+		"capability",
+		"admin HTTP endpoints",
+		"backup",
+		"архитектурный блокер MAJ-07",
+	})
+	design := readRepoFile(t, "../openspec/changes/cloud-pilot-controller-owned-state/design.md")
+	assertContainsAll(t, design, "openspec/changes/cloud-pilot-controller-owned-state/design.md", []string{
+		"worker harness",
+		"чужим job/run/action",
+		"повторным nonce",
+		"EACCES/denied",
+		"разрешить `strict`",
+	})
+	backlog := readRepoFile(t, "research/cloud-flow-2026-10-06/BACKLOG.md")
+	maj07 := strings.SplitN(backlog, "### MAJ-07.", 2)
+	if len(maj07) != 2 {
+		t.Fatal("backlog MAJ-07 отсутствует")
+	}
+	assertContainsAll(t, maj07[1], "BACKLOG.md MAJ-07", []string{
+		"**Статус:** В работе",
+		"deployment manifests",
+		"приёмка изолированного пилота",
+		"state/API",
+	})
+}
+
 // TestReadmeLinksToReferencePages — README остаётся витриной: справочник
 // переехал в docs/reference, и ссылка на каждую страницу обязана остаться.
 func TestReadmeLinksToReferencePages(t *testing.T) {

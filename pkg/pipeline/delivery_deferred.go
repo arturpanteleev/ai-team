@@ -32,11 +32,17 @@ import (
 // workspace lock'а (мы всё ещё внутри RunWithResult). plan перегружается из
 // подготовленного delivery state и сверяется с утверждённым (approvedPlanHash)
 // и с deferred-маркером стадии.
-func (rs *runState) executeDeferredDelivery() error {
+// QS-06: parent — контекст процесса (signal.NotifyContext в cmd/ai-team), а НЕ
+// budgetCtx run'а. Доставка уже одобрена человеком и исполняется после
+// терминального finalize, поэтому исчерпанный max_wall_time не должен её
+// обрывать; но Ctrl-C обязан, и собственный delivery_timeout — тоже.
+func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	if rs.deferredDelivery == nil {
 		return nil
 	}
-	ctx := context.Background() // run ctx может быть завершён; delivery-операция нужна до конца
+	timeout := rs.p.cfg.EffectiveDeliveryTimeout()
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	plan, found, planErr := delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature)
 	if planErr != nil {
 		return fmt.Errorf("deferred delivery: загрузка prepared plan: %w", planErr)
@@ -75,7 +81,7 @@ func (rs *runState) executeDeferredDelivery() error {
 		TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan, Trailers: trailers,
 	})
 	if err != nil {
-		return fmt.Errorf("deferred delivery: controller.Execute: %w", err)
+		return fmt.Errorf("deferred delivery: controller.Execute: %w", annotateDeliveryFailure(ctx, parent, timeout, err))
 	}
 
 	record := delivery.TerminalRecord{
@@ -111,7 +117,11 @@ func (rs *runState) executeDeferredDelivery() error {
 // Дополнительно сверяется identity workspace с attested candidate digest из
 // attestation.json, а сам retry берёт workspace lock, чтобы конкурентные
 // повторы не выполнили доставку дважды.
-func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.TerminalRecord, error) {
+//
+// QS-06: parent — контекст процесса (сигналы), поверх него накладывается
+// собственный delivery_timeout. Contract тот же, что у post-terminal хука:
+// зависший git/gh обрывается дедлайном, Ctrl-C — сигналом.
+func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targetDir string) (delivery.TerminalRecord, error) {
 	if _, err := safeio.ExistingDir(runDir); err != nil {
 		return delivery.TerminalRecord{}, err
 	}
@@ -224,11 +234,14 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 		delivery.TrailerRuntime + ": " + runtimeIdentity,
 		delivery.TrailerAttestation + ": " + attestationDigest,
 	}
-	result, err := p.delivery.Execute(context.Background(), delivery.Request{
+	timeout := p.cfg.EffectiveDeliveryTimeout()
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	result, err := p.delivery.Execute(ctx, delivery.Request{
 		TargetDir: workspace, Feature: feature, Plan: plan, Trailers: trailers,
 	})
 	if err != nil {
-		return delivery.TerminalRecord{}, err
+		return delivery.TerminalRecord{}, annotateDeliveryFailure(ctx, parent, timeout, err)
 	}
 	record := delivery.TerminalRecord{
 		SchemaVersion:     delivery.TerminalRecordSchemaVersion,
@@ -246,6 +259,20 @@ func (p *Pipeline) DeliverDeferred(runDir, feature, targetDir string) (delivery.
 		return delivery.TerminalRecord{}, err
 	}
 	return record, nil
+}
+
+// annotateDeliveryFailure объясняет, ПОЧЕМУ доставка оборвалась. Без этого
+// пользователь видит только «delivery push failed: context canceled» у
+// случайного шага и не может отличить зависший remote от нажатого Ctrl-C.
+func annotateDeliveryFailure(ctx, parent context.Context, timeout time.Duration, err error) error {
+	switch {
+	case parent.Err() != nil:
+		// Отменён внешний контекст (сигнал процессу) — дедлайн доставки ни при чём.
+		return fmt.Errorf("%w (доставка прервана извне: %v)", err, parent.Err())
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("%w (превышен delivery_timeout %s: внешняя команда не завершилась)", err, timeout)
+	}
+	return err
 }
 
 // deliveryWorkspaceFromStatePath выделяет корень workspace из абсолютного

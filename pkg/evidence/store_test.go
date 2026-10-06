@@ -135,7 +135,7 @@ func TestEventLogHashChainDetectsTampering(t *testing.T) {
 	}
 	path := filepath.Join(store.RunDir(), "events.jsonl")
 	events, err := VerifyEventLog(path, "run-events")
-	if err != nil || len(events) != 2 || events[0].PreviousSHA256 != genesisEventHash ||
+	if err != nil || len(events) != 2 || events[0].PreviousSHA256 != chainGenesis("run-events") ||
 		events[1].PreviousSHA256 != events[0].SHA256 {
 		t.Fatalf("valid event chain: events=%+v err=%v", events, err)
 	}

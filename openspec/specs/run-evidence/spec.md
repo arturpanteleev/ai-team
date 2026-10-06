@@ -12,6 +12,17 @@ approval requests/decisions в одной verified chain.
 - **ТОГДА** event MUST содержать approval_id, subject hash, actor/action при
   решении и связанные from/to stages
 
+### Requirement: Event log run binding
+Hash-chain событий MUST начинаться с корня, выведенного из `run_id` своего прогона, так что event log одного прогона MUST NOT проходить проверку целостности в каталоге другого — в том числе после перештамповки `run_id` в событиях и полного пересчёта дайджестов.
+
+#### Scenario: Лог чужого прогона
+
+- **КОГДА** в каталог прогона положен целый валидный `events.jsonl` другого
+  прогона — как есть либо перештампованный под `run_id` этого прогона с
+  пересобранной цепочкой
+- **ТОГДА** проверка целостности MUST отказать, и non-terminal прогон с таким
+  логом MUST NOT возобновляться
+
 ### Requirement: Artifact provenance
 Every published artifact MUST record producer, run, attempt, size and SHA-256 hash.
 

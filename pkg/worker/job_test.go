@@ -153,7 +153,7 @@ func TestProcessEngineHelper(t *testing.T) {
 	}
 	if marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER"); marker != "" {
 		data, _ := json.Marshal(job)
-		if err := os.WriteFile(marker, data, 0600); err != nil {
+		if err := writeMarkerAtomically(marker, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -165,4 +165,28 @@ func TestProcessEngineHelper(t *testing.T) {
 	}
 	fmt.Printf("%s%s\n", ResultPrefix, result)
 	os.Exit(0)
+}
+
+// writeMarkerAtomically keeps the parent test from observing a partially
+// written marker while the helper process is publishing it.
+func writeMarkerAtomically(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".worker-marker-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

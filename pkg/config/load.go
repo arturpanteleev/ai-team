@@ -53,9 +53,10 @@ const (
 )
 
 type stageSpec struct {
-	name      string
-	roles     []string
-	maxVisits int
+	name              string
+	roles             []string
+	maxVisits         int
+	productSpecOutput bool
 }
 
 // DefaultProfile строит готовый конфиг v4 для профиля:
@@ -73,7 +74,7 @@ func DefaultProfile(profile string) (*Config, error) {
 	switch profile {
 	case ProfileStandard:
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}},
+			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
 			{name: "architect", roles: []string{"architect"}},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 3},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 3},
@@ -83,7 +84,7 @@ func DefaultProfile(profile string) (*Config, error) {
 		}
 	case ProfileFast:
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}},
+			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
 			{name: "tester", roles: []string{"qa"}, maxVisits: 2},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
@@ -94,7 +95,7 @@ func DefaultProfile(profile string) (*Config, error) {
 		loopbackQuorum = QuorumAll()
 		maxVisits = 2
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}},
+			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
 			{name: "architect", roles: []string{"architect"}},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
@@ -161,7 +162,7 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 				Roles: roles, Quorum: quorum, Deferred: deferredGates,
 				Actions: map[string]string{"approve": target, "reject": "$stop"},
 			}
-			if name == "analyst" {
+			if name == "analyst" && specByName[name].productSpecOutput {
 				// Product discovery must be explicitly agreed before technical
 				// planning starts, even in profiles that consolidate later gates.
 				edge.Approval.Deferred = false

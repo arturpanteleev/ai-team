@@ -338,6 +338,41 @@ type fakeLookup map[string]bool
 
 func (f fakeLookup) Exists(name string) bool { return f[name] }
 
+type fakeProductSpecLookup struct{ hasContract bool }
+
+func (fakeProductSpecLookup) Exists(string) bool { return true }
+func (f fakeProductSpecLookup) HasProductSpecContract(name string) (bool, error) {
+	return name == "analyst" && f.hasContract, nil
+}
+
+func TestApproveSpecRequiresDeclaredAnalystContract(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(fakeProductSpecLookup{}); err == nil ||
+		!strings.Contains(err.Error(), "outputs proposal и spec") {
+		t.Fatalf("approve_spec без двух outputs должен завершиться actionable validation error, got %v", err)
+	}
+	if err := cfg.Validate(fakeProductSpecLookup{hasContract: true}); err != nil {
+		t.Fatalf("approve_spec с заявленным контрактом должен быть допустим: %v", err)
+	}
+}
+
+func TestCustomAnalystWorkflowKeepsRegularApproval(t *testing.T) {
+	cfg := buildConfig(ProfileStandard, []stageSpec{{name: "analyst"}, {name: "worker"}}, QuorumAny(), QuorumAny(), 3)
+	for _, edge := range cfg.Workflow.Edges {
+		if edge.From != "analyst" || edge.Outcome != "passed" {
+			continue
+		}
+		if edge.Approval == nil || edge.Approval.Actions["approve"] != "worker" {
+			t.Fatalf("custom analyst без product-spec contract должен оставить approve, got %+v", edge.Approval)
+		}
+		if _, exists := edge.Approval.Actions["approve_spec"]; exists {
+			t.Fatalf("custom analyst без product-spec contract получил approve_spec: %+v", edge.Approval.Actions)
+		}
+		return
+	}
+	t.Fatal("не найден analyst passed edge")
+}
+
 func TestValidate_UnknownAgent(t *testing.T) {
 	cfg := &Config{PipelineAgents: []AgentConfig{{Name: "analyst"}, {Name: "ghost"}}}
 	err := cfg.Validate(fakeLookup{"analyst": true})
@@ -478,6 +513,8 @@ func TestDefaultProfilesDeferredGates(t *testing.T) {
 				t.Fatalf("%s: forward-ребро %s→%s без approval", profile, edge.From, edge.To)
 			case edge.To != "$complete" && edge.From == "analyst" && edge.Approval.Deferred:
 				t.Fatalf("%s: согласование продуктовых требований должно быть явным до архитектора", profile)
+			case edge.To != "$complete" && edge.From == "analyst" && edge.Approval.Actions["approve_spec"] != edge.To:
+				t.Fatalf("%s: bundled analyst должен сохранять явное approve_spec Product Owner, actions=%v", profile, edge.Approval.Actions)
 			case edge.To != "$complete" && edge.From != "analyst" && !edge.Approval.Deferred && profile != ProfileRegulated:
 				t.Fatalf("%s: forward-ребро %s→%s должно оставаться deferred (APF-1 consolidation)", profile, edge.From, edge.To)
 			}

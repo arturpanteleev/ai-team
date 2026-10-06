@@ -105,12 +105,16 @@ Live-артефакты находятся в `.ai-team/artifacts/{feature}/`, �
 └── reports/...
 ```
 
-Run manifest schema v6 связывает exact config/workflow snapshots, SHA-256
+Run manifest schema v7 связывает exact config/workflow snapshots, SHA-256
 исполняемого controller и Go/VCS identity. Attempt manifest содержит
 execution/decision/outcome, blocker, SHA-256/provenance артефактов, checks,
 mutations и delivery result. Публикация attempt атомарна, events связаны
 SHA-256 hash chain и проверяются перед каждым append (splice/reorder другой
-цепочки событий обнаруживается при replay). Typed replay проверяет порядок
+цепочки событий обнаруживается при replay). Корень цепочки выводится из
+`run_id` прогона, а не общий для всех прогонов: поэтому целый валидный
+`events.jsonl` другого прогона отвергается даже если в его событиях
+перештамповать `run_id` и пересчитать все дайджесты — принадлежность лога
+своему прогону является частью цепочки, а не отдельной проверкой поля. Typed replay проверяет порядок
 lifecycle transitions, terminal status, invalidations и exact digest каждого
 опубликованного attempt manifest.
 

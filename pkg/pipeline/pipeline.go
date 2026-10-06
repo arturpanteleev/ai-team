@@ -660,21 +660,20 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 
 	// P1-7: жёсткий wall-time бюджет run'а (всегда, default 24h) поверх
 	// per-stage timeout-ов. Превышение → остановка run с явной причиной.
-	var runErr error
-	if budgetDur, budgetStr := rs.budgetConfig.EffectiveMaxWallTime(); budgetDur > 0 {
-		var cancel context.CancelFunc
-		var budgetCtx context.Context
-		budgetCtx, cancel = context.WithTimeout(ctx, budgetDur)
-		defer cancel()
-		runErr = rs.execute(budgetCtx)
-		// Здесь матчится ТОЛЬКО подлинное превышение budget: per-stage таймауты
-		// возвращают ErrStageTimeout (не wrapping context.DeadlineExceeded) и
-		// до этой ветки не доходят — остаются resumable, а не терминал-бюджет.
-		if errors.Is(runErr, context.DeadlineExceeded) {
-			runErr = fmt.Errorf("run budget: превышен max_wall_time %s", budgetStr)
-		}
-	} else {
-		runErr = rs.execute(ctx)
+	// Ветки «без бюджета» здесь нет намеренно: EffectiveMaxWallTime всегда
+	// возвращает положительную длительность, и отсутствие секции `budget`
+	// в конфиге не должно давать run без верхней границы времени (QS-09).
+	budgetDur, budgetStr := rs.budgetConfig.EffectiveMaxWallTime()
+	budgetCtx, cancel := context.WithTimeout(ctx, budgetDur)
+	defer cancel()
+	runErr := rs.execute(budgetCtx)
+	// Здесь матчится ТОЛЬКО подлинное превышение budget: per-stage таймауты
+	// возвращают ErrStageTimeout (не wrapping context.DeadlineExceeded) и
+	// до этой ветки не доходят — остаются resumable, а не терминал-бюджет.
+	// ctx.Err() == nil отделяет наш дедлайн от дедлайна вызывающего: чужой
+	// таймаут не должен рапортоваться как превышение max_wall_time.
+	if errors.Is(runErr, context.DeadlineExceeded) && ctx.Err() == nil {
+		runErr = fmt.Errorf("run budget: превышен max_wall_time %s", budgetStr)
 	}
 	outcome, finalErr := rs.finalize(runErr)
 	if finalErr != nil {

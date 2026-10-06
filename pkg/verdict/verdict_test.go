@@ -35,6 +35,23 @@ func TestParse(t *testing.T) {
 		{"blockquote_spaced_is_data", "> **Result:** FAIL\n", None},
 		{"marker_before_fence_parsed", "**Verdict:** APPROVED\n```\n**Verdict:** REJECTED\n```\n", Approved},
 		{"marker_after_fence_parsed", "```\n**Verdict:** REJECTED\n```\n**Verdict:** APPROVED\n", Approved},
+
+		// QS-22: значение обязано стоять на одной строке с маркером.
+		{"newline_between_marker_and_value_not_matched", "**Verdict:**\nAPPROVED\n", None},
+		{"blank_lines_between_marker_and_value_not_matched", "**Verdict:**\n\n\nREJECTED\n", None},
+		{"result_newline_between_marker_and_value_not_matched", "**Result:**\nPASS\n", None},
+		{"marker_without_value_not_matched", "**Verdict:**\n", None},
+		// Мост через fenced-блок: содержимое региона маскируется пробелами,
+		// и раньше маркер склеивался со значением, стоящим ПОСЛЕ блока.
+		{"fenced_region_is_not_a_bridge", "**Verdict:**\n```\n**Verdict:** CHANGES_REQUESTED\n```\nAPPROVED\n", None},
+		{"blockquote_region_is_not_a_bridge", "**Verdict:**\n> **Verdict:** CHANGES_REQUESTED\nAPPROVED\n", None},
+
+		// Легитимные однострочные формы продолжают распознаваться.
+		{"tab_separator_matched", "**Verdict:**\tAPPROVED\n", Approved},
+		{"multiple_spaces_matched", "**Verdict:**   APPROVED\n", Approved},
+		{"trailing_tabs_matched", "**Result:** PASS\t\t\n", Pass},
+		{"crlf_line_ending_matched", "# Review\r\n\r\n**Verdict:** APPROVED\r\n", Approved},
+		{"crlf_result_matched", "**Result:** FAIL\r\n", Fail},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -156,6 +173,88 @@ func TestMultipleMarkersCountedFromControlRegionsOnly(t *testing.T) {
 	}
 }
 
+// QS-22: строгий contract-путь тоже требует значение на строке маркера —
+// иначе перевод строки (в том числе через маскированный fenced-блок) выдавал
+// бы вердикт, которого агент не писал.
+func TestContractRequiresValueOnMarkerLine(t *testing.T) {
+	dir := t.TempDir()
+	contract := &Contract{Required: true, Marker: "Verdict", Values: []Verdict{Approved, ChangesRequested, Rejected}}
+
+	cases := []struct{ name, content string }{
+		{"newline_between_marker_and_value", "**Verdict:**\nAPPROVED\n"},
+		{"fenced_region_bridge", "**Verdict:**\n```\n**Verdict:** CHANGES_REQUESTED\n```\nAPPROVED\n"},
+		{"blockquote_bridge", "**Verdict:**\n> **Verdict:** CHANGES_REQUESTED\nAPPROVED\n"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".md")
+			writeFile(t, path, tt.content)
+			got, err := FromOutputsContract([]string{path}, contract)
+			if err == nil {
+				t.Fatalf("значение не на строке маркера не должно давать вердикт; got=%q", got)
+			}
+			if !strings.Contains(err.Error(), "отсутствует") {
+				t.Errorf("ожидалась ошибка про отсутствие маркера, got: %v", err)
+			}
+		})
+	}
+
+	// Канонические однострочные формы contract принимает как раньше.
+	for name, content := range map[string]string{
+		"tab_separator": "**Verdict:**\tAPPROVED\n",
+		"crlf":          "**Verdict:** APPROVED\r\n",
+	} {
+		path := filepath.Join(dir, name+"-ok.md")
+		writeFile(t, path, content)
+		got, err := FromOutputsContract([]string{path}, contract)
+		if err != nil || got != Approved {
+			t.Errorf("%s: got=%q err=%v, want APPROVED", name, got, err)
+		}
+	}
+}
+
+// QS-22: BLOCKED-протокол читает **Status:** и **Blocker:** по тем же
+// правилам — значение только на строке маркера.
+func TestReadBlockedRequiresValueOnMarkerLine(t *testing.T) {
+	root := t.TempDir()
+	feature := "f"
+	statusDir := filepath.Join(root, feature, "status")
+	if err := os.MkdirAll(statusDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(statusDir, "split.md"), "**Status:**\nBLOCKED\n")
+	if blocked, _ := ReadBlocked(root, feature, "split"); blocked {
+		t.Error("BLOCKED на следующей строке — не сигнал")
+	}
+
+	writeFile(t, filepath.Join(statusDir, "bridged.md"),
+		"**Status:**\n```\n**Status:** BLOCKED\n```\nBLOCKED\n")
+	if blocked, _ := ReadBlocked(root, feature, "bridged"); blocked {
+		t.Error("fenced-регион не должен работать мостом к BLOCKED")
+	}
+
+	// Blocker без причины на своей строке: блокировка настоящая, но причину
+	// нельзя подтянуть со следующей строки.
+	writeFile(t, filepath.Join(statusDir, "reason.md"),
+		"**Status:** BLOCKED\n**Blocker:**\nпридуманная причина\n")
+	blocked, reason := ReadBlocked(root, feature, "reason")
+	if !blocked {
+		t.Fatal("ожидался blocked")
+	}
+	if reason != "причина не указана" {
+		t.Errorf("reason = %q, want %q", reason, "причина не указана")
+	}
+
+	// Канонические однострочные формы, включая CRLF.
+	writeFile(t, filepath.Join(statusDir, "crlf.md"),
+		"**Status:** BLOCKED\r\n**Blocker:** требования противоречивы\r\n")
+	blocked, reason = ReadBlocked(root, feature, "crlf")
+	if !blocked || reason != "требования противоречивы" {
+		t.Errorf("CRLF: blocked=%v reason=%q", blocked, reason)
+	}
+}
+
 func TestReadBlockedIgnoresDataRegions(t *testing.T) {
 	root := t.TempDir()
 	feature := "my-feature"
@@ -267,6 +366,16 @@ func TestContract_InstructionMatchesParser(t *testing.T) {
 	}
 	if blocked, reason := ReadBlocked(root, "f", "analyst"); !blocked || reason != "тест" {
 		t.Error("формат из BlockedInstruction не распознан ReadBlocked")
+	}
+}
+
+// writeFile — запись фикстуры с проверкой ошибки: неудавшаяся подготовка
+// теста должна падать явно, а не превращаться в непонятный отрицательный
+// результат (и errcheck на это смотрит).
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("подготовка фикстуры %s: %v", path, err)
 	}
 }
 

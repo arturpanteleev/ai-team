@@ -826,6 +826,117 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSession(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := cloudidentity.NewPrincipal("product-1", []cloudidentity.Role{cloudidentity.RoleProductOwner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.Issue(principal, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithAuthenticator(manager), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	login := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	login.Header.Set("Authorization", "Bearer "+token)
+	loginWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(loginWriter, login)
+	if loginWriter.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", loginWriter.Code, loginWriter.Body.String())
+	}
+	var initial sessionResponse
+	if err := json.NewDecoder(loginWriter.Body).Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginWriter.Result().Cookies()[0]
+
+	bootstrap := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	bootstrap.AddCookie(cookie)
+	bootstrap.Header.Set("Origin", "http://127.0.0.1")
+	bootstrapWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(bootstrapWriter, bootstrap)
+	if bootstrapWriter.Code != http.StatusOK {
+		t.Fatalf("same-origin recovery: %d %s", bootstrapWriter.Code, bootstrapWriter.Body.String())
+	}
+	var recovered sessionResponse
+	if err := json.NewDecoder(bootstrapWriter.Body).Decode(&recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.CSRFToken != initial.CSRFToken || recovered.Principal == nil || recovered.Principal.ActorID != principal.ActorID {
+		t.Fatalf("recovered session differs: initial=%+v recovered=%+v", initial, recovered)
+	}
+	if bootstrapWriter.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("session response may be cached: %q", bootstrapWriter.Header().Get("Cache-Control"))
+	}
+	command := func(path, body string) *httptest.ResponseRecorder {
+		req := newLoopbackRequest(http.MethodPost, path, strings.NewReader(body))
+		req.AddCookie(cookie)
+		req.Header.Set("X-CSRF-Token", recovered.CSRFToken)
+		req.Header.Set("Content-Type", "application/json")
+		result := httptest.NewRecorder()
+		srv.router.ServeHTTP(result, req)
+		return result
+	}
+	if result := command("/api/runs", `{"feature":"reload-feature","task":"start after reload"}`); result.Code != http.StatusAccepted {
+		t.Fatalf("start after CSRF recovery: %d %s", result.Code, result.Body.String())
+	}
+	if result := command("/api/runs/run-1/resume", ""); result.Code != http.StatusAccepted || controller.resumeRunID != "run-1" {
+		t.Fatalf("resume after CSRF recovery: %d %s", result.Code, result.Body.String())
+	}
+	decisionBody := `{"actor_id":"client-spoof","actor_role":"product_owner","action":"approve","subject_hash":"` + testSubjectHash + `"}`
+	if result := command("/api/runs/run-1/approvals/approval-1/decisions", decisionBody); result.Code != http.StatusOK || controller.decision.ActorID != principal.ActorID {
+		t.Fatalf("decision after CSRF recovery: %d %s decision=%+v", result.Code, result.Body.String(), controller.decision)
+	}
+
+	foreign := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	foreign.AddCookie(cookie)
+	foreign.Header.Set("Origin", "https://attacker.example")
+	foreignWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(foreignWriter, foreign)
+	if foreignWriter.Code != http.StatusForbidden {
+		t.Fatalf("foreign-origin recovery: %d %s", foreignWriter.Code, foreignWriter.Body.String())
+	}
+	wrongScheme := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	wrongScheme.AddCookie(cookie)
+	wrongScheme.Header.Set("Origin", "https://127.0.0.1")
+	wrongSchemeWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(wrongSchemeWriter, wrongScheme)
+	if wrongSchemeWriter.Code != http.StatusForbidden {
+		t.Fatalf("wrong-scheme recovery: %d %s", wrongSchemeWriter.Code, wrongSchemeWriter.Body.String())
+	}
+	crossSite := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	crossSite.AddCookie(cookie)
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossSiteWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(crossSiteWriter, crossSite)
+	if crossSiteWriter.Code != http.StatusForbidden {
+		t.Fatalf("cross-site metadata recovery: %d %s", crossSiteWriter.Code, crossSiteWriter.Body.String())
+	}
+
+	srv.sessionMu.Lock()
+	session := srv.sessions[cookie.Value]
+	session.ExpiresAt = time.Now().UTC().Add(-time.Second)
+	srv.sessions[cookie.Value] = session
+	srv.sessionMu.Unlock()
+	expired := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	expired.AddCookie(cookie)
+	expired.Header.Set("Origin", "http://127.0.0.1")
+	expiredWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(expiredWriter, expired)
+	if expiredWriter.Code != http.StatusUnauthorized || !strings.Contains(expiredWriter.Body.String(), "сессия истекла") {
+		t.Fatalf("expired session: %d %s", expiredWriter.Code, expiredWriter.Body.String())
+	}
+}
+
 func TestWriteRunAndDecisionCommands(t *testing.T) {
 	controller := &fakeRunController{}
 	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))

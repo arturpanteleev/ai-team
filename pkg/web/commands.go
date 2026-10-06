@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,32 @@ func (s *Server) handleCurrentIdentity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	// An authenticated browser recovers its CSRF token from the HttpOnly
+	// session cookie after reload. This endpoint is deliberately same-origin:
+	// don't disclose the token to a request that cannot prove it came from this
+	// origin, even though the cookie is also SameSite=Strict.
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" &&
+		strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+		if !isSameOriginSessionRequest(r) {
+			http.Error(w, "требуется same-origin session request", http.StatusForbidden)
+			return
+		}
+		if session, ok := s.requestSession(r); ok {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Add("Vary", "Cookie")
+			response := sessionResponse{CSRFToken: session.CSRFToken}
+			if s.authenticator != nil {
+				response.Principal = &session.Principal
+			}
+			writeJSONResponse(w, http.StatusOK, response)
+			return
+		}
+		if s.authenticator != nil {
+			http.Error(w, "сессия истекла, войдите снова", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	var principal cloudidentity.Principal
 	if s.authenticator != nil {
 		header := strings.TrimSpace(r.Header.Get("Authorization"))
@@ -89,7 +116,21 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if s.authenticator != nil {
 		response.Principal = &principal
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Cookie")
 	writeJSONResponse(w, http.StatusOK, response)
+}
+
+func isSameOriginSessionRequest(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		requestScheme := "http"
+		if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+			requestScheme = "https"
+		}
+		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin")
 }
 
 func (s *Server) writeSecurity(next http.Handler) http.Handler {

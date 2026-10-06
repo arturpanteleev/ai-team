@@ -63,6 +63,45 @@ describe('cloud authentication client', () => {
     });
     expect(getActivePrincipal()).toEqual({ actor_id: 'reviewer-1', roles: ['reviewer'] });
   });
+
+  it('восстанавливает CSRF через cookie после перезагрузки без Bearer', async () => {
+    vi.resetModules();
+    const api = await import('./api');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        csrf_token: 'recovered-csrf',
+        principal: { actor_id: 'product-1', roles: ['product_owner'] },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run_id: 'run-after-reload' }), { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.openSession();
+    await api.startRun('feature', 'task');
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe('same-origin');
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toEqual({});
+    expect((fetchMock.mock.calls[1][1] as RequestInit).headers).toMatchObject({ 'X-CSRF-Token': 'recovered-csrf' });
+  });
+
+  it('clears an expired session after 401 and exposes a relogin event/message', async () => {
+    vi.resetModules();
+    const api = await import('./api');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: 'expired-csrf' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('требуется web session', { status: 401 }))
+      .mockResolvedValueOnce(new Response('сессия истекла, войдите снова', { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const onExpired = vi.fn();
+    window.addEventListener(api.SESSION_EXPIRED_EVENT, onExpired);
+
+    await expect(api.startRun('feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    await expect(api.startRun('feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
+    expect(onExpired).toHaveBeenCalledTimes(2);
+
+    window.removeEventListener(api.SESSION_EXPIRED_EVENT, onExpired);
+  });
 });
 
 describe('observability API client', () => {

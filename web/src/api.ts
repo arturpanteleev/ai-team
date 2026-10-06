@@ -2,10 +2,27 @@ import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, LogTail,
 
 const API_BASE = '/api';
 
+export const SESSION_EXPIRED_EVENT = 'ai-team:session-expired';
+
+function expireSession() {
+  csrfToken = null;
+  activePrincipal = null;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+}
+
+async function responseError(response: Response, context = 'API error'): Promise<Error> {
+  const message = (await response.text()).trim();
+  if (response.status === 401) {
+    expireSession();
+    return new Error('Сессия истекла. Войдите снова.');
+  }
+  return new Error(message || `${context}: ${response.status}`);
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, { credentials: 'same-origin' });
   if (!res.ok) {
-    throw new Error(`API error: ${res.status}`);
+    throw await responseError(res);
   }
   return res.json();
 }
@@ -42,7 +59,14 @@ export async function openSession(bearerToken?: string): Promise<Principal | nul
     credentials: 'same-origin',
     headers,
   });
-  if (!response.ok) throw new Error(`Authentication failed: ${response.status}`);
+  if (!response.ok) {
+    if (bearerToken) {
+      csrfToken = null;
+      activePrincipal = null;
+      throw new Error('Не удалось войти. Проверьте access token.');
+    }
+    throw await responseError(response, 'Authentication failed');
+  }
   const session = await response.json() as { csrf_token: string; principal?: Principal };
   csrfToken = session.csrf_token;
   activePrincipal = session.principal ?? null;
@@ -72,8 +96,7 @@ async function command<T>(url: string, body?: unknown): Promise<T> {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message.trim() || `API error: ${response.status}`);
+    throw await responseError(response);
   }
   return response.json();
 }

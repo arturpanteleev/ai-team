@@ -8,7 +8,7 @@
 Delivery executor MUST использовать массив нормализованных workspace-relative файлов без glob и MUST отказать при заранее staged index.
 
 #### Scenario: План содержит каталог или control path
-- **КОГДА** plan содержит каталог, `.git/`, `.ai-team/`, traversal или дублирующийся путь
+- **КОГДА** plan содержит каталог, traversal, дублирующийся путь или control path — `.git` на любом уровне вложенности либо `.ai-team` в корне рабочей копии — в любой записи имени, которую файловая система приводит к тому же каталогу (регистр, хвостовые точки и пробелы, NTFS alternate data stream и 8.3-имя)
 - **ТОГДА** plan validation MUST завершиться ошибкой до staging
 
 #### Scenario: Staged set отличается от plan

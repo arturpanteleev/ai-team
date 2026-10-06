@@ -46,11 +46,106 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	if err := plan.Validate(); err == nil {
 		t.Fatal("protected branch должна быть отклонена")
 	}
-	plan = validTestPlan()
-	plan.Files = []string{".ai-team/secret"}
-	if err := plan.Validate(); err == nil {
-		t.Fatal("control files должны быть отклонены")
+}
+
+// Запрет control path — тот инвариант схемы плана, нарушение которого сразу
+// означает исполнение произвольного кода: файл, попавший в ".git/hooks/",
+// запускается у каждого, кто сделает pull, а ".ai-team/" — состояние прогона,
+// которым агент мог бы переписать собственные evidence. Проверка жила без
+// единого теста: прежняя попытка её покрыть подавала путь, отсутствующий в
+// file_digests, поэтому план отвергался на два правила раньше и удаление
+// запрета ничего не ломало.
+//
+// Поэтому здесь каждый вход валиден по всем остальным правилам Validate —
+// отвергнуть его может только запрет control path. Удаление запрета роняет
+// весь этот тест целиком.
+func TestPlanRejectsControlPaths(t *testing.T) {
+	if err := planWithFile("a.go").Validate(); err != nil {
+		t.Fatalf("заготовка теста должна быть валидна во всём, кроме пути: %v", err)
 	}
+
+	rejected := map[string]string{
+		"git directory itself":   ".git",
+		"git hook":               ".git/hooks/pre-commit",
+		"git config":             ".git/config",
+		"git deep nesting":       ".git/modules/x/hooks/post-merge",
+		"ai-team directory":      ".ai-team",
+		"ai-team run state":      ".ai-team/runs/x.json",
+		"ai-team deep nesting":   ".ai-team/runs/2026/attempt/manifest.json",
+		"git in subdirectory":    "vendor/dep/.git/hooks/pre-commit",
+		"git as nested checkout": "sub/.git/config",
+		// APFS на macOS и NTFS сравнивают имена без учёта регистра, поэтому
+		// ".GIT" открывает ту же директорию, что и ".git".
+		"git uppercase":      ".GIT/hooks/pre-commit",
+		"git mixed case":     ".Git/config",
+		"git odd case":       ".gIt/hooks/pre-commit",
+		"ai-team uppercase":  ".AI-TEAM/runs/x.json",
+		"ai-team title case": ".Ai-Team/state",
+		// Windows отбрасывает хвостовые точки и пробелы, открывает директорию
+		// через alternate data stream и знает её под 8.3-именем.
+		"git trailing dot":     ".git./hooks/pre-commit",
+		"git trailing space":   ".git /config",
+		"git as final segment": ".git.",
+		"git ntfs stream":      ".git::$INDEX_ALLOCATION/hooks/pre-commit",
+		"git ntfs short name":  "git~1/hooks/pre-commit",
+	}
+	for name, file := range rejected {
+		t.Run(name, func(t *testing.T) {
+			err := planWithFile(file).Validate()
+			if err == nil {
+				t.Fatalf("control path %q должен быть отклонён", file)
+			}
+			if !strings.Contains(err.Error(), "control path") {
+				t.Fatalf("control path %q отклонён не запретом control path, а %v", file, err)
+			}
+		})
+	}
+
+	// Обратная сторона того же запрета: он не должен задевать обычные файлы,
+	// имя которых лишь начинается с ".git", и ".ai-team" вне корня рабочей
+	// копии — там это директория пользователя, а не состояние прогона.
+	for name, file := range map[string]string{
+		"gitignore":            ".gitignore",
+		"gitattributes":        ".gitattributes",
+		"gitignore in subtree": "docs/.gitignore",
+		"github workflows":     ".github/workflows/ci.yml",
+		"ai-team prefix":       ".ai-teamrc",
+		"ai-team below root":   "examples/.ai-team/config.yaml",
+	} {
+		t.Run("allowed "+name, func(t *testing.T) {
+			if err := planWithFile(file).Validate(); err != nil {
+				t.Fatalf("обычный файл %q не должен отвергаться: %v", file, err)
+			}
+		})
+	}
+}
+
+// Плану, пришедшему на диск, control path запрещён так же, как собранному в
+// памяти: Parse — единственная дверь для внешнего JSON, и она обязана закрыть
+// тот же инвариант.
+func TestParseRejectsControlPath(t *testing.T) {
+	data, err := json.Marshal(planWithFile(".git/hooks/pre-commit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(data)
+	if err == nil {
+		t.Fatalf("Parse принял план с control path: %v", parsed.Files)
+	}
+	if !strings.Contains(err.Error(), "control path") {
+		t.Fatalf("Parse отклонил план не запретом control path, а %v", err)
+	}
+}
+
+// planWithFile строит план, валидный целиком, кроме самого пути: digest и mode
+// заведены ровно под него, поэтому отвергнуть такой план может только правило,
+// проверяющее путь.
+func planWithFile(file string) Plan {
+	plan := validTestPlan()
+	plan.Files = []string{file}
+	plan.FileDigests = map[string]string{file: strings.Repeat("a", 64)}
+	plan.FileModes = map[string]string{file: "100644"}
+	return plan
 }
 
 func TestPreparedStateRejectsPlanTampering(t *testing.T) {

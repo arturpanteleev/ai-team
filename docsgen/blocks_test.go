@@ -112,3 +112,15 @@ func TestNavigationGroupsSectionsAndLinksReadingOrder(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestCheckLinksCatchesMissingSamePageAnchor(t *testing.T) {
+	out := t.TempDir()
+	page := `<html><body><h2 id="есть">Есть</h2><a href="#есть">ok</a><a href="#нет">broken</a></body></html>`
+	if err := os.WriteFile(filepath.Join(out, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckLinks(out)
+	if err == nil || !strings.Contains(err.Error(), "#нет") || strings.Contains(err.Error(), "#есть") {
+		t.Fatalf("expected only #нет reported, got %v", err)
+	}
+}

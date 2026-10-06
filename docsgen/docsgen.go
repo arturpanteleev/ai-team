@@ -567,7 +567,9 @@ func CheckLinksWithBase(output, basePath string) error {
 		}
 		for _, m := range hrefRe.FindAllStringSubmatch(content[rel], -1) {
 			url := m[1]
-			if url == "" || !needsCheck(url) {
+			// Якорь на той же странице needsCheck пропускает как «не путь»,
+			// но его тоже нужно проверить — ниже, по id текущей страницы.
+			if url == "" || (!needsCheck(url) && !strings.HasPrefix(url, "#")) {
 				continue
 			}
 			pathPart, frag := url, ""

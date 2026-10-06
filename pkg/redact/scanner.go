@@ -27,11 +27,21 @@ const jsonSecretReason = "json secret field"
 // как и в plain-тексте).
 const jsonSecretRedacted = "[REDACTED:json secret field]"
 
-// Лимиты JSON-примеси для сканера (AUD-03): защита от злонамеренно глубоких/
-// больших JSON-документов при детерминированной сортировке evidence.
+// maxJSONDepth — предел вложенности, глубже которого поддерево НЕ разбирается
+// (QS-08): защита от злонамеренно глубоких документов. Превышение лимита не
+// прекращает обход — поддерево пропускается, факт пропуска записывается в
+// Result.Unscanned, остальной документ сканируется дальше.
+//
+// Прежний лимит на размер документа (4 MiB) снят: данные уже целиком в памяти
+// (ScanFile ограничивает чтение MaxScanFileBytes), а обход стал линейным —
+// см. lineTracker. Лимит не экономил ничего, но делал любой документ крупнее
+// 4 MiB слепой зоной fail-closed блокера.
+const maxJSONDepth = 16
+
+// Причины, по которым участок содержимого остался непросканированным (QS-08).
 const (
-	maxJSONScanBytes = 4 << 20 // 4 MiB
-	maxJSONDepth     = 16
+	unscannedJSONDepth = "json depth limit"
+	unscannedJSONParse = "json parse truncated"
 )
 
 // FieldClass — класс чувствительности поля (документированный контракт).
@@ -112,6 +122,29 @@ func (f Finding) RedactedValue() string {
 	return "[REDACTED:" + f.Reason + "]"
 }
 
+// Unscanned — участок содержимого, который сканер разобрать не смог (QS-08).
+//
+// Почему это часть результата, а не молчаливый выход: сканер — fail-closed
+// блокер экспорта. «Находок нет» и «я не смотрел» — разные вердикты, и
+// механизм, который выдаёт второе за первое, опаснее отсутствующего. Всё, что
+// не просканировано, обязано дойти до отчёта и до решения о публикации.
+type Unscanned struct {
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+	Line   int    `json:"line"`
+}
+
+// Result — итог скана содержимого: подтверждённые находки плюс честный
+// перечень того, что осталось непросканированным.
+type Result struct {
+	Findings  []Finding   `json:"findings,omitempty"`
+	Unscanned []Unscanned `json:"unscanned,omitempty"`
+}
+
+// Complete — обход дошёл до конца: слепых зон нет. Только при true «находок
+// нет» означает «секретов нет».
+func (r Result) Complete() bool { return len(r.Unscanned) == 0 }
+
 type secretRule struct {
 	name       string
 	regex      *regexp.Regexp
@@ -138,7 +171,17 @@ func compileSecretRules() []secretRule {
 			{"google api key", `\bAIza[0-9A-Za-z\-_]{20,}\b`, -1},
 			{"jwt", `\beyJ[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{10,}\b`, -1},
 			{"basic auth url", `\b[a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:[^@\s]+@`, -1},
-			{"secret assignment", `(?m)^\s*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|signing[_-]?key)\s*[:=]\s*["']?([0-9A-Za-z+/_\-.\=]{16,})`, 2},
+			// (?i) на альтернацию ключей (QS-08/#150): PASSWORD=, API_KEY=,
+			// Token: — доминирующая форма в env-файлах, shell-export'ах и
+			// CI-логах, то есть ровно в том, что попадает в evidence. Флаг
+			// ограничен группой ключей: значение остаётся в явном классе
+			// символов, поведение остальных правил не меняется. Ложные
+			// срабатывания отсекает likelySecretValue, а не регистр ключа.
+			// Необязательные кавычки вокруг ключа: JSON/YAML-фрагмент в
+			// логе («  "api_key": "…"») построчным правилом иначе не
+			// ловится, а JSON-сканер на таком куске не работает — строка
+			// сама по себе не валидный документ.
+			{"secret assignment", `(?m)^\s*["']?(?i:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|signing[_-]?key)["']?\s*[:=]\s*["']?([0-9A-Za-z+/_\-.\=]{16,})`, 2},
 		}
 		for _, p := range patterns {
 			re, err := regexp.Compile(p.re)
@@ -222,19 +265,47 @@ type jsonFrame struct {
 
 // scanJSON детектирует секретные JSON-поля через токенную экскурсию по
 // документу (AUD-03). Finder работает структурно и не зависит от того,
-// в одну ли строку записан документ. Для не-JSON содержимого (и данных вне
-// bounds) возвращается nil — plain-сканер покрывает остальное.
-func scanJSON(data []byte) []Finding {
+// в одну ли строку записан документ. Для не-JSON содержимого возвращается
+// nil — plain-сканер покрывает остальное.
+//
+// QS-08: обход НИКОГДА не заканчивается молча. Поддерево глубже maxJSONDepth
+// пропускается (а не обрывает весь документ), обрыв структуры внутри
+// контейнера фиксируется — и то, и другое уходит во второй результат как
+// «не просканировано».
+func scanJSON(data []byte) ([]Finding, []Unscanned) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	lines := newLineTracker(data)
 	var stack []jsonFrame
 	var findings []Finding
+	var gaps []Unscanned
 	for {
 		token, err := decoder.Token()
 		if err != nil {
 			if err == io.EOF {
+				// EOF при непустом стеке — документ оборван на середине:
+				// json.Decoder отдаёт io.EOF и на незакрытых контейнерах.
+				if len(stack) > 0 {
+					gaps = append(gaps, Unscanned{
+						Reason: unscannedJSONParse,
+						Detail: "документ оборван: контейнер не закрыт",
+						Line:   lines.at(decoder.InputOffset()),
+					})
+				}
 				break
 			}
-			return findings
+			// Ошибка при пустом стеке — это просто не-JSON содержимое
+			// (обычный лог, код, markdown): сканировать структурно нечего,
+			// plain-правила уже отработали. Ошибка ВНУТРИ контейнера — другое
+			// дело: документ начинался как JSON и оборвался, значит остаток
+			// действительно не разобран и это обязано быть видно.
+			if len(stack) > 0 {
+				gaps = append(gaps, Unscanned{
+					Reason: unscannedJSONParse,
+					Detail: err.Error(),
+					Line:   lines.at(decoder.InputOffset()),
+				})
+			}
+			break
 		}
 		offset := decoder.InputOffset()
 		switch value := token.(type) {
@@ -245,13 +316,13 @@ func scanJSON(data []byte) []Finding {
 			top := &stack[len(stack)-1]
 			if top.isObject && !top.expectKey {
 				// value: значение ключа top-объекта.
-				if (top.keySecret || top.secretCtx) && top.keyOffset >= 0 && top.keyOffset < int64(len(data)) {
+				if top.keySecret || top.secretCtx {
 					if likelySecretValue(value) {
 						findings = append(findings, Finding{
 							Reason:   jsonSecretReason,
 							Matched:  value,
 							Redacted: jsonSecretRedacted,
-							Line:     lineAt(data, top.keyOffset),
+							Line:     lines.at(top.keyOffset),
 						})
 					}
 				}
@@ -270,33 +341,50 @@ func scanJSON(data []byte) []Finding {
 							Reason:   jsonSecretReason,
 							Matched:  value,
 							Redacted: jsonSecretRedacted,
-							Line:     lineAt(data, offset),
+							Line:     lines.at(offset),
 						})
 					}
 				}
 			}
 		case json.Delim:
 			switch value {
-			case '{':
+			case '{', '[':
 				inherited := false
 				if len(stack) > 0 {
 					top := &stack[len(stack)-1]
-					// объект как значение ключа или элемент объекта/массива
-					// наследует секретный контекст родителя.
+					// контейнер как значение ключа или элемент объекта/
+					// массива наследует секретный контекст родителя.
 					inherited = top.keySecret || top.secretCtx
 					top.keySecret = false
 					top.expectKey = true
 				}
-				stack = append(stack, jsonFrame{isObject: true, expectKey: true, secretCtx: inherited})
-			case '[':
-				inherited := false
-				if len(stack) > 0 {
-					top := &stack[len(stack)-1]
-					inherited = top.keySecret || top.secretCtx
-					top.keySecret = false
-					top.expectKey = true
+				if len(stack) >= maxJSONDepth {
+					// Лимит глубины срабатывает на ПОДДЕРЕВО, а не на
+					// документ: дочитываем его до закрывающего токена и
+					// продолжаем с того же уровня. Родительский фрейм уже
+					// переведён в состояние «значение получено» выше.
+					line := lines.at(offset)
+					skipErr := skipSubtree(decoder)
+					gaps = append(gaps, Unscanned{
+						Reason: unscannedJSONDepth,
+						Detail: fmt.Sprintf("вложенность глубже %d: поддерево не просканировано", maxJSONDepth),
+						Line:   line,
+					})
+					if skipErr != nil {
+						gaps = append(gaps, Unscanned{
+							Reason: unscannedJSONParse,
+							Detail: skipErr.Error(),
+							Line:   lines.at(decoder.InputOffset()),
+						})
+						return findings, gaps
+					}
+					continue
 				}
-				stack = append(stack, jsonFrame{secretCtx: inherited})
+				stack = append(stack, jsonFrame{
+					isObject:  value == '{',
+					expectKey: value == '{',
+					secretCtx: inherited,
+				})
 			case '}', ']':
 				if len(stack) > 0 {
 					stack = stack[:len(stack)-1]
@@ -314,11 +402,62 @@ func scanJSON(data []byte) []Finding {
 				}
 			}
 		}
-		if len(stack) > maxJSONDepth {
-			return findings
+	}
+	return findings, gaps
+}
+
+// skipSubtree дочитывает токены уже открытого контейнера до его закрытия.
+// Используется, когда поддерево глубже лимита: вместо отказа от всего
+// документа сканер «перешагивает» такое поддерево.
+func skipSubtree(decoder *json.Decoder) error {
+	depth := 1
+	for depth > 0 {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := token.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
 		}
 	}
-	return findings
+	return nil
+}
+
+// lineTracker переводит byte offset в 1-based номер строки за линейное время
+// на весь обход. Прежний lineAt считал переводы строк от начала документа для
+// КАЖДОЙ находки — O(n²), и именно этим оправдывался лимит на размер
+// JSON-документа. Offsets декодера монотонно растут, поэтому достаточно
+// досчитывать newline'ы от предыдущей позиции.
+type lineTracker struct {
+	data   []byte
+	offset int64
+	line   int
+}
+
+func newLineTracker(data []byte) *lineTracker {
+	return &lineTracker{data: data, line: 1}
+}
+
+func (t *lineTracker) at(offset int64) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(t.data)) {
+		offset = int64(len(t.data))
+	}
+	if offset < t.offset {
+		// Редкий случай (offset назад): считаем честно с начала, курсор не
+		// сдвигаем — корректность важнее экономии.
+		return lineAt(t.data, offset)
+	}
+	t.line += bytes.Count(t.data[t.offset:offset], []byte("\n"))
+	t.offset = offset
+	return t.line
 }
 
 // lineAt возвращает 1-based номер строки для byte offset (AUD-03).
@@ -332,11 +471,17 @@ func lineAt(data []byte, offset int64) int {
 	return 1 + bytes.Count(data[:int(offset)], []byte("\n"))
 }
 
-// Scan возвращает все подтверждённые секретные вхождения в data. Результат
-// стабильно упорядочен (по правилу, затем по позиции) для детерминизма.
-// Помимо line-based правил сканируются структурные JSON-поля (AUD-03).
-func Scan(data []byte) []Finding {
+// Scan возвращает все подтверждённые секретные вхождения в data и перечень
+// участков, которые разобрать не удалось. Результат стабильно упорядочен
+// (по позиции, затем по правилу) для детерминизма. Помимо line-based правил
+// сканируются структурные JSON-поля (AUD-03).
+//
+// QS-08: Scan возвращает Result, а не []Finding, намеренно — пустой список
+// находок сам по себе ничего не доказывает, пока вызывающий не увидел
+// Result.Unscanned. Старая сигнатура позволяла потерять этот факт по дороге.
+func Scan(data []byte) Result {
 	var findings []Finding
+	var gaps []Unscanned
 	for lineNumber, rawLine := range bytes.Split(data, []byte("\n")) {
 		line := string(rawLine)
 		for _, rule := range compileSecretRules() {
@@ -370,8 +515,10 @@ func Scan(data []byte) []Finding {
 			}
 		}
 	}
-	if len(data) > 0 && int64(len(data)) <= maxJSONScanBytes {
-		findings = append(findings, scanJSON(data)...)
+	if len(data) > 0 {
+		jsonFindings, jsonGaps := scanJSON(data)
+		findings = append(findings, jsonFindings...)
+		gaps = append(gaps, jsonGaps...)
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].Line != findings[j].Line {
@@ -382,7 +529,16 @@ func Scan(data []byte) []Finding {
 		}
 		return findings[i].Matched < findings[j].Matched
 	})
-	return findings
+	sort.SliceStable(gaps, func(i, j int) bool {
+		if gaps[i].Line != gaps[j].Line {
+			return gaps[i].Line < gaps[j].Line
+		}
+		if gaps[i].Reason != gaps[j].Reason {
+			return gaps[i].Reason < gaps[j].Reason
+		}
+		return gaps[i].Detail < gaps[j].Detail
+	})
+	return Result{Findings: findings, Unscanned: gaps}
 }
 
 // IsBinary грубо определяет, является ли содержимое бинарным (NUL в первых
@@ -396,18 +552,19 @@ func IsBinary(data []byte) bool {
 }
 
 // ScanFile читает regular file (no-follow, через канонический safeio лимит)
-// и сканирует его. Возвращает nil, nil для бинарных файлов. maxBytes<=0
-// означает канонический дефолт MaxScanFileBytes (как и в ScanDir/Verify).
-func ScanFile(path string, maxBytes int64) ([]Finding, error) {
+// и сканирует его. Для бинарных файлов возвращает пустой Result (пропуск по
+// контракту, а не слепая зона лимита). maxBytes<=0 означает канонический
+// дефолт MaxScanFileBytes (как и в ScanDir/Verify).
+func ScanFile(path string, maxBytes int64) (Result, error) {
 	if maxBytes <= 0 {
 		maxBytes = MaxScanFileBytes
 	}
 	data, err := safeio.ReadRegularFile(path, maxBytes)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if IsBinary(data) {
-		return nil, nil
+		return Result{}, nil
 	}
 	return Scan(data), nil
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{if eq .Current.URL "/"}}{{.Title}} — AI-агенты пишут код, вы решаете, что попадёт в репозиторий{{else}}{{.Current.Title}} — {{.Title}}{{end}}</title>
-<meta name="description" content="{{if .Current.Description}}{{.Current.Description}}{{else}}Документация ai-team: локальный контроллер, который проводит задачу через AI-агентов, детерминированные проверки и ваше подтверждение.{{end}}">
+<meta name="description" content="{{if .Current.Description}}{{.Current.Description}}{{else}}Документация ai-team: процесс разработки с AI-агентами для команды — проверки без модели, подтверждение человеком и веб-дашборд.{{end}}">
 <meta name="generator" content="ai-team docsgen">
 <link rel="stylesheet" href="{{link "/assets/site.css"}}">
 <script defer src="{{link "/assets/search-index.js"}}"></script>
@@ -48,9 +48,9 @@
   <main id="main" class="content" tabindex="-1">
   {{if eq .Current.URL "/"}}
     <section class="hero" aria-labelledby="hero-title">
-      <p class="eyebrow">Open source · локально · Go</p>
+      <p class="eyebrow">Open source · для команды · сервер или облако</p>
       <h1 id="hero-title">AI-агенты пишут код.<br>Вы решаете, что попадёт в&nbsp;репозиторий.</h1>
-      <p class="hero-lead">ai-team проводит задачу через команду агентов: аналитик, архитектор, разработчик, ревьюер, тестировщик. Каждый шаг проверяет обычная программа, а не модель. Коммит и pull request появляются только после того, как вы подтвердите точный план поставки.</p>
+      <p class="hero-lead">ai-team проводит задачу через команду агентов: аналитик, архитектор, разработчик, ревьюер, тестировщик. Каждый шаг проверяет обычная программа, а не модель. Коммит и pull request появляются только после того, как вы подтвердите точный delivery-план. Команда работает через веб-дашборд на своём сервере или в облаке.</p>
       <div class="hero-actions">
         {{range $i, $a := .HeroActions}}<a class="button{{if $i}} secondary{{end}}" href="{{link $a.URL}}">{{$a.Title}}</a>
         {{end}}
@@ -60,7 +60,7 @@
         <li><b>Агенты</b><span>план, код, тесты, ревью</span></li>
         <li><b>Проверки</b><span>Go-контроллер, без LLM</span></li>
         <li><b>Ваше решение</b><span>подтверждаете план по SHA-256</span></li>
-        <li><b>Поставка</b><span>commit, push, PR</span></li>
+        <li><b>Delivery</b><span>commit, push, PR</span></li>
       </ol>
     </section>
     <section class="doc-map" aria-labelledby="doc-map-title">

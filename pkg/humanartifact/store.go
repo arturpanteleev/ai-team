@@ -53,7 +53,7 @@ func New(targetDir string) (*Store, error) {
 // Append applies optimistic concurrency against the latest immutable revision.
 // baseRevision must be empty for the first version, otherwise it must equal the
 // last revision ID observed by the caller.
-func (s *Store) Append(runID, artifactPath, baseRevision, baseSHA, content, comment, actorID string) (Revision, error) {
+func (s *Store) Append(runID, artifactPath, baseRevision, baseSHA, content, comment, actorID string) (result Revision, retErr error) {
 	runID, artifactPath, actorID = strings.TrimSpace(runID), cleanArtifactPath(artifactPath), strings.TrimSpace(actorID)
 	content, comment = strings.ReplaceAll(content, "\r\n", "\n"), strings.TrimSpace(comment)
 	if !safeName(runID) || artifactPath == "" || actorID == "" {
@@ -81,11 +81,17 @@ func (s *Store) Append(runID, artifactPath, baseRevision, baseSHA, content, comm
 	if err != nil {
 		return Revision{}, err
 	}
-	defer lock.Close()
+	locked := false
+	defer func() {
+		if locked {
+			retErr = errors.Join(retErr, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN))
+		}
+		retErr = errors.Join(retErr, lock.Close())
+	}()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return Revision{}, err
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	locked = true
 	previous, err := latest(dir)
 	if err != nil {
 		return Revision{}, err

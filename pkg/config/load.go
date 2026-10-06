@@ -30,8 +30,10 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// defaultLoopbackSources — стадии, чей негативный вердикт возвращается к coder.
+// defaultLoopbackSources — стадии, чей негативный вердикт возвращается в работу.
 var defaultLoopbackSources = []string{"reviewer", "tester", "verifier"}
+
+func hasStage(index map[string]int, name string) bool { _, ok := index[name]; return ok }
 
 // defaultStageRoles — human-роли рёбер default workflow стандартного профиля.
 var defaultStageRoles = map[string][]string{
@@ -184,6 +186,17 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 			},
 		})
 	}
+	if architectIdx, exists := index["architect"]; exists && hasStage(index, "analyst") && index["analyst"] < architectIdx {
+		roles := append([]string(nil), specByName["architect"].roles...)
+		if len(roles) == 0 {
+			roles = []string{"operator"}
+		}
+		workflowConfig.Edges = append(workflowConfig.Edges, WorkflowEdgeConfig{
+			From: "architect", Outcome: "rejected", To: "analyst",
+			Approval: &WorkflowApprovalConfig{Roles: roles, Quorum: loopbackQuorum,
+				Actions: map[string]string{"return_to_analyst": "analyst", "stop": "$stop"}},
+		})
+	}
 	coderIdx, hasCoder := index["coder"]
 	for _, source := range defaultLoopbackSources {
 		srcIdx, srcExists := index[source]
@@ -202,9 +215,7 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 			From: source, Outcome: "rejected", To: "coder",
 			Approval: &WorkflowApprovalConfig{
 				Roles: roles, Quorum: loopbackQuorum,
-				Actions: map[string]string{
-					"return_to_coder": "coder", "override_approve": override, "reject": "$stop",
-				},
+				Actions: loopbackActions(index, override),
 			},
 		})
 	}
@@ -213,6 +224,8 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 			// Intake may ask up to three clarification rounds and must be able
 			// to report the final unresolved question as a normal blocked result.
 			workflowConfig.MaxVisits[name] = 4
+		} else if name == "architect" {
+			workflowConfig.MaxVisits[name] = 3
 		} else if mv := specByName[name].maxVisits; mv > 0 {
 			workflowConfig.MaxVisits[name] = mv
 		} else if name != "deployer" && name != "analyst" && name != "architect" {
@@ -220,6 +233,14 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 		}
 	}
 	return workflowConfig
+}
+
+func loopbackActions(index map[string]int, override string) map[string]string {
+	actions := map[string]string{"return_to_coder": "coder", "override_approve": override, "reject": "$stop"}
+	if hasStage(index, "architect") {
+		actions["return_to_architect"] = "architect"
+	}
+	return actions
 }
 
 // Default — стандартный профиль (совместимость со старыми вызовами).

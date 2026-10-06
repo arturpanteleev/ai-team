@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +17,8 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
@@ -212,11 +216,12 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 type decisionCommand struct {
-	ActorID     string `json:"actor_id"`
-	ActorRole   string `json:"actor_role"`
-	Action      string `json:"action"`
-	Comment     string `json:"comment,omitempty"`
-	SubjectHash string `json:"subject_hash"`
+	ActorID           string            `json:"actor_id"`
+	ActorRole         string            `json:"actor_role"`
+	Action            string            `json:"action"`
+	Comment           string            `json:"comment,omitempty"`
+	SubjectHash       string            `json:"subject_hash"`
+	ArtifactRevisions map[string]string `json:"artifact_revisions,omitempty"`
 }
 
 func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
@@ -286,12 +291,51 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	selectedRevisions := command.ArtifactRevisions
+	pinnedSelection := false
+	if len(selectedRevisions) == 0 {
+		// A quorum-all approval pins its artifacts on the first vote. Reuse that
+		// exact selection for later voters even if somebody has appended a newer
+		// human revision while the approval remains pending. The first decision
+		// is authoritative even when it pinned an empty selection (for example,
+		// when the artifact had no human revision yet).
+		values, listErr := s.controller.Approvals(chi.URLParam(r, "runID"))
+		if listErr != nil {
+			http.Error(w, "approval state unavailable", http.StatusInternalServerError)
+			return
+		}
+		for _, pending := range values {
+			if pending.ID == chi.URLParam(r, "approvalID") && len(pending.Decisions) > 0 {
+				pinned := pending.Decisions[0].ArtifactRevisions
+				pinnedSelection = true
+				selectedRevisions = make(map[string]string, len(pinned))
+				for path, revisionID := range pinned {
+					selectedRevisions[path] = revisionID
+				}
+				break
+			}
+		}
+	}
+	if len(selectedRevisions) == 0 && !pinnedSelection {
+		attemptID, attemptErr := s.approvalAttemptID(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"))
+		if attemptErr != nil {
+			http.Error(w, "не удалось определить артефакты approval", http.StatusInternalServerError)
+			return
+		}
+		revisionSelection, revisionErr := s.latestAttemptRevisions(chi.URLParam(r, "runID"), attemptID)
+		if revisionErr != nil {
+			http.Error(w, "не удалось закрепить текущие версии артефактов", http.StatusConflict)
+			return
+		}
+		selectedRevisions = revisionSelection
+	}
 	value, err := s.controller.Decide(
 		chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"),
 		approval.Decision{
 			ActorID: actorID, ActorRole: command.ActorRole,
 			Action: command.Action, Comment: command.Comment,
-			SubjectHash: command.SubjectHash,
+			SubjectHash:       command.SubjectHash,
+			ArtifactRevisions: selectedRevisions,
 		},
 	)
 	if err != nil {
@@ -299,6 +343,48 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusOK, value)
+}
+
+func (s *Server) approvalAttemptID(runID, approvalID string) (string, error) {
+	values, err := s.controller.Approvals(runID)
+	if err != nil {
+		return "", err
+	}
+	for _, value := range values {
+		if value.ID == approvalID {
+			return value.AttemptID, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *Server) latestAttemptRevisions(runID, attemptID string) (map[string]string, error) {
+	if !safeIdentity(runID) || !safeIdentity(attemptID) {
+		return nil, nil
+	}
+	manifestPath := filepath.Join(s.runRoot, runID, "attempts", attemptID, "manifest.json")
+	data, err := safeio.ReadRegularFile(manifestPath, maxArtifactSize)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var manifest evidence.AttemptManifest
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest.RunID != runID || manifest.AttemptID != attemptID {
+		return nil, errors.New("approval attempt manifest identity mismatch")
+	}
+	selection := make(map[string]string)
+	for _, output := range manifest.Outputs {
+		revisions, listErr := s.humanArtifacts.List(runID, output.EvidencePath)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(revisions) > 0 {
+			selection[output.EvidencePath] = revisions[len(revisions)-1].ID
+		}
+	}
+	return selection, nil
 }
 
 func containsApprovalRole(roles []string, expected string) bool {

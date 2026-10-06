@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -22,7 +24,7 @@ var ErrActive = errors.New("run уже исполняется")
 
 type worker struct {
 	cancel          context.CancelFunc
-	cancelRequested bool
+	cancelRequested chan struct{}
 }
 
 type runEngine interface {
@@ -91,13 +93,14 @@ func (c *Controller) Start(feature, task string) (string, error) {
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	active := &worker{cancel: cancel, cancelRequested: make(chan struct{})}
 	c.mu.Lock()
-	c.active[runID] = &worker{cancel: cancel}
+	c.active[runID] = active
 	c.mu.Unlock()
 	go c.run(runID, ctx, lock, func(ctx context.Context) (pipeline.RunResult, error) {
 		return c.engine.Start(ctx, pipeline.RunConfig{
 			RunID: runID, Feature: feature, TaskDesc: task, TargetDir: c.target,
-			WorkspaceLock: lock,
+			WorkspaceLock: lock, CancelRequested: func() bool { return cancellationRequested(c.target, runID, active.cancelRequested) },
 		})
 	})
 	return runID, nil
@@ -133,16 +136,18 @@ func (c *Controller) Resume(runID string) error {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	active := &worker{cancel: cancel, cancelRequested: make(chan struct{})}
 	c.mu.Lock()
 	if _, exists := c.active[runID]; exists {
 		c.mu.Unlock()
 		cancel()
 		return ErrActive
 	}
-	c.active[runID] = &worker{cancel: cancel}
+	c.active[runID] = active
 	c.mu.Unlock()
 	go c.run(runID, ctx, nil, func(ctx context.Context) (pipeline.RunResult, error) {
-		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target})
+		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target,
+			CancelRequested: func() bool { return cancellationRequested(c.target, runID, active.cancelRequested) }})
 	})
 	return nil
 }
@@ -150,8 +155,15 @@ func (c *Controller) Resume(runID string) error {
 func (c *Controller) Cancel(runID string) error {
 	c.mu.Lock()
 	if active := c.active[runID]; active != nil {
-		active.cancelRequested = true
-		active.cancel()
+		if err := writeCancellationRequest(c.target, runID); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		select {
+		case <-active.cancelRequested:
+		default:
+			close(active.cancelRequested)
+		}
 		c.mu.Unlock()
 		return nil
 	}
@@ -176,8 +188,11 @@ func (c *Controller) run(runID string, ctx context.Context, lock *evidence.Works
 	c.mu.Lock()
 	active := c.active[runID]
 	c.mu.Unlock()
-	if active != nil && active.cancelRequested {
+	if active != nil && requested(active.cancelRequested) {
 		_, _ = c.engine.Cancel(pipeline.CancelConfig{RunID: runID, TargetDir: c.target})
+	}
+	if active != nil && active.cancel != nil {
+		active.cancel()
 	}
 	if execErr != nil && !errors.Is(execErr, pipeline.ErrUserStopped) {
 		// Фоновая ошибка не должна «проглатываться» в 202: отдаём её в
@@ -192,6 +207,49 @@ func (c *Controller) run(runID string, ctx context.Context, lock *evidence.Works
 	c.mu.Lock()
 	delete(c.active, runID)
 	c.mu.Unlock()
+}
+
+func requested(signal <-chan struct{}) bool {
+	select {
+	case <-signal:
+		return true
+	default:
+		return false
+	}
+}
+
+func cancellationRequestPath(targetDir, runID string) (string, error) {
+	root, err := safeio.EnsureDir(targetDir, ".ai-team", "runs", runID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "cancel.requested"), nil
+}
+
+func writeCancellationRequest(targetDir, runID string) error {
+	path, err := cancellationRequestPath(targetDir, runID)
+	if err != nil {
+		return err
+	}
+	if err := safeio.WriteRegularFileNoFollow(path, []byte("safe-boundary cancellation requested\n"), 0o444); err != nil {
+		data, readErr := safeio.ReadRegularFile(path, 1024)
+		if readErr != nil || string(data) != "safe-boundary cancellation requested\n" {
+			return err
+		}
+	}
+	return nil
+}
+
+func cancellationRequested(targetDir, runID string, signal <-chan struct{}) bool {
+	if requested(signal) {
+		return true
+	}
+	path, err := cancellationRequestPath(targetDir, runID)
+	if err != nil {
+		return false
+	}
+	data, err := safeio.ReadRegularFile(path, 1024)
+	return err == nil && string(data) == "safe-boundary cancellation requested\n"
 }
 
 // FailureSink получает фоновые ошибки run для durable-фиксации.

@@ -1,4 +1,4 @@
-import type { PipelineRun, Stage, Artifact, Approval, LogTail, PreflightReport, WorkflowSnapshot, Principal } from './types';
+import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, LogTail, PreflightReport, WorkflowSnapshot, Principal } from './types';
 
 const API_BASE = '/api';
 
@@ -93,7 +93,7 @@ export function cancelRun(runId: string): Promise<{ run_id: string }> {
 export function decideApproval(
   runId: string,
   value: Approval,
-  decision: { actor_id: string; actor_role: string; action: string; comment?: string },
+  decision: { actor_id: string; actor_role: string; action: string; comment?: string; artifact_revisions?: Record<string, string> },
 ): Promise<Approval> {
   return command(
     `/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(value.id)}/decisions`,
@@ -127,4 +127,19 @@ export async function getArtifact(runId: string, path: string): Promise<string> 
     throw new Error(`API error: ${res.status}`);
   }
   return res.text();
+}
+
+export async function getArtifactRevisions(runId: string, path: string): Promise<ArtifactRevision[]> {
+  const encodedRun = encodeURIComponent(runId);
+  const response = await fetchJson<{ revisions: ArtifactRevision[] }>(
+    `/runs/${encodedRun}/artifact-revisions?path=${encodeURIComponent(path)}`,
+  );
+  return response.revisions ?? [];
+}
+
+export function createArtifactRevision(
+  runId: string,
+  value: { artifact_path: string; base_revision?: string; base_sha256: string; content: string; comment?: string },
+): Promise<ArtifactRevision> {
+  return command(`/runs/${encodeURIComponent(runId)}/artifact-revisions`, value);
 }

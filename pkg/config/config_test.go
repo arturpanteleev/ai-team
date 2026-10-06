@@ -493,6 +493,33 @@ func TestDefaultProfiles(t *testing.T) {
 	}
 }
 
+func TestStandardProfileProvidesHumanReturnRoutes(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []struct{ from, action, target string }{
+		{"architect", "return_to_analyst", "analyst"},
+		{"reviewer", "return_to_architect", "architect"},
+		{"reviewer", "return_to_coder", "coder"},
+		{"tester", "return_to_architect", "architect"},
+		{"tester", "return_to_coder", "coder"},
+	} {
+		edge, ok := graph.Edge(expected.from, "rejected")
+		if !ok || edge.Approval == nil || edge.Approval.Actions[expected.action] != expected.target {
+			t.Fatalf("route %s/%s → %s missing: %+v", expected.from, expected.action, expected.target, edge)
+		}
+	}
+	architect, ok := graph.Node("architect")
+	if !ok || architect.MaxVisits < 1 {
+		t.Fatal("architect return cycle needs a finite visit limit")
+	}
+}
+
 func TestDefaultProfilesDeferredGates(t *testing.T) {
 	for _, profile := range []string{ProfileFast, ProfileStandard} {
 		cfg, err := DefaultProfile(profile)

@@ -42,6 +42,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		return graphTerminalError(current, "", nil)
 	}
 	for {
+		if rs.runCfg.CancelRequested != nil && rs.runCfg.CancelRequested() {
+			return context.Canceled
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -92,6 +95,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			logging.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
 			logging.Printf("  Для исправления уточните задачу и запустите заново: ai-team run --feature %s --task \"<описание>\"\n",
 				rs.runCfg.Feature)
+		}
+		// A cancellation requested during the runtime call is honored only after
+		// the attempt, its outputs, and its evidence have been persisted. Stop
+		// before creating a new handoff or starting another stage.
+		if rs.runCfg.CancelRequested != nil && rs.runCfg.CancelRequested() {
+			return context.Canceled
 		}
 
 		edge, found := rs.graph.Edge(current, result.State.Outcome)

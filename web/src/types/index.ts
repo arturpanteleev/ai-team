@@ -137,6 +137,7 @@ export interface ApprovalDecision {
   action: string;
   comment?: string;
   subject_hash: string;
+  artifact_revisions?: Record<string, string>;
   candidate_sha256?: string;
   decided_at: string;
 }
@@ -153,13 +154,28 @@ export interface Approval {
   required_roles: string[];
   quorum: 'any' | 'all';
   actions: string[];
+  feedback_actions?: string[];
   targets?: Record<string, string>;
   payload?: unknown;
   status: 'pending' | 'resolved';
   decisions?: ApprovalDecision[];
   resolved_action?: string;
+  artifact_revisions?: Record<string, string>;
+  artifact_revision_binding_sha256?: string;
   created_at: string;
   resolved_at?: string;
+}
+
+export interface ArtifactRevision {
+  revision: number;
+  id: string;
+  base_revision?: string;
+  base_sha256?: string;
+  content: string;
+  comment?: string;
+  actor_id: string;
+  created_at: string;
+  sha256: string;
 }
 
 export interface WsEvent {

@@ -75,10 +75,11 @@ func (p Principal) Has(role Role) bool {
 type Permission string
 
 const (
-	PermissionStart    Permission = "run:start"
-	PermissionResume   Permission = "run:resume"
-	PermissionCancel   Permission = "run:cancel"
-	PermissionDecision Permission = "approval:decide"
+	PermissionStart        Permission = "run:start"
+	PermissionResume       Permission = "run:resume"
+	PermissionCancel       Permission = "run:cancel"
+	PermissionDecision     Permission = "approval:decide"
+	PermissionArtifactEdit Permission = "artifact:edit"
 )
 
 func Authorize(principal Principal, permission Permission, selectedRole Role) error {
@@ -92,6 +93,9 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleReleaseManager)
 	case PermissionDecision:
 		allowed = knownRoles[selectedRole] && principal.Has(selectedRole)
+	case PermissionArtifactEdit:
+		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect) ||
+			principal.Has(RoleReviewer) || principal.Has(RoleQA)
 	default:
 		return fmt.Errorf("cloud RBAC: неизвестное permission %q", permission)
 	}

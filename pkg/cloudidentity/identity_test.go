@@ -53,3 +53,15 @@ func TestPrincipalRolesAndRBAC(t *testing.T) {
 		t.Fatal("неизвестная роль должна быть отклонена")
 	}
 }
+
+func TestParseRolesRequiresAtLeastOneRole(t *testing.T) {
+	for _, values := range [][]string{nil, {}, {"", " "}} {
+		if _, err := ParseRoles(values); err == nil {
+			t.Fatalf("ParseRoles(%q) accepted an empty role list", values)
+		}
+	}
+	roles, err := ParseRoles([]string{"qa"})
+	if err != nil || len(roles) != 1 || roles[0] != RoleQA {
+		t.Fatalf("ParseRoles valid role: roles=%v err=%v", roles, err)
+	}
+}

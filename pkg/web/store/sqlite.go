@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -554,7 +554,18 @@ func migrate(db *sql.DB) error {
 			attempt_uid TEXT, timestamp DATETIME NOT NULL, data_json TEXT,
 			UNIQUE(run_uid, sequence))`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_uid, sequence)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP)`,
+		`CREATE TABLE IF NOT EXISTS team_members (
+			actor_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, roles_json TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('invited','active','revoked')),
+			session_epoch INTEGER NOT NULL DEFAULT 1, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS team_invitations (
+			token_hash TEXT PRIMARY KEY, actor_id TEXT NOT NULL, expires_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL, used_at DATETIME, invited_by TEXT NOT NULL,
+			FOREIGN KEY(actor_id) REFERENCES team_members(actor_id))`,
+		`CREATE TABLE IF NOT EXISTS team_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+			target_actor_id TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}', created_at DATETIME NOT NULL)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if _, err := tx.Exec(query); err != nil {

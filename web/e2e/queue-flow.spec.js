@@ -161,6 +161,25 @@ test('authenticated cookie session survives reload and a second window for write
     const second = await context.newPage()
     await second.goto(baseURL)
     await expect(second.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+
+    // Team read APIs use the authenticated same-origin session without a
+    // write CSRF header. The owner can load members/audit and the UI refuses
+    // an empty role edit before sending a PATCH.
+    await second.getByRole('link', { name: 'Team' }).click()
+    await expect(second.getByRole('heading', { name: 'Команда' })).toBeVisible()
+    await expect(second.getByRole('heading', { name: 'Участники' })).toBeVisible()
+    await expect(second.getByRole('heading', { name: 'Журнал действий' })).toBeVisible()
+    let emptyRolePatchSent = false
+    second.on('request', (request) => {
+      if (request.method() === 'PATCH' && request.url().includes('/api/team/members/')) emptyRolePatchSent = true
+    })
+    second.once('dialog', (dialog) => dialog.accept(' , '))
+    await second.getByRole('button', { name: 'Изменить роли' }).first().click()
+    await expect(second.getByRole('alert')).toHaveText('Укажите хотя бы одну роль.')
+    expect(emptyRolePatchSent).toBe(false)
+
+    await second.getByRole('link', { name: 'Pipelines' }).click()
+    await expect(second.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
     await second.getByLabel('Название инициативы').fill('authenticated-after-reconnect')
     await second.getByLabel('Какого результата хотите достичь?').fill('Submit with a recovered CSRF token')
     await second.getByRole('button', { name: 'Создать инициативу и передать аналитику' }).click()

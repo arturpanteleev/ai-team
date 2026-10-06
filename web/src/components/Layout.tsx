@@ -19,6 +19,7 @@ export function Layout({ children }: { children: ReactNode }) {
           >
             Pipelines
           </NavLink>
+          {principal?.roles.includes('product_owner') && <NavLink to="/team" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>Team</NavLink>}
         </nav>
         {principal && <small>{principal.actor_id}<br />{principal.roles.join(', ')}</small>}
       </aside>

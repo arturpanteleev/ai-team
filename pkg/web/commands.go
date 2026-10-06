@@ -39,6 +39,46 @@ type sessionResponse struct {
 	Principal *cloudidentity.Principal `json:"principal,omitempty"`
 }
 
+func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudidentity.Principal, int64, error) {
+	if s.authenticator == nil {
+		return principal, 0, nil
+	}
+	member, err := s.store.TeamMember(principal.ActorID)
+	if err != nil {
+		return cloudidentity.Principal{}, 0, err
+	}
+	if member == nil {
+		count, countErr := s.store.TeamMemberCount()
+		if countErr != nil {
+			return cloudidentity.Principal{}, 0, countErr
+		}
+		if count == 0 && principal.Has(cloudidentity.RoleProductOwner) {
+			if err = s.store.BootstrapTeamAdmin(principal.ActorID, time.Now().UTC()); err != nil {
+				// Another first login may have won the bootstrap race.
+				member, err = s.store.TeamMember(principal.ActorID)
+				if err != nil || member == nil {
+					return cloudidentity.Principal{}, 0, errors.New("team registry is already initialized")
+				}
+			} else {
+				var lookupErr error
+				member, lookupErr = s.store.TeamMember(principal.ActorID)
+				if lookupErr != nil {
+					return cloudidentity.Principal{}, 0, lookupErr
+				}
+			}
+		}
+	}
+	if member == nil || member.Status != "active" {
+		return cloudidentity.Principal{}, 0, errors.New("пользователь не активен в команде")
+	}
+	roles, err := cloudidentity.ParseRoles(member.Roles)
+	if err != nil {
+		return cloudidentity.Principal{}, 0, err
+	}
+	canonical, err := cloudidentity.NewPrincipal(member.ActorID, roles)
+	return canonical, member.SessionEpoch, err
+}
+
 func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSONResponse(w, http.StatusOK, map[string]bool{"authentication_required": s.authenticator != nil})
 }
@@ -79,6 +119,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var principal cloudidentity.Principal
+	var sessionEpoch int64
 	if s.authenticator != nil {
 		header := strings.TrimSpace(r.Header.Get("Authorization"))
 		if !strings.HasPrefix(header, "Bearer ") {
@@ -89,6 +130,11 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		principal, err = s.authenticator.Verify(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
 		if err != nil {
 			http.Error(w, "authentication failed", http.StatusUnauthorized)
+			return
+		}
+		principal, sessionEpoch, err = s.resolveTeamPrincipal(principal)
+		if err != nil {
+			http.Error(w, "участник команды не активен или доступ отозван", http.StatusForbidden)
 			return
 		}
 	}
@@ -104,7 +150,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sessionMu.Lock()
 	s.sessions[sessionToken] = browserSession{
-		CSRFToken: csrfToken, Principal: principal, ExpiresAt: time.Now().UTC().Add(browserSessionTTL),
+		CSRFToken: csrfToken, Principal: principal, SessionEpoch: sessionEpoch, ExpiresAt: time.Now().UTC().Add(browserSessionTTL),
 	}
 	s.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -179,6 +225,13 @@ func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
 		delete(s.sessions, cookie.Value)
 		return browserSession{}, false
 	}
+	if s.authenticator != nil && session.Principal.ActorID != "" {
+		member, err := s.store.ValidateTeamSession(session.Principal.ActorID, session.SessionEpoch)
+		if err != nil || member == nil {
+			delete(s.sessions, cookie.Value)
+			return browserSession{}, false
+		}
+	}
 	return session, true
 }
 
@@ -215,6 +268,10 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	actorID := "local-user"
+	if session, ok := s.requestSession(r); ok && session.Principal.ActorID != "" {
+		actorID = session.Principal.ActorID
+	}
 	now := time.Now().UTC()
 	admissionSnapshot, err := json.Marshal(command)
 	if err != nil {
@@ -239,7 +296,7 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued"})
+	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued", "actor_id": actorID})
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
@@ -270,10 +327,15 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
+	actorID := "local-user"
+	if session, ok := s.requestSession(r); ok && session.Principal.ActorID != "" {
+		actorID = session.Principal.ActorID
+	}
 	if err := s.controller.Cancel(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.appendRunEvent(runID, "run_cancel_requested", time.Now().UTC(), map[string]any{"actor_id": actorID})
 	if canceled, err := s.store.MarkQueuedCanceled(runID, time.Now().UTC()); err == nil && canceled {
 		s.appendRunEvent(runID, "run_canceled", time.Now().UTC(), map[string]any{"status": "canceled"})
 	}

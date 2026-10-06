@@ -1053,7 +1053,7 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal, err := cloudidentity.NewPrincipal("reviewer-1", []cloudidentity.Role{cloudidentity.RoleReviewer})
+	principal, err := cloudidentity.NewPrincipal("reviewer@example.com", []cloudidentity.Role{cloudidentity.RoleReviewer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1067,6 +1067,25 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
+
+	adminCookie, adminCSRF := cloudSessionForTest(t, srv, manager, "owner@example.com", cloudidentity.RoleProductOwner)
+	invite := teamRequest(srv, adminCookie, adminCSRF, http.MethodPost, "/api/team/invitations", `{"email":"reviewer@example.com","roles":["reviewer"]}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite reviewer: %d %s", invite.Code, invite.Body.String())
+	}
+	var invitation struct {
+		Token string `json:"activation_token"`
+	}
+	if err := json.NewDecoder(invite.Body).Decode(&invitation); err != nil {
+		t.Fatal(err)
+	}
+	activation := newLoopbackRequest(http.MethodPost, "/api/team/activate", strings.NewReader(`{"token":"`+invitation.Token+`"}`))
+	activation.Header.Set("Content-Type", "application/json")
+	activationWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(activationWriter, activation)
+	if activationWriter.Code != http.StatusOK {
+		t.Fatalf("activate reviewer: %d %s", activationWriter.Code, activationWriter.Body.String())
+	}
 
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, newLoopbackRequest("GET", "/api/pipelines", nil))
@@ -1104,7 +1123,7 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("reviewer decision: %d %s", response.Code, response.Body.String())
 	}
-	if controller.decision.ActorID != "reviewer-1" || controller.decision.ActorRole != "reviewer" {
+	if controller.decision.ActorID != "reviewer@example.com" || controller.decision.ActorRole != "reviewer" {
 		t.Fatalf("decision audit использовал недоверенную identity: %+v", controller.decision)
 	}
 }

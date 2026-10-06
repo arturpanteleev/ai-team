@@ -5,13 +5,16 @@ import { Dashboard } from './pages/Dashboard';
 import { PipelineDetail } from './pages/PipelineDetail';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
-import { openSession, SESSION_EXPIRED_EVENT } from './api';
+import { Team } from './pages/Team';
+import { activateTeamInvitation, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp() {
   const { pathname } = useLocation();
   let page = null;
   if (pathname === '/') {
     page = <Dashboard />;
+  } else if (pathname === '/team') {
+    page = <Team />;
   } else if (/^\/pipelines\/[^/]+$/.test(pathname)) {
     page = <PipelineDetail />;
   } else if (pathname.startsWith('/artifacts/')) {
@@ -42,6 +45,10 @@ function App() {
   if (authState === 'login') {
     return <Login onLogin={async (token) => {
       await openSession(token);
+      setAuthState('ready');
+    }} onActivate={async (token) => {
+      const result = await activateTeamInvitation(token);
+      await openSession(result.access_token);
       setAuthState('ready');
     }} />;
   }

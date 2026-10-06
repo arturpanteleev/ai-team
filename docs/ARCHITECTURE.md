@@ -4,7 +4,7 @@
 контроллера. Если вы ищете, как установить и запустить ai-team, начните с
 [README.md](../README.md); этот файл предполагает, что вы уже знаете базовый
 конвейер (`analyst → architect → coder → reviewer → tester → verifier →
-deployer`) и термины из [глоссария](../README.md#глоссарий).
+deployer`) и термины из [глоссария](start/concepts.md#глоссарий).
 
 ## Карта пакетов
 

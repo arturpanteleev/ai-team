@@ -68,8 +68,9 @@ patched. We recommend always using the newest release.
 - Run ai-team only in trusted, local repositories.
 - For untrusted code or sensitive secrets, execute inside an external
   container/VM sandbox with strict filesystem/network/process limits and a
-  disposable runtime (see `docs/ARCHITECTURE.md` and the deployment notes in
-  `README.md`).
+  disposable runtime (see `docs/ARCHITECTURE.md`,
+  `docs/reference/security.md` and the `ai-team worker` notes in
+  `docs/reference/cli.md`).
 - Treat bundled evidence as integrity-protected but not necessarily
   authenticity-bearing unless signed with your own `--sign-key` and verified
   with `--verify-key`.

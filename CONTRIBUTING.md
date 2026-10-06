@@ -181,6 +181,7 @@ frontend audit/lint/tests/build с проверкой, что встроенны
 >
 > 1. этот список шагов против настоящего тела target-а `verify` в `Makefile`;
 > 2. минимальная версия Go в документах (`README.md`, этот файл,
+>    `docs/tutorial/install.md`, `docs/guides/ci-gate.md`,
 >    `docs/demo/README.md`, `docs/demo/run-demo.sh`) против `go.mod`, а точный
 >    пин в `.tool-versions` — против `go-version:` во ВСЕХ местах, где он
 >    продублирован: `.github/workflows/*` и `docs/demo/ci-gate-demo.yaml`
@@ -198,8 +199,8 @@ frontend audit/lint/tests/build с проверкой, что встроенны
 > `Makefile` или версию Go, пройдитесь по списку выше руками.
 >
 > Как выглядит рабочий подход, видно на соседних сторожах:
-> `TestReadmeCLIReferenceMatchesDispatcher` и `TestUsageTextMatchesDispatcher`
-> (`docs/docs_test.go`) сверяют таблицу README и текст `ai-team help` с
+> `TestCLIReferenceMatchesDispatcher` и `TestUsageTextMatchesDispatcher`
+> (`docs/docs_test.go`) сверяют справочник `docs/reference/cli.md` и текст `ai-team help` с
 > диспетчером команд, разбирая `cmd/ai-team/main.go` через `go/parser`. Они
 > смотрят на AST, а не на форматирование, и поэтому выдержали три круга
 > мутационных проверок. Сторожа из #139 имеет смысл строить так же.
@@ -326,7 +327,7 @@ Explore/propose/apply/archive/sync цикла выше доступны как �
 onboarding-наблюдения внешних участников. Процесс такой:
 
 - Приглашается внешний разработчик (не участник проекта) выполнить один из
-  runnable-сценариев README (например, быстрый старт).
+  runnable-сценариев документации (например, учебник `docs/tutorial/`).
 - С согласия участника фиксируются: **время** до результата/стоп-точки,
   **где именно** он остановился (шаг, команда, ошибка) и **что получилось**.
 - Наблюдение публикуется **без личных данных** (имя, контакты, содержимое

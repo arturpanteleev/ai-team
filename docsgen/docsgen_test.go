@@ -66,7 +66,7 @@ func TestSortPagesBySectionAndWeight(t *testing.T) {
 		{Title: "Security", Section: "Community", Weight: 1, URL: "/security/"},
 		{Title: "Contributing", Section: "Community", Weight: 0, URL: "/contributing/"},
 	}
-	sortPages(pages)
+	sortPages(pages, nil)
 	var order []string
 	for _, p := range pages {
 		order = append(order, p.Title)
@@ -88,77 +88,46 @@ func TestBuildEndToEnd(t *testing.T) {
 	repoRoot := filepath.Dir(root)
 	out := t.TempDir()
 
-	cfg := Config{
-		Root:        repoRoot,
-		Output:      out,
-		Title:       "ai-team",
-		Version:     "dev",
-		CleanOutput: true,
-		GitHubRepo:  "arturpanteleev/ai-team",
-		Sources: []SourcedPage{
-			{Source: "README.md", Title: "Overview", Section: "Guide", Weight: 0, URL: "/"},
-			{Source: "docs/ARCHITECTURE.md", Title: "Architecture", Section: "Reference", Weight: 0, URL: "/architecture/"},
-			{Source: "CONTRIBUTING.md", Title: "Contributing", Section: "Community", Weight: 0, URL: "/contributing/"},
-			{Source: "SECURITY.md", Title: "Security", Section: "Community", Weight: 1, URL: "/security/"},
-			{Source: "CODE_OF_CONDUCT.md", Title: "Code of Conduct", Section: "Community", Weight: 2, URL: "/code-of-conduct/"},
-			{Source: "CHANGELOG.md", Title: "Changelog", Section: "Project", Weight: 0, URL: "/changelog/"},
-			{Source: "docs/demo/README.md", Title: "Demo", Section: "Reference", Weight: 1, URL: "/demo/"},
-		},
-	}
+	cfg := SiteConfig()
+	cfg.Root = repoRoot
+	cfg.Output = out
+	cfg.Version = "dev"
+	cfg.CleanOutput = true
 
 	if err := Build(cfg); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 
-	for _, want := range []string{
-		"index.html",
-		"architecture/index.html",
-		"contributing/index.html",
-		"security/index.html",
-		"code-of-conduct/index.html",
-		"changelog/index.html",
-		"demo/index.html",
-		"assets/site.css",
-	} {
-		if _, err := os.Stat(filepath.Join(out, want)); err != nil {
-			t.Errorf("missing output file %s: %v", want, err)
+	// Every page of the site map is rendered, plus the shared assets.
+	want := []string{"assets/site.css", "assets/search.js", "assets/search-index.js"}
+	for _, sp := range cfg.Sources {
+		want = append(want, strings.TrimPrefix(sp.URL, "/")+"index.html")
+	}
+	for _, w := range want {
+		if _, err := os.Stat(filepath.Join(out, filepath.FromSlash(w))); err != nil {
+			t.Errorf("missing output file %s: %v", w, err)
 		}
 	}
 
-	// Cross-links to other markdown sources must be rewritten to site pages.
-	idx, err := os.ReadFile(filepath.Join(out, "index.html"))
+	// Links to rendered pages are rewritten; README.md is an alias of the
+	// home page. (Other Markdown files are copied as assets, as before.)
+	tour, err := os.ReadFile(filepath.Join(out, "start", "tour", "index.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		`href="/architecture/"`,
-		`href="/contributing/"`,
-		`href="/security/"`,
-	} {
-		if !strings.Contains(string(idx), want) {
-			t.Errorf("index.html missing rewritten link %s", want)
-		}
-	}
-	// Raw markdown links must not remain as broken .md hrefs.
-	if strings.Contains(string(idx), `.md"`) {
-		t.Errorf("index.html still contains raw .md links:\n%#v", string(idx))
-	}
-
-	// Non-page assets referenced by relative links must be copied into the
-	// output so the relative hrefs resolve on the deployed site.
-	for _, want := range []string{
-		"LICENSE",                // README badge link
-		"contributing/CLAUDE.md", // non-page relative .md
-		"demo/ci-gate-demo.yaml", // demo CI asset
-	} {
-		if _, err := os.Stat(filepath.Join(out, filepath.FromSlash(want))); err != nil {
-			t.Errorf("referenced asset not copied to %s: %v", want, err)
+	for _, w := range []string{`href="/tutorial/install/"`, `href="/guides/ci-gate/"`, `class="callout callout-learn"`, "<figcaption>"} {
+		if !strings.Contains(string(tour), w) {
+			t.Errorf("start/tour/index.html missing %s", w)
 		}
 	}
 
-	// Directory links are rewritten to GitHub tree URLs instead of 404ing.
-	if !strings.Contains(string(idx), "https://github.com/arturpanteleev/ai-team/tree/docsgen") {
-		t.Errorf("index.html missing GitHub tree rewrite for docsgen/:\n%.500s", string(idx))
+	// Screenshots referenced from the pages are copied next to them.
+	if _, err := os.Stat(filepath.Join(out, "start", "assets", "screens", "pipeline.png")); err != nil {
+		// Copies land relative to the page URL, mirroring the source layout.
+		matches, _ := filepath.Glob(filepath.Join(out, "*", "*", "screens", "pipeline.png"))
+		if len(matches) == 0 {
+			t.Errorf("screenshot pipeline.png not copied into the site: %v", err)
+		}
 	}
 
 	// The whole generated site must pass the link checker.

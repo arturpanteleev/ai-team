@@ -239,7 +239,7 @@ func TestGateJSONSignedReportsTrue(t *testing.T) {
 // (runPreflight в cmdRun) ходит в тот же pkg/preflight, что web-контроллер
 // (control.WithPreflight) и worker; классификация отсутствующих
 // runtime/gh/origin идентична во всех entry points. Выбранное различие
-// (зафиксировано в README, "Контроллер и preflight"): CLI показывает отчёт
+// (зафиксировано в docs/reference/cli.md, «Preflight перед запуском»): CLI показывает отчёт
 // read-only и блокирует только невозможность запустить runtime вовсе (cli);
 // delivery-предусловия fail-closed проверяются на самой delivery-стадии.
 func TestRunPreflightClassifiesMissingDeliveryPrereqs(t *testing.T) {

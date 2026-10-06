@@ -32,24 +32,13 @@ func main() {
 		log.Fatalf("getwd: %v", err)
 	}
 
-	cfg := docsgen.Config{
-		Root:        root,
-		Output:      filepath.Join(root, *out),
-		Title:       "ai-team",
-		Version:     version(),
-		BasePath:    *basePath,
-		CleanOutput: true,
-		GitHubRepo:  *githubRepo,
-		Sources: []docsgen.SourcedPage{
-			{Source: "README.md", Title: "Overview", Section: "Guide", Weight: 0, URL: "/"},
-			{Source: "docs/ARCHITECTURE.md", Title: "Architecture", Section: "Reference", Weight: 0, URL: "/architecture/"},
-			{Source: "docs/demo/README.md", Title: "Demo: gate → verify", Section: "Reference", Weight: 1, URL: "/demo/"},
-			{Source: "CONTRIBUTING.md", Title: "Contributing", Section: "Community", Weight: 0, URL: "/contributing/"},
-			{Source: "SECURITY.md", Title: "Security", Section: "Community", Weight: 1, URL: "/security/"},
-			{Source: "CODE_OF_CONDUCT.md", Title: "Code of Conduct", Section: "Community", Weight: 2, URL: "/code-of-conduct/"},
-			{Source: "CHANGELOG.md", Title: "Changelog", Section: "Project", Weight: 0, URL: "/changelog/"},
-		},
-	}
+	cfg := docsgen.SiteConfig()
+	cfg.Root = root
+	cfg.Output = filepath.Join(root, *out)
+	cfg.Version = version()
+	cfg.BasePath = *basePath
+	cfg.CleanOutput = true
+	cfg.GitHubRepo = *githubRepo
 
 	if err := docsgen.Build(cfg); err != nil {
 		log.Fatalf("build docs: %v", err)

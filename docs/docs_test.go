@@ -1,6 +1,6 @@
 // Package docs guards against silent regressions in onboarding documentation:
 // missing sections, a deleted glossary entry, or a broken cross-link would
-// otherwise only be caught by a human re-reading the whole README.
+// otherwise only be caught by a human re-reading README and docs/reference.
 package docs
 
 import (
@@ -40,23 +40,73 @@ func assertContainsAll(t *testing.T, haystack, path string, needles []string) {
 func TestReadmeCoversRequiredSections(t *testing.T) {
 	readme := readRepoFile(t, "../README.md")
 	assertContainsAll(t, readme, "README.md", []string{
-		"## Для кого этот инструмент",
-		"## Предварительные требования и установка",
+		"## Зачем это",
+		"## Для кого",
+		"## Установка",
 		"## Быстрый старт",
-		"## Как поставить фичу от начала до конца",
-		"## CLI-справочник",
-		"## Конвейер и зоны ответственности",
-		"## Конфигурация",
-		"## Evals",
-		"## Глоссарий",
-		"## Граница безопасности",
+		"## Документация",
 		"## Разработка",
+		"## Лицензия",
 	})
 }
 
-func TestReadmeGlossaryCoversCoreTerms(t *testing.T) {
+// referencePages — обязательные страницы справочника и их разделы. Справочный
+// материал живёт только здесь (README на них ссылается, а не повторяет), поэтому
+// исчезновение страницы или ключевого раздела — регрессия документации.
+var referencePages = map[string][]string{
+	"reference/cli.md": {
+		"# Команды CLI",
+		"## Все команды",
+		"## Preflight перед запуском",
+	},
+	"reference/config.md": {
+		"# Конфигурация",
+		"## Профили init",
+		"## Runtime и ключи",
+		"## Переходы workflow",
+	},
+	"reference/pipeline.md": {
+		"# Агенты и этапы",
+		"## Кто что решает",
+		"## Вердикты",
+		"## Где решает человек",
+	},
+	"reference/statuses.md": {
+		"# Статусы и коды выхода",
+		"## ai-team run",
+		"## ai-team gate",
+	},
+	"reference/security.md": {
+		"# Граница безопасности",
+		"## Целостность и подлинность",
+		"## Подлинность релизных бинарников",
+		"## Недоверенный код",
+		"../../SECURITY.md",
+	},
+}
+
+func TestReferencePagesCoverRequiredSections(t *testing.T) {
+	for path, needles := range referencePages {
+		assertContainsAll(t, readRepoFile(t, path), "docs/"+path, needles)
+	}
+}
+
+// TestReadmeLinksToReferencePages — README остаётся витриной: справочник
+// переехал в docs/reference, и ссылка на каждую страницу обязана остаться.
+func TestReadmeLinksToReferencePages(t *testing.T) {
 	readme := readRepoFile(t, "../README.md")
-	assertContainsAll(t, readme, "README.md", []string{
+	needles := make([]string, 0, len(referencePages))
+	for path := range referencePages {
+		needles = append(needles, "(docs/"+path+")")
+	}
+	sort.Strings(needles)
+	assertContainsAll(t, readme, "README.md", needles)
+}
+
+func TestGlossaryCoversCoreTerms(t *testing.T) {
+	concepts := readRepoFile(t, "start/concepts.md")
+	assertContainsAll(t, concepts, "docs/start/concepts.md", []string{
+		"## Глоссарий",
 		"**checkpoint**",
 		"**verdict marker**",
 		"**BLOCKED**",
@@ -76,13 +126,13 @@ func TestReadmeLinksToCompanionDocs(t *testing.T) {
 	})
 }
 
-// README называет конкретные дефолты лимитов времени и попыток. Именно
-// расхождение документации/комментария с кодом породило #143 (объявленный
-// дефолт 24h не применялся), поэтому числа сверяются с константами пакета
-// config, а не живут в README сами по себе.
-func TestReadmeBudgetDefaultsMatchCode(t *testing.T) {
-	readme := readRepoFile(t, "../README.md")
-	assertContainsAll(t, readme, "README.md", []string{
+// Справочник конфигурации называет конкретные дефолты лимитов времени и
+// попыток. Именно расхождение документации/комментария с кодом породило #143
+// (объявленный дефолт 24h не применялся), поэтому числа сверяются с
+// константами пакета config, а не живут в документации сами по себе.
+func TestConfigReferenceBudgetDefaultsMatchCode(t *testing.T) {
+	ref := readRepoFile(t, "reference/config.md")
+	assertContainsAll(t, ref, "docs/reference/config.md", []string{
 		"| `budget.max_wall_time` | `" + config.DefaultBudgetMaxWallTime + "` |",
 		"| `budget.max_attempts` | `" + strconv.Itoa(config.DefaultBudgetMaxAttempts) + "` |",
 		"| `stage_timeout` | `30m` |",
@@ -90,13 +140,14 @@ func TestReadmeBudgetDefaultsMatchCode(t *testing.T) {
 	// 30m в таблице выше — человеческая запись той же константы:
 	// DefaultStageTimeout.String() даёт "30m0s", поэтому сверяем значением.
 	if config.DefaultStageTimeout != 30*time.Minute {
-		t.Errorf("DefaultStageTimeout = %v, а README обещает 30m", config.DefaultStageTimeout)
+		t.Errorf("DefaultStageTimeout = %v, а справочник обещает 30m", config.DefaultStageTimeout)
 	}
 }
 
 func TestArchitectureDocCoversReferencedAnchors(t *testing.T) {
-	// README ссылается на конкретные заголовки в ARCHITECTURE.md через
-	// #anchor; если заголовок переименуют, ссылка молча сломается.
+	// Справочник (docs/reference) ссылается на конкретные заголовки в
+	// ARCHITECTURE.md через #anchor; если заголовок переименуют, ссылка молча
+	// сломается.
 	arch := readRepoFile(t, "ARCHITECTURE.md")
 	assertContainsAll(t, arch, "docs/ARCHITECTURE.md", []string{
 		"## Deployer и canonical delivery plan",
@@ -132,15 +183,23 @@ func TestContributingKeepsOpenSpecOptional(t *testing.T) {
 // в проверку по умолчанию (fail-closed), а не молча выпадала из неё.
 var dispatcherAliases = map[string]bool{"--help": true, "-h": true}
 
-// cliCommandRe якорится на начало фрагмента: команда считается
-// задокументированной, только если ячейка (или её вариант после «/») с неё
-// НАЧИНАЕТСЯ. Без якоря упоминание `ai-team gc` в середине описания чужой
-// строки закрывало бы требование, и удалённая строка проходила бы незамеченной.
+// cliReferencePath — страница справочника команд. Раньше справочник жил в
+// README; он переехал в docs/reference, а README только ссылается на него.
+const cliReferencePath = "reference/cli.md"
+
+// cliTableCellRe — первая ячейка строки обзорной таблицы обязана состоять
+// РОВНО из одной команды в обратных кавычках. Якорь с обеих сторон закрывает
+// дыру прежней README-таблицы, где ячейка резалась по «/» и лишний вариант в
+// чужой строке молча «документировал» удалённую команду.
 //
 // Имя команды — [a-z] и далее буквы, цифры, «-» и «_»: диспетчер цифры
 // допускает, и запрет на них делал бы тест неисправимо красным для команды
 // вроде `gc2`, описанной везде корректно.
-var cliCommandRe = regexp.MustCompile("^\\s*`ai-team ([a-z][a-z0-9_-]*)")
+var cliTableCellRe = regexp.MustCompile("^\\s*`ai-team ([a-z][a-z0-9_-]*)`\\s*$")
+
+// cliHeadingRe — заголовок раздела команды: «### ai-team <команда>» и ничего
+// больше в строке. Прозаические упоминания и примеры в коде не считаются.
+var cliHeadingRe = regexp.MustCompile(`^### ai-team ([a-z][a-z0-9_-]*)\s*$`)
 
 const mainSourcePath = "../cmd/ai-team/main.go"
 
@@ -161,7 +220,7 @@ func parseMainSource(t *testing.T) (*token.FileSet, *ast.File) {
 //
 // ПОЧЕМУ разбор исходника, а не литеральный список в тесте: список,
 // продублированный в тесте, разойдётся с кодом ровно так же, как разошёлся
-// README, — сторож тогда охраняет сам себя. Вариант «прогнать `ai-team help`»
+// прежний README, — сторож тогда охраняет сам себя. Вариант «прогнать `ai-team help`»
 // отвергнут: он требует собранного бинарника (go build внутри docs-теста), то
 // есть делает документационный тест зависимым от сборки и медленным, а
 // печатаемая справка — это тоже текст, который может отстать от switch.
@@ -178,7 +237,7 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 
 	// Диспетчер опознаём по выражению switch, а не по позиции в файле.
 	// Собираем ВСЕ совпадения: при втором таком switch «побеждал бы последний»
-	// и сторож молча читал бы не тот блок, обвиняя README в несуществующем
+	// и сторож молча читал бы не тот блок, обвиняя справочник в несуществующем
 	// расхождении. Неоднозначность — это отказ, а не выбор наугад.
 	var dispatchers []*ast.SwitchStmt
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -235,66 +294,87 @@ func dispatcherCommands(t *testing.T) map[string]bool {
 	return commands
 }
 
-// readmeCLICommands собирает команды из первой колонки строк раздела
-// «CLI-справочник», начинающихся с «|». Прозаические упоминания
-// (`ai-team run --resume ...` ниже по тексту) не считаются документированием
-// команды в справочнике.
-//
-// Что именно считается строкой таблицы: любая строка секции, начинающаяся с
-// «|», — разметка не отслеживается, поэтому такая же строка внутри fenced-блока
-// ``` в этой секции тоже была бы прочитана как строка таблицы. Полноценный
-// Markdown-разбор сюда не заводим: это тот же класс задач, что и #139.
-func readmeCLICommands(t *testing.T) map[string]bool {
-	t.Helper()
-	readme := readRepoFile(t, "../README.md")
-	const header = "## CLI-справочник"
-	start := strings.Index(readme, header)
-	if start < 0 {
-		t.Fatalf("README.md: не найден раздел %q", header)
+// markdownLinesOutsideFences возвращает строки Markdown-файла, не входящие в
+// fenced-блоки ```. Иначе пример вывода или таблица внутри блока кода
+// засчитывались бы как документирование команды.
+func markdownLinesOutsideFences(content string) []string {
+	var lines []string
+	inFence := false
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence {
+			lines = append(lines, line)
+		}
 	}
-	section := readme[start:]
-	if next := strings.Index(section[len(header):], "\n## "); next >= 0 {
-		section = section[:len(header)+next]
+	return lines
+}
+
+// cliReferenceTableCommands собирает команды из первой колонки обзорной
+// таблицы раздела «## Все команды» страницы docs/reference/cli.md.
+func cliReferenceTableCommands(t *testing.T) map[string]bool {
+	t.Helper()
+	const header = "## Все команды"
+	lines := markdownLinesOutsideFences(readRepoFile(t, cliReferencePath))
+	start := -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) == header {
+			start = index
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("docs/%s: не найден раздел %q", cliReferencePath, header)
 	}
 	commands := map[string]bool{}
-	for _, line := range strings.Split(section, "\n") {
+	for _, line := range lines[start+1:] {
+		if strings.HasPrefix(line, "## ") {
+			break
+		}
 		if !strings.HasPrefix(line, "|") || strings.HasPrefix(line, "|---") {
 			continue
 		}
 		cells := strings.Split(strings.Trim(line, "|"), "|")
-		// Одна строка таблицы может законно документировать пару команд через
-		// «/» (`ai-team version` / `ai-team help`), поэтому ячейка режется на
-		// варианты, и каждый обязан НАЧИНАТЬСЯ с имени команды.
-		//
-		// Остаток исходной дыры: лишний вариант после «/» в ЧУЖОЙ ячейке
-		// закроет требование, и строку про команду можно будет удалить
-		// незаметно. Дыра существует только в ГОЛОЙ форме — вариант обязан
-		// сам начинаться с имени команды:
-		//
-		//   | `ai-team version` / `ai-team help` / `ai-team gc` | … |   не ловим
-		//   | `ai-team version` / `ai-team help` / см. также `ai-team gc` | … |
-		//                                                                ловим,
-		//   потому что якорь отбрасывает вариант, начинающийся с прозы.
-		//
-		// Отличить документирование от ссылки текстом нельзя — нужен разбор
-		// таблицы (#139).
-		for _, alternative := range strings.Split(cells[0], "/") {
-			if match := cliCommandRe.FindStringSubmatch(alternative); match != nil {
-				commands[match[1]] = true
+		match := cliTableCellRe.FindStringSubmatch(cells[0])
+		if match == nil {
+			// Заголовок таблицы — единственная законная строка без команды.
+			if strings.TrimSpace(cells[0]) == "Команда" {
+				continue
 			}
+			t.Errorf("docs/%s «%s»: первая ячейка строки не является одной командой: %q", cliReferencePath, header, line)
+			continue
+		}
+		if commands[match[1]] {
+			t.Errorf("docs/%s «%s»: команда %q описана дважды", cliReferencePath, header, match[1])
+		}
+		commands[match[1]] = true
+	}
+	return commands
+}
+
+// cliReferenceSectionCommands собирает команды, у которых на странице
+// справочника есть собственный раздел «### ai-team <команда>».
+func cliReferenceSectionCommands(t *testing.T) map[string]bool {
+	t.Helper()
+	commands := map[string]bool{}
+	for _, line := range markdownLinesOutsideFences(readRepoFile(t, cliReferencePath)) {
+		if match := cliHeadingRe.FindStringSubmatch(line); match != nil {
+			if commands[match[1]] {
+				t.Errorf("docs/%s: раздел команды %q встречается дважды", cliReferencePath, match[1])
+			}
+			commands[match[1]] = true
 		}
 	}
 	return commands
 }
 
-// TestReadmeCLIReferenceMatchesDispatcher — сторож против расхождения, из-за
-// которого `usage`, `gc` и `scheduler-worker` отсутствовали в справочнике.
-// Проверяем оба направления: README не должен описывать и несуществующие
-// команды тоже.
-func TestReadmeCLIReferenceMatchesDispatcher(t *testing.T) {
-	dispatcher := dispatcherCommands(t)
-	documented := readmeCLICommands(t)
-
+// compareWithDispatcher сверяет множество задокументированных команд с
+// диспетчером в обе стороны: справочник не должен ни терять команды, ни
+// описывать несуществующие.
+func compareWithDispatcher(t *testing.T, where string, dispatcher, documented map[string]bool) {
+	t.Helper()
 	var missing, extra []string
 	for command := range dispatcher {
 		if !documented[command] {
@@ -308,13 +388,22 @@ func TestReadmeCLIReferenceMatchesDispatcher(t *testing.T) {
 	}
 	sort.Strings(missing)
 	sort.Strings(extra)
-
 	if len(missing) > 0 {
-		t.Errorf("README.md «CLI-справочник»: команды есть в cmd/ai-team/main.go, но не описаны: %v", missing)
+		t.Errorf("%s: команды есть в cmd/ai-team/main.go, но не описаны: %v", where, missing)
 	}
 	if len(extra) > 0 {
-		t.Errorf("README.md «CLI-справочник»: описаны команды, которых нет в диспетчере cmd/ai-team/main.go: %v", extra)
+		t.Errorf("%s: описаны команды, которых нет в диспетчере cmd/ai-team/main.go: %v", where, extra)
 	}
+}
+
+// TestCLIReferenceMatchesDispatcher — сторож против расхождения, из-за
+// которого `usage`, `gc` и `scheduler-worker` когда-то отсутствовали в
+// справочнике. Проверяются и обзорная таблица, и разделы команд: удалить
+// команду из одного места и оставить в другом не получится.
+func TestCLIReferenceMatchesDispatcher(t *testing.T) {
+	dispatcher := dispatcherCommands(t)
+	compareWithDispatcher(t, "docs/"+cliReferencePath+" «Все команды»", dispatcher, cliReferenceTableCommands(t))
+	compareWithDispatcher(t, "docs/"+cliReferencePath+" разделы «### ai-team …»", dispatcher, cliReferenceSectionCommands(t))
 }
 
 // usageCommandRe — строка справки, НАЧИНАЮЩАЯСЯ с имени команды.
@@ -411,9 +500,9 @@ func usageCommands(t *testing.T) map[string]bool {
 }
 
 // TestUsageTextMatchesDispatcher — справка это третий справочник команд рядом с
-// README и диспетчером, и он уже успел разойтись в другую сторону: `ci-import`
+// docs/reference/cli.md и диспетчером, и он уже успел разойтись в другую сторону: `ci-import`
 // в printUsage не было. Сверяем с тем же устойчивым источником — AST
-// диспетчера, — и в обе стороны, как и README.
+// диспетчера, — и в обе стороны, как и справочник.
 func TestUsageTextMatchesDispatcher(t *testing.T) {
 	dispatcher := dispatcherCommands(t)
 	documented := usageCommands(t)

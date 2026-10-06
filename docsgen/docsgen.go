@@ -8,7 +8,6 @@
 package docsgen
 
 import (
-	"bytes"
 	"fmt"
 	"html/template"
 	"net/url"
@@ -19,13 +18,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/renderer/html"
 	"github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
 )
 
 // SourcedPage declares an input Markdown file and how it maps to a page.
@@ -37,27 +32,53 @@ type SourcedPage struct {
 	// URL overrides the computed output URL (default derived from Source).
 	// Use "/" to make a page the site index.
 	URL string
+	// Description is a one-line summary used for the meta description and
+	// for page cards on the home page.
+	Description string
 }
 
 // Page is a single documentation page derived from one Markdown file.
 type Page struct {
-	Source  string
-	Title   string
-	Section string
-	Weight  int
-	URL     string
+	Source      string
+	Title       string
+	Section     string
+	Weight      int
+	URL         string
+	Description string
 
 	Body template.HTML
 	TOC  template.HTML
+
+	// Prev and Next link pages in reading order (sidebar order).
+	Prev *Page
+	Next *Page
+
+	headings []pageHeading
+}
+
+// NavSection is one sidebar group with its pages in reading order.
+type NavSection struct {
+	Title string
+	Pages []*Page
+}
+
+// NavLink is a labelled link in the header or on the home page. Root-relative
+// URLs ("/start/") get the site base path; absolute URLs are kept as is.
+type NavLink struct {
+	Title string
+	URL   string
 }
 
 // Site holds the full set of pages and shared metadata used by the layout.
 type Site struct {
-	Title    string
-	Version  string
-	BasePath string
-	Pages    []*Page
-	Current  *Page
+	Title       string
+	Version     string
+	BasePath    string
+	Pages       []*Page
+	Sections    []NavSection
+	HeaderLinks []NavLink
+	HeroActions []NavLink
+	Current     *Page
 }
 
 // Config describes the whole site build.
@@ -69,9 +90,20 @@ type Config struct {
 	BasePath    string
 	CleanOutput bool
 	Sources     []SourcedPage
+	// SectionOrder lists sidebar section titles in display order. Sections
+	// not listed go last; nil keeps the default English order (Guide,
+	// Reference, Community, Project).
+	SectionOrder []string
 	// GitHubRepo is the "owner/repo" used to rewrite directory links to
 	// GitHub blob URLs (e.g. "arturpanteleev/ai-team").
 	GitHubRepo string
+	// HeaderLinks are shown in the site header; HeroActions are the buttons
+	// on the home page.
+	HeaderLinks []NavLink
+	HeroActions []NavLink
+	// Aliases map repository Markdown files that are not rendered pages to a
+	// site URL, so links to them lead somewhere useful (README.md → "/").
+	Aliases map[string]string
 }
 
 // Build renders all configured Markdown sources into HTML under Output.
@@ -83,9 +115,11 @@ func Build(cfg Config) error {
 	}
 
 	site := &Site{
-		Title:    cfg.Title,
-		Version:  cfg.Version,
-		BasePath: normalizeBasePath(cfg.BasePath),
+		Title:       cfg.Title,
+		Version:     cfg.Version,
+		BasePath:    normalizeBasePath(cfg.BasePath),
+		HeaderLinks: cfg.HeaderLinks,
+		HeroActions: cfg.HeroActions,
 	}
 
 	// Path map: repository-absolute Markdown path -> site URL, used to rewrite
@@ -107,6 +141,16 @@ func Build(cfg Config) error {
 	// blob/tree URLs. It is distinct from a linkTransformer's baseDir, which
 	// is the directory of the specific page being rendered (see below) and
 	// varies per page depth.
+	for source, url := range cfg.Aliases {
+		abs, err := filepath.Abs(filepath.Join(cfg.Root, filepath.FromSlash(source)))
+		if err != nil {
+			return err
+		}
+		if _, isPage := pathMap[abs]; !isPage {
+			pathMap[abs] = joinBase(site.BasePath, url)
+		}
+	}
+
 	repoRoot, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return fmt.Errorf("resolve repo root: %w", err)
@@ -144,9 +188,11 @@ func Build(cfg Config) error {
 		site.Pages = append(site.Pages, page)
 	}
 
-	sortPages(site.Pages)
+	sortPages(site.Pages, cfg.SectionOrder)
+	site.Sections = navSections(site.Pages)
+	linkReadingOrder(site.Sections)
 
-	if err := writeLayoutAssets(cfg.Output); err != nil {
+	if err := writeLayoutAssets(cfg.Output, site); err != nil {
 		return err
 	}
 
@@ -177,56 +223,6 @@ func Build(cfg Config) error {
 	}
 
 	return nil
-}
-
-// renderPage converts Markdown bytes into a Page with a body and TOC.
-// tr carries the transformation configuration (baseDir, pathMap, pageURL and
-// githubRepo) and accumulates any non-page relative links it finds.
-func renderPage(tr *linkTransformer, sp SourcedPage, content []byte) (*Page, error) {
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.GFM,
-			extension.Table,
-			extension.Linkify,
-		),
-		goldmark.WithParserOptions(
-			parser.WithASTTransformers(
-				util.Prioritized(tr, 100),
-				util.Prioritized(&headingIDTransformer{}, 200),
-			),
-		),
-		goldmark.WithRendererOptions(
-			html.WithUnsafe(),
-		),
-	)
-
-	var buf bytes.Buffer
-	if err := md.Convert(content, &buf); err != nil {
-		return nil, err
-	}
-
-	title := sp.Title
-	if title == "" {
-		title = firstHeading(content)
-	}
-	if title == "" {
-		title = sp.Source
-	}
-
-	url := sp.URL
-	if url == "" {
-		url = slugify(sp.Source)
-	}
-
-	return &Page{
-		Source:  sp.Source,
-		Title:   title,
-		Section: sp.Section,
-		Weight:  sp.Weight,
-		URL:     url,
-		Body:    template.HTML(buf.String()),
-		TOC:     template.HTML(buildTOC(content)),
-	}, nil
 }
 
 // headingIDTransformer assigns readable, stable IDs to headings so that the
@@ -678,266 +674,3 @@ func listHTML(dir string) ([]string, error) {
 	})
 	return files, err
 }
-
-// firstHeading extracts the first ATX heading (# Foo) from Markdown bytes.
-func firstHeading(content []byte) string {
-	for _, line := range bytes.Split(content, []byte("\n")) {
-		trimmed := strings.TrimSpace(string(line))
-		if strings.HasPrefix(trimmed, "# ") {
-			return strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
-		}
-	}
-	return ""
-}
-
-// buildTOC scans Markdown headings (levels 2-3) and emits a nested list whose
-// anchors match the IDs goldmark generates (slugified heading text). This
-// mirrors the site's auto-generated heading IDs deterministically.
-func buildTOC(content []byte) string {
-	type item struct {
-		level int
-		text  string
-		id    string
-	}
-	var items []item
-	seen := make(map[string]int)
-
-	for _, rawLine := range bytes.Split(content, []byte("\n")) {
-		line := strings.TrimSpace(string(rawLine))
-		if !strings.HasPrefix(line, "#") {
-			continue
-		}
-		// Count leading '#'.
-		level := 0
-		for level < len(line) && line[level] == '#' {
-			level++
-		}
-		rest := strings.TrimSpace(line[level:])
-		if rest == "" || level < 2 || level > 3 {
-			continue
-		}
-		base := slugifyID(rest)
-		n := seen[base]
-		seen[base]++
-		id := base
-		if n > 0 {
-			id = fmt.Sprintf("%s-%d", base, n)
-		}
-		items = append(items, item{level: level, text: rest, id: id})
-	}
-
-	if len(items) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	b.WriteString(`<nav class="toc"><strong>On this page</strong><ul>`)
-	currentLevel := 2
-	openLevel := 0
-	for _, it := range items {
-		if it.level > currentLevel {
-			b.WriteString("<ul>")
-			openLevel++
-		} else if it.level < currentLevel {
-			b.WriteString("</ul>")
-			openLevel--
-		}
-		currentLevel = it.level
-		b.WriteString(fmt.Sprintf(`<li><a href="#%s">%s</a></li>`,
-			it.id, template.HTMLEscapeString(it.text)))
-	}
-	for openLevel > 0 {
-		b.WriteString("</ul>")
-		openLevel--
-	}
-	b.WriteString("</ul></nav>")
-	return b.String()
-}
-
-// slugify converts a file source to a default output URL. README.md maps to
-// the site root; otherwise the source path (minus ".md") becomes a directory
-// with a trailing slash.
-func slugify(source string) string {
-	s := strings.TrimSuffix(source, ".md")
-	s = strings.ReplaceAll(s, `\`, "/")
-	s = strings.Trim(s, "/")
-	if s == "README" {
-		return "/"
-	}
-	return "/" + s + "/"
-}
-
-// normalizeBasePath ensures a base path looks like "" or "/prefix".
-func normalizeBasePath(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" || p == "/" {
-		return ""
-	}
-	return "/" + strings.Trim(p, "/")
-}
-
-// joinBase prefixes a root-relative URL with a site base path. If base is
-// empty the URL is returned unchanged.
-func joinBase(base, url string) string {
-	if base == "" || url == "" {
-		return url
-	}
-	return base + url
-}
-
-func sortPages(pages []*Page) {
-	sort.SliceStable(pages, func(i, j int) bool {
-		if pages[i].Section != pages[j].Section {
-			return sectionRank(pages[i].Section) < sectionRank(pages[j].Section)
-		}
-		return pages[i].Weight < pages[j].Weight
-	})
-}
-
-func sectionRank(s string) int {
-	switch s {
-	case "Guide":
-		return 0
-	case "Reference":
-		return 1
-	case "Community":
-		return 2
-	case "Project":
-		return 3
-	default:
-		return 99
-	}
-}
-
-// layoutSrc is the shared HTML shell every page is rendered into. It uses the
-// "link" template function so all root-relative hrefs honour the site base path.
-const layoutSrc = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{.Current.Title}} — {{.Title}}</title>
-<meta name="generator" content="ai-team docsgen">
-<link rel="stylesheet" href="{{link "/assets/site.css"}}">
-</head>
-<body>
-<header class="site-header">
-  <a class="brand" href="{{link "/"}}">{{.Title}}</a>
-  <span class="version">{{.Version}}</span>
-  <nav class="topnav">
-    {{range .Pages}}<a href="{{link .URL}}"{{if eq .URL $.Current.URL}} class="active"{{end}}>{{.Title}}</a>{{end}}
-  </nav>
-</header>
-<div class="layout">
-  <aside class="sidebar">
-    {{template "sidebar" .}}
-  </aside>
-  <main class="content">
-    {{.Current.TOC}}
-    <article class="markdown">{{.Current.Body}}</article>
-  </main>
-</div>
-<footer class="site-footer">Generated from Markdown by ai-team docsgen.</footer>
-</body>
-</html>
-`
-
-const sidebarSrc = `
-{{- $cur := .Current -}}
-{{- $lastSection := "" -}}
-{{- range .Pages -}}
-  {{- if ne .Section $lastSection -}}
-    {{- if ne $lastSection "" -}}</ul>{{- end -}}
-    {{- $lastSection = .Section -}}
-    <div class="section-label">{{.Section}}</div><ul class="sidenav">
-  {{- end -}}
-  <li><a href="{{link .URL}}"{{if eq .URL $cur.URL}} class="active"{{end}}>{{.Title}}</a></li>
-{{- end -}}
-{{- if ne $lastSection "" -}}</ul>{{- end -}}
-`
-
-func executeLayout(site *Site) ([]byte, error) {
-	funcs := template.FuncMap{
-		"link": func(url string) string {
-			return joinBase(site.BasePath, url)
-		},
-	}
-	layout, err := template.New("layout").Funcs(funcs).Parse(layoutSrc)
-	if err != nil {
-		return nil, err
-	}
-	sidebar, err := template.New("sidebar").Funcs(funcs).Parse(sidebarSrc)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := layout.AddParseTree("sidebar", sidebar.Tree); err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	if err := layout.ExecuteTemplate(&buf, "layout", site); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func writeLayoutAssets(output string) error {
-	if err := os.MkdirAll(filepath.Join(output, "assets"), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(output, "assets", "site.css"), []byte(css), 0o644)
-}
-
-const css = `:root {
-  --bg: #ffffff; --fg: #1f2328; --muted: #57606a; --border: #d0d7de;
-  --accent: #0969da; --code-bg: #f6f8fa;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  color: var(--fg); background: var(--bg); line-height: 1.6;
-}
-.site-header {
-  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 1rem;
-  padding: 0.75rem 1.5rem; background: var(--bg); border-bottom: 1px solid var(--border);
-}
-.brand { font-weight: 600; font-size: 1.1rem; color: var(--fg); text-decoration: none; }
-.version { color: var(--muted); font-size: 0.8rem; }
-.topnav { margin-left: auto; display: flex; gap: 1rem; flex-wrap: wrap; }
-.topnav a { color: var(--muted); text-decoration: none; font-size: 0.9rem; }
-.topnav a.active { color: var(--accent); font-weight: 600; }
-.layout { display: flex; max-width: 1200px; margin: 0 auto; }
-.sidebar {
-  width: 260px; min-width: 260px; padding: 1.5rem 1rem 2rem 1.5rem;
-  border-right: 1px solid var(--border); height: 100vh; position: sticky; top: 3rem; overflow-y: auto;
-}
-.section-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 1rem 0 .25rem; }
-.sidenav { list-style: none; margin: 0; padding: 0; }
-.sidenav li { margin: .15rem 0; }
-.sidenav a { color: var(--fg); text-decoration: none; font-size: .92rem; display: block; padding: .15rem .4rem; border-radius: 4px; }
-.sidenav a:hover { background: var(--code-bg); }
-.sidenav a.active { color: var(--accent); font-weight: 600; }
-.content { flex: 1; min-width: 0; padding: 1.5rem 2.5rem 3rem; max-width: 880px; }
-.toc { border: 1px solid var(--border); border-radius: 6px; padding: .6rem 1rem; margin-bottom: 1.5rem; font-size: .88rem; }
-.toc strong { display: block; margin-bottom: .25rem; }
-.toc ul { margin: .25rem 0; padding-left: 1.1rem; }
-.toc li { margin: .1rem 0; }
-.markdown h1 { font-size: 1.9rem; border-bottom: 1px solid var(--border); padding-bottom: .3rem; }
-.markdown h2 { font-size: 1.4rem; margin-top: 1.6rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
-.markdown h3 { font-size: 1.15rem; margin-top: 1.2rem; }
-.markdown a { color: var(--accent); text-decoration: none; }
-.markdown a:hover { text-decoration: underline; }
-.markdown pre { background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
-.markdown code { background: var(--code-bg); padding: .15em .35em; border-radius: 4px; font-size: .88em; }
-.markdown pre code { background: none; padding: 0; }
-.markdown table { border-collapse: collapse; margin: 1rem 0; width: 100%; }
-.markdown th, .markdown td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left; }
-.markdown th { background: var(--code-bg); }
-.markdown blockquote { border-left: 4px solid var(--border); margin: 1rem 0; padding: .1rem 1rem; color: var(--muted); }
-.markdown img { max-width: 100%; }
-.markdown hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
-.site-footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .8rem; text-align: center; padding: 1rem; margin-top: 2rem; }
-@media (max-width: 720px) {
-  .layout { flex-direction: column; }
-  .sidebar { width: 100%; min-width: 0; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--border); padding: 1rem; }
-}
-`

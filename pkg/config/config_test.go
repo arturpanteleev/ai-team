@@ -466,14 +466,20 @@ func TestDefaultProfilesDeferredGates(t *testing.T) {
 		}
 		for _, edge := range cfg.Workflow.Edges {
 			switch {
+			case edge.Outcome == "blocked":
+				if edge.From != "analyst" || edge.To != "analyst" || edge.Approval == nil || edge.Approval.Deferred {
+					t.Fatalf("%s: clarification edge analyst/blocked должен требовать немедленного решения", profile)
+				}
 			case edge.Outcome == "rejected":
 				if edge.Approval != nil && edge.Approval.Deferred {
 					t.Fatalf("%s: loopback-ребро %s→%s не должно быть deferred", profile, edge.From, edge.To)
 				}
 			case edge.To != "$complete" && edge.Approval == nil:
 				t.Fatalf("%s: forward-ребро %s→%s без approval", profile, edge.From, edge.To)
-			case edge.To != "$complete" && !edge.Approval.Deferred:
-				t.Fatalf("%s: forward-ребро %s→%s должно быть deferred (APF-1 consolidation)", profile, edge.From, edge.To)
+			case edge.To != "$complete" && edge.From == "analyst" && edge.Approval.Deferred:
+				t.Fatalf("%s: согласование продуктовых требований должно быть явным до архитектора", profile)
+			case edge.To != "$complete" && edge.From != "analyst" && !edge.Approval.Deferred && profile != ProfileRegulated:
+				t.Fatalf("%s: forward-ребро %s→%s должно оставаться deferred (APF-1 consolidation)", profile, edge.From, edge.To)
 			}
 		}
 		graph, err := cfg.CompiledGraph()

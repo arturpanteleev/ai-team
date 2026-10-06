@@ -620,6 +620,366 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 	}
 }
 
+func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
+	rt.content["analyst"] = map[string]string{"proposal": "готовая спецификация"}
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name != "analyst" {
+			return
+		}
+		if rt.calls[name] == 1 {
+			path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("## Уточнение\nКто целевой клиент и на какую метрику влияем?\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		delete(rt.blocked, name)
+		gotQuestion, gotAnswer, gotBrief, gotBriefVersion := false, false, false, false
+		for _, input := range inputs {
+			if input.Name == "questions" {
+				gotQuestion = true
+				question, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(question), "целевой клиент") {
+					t.Errorf("архивный source artifact с вопросами не попал в повторную попытку: %q err=%v", question, err)
+				}
+			}
+			if input.Name == "clarification-answer" {
+				gotAnswer = true
+				answer, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(answer), "B2B-клиенты") {
+					t.Errorf("аналитик не получил durable answer: %q err=%v", answer, err)
+				}
+			}
+			if input.Name == "business-brief" {
+				gotBrief = true
+				brief, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(brief), "B2B-клиенты среднего бизнеса") {
+					t.Errorf("analyst не получил новую версию brief с ответом: %q err=%v", brief, err)
+				}
+			}
+			if input.Name == "business-brief-version" {
+				gotBriefVersion = true
+				metadata, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(metadata), `"sha256"`) || !strings.Contains(string(metadata), `"id"`) {
+					t.Errorf("analyst должен получить ID/SHA version manifest: %q err=%v", metadata, err)
+				}
+			}
+		}
+		if !gotQuestion || !gotAnswer || !gotBrief || !gotBriefVersion {
+			t.Errorf("resume inputs: questions=%v answer=%v brief=%v version=%v", gotQuestion, gotAnswer, gotBrief, gotBriefVersion)
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"product_owner"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "analyst"})
+	pr := &scriptedPrompter{}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(pr))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("run должен ждать Product Owner, result=%+v err=%v", first, err)
+	}
+	stateStore, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := stateStore.Load(first.RunID)
+	if err != nil || state.Phase != lifecycle.PhaseWaiting || state.NextStage != "analyst" {
+		t.Fatalf("ожидание должно сохранить тот же этап и run: %+v err=%v", state, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || pending.FromStage != "analyst" || pending.Targets["answer_questions"] != "analyst" || !strings.Contains(string(pending.Payload), "целевой клиент") {
+		t.Fatalf("question approval потерял содержимое/маршрут: %+v err=%v", pending, err)
+	}
+	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "answer_questions",
+		Comment: "Целевые клиенты — B2B-клиенты среднего бизнеса.", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil {
+		t.Fatalf("resume должен продолжить тот же run: result=%+v err=%v", second, err)
+	}
+	if second.RunID != first.RunID || rt.calls["analyst"] != 2 || second.Outcome != "completed" {
+		t.Fatalf("неверный resume: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+	versions, err := listBriefVersions(filepath.Join(dir, ".ai-team", "runs", first.RunID, "brief"))
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("ожидаются исходная версия и версия с уточнением: %#v err=%v", versions, err)
+	}
+	brief, err := os.ReadFile(versions[1].Path)
+	if err != nil || !strings.Contains(string(brief), "увеличить доход продаж") || !strings.Contains(string(brief), "Целевые клиенты — B2B-клиенты") {
+		t.Fatalf("версия brief должна хранить намерение и ответ: %q err=%v", brief, err)
+	}
+}
+
+func TestRun_ProductOwnerApprovesVersionedSpecBeforeArchitect(t *testing.T) {
+	dir := env(t)
+	registry := agent.NewFS(fstest.MapFS{
+		"analyst/def.yaml": def(`name: analyst
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  proposal: '{feature}/proposal.md'
+  spec: '{feature}/specs/product/spec.md'
+`),
+		"architect/def.yaml": def(`name: architect
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs:
+  design: '{feature}/design.md'
+`),
+		"analyst/prompt.md": def("test"), "architect/prompt.md": def("test"),
+	})
+	governance := func(wf *config.WorkflowConfig) {
+		for i := range wf.Edges {
+			if wf.Edges[i].From == "analyst" && wf.Edges[i].Outcome == "passed" {
+				wf.Edges[i].Approval = &config.WorkflowApprovalConfig{
+					Roles: []string{"product_owner"}, Quorum: "any", Deferred: false,
+					Actions: map[string]string{"approve_spec": "architect", "reject": "$stop"},
+				}
+			}
+		}
+	}
+	cfg := cfgForGraph(governance, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "architect"})
+	rt := newScripted()
+	architectBrief, architectBriefVersion, architectSpec := false, false, false
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name != "architect" {
+			return
+		}
+		for _, input := range inputs {
+			if input.Name == "business-brief" {
+				architectBrief = true
+			}
+			if input.Name == "business-brief-version" {
+				architectBriefVersion = true
+			}
+			if input.Name == "approved-spec" {
+				architectSpec = true
+			}
+		}
+	}
+	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir, ApproveGates: true,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) || rt.calls["architect"] != 0 {
+		t.Fatalf("architect должен ждать явного решения Product Owner: result=%+v calls=%v err=%v", first, rt.calls, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload approvedSpecPayload
+	if json.Unmarshal(pending.Payload, &payload) != nil || payload.Kind != "agreed_spec" ||
+		payload.BriefVersion.SHA256 == "" || payload.Artifacts["proposal"] == "" || payload.Artifacts["spec"] == "" {
+		t.Fatalf("approval должен связывать версии намерения и обоих артефактов: %+v", payload)
+	}
+	if _, err := store.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "approve_spec", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil || second.RunID != first.RunID || rt.calls["architect"] != 1 || !architectBrief || !architectBriefVersion || !architectSpec {
+		t.Fatalf("архитектор должен получить согласованные immutable inputs: result=%+v calls=%v brief=%v version=%v spec=%v err=%v", second, rt.calls, architectBrief, architectBriefVersion, architectSpec, err)
+	}
+	briefInfo, err := os.Stat(filepath.Join(dir, ".ai-team", "runs", first.RunID, payload.BriefVersion.Path))
+	if err != nil || briefInfo.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("версия brief должна быть immutable: info=%v err=%v", briefInfo, err)
+	}
+}
+
+func TestRun_ApproveGatesDoesNotAutoApproveAnalystQuestions(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		if name != "analyst" {
+			return
+		}
+		path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("Кто целевой клиент?\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"product_owner"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "analyst"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir, ApproveGates: true,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("answer_questions должен ждать человеческий ответ даже при ApproveGates: result=%+v err=%v", result, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(result.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != approval.StatusPending || len(pending.Decisions) != 0 {
+		t.Fatalf("уточнение должно оставаться pending без автоматически созданных решений: %+v", pending)
+	}
+}
+
+func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
+	rt.content["analyst"] = map[string]string{"proposal": "готовая спецификация"}
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name != "analyst" {
+			return
+		}
+		if rt.calls[name] == 1 {
+			path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("Кто целевой клиент?\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		delete(rt.blocked, name)
+		var gotQuestion, gotAnswer bool
+		for _, input := range inputs {
+			switch input.Name {
+			case "questions":
+				gotQuestion = true
+			case "clarification-answer":
+				gotAnswer = true
+				answer, readErr := os.ReadFile(input.Path)
+				if readErr != nil || !strings.Contains(string(answer), "B2B-клиенты") {
+					t.Errorf("после recovery потерян durable answer: %q err=%v", answer, readErr)
+				}
+			}
+		}
+		if !gotQuestion || !gotAnswer {
+			t.Errorf("после recovery analyst inputs: questions=%v answer=%v", gotQuestion, gotAnswer)
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"product_owner"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "analyst"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("ожидалось ожидание ответа: result=%+v err=%v", first, err)
+	}
+	approvals, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := approvals.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "answer_questions",
+		Comment: "B2B-клиенты среднего бизнеса", SubjectHash: pending.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Match the durable events written by the first resume attempt before its
+	// lifecycle state advances to running. The process then crashes at that
+	// boundary, so the next process sees a running lifecycle and invalidated
+	// question attempt but must still rebuild the answer input.
+	evidenceStore, _, replayed, err := evidence.Resume(filepath.Join(dir, ".ai-team", "runs"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: decided.AttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "attempts_invalidated", Data: map[string]any{
+		"attempt_ids": []string{replayed.Attempts[0].AttemptID}, "reason": "approved_loopback",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce a crash after decision and the PhaseRunning/NextStage write, but
+	// before the analyst consumes its reconstructed extra inputs.
+	lifecycles, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := lifecycles.Load(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := waiting
+	running.Phase = lifecycle.PhaseRunning
+	running.NextStage = "analyst"
+	running.PendingApprovalID = ""
+	if err := lifecycles.Save(waiting, running); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil {
+		t.Fatalf("resume после crash должен восстановить approval answer: result=%+v err=%v", second, err)
+	}
+	if second.RunID != first.RunID || second.Outcome != "completed" || rt.calls["analyst"] != 2 {
+		t.Fatalf("неверный resumed result: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+}
+
 func TestRun_ResumeRejectsApprovalForMutatedCandidate(t *testing.T) {
 	dir := env(t)
 	gitInit(t, dir)

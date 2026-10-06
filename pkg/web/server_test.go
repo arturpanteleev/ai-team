@@ -235,6 +235,69 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	}
 }
 
+func TestQuestionApprovalRequiresNonEmptyAnswer(t *testing.T) {
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-1", RunID: "run-1", Status: approval.StatusPending,
+		RequiredRoles: []string{"product_owner"},
+		Payload:       []byte(`{"kind":"questions","markdown":"Какова целевая аудитория?"}`),
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	endpoint := "/api/runs/run-1/approvals/approval-1/decisions"
+	empty := authorizedRequest(t, srv, "POST", endpoint,
+		`{"actor_id":"user-1","actor_role":"product_owner","action":"answer_questions","subject_hash":"`+testSubjectHash+`"}`)
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, empty)
+	if writer.Code != http.StatusBadRequest || controller.approvalID != "" {
+		t.Fatalf("пустой ответ должен отклоняться: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
+	}
+	answered := authorizedRequest(t, srv, "POST", endpoint,
+		`{"actor_id":"user-1","actor_role":"product_owner","action":"answer_questions","comment":"B2B-клиенты среднего бизнеса","subject_hash":"`+testSubjectHash+`"}`)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, answered)
+	if writer.Code != http.StatusOK || controller.decision.Comment != "B2B-клиенты среднего бизнеса" {
+		t.Fatalf("ответ должен сохраниться как решение: code=%d decision=%+v body=%s", writer.Code, controller.decision, writer.Body.String())
+	}
+}
+
+func TestSpecificationApprovalRequiresProductOwnerRoleAndPayload(t *testing.T) {
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-spec", RunID: "run-1", Status: approval.StatusPending,
+		RequiredRoles: []string{"product_owner"},
+		Payload:       []byte(`{"kind":"agreed_spec","artifacts":{"spec":"abc"}}`),
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	endpoint := "/api/runs/run-1/approvals/approval-spec/decisions"
+	nonProductOwner := authorizedRequest(t, srv, "POST", endpoint,
+		`{"actor_id":"user-1","actor_role":"qa","action":"approve_spec","subject_hash":"`+testSubjectHash+`"}`)
+	writer := httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, nonProductOwner)
+	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
+		t.Fatalf("approve_spec должен быть запрещён другой роли: code=%d controller=%+v", writer.Code, controller)
+	}
+	legacyAction := authorizedRequest(t, srv, "POST", endpoint,
+		`{"actor_id":"user-1","actor_role":"qa","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, legacyAction)
+	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
+		t.Fatalf("Product Owner role check нельзя обойти общим approve action: code=%d controller=%+v", writer.Code, controller)
+	}
+	productOwner := authorizedRequest(t, srv, "POST", endpoint,
+		`{"actor_id":"user-1","actor_role":"product_owner","action":"approve_spec","subject_hash":"`+testSubjectHash+`"}`)
+	writer = httptest.NewRecorder()
+	srv.router.ServeHTTP(writer, productOwner)
+	if writer.Code != http.StatusOK || controller.decision.Action != "approve_spec" {
+		t.Fatalf("Product Owner должен иметь возможность согласовать ТЗ: code=%d decision=%+v", writer.Code, controller.decision)
+	}
+}
+
 func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	controller := &fakeRunController{}
 	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
@@ -483,6 +546,13 @@ func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 	if err := os.WriteFile(evidenceFile, []byte("immutable"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	briefFile := filepath.Join(runDir, "brief", "0001-intention.md")
+	if err := os.MkdirAll(filepath.Dir(briefFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(briefFile, []byte("business intention"), 0444); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(root, "feat"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -493,14 +563,20 @@ func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 	srv.router.ServeHTTP(w, req)
 	var artifacts []artifactInfo
 	_ = json.NewDecoder(w.Body).Decode(&artifacts)
-	if len(artifacts) != 1 || artifacts[0].RunID != runID {
+	if len(artifacts) != 2 || artifacts[0].RunID != runID || artifacts[1].RunID != runID {
 		t.Fatalf("immutable listing: %+v", artifacts)
 	}
-	raw := newLoopbackRequest("GET", "/api/runs/"+runID+"/artifacts/"+artifacts[0].Path, nil)
-	rawWriter := httptest.NewRecorder()
-	srv.router.ServeHTTP(rawWriter, raw)
-	if rawWriter.Code != http.StatusOK || rawWriter.Body.String() != "immutable" {
-		t.Fatalf("immutable artifact: code=%d body=%q", rawWriter.Code, rawWriter.Body.String())
+	for _, artifact := range artifacts {
+		raw := newLoopbackRequest("GET", "/api/runs/"+runID+"/artifacts/"+artifact.Path, nil)
+		rawWriter := httptest.NewRecorder()
+		srv.router.ServeHTTP(rawWriter, raw)
+		want := "immutable"
+		if artifact.Path == "brief/0001-intention.md" {
+			want = "business intention"
+		}
+		if rawWriter.Code != http.StatusOK || rawWriter.Body.String() != want {
+			t.Fatalf("immutable artifact %s: code=%d body=%q", artifact.Path, rawWriter.Code, rawWriter.Body.String())
+		}
 	}
 }
 

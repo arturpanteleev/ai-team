@@ -161,8 +161,27 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 				Roles: roles, Quorum: quorum, Deferred: deferredGates,
 				Actions: map[string]string{"approve": target, "reject": "$stop"},
 			}
+			if name == "analyst" {
+				// Product discovery must be explicitly agreed before technical
+				// planning starts, even in profiles that consolidate later gates.
+				edge.Approval.Deferred = false
+				edge.Approval.Actions = map[string]string{"approve_spec": target, "reject": "$stop"}
+			}
 		}
 		workflowConfig.Edges = append(workflowConfig.Edges, edge)
+	}
+	if _, exists := index["analyst"]; exists {
+		roles := append([]string(nil), specByName["analyst"].roles...)
+		if len(roles) == 0 {
+			roles = []string{"product_owner"}
+		}
+		workflowConfig.Edges = append(workflowConfig.Edges, WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &WorkflowApprovalConfig{
+				Roles: roles, Quorum: quorum,
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
 	}
 	coderIdx, hasCoder := index["coder"]
 	for _, source := range defaultLoopbackSources {
@@ -189,7 +208,11 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 		})
 	}
 	for _, name := range names {
-		if mv := specByName[name].maxVisits; mv > 0 {
+		if name == "analyst" {
+			// Intake may ask up to three clarification rounds and must be able
+			// to report the final unresolved question as a normal blocked result.
+			workflowConfig.MaxVisits[name] = 4
+		} else if mv := specByName[name].maxVisits; mv > 0 {
 			workflowConfig.MaxVisits[name] = mv
 		} else if name != "deployer" && name != "analyst" && name != "architect" {
 			workflowConfig.MaxVisits[name] = defaultMaxVisits

@@ -169,6 +169,7 @@ type runState struct {
 	approvalStore    *approval.Store
 	resumedApproval  *approval.PendingApproval
 	resumed          bool
+	brief            briefVersion
 	graph            workflow.Graph
 	visits           map[string]int
 	candidate        *candidate.Manager
@@ -264,6 +265,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 	var resumedState lifecycle.State
 	var resumedApproval *approval.PendingApproval
+	var recoveredClarification *approval.PendingApproval
 	var resumedTransitionData map[string]any
 	if runCfg.ResumeRunID != "" {
 		resumedState, err = lifecycleStore.Load(runCfg.ResumeRunID)
@@ -336,6 +338,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					}
 				}
 			}
+		}
+	}
+	if runCfg.ResumeRunID != "" && resumedState.Phase == lifecycle.PhaseRunning {
+		recoveredClarification, err = recoveredQuestionApproval(approvalStore, resumedState.RunID, resumedState.NextStage)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
 		}
 	}
 
@@ -489,7 +497,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				targetIndex := compiledGraph.Index(runCfg.retryFrom)
 				for index := range replayedRun.Attempts {
 					attempt := &replayedRun.Attempts[index]
-					if targetIndex >= 0 && attempt.StageIndex > targetIndex+1 && !attempt.Superseded {
+					invalidate := targetIndex >= 0 && attempt.StageIndex > targetIndex+1
+					if resumedApproval.ResolvedAction == "answer_questions" && attempt.AttemptID == resumedApproval.AttemptID {
+						invalidate = true
+					}
+					if invalidate && !attempt.Superseded {
 						attempt.Superseded = true
 						attempt.State = workflow.Invalidate(attempt.State)
 						attempt.Status = attempt.State.LegacyStatus()
@@ -557,6 +569,35 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{}, fmt.Errorf("создание lifecycle state: %w", err)
 		}
 	}
+	var currentBrief briefVersion
+	if runCfg.ResumeRunID == "" {
+		currentBrief, _, err = writeInitialBrief(runCfg.TargetDir, runID, runCfg.TaskDesc)
+	} else {
+		versions, briefErr := listBriefVersions(filepath.Join(runCfg.TargetDir, ".ai-team", "runs", runID, "brief"))
+		if os.IsNotExist(briefErr) || (briefErr == nil && len(versions) == 0) {
+			// Runs created before business-brief versioning can resume from their
+			// immutable lifecycle task snapshot; new runs always write version 1.
+			currentBrief, _, err = writeInitialBrief(runCfg.TargetDir, runID, resumedState.Task)
+		} else if briefErr != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: durable business brief unavailable: %w", briefErr)
+		} else {
+			currentBrief = versions[len(versions)-1]
+		}
+		answerApproval := resumedApproval
+		if answerApproval == nil {
+			answerApproval = recoveredClarification
+		}
+		if answerApproval != nil && answerApproval.FromStage == "analyst" && answerApproval.ResolvedAction == "answer_questions" {
+			var payload questionPayload
+			if json.Unmarshal(answerApproval.Payload, &payload) != nil || payload.Kind != "questions" {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification payload")
+			}
+			currentBrief, _, err = appendClarificationVersion(runCfg.TargetDir, runID, answerApproval.ID, payload.Markdown, questionAnswer(answerApproval.Decisions))
+		}
+	}
+	if err != nil {
+		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("durable business brief: %w", err)
+	}
 	if candidateManager != nil {
 		if err := publishCandidateMetadata(evidenceStore.RunDir(), candidateManager.Metadata()); err != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, err
@@ -609,6 +650,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		approvalStore:    approvalStore,
 		resumedApproval:  resumedApproval,
 		resumed:          runCfg.ResumeRunID != "",
+		brief:            currentBrief,
 		graph:            compiledGraph,
 		visits:           make(map[string]int),
 		candidate:        candidateManager,
@@ -649,13 +691,63 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	for _, mutation := range resumeMutations {
 		delete(rs.userOwnedPaths, filepath.ToSlash(mutation))
 	}
-	if resumedApproval != nil && isBackwardTransition(rs.graph, resumedApproval) {
-		inputs, inputErr := rs.stageOutputs(resumedApproval.FromStage, resumedApproval.AttemptID)
+	inputApproval := resumedApproval
+	if inputApproval == nil {
+		inputApproval = recoveredClarification
+	}
+	if inputApproval == nil && !rs.resumed {
+		rs.extraInputs["analyst"] = briefInputs(rs.brief)
+	}
+	if inputApproval != nil && (inputApproval.ResolvedAction == "answer_questions" || inputApproval.ResolvedAction == "approve_spec" || isBackwardTransition(rs.graph, inputApproval)) {
+		inputs, inputErr := rs.stageOutputs(inputApproval.FromStage, inputApproval.AttemptID)
 		if inputErr != nil {
 			outcome, finalErr := rs.finalize(inputErr)
 			return RunResult{RunID: runID, Outcome: outcome}, finalErr
 		}
-		rs.extraInputs[runCfg.retryFrom] = inputs
+		if inputApproval.FromStage == "analyst" && inputApproval.ResolvedAction == "answer_questions" {
+			filtered := make([]runtime.Artifact, 0, len(inputs)+1)
+			for _, input := range inputs {
+				if input.Name == "questions" {
+					filtered = append(filtered, input)
+				}
+			}
+			answer, answerErr := writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
+			if answerErr != nil {
+				outcome, finalErr := rs.finalize(answerErr)
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+			filtered = append(filtered, answer)
+			filtered = append(filtered, briefInputs(rs.brief)...)
+			rs.extraInputs[runCfg.retryFrom] = filtered
+		} else if inputApproval.FromStage == "analyst" && inputApproval.ResolvedAction == "approve_spec" {
+			var payload approvedSpecPayload
+			if err := json.Unmarshal(inputApproval.Payload, &payload); err != nil || payload.Kind != "agreed_spec" ||
+				payload.BriefVersion.ID != rs.brief.ID || payload.BriefVersion.SHA256 != rs.brief.SHA256 {
+				outcome, finalErr := rs.finalize(errors.New("approved specification is not bound to the current business brief version"))
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+			byName := make(map[string]runtime.Artifact, len(inputs))
+			for _, input := range inputs {
+				byName[input.Name] = input
+			}
+			for _, name := range []string{"proposal", "spec"} {
+				input, ok := byName[name]
+				if !ok {
+					outcome, finalErr := rs.finalize(fmt.Errorf("approved analyst artifact %s missing", name))
+					return RunResult{RunID: runID, Outcome: outcome}, finalErr
+				}
+				_, _, digest, digestErr := evidence.ArtifactDigest(input.Path)
+				if digestErr != nil || payload.Artifacts[name] != digest {
+					outcome, finalErr := rs.finalize(fmt.Errorf("approved analyst artifact %s digest mismatch", name))
+					return RunResult{RunID: runID, Outcome: outcome}, finalErr
+				}
+				input.Name = "approved-" + name
+				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], input)
+			}
+			rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], briefInputs(rs.brief)...)
+		} else {
+			rs.extraInputs[runCfg.retryFrom] = inputs
+		}
 	}
 
 	// P1-7: жёсткий wall-time бюджет run'а (всегда, default 24h) поверх

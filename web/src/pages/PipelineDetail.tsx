@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { useParams, Link } from '../router';
 import type { PipelineRun, Stage, Artifact, Approval, CloudRole, WorkflowGraph, WorkflowSnapshot } from '../types';
 import { getPipelineRun, getPipelineArtifacts, getRunWorkflow, decideApproval, resumeRun, cancelRun, getActivePrincipal } from '../api';
@@ -17,6 +18,7 @@ export function PipelineDetail() {
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [nextStage, setNextStage] = useState('');
   const [actor, setActor] = useState(principal?.actor_id ?? 'local-user');
+  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [controlError, setControlError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -71,11 +73,11 @@ export function PipelineDetail() {
   const getArtifactsForStage = (stage: Stage) =>
     artifacts.filter((a) => a.path.includes(stage.attempt_id) || a.name.toLowerCase().includes(stage.agent_name));
 
-  const sendDecision = async (value: Approval, role: string, action: string) => {
+  const sendDecision = async (value: Approval, role: string, action: string, comment?: string) => {
     setControlError('');
     try {
       await decideApproval(run.run_id, value, {
-        actor_id: actor, actor_role: role, action,
+        actor_id: actor, actor_role: role, action, comment,
       });
       await fetchData();
     } catch (err) {
@@ -109,6 +111,22 @@ export function PipelineDetail() {
         </div>
       </div>
 
+      {artifacts.some((artifact) => artifact.run_id === run.run_id && artifact.path.startsWith('brief/')) && (
+        <section className={styles.workflow}>
+          <h2>История бизнес-намерения</h2>
+          <div className={styles.edges}>
+            {artifacts.filter((artifact) => artifact.run_id === run.run_id && artifact.path.startsWith('brief/'))
+              .sort((left, right) => left.path.localeCompare(right.path))
+              .map((artifact) => (
+                <Link key={artifact.path}
+                  to={`/artifacts/${encodeURIComponent(run.run_id)}/${artifact.path.split('/').map(encodeURIComponent).join('/')}`}>
+                  {artifact.path.replace('brief/', '')}
+                </Link>
+              ))}
+          </div>
+        </section>
+      )}
+
       <section className={styles.controls}>
         <div className={styles.controlHeader}>
           <h2>Человеческие решения</h2>
@@ -120,18 +138,62 @@ export function PipelineDetail() {
           <button onClick={() => sendRunCommand('cancel')}>Cancel</button>
         </div>
         {controlError && <div className={styles.controlError}>{controlError}</div>}
-        {approvals.length === 0 ? <p>Approvals пока нет.</p> : approvals.map((value) => (
+        {approvals.length === 0 ? <p>Approvals пока нет.</p> : approvals.map((value) => {
+          const question = value.payload && typeof value.payload === 'object' &&
+            (value.payload as { kind?: unknown }).kind === 'questions'
+            ? value.payload as { kind: 'questions'; markdown?: string }
+            : null;
+          const agreedSpec = value.payload && typeof value.payload === 'object' &&
+            (value.payload as { kind?: unknown }).kind === 'agreed_spec'
+            ? value.payload as { kind: 'agreed_spec'; brief_version?: { id?: string; sha256?: string }; artifacts?: Record<string, string> }
+            : null;
+          return (
           <article key={value.id} className={styles.approval}>
             <strong>{value.from_stage} → {value.to_stage}</strong>
             <span>{value.status} · trigger {value.trigger} · quorum {value.quorum}</span>
             <code>subject {value.subject_hash}</code>
             {value.candidate_sha256 && <code>candidate {value.candidate_sha256}</code>}
+            {question && (
+              <div className={styles.question}>
+                <h3>Вопрос аналитика</h3>
+                <div className={styles.questionText}><ReactMarkdown>{question.markdown || 'Текст вопроса находится в артефакте этапа.'}</ReactMarkdown></div>
+                {value.status === 'pending' && (
+                  <label>
+                    Ваш ответ
+                    <textarea value={answers[value.id] ?? ''}
+                      onChange={(event) => setAnswers((current) => ({ ...current, [value.id]: event.target.value }))}
+                      maxLength={16 * 1024} rows={5} />
+                  </label>
+                )}
+              </div>
+            )}
+            {agreedSpec && (
+              <div className={styles.question}>
+                <h3>Product Owner согласует требования перед архитектором</h3>
+                <p>Версия намерения: {agreedSpec.brief_version?.id ?? 'не указана'}</p>
+                <code>brief SHA-256: {agreedSpec.brief_version?.sha256 ?? 'не указан'}</code>
+                {Object.entries(agreedSpec.artifacts ?? {}).map(([name, digest]) => (
+                  <code key={name}>{name} SHA-256: {digest}</code>
+                ))}
+                <div className={styles.questionText}>
+                  {artifacts.filter((artifact) => artifact.run_id === run.run_id &&
+                    artifact.path.includes(`attempts/${value.attempt_id}/artifacts/`) &&
+                    (artifact.path.endsWith('/proposal.md') || artifact.path.endsWith('/spec.md')))
+                    .map((artifact) => (
+                      <Link key={artifact.path}
+                        to={`/artifacts/${encodeURIComponent(run.run_id)}/${artifact.path.split('/').map(encodeURIComponent).join('/')}`}>
+                        Открыть {artifact.path.endsWith('/proposal.md') ? 'обоснование' : 'product spec'}
+                      </Link>
+                    ))}
+                </div>
+              </div>
+            )}
             {value.targets && (
               <small>
                 {Object.entries(value.targets).map(([action, target]) => `${action}→${target}`).join(', ')}
               </small>
             )}
-            {value.payload != null && (
+            {value.payload != null && !question && (
               <details>
                 <summary>Payload (canonical JSON)</summary>
                 <pre><code>{JSON.stringify(value.payload, null, 2)}</code></pre>
@@ -142,8 +204,12 @@ export function PipelineDetail() {
                 .filter((role) => !principal || principal.roles.includes(role as CloudRole))
                 .flatMap((role) =>
                 value.actions.map((action) => (
-                  <button key={`${role}:${action}`} onClick={() => sendDecision(value, role, action)}>
-                    {action} · {role}
+                  <button key={`${role}:${action}`}
+                    disabled={Boolean(question && action === 'answer_questions' && !(answers[value.id] ?? '').trim())}
+                    onClick={() => sendDecision(value, role, action, action === 'answer_questions' ? answers[value.id] : undefined)}>
+                    {question && action === 'answer_questions' ? 'Ответить и продолжить'
+                      : agreedSpec && action === 'approve_spec' ? 'Согласовать ТЗ и передать архитектору'
+                        : action === 'reject' || action === 'stop' ? 'Отклонить / остановить' : `${action} · ${role}`}
                   </button>
                 )))}
             </div>
@@ -153,7 +219,8 @@ export function PipelineDetail() {
               </small>
             ))}
           </article>
-        ))}
+          );
+        })}
       </section>
 
       {graph && (

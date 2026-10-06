@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
@@ -50,6 +51,7 @@ func findModuleRoot() string {
 // Возвращает exit-код и combined output.
 func runAI(t *testing.T, binPath, dir string, envs []string, args ...string) (int, string) {
 	t.Helper()
+	useGenericAutoApprovalFixture(t, dir, args)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
 	var out strings.Builder
@@ -167,6 +169,7 @@ func checkDir(t *testing.T, parts ...string) {
 // stdout, stderr и exit-код.
 func runAIJSON(t *testing.T, binPath, dir string, envs []string, args ...string) (string, string, int) {
 	t.Helper()
+	useGenericAutoApprovalFixture(t, dir, args)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -184,6 +187,54 @@ func runAIJSON(t *testing.T, binPath, dir string, envs []string, args ...string)
 		}
 	}
 	return stdout.String(), stderr.String(), code
+}
+
+// useGenericAutoApprovalFixture keeps CLI tests focused on routine local
+// gate automation. Tests of the bundled Product Owner contract use the default
+// config directly and assert that only approve_spec resolves the analyst gate.
+func useGenericAutoApprovalFixture(t *testing.T, dir string, args []string) {
+	t.Helper()
+	if len(args) == 0 || args[0] != "run" || !containsArg(args, "--approve-gates") {
+		return
+	}
+	path := filepath.Join(dir, ".ai-team", "config.yaml")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load generic auto-approval fixture: %v", err)
+	}
+	if cfg.Workflow == nil {
+		t.Fatalf("generic auto-approval fixture requires workflow config")
+	}
+	updated := false
+	for i := range cfg.Workflow.Edges {
+		edge := &cfg.Workflow.Edges[i]
+		if edge.From != "analyst" || edge.Outcome != "passed" || edge.Approval == nil {
+			continue
+		}
+		delete(edge.Approval.Actions, "approve_spec")
+		edge.Approval.Actions["approve"] = edge.To
+		updated = true
+		break
+	}
+	if !updated {
+		return
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal generic auto-approval fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write generic auto-approval fixture: %v", err)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // parseJSONLStdout — контракт AUD-19/F-2: весь stdout `run --json` обязан
@@ -634,7 +685,9 @@ func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
 	}
 
 	waitFile := filepath.Join(t.TempDir(), "analyst-started")
-	command := exec.Command(bin, "run", "--feature", "durable-resume", "--task", "resume test", "--approve-gates")
+	resumeArgs := []string{"run", "--feature", "durable-resume", "--task", "resume test", "--approve-gates"}
+	useGenericAutoApprovalFixture(t, dir, resumeArgs)
+	command := exec.Command(bin, resumeArgs...)
 	command.Dir = dir
 	var output strings.Builder
 	command.Stdout, command.Stderr = &output, &output
@@ -795,16 +848,23 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		first = readPending()
 		return first.ID != ""
 	}, func() string { return serverOutput.String() })
-	role := "product_owner"
-	if len(first.RequiredRoles) > 0 {
-		role = first.RequiredRoles[0]
+	if len(first.RequiredRoles) != 1 || first.RequiredRoles[0] != "product_owner" {
+		t.Fatalf("default analyst gate должен требовать Product Owner, got roles=%v", first.RequiredRoles)
 	}
-	status, decided := post("/api/runs/"+runID+"/approvals/"+first.ID+"/decisions", map[string]string{
-		"actor_id": "product-1", "actor_role": role,
+	decisionURL := "/api/runs/" + runID + "/approvals/" + first.ID + "/decisions"
+	status, genericDecision := post(decisionURL, map[string]string{
+		"actor_id": "product-1", "actor_role": "product_owner",
 		"action": "approve", "subject_hash": first.SubjectHash,
 	})
+	if status != http.StatusConflict {
+		t.Fatalf("общий approve не должен обходить явное согласование ТЗ: status=%d body=%v", status, genericDecision)
+	}
+	status, decided := post(decisionURL, map[string]string{
+		"actor_id": "product-1", "actor_role": "product_owner",
+		"action": "approve_spec", "subject_hash": first.SubjectHash,
+	})
 	if status != http.StatusOK {
-		t.Fatalf("web decision status=%d role=%s body=%v", status, role, decided)
+		t.Fatalf("web Product Owner spec decision status=%d body=%v", status, decided)
 	}
 	var resumed map[string]any
 	waitUntil(t, 10*time.Second, func() bool {

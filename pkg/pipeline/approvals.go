@@ -36,6 +36,7 @@ func (rs *runState) authorizeTransition(
 	actions []string,
 	targets map[string]string,
 	deferred bool,
+	payload json.RawMessage,
 ) (string, error) {
 	if quorum == "" {
 		quorum = approval.QuorumAny
@@ -84,7 +85,7 @@ func (rs *runState) authorizeTransition(
 		SubjectHash: subjectHash, CandidateSHA256: candidateSHA,
 		RequiredRoles: append([]string(nil), roles...),
 		Quorum:        quorum, Actions: append([]string(nil), actions...), Targets: targets,
-		Deferred: deferred,
+		Deferred: deferred, Payload: payload,
 	})
 	if err != nil {
 		return "", err
@@ -108,9 +109,18 @@ func (rs *runState) authorizeTransition(
 	}
 
 	action := ""
-	if rs.runCfg.ApproveGates {
+	// Analyst clarification is a human-input boundary, not an approval-only
+	// gate. Auto-approving it would route back to the analyst without the answer
+	// that makes the loop useful. The web decision path supplies that answer in
+	// the durable approval comment, so leave this approval pending here.
+	requiresHumanAnswer := fromStage == "analyst" && containsString(actions, "answer_questions")
+	// Product Owner agreement on the analyst's spec is also an explicit
+	// boundary: --approve-gates may shortcut routine local gates, but must not
+	// manufacture agreement on business scope.
+	requiresExplicitSpecApproval := fromStage == "analyst" && containsString(actions, "approve_spec")
+	if rs.runCfg.ApproveGates && !requiresHumanAnswer && !requiresExplicitSpecApproval {
 		action = actions[0]
-	} else if rs.p.prompter.Interactive() {
+	} else if rs.p.prompter.Interactive() && !requiresHumanAnswer {
 		for {
 			answer := rs.p.prompter.Ask(fmt.Sprintf(
 				"%s %s, subject %s [%s/diff]",

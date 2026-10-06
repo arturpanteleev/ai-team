@@ -99,6 +99,41 @@
   border-radius: 6px;
 }
 
+.question {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-left: 3px solid var(--accent, #5266d8);
+  background: var(--surface-muted, #f5f6fa);
+}
+
+.question h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.questionText > :first-child {
+  margin: 0;
+}
+
+.questionText {
+  overflow-wrap: anywhere;
+}
+
+.questionText p:last-child {
+  margin-bottom: 0;
+}
+
+.question label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.question textarea {
+  width: 100%;
+  resize: vertical;
+}
+
 .approval code {
   overflow-wrap: anywhere;
   color: #93c5fd;

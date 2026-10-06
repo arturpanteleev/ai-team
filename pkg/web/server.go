@@ -400,7 +400,7 @@ func (s *Server) handleGetArtifacts(w http.ResponseWriter, r *http.Request) {
 	artifacts := make([]artifactInfo, 0)
 	if run.RunID != "" && filepath.Base(run.RunID) == run.RunID {
 		runDir := filepath.Join(s.runRoot, run.RunID)
-		for _, relativeRoot := range []string{"attempts", "reports"} {
+		for _, relativeRoot := range []string{"attempts", "reports", "brief"} {
 			found, walkErr := walkArtifacts(runDir, filepath.Join(runDir, relativeRoot), run.RunID)
 			if walkErr != nil {
 				http.Error(w, "immutable evidence unavailable: "+walkErr.Error(), http.StatusInternalServerError)
@@ -546,6 +546,10 @@ func safeIdentity(value string) bool {
 func allowedRunArtifactPath(relative string) bool {
 	relative = filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))
 	if strings.HasPrefix(relative, "reports/") {
+		return true
+	}
+	if strings.HasPrefix(relative, "brief/") && strings.HasSuffix(relative, ".md") &&
+		!strings.Contains(strings.TrimPrefix(relative, "brief/"), "/") {
 		return true
 	}
 	parts := strings.Split(relative, "/")

@@ -95,6 +95,32 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 
 		edge, found := rs.graph.Edge(current, result.State.Outcome)
+		var transitionPayload json.RawMessage
+		if current == "analyst" && result.Status == notifier.StatusBlocked {
+			var hasQuestions bool
+			var questionErr error
+			transitionPayload, hasQuestions, questionErr = questionsPayload(result.Outputs)
+			if questionErr != nil {
+				return questionErr
+			}
+			if !hasQuestions {
+				return &BlockedError{Agent: current, Reason: result.Blocker}
+			}
+			questionRounds, roundsErr := countQuestionApprovals(rs.approvalStore, rs.runID)
+			if roundsErr != nil {
+				return fmt.Errorf("count analyst clarification rounds: %w", roundsErr)
+			}
+			if questionRounds >= maxQuestionRounds {
+				return &BlockedError{Agent: current, Reason: fmt.Sprintf("после %d циклов уточнений аналитик всё ещё запрашивает информацию: %s", maxQuestionRounds, result.Blocker)}
+			}
+		}
+		if current == "analyst" && result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed {
+			var payloadErr error
+			transitionPayload, payloadErr = encodeApprovedSpec(rs.brief, result.AttemptID, result.Outputs)
+			if payloadErr != nil {
+				return fmt.Errorf("prepare Product Owner specification approval: %w", payloadErr)
+			}
+		}
 		if !found {
 			if result.Status == notifier.StatusBlocked {
 				return &BlockedError{Agent: current, Reason: result.Blocker}
@@ -115,7 +141,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			selected, err := rs.authorizeTransition(
 				current, edge.To, "graph_outcome:"+string(edge.Outcome), result,
 				edge.Approval.Roles, edge.Approval.Quorum, actions, edge.Approval.Actions,
-				edge.Approval.Deferred,
+				edge.Approval.Deferred, transitionPayload,
 			)
 			if err != nil {
 				return err

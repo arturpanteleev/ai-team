@@ -5,7 +5,7 @@ import { Dashboard } from './pages/Dashboard';
 import { PipelineDetail } from './pages/PipelineDetail';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
-import { getAuthConfig, getCurrentIdentity, openSession } from './api';
+import { openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp() {
   const { pathname } = useLocation();
@@ -25,19 +25,17 @@ function App() {
   const [authState, setAuthState] = useState<'loading' | 'login' | 'ready'>('loading');
 
   useEffect(() => {
+    const onSessionExpired = () => setAuthState('login');
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
     void (async () => {
       try {
-        const config = await getAuthConfig();
-        if (config.authentication_required) {
-          await getCurrentIdentity();
-        } else {
-          await openSession();
-        }
+        await openSession();
         setAuthState('ready');
       } catch {
         setAuthState('login');
       }
     })();
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   }, []);
 
   if (authState === 'loading') return <div>Загрузка…</div>;

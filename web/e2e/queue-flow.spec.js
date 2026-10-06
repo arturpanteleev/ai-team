@@ -47,7 +47,7 @@ async function waitForServer(url, child) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`web server exited: ${child.outputText()}`)
     try {
-      const response = await fetch(`${url}/api/preflight`)
+      const response = await fetch(`${url}/api/auth/config`)
       if (response.ok) return
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -119,6 +119,67 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     expect(browserErrors).toEqual([])
   } finally {
     await stop(worker)
+    await stop(webServer)
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('authenticated cookie session survives reload and a second window for write commands', async ({ browser }) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'ai-team-auth-browser-e2e-'))
+  const target = path.join(tempRoot, 'target')
+  const binary = path.join(tempRoot, 'ai-team')
+  const port = await unusedPort()
+  const baseURL = `http://127.0.0.1:${port}`
+  const secret = 'browser-e2e-signing-secret-that-is-long-enough'
+  let webServer
+
+  try {
+    run('go', ['build', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
+    const token = run(binary, ['auth-token', '--actor', 'browser-product-owner', '--roles', 'product_owner'], {
+      cwd: repoDir,
+      env: { ...process.env, AI_TEAM_AUTH_SECRET: secret },
+    }).trim()
+    await mkdir(target, { recursive: true })
+    run(binary, ['init', '--target', target], { cwd: repoDir })
+    webServer = start(binary, ['web', '--target', target, '--port', String(port), '--dist', path.join(webDir, 'dist'), '--scheduler-db', '.ai-team/scheduler.db'], {
+      cwd: target,
+      env: { ...process.env, AI_TEAM_AUTH_SECRET: secret },
+    })
+    await waitForServer(baseURL, webServer)
+
+    const context = await browser.newContext()
+    const first = await context.newPage()
+    await first.goto(baseURL)
+    await first.getByLabel('Access token').fill(token)
+    await first.getByRole('button', { name: 'Войти' }).click()
+    await expect(first.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+
+    // A new JS context has no in-memory CSRF token; the HttpOnly cookie must
+    // recover it before the command is sent.
+    await first.reload()
+    await expect(first.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    const second = await context.newPage()
+    await second.goto(baseURL)
+    await expect(second.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await second.getByLabel('Название инициативы').fill('authenticated-after-reconnect')
+    await second.getByLabel('Какого результата хотите достичь?').fill('Submit with a recovered CSRF token')
+    await second.getByRole('button', { name: 'Создать инициативу и передать аналитику' }).click()
+    const runCard = second.locator('[class*="card"]').filter({ hasText: 'authenticated-after-reconnect' })
+    await expect(runCard.getByText('queued', { exact: true })).toBeVisible({ timeout: 10_000 })
+
+    // Browser sessions are intentionally process-local. Restarting the server
+    // revokes that session while retaining the browser's HttpOnly cookie.
+    await stop(webServer)
+    webServer = start(binary, ['web', '--target', target, '--port', String(port), '--dist', path.join(webDir, 'dist'), '--scheduler-db', '.ai-team/scheduler.db'], {
+      cwd: target,
+      env: { ...process.env, AI_TEAM_AUTH_SECRET: secret },
+    })
+    await waitForServer(baseURL, webServer)
+    await second.reload()
+    await expect(second.getByLabel('Access token')).toBeVisible()
+    await expect(second.getByText(/Сессия истекла или отсутствует/)).toBeVisible()
+    await context.close()
+  } finally {
     await stop(webServer)
     await rm(tempRoot, { recursive: true, force: true })
   }

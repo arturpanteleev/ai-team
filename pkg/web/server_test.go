@@ -386,19 +386,19 @@ func TestSchedulerAdmissionIsVisibleAndCancelableWithoutWorker(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	var projected *store.PipelineRun
+	var jobs []scheduler.Record
 	for time.Now().Before(deadline) {
 		projected, err = srv.store.GetPipelineRunByRunID(accepted.RunID)
 		if err == nil && projected.QueueJobID > 0 {
-			break
+			jobs, err = queue.ListRun(accepted.RunID)
+			if err == nil && len(jobs) == 1 && jobs[0].Status == scheduler.StatusQueued {
+				break
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err != nil || projected == nil || projected.Status != "queued" || projected.QueueJobID == 0 {
+	if err != nil || projected == nil || projected.Status != "queued" || projected.QueueJobID == 0 || len(jobs) != 1 || jobs[0].Status != scheduler.StatusQueued {
 		t.Fatalf("run not projected with scheduler identity: %+v err=%v", projected, err)
-	}
-	jobs, err := queue.ListRun(accepted.RunID)
-	if err != nil || len(jobs) != 1 || jobs[0].Status != scheduler.StatusQueued {
-		t.Fatalf("queue state: %+v err=%v", jobs, err)
 	}
 	cancel := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+accepted.RunID+"/cancel", "")
 	response = httptest.NewRecorder()

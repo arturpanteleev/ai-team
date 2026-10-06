@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -358,6 +359,17 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		return
 	}
 	switch os.Getenv("AI_TEAM_WORKER_TEST_MODE") {
+	case "wait":
+		marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER")
+		if marker == "" {
+			t.Fatal("wait helper requires a start marker")
+		}
+		if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "no-result":
 		os.Exit(0)
 	case "fail-no-result":

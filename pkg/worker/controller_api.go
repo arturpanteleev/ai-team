@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -76,6 +77,7 @@ type workerAPICall struct {
 	CandidateMetadata candidate.Metadata       `json:"candidate_metadata,omitempty"`
 	Usage             metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
 	TerminalRecord    delivery.TerminalRecord  `json:"terminal_record,omitempty"`
+	Attestation       attest.Statement         `json:"attestation,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -112,6 +114,7 @@ type workerAPIServer struct {
 	candidates              candidate.MetadataStore
 	absences                candidate.AbsenceMarkerStore
 	usage                   metrics.FileUsageEnvelopeStore
+	attestations            attest.ControllerStore
 	usageAllowed            bool
 	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
@@ -213,8 +216,17 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		return nil, err
 	}
 	fileCandidateStore := candidate.FileMetadataStore{}
+	canonicalTarget, err := candidate.CanonicalTargetDir(job.TargetDir)
+	if err != nil {
+		_ = listener.Close()
+		if socketPath != "" {
+			_ = os.Remove(socketPath)
+		}
+		return nil, fmt.Errorf("canonicalize worker API attestation target: %w", err)
+	}
 	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	api.usageAllowed = socketPath != ""
+	api.attestations = attest.ControllerStore{TargetDir: canonicalTarget}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -502,6 +514,23 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, err
 		}
 		return nil, delivery.WriteControllerTerminalRecord(target, s.scope.RunID, record)
+	case "attestation.write":
+		if !s.usageAllowed || s.attestations.TargetDir == "" {
+			return nil, errors.New("controller attestation writes require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API attestation write is not allowed for operation %q", s.scope.Operation)
+		}
+		if c.Attestation.Predicate.RunID != s.scope.RunID {
+			return nil, errors.New("attestation run mismatch")
+		}
+		raw, err := json.Marshal(c.Attestation)
+		if err != nil {
+			return nil, err
+		}
+		return nil, s.attestations.Write(s.scope.RunID, raw)
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -638,6 +667,26 @@ func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort
 // transport that is reachable only from the bubblewrap worker namespace.
 func (p *workerAPIPort) SupportsControllerUsageStore() bool {
 	return p != nil && p.address == "http://unix" && os.Getenv(workerAPISocketEnv) != ""
+}
+
+func (p *workerAPIPort) SupportsControllerAttestationStore() bool {
+	return p != nil && p.SupportsControllerUsageStore()
+}
+
+type workerAPIAttestationWriter struct{ port *workerAPIPort }
+type WorkerAPIAttestationWriter = workerAPIAttestationWriter
+
+func NewWorkerAPIAttestationWriter(port *WorkerAPIPort) pipeline.AttestationWriter {
+	return &workerAPIAttestationWriter{port: port}
+}
+func (w *workerAPIAttestationWriter) WriteAttestation(statement *attest.Statement) error {
+	if w == nil || w.port == nil || !w.port.SupportsControllerAttestationStore() {
+		return errors.New("worker attestation API unavailable")
+	}
+	if statement == nil || statement.Predicate.RunID != w.port.scope.RunID {
+		return errors.New("worker attestation API run mismatch")
+	}
+	return w.port.call("attestation.write", workerAPICall{Attestation: *statement}, nil)
 }
 
 type workerAPITerminalRecordWriter struct{ port *workerAPIPort }

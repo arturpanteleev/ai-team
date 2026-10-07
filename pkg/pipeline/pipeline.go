@@ -15,6 +15,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -82,6 +83,10 @@ type TerminalRecordWriter interface {
 	WriteTerminalRecord(delivery.TerminalRecord) error
 }
 
+// AttestationWriter persists the worker-supplied terminal statement in
+// controller-owned storage for sandboxed workers.
+type AttestationWriter interface{ WriteAttestation(*attest.Statement) error }
+
 type Pipeline struct {
 	cfg                  *config.Config
 	reg                  *agent.Registry
@@ -97,6 +102,7 @@ type Pipeline struct {
 	candidateMetadata    candidate.MetadataStore
 	usageEnvelopeWriter  UsageEnvelopeWriter
 	terminalRecordWriter TerminalRecordWriter
+	attestationWriter    AttestationWriter
 	reportsDir           string
 }
 
@@ -169,6 +175,10 @@ func WithUsageEnvelopeWriter(writer UsageEnvelopeWriter) Option {
 
 func WithTerminalRecordWriter(writer TerminalRecordWriter) Option {
 	return func(p *Pipeline) { p.terminalRecordWriter = writer }
+}
+
+func WithAttestationWriter(writer AttestationWriter) Option {
+	return func(p *Pipeline) { p.attestationWriter = writer }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
@@ -262,6 +272,7 @@ type runState struct {
 	deferredDelivery          *deferredDelivery
 	budgetConfig              *config.BudgetConfig
 	usageTotal                runtime.Usage
+	attestationDigest         string
 }
 
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR

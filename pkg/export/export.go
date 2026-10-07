@@ -141,7 +141,16 @@ func Build(runDir, outDir string) (*Index, error) {
 		if err := safePath(file.rel); err != nil {
 			return nil, fmt.Errorf("export: небезопасный путь evidence %q: %w", file.rel, err)
 		}
-		sum, err := copyRecord(runDir, file.rel, outDir, file.kind)
+		var sum string
+		if file.kind == RecordAttestation {
+			data, sourceErr := runAttestationData(runDir, manifest.RunID)
+			if sourceErr != nil {
+				return nil, sourceErr
+			}
+			sum, err = writeRecordBytes(data, file.rel, outDir, file.kind)
+		} else {
+			sum, err = copyRecord(runDir, file.rel, outDir, file.kind)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -178,6 +187,43 @@ func Build(runDir, outDir string) (*Index, error) {
 		return nil, err
 	}
 	return index, nil
+}
+
+func runAttestationData(runDir, runID string) ([]byte, error) {
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
+	data, err := (attest.ControllerStore{TargetDir: targetDir}).Read(runID)
+	if err == nil {
+		return data, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("export: controller attestation: %w", err)
+	}
+	data, err = safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), maxAttestationSize)
+	if err != nil {
+		return nil, fmt.Errorf("export: attestation: %w", err)
+	}
+	statement, err := attest.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("export: legacy attestation invalid: %w", err)
+	}
+	if statement.Predicate.RunID != runID {
+		return nil, fmt.Errorf("export: legacy attestation run mismatch: %s != %s", statement.Predicate.RunID, runID)
+	}
+	return data, nil
+}
+
+func writeRecordBytes(data []byte, rel, outDir, kind string) (string, error) {
+	if int64(len(data)) > sizeLimitFor(kind, rel) {
+		return "", fmt.Errorf("export: %s %s exceeds size limit", kind, rel)
+	}
+	destination := filepath.Join(outDir, rel)
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(destination, data, safeio.ReadOnlyFileMode); err != nil {
+		return "", err
+	}
+	return sha256Bytes(data), nil
 }
 
 // SignBundle подписывает детерминированный BundleDigest собранного bundle

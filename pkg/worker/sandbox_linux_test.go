@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -82,6 +83,11 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: "sandbox-probe", Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
 	if err := delivery.WriteControllerTerminalRecord(target, deliveryRecord.RunID, deliveryRecord); err != nil {
+		t.Fatal(err)
+	}
+	seedAttestation := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: "sandbox-probe"}}
+	seedAttestationBytes, _ := json.Marshal(seedAttestation)
+	if err := (attest.ControllerStore{TargetDir: target}).Write("sandbox-probe", seedAttestationBytes); err != nil {
 		t.Fatal(err)
 	}
 	briefStore := pipeline.NewFileBriefStore(target)
@@ -174,6 +180,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if !report.DeliveryAPIWriteSucceeded {
 		t.Fatalf("worker could not submit terminal delivery through controller API: %+v", report)
+	}
+	if report.AttestationStateReadable || report.AttestationDirectWriteSucceeded || !report.AttestationAPIWriteSucceeded {
+		t.Fatalf("controller attestation isolation/API boundary failed: %+v", report)
+	}
+	if _, err := (attest.ControllerStore{TargetDir: target}).Read("sandbox-probe"); err != nil {
+		t.Fatalf("host controller attestation was modified or lost: %v", err)
 	}
 	if stored, found, readErr := delivery.ReadControllerTerminalRecord(target, deliveryRecord.RunID); readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA {
 		t.Fatalf("controller delivery sentinel changed or disappeared: record=%+v found=%v err=%v", stored, found, readErr)
@@ -355,6 +367,86 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 			t.Fatalf("controller API Unix socket failure must stop the worker invocation before egress setup, got %v", err)
 		}
 	})
+}
+
+func TestBubblewrapRejectsNonRegularControllerAttestationRecord(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	target := makeBubblewrapTarget(t)
+	attestationDir := filepath.Join(target, ".ai-team", "state", "attestation")
+	if err := os.MkdirAll(attestationDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(attestationDir, "sandbox-test.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+		filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "controller attestation path") || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("non-regular controller attestation record must fail closed, got %v", err)
+	}
+}
+
+func TestBubblewrapRejectsUnsafeControllerAttestationDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		seedState func(t *testing.T, target string)
+		want      string
+	}{
+		{
+			name: "symlinked directory",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				stateDir := filepath.Join(target, ".ai-team", "state")
+				outside := filepath.Join(t.TempDir(), "attestation")
+				if err := os.Mkdir(outside, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(stateDir, "attestation")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "prepare controller attestation mount",
+		},
+		{
+			name: "hard-linked entry",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				attestationDir := filepath.Join(target, ".ai-team", "state", "attestation")
+				if err := os.Mkdir(attestationDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				entry := filepath.Join(attestationDir, "sentinel.json")
+				if err := os.WriteFile(entry, []byte("controller sentinel"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(entry, filepath.Join(target, "sentinel-alias.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "hard links",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			fakeBwrap := filepath.Join(fakeBin, "bwrap")
+			if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin)
+			target := makeBubblewrapTarget(t)
+			tc.seedState(t, target)
+			_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+				filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unsafe controller attestation directory must fail closed with %q, got %v", tc.want, err)
+			}
+		})
+	}
 }
 
 func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
@@ -654,36 +746,39 @@ func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 }
 
 type sandboxProbeReport struct {
-	DatabaseReadable              bool `json:"database_readable"`
-	WALReadable                   bool `json:"wal_readable"`
-	SHMReadable                   bool `json:"shm_readable"`
-	JournalReadable               bool `json:"journal_readable"`
-	LifecycleReadable             bool `json:"lifecycle_readable"`
-	LegacyApprovalReadable        bool `json:"legacy_approval_readable"`
-	CandidateMetadataReadable     bool `json:"candidate_metadata_readable"`
-	UsageStateReadable            bool `json:"usage_state_readable"`
-	DeliveryStateReadable         bool `json:"delivery_state_readable"`
-	DeliveryDirectWriteSucceeded  bool `json:"delivery_direct_write_succeeded"`
-	DeliveryAPIWriteSucceeded     bool `json:"delivery_api_write_succeeded"`
-	UsageAPIWriteSucceeded        bool `json:"usage_api_write_succeeded"`
-	BriefSourceReadable           bool `json:"brief_source_readable"`
-	BriefSourceWriteSucceeded     bool `json:"brief_source_write_succeeded"`
-	BriefAPIListReadSucceeded     bool `json:"brief_api_list_read_succeeded"`
-	WorktreeReadable              bool `json:"worktree_readable"`
-	TargetReadable                bool `json:"target_readable"`
-	TargetWritable                bool `json:"target_writable"`
-	AgentRegistryWritable         bool `json:"agent_registry_writable"`
-	ControllerAPIReachable        bool `json:"controller_api_reachable"`
-	AdminControlPlaneCallRejected bool `json:"admin_control_plane_call_rejected"`
-	AuthSecretAbsent              bool `json:"auth_secret_absent"`
-	SigningKeyAbsent              bool `json:"signing_key_absent"`
-	DatabasePasswordAbsent        bool `json:"database_password_absent"`
-	HostingWriteTokenAbsent       bool `json:"hosting_write_token_absent"`
-	HostTCPReachable              bool `json:"host_tcp_reachable"`
-	OutboundTCPReachable          bool `json:"outbound_tcp_reachable"`
-	OpenAIProxyReachable          bool `json:"openai_proxy_reachable"`
-	OpenAIDeniedOtherHost         bool `json:"openai_denied_other_host"`
-	OpenAIDeniedOtherPort         bool `json:"openai_denied_other_port"`
+	DatabaseReadable                bool `json:"database_readable"`
+	WALReadable                     bool `json:"wal_readable"`
+	SHMReadable                     bool `json:"shm_readable"`
+	JournalReadable                 bool `json:"journal_readable"`
+	LifecycleReadable               bool `json:"lifecycle_readable"`
+	LegacyApprovalReadable          bool `json:"legacy_approval_readable"`
+	CandidateMetadataReadable       bool `json:"candidate_metadata_readable"`
+	UsageStateReadable              bool `json:"usage_state_readable"`
+	DeliveryStateReadable           bool `json:"delivery_state_readable"`
+	DeliveryDirectWriteSucceeded    bool `json:"delivery_direct_write_succeeded"`
+	DeliveryAPIWriteSucceeded       bool `json:"delivery_api_write_succeeded"`
+	AttestationStateReadable        bool `json:"attestation_state_readable"`
+	AttestationDirectWriteSucceeded bool `json:"attestation_direct_write_succeeded"`
+	AttestationAPIWriteSucceeded    bool `json:"attestation_api_write_succeeded"`
+	UsageAPIWriteSucceeded          bool `json:"usage_api_write_succeeded"`
+	BriefSourceReadable             bool `json:"brief_source_readable"`
+	BriefSourceWriteSucceeded       bool `json:"brief_source_write_succeeded"`
+	BriefAPIListReadSucceeded       bool `json:"brief_api_list_read_succeeded"`
+	WorktreeReadable                bool `json:"worktree_readable"`
+	TargetReadable                  bool `json:"target_readable"`
+	TargetWritable                  bool `json:"target_writable"`
+	AgentRegistryWritable           bool `json:"agent_registry_writable"`
+	ControllerAPIReachable          bool `json:"controller_api_reachable"`
+	AdminControlPlaneCallRejected   bool `json:"admin_control_plane_call_rejected"`
+	AuthSecretAbsent                bool `json:"auth_secret_absent"`
+	SigningKeyAbsent                bool `json:"signing_key_absent"`
+	DatabasePasswordAbsent          bool `json:"database_password_absent"`
+	HostingWriteTokenAbsent         bool `json:"hosting_write_token_absent"`
+	HostTCPReachable                bool `json:"host_tcp_reachable"`
+	OutboundTCPReachable            bool `json:"outbound_tcp_reachable"`
+	OpenAIProxyReachable            bool `json:"openai_proxy_reachable"`
+	OpenAIDeniedOtherHost           bool `json:"openai_denied_other_host"`
+	OpenAIDeniedOtherPort           bool `json:"openai_denied_other_port"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -717,6 +812,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	deliveryPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery", job.RunID+".json")
 	deliveryData, deliveryErr := os.ReadFile(deliveryPath)
 	deliveryDirectWriteErr := os.WriteFile(deliveryPath, []byte("worker-overwrite-attempt"), 0600)
+	attestationPath := filepath.Join(job.TargetDir, ".ai-team", "state", "attestation", job.RunID+".json")
+	attestationData, attestationErr := os.ReadFile(attestationPath)
+	attestationDirectWriteErr := os.WriteFile(attestationPath, []byte("worker-overwrite-attempt"), 0600)
 	briefPath := filepath.Join(job.TargetDir, ".ai-team", "runs", job.RunID, "brief", "0001-intention.md")
 	_, briefErr := os.ReadFile(briefPath)
 	briefWriteErr := os.WriteFile(briefPath, []byte("worker-overwrite-attempt"), 0600)
@@ -728,6 +826,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	adminControlPlaneCallRejected := false
 	usageAPIWriteSucceeded := false
 	deliveryAPIWriteSucceeded := false
+	attestationAPIWriteSucceeded := false
 	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
@@ -738,6 +837,8 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		usageAPIWriteSucceeded = port.call("usage.envelope.write", workerAPICall{Usage: usageEnvelope}, nil) == nil
 		deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID, Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
 		deliveryAPIWriteSucceeded = NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(deliveryRecord) == nil
+		workerStatement := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: job.RunID}}
+		attestationAPIWriteSucceeded = NewWorkerAPIAttestationWriter(port).WriteAttestation(workerStatement) == nil
 		briefs := NewWorkerAPIBriefs(port)
 		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
 		versions, listErr := briefs.List(job.RunID)
@@ -756,36 +857,39 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	}
 	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
 	report := sandboxProbeReport{
-		DatabaseReadable:              dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
-		WALReadable:                   walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
-		SHMReadable:                   shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
-		JournalReadable:               journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
-		LifecycleReadable:             lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
-		LegacyApprovalReadable:        approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
-		CandidateMetadataReadable:     candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
-		UsageStateReadable:            usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
-		DeliveryStateReadable:         deliveryErr == nil && len(deliveryData) > 0,
-		DeliveryDirectWriteSucceeded:  deliveryDirectWriteErr == nil,
-		DeliveryAPIWriteSucceeded:     deliveryAPIWriteSucceeded,
-		UsageAPIWriteSucceeded:        usageAPIWriteSucceeded,
-		BriefSourceReadable:           briefErr == nil,
-		BriefSourceWriteSucceeded:     briefWriteErr == nil,
-		BriefAPIListReadSucceeded:     briefAPIListReadSucceeded,
-		WorktreeReadable:              worktreeErr == nil && string(worktreeData) == "worktree-visible",
-		TargetReadable:                targetErr == nil && string(targetData) == "target-visible",
-		TargetWritable:                writeErr == nil,
-		AgentRegistryWritable:         agentWriteErr == nil,
-		ControllerAPIReachable:        apiReachable,
-		AdminControlPlaneCallRejected: adminControlPlaneCallRejected,
-		AuthSecretAbsent:              os.Getenv("AI_TEAM_AUTH_SECRET") == "",
-		SigningKeyAbsent:              os.Getenv("AI_TEAM_SIGNING_KEY") == "",
-		DatabasePasswordAbsent:        os.Getenv("AI_TEAM_DB_PASSWORD") == "",
-		HostingWriteTokenAbsent:       os.Getenv("AI_TEAM_HOSTING_WRITE_TOKEN") == "",
-		HostTCPReachable:              canDial(value("--probe-host-tcp")),
-		OutboundTCPReachable:          canDial("1.1.1.1:443"),
-		OpenAIProxyReachable:          openAIProxyReachable,
-		OpenAIDeniedOtherHost:         deniedOtherHost,
-		OpenAIDeniedOtherPort:         deniedOtherPort,
+		DatabaseReadable:                dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
+		WALReadable:                     walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
+		SHMReadable:                     shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
+		JournalReadable:                 journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
+		LifecycleReadable:               lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
+		LegacyApprovalReadable:          approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
+		CandidateMetadataReadable:       candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
+		UsageStateReadable:              usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
+		DeliveryStateReadable:           deliveryErr == nil && len(deliveryData) > 0,
+		DeliveryDirectWriteSucceeded:    deliveryDirectWriteErr == nil,
+		DeliveryAPIWriteSucceeded:       deliveryAPIWriteSucceeded,
+		AttestationStateReadable:        attestationErr == nil && len(attestationData) > 0,
+		AttestationDirectWriteSucceeded: attestationDirectWriteErr == nil,
+		AttestationAPIWriteSucceeded:    attestationAPIWriteSucceeded,
+		UsageAPIWriteSucceeded:          usageAPIWriteSucceeded,
+		BriefSourceReadable:             briefErr == nil,
+		BriefSourceWriteSucceeded:       briefWriteErr == nil,
+		BriefAPIListReadSucceeded:       briefAPIListReadSucceeded,
+		WorktreeReadable:                worktreeErr == nil && string(worktreeData) == "worktree-visible",
+		TargetReadable:                  targetErr == nil && string(targetData) == "target-visible",
+		TargetWritable:                  writeErr == nil,
+		AgentRegistryWritable:           agentWriteErr == nil,
+		ControllerAPIReachable:          apiReachable,
+		AdminControlPlaneCallRejected:   adminControlPlaneCallRejected,
+		AuthSecretAbsent:                os.Getenv("AI_TEAM_AUTH_SECRET") == "",
+		SigningKeyAbsent:                os.Getenv("AI_TEAM_SIGNING_KEY") == "",
+		DatabasePasswordAbsent:          os.Getenv("AI_TEAM_DB_PASSWORD") == "",
+		HostingWriteTokenAbsent:         os.Getenv("AI_TEAM_HOSTING_WRITE_TOKEN") == "",
+		HostTCPReachable:                canDial(value("--probe-host-tcp")),
+		OutboundTCPReachable:            canDial("1.1.1.1:443"),
+		OpenAIProxyReachable:            openAIProxyReachable,
+		OpenAIDeniedOtherHost:           deniedOtherHost,
+		OpenAIDeniedOtherPort:           deniedOtherPort,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

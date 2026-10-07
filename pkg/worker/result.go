@@ -1,9 +1,11 @@
 package worker
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
 // ResultPrefix маркирует единственную машиночитаемую строку результата,
@@ -11,7 +13,9 @@ import (
 const ResultPrefix = "ai-team-worker-result: "
 
 // ResultSchemaVersion — версия контракта строки результата.
-const ResultSchemaVersion = 1
+const ResultSchemaVersion = 2
+const MaxResultBytes = 4 << 10
+const MaxResultErrorBytes = 2 << 10
 
 // Исходы воркер-задачи. Отличают business-исходы run (durable состояние,
 // требующее человека) от инфраструктурных сбоев самого воркера.
@@ -38,33 +42,67 @@ func (r Result) Controlled() bool {
 }
 
 type Result struct {
-	SchemaVersion int    `json:"schema_version"`
-	RunID         string `json:"run_id"`
-	Outcome       string `json:"outcome"`
-	Error         string `json:"error,omitempty"`
+	SchemaVersion int       `json:"schema_version"`
+	RunID         string    `json:"run_id"`
+	Operation     Operation `json:"operation"`
+	Outcome       string    `json:"outcome"`
+	Error         string    `json:"error,omitempty"`
 }
 
-// ParseResult извлекает последнюю строку результата из объединённого
-// вывода воркера. Отсутствие валидной строки означает инфраструктурный
-// сбой до записи результата (crash, preflight fatal, чужой binary).
+// ParseResult accepts exactly one bounded result line from combined worker
+// output. This is an untrusted status report, never evidence of human approval.
+// Missing or malformed output is an infrastructure failure.
 func ParseResult(output string) (Result, error) {
 	var parsed Result
 	last := ""
+	count := 0
 	for _, line := range strings.Split(output, "\n") {
 		if strings.HasPrefix(line, ResultPrefix) {
 			last = strings.TrimPrefix(line, ResultPrefix)
+			count++
 		}
 	}
 	if last == "" {
 		return parsed, fmt.Errorf("worker result line не найдена")
 	}
-	decoder := json.NewDecoder(strings.NewReader(last))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&parsed); err != nil {
+	if count != 1 {
+		return parsed, errors.New("worker result line должна быть единственной")
+	}
+	if len(last) > MaxResultBytes {
+		return parsed, errors.New("worker result line превышает лимит размера")
+	}
+	if err := strictjson.Unmarshal([]byte(last), MaxResultBytes, &parsed); err != nil {
 		return Result{}, fmt.Errorf("worker result line: %w", err)
 	}
-	if parsed.SchemaVersion != ResultSchemaVersion || parsed.Outcome == "" {
+	if parsed.SchemaVersion != ResultSchemaVersion {
+		return Result{}, fmt.Errorf("worker result line: неподдерживаемая schema_version %d (ожидается %d)", parsed.SchemaVersion, ResultSchemaVersion)
+	}
+	if parsed.RunID == "" || parsed.Operation == "" || !validOutcome(parsed.Outcome) ||
+		len(parsed.Error) > MaxResultErrorBytes {
 		return Result{}, fmt.Errorf("worker result line: недопустимый результат")
 	}
 	return parsed, nil
+}
+
+// ValidateFor binds an untrusted worker result to the exact job that the
+// controller launched. A result can report an outcome; it cannot express an
+// approval decision or control-plane operation (unknown JSON fields fail closed).
+func (r Result) ValidateFor(job Job) error {
+	if r.RunID != job.RunID {
+		return errors.New("worker result: run_id не совпадает с job")
+	}
+	if r.Operation != job.Operation {
+		return errors.New("worker result: operation не совпадает с job")
+	}
+	return nil
+}
+
+func validOutcome(value string) bool {
+	switch value {
+	case OutcomeCompleted, OutcomeFailed, OutcomeBlocked, OutcomeStopped,
+		OutcomeWaitingApproval, OutcomeCanceled, OutcomeInfraFailed:
+		return true
+	default:
+		return false
+	}
 }

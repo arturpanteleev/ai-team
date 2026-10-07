@@ -114,6 +114,9 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		if parseErr != nil {
 			return result, &ProcessError{ExitCode: 0, Diagnostics: output.String(), Err: parseErr}
 		}
+		if err := parsed.ValidateFor(job); err != nil {
+			return result, &ProcessError{ExitCode: 0, Diagnostics: output.String(), Err: err}
+		}
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 		return result, nil
 	}
@@ -126,7 +129,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		exitCode = exitError.ExitCode()
 	}
 	processErr := &ProcessError{ExitCode: exitCode, Diagnostics: output.String(), Err: err}
-	if parsed, parseErr := ParseResult(output.String()); parseErr == nil {
+	if parsed, parseErr := ParseResult(output.String()); parseErr == nil && parsed.ValidateFor(job) == nil {
 		parsedResult := parsed
 		processErr.Result = &parsedResult
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)

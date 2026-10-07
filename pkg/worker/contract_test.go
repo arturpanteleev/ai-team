@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -415,6 +416,253 @@ func TestWorkerEnvironmentWindowsNamesAndSystemBaseline(t *testing.T) {
 	}
 }
 
+func TestAgentRegistryPathsOptionAndEnvironmentSnapshot(t *testing.T) {
+	target := t.TempDir()
+	paths := []string{filepath.Join("agents", "..", "shared-agents"), filepath.Join(target, "agents")}
+	engine, err := NewProcessEngine([]string{"worker"}, target, filepath.Join(target, "web.db"), WithAgentRegistryPaths(paths))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.agentPaths) != len(paths) {
+		t.Fatalf("registry paths count = %d, want %d", len(engine.agentPaths), len(paths))
+	}
+	for index, path := range paths {
+		absolute, absErr := filepath.Abs(path)
+		if absErr != nil || engine.agentPaths[index] != filepath.Clean(absolute) {
+			t.Fatalf("registry path %d = %q, want absolute clean %q (err=%v)", index, engine.agentPaths[index], filepath.Clean(absolute), absErr)
+		}
+	}
+
+	if _, err := NewProcessEngine([]string{"worker"}, target, filepath.Join(target, "web.db"), WithAgentRegistryPaths([]string{"agents", ""})); err == nil {
+		t.Fatal("empty registry path must be rejected")
+	}
+
+	previous, wasSet := os.LookupEnv(WorkerAgentPathsEnvVar)
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv(WorkerAgentPathsEnvVar, previous)
+		} else {
+			_ = os.Unsetenv(WorkerAgentPathsEnvVar)
+		}
+	})
+	_ = os.Unsetenv(WorkerAgentPathsEnvVar)
+	if got, exists, err := AgentRegistryPathsFromEnvironment(); err != nil || exists || got != nil {
+		t.Fatalf("absent snapshot = (%v, %v, %v), want (nil, false, nil)", got, exists, err)
+	}
+
+	encoded, err := json.Marshal(engine.agentPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(WorkerAgentPathsEnvVar, string(encoded))
+	got, exists, err := AgentRegistryPathsFromEnvironment()
+	if err != nil || !exists || len(got) != len(engine.agentPaths) {
+		t.Fatalf("valid snapshot = (%v, %v, %v)", got, exists, err)
+	}
+	for index := range got {
+		if got[index] != engine.agentPaths[index] {
+			t.Fatalf("snapshot[%d] = %q, want %q", index, got[index], engine.agentPaths[index])
+		}
+	}
+}
+
+func TestAgentRegistryPathsEnvironmentRejectsMalformedSnapshots(t *testing.T) {
+	for _, raw := range []string{
+		"{", `{}`, `"/tmp/agents"`, `["relative/agents"]`, `["/tmp/agents/../other"]`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(WorkerAgentPathsEnvVar, raw)
+			if _, exists, err := AgentRegistryPathsFromEnvironment(); !exists || err == nil {
+				t.Fatalf("malformed snapshot %q must be present and rejected; exists=%v err=%v", raw, exists, err)
+			}
+		})
+	}
+}
+
+func TestWorkerProcessEnvironmentIsolationAndCleanup(t *testing.T) {
+	parent := []string{
+		"PATH=/controller/bin", "USER=worker-test", "HOME=/controller/home",
+		"XDG_CONFIG_HOME=/controller/config", "AI_TEAM_AGENT_PATH=/controller/agents",
+		"AI_TEAM_HARNESS_ENV_ALLOW=stale,controller", "AI_TEAM_WORKER_ENV_ALLOW= ZED, MISSING_KEY, TEST_TOKEN,TEST_TOKEN ",
+		"ZED=zed-value", "TEST_TOKEN=token-value", "BROKEN_ENTRY", "=empty-name",
+	}
+	result, cleanup, err := workerProcessEnvironmentForOS(parent, []string{"/shared/agents"}, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string, len(result))
+	for _, entry := range result {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("environment entry missing separator: %q", entry)
+		}
+		if _, duplicate := values[key]; duplicate {
+			t.Fatalf("duplicate environment key %q", key)
+		}
+		values[key] = value
+	}
+	if values["PATH"] != "/controller/bin" || values["USER"] != "worker-test" || values["TEST_TOKEN"] != "token-value" || values["ZED"] != "zed-value" {
+		t.Fatalf("baseline and explicitly allowed values missing: %v", values)
+	}
+	if values["AI_TEAM_HARNESS_ENV_ALLOW"] != "MISSING_KEY,TEST_TOKEN,ZED" {
+		t.Fatalf("nested allow-list should be normalized, deduplicated, and sorted: %q", values["AI_TEAM_HARNESS_ENV_ALLOW"])
+	}
+	if _, exists := values["MISSING_KEY"]; exists {
+		t.Fatal("selected variable absent from controller should not be synthesized")
+	}
+	if values["XDG_CONFIG_HOME"] == "/controller/config" || values["XDG_CONFIG_HOME"] != filepath.Join(values["HOME"], ".config") {
+		t.Errorf("XDG_CONFIG_HOME should be redirected into worker home: %q", values["XDG_CONFIG_HOME"])
+	}
+	if _, exists := values["AI_TEAM_AGENT_PATH"]; exists {
+		t.Error("controller AI_TEAM_AGENT_PATH leaked into worker environment")
+	}
+	if values["HOME"] == "/controller/home" || values["HOME"] == "" || values["TMPDIR"] == "" {
+		t.Fatalf("worker home/temp were not isolated: home=%q tmp=%q", values["HOME"], values["TMPDIR"])
+	}
+	home := values["HOME"]
+	info, err := os.Stat(home)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("worker home should exist as a directory before cleanup: info=%v err=%v", info, err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
+		t.Fatalf("worker home permissions = %o, want 0700 on POSIX", info.Mode().Perm())
+	}
+	if values[WorkerAgentPathsEnvVar] != `["/shared/agents"]` {
+		t.Fatalf("registry snapshot serialization = %q", values[WorkerAgentPathsEnvVar])
+	}
+	cleanup()
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("worker home should be removed by cleanup; stat err=%v", err)
+	}
+}
+
+func TestWindowsHomeDriveAndPathNormalization(t *testing.T) {
+	drive, homePath := windowsHomeDriveAndPath(`C:\Users\worker`, func(string) string { return `C:` })
+	if drive != `C:` || homePath != `\Users\worker` {
+		t.Fatalf("Windows home volume normalization = (%q, %q)", drive, homePath)
+	}
+	if drive, homePath := windowsHomeDriveAndPath("/private/home", func(string) string { return "" }); drive != "" || homePath != "" {
+		t.Fatalf("path without a volume = (%q, %q), want empty pair", drive, homePath)
+	}
+}
+
+func TestWorkerProcessEnvironmentRejectsInvalidAndReservedNames(t *testing.T) {
+	for _, name := range []string{"A-B", "1TOKEN", "TOKEN=VALUE", "\u2603"} {
+		t.Run("invalid/"+name, func(t *testing.T) {
+			parent := []string{"PATH=/bin", WorkerEnvAllowVar + "=" + name}
+			if _, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "linux"); err == nil {
+				cleanup()
+				t.Fatalf("invalid environment name %q was accepted", name)
+			}
+		})
+	}
+	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar} {
+		t.Run("reserved/"+name, func(t *testing.T) {
+			parent := []string{"PATH=/bin", WorkerEnvAllowVar + "=" + name}
+			if _, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "linux"); err == nil {
+				cleanup()
+				t.Fatalf("reserved environment name %q was accepted", name)
+			}
+		})
+	}
+
+	valid := []string{"A", "TOKEN_2", "_UNDERSCORE", "a9"}
+	for _, name := range valid {
+		if !validEnvironmentName(name) {
+			t.Errorf("valid environment name %q was rejected", name)
+		}
+	}
+	for _, name := range []string{"", "9TOKEN"} {
+		if validEnvironmentName(name) {
+			t.Errorf("invalid environment name %q was accepted", name)
+		}
+	}
+}
+
+func TestWorkerProcessEnvironmentRequiresPathAndWindowsRoot(t *testing.T) {
+	if _, cleanup, err := workerProcessEnvironmentForOS([]string{"USER=test"}, nil, "linux"); err == nil {
+		cleanup()
+		t.Fatal("missing PATH must fail")
+	}
+	if _, cleanup, err := workerProcessEnvironmentForOS([]string{"PATH=/bin"}, nil, "windows"); err == nil {
+		cleanup()
+		t.Fatal("missing Windows SystemRoot/WINDIR must fail")
+	}
+	withoutAllowList, cleanup, err := workerProcessEnvironmentForOS([]string{"PATH=/bin", "AI_TEAM_HARNESS_ENV_ALLOW=stale"}, nil, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range withoutAllowList {
+		if strings.HasPrefix(entry, "AI_TEAM_HARNESS_ENV_ALLOW=") {
+			cleanup()
+			t.Fatalf("stale downstream allow-list should be dropped when no variables are selected: %q", entry)
+		}
+	}
+	cleanup()
+
+	for _, rootKey := range []string{"SYSTEMROOT", "WINDIR"} {
+		parent := []string{"PATH=C:\\Windows\\System32", rootKey + "=C:\\Windows", "COMSPEC=C:\\Windows\\cmd.exe", "PATHEXT=.COM;.EXE"}
+		result, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "windows")
+		if err != nil {
+			t.Fatalf("Windows root provided by %s: %v", rootKey, err)
+		}
+		values := make(map[string]string)
+		for _, entry := range result {
+			key, value, _ := strings.Cut(entry, "=")
+			values[key] = value
+		}
+		if values["SYSTEMROOT"] != `C:\Windows` || values["WINDIR"] != `C:\Windows` ||
+			values["COMSPEC"] != `C:\Windows\cmd.exe` || values["PATHEXT"] != `.COM;.EXE` {
+			cleanup()
+			t.Fatalf("Windows baseline normalization failed for %s: %v", rootKey, values)
+		}
+		home := values["HOME"]
+		cleanup()
+		if _, err := os.Stat(home); !os.IsNotExist(err) {
+			t.Errorf("Windows environment cleanup failed for %s: %v", rootKey, err)
+		}
+	}
+}
+
+func TestWorkerProcessEnvironmentReportsTempCreationFailure(t *testing.T) {
+	base := t.TempDir()
+	tempFile := filepath.Join(base, "not-a-directory")
+	if err := os.WriteFile(tempFile, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempFile)
+	// os.TempDir uses TMPDIR on Unix and TMP/TEMP/USERPROFILE on Windows.
+	// Point every platform-specific candidate at the file so MkdirTemp must fail.
+	t.Setenv("TMP", tempFile)
+	t.Setenv("TEMP", tempFile)
+	t.Setenv("USERPROFILE", tempFile)
+	if _, cleanup, err := workerProcessEnvironmentForOS([]string{"PATH=/bin"}, nil, "linux"); err == nil {
+		cleanup()
+		t.Fatal("worker home creation under a file must fail")
+	}
+}
+
+func TestWorkerProcessEnvironmentCleansHomeAfterPermissionFailure(t *testing.T) {
+	permissionErr := errors.New("chmod denied")
+	var createdHome string
+	_, _, err := workerProcessEnvironmentForOSWithChmod([]string{"PATH=/bin"}, nil, "linux", func(path string, mode os.FileMode) error {
+		createdHome = path
+		if mode != 0700 {
+			t.Errorf("worker home mode = %o, want 0700", mode)
+		}
+		return permissionErr
+	})
+	if !errors.Is(err, permissionErr) {
+		t.Fatalf("permission error should be returned unchanged: %v", err)
+	}
+	if createdHome == "" {
+		t.Fatal("permission callback was not invoked")
+	}
+	if _, err := os.Stat(createdHome); !os.IsNotExist(err) {
+		t.Fatalf("partially initialized worker home should be removed, stat err=%v", err)
+	}
+}
+
 // TestProcessEngineResumeAndCancelBuildTypedJobs — Resume/Cancel обязаны
 // отправлять именно свою операцию и не протаскивать execution-параметры,
 // которые Validate запрещает для cancel.
@@ -465,6 +713,19 @@ func TestProcessEngineRejectsInvalidJobBeforeSpawn(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "mounted target") {
 		t.Fatalf("job чужого target обязан отклоняться до spawn, получено: %v", err)
+	}
+}
+
+func TestProcessEngineRejectsInvalidWorkerEnvironmentBeforeSpawn(t *testing.T) {
+	target := t.TempDir()
+	engine := newTestEngine(t, target)
+	allowWorkerTestEnvironment(t, "INVALID-NAME")
+	_, err := engine.Execute(context.Background(), Job{
+		SchemaVersion: SchemaVersion, Operation: OperationStart,
+		RunID: "run-env-invalid", TargetDir: engine.TargetDir(), Feature: "feature", Task: "task",
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker environment") {
+		t.Fatalf("invalid worker environment must prevent child spawn: %v", err)
 	}
 }
 

@@ -52,6 +52,21 @@ func TestQueuedLegacyJobIsUpgradedOnlyAtProcessSpawn(t *testing.T) {
 	if err := legacy.ValidateQueued(target); err == nil {
 		t.Fatal("durable queue не должен сохранять process-specific execution_id")
 	}
+	legacy.ExecutionID = ""
+	legacy.SchemaVersion = SchemaVersion + 1
+	if err := legacy.ValidateQueued(target); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Fatalf("unsupported queued schema must be rejected: %v", err)
+	}
+}
+
+type failedJobReader struct{}
+
+func (failedJobReader) Read([]byte) (int, error) { return 0, fmt.Errorf("read failed") }
+
+func TestDecodeJobPropagatesReaderFailure(t *testing.T) {
+	if _, err := DecodeJob(failedJobReader{}, t.TempDir()); err == nil || err.Error() != "read failed" {
+		t.Fatalf("reader failure should be propagated unchanged: %v", err)
+	}
 }
 
 func TestProcessEnginePassesStrictJob(t *testing.T) {

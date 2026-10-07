@@ -240,6 +240,12 @@ func workerProcessEnvironment(parent []string, agentPaths []string) ([]string, f
 }
 
 func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos string) ([]string, func(), error) {
+	return workerProcessEnvironmentForOSWithChmod(parent, agentPaths, goos, os.Chmod)
+}
+
+// workerProcessEnvironmentForOSWithChmod isolates the permission-setting step
+// so failure cleanup can be verified without relying on host filesystem quirks.
+func workerProcessEnvironmentForOSWithChmod(parent []string, agentPaths []string, goos string, chmod func(string, os.FileMode) error) ([]string, func(), error) {
 	keyForOS := func(key string) string { return environmentKeyForOS(key, goos) }
 	values := make(map[string]string, len(parent))
 	for _, item := range parent {
@@ -279,7 +285,7 @@ func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos st
 		return nil, func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(workerHome) }
-	if err := os.Chmod(workerHome, 0700); err != nil {
+	if err := chmod(workerHome, 0700); err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}
@@ -321,9 +327,9 @@ func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos st
 		environment["USERPROFILE"] = workerHome
 		environment["APPDATA"] = appData
 		environment["LOCALAPPDATA"] = localAppData
-		if drive := filepath.VolumeName(workerHome); drive != "" {
+		if drive, homePath := windowsHomeDriveAndPath(workerHome, filepath.VolumeName); drive != "" {
 			environment["HOMEDRIVE"] = drive
-			environment["HOMEPATH"] = strings.TrimPrefix(workerHome, drive)
+			environment["HOMEPATH"] = homePath
 		}
 	}
 	environment["XDG_CONFIG_HOME"] = filepath.Join(workerHome, ".config")
@@ -374,6 +380,14 @@ func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos st
 		result = append(result, key+"="+environment[key])
 	}
 	return result, cleanup, nil
+}
+
+func windowsHomeDriveAndPath(home string, volumeName func(string) string) (string, string) {
+	drive := volumeName(home)
+	if drive == "" {
+		return "", ""
+	}
+	return drive, strings.TrimPrefix(home, drive)
 }
 
 func environmentKeyForOS(value, goos string) string {

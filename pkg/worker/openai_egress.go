@@ -294,7 +294,7 @@ func StartOpenAIEgressBridge(ctx context.Context, socketPath, token string) (str
 }
 
 func bridgeOpenAIClient(client net.Conn, socketPath, token string, done <-chan struct{}) {
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	_ = client.SetDeadline(time.Now().Add(10 * time.Second))
 	reader := bufio.NewReader(client)
 	req, err := http.ReadRequest(reader)
@@ -308,7 +308,7 @@ func bridgeOpenAIClient(client net.Conn, socketPath, token string, done <-chan s
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	stopCancellation := make(chan struct{})
 	defer close(stopCancellation)
 	go func() {

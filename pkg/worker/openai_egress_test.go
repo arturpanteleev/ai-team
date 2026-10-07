@@ -97,7 +97,7 @@ func TestOpenAIEgressControllerRequiresCapabilityAndExactTarget(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conn, dialErr := net.Dial("unix", socket)
 			mustNoError(t, dialErr)
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			_, writeErr := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", test.target, test.target)
 			mustNoError(t, writeErr)
 			if test.token != "" {
@@ -150,7 +150,7 @@ func TestPublicUnicastIPRejectsSpecialAndReservedRanges(t *testing.T) {
 func TestOpenAIEgressControllerShutdownClosesHijackedTunnel(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	mustNoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	upstreamClosed := make(chan struct{})
 	go func() {
 		connection, acceptErr := listener.Accept()
@@ -158,7 +158,7 @@ func TestOpenAIEgressControllerShutdownClosesHijackedTunnel(t *testing.T) {
 			close(upstreamClosed)
 			return
 		}
-		defer connection.Close()
+		defer func() { _ = connection.Close() }()
 		var one [1]byte
 		_, _ = connection.Read(one[:]) // deliberately stay open until controller closes it
 		close(upstreamClosed)
@@ -192,7 +192,7 @@ func TestOpenAIEgressControllerShutdownClosesHijackedTunnel(t *testing.T) {
 func TestOpenAIEgressControllerShutdownClosesActiveTunnel(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	mustNoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	upstreamClosed := make(chan struct{})
 	go func() {
 		connection, acceptErr := listener.Accept()
@@ -200,7 +200,7 @@ func TestOpenAIEgressControllerShutdownClosesActiveTunnel(t *testing.T) {
 			close(upstreamClosed)
 			return
 		}
-		defer connection.Close()
+		defer func() { _ = connection.Close() }()
 		var one [1]byte
 		_, _ = connection.Read(one[:])
 		close(upstreamClosed)
@@ -213,7 +213,7 @@ func TestOpenAIEgressControllerShutdownClosesActiveTunnel(t *testing.T) {
 	defer server.close()
 	worker, err := net.Dial("unix", socket)
 	mustNoError(t, err)
-	defer worker.Close()
+	defer func() { _ = worker.Close() }()
 	if _, err := io.WriteString(worker, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\nProxy-Authorization: Bearer known-capability\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestOpenAIEgressBridgeClosesConnectionsOnCancellation(t *testing.T) {
 	mustNoError(t, err)
 	connection, err := net.DialTimeout("tcp", proxy.Host, time.Second)
 	mustNoError(t, err)
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	_, err = io.WriteString(connection, "CONNECT api.openai.com:443 HTTP/1.1\r\n")
 	mustNoError(t, err)
 	cancel()

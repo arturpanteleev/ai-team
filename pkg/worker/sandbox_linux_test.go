@@ -270,7 +270,7 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 			RunID: "socket-setup-failure", Feature: "probe", TaskDesc: "test fail-closed socket setup", TargetDir: target,
 		})
 		if err == nil || !strings.Contains(err.Error(), "worker controller API") {
-			t.Fatalf("socket setup failure must stop the worker invocation without fallback, got %v", err)
+			t.Fatalf("controller API Unix socket failure must stop the worker invocation before egress setup, got %v", err)
 		}
 	})
 }

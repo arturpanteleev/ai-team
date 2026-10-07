@@ -255,8 +255,8 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API task: %w", taskErr)
 		}
 		recorder := e.apiRecorderFactory()
+		tempDir := ""
 		if e.bubblewrap {
-			tempDir := ""
 			for _, item := range environment {
 				if key, value, ok := strings.Cut(item, "="); ok && key == "TMPDIR" {
 					tempDir = value
@@ -266,18 +266,6 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			if tempDir == "" {
 				return pipeline.RunResult{}, errors.New("worker private TMPDIR is missing")
 			}
-			openAIEgressSocket = filepath.Join(tempDir, "openai-egress.sock")
-			dial := e.openAIEgressDial
-			if dial == nil {
-				dial = dialOpenAIHost
-			}
-			openAIEgress, err = startOpenAIEgressServerWithDial(openAIEgressSocket, dial)
-			if err != nil {
-				return pipeline.RunResult{}, fmt.Errorf("worker OpenAI egress proxy: %w", err)
-			}
-			defer openAIEgress.close()
-			openAIEgressToken = openAIEgress.token
-			command.Env = append(command.Env, openAIEgressSocketEnv+"="+openAIEgressSocket, openAIEgressTokenEnv+"="+openAIEgressToken)
 			socketPath := filepath.Join(tempDir, "controller-api.sock")
 			api, err = startWorkerAPIServerUnixForTask(job, recorder, e.apiApprovals, socketPath, expectedTask)
 			if err == nil {
@@ -294,6 +282,20 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 		api.lifecycle = apiLifecycle
 		defer api.close()
+		if e.bubblewrap {
+			openAIEgressSocket = filepath.Join(tempDir, "openai-egress.sock")
+			dial := e.openAIEgressDial
+			if dial == nil {
+				dial = dialOpenAIHost
+			}
+			openAIEgress, err = startOpenAIEgressServerWithDial(openAIEgressSocket, dial)
+			if err != nil {
+				return pipeline.RunResult{}, fmt.Errorf("worker OpenAI egress proxy: %w", err)
+			}
+			defer openAIEgress.close()
+			openAIEgressToken = openAIEgress.token
+			command.Env = append(command.Env, openAIEgressSocketEnv+"="+openAIEgressSocket, openAIEgressTokenEnv+"="+openAIEgressToken)
+		}
 	}
 	if e.bubblewrap {
 		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, e.agentPaths, command.Env)

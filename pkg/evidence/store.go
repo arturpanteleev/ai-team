@@ -370,12 +370,24 @@ func startWithEventLog(root string, manifest RunManifest, eventLog eventLog) (*S
 // Resume открывает существующий non-terminal run после полной проверки
 // manifest, snapshots и hash-chained event log.
 func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
-	return resumeWithEventLog(root, runID, nil)
+	return ResumeWithAttemptManifestSource(root, runID, nil)
+}
+
+// ResumeWithAttemptManifestSource resumes a run while obtaining immutable
+// attempt manifest bytes from source. Source-backed reads are limited to
+// MaxAttemptManifestSize. Resume retains its existing 8 MiB filesystem
+// manifest-read limit.
+func ResumeWithAttemptManifestSource(root, runID string, source AttemptManifestSource) (*Store, RunManifest, ReplayedRun, error) {
+	return resumeWithEventLogAndAttemptManifestSource(root, runID, nil, source)
 }
 
 // resumeWithEventLog is intentionally package-private: this abstraction slice
 // does not support an independent backend while path-based consumers remain.
 func resumeWithEventLog(root, runID string, eventLog eventLog) (*Store, RunManifest, ReplayedRun, error) {
+	return resumeWithEventLogAndAttemptManifestSource(root, runID, eventLog, nil)
+}
+
+func resumeWithEventLogAndAttemptManifestSource(root, runID string, eventLog eventLog, source AttemptManifestSource) (*Store, RunManifest, ReplayedRun, error) {
 	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
 		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("недопустимый run_id %q", runID)
 	}
@@ -422,7 +434,7 @@ func resumeWithEventLog(root, runID string, eventLog eventLog) (*Store, RunManif
 		// event before restoring lifecycle state.
 		replayed = ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	} else {
-		replayed, err = replayEvents(events, runID, runDir)
+		replayed, err = replayEventsWithAttemptManifestSource(events, runID, runDir, source)
 		if err != nil {
 			return nil, RunManifest{}, ReplayedRun{}, err
 		}
@@ -443,13 +455,9 @@ func resumeWithEventLog(root, runID string, eventLog eventLog) (*Store, RunManif
 		if attempt.ManifestSHA256 == "" {
 			continue
 		}
-		data, readErr := safeio.ReadRegularFile(filepath.Join(runDir, "attempts", attempt.AttemptID, "manifest.json"), 8<<20)
+		_, attemptManifest, readErr := readAttemptManifest(source, runDir, runID, attempt.AttemptID)
 		if readErr != nil {
 			return nil, RunManifest{}, ReplayedRun{}, readErr
-		}
-		var attemptManifest AttemptManifest
-		if json.Unmarshal(data, &attemptManifest) != nil {
-			return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("attempt manifest %s повреждён", attempt.AttemptID)
 		}
 		for _, output := range attemptManifest.Outputs {
 			store.provenance[cleanArtifactKey(output.SourcePath)] = output
@@ -695,7 +703,15 @@ func (s *Store) PublishAttempt(manifest AttemptManifest, artifactRoot string, in
 			Size: size, SHA256: digest,
 		})
 	}
-	if err := writeJSON(filepath.Join(tmpDir, "manifest.json"), manifest); err != nil {
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	manifestData = append(manifestData, '\n')
+	if len(manifestData) > MaxAttemptManifestSize {
+		return fmt.Errorf("attempt manifest %s exceeds maximum size of %d bytes", manifest.AttemptID, MaxAttemptManifestSize)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "manifest.json"), manifestData, 0644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {

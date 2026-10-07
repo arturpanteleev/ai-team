@@ -1,0 +1,9 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Ubuntu 24.04+ restricts unprivileged user namespaces by default. Grant that
+# permission only to the bubblewrap executable used by the sandbox integration
+# tests; do not disable the host-wide AppArmor user-namespace restriction.
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

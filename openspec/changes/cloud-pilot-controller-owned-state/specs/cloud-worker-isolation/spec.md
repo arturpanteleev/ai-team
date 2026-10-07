@@ -107,7 +107,10 @@ contents. Files below the private lifecycle and legacy-approval directories
 MUST also be regular files with no hard-link aliases; symlinks and special
 files MUST fail closed. Missing bubblewrap or a failed sandbox launch MUST fail
 the invocation; the launcher MUST NOT retry the worker without the sandbox.
-The feature is opt-in and Linux-only.
+The Linux host MUST allow bubblewrap to create the required unprivileged user
+namespace; package presence alone is not sufficient. If host policy denies
+namespace setup, the invocation MUST fail closed. The feature is opt-in and
+Linux-only.
 
 This slice does not isolate `.ai-team/runs` evidence/manifests, candidate or
 other target artifacts, agent registry files, host files other than the

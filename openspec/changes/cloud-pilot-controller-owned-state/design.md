@@ -193,7 +193,13 @@ it if it resolves to `/`; otherwise the writable target bind would override the
 read-only host-root bind for the entire filesystem.
 If bubblewrap is absent or its namespace setup fails, the process fails without
 an unsandboxed retry. This option is not enabled by default and does not change
-the containment receipt.
+the containment receipt. The Linux host must permit bubblewrap's unprivileged
+user namespaces. On Ubuntu 24.04 and newer, AppArmor may deny them by default;
+operators need a narrow AppArmor rule for the bubblewrap executable. The
+reference CI profile is in `.github/ci-bwrap.apparmor`; it grants `userns` to
+`/usr/bin/bwrap` without disabling the host-wide restriction. Runtime
+availability is distinct from package presence, so a host-policy denial still
+fails the worker invocation closed.
 
 Before launch, the configured canonical DB path and each existing canonical
 SQLite sidecar are checked for regular-file type and `st_nlink == 1`. The

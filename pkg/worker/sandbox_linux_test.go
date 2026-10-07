@@ -162,7 +162,7 @@ func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 	if err := appendPrivateDirectoryMount(&args, privateDir, true); err == nil || !strings.Contains(err.Error(), "hard links") {
 		t.Fatalf("hard-linked private state must fail closed, got %v", err)
 	}
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("failed mount must not be appended, args=%v", args)
 	}
 }

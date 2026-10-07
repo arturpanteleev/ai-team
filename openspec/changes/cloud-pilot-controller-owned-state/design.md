@@ -180,6 +180,52 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
 
 ## Последовательность
 
+### Bounded Linux bubblewrap filesystem slice
+
+Web/scheduler launchers can opt in with `AI_TEAM_WORKER_SANDBOX=bubblewrap`.
+On Linux, `ProcessEngine` wraps the child in bubblewrap user/PID/IPC/UTS and
+mount namespaces, exposes the host root read-only, rebinds the configured
+target read-write, and masks the configured SQLite database plus sidecars and
+the lifecycle/legacy-approval state directories. The worker still needs the
+shared network namespace to reach its per-invocation loopback controller API.
+Before process creation, the launcher resolves and cleans the target and rejects
+it if it resolves to `/`; otherwise the writable target bind would override the
+read-only host-root bind for the entire filesystem.
+If bubblewrap is absent or its namespace setup fails, the process fails without
+an unsandboxed retry. This option is not enabled by default and does not change
+the containment receipt. The Linux host must permit bubblewrap's unprivileged
+user namespaces. On Ubuntu 24.04 and newer, AppArmor may deny them by default;
+operators need a narrow AppArmor rule for the bubblewrap executable. The
+reference CI profile is in `.github/ci-bwrap.apparmor`; it grants `userns` to
+`/usr/bin/bwrap` without disabling the host-wide restriction. Runtime
+availability is distinct from package presence, so a host-policy denial still
+fails the worker invocation closed.
+
+Before launch, the configured canonical DB path and each existing canonical
+SQLite sidecar are checked for regular-file type and `st_nlink == 1`. The
+launcher also checks files under the private lifecycle and legacy-approval
+directories for regular-file type and a single link. It fails closed on
+hard-link aliases because masking one pathname or directory would leave the
+same file reachable elsewhere. Integration coverage places real sentinel files
+at the DB, WAL, SHM, and rollback-journal canonical paths before spawning the
+sandbox and checks that none of their secret bytes can be read inside it. Only
+the explicitly listed DB paths and state directories are covered by this
+slice.
+
+The slice leaves `.ai-team/runs` evidence/manifests, candidate and artifact
+paths, and host files outside the configured database potentially reachable
+through the read-only host-root bind, subject to host permissions. The worker's
+`HOME` points to a fresh per-invocation temporary directory, so the original
+host home is not exposed through `HOME`;
+its original absolute path may still be reachable through the read-only `/`
+bind, subject to host permissions. The read-only root bind does not provide
+general host-secret isolation.
+The target is still writable, and network policy, independent OS identity,
+artifact transfer, recovery, backups, and deployment smoke remain open. Linux CI installs
+bubblewrap and runs a child-process probe that attempts to read DB/lifecycle
+sentinels while confirming target read/write still works. Passing this probe is
+evidence for only these specific mounts, not full worker isolation.
+
 1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
    здесь:** worker result/checks/artifacts недоверен; controller подтверждает
    только correlation и собственные независимые проверки.

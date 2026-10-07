@@ -4,8 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
 func TestCheckControlRootDistinguishesUninitializedFromUnsafe(t *testing.T) {
@@ -47,6 +50,66 @@ func TestCheckControlRootDistinguishesUninitializedFromUnsafe(t *testing.T) {
 			t.Fatalf("валидный control root не должен возвращать ошибку: %v", err)
 		}
 	})
+}
+
+func TestConfiguredWorkerProcessOptions(t *testing.T) {
+	t.Run("default has no sandbox override", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "")
+		options, err := configuredWorkerProcessOptions()
+		if err != nil || len(options) != 0 {
+			t.Fatalf("default worker options = %d, %v; want none", len(options), err)
+		}
+	})
+
+	t.Run("unknown sandbox fails closed", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "unknown")
+		if _, err := configuredWorkerProcessOptions(); err == nil || !strings.Contains(err.Error(), worker.WorkerSandboxEnvVar) {
+			t.Fatalf("unknown sandbox selector must fail closed, got %v", err)
+		}
+	})
+
+	t.Run("bubblewrap selector", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "bubblewrap")
+		options, err := configuredWorkerProcessOptions()
+		if err != nil || len(options) != 1 {
+			t.Fatalf("bubblewrap worker options = %d, %v; want one option", len(options), err)
+		}
+		target := t.TempDir()
+		_, engineErr := worker.NewProcessEngine([]string{"worker"}, target, filepath.Join(target, "controller.db"), options...)
+		_, bwrapErr := exec.LookPath("bwrap")
+		if runtime.GOOS != "linux" || bwrapErr != nil {
+			if engineErr == nil {
+				t.Fatal("unsupported or unavailable bubblewrap selector must fail closed")
+			}
+			return
+		}
+		if engineErr != nil {
+			t.Fatalf("available Linux bubblewrap option rejected: %v", engineErr)
+		}
+	})
+}
+
+func TestConfiguredAgentRegistryPathsNormalizesPlugins(t *testing.T) {
+	pluginPath := filepath.Join("relative", "plugins")
+	t.Setenv("AI_TEAM_AGENT_PATH", pluginPath+string(os.PathListSeparator))
+	paths := configuredAgentRegistryPaths()
+	if len(paths) != 2 {
+		t.Fatalf("agent registry paths = %v; want plugin and user config paths", paths)
+	}
+	wantPlugin, err := filepath.Abs(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths[0] != wantPlugin {
+		t.Fatalf("plugin path = %q, want %q", paths[0], wantPlugin)
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(configDir, "ai-team", "agents"); paths[1] != want {
+		t.Fatalf("user agent path = %q, want %q", paths[1], want)
+	}
 }
 
 func TestEnsureControlIgnoredUsesLocalGitExclude(t *testing.T) {

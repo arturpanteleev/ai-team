@@ -143,6 +143,35 @@ func TestWorkerAPIAttemptManifestStoreReturnsControllerErrors(t *testing.T) {
 	}
 }
 
+func TestWorkerAPIAttemptManifestDispatchRequiresUnixTransportAndAllowedOperation(t *testing.T) {
+	runID := "attempt-api-policy"
+	for _, method := range []string{"attempt_manifest.write", "attempt_manifest.read"} {
+		t.Run(method+" transport", func(t *testing.T) {
+			api := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationStart}}
+			if _, err := api.dispatch(method, workerAPICall{AttemptManifest: evidence.AttemptManifest{RunID: runID}}); err == nil || !strings.Contains(err.Error(), "require bubblewrap Unix transport") {
+				t.Fatalf("dispatch error = %v, want Unix transport restriction", err)
+			}
+		})
+		t.Run(method+" operation", func(t *testing.T) {
+			api := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationCancel}, usageAllowed: true}
+			if _, err := api.dispatch(method, workerAPICall{AttemptManifest: evidence.AttemptManifest{RunID: runID}}); err == nil || !strings.Contains(err.Error(), "not allowed for operation") {
+				t.Fatalf("dispatch error = %v, want operation restriction", err)
+			}
+		})
+	}
+}
+
+func TestWorkerAPIRejectsOversizedAttemptManifestEnvelope(t *testing.T) {
+	api := &workerAPIServer{token: "test-token"}
+	req := httptest.NewRequest(http.MethodPost, "/v1/call", strings.NewReader(strings.Repeat("x", workerAPIMaxAttemptManifestEnvelope+1)))
+	req.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	api.handle(response, req)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized attempt manifest envelope status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestWorkerAPIServerFailsClosedWhenAttemptManifestReservationCannotBeCreated(t *testing.T) {
 	target := t.TempDir()
 	manifestRoot := filepath.Join(target, ".ai-team", "state", "attempt-manifests")

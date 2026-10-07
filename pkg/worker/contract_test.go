@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -304,6 +305,30 @@ func TestBubblewrapWorkerRequiresControllerAPI(t *testing.T) {
 		RunID: "sandbox-api-required", Feature: "feature", TaskDesc: "task", TargetDir: target,
 	}); err == nil || !strings.Contains(err.Error(), "requires the controller API") {
 		t.Fatalf("sandbox without controller API must fail before spawning: %v", err)
+	}
+}
+
+func TestProcessEngineRejectsControllerLifecycleStoreBeforeSpawn(t *testing.T) {
+	target := t.TempDir()
+	stateDir := filepath.Join(target, ".ai-team", "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "runs"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewProcessEngine(
+		[]string{"worker-must-not-run"}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Start(context.Background(), pipeline.RunConfig{
+		RunID: "lifecycle-store-failure", Feature: "feature", TaskDesc: "task", TargetDir: target,
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker lifecycle store") {
+		t.Fatalf("invalid controller lifecycle store must fail before spawning worker, got %v", err)
 	}
 }
 

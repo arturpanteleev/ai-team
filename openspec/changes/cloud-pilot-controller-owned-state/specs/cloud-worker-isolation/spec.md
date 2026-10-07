@@ -89,6 +89,43 @@ filesystem until a separately verified runtime boundary is deployed.
 - **THEN** the controller MUST reject the request without changing lifecycle
   state
 
+### Requirement: Run-scoped controller-owned business brief API
+
+For disposable worker execution, the pipeline MUST create, append, list, and
+read durable business-brief versions through typed controller API operations
+scoped to the invocation's run. Requests MUST NOT accept a target path or an
+arbitrary version path; reads MUST resolve a version ID from that run's store.
+The controller MUST bind initial-brief creation to the immutable task in the
+start job, or to the persisted lifecycle task during resume/recovery, and MUST
+reject a worker-supplied initial intention that differs from that value.
+The controller MUST preserve immutable version identity and return only the
+requested run's brief content. The worker MAY materialize returned bytes in
+per-invocation staging under `{target}/.ai-team/artifacts` for runtime inputs.
+This staging directory is writable and visible to the worker and is not a
+security boundary; abrupt termination MAY leave temporary `.brief-*`
+directories behind. Local CLI runs MAY continue to use the filesystem-backed
+implementation of the same typed store contract.
+This application/API ownership boundary MUST NOT be described as OS
+inaccessibility: the target remains mounted to the worker, and a compromised
+worker can still read or alter the controller's on-target brief files directly.
+
+#### Scenario: Worker creates and resumes a clarified business brief
+
+- **WHEN** a worker creates an initial brief, records a human clarification,
+  exits, and later resumes the same run
+- **THEN** the controller MUST preserve both immutable versions and their
+  parent/hash identity
+- **AND** the resumed worker MUST receive the latest content through the
+  run-scoped API without supplying a filesystem path
+
+#### Scenario: Worker requests a brief outside its run
+
+- **WHEN** a worker requests another run's brief or supplies a filesystem path
+  in place of a version ID
+- **THEN** the controller MUST reject the cross-run request or return no
+  matching version
+- **AND** no other run's brief content may be returned
+
 ### Requirement: Opt-in Linux controller-state filesystem masking
 
 The system MUST wrap a child in bubblewrap mount, user, PID, IPC, UTS, and network

@@ -290,6 +290,7 @@ func cmdWorker() {
 	}
 	var recorderStore *webstore.Store
 	var approvalStore pipeline.ApprovalStore
+	var businessBriefStore pipeline.BriefStore
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -299,6 +300,7 @@ func cmdWorker() {
 		}
 		recorder = worker.NewWorkerAPIRecorder(apiPort)
 		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
+		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
 		if *dbPath == "" {
@@ -356,10 +358,15 @@ func cmdWorker() {
 			fatal("Worker preflight: %v", report.Error())
 		}
 	}
-	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
+	engineOptions := []pipeline.Option{
 		pipeline.WithRecorder(recorder),
 		pipeline.WithApprovalStore(approvalStore),
-		pipeline.WithLifecycleStore(lifecycleStore)))
+		pipeline.WithLifecycleStore(lifecycleStore),
+	}
+	if businessBriefStore != nil {
+		engineOptions = append(engineOptions, pipeline.WithBusinessBriefStore(businessBriefStore))
+	}
+	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var result pipeline.RunResult

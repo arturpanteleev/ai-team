@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -90,8 +91,8 @@ func validExecutionID(value string) bool {
 }
 
 func (j Job) validateFields(expectedTarget string) error {
-	if j.RunID == "" || filepath.Base(j.RunID) != j.RunID || strings.ContainsAny(j.RunID, `/\`) {
-		return errors.New("worker job: недопустимый run_id")
+	if err := evidence.ValidateRunID(j.RunID); err != nil {
+		return fmt.Errorf("worker job: %w", err)
 	}
 	target, err := filepath.Abs(j.TargetDir)
 	if err != nil || !filepath.IsAbs(j.TargetDir) || filepath.Clean(j.TargetDir) != filepath.Clean(target) {

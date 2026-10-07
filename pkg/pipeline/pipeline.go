@@ -80,6 +80,7 @@ type Pipeline struct {
 	approvals  ApprovalStore
 	lifecycle  lifecycle.StorePort
 	evidence   EvidenceStoreFactory
+	briefs     BriefStore
 	reportsDir string
 }
 
@@ -131,6 +132,12 @@ func WithLifecycleStore(store lifecycle.StorePort) Option {
 // worker from controller-owned state.
 func WithEvidenceStoreFactory(factory EvidenceStoreFactory) Option {
 	return func(p *Pipeline) { p.evidence = factory }
+}
+
+// WithBusinessBriefStore routes durable business-brief persistence through a
+// controller-owned typed store. The default remains the local filesystem store.
+func WithBusinessBriefStore(store BriefStore) Option {
+	return func(p *Pipeline) { p.briefs = store }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
@@ -632,19 +639,44 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{}, fmt.Errorf("чтение созданного lifecycle state: %w", err)
 		}
 	}
+	briefStore := p.briefs
+	if briefStore == nil {
+		briefStore = NewFileBriefStore(runCfg.TargetDir)
+	}
+	artifactRoot, err := safeio.EnsureDir(sourceTarget, ".ai-team", "artifacts")
+	if err != nil {
+		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("prepare private brief workspace: %w", err)
+	}
+	briefWorkspace, err := os.MkdirTemp(artifactRoot, ".brief-"+runID+"-")
+	if err != nil {
+		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("create private brief workspace: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(briefWorkspace) }()
 	var currentBrief briefVersion
 	if runCfg.ResumeRunID == "" {
-		currentBrief, _, err = writeInitialBrief(runCfg.TargetDir, runID, runCfg.TaskDesc)
+		var document BriefDocument
+		document, err = briefStore.CreateInitial(runID, runCfg.TaskDesc)
+		if err == nil {
+			currentBrief, err = materializeBriefDocument(briefWorkspace, document)
+		}
 	} else {
-		versions, briefErr := listBriefVersions(filepath.Join(runCfg.TargetDir, ".ai-team", "runs", runID, "brief"))
+		versions, briefErr := briefStore.List(runID)
 		if os.IsNotExist(briefErr) || (briefErr == nil && len(versions) == 0) {
 			// Runs created before business-brief versioning can resume from their
 			// immutable lifecycle task snapshot; new runs always write version 1.
-			currentBrief, _, err = writeInitialBrief(runCfg.TargetDir, runID, resumedState.Task)
+			var document BriefDocument
+			document, err = briefStore.CreateInitial(runID, resumedState.Task)
+			if err == nil {
+				currentBrief, err = materializeBriefDocument(briefWorkspace, document)
+			}
 		} else if briefErr != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: durable business brief unavailable: %w", briefErr)
 		} else {
-			currentBrief = versions[len(versions)-1]
+			document, readErr := briefStore.Read(runID, versions[len(versions)-1].ID)
+			if readErr != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: durable business brief unavailable: %w", readErr)
+			}
+			currentBrief, err = materializeBriefDocument(briefWorkspace, document)
 		}
 		answerApproval := resumedApproval
 		if answerApproval == nil {
@@ -655,7 +687,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if json.Unmarshal(answerApproval.Payload, &payload) != nil || payload.Kind != "questions" {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification payload")
 			}
-			currentBrief, _, err = appendClarificationVersion(runCfg.TargetDir, runID, answerApproval.ID, payload.Markdown, questionAnswer(answerApproval.Decisions))
+			var document BriefDocument
+			document, err = briefStore.AppendClarification(runID, answerApproval.ID, payload.Markdown, questionAnswer(answerApproval.Decisions))
+			if err == nil {
+				currentBrief, err = materializeBriefDocument(briefWorkspace, document)
+			}
 		}
 	}
 	if err != nil {

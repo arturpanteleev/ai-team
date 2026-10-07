@@ -27,77 +27,177 @@ type briefVersion struct {
 	Kind       string `json:"kind"`
 }
 
-type approvedSpecPayload struct {
-	Kind             string            `json:"kind"`
-	BriefVersion     briefVersion      `json:"brief_version"`
-	AnalystAttemptID string            `json:"analyst_attempt_id"`
-	Artifacts        map[string]string `json:"artifacts"`
+// BriefVersion is the immutable, run-scoped identity of a business brief.
+// Path is always relative to the controller's run store when returned by a
+// BriefStore. Pipeline materializes the bytes privately before passing an
+// artifact path to a runtime.
+type BriefVersion = briefVersion
+
+type BriefDocument struct {
+	Version BriefVersion `json:"version"`
+	Content []byte       `json:"content"`
 }
 
-func initialBriefPath(targetDir, runID string) string {
-	return filepath.Join(targetDir, ".ai-team", "runs", runID, "brief", "0001-intention.md")
+func materializeBriefDocument(workspace string, document BriefDocument) (briefVersion, error) {
+	version := document.Version
+	name := filepath.Base(filepath.FromSlash(version.Path))
+	if name == "." || name == string(filepath.Separator) || name == "" ||
+		version.Path != filepath.ToSlash(filepath.Join("brief", name)) || !strings.HasSuffix(name, ".md") {
+		return briefVersion{}, errors.New("controller returned invalid brief version path")
+	}
+	if len(document.Content) == 0 || len(document.Content) > maxBriefBytes {
+		return briefVersion{}, errors.New("controller returned invalid brief content size")
+	}
+	root := filepath.Join(workspace, "brief")
+	path := filepath.Join(root, name)
+	if err := writeImmutable(path, document.Content); err != nil {
+		return briefVersion{}, err
+	}
+	local, err := makeBriefVersion(path, version.Kind, version.ParentID, version.ApprovalID)
+	if err != nil {
+		return briefVersion{}, err
+	}
+	if local.ID != version.ID || local.SHA256 != version.SHA256 {
+		return briefVersion{}, errors.New("controller business brief identity does not match its content")
+	}
+	local.Path = path
+	return local, nil
 }
 
-func writeInitialBrief(targetDir, runID, intention string) (briefVersion, runtime.Artifact, error) {
+// BriefStore is the typed persistence boundary for durable business briefs.
+// It deliberately accepts no filesystem paths from callers.
+type BriefStore interface {
+	CreateInitial(runID, intention string) (BriefDocument, error)
+	AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error)
+	List(runID string) ([]BriefVersion, error)
+	Read(runID, versionID string) (BriefDocument, error)
+}
+
+type FileBriefStore struct{ targetDir string }
+
+func NewFileBriefStore(targetDir string) *FileBriefStore {
+	return &FileBriefStore{targetDir: targetDir}
+}
+
+func (s *FileBriefStore) runRoot(runID string) (string, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return "", fmt.Errorf("invalid business brief run id: %w", err)
+	}
+	root, err := safeio.EnsureDir(s.targetDir, ".ai-team", "runs", runID, "brief")
+	if err != nil {
+		return "", fmt.Errorf("prepare business brief directory: %w", err)
+	}
+	return root, nil
+}
+
+func (s *FileBriefStore) CreateInitial(runID, intention string) (BriefDocument, error) {
 	intention = strings.TrimSpace(intention)
 	if intention == "" || len(intention) > maxBriefBytes {
-		return briefVersion{}, runtime.Artifact{}, errors.New("business intention must contain 1..262144 bytes")
+		return BriefDocument{}, errors.New("business intention must contain 1..262144 bytes")
+	}
+	root, err := s.runRoot(runID)
+	if err != nil {
+		return BriefDocument{}, err
 	}
 	content := []byte("# Исходное намерение\n\n" + intention + "\n")
-	path := initialBriefPath(targetDir, runID)
+	path := filepath.Join(root, "0001-intention.md")
 	if err := writeImmutable(path, content); err != nil {
-		return briefVersion{}, runtime.Artifact{}, err
+		return BriefDocument{}, err
 	}
 	version, err := makeBriefVersion(path, "intention", "", "")
 	if err != nil {
-		return briefVersion{}, runtime.Artifact{}, err
+		return BriefDocument{}, err
 	}
-	return version, briefArtifact(version), nil
+	version.Path = filepath.ToSlash(filepath.Join("brief", filepath.Base(path)))
+	return BriefDocument{Version: version, Content: content}, nil
 }
 
-// appendClarificationVersion records each human answer as a new immutable brief
-// snapshot. Deterministic approval filenames make retries idempotent after a
-// process restart.
-func appendClarificationVersion(targetDir, runID, approvalID, questions, answer string) (briefVersion, runtime.Artifact, error) {
+func (s *FileBriefStore) AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" || len(answer) > maxAnswerBytes {
-		return briefVersion{}, runtime.Artifact{}, errors.New("answer must contain 1..16384 bytes")
+		return BriefDocument{}, errors.New("answer must contain 1..16384 bytes")
 	}
-	root := filepath.Join(targetDir, ".ai-team", "runs", runID, "brief")
+	root, err := s.runRoot(runID)
+	if err != nil {
+		return BriefDocument{}, err
+	}
 	versions, err := listBriefVersions(root)
 	if err != nil || len(versions) == 0 {
-		return briefVersion{}, runtime.Artifact{}, errors.Join(errors.New("versioned business brief missing"), err)
+		return BriefDocument{}, errors.Join(errors.New("versioned business brief missing"), err)
 	}
 	for _, existing := range versions {
 		if strings.Contains(filepath.Base(existing.Path), "-answer-"+filepath.Base(approvalID)+".") {
-			existing.Kind = "clarification"
-			existing.ApprovalID = approvalID
-			return existing, briefArtifact(existing), nil
+			data, readErr := safeio.ReadRegularFile(filepath.Join(root, filepath.Base(existing.Path)), maxBriefBytes)
+			if readErr != nil {
+				return BriefDocument{}, readErr
+			}
+			existing.Kind, existing.ApprovalID = "clarification", approvalID
+			existing.Path = filepath.ToSlash(filepath.Join("brief", filepath.Base(existing.Path)))
+			return BriefDocument{Version: existing, Content: data}, nil
 		}
 	}
 	parent := versions[len(versions)-1]
 	parentData, err := safeio.ReadRegularFile(parent.Path, maxBriefBytes)
 	if err != nil {
-		return briefVersion{}, runtime.Artifact{}, err
+		return BriefDocument{}, err
 	}
 	name := fmt.Sprintf("%04d-answer-%s.md", len(versions)+1, filepath.Base(approvalID))
 	path := filepath.Join(root, name)
-	addition := []byte(fmt.Sprintf(
-		"\n## Уточнение %d\n\n### Вопросы аналитика\n\n%s\n\n### Ответ Product Owner\n\n%s\n",
-		len(versions), strings.TrimSpace(questions), answer,
-	))
+	addition := []byte(fmt.Sprintf("\n## Уточнение %d\n\n### Вопросы аналитика\n\n%s\n\n### Ответ Product Owner\n\n%s\n", len(versions), strings.TrimSpace(questions), answer))
 	content := append(append([]byte(nil), parentData...), addition...)
 	if len(content) > maxBriefBytes {
-		return briefVersion{}, runtime.Artifact{}, errors.New("versioned business brief exceeds 262144 bytes")
+		return BriefDocument{}, errors.New("versioned business brief exceeds 262144 bytes")
 	}
 	if err := writeImmutable(path, content); err != nil {
-		return briefVersion{}, runtime.Artifact{}, err
+		return BriefDocument{}, err
 	}
 	version, err := makeBriefVersion(path, "clarification", parent.ID, approvalID)
 	if err != nil {
-		return briefVersion{}, runtime.Artifact{}, err
+		return BriefDocument{}, err
 	}
-	return version, briefArtifact(version), nil
+	version.Path = filepath.ToSlash(filepath.Join("brief", filepath.Base(path)))
+	return BriefDocument{Version: version, Content: content}, nil
+}
+
+func (s *FileBriefStore) List(runID string) ([]BriefVersion, error) {
+	root, err := s.runRoot(runID)
+	if err != nil {
+		return nil, err
+	}
+	versions, err := listBriefVersions(root)
+	if err != nil {
+		return nil, err
+	}
+	for i := range versions {
+		versions[i].Path = filepath.ToSlash(filepath.Join("brief", filepath.Base(versions[i].Path)))
+	}
+	return versions, nil
+}
+
+func (s *FileBriefStore) Read(runID, versionID string) (BriefDocument, error) {
+	versions, err := s.List(runID)
+	if err != nil {
+		return BriefDocument{}, err
+	}
+	for _, version := range versions {
+		if version.ID != versionID {
+			continue
+		}
+		root, _ := s.runRoot(runID)
+		content, readErr := safeio.ReadRegularFile(filepath.Join(root, filepath.Base(version.Path)), maxBriefBytes)
+		if readErr != nil {
+			return BriefDocument{}, readErr
+		}
+		return BriefDocument{Version: version, Content: content}, nil
+	}
+	return BriefDocument{}, os.ErrNotExist
+}
+
+type approvedSpecPayload struct {
+	Kind             string            `json:"kind"`
+	BriefVersion     briefVersion      `json:"brief_version"`
+	AnalystAttemptID string            `json:"analyst_attempt_id"`
+	Artifacts        map[string]string `json:"artifacts"`
 }
 
 func makeBriefVersion(path, kind, parentID, approvalID string) (briefVersion, error) {
@@ -141,6 +241,16 @@ func listBriefVersions(root string) ([]briefVersion, error) {
 		version, err := makeBriefVersion(path, "", "", "")
 		if err != nil {
 			return nil, err
+		}
+		if len(versions) == 0 {
+			version.Kind = "intention"
+		} else {
+			version.Kind = "clarification"
+			version.ParentID = versions[len(versions)-1].ID
+			name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			if marker := strings.Index(name, "-answer-"); marker >= 0 {
+				version.ApprovalID = name[marker+len("-answer-"):]
+			}
 		}
 		versions = append(versions, version)
 	}

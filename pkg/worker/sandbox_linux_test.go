@@ -479,8 +479,8 @@ func TestBubblewrapRejectsSymlinkedControllerCandidateEvidence(t *testing.T) {
 	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
 		filepath.Join(target, "controller.db"), "sandbox-test", nil,
 		[]string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "controller candidate evidence path") || !strings.Contains(err.Error(), "regular file") {
-		t.Fatalf("symlinked controller candidate evidence must fail closed, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "private worker path") || !strings.Contains(err.Error(), "must contain only regular files and directories") {
+		t.Fatalf("symlinked controller candidate evidence must be rejected by private directory validation, got %v", err)
 	}
 }
 

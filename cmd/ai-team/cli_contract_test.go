@@ -425,6 +425,30 @@ func TestUsageCommandContract(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("controller usage missing does not fall back to worker-visible evidence", func(t *testing.T) {
+		const runID = "cloud-usage-missing"
+		runDir := filepath.Join(root, ".ai-team", "runs", runID)
+		if err := os.MkdirAll(runDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		envelope := metrics.Build(runID, "fixture", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := (metrics.FileUsageEnvelopeStore{}).Reserve(root, runID); err != nil {
+			t.Fatal(err)
+		}
+		_, code, stderr := runCLI(t, "usage", "--target", root, runID)
+		if code == 0 || !strings.Contains(stderr, "controller usage envelope") {
+			t.Fatalf("missing controller state must fail without evidence fallback: code=%d stderr=%s", code, stderr)
+		}
+	})
 }
 
 // writeED25519PublicKey кладёт raw ed25519 public key на диск.

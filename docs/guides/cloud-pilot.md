@@ -45,6 +45,19 @@ cloud non-Git resume в этом режиме завершается fail-closed
 сохраняет совместимость со старыми non-Git runs по provenance из target-файла;
 этот путь не является trust boundary.
 
+Финальная usage-сводка bubblewrap cloud-run формируется worker-ом, но
+сохраняется контроллером через write-only Unix API в
+`.ai-team/state/usage/<run_id>.json`.
+Каталог маскируется в bubblewrap, API проверяет schema/run ID и не позволяет
+читать или адресовать другой run. Значения остаются worker-supplied и не
+считаются attestation истинности usage; Resume/Recover может обновить summary
+после interrupted finalization. `ai-team usage` сначала читает controller
+state; если оно существует, отсутствие или повреждение envelope является
+ошибкой без fallback к worker-visible evidence. Локальные runs продолжают
+использовать `.ai-team/runs/<run_id>/usage.json`. Loopback API workers без
+bubblewrap тоже сохраняют этот target-file путь; их worker имеет прямой доступ
+к target, поэтому такой envelope не считается controller-owned.
+
 При запуске web/controller файловые approvals из `.ai-team/state/approvals`
 импортируются в SQLite транзакционно и без удаления исходных файлов; worker
 использует эту базу, но сам импорт не выполняет. Повторный

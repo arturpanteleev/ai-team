@@ -24,6 +24,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
@@ -403,6 +404,252 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 	}
 	if _, err := workerApprovals.ResolveDeferred("run-active", "approval-1", approval.Decision{}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
 		t.Fatalf("deferred decision adapter allowed write: %v", err)
+	}
+}
+
+func TestWorkerUsageEnvelopeAPIIsWriteOnlyAndRunScoped(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "usage-api-run", TargetDir: target, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+	envelope := metrics.Build(job.RunID, "feature", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+	writer := NewWorkerAPIUsageEnvelopeWriter(port)
+	if port.SupportsControllerUsageStore() {
+		t.Fatal("loopback worker API must not establish controller usage authority")
+	}
+	if err := writer.WriteUsageEnvelope(envelope); err == nil {
+		t.Fatal("unmasked worker must not publish authoritative controller usage")
+	}
+	if reserved, err := metrics.UsageEnvelopeReservation(target, job.RunID); err != nil || reserved {
+		t.Fatalf("unmasked API must not create per-run controller reservation: reserved=%v err=%v", reserved, err)
+	}
+	if _, err := server.dispatch("usage.envelope.read", workerAPICall{A: job.RunID}); err == nil {
+		t.Fatal("worker API must not expose a usage read operation")
+	}
+	wrongRun := envelope
+	wrongRun.RunID = "other-run"
+	if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: wrongRun}); err == nil {
+		t.Fatal("worker must not write usage for another run")
+	}
+	cancelJob := job
+	cancelJob.Operation = OperationCancel
+	cancelServer, err := startWorkerAPIServer(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelServer.close()
+	if _, err := cancelServer.dispatch("usage.envelope.write", workerAPICall{Usage: envelope}); err == nil {
+		t.Fatal("cancel invocation must not publish a terminal usage envelope")
+	}
+}
+
+func TestWorkerUsageEnvelopeDispatchRejectsInvalidAuthorityAndInput(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationCancel, RunID: "usage-dispatch-run", TargetDir: target,
+		ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	server.usageAllowed = true // Exercise the operation gate after transport admission.
+	valid := metrics.Build(job.RunID, "feature", time.Now().UTC(), time.Now().UTC().Add(time.Second), nil, 0, "completed", metrics.Usage{})
+	if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: valid}); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("cancel operation should be denied after transport admission, got %v", err)
+	}
+
+	job.Operation = OperationStart
+	server.scope.Operation = job.Operation
+	if _, err := server.dispatch("usage.envelope.write", workerAPICall{}); err == nil {
+		t.Fatal("malformed usage envelope was accepted")
+	}
+
+	server.scope.TargetDir = filepath.Join(t.TempDir(), "missing-target")
+	if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: valid}); err == nil {
+		t.Fatal("usage write accepted a target that does not exist")
+	}
+}
+
+func TestWorkerUsageEnvelopeWriterRejectsUnavailableAndInvalidCalls(t *testing.T) {
+	started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+	valid := metrics.Build("usage-writer-run", "feature", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+	var nilWriter *workerAPIUsageEnvelopeWriter
+	if err := nilWriter.WriteUsageEnvelope(valid); err == nil {
+		t.Fatal("nil usage writer should fail closed")
+	}
+	if err := (&workerAPIUsageEnvelopeWriter{}).WriteUsageEnvelope(valid); err == nil {
+		t.Fatal("usage writer without an API port should fail closed")
+	}
+
+	port := &workerAPIPort{scope: workerAPIScope{RunID: valid.RunID}}
+	writer := NewWorkerAPIUsageEnvelopeWriter(port)
+	if err := writer.WriteUsageEnvelope(metrics.UsageEnvelope{}); err == nil {
+		t.Fatal("writer accepted an invalid usage envelope")
+	}
+}
+
+func TestWorkerUsageEnvelopeAPIRequiresDurableStoreWriteForSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preseed bool
+	}{
+		{name: "existing run cannot be rewritten", preseed: true},
+		{name: "retry requires stored envelope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := t.TempDir()
+			job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "usage-store-run", TargetDir: target,
+				ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+			started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+			initial := metrics.Build(job.RunID, "feature", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+			store := metrics.FileUsageEnvelopeStore{}
+			if err := store.Reserve(target, job.RunID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.preseed {
+				if err := store.Write(target, job.RunID, initial); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.close()
+			server.usageAllowed = true
+			if tc.preseed {
+				updated := initial
+				updated.Outcome = "rewritten"
+				if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: updated}); err == nil {
+					t.Fatal("start invocation rewrote previously persisted usage")
+				}
+				return
+			}
+
+			if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: initial}); err != nil {
+				t.Fatalf("initial envelope write: %v", err)
+			}
+			path, err := metrics.UsageEnvelopePath(target, job.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.dispatch("usage.envelope.write", workerAPICall{Usage: initial}); err == nil {
+				t.Fatal("exact retry succeeded after its persisted state disappeared")
+			}
+		})
+	}
+}
+
+func TestWorkerUsageEnvelopeUnixAdmissionCleansUpOnStoreErrors(t *testing.T) {
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	for _, tc := range []struct {
+		name               string
+		job                Job
+		corruptReservation bool
+	}{
+		{name: "invalid run identity", job: Job{RunID: "../invalid", TargetDir: t.TempDir()}},
+		{name: "target unavailable", job: Job{RunID: "usage-target-error", TargetDir: filepath.Join(t.TempDir(), "missing")}},
+		{name: "corrupt reservation", job: Job{RunID: "usage-reservation-error", TargetDir: t.TempDir()}, corruptReservation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := tc.job.TargetDir
+			job := tc.job
+			job.SchemaVersion = SchemaVersion
+			job.Operation = OperationStart
+			job.ExecutionID = strings.Repeat("b", ExecutionIDBytes*2)
+			socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-usage-admission-%d-%s.sock", os.Getpid(), tc.name))
+			_ = os.Remove(socket)
+			if tc.corruptReservation {
+				reservation := filepath.Join(target, ".ai-team", "state", "usage", job.RunID+".reserved.json")
+				if err := os.MkdirAll(filepath.Dir(reservation), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(reservation, []byte("corrupt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+			if err == nil {
+				server.close()
+				t.Fatal("Unix API admission unexpectedly accepted invalid controller state")
+			}
+			if _, statErr := os.Lstat(socket); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("failed admission left socket behind: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestWorkerUsageEnvelopeUnixAPIAllowsExactRetryAndRecoveryAdvance(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "usage-unix-run", TargetDir: target, ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	startServer := func(value Job) (*workerAPIServer, pipeline.UsageEnvelopeWriter) {
+		t.Helper()
+		socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-usage-%d.sock", os.Getpid()))
+		server, err := startWorkerAPIServerUnix(value, &apiRecorderSpy{}, store, socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(WorkerAPIAddressEnv, "http://unix")
+		t.Setenv(WorkerAPISocketEnv, socket)
+		t.Setenv(WorkerAPITokenEnv, server.token)
+		port, err := NewWorkerAPIPort(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !port.SupportsControllerUsageStore() {
+			t.Fatal("Unix worker API should enable controller usage store")
+		}
+		return server, NewWorkerAPIUsageEnvelopeWriter(port)
+	}
+	started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+	first := metrics.Build(job.RunID, "feature", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+	server, writer := startServer(job)
+	if err := writer.WriteUsageEnvelope(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteUsageEnvelope(first); err != nil {
+		t.Fatalf("exact retry in same invocation should succeed: %v", err)
+	}
+	conflicting := first
+	conflicting.Outcome = "rewritten"
+	if err := writer.WriteUsageEnvelope(conflicting); err == nil {
+		t.Fatal("same invocation must not change its submitted envelope")
+	}
+	server.close()
+
+	recoverJob := job
+	recoverJob.Operation = OperationRecover
+	recoverJob.ExecutionID = strings.Repeat("e", ExecutionIDBytes*2)
+	recoverServer, recoverWriter := startServer(recoverJob)
+	defer recoverServer.close()
+	updated := first
+	updated.Outcome = "completed-after-recovery"
+	updated.FinishedAt = updated.FinishedAt.Add(time.Minute)
+	if err := recoverWriter.WriteUsageEnvelope(updated); err != nil {
+		t.Fatalf("recovery invocation must advance a prior envelope: %v", err)
+	}
+	stored, err := metrics.ReadUsageEnvelope(target, job.RunID)
+	if err != nil || stored.Outcome != updated.Outcome {
+		t.Fatalf("stored recovered usage = %+v, %v", stored, err)
 	}
 }
 

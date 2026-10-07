@@ -332,6 +332,33 @@ the tested Linux bubblewrap configuration; it does not prove that every admin
 route, secret source, or deployment setup is inaccessible, and it does not
 close the MAJ-07 runtime/deployment gate.
 
+The final `metrics.UsageEnvelope` is controller-stored but worker-supplied and
+untrusted for bubblewrap cloud workers.
+Pipeline finalization submits the envelope through a write-only API bound to
+the invocation's run, operation, and target. The controller validates schema
+and run identity, then stores it at
+`{target}/.ai-team/state/usage/{run_id}.json` using atomic no-replace
+publication; an exact retry within one invocation is idempotent and conflicting
+second writes are rejected. A later Resume/Recover invocation may atomically
+advance the envelope because an interrupted finalization can be retried after
+an earlier summary was written.
+Before worker spawn, the controller creates an immutable per-run reservation
+beside the envelope. `ai-team usage` uses that reservation to select controller
+state for one run and fails closed if its envelope is missing or corrupt;
+unrelated reservations do not affect legacy local runs.
+Bubblewrap masks the usage state directory with a namespace-local tmpfs, while
+the worker can still finish by calling the scoped API. The Unix API endpoint
+is enabled only for bubblewrap launches; loopback API workers keep the legacy
+target evidence path and do not get controller-usage authority. The worker API has no
+read or arbitrary-path operation. This boundary protects against the sandboxed
+child of that invocation; a process or user with direct write access to the
+target can alter its files. Envelope values remain worker-supplied and
+untrusted. Local CLI runs continue writing
+`{RunDir}/usage.json`; `ai-team usage` checks controller state first and then
+supports the local/legacy evidence location. Missing or corrupt authoritative
+controller state is an error, not a reason to fall back to worker-visible
+evidence.
+
 1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
    здесь:** worker result/checks/artifacts недоверен; controller подтверждает
    только correlation и собственные независимые проверки.

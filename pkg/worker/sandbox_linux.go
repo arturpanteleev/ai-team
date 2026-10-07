@@ -91,6 +91,13 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := appendPrivateDirectoryMount(&args, candidateMetadataDir, true); err != nil {
 		return nil, err
 	}
+	usageDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "usage")
+	if err != nil {
+		return nil, fmt.Errorf("prepare usage envelope mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, usageDir, true); err != nil {
+		return nil, err
+	}
 	resolvedDB, err := resolveExistingPath(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("controller database path: %w", err)

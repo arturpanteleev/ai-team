@@ -61,7 +61,8 @@ func openStoreForAppend(runDir, runID string) (*Store, error) {
 	}
 	return &Store{
 		root: filepath.Dir(runDir), runID: runID,
-		nextID: uint64(len(events)), lastEventHash: events[len(events)-1].SHA256,
+		eventLog: newFileEventLog(filepath.Join(runDir, "events.jsonl")),
+		nextID:   uint64(len(events)), lastEventHash: events[len(events)-1].SHA256,
 		provenance: make(map[string]ArtifactRecord),
 	}, nil
 }

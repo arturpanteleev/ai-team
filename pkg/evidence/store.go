@@ -168,11 +168,114 @@ type Event struct {
 type Store struct {
 	root          string
 	runID         string
+	eventLog      eventLog
 	mu            sync.Mutex
 	nextID        uint64
 	lastEventHash string
 	provenanceMu  sync.Mutex
 	provenance    map[string]ArtifactRecord
+}
+
+// eventLog is the package-internal persistence seam for one run's append-only lifecycle journal.
+// Implementations must verify the existing chain before appending and return
+// the complete verified chain after a successful append. expectedSequence and
+// expectedPreviousSHA256 bind the append to the caller's last observed state.
+// The filesystem implementation remains the only supported backend in this
+// slice because verification, anchors, recovery, and attestation still read
+// the run-local events.jsonl path directly.
+type eventLog interface {
+	Read(runID string) ([]Event, error)
+	Append(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) ([]Event, error)
+}
+
+// fileEventLog persists a run journal at one filesystem path.
+type fileEventLog struct {
+	path      string
+	closeFile func(*os.File) error
+}
+
+func newFileEventLog(path string) *fileEventLog { return &fileEventLog{path: path} }
+
+func validateOpenedEventLogPath(file *os.File, path string) error {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file without symlink", path)
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return fmt.Errorf("%s changed while opening event log", path)
+	}
+	return nil
+}
+
+func closeEventLogFile(file *os.File, closeFile func(*os.File) error) error {
+	if closeFile != nil {
+		return closeFile(file)
+	}
+	return file.Close()
+}
+
+func (l *fileEventLog) Read(runID string) ([]Event, error) {
+	if l == nil || l.path == "" {
+		return nil, errors.New("event log path is required")
+	}
+	return VerifyEventLog(l.path, runID)
+}
+
+func (l *fileEventLog) Append(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) ([]Event, error) {
+	if l == nil || l.path == "" {
+		return nil, errors.New("event log path is required")
+	}
+	f, unlock, err := openLockedEventLog(l.path, true, l.closeFile)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unlock() }()
+	events, err := readEventLogFile(f, runID)
+	if err != nil {
+		return nil, fmt.Errorf("event log integrity: %w", err)
+	}
+	lastHash := chainGenesis(runID)
+	if len(events) > 0 {
+		lastHash = events[len(events)-1].SHA256
+	}
+	if uint64(len(events)) != expectedSequence || lastHash != expectedPreviousSHA256 {
+		return nil, fmt.Errorf("event log changed outside current store")
+	}
+	event.SchemaVersion = SchemaVersion
+	event.Sequence = expectedSequence + 1
+	event.RunID = runID
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	event.PreviousSHA256 = expectedPreviousSHA256
+	event.SHA256, err = eventDigest(event)
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	if err := unlock(); err != nil {
+		return nil, err
+	}
+	return append(events, event), nil
 }
 
 func NewRunID(now time.Time) (string, error) {
@@ -184,6 +287,12 @@ func NewRunID(now time.Time) (string, error) {
 }
 
 func Start(root string, manifest RunManifest) (*Store, error) {
+	return startWithEventLog(root, manifest, nil)
+}
+
+// startWithEventLog is intentionally package-private: this abstraction slice
+// does not support an independent backend while path-based consumers remain.
+func startWithEventLog(root string, manifest RunManifest, eventLog eventLog) (*Store, error) {
 	if err := ValidateRunID(manifest.RunID); err != nil {
 		return nil, err
 	}
@@ -248,8 +357,12 @@ func Start(root string, manifest RunManifest) (*Store, error) {
 		return nil, err
 	}
 	cleanup = false
+	if eventLog == nil {
+		eventLog = newFileEventLog(filepath.Join(finalDir, "events.jsonl"))
+	}
 	return &Store{
 		root: root, runID: manifest.RunID, lastEventHash: chainGenesis(manifest.RunID),
+		eventLog:   eventLog,
 		provenance: make(map[string]ArtifactRecord),
 	}, nil
 }
@@ -257,6 +370,12 @@ func Start(root string, manifest RunManifest) (*Store, error) {
 // Resume открывает существующий non-terminal run после полной проверки
 // manifest, snapshots и hash-chained event log.
 func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
+	return resumeWithEventLog(root, runID, nil)
+}
+
+// resumeWithEventLog is intentionally package-private: this abstraction slice
+// does not support an independent backend while path-based consumers remain.
+func resumeWithEventLog(root, runID string, eventLog eventLog) (*Store, RunManifest, ReplayedRun, error) {
 	if runID == "" || runID == "." || runID == ".." || filepath.Base(runID) != runID {
 		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("недопустимый run_id %q", runID)
 	}
@@ -289,7 +408,10 @@ func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
 	if err != nil || sha256Bytes(workflowData) != manifest.ResolvedWorkflowSHA256 {
 		return nil, RunManifest{}, ReplayedRun{}, errors.New("workflow snapshot identity mismatch")
 	}
-	events, err := VerifyEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	if eventLog == nil {
+		eventLog = newFileEventLog(filepath.Join(runDir, "events.jsonl"))
+	}
+	events, err := eventLog.Read(runID)
 	if err != nil {
 		return nil, RunManifest{}, ReplayedRun{}, err
 	}
@@ -300,7 +422,7 @@ func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
 		// event before restoring lifecycle state.
 		replayed = ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	} else {
-		replayed, err = ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+		replayed, err = replayEvents(events, runID, runDir)
 		if err != nil {
 			return nil, RunManifest{}, ReplayedRun{}, err
 		}
@@ -314,6 +436,7 @@ func Resume(root, runID string) (*Store, RunManifest, ReplayedRun, error) {
 	}
 	store := &Store{
 		root: root, runID: runID, nextID: uint64(len(events)), lastEventHash: lastHash,
+		eventLog:   eventLog,
 		provenance: make(map[string]ArtifactRecord),
 	}
 	for _, attempt := range replayed.Attempts {
@@ -598,52 +721,21 @@ func cleanArtifactKey(path string) string {
 func (s *Store) Append(event Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	events, err := VerifyEventLog(filepath.Join(s.RunDir(), "events.jsonl"), s.runID)
-	if err != nil {
-		return fmt.Errorf("event log integrity: %w", err)
+	if s.eventLog == nil {
+		return errors.New("event log is unavailable")
 	}
-	lastHash := chainGenesis(s.runID)
-	if len(events) > 0 {
-		lastHash = events[len(events)-1].SHA256
-	}
-	if uint64(len(events)) != s.nextID || lastHash != s.lastEventHash {
-		return fmt.Errorf("event log changed outside current store")
-	}
-	event.SchemaVersion = SchemaVersion
-	event.Sequence = s.nextID + 1
-	event.RunID = s.runID
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
-	}
-	event.PreviousSHA256 = s.lastEventHash
-	event.SHA256, err = eventDigest(event)
+	events, err := s.eventLog.Append(s.runID, event, s.nextID, s.lastEventHash)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return err
+	if len(events) != int(s.nextID+1) {
+		return errors.New("event log append returned an invalid chain length")
 	}
-	f, err := os.OpenFile(filepath.Join(s.RunDir(), "events.jsonl"), os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	s.nextID = event.Sequence
-	s.lastEventHash = event.SHA256
+	appended := events[len(events)-1]
+	s.nextID = appended.Sequence
+	s.lastEventHash = appended.SHA256
 	if isTerminalEventType(event.Type) {
-		events = append(events, event)
-		if err := s.writeAnchor(event.Type, events); err != nil {
+		if err := s.writeAnchor(appended.Type, events); err != nil {
 			return fmt.Errorf("запись anchor.json: %w", err)
 		}
 	}
@@ -655,9 +747,31 @@ func (s *Store) Append(event Event) error {
 // modification, removal, insertion or reordering of any persisted event, as
 // well as substitution of an intact log that belongs to a different run.
 func VerifyEventLog(path, runID string) ([]Event, error) {
-	data, err := safeio.ReadRegularFile(path, maxEventLogSize)
+	f, unlock, err := openLockedEventLog(path, false, nil)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = unlock() }()
+	return readEventLogFile(f, runID)
+}
+
+func readEventLogFile(file *os.File, runID string) ([]Event, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxEventLogSize {
+		return nil, fmt.Errorf("event log is not a bounded regular file")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxEventLogSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxEventLogSize {
+		return nil, fmt.Errorf("event log exceeds size limit")
 	}
 	lines := bytes.Split(data, []byte{'\n'})
 	events := make([]Event, 0, len(lines))

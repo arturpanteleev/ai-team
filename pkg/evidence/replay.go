@@ -45,7 +45,15 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 	if err != nil {
 		return ReplayedRun{}, err
 	}
+	return replayEvents(events, runID, filepath.Dir(path))
+}
+
+// replayEvents rebuilds lifecycle state from an already verified event chain.
+// Keeping replay separate from filesystem access lets the package persistence
+// seam share the exact existing transition validation.
+func replayEvents(events []Event, runID, runDir string) (ReplayedRun, error) {
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
+	var err error
 	byID := make(map[string]int)
 	approvalSubjects := make(map[string]string)
 	decidedApprovals := make(map[string]bool)
@@ -122,7 +130,7 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 				if !validSHA256(attempt.ManifestSHA256) {
 					return ReplayedRun{}, fmt.Errorf("attempt_finished %q manifest digest is invalid", event.AttemptID)
 				}
-				manifestPath := filepath.Join(filepath.Dir(path), "attempts", event.AttemptID, "manifest.json")
+				manifestPath := filepath.Join(runDir, "attempts", event.AttemptID, "manifest.json")
 				artifactType, _, digest, digestErr := ArtifactDigest(manifestPath)
 				if digestErr != nil || artifactType != "file" || digest != attempt.ManifestSHA256 {
 					return ReplayedRun{}, fmt.Errorf("attempt_finished %q manifest identity mismatch", event.AttemptID)

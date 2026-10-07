@@ -116,6 +116,13 @@
   open for other evidence/artifact paths and deployment/recovery validation.
   Loopback API workers without bubblewrap are explicitly denied this authority
   and retain the legacy target-file output.
+- [x] Extract per-run event journal operations behind a package-private
+  `eventLog` seam; preserve the filesystem backend for existing `Start`/`Resume`
+  and local CLI, serialize filesystem appends across Store handles, and route
+  store append plus verified resume replay through the seam. Independent
+  backends are not supported while pipeline verification/recovery, cancel,
+  attestation, and other path-based consumers still use target files. No
+  journal masking or OS ownership boundary is implemented.
 - [ ] Test the complete worker process/network policy on supported deployment
   runtimes and verify there is no route to admin control endpoints and no
   control-plane secrets in worker.

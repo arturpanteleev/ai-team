@@ -19,6 +19,19 @@ identity и доступ к target filesystem позволяют worker-у об�
 изменить lifecycle-файл или открыть известный путь к SQLite. Это application-
 level ownership, а не граница безопасности.
 
+## Основа для event journal seam
+
+Внутренний `eventLog` seam выделяет чтение проверенной цепочки и условный append
+из `evidence.Store`; `fileEventLog` остаётся единственной поддерживаемой
+реализацией. Unix backend сериализует read/append flock-ом на том же journal
+file descriptor; другие платформы используют локальную per-path mutex.
+Старые `Start` и `Resume` сохраняют тот же файловый формат, sync-on-append и
+terminal `anchor.json`. Seam пока package-private: независимый backend не
+поддерживается, потому что pipeline, resume verification, recovery, cancel,
+attestation и другие path-based consumers продолжают читать или писать
+evidence в target filesystem. Bubblewrap mounts и worker API этим изменением не
+меняются; никакая OS-изоляция журнала не заявляется.
+
 Дизайн контейнерного volume/network deployment без изменения этого контракта
 будет ложным свидетельством изоляции. `strict` сейчас корректно отказывает
 fail-closed и не должен обходиться deployment flag-ом.

@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,132 @@ import (
 
 func testRunManifest(runID string) RunManifest {
 	return RunManifest{RunID: runID, ConfigSnapshot: json.RawMessage(`{"schema_version":1}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`)}
+}
+
+type countingEventLog struct {
+	delegate eventLog
+	reads    int
+	appends  int
+}
+
+func (l *countingEventLog) Read(runID string) ([]Event, error) {
+	l.reads++
+	return l.delegate.Read(runID)
+}
+
+func (l *countingEventLog) Append(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) ([]Event, error) {
+	l.appends++
+	return l.delegate.Append(runID, event, expectedSequence, expectedPreviousSHA256)
+}
+
+func TestStoreUsesInternalEventLogSeamForAppendAndResume(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runs")
+	manifest := testRunManifest("run-event-log-port")
+	journalPath := filepath.Join(root, manifest.RunID, "events.jsonl")
+	startLog := &countingEventLog{delegate: newFileEventLog(journalPath)}
+	store, err := startWithEventLog(root, manifest, startLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	if err := store.Append(Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	if startLog.appends != 1 {
+		t.Fatalf("injected event log append calls=%d, want 1", startLog.appends)
+	}
+
+	resumeLog := &countingEventLog{delegate: newFileEventLog(journalPath)}
+	resumed, _, replayed, err := resumeWithEventLog(root, manifest.RunID, resumeLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeLog.reads != 1 || replayed.StartedAt != startedAt {
+		t.Fatalf("resume journal reads=%d replay=%+v", resumeLog.reads, replayed)
+	}
+	if err := resumed.Append(Event{Type: "run_resumed", Timestamp: startedAt.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if resumeLog.appends != 1 {
+		t.Fatalf("resumed event log append calls=%d, want 1", resumeLog.appends)
+	}
+
+	events, err := VerifyEventLog(journalPath, manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Type != "run_started" || events[1].Type != "run_resumed" || events[1].Sequence != 2 {
+		t.Fatalf("filesystem journal did not preserve event sequence: %+v", events)
+	}
+	replayed, err = ReplayEventLog(journalPath, manifest.RunID)
+	if err != nil || replayed.StartedAt != startedAt || replayed.RunID != manifest.RunID {
+		t.Fatalf("filesystem replay=%+v err=%v", replayed, err)
+	}
+}
+
+func TestFileEventLogSerializesStaleStores(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runs")
+	manifest := testRunManifest("run-event-log-race")
+	first, err := Start(root, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := Resume(root, manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, store := range []*Store{first, second} {
+		go func(store *Store) {
+			<-start
+			results <- store.Append(Event{Type: "run_started", Timestamp: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)})
+		}(store)
+	}
+	close(start)
+	errorsSeen := 0
+	for range 2 {
+		if err := <-results; err != nil {
+			errorsSeen++
+		}
+	}
+	if errorsSeen != 1 {
+		t.Fatalf("stale writer errors=%d, want exactly 1", errorsSeen)
+	}
+	events, err := VerifyEventLog(filepath.Join(first.RunDir(), "events.jsonl"), manifest.RunID)
+	if err != nil {
+		t.Fatalf("serialized journal is invalid: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "run_started" || events[0].Sequence != 1 {
+		t.Fatalf("unexpected journal after concurrent append: %+v", events)
+	}
+}
+
+func TestFileEventLogPropagatesCloseErrorAfterSync(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runs")
+	manifest := testRunManifest("run-event-log-close")
+	path := filepath.Join(root, manifest.RunID, "events.jsonl")
+	closeFailure := errors.New("injected close failure")
+	closeCalls := 0
+	log := &fileEventLog{path: path, closeFile: func(file *os.File) error {
+		closeCalls++
+		_ = file.Close()
+		return closeFailure
+	}}
+	store, err := startWithEventLog(root, manifest, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "run_started", Timestamp: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)}); !errors.Is(err, closeFailure) {
+		t.Fatalf("Append error=%v, want close error", err)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("event file close calls=%d, want exactly 1", closeCalls)
+	}
+	events, err := VerifyEventLog(path, manifest.RunID)
+	if err != nil || len(events) != 1 || events[0].Type != "run_started" {
+		t.Fatalf("event after synced close failure: events=%+v err=%v", events, err)
+	}
 }
 
 func TestValidateRunIDRejectsControlAndPlatformUnsafeValues(t *testing.T) {

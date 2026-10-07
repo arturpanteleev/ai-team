@@ -319,6 +319,19 @@ loopback/direct-egress blocking, controller-state sentinels, and target
 read/write. Passing these probes is evidence for only the specific properties
 they exercise, not full worker isolation.
 
+The Linux child probe also exercises one allowed typed API call and verifies
+that an `admin.*` call is rejected by the worker API. Before `ProcessEngine.Start`,
+the test sets distinct parent-environment sentinels for `AI_TEAM_AUTH_SECRET`,
+`AI_TEAM_SIGNING_KEY`, `AI_TEAM_DB_PASSWORD`, and
+`AI_TEAM_HOSTING_WRITE_TOKEN`; the child reports each variable absent. The
+existing scoped API, TCP-denial, OpenAI-only proxy, masked-state, and workspace
+checks remain part of the same runtime probe. `OPENAI_API_KEY` is a
+provider-scoped credential and is intentionally not classified as a
+control-plane secret here. This probe covers only these calls and variables in
+the tested Linux bubblewrap configuration; it does not prove that every admin
+route, secret source, or deployment setup is inaccessible, and it does not
+close the MAJ-07 runtime/deployment gate.
+
 1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
    здесь:** worker result/checks/artifacts недоверен; controller подтверждает
    только correlation и собственные независимые проверки.

@@ -1,0 +1,353 @@
+package worker
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+)
+
+const (
+	workerAPIAddressEnv  = "AI_TEAM_WORKER_API_ADDRESS"
+	workerAPITokenEnv    = "AI_TEAM_WORKER_API_TOKEN"
+	workerAPIMaxBody     = 1 << 20
+	workerAPIErrorMarker = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
+)
+
+const WorkerAPIAddressEnv = workerAPIAddressEnv
+const WorkerAPITokenEnv = workerAPITokenEnv
+
+type workerAPIScope struct {
+	RunID       string    `json:"run_id"`
+	Operation   Operation `json:"operation"`
+	ExecutionID string    `json:"execution_id"`
+}
+type workerAPIRequest struct {
+	workerAPIScope
+	Method  string          `json:"method"`
+	Payload json.RawMessage `json:"payload"`
+}
+type workerAPICall struct {
+	RunID    string                   `json:"run_id,omitempty"`
+	A        string                   `json:"a,omitempty"`
+	B        string                   `json:"b,omitempty"`
+	C        string                   `json:"c,omitempty"`
+	Index    int                      `json:"index,omitempty"`
+	At       time.Time                `json:"at,omitempty"`
+	Data     map[string]any           `json:"data,omitempty"`
+	IDs      []string                 `json:"ids,omitempty"`
+	Stage    notifier.StageResult     `json:"stage,omitempty"`
+	Error    string                   `json:"error,omitempty"`
+	Approval approval.PendingApproval `json:"approval,omitempty"`
+}
+type workerApprovalPort interface {
+	Create(approval.PendingApproval) (approval.PendingApproval, error)
+	Load(string, string) (approval.PendingApproval, error)
+	List(string) ([]approval.PendingApproval, error)
+}
+type workerAPIServer struct {
+	scope      workerAPIScope
+	token      string
+	listener   net.Listener
+	server     *http.Server
+	recorder   pipeline.Recorder
+	approvals  workerApprovalPort
+	dispatchMu sync.Mutex
+}
+
+// startWorkerAPIServer creates a per-execution loopback capability. The worker
+// can report pipeline events and request/read approvals only for this run.
+func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerApprovalPort) (*workerAPIServer, error) {
+	if recorder == nil || approvals == nil {
+		return nil, errors.New("worker controller API requires recorder and approval ports")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	api := &workerAPIServer{scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/call", api.handle)
+	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	go func() { _ = api.server.Serve(listener) }()
+	return api, nil
+}
+func (s *workerAPIServer) close() {
+	if s != nil && s.server != nil {
+		_ = s.server.Close()
+	}
+}
+func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != "/v1/call" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Header.Get("Authorization") != "Bearer "+s.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, workerAPIMaxBody+1))
+	if err != nil || len(data) > workerAPIMaxBody {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	var request workerAPIRequest
+	if strictjson.Unmarshal(data, workerAPIMaxBody, &request) != nil || request.workerAPIScope != s.scope {
+		http.Error(w, "invalid invocation scope", http.StatusForbidden)
+		return
+	}
+	var call workerAPICall
+	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, workerAPIMaxBody, &call) != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	result, err := s.dispatch(request.Method, call)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if result == nil {
+		result = struct{}{}
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}
+func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) {
+	// Recorder implementations such as web.StoreRecorder keep per-run sequence
+	// and stage state. Requests from one child can arrive concurrently, so keep
+	// each invocation's projection ordered and race-free.
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if c.RunID != "" && c.RunID != s.scope.RunID {
+		return nil, errors.New("worker API run mismatch")
+	}
+	switch method {
+	case "approval.create":
+		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
+			return nil, errors.New("approval run mismatch")
+		}
+		c.Approval.RunID = s.scope.RunID
+		return s.approvals.Create(c.Approval)
+	case "approval.load":
+		return s.approvals.Load(s.scope.RunID, c.A)
+	case "approval.list":
+		return s.approvals.List(s.scope.RunID)
+	case "approval.decide", "approval.resolve_deferred":
+		return nil, errors.New("worker API cannot make human approval decisions")
+	case "recorder.run_started":
+		s.recorder.RunStarted(s.scope.RunID, c.A, c.B, c.At)
+	case "recorder.run_resumed":
+		s.recorder.RunResumed(s.scope.RunID, c.At)
+	case "recorder.run_attached":
+		s.recorder.RunAttached(s.scope.RunID)
+	case "recorder.run_paused":
+		s.recorder.RunPaused(s.scope.RunID, c.A, c.At)
+	case "recorder.run_canceled":
+		s.recorder.RunCanceled(s.scope.RunID, c.At)
+	case "recorder.approval_requested":
+		s.recorder.ApprovalRequested(s.scope.RunID, c.A, c.B, c.At, c.Data)
+	case "recorder.transition_selected":
+		s.recorder.TransitionSelected(s.scope.RunID, c.A, c.At, c.Data)
+	case "recorder.stage_started":
+		s.recorder.StageStarted(s.scope.RunID, c.A, c.B, c.Index, c.At)
+	case "recorder.stage_finished":
+		c.Stage.RunID = s.scope.RunID
+		if c.Error != "" {
+			c.Stage.Err = errors.New(c.Error)
+		}
+		s.recorder.StageFinished(c.Stage)
+	case "recorder.attempts_invalidated":
+		s.recorder.AttemptsInvalidated(s.scope.RunID, c.IDs, c.At)
+	case "recorder.run_finished":
+		s.recorder.RunFinished(s.scope.RunID, c.A, c.At)
+	default:
+		return nil, fmt.Errorf("worker API method %q is not allowed", method)
+	}
+	return nil, nil
+}
+
+type workerAPIPort struct {
+	address, token string
+	scope          workerAPIScope
+	client         *http.Client
+}
+
+type WorkerAPIPort = workerAPIPort
+
+func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
+	address, okA := os.LookupEnv(workerAPIAddressEnv)
+	token, okT := os.LookupEnv(workerAPITokenEnv)
+	if !okA || !okT || !strings.HasPrefix(address, "http://127.0.0.1:") || token == "" {
+		return nil, errors.New("worker controller API environment is missing or invalid")
+	}
+	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, client: &http.Client{Timeout: 5 * time.Second}}, nil
+}
+
+func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }
+func (p *workerAPIPort) call(method string, value, out any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(workerAPIRequest{p.scope, method, payload})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, p.address+"/v1/call", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, workerAPIMaxBody+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > workerAPIMaxBody {
+		return errors.New("worker API response too large")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("worker API %s: %s", method, strings.TrimSpace(string(body)))
+	}
+	if out != nil {
+		return json.Unmarshal(body, out)
+	}
+	return nil
+}
+
+type workerAPIRecorder struct {
+	port     *workerAPIPort
+	mu       sync.Mutex
+	firstErr error
+}
+type WorkerAPIRecorder = workerAPIRecorder
+
+func NewWorkerAPIRecorder(port *WorkerAPIPort) pipeline.Recorder {
+	return &workerAPIRecorder{port: port}
+}
+func (r *workerAPIRecorder) send(method string, c workerAPICall) {
+	if err := r.port.call("recorder."+method, c, nil); err != nil {
+		r.mu.Lock()
+		if r.firstErr == nil {
+			r.firstErr = err
+			// pipeline.Recorder intentionally has no error return. Preserve the
+			// first infrastructure failure in captured child diagnostics so the
+			// parent ProcessEngine can fail the invocation closed.
+			_, _ = fmt.Fprintf(os.Stderr, "%s%s\n", workerAPIErrorMarker, err)
+		}
+		r.mu.Unlock()
+	}
+}
+
+func (r *workerAPIRecorder) Error() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.firstErr
+}
+
+func workerAPIRecorderFailure(diagnostics string) string {
+	for _, line := range strings.Split(diagnostics, "\n") {
+		if index := strings.Index(line, workerAPIErrorMarker); index >= 0 {
+			return strings.TrimSpace(line[index+len(workerAPIErrorMarker):])
+		}
+	}
+	return ""
+}
+
+// Reconciliation is controller startup maintenance, never a worker report.
+func (r *workerAPIRecorder) ReconcileInterrupted(time.Time) {}
+func (r *workerAPIRecorder) RunStarted(id, feature, snapshot string, at time.Time) {
+	r.send("run_started", workerAPICall{A: feature, B: snapshot, At: at})
+}
+func (r *workerAPIRecorder) RunResumed(_ string, at time.Time) {
+	r.send("run_resumed", workerAPICall{At: at})
+}
+func (r *workerAPIRecorder) RunAttached(_ string) { r.send("run_attached", workerAPICall{}) }
+func (r *workerAPIRecorder) RunPaused(_, status string, at time.Time) {
+	r.send("run_paused", workerAPICall{A: status, At: at})
+}
+func (r *workerAPIRecorder) RunCanceled(_ string, at time.Time) {
+	r.send("run_canceled", workerAPICall{At: at})
+}
+func (r *workerAPIRecorder) ApprovalRequested(_, id, attempt string, at time.Time, data map[string]any) {
+	r.send("approval_requested", workerAPICall{A: id, B: attempt, At: at, Data: data})
+}
+func (r *workerAPIRecorder) ApprovalDecided(_, id, attempt string, at time.Time, data map[string]any) {
+	// Human decisions are committed by the controller approval service. The
+	// worker-side event cannot assert or manufacture that decision.
+}
+func (r *workerAPIRecorder) TransitionSelected(_, attempt string, at time.Time, data map[string]any) {
+	r.send("transition_selected", workerAPICall{A: attempt, At: at, Data: data})
+}
+func (r *workerAPIRecorder) StageStarted(_, attempt, agent string, index int, at time.Time) {
+	r.send("stage_started", workerAPICall{A: attempt, B: agent, Index: index, At: at})
+}
+func (r *workerAPIRecorder) StageFinished(stage notifier.StageResult) {
+	message := ""
+	if stage.Err != nil {
+		message = stage.Err.Error()
+	}
+	stage.Err = nil
+	r.send("stage_finished", workerAPICall{Stage: stage, Error: message})
+}
+func (r *workerAPIRecorder) AttemptsInvalidated(_ string, ids []string, at time.Time) {
+	r.send("attempts_invalidated", workerAPICall{IDs: ids, At: at})
+}
+func (r *workerAPIRecorder) RunFinished(_, status string, at time.Time) {
+	r.send("run_finished", workerAPICall{A: status, At: at})
+}
+
+type workerAPIApprovals struct{ port *workerAPIPort }
+type WorkerAPIApprovals = workerAPIApprovals
+
+func NewWorkerAPIApprovals(port *WorkerAPIPort) pipeline.ApprovalStore {
+	return &workerAPIApprovals{port: port}
+}
+func (a *workerAPIApprovals) Create(value approval.PendingApproval) (approval.PendingApproval, error) {
+	var out approval.PendingApproval
+	err := a.port.call("approval.create", workerAPICall{Approval: value}, &out)
+	return out, err
+}
+func (a *workerAPIApprovals) Load(_, id string) (approval.PendingApproval, error) {
+	var out approval.PendingApproval
+	err := a.port.call("approval.load", workerAPICall{A: id}, &out)
+	return out, err
+}
+func (a *workerAPIApprovals) List(_ string) ([]approval.PendingApproval, error) {
+	var out []approval.PendingApproval
+	err := a.port.call("approval.list", workerAPICall{}, &out)
+	return out, err
+}
+func (*workerAPIApprovals) Decide(string, string, approval.Decision) (approval.PendingApproval, error) {
+	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
+}
+func (*workerAPIApprovals) ResolveDeferred(string, string, approval.Decision) (approval.PendingApproval, error) {
+	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
+}
+
+var _ pipeline.Recorder = (*workerAPIRecorder)(nil)
+var _ pipeline.ApprovalStore = (*workerAPIApprovals)(nil)

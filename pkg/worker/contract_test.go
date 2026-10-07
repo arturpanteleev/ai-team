@@ -556,7 +556,7 @@ func TestWorkerProcessEnvironmentRejectsInvalidAndReservedNames(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar} {
+	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar, WorkerAPIAddressEnv, WorkerAPITokenEnv} {
 		t.Run("reserved/"+name, func(t *testing.T) {
 			parent := []string{"PATH=/bin", WorkerEnvAllowVar + "=" + name}
 			if _, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "linux"); err == nil {
@@ -841,6 +841,12 @@ func TestLimitedOutputTruncatesDiagnostics(t *testing.T) {
 	if !strings.Contains(value, "truncated") {
 		t.Fatalf("усечение обязано быть помечено: %q", value)
 	}
+	apiOutput := &limitedOutput{limit: 8}
+	_, _ = apiOutput.Write([]byte(strings.Repeat("x", 20)))
+	_, _ = apiOutput.Write([]byte(workerAPIErrorMarker + "recorder rejected"))
+	if value := apiOutput.String(); !strings.Contains(value, workerAPIErrorMarker+"recorder rejected") {
+		t.Fatalf("API failure marker lost after diagnostics truncation: %q", value)
+	}
 }
 
 func readMarkerJob(t *testing.T, marker string) Job {
@@ -883,8 +889,17 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		job := decodeHelperJob(t)
 		printHelperResult(t, job.ExecutionID, "run-blocked", OperationStart, OutcomeBlocked)
 		os.Exit(2)
-	case "echo", "env", "wrong-run", "wrong-operation", "wrong-execution", "replay-execution":
+	case "echo", "env", "wrong-run", "wrong-operation", "wrong-execution", "replay-execution", "api-failure":
 		job := decodeHelperJob(t)
+		if os.Getenv("AI_TEAM_WORKER_TEST_MODE") == "api-failure" {
+			forged := job
+			forged.RunID = "another-run"
+			port, err := NewWorkerAPIPort(forged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			NewWorkerAPIRecorder(port).RunStarted(forged.RunID, "feature", "snapshot", time.Now())
+		}
 		data, _ := json.Marshal(job)
 		if marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER"); marker != "" {
 			if err := os.WriteFile(marker, data, 0600); err != nil {
@@ -942,6 +957,11 @@ func decodeHelperJob(t *testing.T) Job {
 		}
 		data, _ := json.Marshal(environment)
 		if err := writeMarkerAtomically(marker, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if marker := os.Getenv("AI_TEAM_WORKER_ARGS_MARKER"); marker != "" {
+		if err := os.WriteFile(marker, []byte(strings.Join(os.Args, "\n")), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}

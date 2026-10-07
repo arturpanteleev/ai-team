@@ -128,6 +128,71 @@ func TestWorkerControllerAPIRejectsExpiredFutureMissingAndReplayedRequests(t *te
 	}
 }
 
+func TestWorkerControllerAPIConcurrentReplayDispatchesOnce(t *testing.T) {
+	job := Job{RunID: "run", Operation: OperationStart, ExecutionID: strings.Repeat("c", ExecutionIDBytes*2)}
+	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	recorder := &apiRecorderSpy{}
+	server, err := startWorkerAPIServer(job, recorder, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+
+	const requests = 24
+	now := time.Now().UTC()
+	body := workerAPIRequestBody(t, server.scope, "approval.create", workerAPICall{Approval: approval.PendingApproval{ID: "concurrent-replay"}}, strings.Repeat("cd", 32), now)
+	start := make(chan struct{})
+	statuses := make(chan int, requests)
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req, reqErr := http.NewRequest(http.MethodPost, "http://"+server.listener.Addr().String()+"/v1/call", strings.NewReader(body))
+			if reqErr != nil {
+				errs <- reqErr
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+server.token)
+			resp, doErr := http.DefaultClient.Do(req)
+			if doErr != nil {
+				errs <- doErr
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			statuses <- resp.StatusCode
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	close(errs)
+	for reqErr := range errs {
+		t.Errorf("concurrent request failed: %v", reqErr)
+	}
+
+	accepted, rejected := 0, 0
+	for status := range statuses {
+		switch status {
+		case http.StatusOK:
+			accepted++
+		case http.StatusUnauthorized:
+			rejected++
+		default:
+			t.Errorf("unexpected concurrent replay status %d", status)
+		}
+	}
+	if accepted != 1 || rejected != requests-1 {
+		t.Fatalf("concurrent replay statuses: accepted=%d rejected=%d; want 1 and %d", accepted, rejected, requests-1)
+	}
+	if store.createCalls != 1 || len(store.values) != 1 {
+		t.Fatalf("concurrent replay duplicated approval side effect: create calls=%d approvals=%d", store.createCalls, len(store.values))
+	}
+}
+
 func TestWorkerControllerAPINonceCacheIsBoundedAndFailsClosed(t *testing.T) {
 	server := &workerAPIServer{nonces: make(map[string]time.Time)}
 	now := time.Now().UTC()

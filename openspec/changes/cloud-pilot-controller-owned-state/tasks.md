@@ -34,8 +34,15 @@
   isolation proves raw SQL/other filesystem access is denied.
 - [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
   worker-writable state; verify their integrity after worker-side attempts.
-- [ ] Add replay, wrong-job, wrong-action, expiry, oversized result, malformed
-  schema, path traversal, and forged-decision negative protocol tests.
+- [x] Add a negative test matrix for the currently implemented worker result
+  and controller API contracts: wrong run/operation/execution identity,
+  replayed result and API request, expired/future/malformed API nonce,
+  oversized/malformed requests and results, path traversal fields, cross-run
+  scope, forbidden methods, and forged human decisions. Concurrent replay is
+  covered by asserting exactly one accepted request and approval write. These
+  tests validate the current application protocol only; they do not complete
+  the capability, typed artifact transfer/commit, trusted check provenance,
+  or OS/runtime isolation requirements above and below.
 - [ ] Test worker process/network policy on a real runtime and verify there is
   no route to admin control endpoints and no control-plane secrets in worker.
 - [ ] Preserve run/approval/evidence through worker loss, controller restart,

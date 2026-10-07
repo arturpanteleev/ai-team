@@ -59,6 +59,14 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(target, "visible.txt"), []byte("target-visible"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	agentDir := filepath.Join(target, ".ai-team", "agents")
+	if err := os.MkdirAll(agentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(agentDir, "role.md")
+	if err := os.WriteFile(agentPath, []byte("agent-definition"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	probePath := filepath.Join(target, "sandbox-probe.json")
 	t.Setenv("AI_TEAM_BUBBLEWRAP_PROBE", "1")
 	allowWorkerTestEnvironment(t, "AI_TEAM_BUBBLEWRAP_PROBE")
@@ -68,6 +76,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 			"--probe-output", probePath},
 		target, dbPath,
 		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+		WithAgentRegistryPaths([]string{agentDir}),
 		WithLinuxBubblewrapIsolation(),
 	)
 	if err != nil {
@@ -89,8 +98,8 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
-	if !report.TargetReadable || !report.TargetWritable {
-		t.Fatalf("worker lost required target workspace access: %+v", report)
+	if !report.TargetReadable || !report.TargetWritable || report.AgentRegistryWritable {
+		t.Fatalf("unexpected workspace or agent-registry access: %+v", report)
 	}
 }
 
@@ -323,6 +332,7 @@ type sandboxProbeReport struct {
 	LegacyApprovalReadable bool `json:"legacy_approval_readable"`
 	TargetReadable         bool `json:"target_readable"`
 	TargetWritable         bool `json:"target_writable"`
+	AgentRegistryWritable  bool `json:"agent_registry_writable"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -353,6 +363,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
+	agentWriteErr := os.WriteFile(filepath.Join(job.TargetDir, ".ai-team", "agents", "role.md"), []byte("modified"), 0600)
 	report := sandboxProbeReport{
 		DatabaseReadable:       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
 		WALReadable:            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
@@ -362,6 +373,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		LegacyApprovalReadable: approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
 		TargetReadable:         targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:         writeErr == nil,
+		AgentRegistryWritable:  agentWriteErr == nil,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

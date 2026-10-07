@@ -89,6 +89,29 @@ func TestConfiguredWorkerProcessOptions(t *testing.T) {
 	})
 }
 
+func TestConfiguredAgentRegistryPathsNormalizesPlugins(t *testing.T) {
+	pluginPath := filepath.Join("relative", "plugins")
+	t.Setenv("AI_TEAM_AGENT_PATH", pluginPath+string(os.PathListSeparator))
+	paths := configuredAgentRegistryPaths()
+	if len(paths) != 2 {
+		t.Fatalf("agent registry paths = %v; want plugin and user config paths", paths)
+	}
+	wantPlugin, err := filepath.Abs(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths[0] != wantPlugin {
+		t.Fatalf("plugin path = %q, want %q", paths[0], wantPlugin)
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(configDir, "ai-team", "agents"); paths[1] != want {
+		t.Fatalf("user agent path = %q, want %q", paths[1], want)
+	}
+}
+
 func TestEnsureControlIgnoredUsesLocalGitExclude(t *testing.T) {
 	target := t.TempDir()
 	runGitTest(t, target, "init", "-b", "main")

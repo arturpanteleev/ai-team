@@ -612,6 +612,7 @@ func TestWorkerControllerCandidateAbsenceIsControllerProvenAndScoped(t *testing.
 	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err == nil {
 		t.Fatal("candidate absence read accepted a different/unavailable target")
 	}
+	server.scope.TargetDir = target
 
 	port := &WorkerAPIPort{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target}}
 	apiStore := NewWorkerAPICandidates(port)
@@ -623,6 +624,282 @@ func TestWorkerControllerCandidateAbsenceIsControllerProvenAndScoped(t *testing.
 	}
 	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(filepath.Join(target, "missing"), runID); err == nil {
 		t.Fatal("candidate absence adapter accepted another target")
+	}
+	// Exercise the successful adapter path too: a correctly scoped worker read
+	// must go through the controller API, which owns the durable marker.
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err = NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiStore = NewWorkerAPICandidates(port)
+	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(target, runID); err != nil {
+		t.Fatalf("scoped candidate absence adapter read: %v", err)
+	}
+}
+
+func TestPrepareCandidateAbsenceFailsClosedOnInvalidAndCorruptAdmission(t *testing.T) {
+	ctx := context.Background()
+
+	// Git detection errors must stop Start instead of treating an unavailable
+	// target as a non-Git workspace.
+	missing := filepath.Join(t.TempDir(), "missing")
+	engine := &ProcessEngine{target: missing, bubblewrap: true}
+	if allowed, err := engine.prepareCandidateAbsence(ctx, Job{Operation: OperationStart, RunID: "missing-target"}, nil); err == nil || allowed {
+		t.Fatalf("Start accepted a missing target: allowed=%v err=%v", allowed, err)
+	}
+
+	// Recover requires the lifecycle store before consulting any candidate
+	// evidence, and propagates errors reading that store.
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Operation: OperationRecover, RunID: "corrupt-lifecycle"}
+	engine = &ProcessEngine{target: target, bubblewrap: true}
+	if allowed, err := engine.prepareCandidateAbsence(ctx, job, nil); err == nil || allowed {
+		t.Fatalf("Recover accepted a nil lifecycle store: allowed=%v err=%v", allowed, err)
+	}
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(target, ".ai-team", "state", "runs", job.RunID+".json")
+	if err := os.WriteFile(statePath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := engine.prepareCandidateAbsence(ctx, job, store); err == nil || allowed {
+		t.Fatalf("Recover ignored corrupt lifecycle state: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestPrepareCandidateAbsenceResumeConsumesGitAndMetadataEvidence(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	job := Job{Operation: OperationResume, RunID: "resume-git-evidence"}
+	metadata := candidate.FileMetadataStore{}
+	if err := metadata.MarkGitAdmission(target, job.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil); err != nil || allowed {
+		t.Fatalf("Resume with Git admission evidence: allowed=%v err=%v", allowed, err)
+	}
+
+	job.RunID = "resume-metadata-evidence"
+	if err := metadata.Create(candidate.Metadata{SchemaVersion: 1, RunID: job.RunID, ControlTarget: target,
+		Worktree: filepath.Join(target, ".ai-team", "worktrees", job.RunID), BaseCommit: strings.Repeat("a", 40), BaseTree: strings.Repeat("b", 40), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil); err != nil || allowed {
+		t.Fatalf("Resume with candidate metadata: allowed=%v err=%v", allowed, err)
+	}
+
+	job.RunID = "resume-missing-proof"
+	if allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil); err != nil || allowed {
+		t.Fatalf("Resume without absence proof should remain candidate-backed: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestPrepareCandidateAbsenceRejectsCorruptProofAndGitRecoveryWithoutProof(t *testing.T) {
+	ctx := context.Background()
+	makeTarget := func() string {
+		t.Helper()
+		target, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return target
+	}
+	assertRejected := func(name string, engine *ProcessEngine, job Job, store lifecycle.StorePort) {
+		t.Helper()
+		if allowed, err := engine.prepareCandidateAbsence(ctx, job, store); err == nil || allowed {
+			t.Fatalf("%s must fail closed: allowed=%v err=%v", name, allowed, err)
+		}
+	}
+
+	// A Git Start cannot publish its positive admission record when the
+	// controller state path is obstructed by a regular file.
+	gitTarget := makeTarget()
+	if output, err := exec.Command("git", "-C", gitTarget, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(gitTarget, ".ai-team", "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitTarget, ".ai-team", "state", "candidates"), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("Git Start with blocked admission path", &ProcessEngine{target: gitTarget}, Job{Operation: OperationStart, RunID: "blocked-git-admission"}, nil)
+
+	// Recover returns an existing candidate's metadata as candidate-backed.
+	target := makeTarget()
+	job := Job{Operation: OperationRecover, RunID: "recover-existing-metadata"}
+	metadata := candidate.FileMetadataStore{}
+	if err := metadata.Create(candidate.Metadata{SchemaVersion: 1, RunID: job.RunID, ControlTarget: target,
+		Worktree: filepath.Join(target, ".ai-team", "worktrees", job.RunID), BaseCommit: strings.Repeat("c", 40),
+		BaseTree: strings.Repeat("d", 40), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := (&ProcessEngine{target: target, bubblewrap: true}).prepareCandidateAbsence(ctx, job, store); err != nil || allowed {
+		t.Fatalf("Recover with candidate metadata: allowed=%v err=%v", allowed, err)
+	}
+
+	// A corrupt controller proof is an error, never a reason to infer a new
+	// kind of admission.
+	corruptTarget := makeTarget()
+	corruptStore, err := lifecycle.NewStore(corruptTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptJob := Job{Operation: OperationRecover, RunID: "corrupt-absence-proof"}
+	markerPath := filepath.Join(corruptTarget, ".ai-team", "state", "candidates", corruptJob.RunID+".absent.json")
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("Recover with corrupt absence proof", &ProcessEngine{target: corruptTarget, bubblewrap: true}, corruptJob, corruptStore)
+
+	// A repository discovered during Recover is still a normal candidate run;
+	// the controller must not grant absence authority without an admission
+	// record from Start.
+	gitRecoverTarget := makeTarget()
+	if output, err := exec.Command("git", "-C", gitRecoverTarget, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init for Recover: %v: %s", err, output)
+	}
+	gitRecoverStore, err := lifecycle.NewStore(gitRecoverTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := (&ProcessEngine{target: gitRecoverTarget, bubblewrap: true}).prepareCandidateAbsence(ctx,
+		Job{Operation: OperationRecover, RunID: "git-recover-without-proof"}, gitRecoverStore); err != nil || allowed {
+		t.Fatalf("Recover with Git but no prior proof: allowed=%v err=%v", allowed, err)
+	}
+
+	// Resume likewise rejects a corrupt marker rather than silently trusting
+	// metadata from the target volume.
+	resumeTarget := makeTarget()
+	resumeJob := Job{Operation: OperationResume, RunID: "corrupt-resume-proof"}
+	resumePath := filepath.Join(resumeTarget, ".ai-team", "state", "candidates", resumeJob.RunID+".absent.json")
+	if err := os.MkdirAll(filepath.Dir(resumePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resumePath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("Resume with corrupt absence proof", &ProcessEngine{target: resumeTarget, bubblewrap: true}, resumeJob, nil)
+
+	// A corrupt Git admission record is also an error on Recover and Resume.
+	for _, operation := range []Operation{OperationRecover, OperationResume} {
+		corruptGitTarget := makeTarget()
+		corruptGitStore, err := lifecycle.NewStore(corruptGitTarget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptGitJob := Job{Operation: operation, RunID: "corrupt-git-proof-" + string(operation)}
+		gitProofPath := filepath.Join(corruptGitTarget, ".ai-team", "state", "candidates", corruptGitJob.RunID+".git-admitted.json")
+		if err := os.MkdirAll(filepath.Dir(gitProofPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(gitProofPath, []byte("not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertRejected("operation with corrupt Git admission", &ProcessEngine{target: corruptGitTarget, bubblewrap: true}, corruptGitJob, corruptGitStore)
+	}
+
+	// Corrupt candidate metadata is not equivalent to a missing record.
+	corruptMetadataTarget := makeTarget()
+	corruptMetadataStore, err := lifecycle.NewStore(corruptMetadataTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptMetadataJob := Job{Operation: OperationRecover, RunID: "corrupt-candidate-metadata"}
+	metadataPath := filepath.Join(corruptMetadataTarget, ".ai-team", "state", "candidates", corruptMetadataJob.RunID+".json")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("Recover with corrupt candidate metadata", &ProcessEngine{target: corruptMetadataTarget, bubblewrap: true}, corruptMetadataJob, corruptMetadataStore)
+
+	// A missing target is a detection error on Recover, while an intact
+	// non-Git target with no prior evidence is rejected explicitly.
+	validTarget := makeTarget()
+	validStore, err := lifecycle.NewStore(validTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingTarget := filepath.Join(t.TempDir(), "missing")
+	assertRejected("Recover with missing target", &ProcessEngine{target: missingTarget, bubblewrap: true},
+		Job{Operation: OperationRecover, RunID: "recover-missing-target"}, validStore)
+	assertRejected("Recover without admission evidence", &ProcessEngine{target: validTarget, bubblewrap: true},
+		Job{Operation: OperationRecover, RunID: "recover-no-proof"}, validStore)
+
+	// The Start path separately refuses pre-seeded absence markers and reports
+	// marker creation failures; both cases are security-relevant.
+	preseedTarget := makeTarget()
+	preseedJob := Job{Operation: OperationStart, RunID: "preseeded-nongit-marker"}
+	if err := (candidate.FileMetadataStore{}).MarkAbsent(preseedTarget, preseedJob.RunID); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("non-Git Start with pre-seeded marker", &ProcessEngine{target: preseedTarget, bubblewrap: true}, preseedJob, nil)
+	assertRejected("non-Git Start with invalid run id", &ProcessEngine{target: makeTarget(), bubblewrap: true},
+		Job{Operation: OperationStart, RunID: "../invalid"}, nil)
+	blockedTarget := makeTarget()
+	if err := os.MkdirAll(filepath.Join(blockedTarget, ".ai-team", "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedTarget, ".ai-team", "state", "candidates"), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("non-Git Start with blocked marker path", &ProcessEngine{target: blockedTarget, bubblewrap: true},
+		Job{Operation: OperationStart, RunID: "blocked-marker-path"}, nil)
+
+	// Resume propagates malformed metadata instead of interpreting it as
+	// missing candidate data.
+	resumeMetadataTarget := makeTarget()
+	resumeMetadataJob := Job{Operation: OperationResume, RunID: "corrupt-resume-metadata"}
+	resumeMetadataPath := filepath.Join(resumeMetadataTarget, ".ai-team", "state", "candidates", resumeMetadataJob.RunID+".json")
+	if err := os.MkdirAll(filepath.Dir(resumeMetadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resumeMetadataPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("Resume with corrupt metadata", &ProcessEngine{target: resumeMetadataTarget, bubblewrap: true}, resumeMetadataJob, nil)
+
+	// If Git is unavailable at recovery time, no absence conclusion can be
+	// drawn from a failed repository probe.
+	detectionTarget := makeTarget()
+	detectionStore, err := lifecycle.NewStore(detectionTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	assertRejected("Recover when Git detection is unavailable", &ProcessEngine{target: detectionTarget, bubblewrap: true},
+		Job{Operation: OperationRecover, RunID: "recover-git-unavailable"}, detectionStore)
+
+	// Unsupported operations and a bubblewrap Resume with no absence proof
+	// preserve candidate-backed behavior instead of asserting absence.
+	if allowed, err := (&ProcessEngine{target: validTarget, bubblewrap: true}).prepareCandidateAbsence(ctx,
+		Job{Operation: OperationResume, RunID: "resume-no-proof"}, nil); err != nil || allowed {
+		t.Fatalf("Resume without proof: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := (&ProcessEngine{target: validTarget, bubblewrap: true}).prepareCandidateAbsence(ctx,
+		Job{Operation: Operation("unsupported"), RunID: "unsupported-operation"}, nil); err != nil || allowed {
+		t.Fatalf("unsupported operation: allowed=%v err=%v", allowed, err)
 	}
 }
 

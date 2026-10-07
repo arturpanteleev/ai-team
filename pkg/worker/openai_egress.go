@@ -44,8 +44,12 @@ func startOpenAIEgressServer(socketPath string) (*openAIEgressServer, error) {
 }
 
 func startOpenAIEgressServerWithDial(socketPath string, dial func(context.Context) (net.Conn, error)) (*openAIEgressServer, error) {
+	return startOpenAIEgressServerWithToken(socketPath, rand.Read, dial)
+}
+
+func startOpenAIEgressServerWithToken(socketPath string, readRandom func([]byte) (int, error), dial func(context.Context) (net.Conn, error)) (*openAIEgressServer, error) {
 	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
+	if _, err := readRandom(raw[:]); err != nil {
 		return nil, fmt.Errorf("OpenAI egress capability: %w", err)
 	}
 	return startOpenAIEgressServerWith(socketPath, hex.EncodeToString(raw[:]), dial)
@@ -157,14 +161,25 @@ func allowedOpenAIConnectTarget(target string) bool {
 }
 
 func dialOpenAIHost(ctx context.Context) (net.Conn, error) {
+	return dialOpenAIHostWith(ctx, net.DefaultResolver, &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second})
+}
+
+type openAIEgressResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type openAIEgressDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+}
+
+func dialOpenAIHostWith(ctx context.Context, resolver openAIEgressResolver, dialer openAIEgressDialer) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, openAIEgressHost)
+	ips, err := resolver.LookupIPAddr(ctx, openAIEgressHost)
 	if err != nil {
 		return nil, fmt.Errorf("resolve OpenAI endpoint")
 	}
 	var lastErr error
-	dialer := net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second}
 	for _, item := range ips {
 		if !publicUnicastIP(item.IP) {
 			continue
@@ -232,13 +247,19 @@ func publicUnicastIP(ip net.IP) bool {
 // accepts api.openai.com:443 CONNECT requests; it never accepts absolute-form
 // requests or logs request headers/bodies.
 func StartOpenAIEgressBridge(ctx context.Context, socketPath, token string) (string, func(), error) {
+	return startOpenAIEgressBridge(ctx, socketPath, token, ensureOpenAIEgressLoopback, func() (net.Listener, error) {
+		return net.Listen("tcp4", "127.0.0.1:0")
+	})
+}
+
+func startOpenAIEgressBridge(ctx context.Context, socketPath, token string, ensureLoopback func() error, listen func() (net.Listener, error)) (string, func(), error) {
 	if socketPath == "" || token == "" {
 		return "", func() {}, errors.New("OpenAI egress socket and capability are required")
 	}
-	if err := ensureOpenAIEgressLoopback(); err != nil {
+	if err := ensureLoopback(); err != nil {
 		return "", func() {}, fmt.Errorf("enable namespace-local loopback: %w", err)
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := listen()
 	if err != nil {
 		return "", func() {}, fmt.Errorf("listen on namespace-local OpenAI proxy: %w", err)
 	}

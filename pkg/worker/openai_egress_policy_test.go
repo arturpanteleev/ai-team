@@ -1,0 +1,256 @@
+package worker
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+type fakeOpenAIResolver struct {
+	ips []net.IPAddr
+	err error
+}
+
+func (r fakeOpenAIResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	if host != openAIEgressHost {
+		return nil, fmt.Errorf("unexpected host %q", host)
+	}
+	return r.ips, r.err
+}
+
+type fakeOpenAIDialer struct {
+	addresses []string
+	conn      net.Conn
+	err       error
+}
+
+func (d *fakeOpenAIDialer) DialContext(_ context.Context, network, address string) (net.Conn, error) {
+	if network != "tcp" {
+		return nil, fmt.Errorf("unexpected network %q", network)
+	}
+	d.addresses = append(d.addresses, address)
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.conn, nil
+}
+
+func TestOpenAIEgressServerConstructionAndLifecycleBranches(t *testing.T) {
+	if _, err := startOpenAIEgressServerWith("", "token", nil); err == nil {
+		t.Fatal("empty socket path should fail")
+	}
+	if _, err := startOpenAIEgressServerWith("/tmp/unused.sock", "", nil); err == nil {
+		t.Fatal("empty token should fail")
+	}
+	if _, err := startOpenAIEgressServerWithToken("unused.sock", func([]byte) (int, error) { return 0, errors.New("entropy unavailable") }, nil); err == nil {
+		t.Fatal("random capability error should propagate")
+	}
+	occupied := shortOpenAIEgressSocket(t)
+	listener, err := net.Listen("unix", occupied)
+	mustNoError(t, err)
+	if _, err := startOpenAIEgressServerWith(occupied, "token", nil); err == nil {
+		t.Fatal("existing socket should fail")
+	}
+	_ = listener.Close()
+
+	server, err := startOpenAIEgressServerWithDial(shortOpenAIEgressSocket(t), func(context.Context) (net.Conn, error) {
+		return nil, errors.New("not used")
+	})
+	mustNoError(t, err)
+	server.close()
+	server.close()
+	server, err = startOpenAIEgressServer(shortOpenAIEgressSocket(t))
+	mustNoError(t, err)
+	server.close()
+	var nilServer *openAIEgressServer
+	nilServer.close()
+}
+
+func TestOpenAIEgressServerReturnsBadGatewayWhenDialFails(t *testing.T) {
+	socket := shortOpenAIEgressSocket(t)
+	server, err := startOpenAIEgressServerWith(socket, "known-capability", func(context.Context) (net.Conn, error) {
+		return nil, errors.New("upstream unavailable")
+	})
+	mustNoError(t, err)
+	defer server.close()
+	conn, err := net.Dial("unix", socket)
+	mustNoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_, err = io.WriteString(conn, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\nProxy-Authorization: Bearer known-capability\r\n\r\n")
+	mustNoError(t, err)
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	mustNoError(t, err)
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", response.StatusCode)
+	}
+}
+
+func TestOpenAIEgressServerTrackingBranches(t *testing.T) {
+	server := &openAIEgressServer{active: make(map[net.Conn]struct{})}
+	left, leftPeer := net.Pipe()
+	right, rightPeer := net.Pipe()
+	defer func() { _ = leftPeer.Close() }()
+	defer func() { _ = rightPeer.Close() }()
+	if !server.track(left, right) {
+		t.Fatal("open server rejected connections")
+	}
+	if len(server.active) != 2 {
+		t.Fatalf("tracked %d connections, want 2", len(server.active))
+	}
+	server.untrack(left, right)
+	if len(server.active) != 0 {
+		t.Fatalf("untracked connections remain: %d", len(server.active))
+	}
+	server.closed = true
+	if server.track(left, right) {
+		t.Fatal("closed server accepted connections")
+	}
+	_ = left.Close()
+	_ = right.Close()
+}
+
+func TestDialOpenAIHostPolicyAndFailures(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dialOpenAIHost(canceled); err == nil {
+		t.Fatal("canceled DNS lookup should fail")
+	}
+	lookupErr := errors.New("resolver unavailable")
+	if _, err := dialOpenAIHostWith(context.Background(), fakeOpenAIResolver{err: lookupErr}, &fakeOpenAIDialer{}); err == nil || !strings.Contains(err.Error(), "resolve OpenAI endpoint") {
+		t.Fatalf("resolver error = %v", err)
+	}
+	for _, ips := range [][]net.IPAddr{
+		nil,
+		{{IP: net.ParseIP("127.0.0.1")}},
+		{{IP: net.ParseIP("192.0.2.10")}},
+	} {
+		dialer := &fakeOpenAIDialer{}
+		if _, err := dialOpenAIHostWith(context.Background(), fakeOpenAIResolver{ips: ips}, dialer); err == nil || !strings.Contains(err.Error(), "no public addresses") {
+			t.Fatalf("addresses %v error = %v, want no public addresses", ips, err)
+		}
+		if len(dialer.addresses) != 0 {
+			t.Fatalf("attempted a non-public address: %v", dialer.addresses)
+		}
+	}
+	connectErr := errors.New("connect refused")
+	dialer := &fakeOpenAIDialer{err: connectErr}
+	_, err := dialOpenAIHostWith(context.Background(), fakeOpenAIResolver{ips: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, dialer)
+	if err == nil || !strings.Contains(err.Error(), "connect to OpenAI endpoint") {
+		t.Fatalf("dial error = %v", err)
+	}
+	client, upstream := net.Pipe()
+	defer func() { _ = upstream.Close() }()
+	dialer = &fakeOpenAIDialer{conn: client}
+	conn, err := dialOpenAIHostWith(context.Background(), fakeOpenAIResolver{ips: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}, {IP: net.ParseIP("8.8.8.8")}}}, dialer)
+	mustNoError(t, err)
+	if conn != client || len(dialer.addresses) != 1 || dialer.addresses[0] != "8.8.8.8:443" {
+		t.Fatalf("dial result %v, attempted %v", conn, dialer.addresses)
+	}
+	_ = conn.Close()
+}
+
+func TestOpenAIEgressBridgeSetupErrors(t *testing.T) {
+	noListen := func() (net.Listener, error) { return nil, errors.New("listen failure") }
+	if _, _, err := startOpenAIEgressBridge(context.Background(), "", "token", nil, noListen); err == nil {
+		t.Fatal("empty socket should fail")
+	}
+	if _, _, err := startOpenAIEgressBridge(context.Background(), "socket", "", nil, noListen); err == nil {
+		t.Fatal("empty token should fail")
+	}
+	if _, _, err := startOpenAIEgressBridge(context.Background(), "socket", "token", func() error { return errors.New("loopback failure") }, noListen); err == nil {
+		t.Fatal("loopback setup failure should propagate")
+	}
+	if _, _, err := startOpenAIEgressBridge(context.Background(), "socket", "token", func() error { return nil }, noListen); err == nil || !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("listener error = %v", err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	mustNoError(t, err)
+	proxy, closeFn, err := startOpenAIEgressBridge(context.Background(), "socket", "token", func() error { return nil }, func() (net.Listener, error) { return listener, nil })
+	mustNoError(t, err)
+	if !strings.HasPrefix(proxy, "http://127.0.0.1:") {
+		t.Fatalf("proxy URL = %q", proxy)
+	}
+	closeFn()
+	closeFn()
+}
+
+func TestBridgeOpenAIClientRejectsMalformedAndUnavailableRequests(t *testing.T) {
+	for _, request := range []string{
+		"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+		"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+		"this is not http\r\n\r\n",
+	} {
+		client, proxy := net.Pipe()
+		done := make(chan struct{})
+		go bridgeOpenAIClient(proxy, filepath.Join(t.TempDir(), "missing.sock"), "token", done)
+		_, _ = io.WriteString(client, request)
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+		if err == nil {
+			if response.StatusCode != http.StatusForbidden {
+				t.Fatalf("request %q got status %d", request, response.StatusCode)
+			}
+		} else if !strings.Contains(request, "this is not") {
+			t.Fatalf("request %q read response: %v", request, err)
+		}
+		_ = client.Close()
+	}
+	client, proxy := net.Pipe()
+	go bridgeOpenAIClient(proxy, filepath.Join(t.TempDir(), "missing.sock"), "token", make(chan struct{}))
+	_, _ = io.WriteString(client, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n")
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	mustNoError(t, err)
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", response.StatusCode)
+	}
+	_ = client.Close()
+}
+
+func TestBridgeOpenAIClientForwardsControllerDenial(t *testing.T) {
+	socket := shortOpenAIEgressSocket(t)
+	listener, err := net.Listen("unix", socket)
+	mustNoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		upstream, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = upstream.Close() }()
+		_, _ = http.ReadRequest(bufio.NewReader(upstream))
+		_, _ = io.WriteString(upstream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+	}()
+	client, proxy := net.Pipe()
+	go bridgeOpenAIClient(proxy, socket, "secret-token", make(chan struct{}))
+	_, err = io.WriteString(client, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\nProxy-Authorization: Bearer client-value\r\n\r\n")
+	mustNoError(t, err)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	mustNoError(t, err)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", response.StatusCode)
+	}
+	_ = client.Close()
+}
+
+func TestOpenAIEgressServerSocketPermissions(t *testing.T) {
+	socket := shortOpenAIEgressSocket(t)
+	server, err := startOpenAIEgressServerWith(socket, "capability", func(context.Context) (net.Conn, error) { return nil, errors.New("unused") })
+	mustNoError(t, err)
+	info, err := os.Stat(socket)
+	mustNoError(t, err)
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("socket permissions = %o, want 600", info.Mode().Perm())
+	}
+	server.close()
+}

@@ -16,26 +16,33 @@ type openAIEgressIfreq struct {
 }
 
 func ensureOpenAIEgressLoopback() error {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	return ensureOpenAIEgressLoopbackWith(syscall.Socket, ioctlOpenAIEgressInterface, syscall.Close)
+}
+
+func ioctlOpenAIEgressInterface(fd int, request uintptr, ifreq *openAIEgressIfreq) error {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), request, uintptr(unsafe.Pointer(ifreq)))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func ensureOpenAIEgressLoopbackWith(socket func(int, int, int) (int, error), ioctl func(int, uintptr, *openAIEgressIfreq) error, closeSocket func(int) error) error {
+	fd, err := socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(fd)
+	defer func() { _ = closeSocket(fd) }()
 	var request openAIEgressIfreq
 	copy(request.name[:], "lo")
 	const getFlags = uintptr(0x8913) // SIOCGIFFLAGS
 	const setFlags = uintptr(0x8914) // SIOCSIFFLAGS
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), getFlags, uintptr(unsafe.Pointer(&request)))
-	if errno != 0 {
-		return errno
+	if err := ioctl(fd, getFlags, &request); err != nil {
+		return err
 	}
 	if request.flags&1 != 0 { // IFF_UP
 		return nil
 	}
 	request.flags |= 1
-	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), setFlags, uintptr(unsafe.Pointer(&request)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return ioctl(fd, setFlags, &request)
 }

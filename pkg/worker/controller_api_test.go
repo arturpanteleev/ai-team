@@ -608,6 +608,18 @@ func TestWorkerContainmentReceiptUsesScopedUnixAPI(t *testing.T) {
 	if _, err := server.dispatch("containment.write", workerAPICall{}); err == nil {
 		t.Fatal("controller accepted a missing containment receipt")
 	}
+	for _, operation := range []Operation{OperationResume, OperationRecover} {
+		server.scope.Operation = operation
+		server.scope.RunID = "containment-api-" + strings.ToLower(string(operation))
+		if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err != nil {
+			t.Fatalf("controller rejected containment write for %s: %v", operation, err)
+		}
+	}
+	server.scope.Operation = OperationStart
+	server.containmentReceipts.TargetDir = ""
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err == nil {
+		t.Fatal("controller accepted containment write without a configured store")
+	}
 }
 
 func TestWorkerContainmentReceiptWriterRejectsUnavailableTransport(t *testing.T) {

@@ -28,18 +28,20 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
 const (
-	workerAPIAddressEnv  = "AI_TEAM_WORKER_API_ADDRESS"
-	workerAPISocketEnv   = "AI_TEAM_WORKER_API_SOCKET"
-	workerAPITokenEnv    = "AI_TEAM_WORKER_API_TOKEN"
-	workerAPIMaxBody     = 1 << 20
-	workerAPIErrorMarker = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
-	workerAPIRequestTTL  = 30 * time.Second
-	workerAPIFutureSkew  = 5 * time.Second
-	workerAPIMaxNonces   = 4096
+	workerAPIAddressEnv               = "AI_TEAM_WORKER_API_ADDRESS"
+	workerAPISocketEnv                = "AI_TEAM_WORKER_API_SOCKET"
+	workerAPITokenEnv                 = "AI_TEAM_WORKER_API_TOKEN"
+	workerAPIMaxBody                  = 1 << 20
+	workerAPIMaxCandidateEvidenceBody = 9 << 20
+	workerAPIErrorMarker              = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
+	workerAPIRequestTTL               = 30 * time.Second
+	workerAPIFutureSkew               = 5 * time.Second
+	workerAPIMaxNonces                = 4096
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -60,26 +62,28 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID              string                   `json:"run_id,omitempty"`
-	A                  string                   `json:"a,omitempty"`
-	B                  string                   `json:"b,omitempty"`
-	C                  string                   `json:"c,omitempty"`
-	Index              int                      `json:"index,omitempty"`
-	At                 time.Time                `json:"at,omitempty"`
-	Data               map[string]any           `json:"data,omitempty"`
-	IDs                []string                 `json:"ids,omitempty"`
-	Stage              notifier.StageResult     `json:"stage,omitempty"`
-	Error              string                   `json:"error,omitempty"`
-	Approval           approval.PendingApproval `json:"approval,omitempty"`
-	Lifecycle          lifecycle.State          `json:"lifecycle,omitempty"`
-	Previous           lifecycle.State          `json:"previous_lifecycle,omitempty"`
-	BriefVersion       pipeline.BriefVersion    `json:"brief_version,omitempty"`
-	BriefContent       []byte                   `json:"brief_content,omitempty"`
-	CandidateMetadata  candidate.Metadata       `json:"candidate_metadata,omitempty"`
-	Usage              metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
-	TerminalRecord     delivery.TerminalRecord  `json:"terminal_record,omitempty"`
-	Attestation        attest.Statement         `json:"attestation,omitempty"`
-	ContainmentReceipt *containment.Receipt     `json:"containment_receipt,omitempty"`
+	RunID                 string                     `json:"run_id,omitempty"`
+	A                     string                     `json:"a,omitempty"`
+	B                     string                     `json:"b,omitempty"`
+	C                     string                     `json:"c,omitempty"`
+	Index                 int                        `json:"index,omitempty"`
+	At                    time.Time                  `json:"at,omitempty"`
+	Data                  map[string]any             `json:"data,omitempty"`
+	IDs                   []string                   `json:"ids,omitempty"`
+	Stage                 notifier.StageResult       `json:"stage,omitempty"`
+	Error                 string                     `json:"error,omitempty"`
+	Approval              approval.PendingApproval   `json:"approval,omitempty"`
+	Lifecycle             lifecycle.State            `json:"lifecycle,omitempty"`
+	Previous              lifecycle.State            `json:"previous_lifecycle,omitempty"`
+	BriefVersion          pipeline.BriefVersion      `json:"brief_version,omitempty"`
+	BriefContent          []byte                     `json:"brief_content,omitempty"`
+	CandidateMetadata     candidate.Metadata         `json:"candidate_metadata,omitempty"`
+	Usage                 metrics.UsageEnvelope      `json:"usage_envelope,omitempty"`
+	TerminalRecord        delivery.TerminalRecord    `json:"terminal_record,omitempty"`
+	Attestation           attest.Statement           `json:"attestation,omitempty"`
+	ContainmentReceipt    *containment.Receipt       `json:"containment_receipt,omitempty"`
+	CandidateEvidenceName string                     `json:"candidate_evidence_name,omitempty"`
+	CandidateEvidence     pipeline.CandidateEvidence `json:"candidate_evidence,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -118,6 +122,7 @@ type workerAPIServer struct {
 	usage                   metrics.FileUsageEnvelopeStore
 	attestations            attest.ControllerStore
 	containmentReceipts     containment.ControllerReceiptStore
+	candidateEvidenceRoot   string
 	usageAllowed            bool
 	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
@@ -229,6 +234,9 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 	}
 	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	api.usageAllowed = socketPath != ""
+	if api.usageAllowed {
+		api.candidateEvidenceRoot = filepath.Join(canonicalTarget, ".ai-team", "state", "evidence")
+	}
 	api.attestations = attest.ControllerStore{TargetDir: canonicalTarget}
 	api.containmentReceipts = containment.ControllerReceiptStore{TargetDir: canonicalTarget}
 	mux := http.NewServeMux()
@@ -254,18 +262,30 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, workerAPIMaxBody+1))
-	if err != nil || len(data) > workerAPIMaxBody {
+	data, err := io.ReadAll(io.LimitReader(r.Body, workerAPIMaxCandidateEvidenceBody+1))
+	if err != nil || len(data) > workerAPIMaxCandidateEvidenceBody {
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	if len(data) > workerAPIMaxBody {
+		var largeRequest workerAPIRequest
+		if json.Unmarshal(data, &largeRequest) != nil ||
+			(largeRequest.Method != "candidate.evidence.write" && largeRequest.Method != "candidate.evidence.read") {
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
 	var request workerAPIRequest
-	if strictjson.Unmarshal(data, workerAPIMaxBody, &request) != nil || request.workerAPIScope != s.scope {
+	if strictjson.Unmarshal(data, workerAPIMaxCandidateEvidenceBody, &request) != nil || request.workerAPIScope != s.scope {
 		http.Error(w, "invalid invocation scope", http.StatusForbidden)
 		return
 	}
 	var call workerAPICall
-	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, workerAPIMaxBody, &call) != nil {
+	payloadLimit := workerAPIMaxBody
+	if request.Method == "candidate.evidence.write" || request.Method == "candidate.evidence.read" {
+		payloadLimit = workerAPIMaxCandidateEvidenceBody
+	}
+	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, int64(payloadLimit), &call) != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
@@ -463,6 +483,35 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return nil, nil
 	case "candidate.absence.create":
 		return nil, errors.New("worker API cannot create candidate absence markers")
+	case "candidate.evidence.write":
+		if !s.usageAllowed || s.candidateEvidenceRoot == "" {
+			return nil, errors.New("controller candidate evidence writes require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("candidate evidence run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API candidate evidence write is not allowed for operation %q", s.scope.Operation)
+		}
+		if err := pipeline.ValidateCandidateEvidence(s.scope.RunID, c.CandidateEvidenceName, c.CandidateEvidence); err != nil {
+			return nil, err
+		}
+		return nil, writeControllerCandidateEvidence(s.candidateEvidenceRoot, s.scope.RunID, c.CandidateEvidenceName, c.CandidateEvidence)
+	case "candidate.evidence.read":
+		if !s.usageAllowed || s.candidateEvidenceRoot == "" {
+			return nil, errors.New("controller candidate evidence reads require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("candidate evidence run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API candidate evidence read is not allowed for operation %q", s.scope.Operation)
+		}
+		return readControllerCandidateEvidence(s.candidateEvidenceRoot, s.scope.RunID, c.CandidateEvidenceName)
 	case "usage.envelope.write":
 		if !s.usageAllowed {
 			return nil, errors.New("controller usage writes require bubblewrap Unix transport")
@@ -634,6 +683,83 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 	return nil, nil
 }
 
+func candidateEvidencePath(root, runID, name string) (string, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return "", fmt.Errorf("candidate evidence run id: %w", err)
+	}
+	if name != "review-candidate.json" && name != "verification-candidate.json" {
+		return "", fmt.Errorf("unsupported candidate evidence name %q", name)
+	}
+	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return "", errors.New("candidate evidence controller root must be absolute and clean")
+	}
+	return filepath.Join(root, runID, name), nil
+}
+
+// Candidate evidence writes are immutable. Serialize the check-and-create step
+// process-wide so concurrent exact retries cannot both observe a missing file
+// and have one fail after the other creates it. A single bounded mutex avoids
+// retaining locks for every run ID.
+var controllerCandidateEvidenceWriteMu sync.Mutex
+
+func writeControllerCandidateEvidence(root, runID, name string, document pipeline.CandidateEvidence) error {
+	controllerCandidateEvidenceWriteMu.Lock()
+	defer controllerCandidateEvidenceWriteMu.Unlock()
+
+	if err := pipeline.ValidateCandidateEvidence(runID, name, document); err != nil {
+		return err
+	}
+	path, err := candidateEvidencePath(root, runID, name)
+	if err != nil {
+		return err
+	}
+	if data, readErr := safeio.ReadRegularFile(path, workerAPIMaxCandidateEvidenceBody); readErr == nil {
+		var stored pipeline.CandidateEvidence
+		if err := strictjson.Unmarshal(data, workerAPIMaxCandidateEvidenceBody, &stored); err != nil {
+			return fmt.Errorf("stored candidate evidence is invalid: %w", err)
+		}
+		if err := pipeline.ValidateCandidateEvidence(runID, name, stored); err != nil {
+			return err
+		}
+		if reflect.DeepEqual(stored, document) {
+			return nil
+		}
+		return errors.New("candidate evidence already submitted with different content")
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	data, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	if len(data) > workerAPIMaxCandidateEvidenceBody {
+		return errors.New("candidate evidence exceeds controller storage limit")
+	}
+	if err := safeio.EnsureDirPath(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return safeio.WriteRegularFileNoFollow(path, append(data, '\n'), 0o600)
+}
+
+func readControllerCandidateEvidence(root, runID, name string) (pipeline.CandidateEvidence, error) {
+	path, err := candidateEvidencePath(root, runID, name)
+	if err != nil {
+		return pipeline.CandidateEvidence{}, err
+	}
+	data, err := safeio.ReadRegularFile(path, workerAPIMaxCandidateEvidenceBody)
+	if err != nil {
+		return pipeline.CandidateEvidence{}, err
+	}
+	var document pipeline.CandidateEvidence
+	if err := strictjson.Unmarshal(data, workerAPIMaxCandidateEvidenceBody, &document); err != nil {
+		return pipeline.CandidateEvidence{}, err
+	}
+	if err := pipeline.ValidateCandidateEvidence(runID, name, document); err != nil {
+		return pipeline.CandidateEvidence{}, err
+	}
+	return document, nil
+}
+
 // sameLifecycleState compares the complete persisted checkpoint. time.Time.Equal
 // avoids treating equivalent instants with different location metadata as a
 // stale checkpoint after a JSON round trip.
@@ -771,11 +897,15 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, workerAPIMaxBody+1))
+	responseLimit := workerAPIMaxBody
+	if method == "candidate.evidence.read" {
+		responseLimit = workerAPIMaxCandidateEvidenceBody
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 	if err != nil {
 		return err
 	}
-	if len(body) > workerAPIMaxBody {
+	if len(body) > responseLimit {
 		return errors.New("worker API response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -951,6 +1081,50 @@ func (c *workerAPICandidates) Read(target, runID string) (candidate.Metadata, er
 func (c *workerAPICandidates) MarkAbsent(string, string) error {
 	return errors.New("worker candidate API cannot create candidate absence markers")
 }
+
+type workerAPICandidateEvidenceStore struct{ port *workerAPIPort }
+
+type WorkerAPICandidateEvidenceStore = workerAPICandidateEvidenceStore
+
+func NewWorkerAPICandidateEvidenceStore(port *WorkerAPIPort) pipeline.CandidateEvidenceStore {
+	return &workerAPICandidateEvidenceStore{port: port}
+}
+
+func (s *workerAPICandidateEvidenceStore) check(name string) error {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return errors.New("controller candidate evidence API unavailable")
+	}
+	if name != "review-candidate.json" && name != "verification-candidate.json" {
+		return fmt.Errorf("unsupported candidate evidence name %q", name)
+	}
+	return nil
+}
+
+func (s *workerAPICandidateEvidenceStore) WriteCandidateEvidence(name string, document pipeline.CandidateEvidence) error {
+	if err := s.check(name); err != nil {
+		return err
+	}
+	if err := pipeline.ValidateCandidateEvidence(s.port.scope.RunID, name, document); err != nil {
+		return err
+	}
+	return s.port.call("candidate.evidence.write", workerAPICall{
+		RunID: s.port.scope.RunID, CandidateEvidenceName: name, CandidateEvidence: document,
+	}, nil)
+}
+
+func (s *workerAPICandidateEvidenceStore) ReadCandidateEvidence(name string) (pipeline.CandidateEvidence, error) {
+	if err := s.check(name); err != nil {
+		return pipeline.CandidateEvidence{}, err
+	}
+	var document pipeline.CandidateEvidence
+	err := s.port.call("candidate.evidence.read", workerAPICall{RunID: s.port.scope.RunID, CandidateEvidenceName: name}, &document)
+	if err == nil {
+		err = pipeline.ValidateCandidateEvidence(s.port.scope.RunID, name, document)
+	}
+	return document, err
+}
+
+var _ pipeline.CandidateEvidenceStore = (*workerAPICandidateEvidenceStore)(nil)
 
 func (c *workerAPICandidates) ReadAbsent(target, runID string) error {
 	if c == nil || c.port == nil || runID != c.port.scope.RunID {

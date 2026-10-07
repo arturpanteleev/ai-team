@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -3525,6 +3526,93 @@ func TestReviewedCandidateIdentityFailsAfterWorkspaceMutation(t *testing.T) {
 	}
 	if err := state.verifyCandidateEvidence("review-candidate.json", "semantic_code_review"); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("mutated reviewed candidate must fail closed: %v", err)
+	}
+}
+
+type memoryCandidateEvidenceStore struct {
+	documents map[string]CandidateEvidence
+}
+
+func (s *memoryCandidateEvidenceStore) WriteCandidateEvidence(name string, document CandidateEvidence) error {
+	if s.documents == nil {
+		s.documents = make(map[string]CandidateEvidence)
+	}
+	if existing, ok := s.documents[name]; ok {
+		if !reflect.DeepEqual(existing, document) {
+			return errors.New("candidate evidence already submitted with different content")
+		}
+		return nil
+	}
+	s.documents[name] = document
+	return nil
+}
+
+func (s *memoryCandidateEvidenceStore) ReadCandidateEvidence(name string) (CandidateEvidence, error) {
+	document, ok := s.documents[name]
+	if !ok {
+		return CandidateEvidence{}, os.ErrNotExist
+	}
+	return document, nil
+}
+
+func TestReviewedCandidateImportsLegacyProjectionIntoControllerStore(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "source.go"), []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactRoot := filepath.Join(target, ".ai-team", "artifacts")
+	controlDir := filepath.Join(artifactRoot, "feat", ".control")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := checks.WorkspaceDigest(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := CandidateEvidence{
+		SchemaVersion: 1, RunID: "run-legacy-candidate", Purpose: "semantic_code_review", WorkspaceSHA256: digest,
+		ChangedFiles: []CandidateFile{}, Checks: []CandidateCheck{}, Attempts: []CandidateAttempt{},
+	}
+	if err := writeControllerJSON(filepath.Join(controlDir, "review-candidate.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryCandidateEvidenceStore{}
+	state := &runState{
+		runCfg: RunConfig{TargetDir: target, Feature: "feat"}, runID: legacy.RunID,
+		task: &runtime.Task{ArtifactRoot: artifactRoot}, p: &Pipeline{candidateEvidence: store},
+	}
+	if err := state.verifyCandidateEvidence("review-candidate.json", "semantic_code_review"); err != nil {
+		t.Fatalf("legacy projection should resume through controller store: %v", err)
+	}
+	if got, err := store.ReadCandidateEvidence("review-candidate.json"); err != nil || !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("legacy document was not imported exactly: got=%+v err=%v", got, err)
+	}
+	// A repeated resume reads the canonical record and does not need the legacy
+	// projection after the one-time import.
+	if err := os.Remove(filepath.Join(controlDir, "review-candidate.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.verifyCandidateEvidence("review-candidate.json", "semantic_code_review"); err != nil {
+		t.Fatalf("canonical controller record should resume independently: %v", err)
+	}
+}
+
+func TestReviewedCandidateLegacyImportRejectsSymlinkedControlDirectory(t *testing.T) {
+	target := t.TempDir()
+	artifactRoot := filepath.Join(target, ".ai-team", "artifacts")
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(artifactRoot, "feat")); err != nil {
+		t.Fatal(err)
+	}
+	state := &runState{
+		runCfg: RunConfig{TargetDir: target, Feature: "feat"}, runID: "run-legacy-candidate",
+		task: &runtime.Task{ArtifactRoot: artifactRoot}, p: &Pipeline{candidateEvidence: &memoryCandidateEvidenceStore{}},
+	}
+	if err := state.verifyCandidateEvidence("review-candidate.json", "semantic_code_review"); err == nil {
+		t.Fatal("legacy import must reject a symlinked feature directory")
 	}
 }
 

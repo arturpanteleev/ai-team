@@ -92,6 +92,14 @@ type ContainmentReceiptWriter interface {
 	WriteContainmentReceipt(containment.Receipt) error
 }
 
+// CandidateEvidenceStore keeps the two generated gate identity documents in
+// controller-owned storage for isolated workers. Stage agents still receive a
+// worker-visible projection as an ordinary input artifact.
+type CandidateEvidenceStore interface {
+	WriteCandidateEvidence(name string, document CandidateEvidence) error
+	ReadCandidateEvidence(name string) (CandidateEvidence, error)
+}
+
 type Pipeline struct {
 	cfg                  *config.Config
 	reg                  *agent.Registry
@@ -109,6 +117,7 @@ type Pipeline struct {
 	terminalRecordWriter TerminalRecordWriter
 	attestationWriter    AttestationWriter
 	containmentWriter    ContainmentReceiptWriter
+	candidateEvidence    CandidateEvidenceStore
 	reportsDir           string
 }
 
@@ -189,6 +198,10 @@ func WithAttestationWriter(writer AttestationWriter) Option {
 
 func WithContainmentReceiptWriter(writer ContainmentReceiptWriter) Option {
 	return func(p *Pipeline) { p.containmentWriter = writer }
+}
+
+func WithCandidateEvidenceStore(store CandidateEvidenceStore) Option {
+	return func(p *Pipeline) { p.candidateEvidence = store }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {

@@ -13,8 +13,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +33,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 type apiApprovalStore struct {
@@ -774,6 +778,353 @@ func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T
 	unixAPI.scope.TargetDir = fileTargetPath
 	if _, err := unixAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
 		t.Fatal("Unix API accepted a non-directory target")
+	}
+}
+
+func TestWorkerCandidateEvidenceControllerStoreIsScopedAndImmutable(t *testing.T) {
+	target := t.TempDir()
+	socketDir, err := os.MkdirTemp("/tmp", "candidate-evidence-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-evidence-run", TargetDir: target,
+		ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, filepath.Join(socketDir, "worker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: job.RunID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+	call := workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json", CandidateEvidence: document}
+	if _, err := server.dispatch("candidate.evidence.write", call); err != nil {
+		t.Fatalf("write typed candidate evidence: %v", err)
+	}
+	path, err := candidateEvidencePath(filepath.Join(target, ".ai-team", "state", "evidence"), job.RunID, call.CandidateEvidenceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("controller evidence permissions: info=%v err=%v", info, err)
+	}
+	if _, err := server.dispatch("candidate.evidence.write", call); err != nil {
+		t.Fatalf("exact retry should be idempotent: %v", err)
+	}
+	loaded, err := server.dispatch("candidate.evidence.read", workerAPICall{RunID: job.RunID, CandidateEvidenceName: call.CandidateEvidenceName})
+	if err != nil || !reflect.DeepEqual(loaded, document) {
+		t.Fatalf("read candidate evidence: loaded=%+v err=%v", loaded, err)
+	}
+	conflicting := document
+	conflicting.WorkspaceSHA256 = strings.Repeat("b", 64)
+	call.CandidateEvidence = conflicting
+	if _, err := server.dispatch("candidate.evidence.write", call); err == nil {
+		t.Fatal("conflicting retry replaced controller-owned candidate evidence")
+	}
+	for name, badCall := range map[string]workerAPICall{
+		"foreign run":            {RunID: "another-run", CandidateEvidenceName: "review-candidate.json", CandidateEvidence: document},
+		"wrong document purpose": {RunID: job.RunID, CandidateEvidenceName: "verification-candidate.json", CandidateEvidence: document},
+		"unsupported name":       {RunID: job.RunID, CandidateEvidenceName: "../../controller.db", CandidateEvidence: document},
+	} {
+		if _, err := server.dispatch("candidate.evidence.write", badCall); err == nil {
+			t.Errorf("accepted %s candidate evidence", name)
+		}
+	}
+	loopback, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loopback.close()
+	if _, err := loopback.dispatch("candidate.evidence.write", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json", CandidateEvidence: document}); err == nil {
+		t.Fatal("loopback API accepted controller-owned candidate evidence write")
+	}
+	cancelJob := job
+	cancelJob.Operation = OperationCancel
+	cancel, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, filepath.Join(socketDir, "cancel.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel.close()
+	if _, err := cancel.dispatch("candidate.evidence.read", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json"}); err == nil {
+		t.Fatal("Cancel API accepted candidate evidence read")
+	}
+}
+
+func TestWorkerAPICandidateEvidenceStoreUsesScopedUnixAPI(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-evidence-client-run", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "candidate-evidence-client-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPICandidateEvidenceStore(port)
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: job.RunID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+
+	if err := store.WriteCandidateEvidence("review-candidate.json", document); err != nil {
+		t.Fatalf("write candidate evidence through worker API: %v", err)
+	}
+	if err := store.WriteCandidateEvidence("review-candidate.json", document); err != nil {
+		t.Fatalf("exact retry through worker API should be idempotent: %v", err)
+	}
+	loaded, err := store.ReadCandidateEvidence("review-candidate.json")
+	if err != nil || !reflect.DeepEqual(loaded, document) {
+		t.Fatalf("read candidate evidence through worker API: loaded=%+v err=%v", loaded, err)
+	}
+
+	badDocument := document
+	badDocument.RunID = "another-run"
+	if err := store.WriteCandidateEvidence("review-candidate.json", badDocument); err == nil {
+		t.Fatal("worker API store accepted evidence for another run")
+	}
+	if err := store.WriteCandidateEvidence("unsupported.json", document); err == nil {
+		t.Fatal("worker API store accepted an unsupported evidence name")
+	}
+	if _, err := store.ReadCandidateEvidence("unsupported.json"); err == nil {
+		t.Fatal("worker API store read an unsupported evidence name")
+	}
+	if _, err := store.ReadCandidateEvidence("verification-candidate.json"); err == nil {
+		t.Fatal("worker API store read missing evidence")
+	}
+
+	var nilStore *workerAPICandidateEvidenceStore
+	if err := nilStore.check("review-candidate.json"); err == nil {
+		t.Fatal("nil candidate evidence store was accepted")
+	}
+	if err := NewWorkerAPICandidateEvidenceStore(nil).(*workerAPICandidateEvidenceStore).WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("candidate evidence store without a port was accepted")
+	}
+
+	// A non-Unix scoped client must refuse this controller-owned store.
+	loopbackPort := &WorkerAPIPort{address: "http://127.0.0.1:1234", scope: port.scope}
+	if err := NewWorkerAPICandidateEvidenceStore(loopbackPort).WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("loopback worker API used controller-owned candidate evidence storage")
+	}
+
+	cancelJob := job
+	cancelJob.Operation = OperationCancel
+	cancelSocket := filepath.Join(socketDir, "cancel.sock")
+	cancelServer, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, cancelSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelServer.close()
+	t.Setenv(WorkerAPISocketEnv, cancelSocket)
+	t.Setenv(WorkerAPITokenEnv, cancelServer.token)
+	cancelPort, err := NewWorkerAPIPort(cancelJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelStore := NewWorkerAPICandidateEvidenceStore(cancelPort)
+	if err := cancelStore.WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("Cancel API accepted candidate evidence write")
+	}
+	if _, err := cancelStore.ReadCandidateEvidence("review-candidate.json"); err == nil {
+		t.Fatal("Cancel API accepted candidate evidence read")
+	}
+}
+
+func TestControllerCandidateEvidenceStorageRejectsInvalidState(t *testing.T) {
+	const runID = "candidate-evidence-invalid-state"
+	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+
+	for name, args := range map[string]struct{ root, runID, name string }{
+		"invalid run ID":   {root: root, runID: "../escape", name: "review-candidate.json"},
+		"unsupported name": {root: root, runID: runID, name: "other.json"},
+		"relative root":    {root: "relative", runID: runID, name: "review-candidate.json"},
+		"unclean root":     {root: root + "/../evidence", runID: runID, name: "review-candidate.json"},
+		"empty root":       {root: "", runID: runID, name: "review-candidate.json"},
+	} {
+		t.Run("path "+name, func(t *testing.T) {
+			if _, err := candidateEvidencePath(args.root, args.runID, args.name); err == nil {
+				t.Fatalf("candidate evidence path accepted invalid input: %+v", args)
+			}
+		})
+	}
+
+	badDocument := document
+	badDocument.RunID = "another-run"
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", badDocument); err == nil {
+		t.Fatal("controller accepted candidate evidence for another run")
+	}
+	if _, err := readControllerCandidateEvidence(root, "../escape", "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence for invalid run ID")
+	}
+	if _, err := readControllerCandidateEvidence("relative", runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence from a relative root")
+	}
+
+	// A non-directory component makes the controller's safe directory creation fail.
+	blockedParent := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blockedParent, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(filepath.Join(blockedParent, "evidence"), runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller wrote candidate evidence below a file")
+	}
+	directoryRoot := filepath.Join(t.TempDir(), "evidence")
+	directoryPath, err := candidateEvidencePath(directoryRoot, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(directoryRoot, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced a directory at the candidate evidence path")
+	}
+
+	path, err := candidateEvidencePath(root, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced malformed existing candidate evidence")
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read malformed candidate evidence")
+	}
+
+	stored, err := json.Marshal(badDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, stored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced stored candidate evidence with invalid run scope")
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence with invalid run scope")
+	}
+}
+
+func TestWriteControllerCandidateEvidenceRejectsReadOnlyRunDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions are required")
+	}
+	currentUser, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot determine current user for permission test: %v", err)
+	}
+	uid, err := strconv.Atoi(currentUser.Uid)
+	if err != nil {
+		t.Skipf("cannot determine current uid for permission test: %v", err)
+	}
+	if uid == 0 {
+		t.Skip("directory permission checks are ineffective as root")
+	}
+
+	const runID = "candidate-evidence-read-only-run"
+	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
+	path, err := candidateEvidencePath(root, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Dir(path)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Restore permissions before TempDir cleanup so the test remains safe even
+	// when it fails after making the directory read-only.
+	defer func() {
+		if err := os.Chmod(runDir, 0o700); err != nil {
+			t.Errorf("restore evidence run directory permissions: %v", err)
+		}
+	}()
+
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+	if err := pipeline.ValidateCandidateEvidence(runID, "review-candidate.json", document); err != nil {
+		t.Fatalf("valid candidate evidence rejected before filesystem permission check: %v", err)
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing candidate evidence read err=%v, want os.ErrNotExist", err)
+	}
+	if err := safeio.EnsureDirPath(runDir); err != nil {
+		t.Fatalf("ensure existing evidence run directory: %v", err)
+	}
+	if err := os.Chmod(runDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	err = writeControllerCandidateEvidence(root, runID, "review-candidate.json", document)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write to read-only evidence run directory err=%v, want os.ErrPermission", err)
+	}
+}
+
+func TestWriteControllerCandidateEvidenceConcurrentExactRetries(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
+	const runID = "candidate-evidence-concurrent-run"
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+
+	const writers = 32
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var ready sync.WaitGroup
+	ready.Add(writers)
+	var done sync.WaitGroup
+	done.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			errs <- writeControllerCandidateEvidence(root, runID, "review-candidate.json", document)
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent exact retry failed: %v", err)
+		}
+	}
+
+	stored, err := readControllerCandidateEvidence(root, runID, "review-candidate.json")
+	if err != nil || !reflect.DeepEqual(stored, document) {
+		t.Fatalf("stored candidate evidence: stored=%+v err=%v", stored, err)
 	}
 }
 

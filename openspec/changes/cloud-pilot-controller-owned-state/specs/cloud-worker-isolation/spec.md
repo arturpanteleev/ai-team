@@ -24,10 +24,19 @@ not satisfy the requirement or prevent direct database writes.
 ### Requirement: Job-scoped worker result capability
 
 The controller MUST issue a short-lived capability scoped to one active job and
-allowed result operation. It MUST reject a result with an unknown schema, wrong
-job/run/action, expired or replayed capability, invalid nonce, oversized output,
-path traversal, or forged human decision. Worker output MUST NOT itself count as
-proof of a human decision or of an independently executed check.
+allowed result operation. Each `ProcessEngine` child invocation MUST receive a
+fresh bounded `execution_id`, and the result MUST echo that exact identity. The
+controller MUST reject a result with an unknown schema, wrong job/run/action or
+execution identity, expired or replayed capability, invalid nonce, oversized
+output, path traversal, or forged human decision. Worker output MUST NOT itself
+count as proof of a human decision or of an independently executed check.
+
+The `execution_id` binds a result to one launched invocation and detects stale
+or cross-invocation output. It does not prove worker honesty, prevent the worker
+from editing accessible files, or create process isolation. Durable queue
+records are logical jobs: schema 1 records remain loadable and are upgraded to
+the current invocation schema with a newly generated identity only when
+`ProcessEngine` launches them.
 
 #### Scenario: Invalid or replayed worker result
 
@@ -35,6 +44,15 @@ proof of a human decision or of an independently executed check.
   out-of-scope result
 - **THEN** the controller MUST reject it without changing approvals, lifecycle,
   evidence, or delivery state
+
+#### Scenario: Result belongs to another or previous process invocation
+
+- **WHEN** a worker returns a result whose `execution_id` differs from the
+  freshly generated identity for this invocation, including a valid result
+  replayed from an earlier invocation of the same run and operation
+- **THEN** the controller MUST reject it as an infrastructure failure
+- **AND** it MUST NOT classify the stale result's business outcome as the
+  outcome of the current invocation
 
 ### Requirement: Network separation from administrative control API
 

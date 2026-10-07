@@ -153,7 +153,7 @@ func (q *Queue) EnsureStartJob(job worker.Job) (int64, error) {
 	if job.Operation != worker.OperationStart {
 		return 0, errors.New("EnsureStartJob requires start operation")
 	}
-	if err := job.Validate(job.TargetDir); err != nil {
+	if err := job.ValidateQueued(job.TargetDir); err != nil {
 		return 0, err
 	}
 	canonical, err := canonicalTargetPath(job.TargetDir)
@@ -197,7 +197,7 @@ func (q *Queue) EnsureStartJob(job worker.Job) (int64, error) {
 }
 
 func (q *Queue) enqueue(job worker.Job, status string) (int64, error) {
-	if err := job.Validate(job.TargetDir); err != nil {
+	if err := job.ValidateQueued(job.TargetDir); err != nil {
 		return 0, err
 	}
 	canonical, err := canonicalTargetPath(job.TargetDir)

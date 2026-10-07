@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +14,10 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
+const LegacyQueueSchemaVersion = 1
 const MaxJobBytes = 64 << 10
+const ExecutionIDBytes = 32
 
 type Operation string
 
@@ -37,6 +40,7 @@ type Job struct {
 	Task            string    `json:"task,omitempty"`
 	ApproveGates    bool      `json:"approve_gates,omitempty"`
 	ApprovePlanHash string    `json:"approve_plan_hash,omitempty"`
+	ExecutionID     string    `json:"execution_id,omitempty"`
 }
 
 func DecodeJob(reader io.Reader, expectedTarget string) (Job, error) {
@@ -58,6 +62,34 @@ func (j Job) Validate(expectedTarget string) error {
 	if j.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("worker job: неподдерживаемая schema_version %d", j.SchemaVersion)
 	}
+	if !validExecutionID(j.ExecutionID) {
+		return errors.New("worker job: недопустимый execution_id")
+	}
+	return j.validateFields(expectedTarget)
+}
+
+// ValidateQueued accepts the current logical-job schema and the previous
+// durable queue schema. Queued work has no process invocation identity until
+// ProcessEngine spawns the child process.
+func (j Job) ValidateQueued(expectedTarget string) error {
+	if j.SchemaVersion != SchemaVersion && j.SchemaVersion != LegacyQueueSchemaVersion {
+		return fmt.Errorf("worker queued job: неподдерживаемая schema_version %d", j.SchemaVersion)
+	}
+	if j.ExecutionID != "" {
+		return errors.New("worker queued job: execution_id должен назначаться при запуске процесса")
+	}
+	return j.validateFields(expectedTarget)
+}
+
+func validExecutionID(value string) bool {
+	if len(value) != ExecutionIDBytes*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == ExecutionIDBytes
+}
+
+func (j Job) validateFields(expectedTarget string) error {
 	if j.RunID == "" || filepath.Base(j.RunID) != j.RunID || strings.ContainsAny(j.RunID, `/\`) {
 		return errors.New("worker job: недопустимый run_id")
 	}

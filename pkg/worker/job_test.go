@@ -19,7 +19,7 @@ func TestDecodeJobStrictAndExactTarget(t *testing.T) {
 	target := filepath.Clean(t.TempDir())
 	value := Job{
 		SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "run-1",
-		TargetDir: target, Feature: "feature", Task: "задача",
+		TargetDir: target, Feature: "feature", Task: "задача", ExecutionID: strings.Repeat("a", ExecutionIDBytes*2),
 	}
 	data, _ := json.Marshal(value)
 	if _, err := DecodeJob(bytes.NewReader(data), target); err != nil {
@@ -31,6 +31,26 @@ func TestDecodeJobStrictAndExactTarget(t *testing.T) {
 	}
 	if _, err := DecodeJob(bytes.NewReader(data), t.TempDir()); err == nil {
 		t.Fatal("другой mounted target должен быть отклонён")
+	}
+}
+
+func TestQueuedLegacyJobIsUpgradedOnlyAtProcessSpawn(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	legacy := Job{SchemaVersion: LegacyQueueSchemaVersion, Operation: OperationStart,
+		RunID: "legacy-run", TargetDir: target, Feature: "feature", Task: "задача"}
+	if err := legacy.ValidateQueued(target); err != nil {
+		t.Fatalf("старый durable queue job должен оставаться читаемым: %v", err)
+	}
+	if err := legacy.Validate(target); err == nil {
+		t.Fatal("legacy queue job нельзя запускать как worker invocation без новой identity")
+	}
+	legacy.SchemaVersion = SchemaVersion
+	if err := legacy.ValidateQueued(target); err != nil {
+		t.Fatalf("новая queued job schema без process identity должна приниматься: %v", err)
+	}
+	legacy.ExecutionID = strings.Repeat("a", ExecutionIDBytes*2)
+	if err := legacy.ValidateQueued(target); err == nil {
+		t.Fatal("durable queue не должен сохранять process-specific execution_id")
 	}
 }
 
@@ -158,7 +178,8 @@ func TestProcessEngineHelper(t *testing.T) {
 		}
 	}
 	result, encodeErr := json.Marshal(Result{
-		SchemaVersion: ResultSchemaVersion, RunID: job.RunID, Operation: job.Operation, Outcome: OutcomeCompleted,
+		SchemaVersion: ResultSchemaVersion, RunID: job.RunID, Operation: job.Operation,
+		ExecutionID: job.ExecutionID, Outcome: OutcomeCompleted,
 	})
 	if encodeErr != nil {
 		t.Fatal(encodeErr)

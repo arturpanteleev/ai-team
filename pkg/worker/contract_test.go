@@ -28,7 +28,7 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 	base := func() Job {
 		return Job{
 			SchemaVersion: SchemaVersion, Operation: OperationStart,
-			RunID: "run-1", TargetDir: target, Feature: "feature", Task: "задача",
+			RunID: "run-1", TargetDir: target, Feature: "feature", Task: "задача", ExecutionID: strings.Repeat("a", ExecutionIDBytes*2),
 		}
 	}
 	if err := base().Validate(target); err != nil {
@@ -46,6 +46,8 @@ func TestJobValidateRejectsMalformed(t *testing.T) {
 		expected string
 	}{
 		{"чужая schema_version", func(j *Job) { j.SchemaVersion = SchemaVersion + 1 }, "schema_version"},
+		{"пустая execution identity", func(j *Job) { j.ExecutionID = "" }, "execution_id"},
+		{"короткая execution identity", func(j *Job) { j.ExecutionID = "deadbeef" }, "execution_id"},
 		{"пустой run_id", func(j *Job) { j.RunID = "" }, "run_id"},
 		{"run_id с разделителем пути", func(j *Job) { j.RunID = "../escape" }, "run_id"},
 		{"run_id с обратным слэшем", func(j *Job) { j.RunID = `a\b` }, "run_id"},
@@ -112,8 +114,8 @@ func TestJobRunConfigCarriesIdentityAndApproval(t *testing.T) {
 // job завершённым контролируемо. Чужой binary, старая схема и мусор обязаны
 // отличаться от честного результата.
 func TestParseResultRejectsMalformed(t *testing.T) {
-	valid := fmt.Sprintf(`%s{"schema_version":%d,"run_id":"run-1","operation":"start","outcome":"completed"}`,
-		ResultPrefix, ResultSchemaVersion)
+	valid := fmt.Sprintf(`%s{"schema_version":%d,"run_id":"run-1","operation":"start","execution_id":"%s","outcome":"completed"}`,
+		ResultPrefix, ResultSchemaVersion, strings.Repeat("a", ExecutionIDBytes*2))
 
 	parsed, err := ParseResult("шум\n" + valid + "\nхвост\n")
 	if err != nil {
@@ -133,16 +135,17 @@ func TestParseResultRejectsMalformed(t *testing.T) {
 
 	cases := map[string]string{
 		"без строки результата": "просто вывод\n",
-		"не JSON":          ResultPrefix + "not-json\n",
-		"неизвестное поле": ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","extra":1}` + "\n",
-		"чужая схема":      ResultPrefix + `{"schema_version":99,"outcome":"completed"}` + "\n",
-		"пустой outcome":   ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":""}` + "\n",
-		"admin operation":  ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","admin_operation":"grant_role"}` + "\n",
-		"human decision":   ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","approval_decision":{"action":"approve"}}` + "\n",
-		"artifact path":    ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","artifacts":[{"path":"../../approvals.json"}]}` + "\n",
-		"oversized error":  ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","error":"` + strings.Repeat("x", MaxResultErrorBytes+1) + `"}` + "\n",
-		"oversized":        ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","error":"` + strings.Repeat("x", MaxResultBytes) + `"}` + "\n",
-		"trailing JSON":    valid + ` {"run_id":"other"}` + "\n",
+		"не JSON":                ResultPrefix + "not-json\n",
+		"неизвестное поле":       ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","extra":1}` + "\n",
+		"чужая схема":            ResultPrefix + `{"schema_version":99,"outcome":"completed"}` + "\n",
+		"пустой outcome":         ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":""}` + "\n",
+		"нет execution identity": ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","outcome":"completed"}` + "\n",
+		"admin operation":        ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","admin_operation":"grant_role"}` + "\n",
+		"human decision":         ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","approval_decision":{"action":"approve"}}` + "\n",
+		"artifact path":          ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","artifacts":[{"path":"../../approvals.json"}]}` + "\n",
+		"oversized error":        ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","error":"` + strings.Repeat("x", MaxResultErrorBytes+1) + `"}` + "\n",
+		"oversized":              ResultPrefix + `{"schema_version":3,"run_id":"run-1","operation":"start","execution_id":"` + strings.Repeat("a", ExecutionIDBytes*2) + `","outcome":"completed","error":"` + strings.Repeat("x", MaxResultBytes) + `"}` + "\n",
+		"trailing JSON":          valid + ` {"run_id":"other"}` + "\n",
 	}
 	for name, output := range cases {
 		if _, err := ParseResult(output); err == nil {
@@ -169,14 +172,15 @@ func TestResultControlledSeparatesDurableFromRetryable(t *testing.T) {
 }
 
 func TestResultMustMatchTheLaunchedJob(t *testing.T) {
-	job := Job{RunID: "run-1", Operation: OperationResume}
-	valid := Result{RunID: job.RunID, Operation: job.Operation, Outcome: OutcomeWaitingApproval}
+	job := Job{RunID: "run-1", Operation: OperationResume, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	valid := Result{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, Outcome: OutcomeWaitingApproval}
 	if err := valid.ValidateFor(job); err != nil {
 		t.Fatalf("matching result rejected: %v", err)
 	}
 	for name, result := range map[string]Result{
-		"other run":    {RunID: "run-2", Operation: job.Operation, Outcome: OutcomeCompleted},
-		"other action": {RunID: job.RunID, Operation: OperationCancel, Outcome: OutcomeCompleted},
+		"other run":       {RunID: "run-2", Operation: job.Operation, Outcome: OutcomeCompleted},
+		"other action":    {RunID: job.RunID, Operation: OperationCancel, ExecutionID: job.ExecutionID, Outcome: OutcomeCompleted},
+		"other execution": {RunID: job.RunID, Operation: job.Operation, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2), Outcome: OutcomeCompleted},
 	} {
 		if err := result.ValidateFor(job); err == nil {
 			t.Errorf("%s result should be rejected", name)
@@ -186,7 +190,7 @@ func TestResultMustMatchTheLaunchedJob(t *testing.T) {
 
 func TestProcessEngineRejectsWrongJobAndOperationResults(t *testing.T) {
 	target := t.TempDir()
-	for _, mode := range []string{"wrong-run", "wrong-operation"} {
+	for _, mode := range []string{"wrong-run", "wrong-operation", "wrong-execution"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("AI_TEAM_WORKER_TEST_MODE", mode)
 			engine, err := NewProcessEngine(
@@ -205,6 +209,67 @@ func TestProcessEngineRejectsWrongJobAndOperationResults(t *testing.T) {
 				t.Fatalf("untrusted mismatched result must fail closed, got %v", err)
 			}
 		})
+	}
+}
+
+func TestProcessEngineRejectsReplayedExecutionResult(t *testing.T) {
+	target := t.TempDir()
+	replayPath := filepath.Join(t.TempDir(), "execution-id")
+	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "replay-execution")
+	t.Setenv("AI_TEAM_WORKER_REPLAY_ID", replayPath)
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
+		target, filepath.Join(target, "web.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart,
+		RunID: "same-run", TargetDir: target, Feature: "feature", Task: "task"}
+	if _, err := engine.Execute(context.Background(), job); err != nil {
+		t.Fatalf("первый invocation должен принять собственный результат: %v", err)
+	}
+	_, err = engine.Execute(context.Background(), job)
+	var processErr *ProcessError
+	if !errors.As(err, &processErr) || processErr.Result != nil || !strings.Contains(err.Error(), "execution_id") {
+		t.Fatalf("повтор старого результата должен быть отклонён: %v", err)
+	}
+}
+
+func TestProcessEngineAssignsFreshExecutionIdentityAndUpgradesQueuedV1(t *testing.T) {
+	target := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "worker-job.json")
+	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "echo")
+	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
+		target, filepath.Join(target, "web.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: LegacyQueueSchemaVersion, Operation: OperationStart,
+		RunID: "run-old-queue", TargetDir: target, Feature: "feature", Task: "task"}
+	var previous string
+	for i := 0; i < 2; i++ {
+		if _, err := engine.Execute(context.Background(), job); err != nil {
+			t.Fatalf("legacy durable job invocation %d: %v", i+1, err)
+		}
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var invoked Job
+		if err := json.Unmarshal(data, &invoked); err != nil {
+			t.Fatal(err)
+		}
+		if invoked.SchemaVersion != SchemaVersion || !validExecutionID(invoked.ExecutionID) {
+			t.Fatalf("process invocation not upgraded/bound: %+v", invoked)
+		}
+		if previous != "" && previous == invoked.ExecutionID {
+			t.Fatal("повторный invocation должен получить новый execution_id")
+		}
+		previous = invoked.ExecutionID
 	}
 }
 
@@ -418,19 +483,11 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "паника воркера: nil map")
 		os.Exit(7)
 	case "fail-with-result":
-		printHelperResult(t, "run-blocked", OperationStart, OutcomeBlocked)
+		job := decodeHelperJob(t)
+		printHelperResult(t, job.ExecutionID, "run-blocked", OperationStart, OutcomeBlocked)
 		os.Exit(2)
-	case "echo", "wrong-run", "wrong-operation":
-		target := ""
-		for index := range os.Args {
-			if os.Args[index] == "--target" && index+1 < len(os.Args) {
-				target = os.Args[index+1]
-			}
-		}
-		job, err := DecodeJob(os.Stdin, target)
-		if err != nil {
-			t.Fatal(err)
-		}
+	case "echo", "wrong-run", "wrong-operation", "wrong-execution", "replay-execution":
+		job := decodeHelperJob(t)
 		data, _ := json.Marshal(job)
 		if marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER"); marker != "" {
 			if err := os.WriteFile(marker, data, 0600); err != nil {
@@ -444,16 +501,45 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		if os.Getenv("AI_TEAM_WORKER_TEST_MODE") == "wrong-operation" {
 			resultOperation = OperationCancel
 		}
-		printHelperResult(t, resultRunID, resultOperation, OutcomeCompleted)
+		resultExecutionID := job.ExecutionID
+		switch os.Getenv("AI_TEAM_WORKER_TEST_MODE") {
+		case "wrong-execution":
+			resultExecutionID = strings.Repeat("0", ExecutionIDBytes*2)
+		case "replay-execution":
+			replayPath := os.Getenv("AI_TEAM_WORKER_REPLAY_ID")
+			if previous, readErr := os.ReadFile(replayPath); readErr == nil {
+				resultExecutionID = string(previous)
+			} else if !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			} else if writeErr := os.WriteFile(replayPath, []byte(job.ExecutionID), 0600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+		}
+		printHelperResult(t, resultExecutionID, resultRunID, resultOperation, OutcomeCompleted)
 		os.Exit(0)
 	}
 	os.Exit(0)
 }
 
-func printHelperResult(t *testing.T, runID string, operation Operation, outcome string) {
+func decodeHelperJob(t *testing.T) Job {
+	t.Helper()
+	target := ""
+	for index := range os.Args {
+		if os.Args[index] == "--target" && index+1 < len(os.Args) {
+			target = os.Args[index+1]
+		}
+	}
+	job, err := DecodeJob(os.Stdin, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
+func printHelperResult(t *testing.T, executionID, runID string, operation Operation, outcome string) {
 	t.Helper()
 	data, err := json.Marshal(Result{
-		SchemaVersion: ResultSchemaVersion, RunID: runID, Operation: operation, Outcome: outcome,
+		SchemaVersion: ResultSchemaVersion, RunID: runID, Operation: operation, ExecutionID: executionID, Outcome: outcome,
 	})
 	if err != nil {
 		t.Fatal(err)

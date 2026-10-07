@@ -5,8 +5,12 @@
   controller validation/commit semantics.
 - [x] Add an application-level worker approval adapter that rejects the
   pipeline's `Decide` and `ResolveDeferred` calls; verify the row remains
-  pending and an authenticated controller route can resolve it. This is
-  defense in depth only and does not prove process isolation.
+  pending and an authenticated controller route can resolve it (#198). This
+  is defense in depth only and does not prove process isolation.
+- [x] Bind each `ProcessEngine` invocation and result to a fresh bounded
+  `execution_id`; reject wrong or replayed invocation identities, and safely
+  upgrade schema 1 durable queue jobs at spawn. This is correlation/replay
+  hardening only; it does not prove worker honesty or process isolation.
 - [ ] Remove worker access to the controller DB path and replace direct store
   access with a controller-owned API; verify a worker cannot mutate approvals
   through raw SQL or other filesystem access.

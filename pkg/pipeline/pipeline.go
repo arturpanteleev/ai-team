@@ -76,21 +76,28 @@ type UsageEnvelopeWriter interface {
 	WriteUsageEnvelope(metrics.UsageEnvelope) error
 }
 
+// TerminalRecordWriter persists worker-supplied terminal delivery metadata.
+// Cloud workers route writes through their scoped controller API.
+type TerminalRecordWriter interface {
+	WriteTerminalRecord(delivery.TerminalRecord) error
+}
+
 type Pipeline struct {
-	cfg                 *config.Config
-	reg                 *agent.Registry
-	notifier            notifier.Notifier
-	prompter            Prompter
-	newRuntime          runtime.Factory
-	recorder            Recorder
-	delivery            delivery.Service
-	approvals           ApprovalStore
-	lifecycle           lifecycle.StorePort
-	evidence            EvidenceStoreFactory
-	briefs              BriefStore
-	candidateMetadata   candidate.MetadataStore
-	usageEnvelopeWriter UsageEnvelopeWriter
-	reportsDir          string
+	cfg                  *config.Config
+	reg                  *agent.Registry
+	notifier             notifier.Notifier
+	prompter             Prompter
+	newRuntime           runtime.Factory
+	recorder             Recorder
+	delivery             delivery.Service
+	approvals            ApprovalStore
+	lifecycle            lifecycle.StorePort
+	evidence             EvidenceStoreFactory
+	briefs               BriefStore
+	candidateMetadata    candidate.MetadataStore
+	usageEnvelopeWriter  UsageEnvelopeWriter
+	terminalRecordWriter TerminalRecordWriter
+	reportsDir           string
 }
 
 type Option func(*Pipeline)
@@ -158,6 +165,10 @@ func WithCandidateMetadataStore(store candidate.MetadataStore) Option {
 // WithUsageEnvelopeWriter routes cloud usage summaries through the controller.
 func WithUsageEnvelopeWriter(writer UsageEnvelopeWriter) Option {
 	return func(p *Pipeline) { p.usageEnvelopeWriter = writer }
+}
+
+func WithTerminalRecordWriter(writer TerminalRecordWriter) Option {
+	return func(p *Pipeline) { p.terminalRecordWriter = writer }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {

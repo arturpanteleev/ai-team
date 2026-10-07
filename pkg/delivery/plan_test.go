@@ -392,6 +392,71 @@ func TestTerminalRecordRoundtripAndTamper(t *testing.T) {
 	}
 }
 
+func TestControllerTerminalRecordIsScopedIdempotentAndConflictSafe(t *testing.T) {
+	target := t.TempDir()
+	runID := "controller-delivery-run"
+	record := TerminalRecord{SchemaVersion: TerminalRecordSchemaVersion, RunID: runID, Feature: "feat", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Now().UTC()}
+	if err := WriteControllerTerminalRecord(target, runID, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteControllerTerminalRecord(target, runID, record); err != nil {
+		t.Fatalf("exact retry: %v", err)
+	}
+	if _, ok, err := ReadControllerTerminalRecord(target, runID); err != nil || !ok {
+		t.Fatalf("read: found=%v err=%v", ok, err)
+	}
+	wrong := record
+	wrong.RunID = "other-run"
+	if err := WriteControllerTerminalRecord(target, runID, wrong); err == nil {
+		t.Fatal("scope mismatch was accepted")
+	}
+	conflict := record
+	conflict.CommitSHA = strings.Repeat("b", 40)
+	if err := WriteControllerTerminalRecord(target, runID, conflict); err == nil {
+		t.Fatal("conflicting overwrite was accepted")
+	}
+	path := filepath.Join(target, ".ai-team", "state", "delivery", runID+".json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadControllerTerminalRecord(target, runID); err == nil {
+		t.Fatal("corrupted controller record did not fail closed")
+	}
+}
+
+func TestTerminalRecordForRunPrefersControllerStoreAndFallsBackToLegacy(t *testing.T) {
+	target := t.TempDir()
+	runID := "delivery-read-run"
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	if err := os.MkdirAll(runDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := TerminalRecord{SchemaVersion: TerminalRecordSchemaVersion, RunID: runID, Feature: "legacy", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Now().UTC()}
+	if err := WriteTerminalRecord(runDir, legacy); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := ReadTerminalRecordForRun(target, runDir, runID)
+	if err != nil || !ok || got.Feature != "legacy" {
+		t.Fatalf("legacy fallback: record=%+v ok=%v err=%v", got, ok, err)
+	}
+	controller := legacy
+	controller.Feature = "controller"
+	if err := WriteControllerTerminalRecord(target, runID, controller); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = ReadTerminalRecordForRun(target, runDir, runID)
+	if err != nil || !ok || got.Feature != "controller" {
+		t.Fatalf("controller priority: record=%+v ok=%v err=%v", got, ok, err)
+	}
+	storePath := filepath.Join(target, ".ai-team", "state", "delivery", runID+".json")
+	if err := os.WriteFile(storePath, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadTerminalRecordForRun(target, runDir, runID); err == nil {
+		t.Fatal("corrupt controller record must not fall back to legacy")
+	}
+}
+
 func TestControllerStagesExactFilesAndCreatesPR(t *testing.T) {
 	repo, _ := setupRepository(t)
 	installFakeGH(t)

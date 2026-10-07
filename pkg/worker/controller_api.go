@@ -20,6 +20,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
@@ -74,6 +75,7 @@ type workerAPICall struct {
 	BriefContent      []byte                   `json:"brief_content,omitempty"`
 	CandidateMetadata candidate.Metadata       `json:"candidate_metadata,omitempty"`
 	Usage             metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
+	TerminalRecord    delivery.TerminalRecord  `json:"terminal_record,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -479,6 +481,27 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		}
 		s.usageEnvelopeWritten = true
 		return nil, nil
+	case "delivery.terminal_record.write":
+		if !s.usageAllowed {
+			return nil, errors.New("controller delivery writes require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API terminal delivery write is not allowed for operation %q", s.scope.Operation)
+		}
+		record := c.TerminalRecord
+		if record.RunID != s.scope.RunID {
+			return nil, errors.New("terminal delivery record run mismatch")
+		}
+		if err := record.Validate(); err != nil {
+			return nil, err
+		}
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		return nil, delivery.WriteControllerTerminalRecord(target, s.scope.RunID, record)
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -615,6 +638,22 @@ func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort
 // transport that is reachable only from the bubblewrap worker namespace.
 func (p *workerAPIPort) SupportsControllerUsageStore() bool {
 	return p != nil && p.address == "http://unix" && os.Getenv(workerAPISocketEnv) != ""
+}
+
+type workerAPITerminalRecordWriter struct{ port *workerAPIPort }
+type WorkerAPITerminalRecordWriter = workerAPITerminalRecordWriter
+
+func NewWorkerAPITerminalRecordWriter(port *WorkerAPIPort) pipeline.TerminalRecordWriter {
+	return &workerAPITerminalRecordWriter{port: port}
+}
+func (w *workerAPITerminalRecordWriter) WriteTerminalRecord(record delivery.TerminalRecord) error {
+	if w == nil || w.port == nil || w.port.address != "http://unix" {
+		return errors.New("worker terminal delivery API unavailable")
+	}
+	if record.RunID != w.port.scope.RunID {
+		return errors.New("worker terminal delivery API run mismatch")
+	}
+	return w.port.call("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}, nil)
 }
 
 func (p *workerAPIPort) call(method string, value, out any) error {

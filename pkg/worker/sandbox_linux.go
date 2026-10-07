@@ -24,6 +24,9 @@ func checkBubblewrapAvailable() error {
 }
 
 func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPath, runID string, agentPaths, environment []string) (*exec.Cmd, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return nil, fmt.Errorf("bubblewrap run id: %w", err)
+	}
 	canonicalTarget, err := resolveBubblewrapTarget(target)
 	if err != nil {
 		return nil, err
@@ -99,6 +102,22 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	}
 	if err := appendPrivateDirectoryMount(&args, usageDir, true); err != nil {
 		return nil, err
+	}
+	deliveryDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "delivery")
+	if err != nil {
+		return nil, fmt.Errorf("prepare terminal delivery mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, deliveryDir, true); err != nil {
+		return nil, err
+	}
+	deliveryRecordPath := filepath.Join(deliveryDir, runID+".json")
+	if info, statErr := os.Lstat(deliveryRecordPath); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("controller delivery record path %q must be a regular file", deliveryRecordPath)
+		}
+		args = append(args, "--ro-bind", "/dev/null", deliveryRecordPath)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect controller delivery record path: %w", statErr)
 	}
 	if err := evidence.ValidateRunID(runID); err != nil {
 		return nil, fmt.Errorf("business brief run id: %w", err)

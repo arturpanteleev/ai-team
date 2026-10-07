@@ -23,6 +23,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -450,6 +451,49 @@ func TestWorkerUsageEnvelopeAPIIsWriteOnlyAndRunScoped(t *testing.T) {
 	defer cancelServer.close()
 	if _, err := cancelServer.dispatch("usage.envelope.write", workerAPICall{Usage: envelope}); err == nil {
 		t.Fatal("cancel invocation must not publish a terminal usage envelope")
+	}
+}
+
+func TestWorkerTerminalDeliveryRecordUsesScopedUnixAPI(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "terminal-api-run", TargetDir: target, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !port.SupportsControllerUsageStore() {
+		t.Fatal("Unix scoped API should be accepted")
+	}
+	record := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID, Feature: "feat", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Now().UTC()}
+	if err := NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(record); err != nil {
+		t.Fatalf("write over API: %v", err)
+	}
+	if _, ok, err := delivery.ReadControllerTerminalRecord(target, job.RunID); err != nil || !ok {
+		t.Fatalf("controller record missing: found=%v err=%v", ok, err)
+	}
+	wrong := record
+	wrong.RunID = "another-run"
+	if _, err := server.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: wrong}); err == nil {
+		t.Fatal("API accepted a record for another run")
+	}
+	conflict := record
+	conflict.CommitSHA = strings.Repeat("b", 40)
+	if err := NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(conflict); err == nil {
+		t.Fatal("API accepted conflicting overwrite")
 	}
 }
 

@@ -98,8 +98,14 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 		RuntimeIdentity:   runtimeIdentity,
 		PerformedAt:       time.Now().UTC(),
 	}
-	if err := delivery.WriteTerminalRecord(rs.evidence.RunDir(), record); err != nil {
-		return fmt.Errorf("deferred delivery: запись terminal record: %w", err)
+	var writeErr error
+	if rs.p.terminalRecordWriter != nil {
+		writeErr = rs.p.terminalRecordWriter.WriteTerminalRecord(record)
+	} else {
+		writeErr = delivery.WriteTerminalRecord(rs.evidence.RunDir(), record)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("deferred delivery: запись terminal record: %w", writeErr)
 	}
 	logging.Printf("\n%s delivery по run %s: commit=%s pr=%s\n",
 		ui.Colorize("✓", ui.ColorGreen), rs.runID, result.CommitSHA, result.PRURL)
@@ -131,7 +137,7 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if runID == "." || runID == string(filepath.Separator) {
 		return delivery.TerminalRecord{}, errors.New("deliver: недопустимый run dir")
 	}
-	if _, ok, err := delivery.ReadTerminalRecord(runDir); err != nil {
+	if _, ok, err := delivery.ReadTerminalRecordForRun(targetDir, runDir, runID); err != nil {
 		return delivery.TerminalRecord{}, err
 	} else if ok {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: run %s уже доставлен (delivery.json существует)", runID)
@@ -271,7 +277,7 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	if filepath.Base(runID) != runID || runID == "." || runID == ".." {
 		return fmt.Errorf("recover delivery: invalid run id %q", runID)
 	}
-	record, found, err := delivery.ReadTerminalRecord(runDir)
+	record, found, err := delivery.ReadTerminalRecordForRun(targetDir, runDir, runID)
 	if err != nil {
 		return fmt.Errorf("recover delivery record: %w", err)
 	}

@@ -186,6 +186,41 @@ func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 	})
 }
 
+func TestBubblewrapCommandBuilderRejectsProtectedAliasesAndApprovalSymlinks(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bubblewrap is installed by Linux CI; command validation requires it on PATH")
+	}
+	target := makeBubblewrapTarget(t)
+	dbPath := filepath.Join(target, ".ai-team", "controller.db")
+	if err := os.WriteFile(dbPath, []byte("controller secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(target, "controller-alias.db")
+	if err := os.Link(dbPath, alias); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, nil, env)
+	if err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("command builder must reject a DB alias before masking: %v", err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	approvalPath := filepath.Join(target, ".ai-team", "state", "approvals")
+	approvalTarget := filepath.Join(t.TempDir(), "approvals")
+	if err := os.Mkdir(approvalTarget, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(approvalTarget, approvalPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, nil, env)
+	if err == nil || !strings.Contains(err.Error(), "real directory") {
+		t.Fatalf("command builder must reject a symlinked approval directory: %v", err)
+	}
+}
+
 func TestBubblewrapPrivateStateRejectsUnsafeEntries(t *testing.T) {
 	t.Run("missing required directory", func(t *testing.T) {
 		if err := appendPrivateDirectoryMount(&[]string{}, filepath.Join(t.TempDir(), "missing"), true); err == nil {
@@ -222,6 +257,19 @@ func TestBubblewrapPrivateStateRejectsUnsafeEntries(t *testing.T) {
 	t.Run("missing directory", func(t *testing.T) {
 		if err := verifyPrivateDirectory(filepath.Join(t.TempDir(), "missing")); err == nil {
 			t.Fatal("missing private directory must fail closed")
+		}
+	})
+	t.Run("unreadable directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission checks are ineffective as root")
+		}
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+		if err := verifyPrivateDirectory(dir); err == nil {
+			t.Fatal("unreadable private directory must fail closed")
 		}
 	})
 	t.Run("looping database symlink", func(t *testing.T) {

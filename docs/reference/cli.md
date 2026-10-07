@@ -29,6 +29,7 @@
 | `ai-team worker` | исполняет одно задание из stdin; вызывается дашбордом, не вручную |
 | `ai-team scheduler-worker` | забирает задания из постоянной очереди и исполняет их |
 | `ai-team gc` | убирает старые прогоны, worktree и состояние из `.ai-team` |
+| `ai-team db` | операции обслуживания controller database, сейчас — backup |
 | `ai-team version` | печатает версию |
 | `ai-team help` | печатает краткую справку (то же — `--help`, `-h`) |
 
@@ -453,6 +454,19 @@ ai-team gc [--target <путь>] [--older-than 720h] [--keep-last 20] [--dry-run
 ```bash
 ai-team gc --dry-run
 ```
+
+### ai-team db
+
+Создаёт новый согласованный онлайн snapshot controller SQLite database,
+включая committed WAL-состояние. Существующий output не перезаписывается.
+
+```text
+ai-team db backup --db <существующая-база.sqlite> --out <новый-снимок.sqlite>
+```
+
+Snapshot ограничен одним SQLite-файлом и записывается с правами `0600`. Он не
+включает run evidence, artifacts, конфигурацию или другие файлы; процедура
+восстановления пилота этой командой не предоставляется.
 
 ### ai-team version
 

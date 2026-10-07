@@ -28,6 +28,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	webstore "github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -118,13 +119,55 @@ func TestCLIDispatchContract(t *testing.T) {
 			}
 			// Справка обязана перечислять подкоманды: она — единственный
 			// источник контракта для пользователя без документации.
-			for _, command := range []string{"ai-team run", "ai-team gate", "ai-team verify", "ai-team export"} {
+			for _, command := range []string{"ai-team run", "ai-team gate", "ai-team verify", "ai-team export", "ai-team db backup"} {
 				if !strings.Contains(stdout, command) {
 					t.Fatalf("%s: справка не упоминает %q:\n%s", arg, command, stdout)
 				}
 			}
 		}
 	})
+}
+
+func TestCLIDatabaseBackupContract(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "controller.db")
+	sourceStore, err := webstore.New(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.CreatePipelineRun(&webstore.PipelineRun{
+		RunID: "cli-backup-run", Feature: "cli-backup", Status: "queued", StartedAt: time.Now().UTC(),
+		ConfigSnapshot: `{"schema_version":1}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(dir, "backup.sqlite")
+	stdout, code, stderr := runCLI(t, "db", "backup", "--db", source, "--out", destination)
+	if code != 0 {
+		t.Fatalf("database backup failed: code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "SQLite controller database snapshot") || !strings.Contains(stdout, "run evidence") {
+		t.Fatalf("backup output must state its limited scope, got %q", stdout)
+	}
+	backupStore, err := webstore.New(destination)
+	if err != nil {
+		t.Fatalf("open CLI database snapshot: %v", err)
+	}
+	defer func() { _ = backupStore.Close() }()
+	if _, err := backupStore.GetPipelineRunByRunID("cli-backup-run"); err != nil {
+		t.Fatalf("CLI snapshot lost controller database state: %v", err)
+	}
+	_, code, stderr = runCLI(t, "db", "backup", "--db", source, "--out", destination)
+	if code == 0 || !strings.Contains(stderr, "already exists") {
+		t.Fatalf("backup command must not replace an existing snapshot: code=%d stderr=%q", code, stderr)
+	}
+	_, code, stderr = runCLI(t, "db", "backup", "--db", source)
+	if code == 0 || !strings.Contains(stderr, "Использование") {
+		t.Fatalf("backup command must require an output path: code=%d stderr=%q", code, stderr)
+	}
 }
 
 // TestRunFlagContract — `run` обязан отказывать до любой дорогой работы:

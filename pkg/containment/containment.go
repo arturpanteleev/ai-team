@@ -9,7 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
+
+const controllerReceiptLimit = 1 << 20
 
 // Axis — containment axis identifier.
 type Axis string
@@ -155,6 +162,105 @@ func UnavailableReceipt() Receipt {
 		},
 		Profile: "unknown",
 	}
+}
+
+// ControllerReceiptStore persists a worker-supplied containment assertion
+// outside the worker-visible run evidence tree. This records what the worker
+// claims about execution; it does not establish that claim as true.
+type ControllerReceiptStore struct{ TargetDir string }
+
+func (s ControllerReceiptStore) path(runID string) (string, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return "", err
+	}
+	if s.TargetDir == "" {
+		return "", errors.New("containment controller target is empty")
+	}
+	dir, err := safeio.EnsureDir(s.TargetDir, ".ai-team", "state", "containment")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, runID+".json"), nil
+}
+
+func (s ControllerReceiptStore) Write(runID string, receipt Receipt) (retErr error) {
+	if err := receipt.Validate(); err != nil {
+		return err
+	}
+	path, err := s.path(runID)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if len(data) > controllerReceiptLimit {
+		return errors.New("containment controller record exceeds size limit")
+	}
+	if existing, readErr := safeio.ReadRegularFile(path, controllerReceiptLimit); readErr == nil {
+		if bytes.Equal(existing, data) {
+			return syncControllerReceiptDir(filepath.Dir(path))
+		}
+		return fmt.Errorf("controller containment receipt already exists for run %s; conflicting overwrite rejected", runID)
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("read controller containment receipt: %w", readErr)
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-containment-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary controller containment receipt: %w", err))
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Sync(); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if existing, readErr := safeio.ReadRegularFile(path, controllerReceiptLimit); readErr == nil && bytes.Equal(existing, data) {
+			return syncControllerReceiptDir(dir)
+		}
+		return fmt.Errorf("persist controller containment receipt: %w", err)
+	}
+	return syncControllerReceiptDir(dir)
+}
+
+func (s ControllerReceiptStore) Read(runID string) (Receipt, error) {
+	path, err := s.path(runID)
+	if err != nil {
+		return Receipt{}, err
+	}
+	data, err := safeio.ReadRegularFile(path, controllerReceiptLimit)
+	if err != nil {
+		return Receipt{}, err
+	}
+	var receipt Receipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return Receipt{}, err
+	}
+	return receipt, nil
+}
+
+func syncControllerReceiptDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open controller containment directory for sync: %w", err)
+	}
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 // HasUnavailable returns true if any axis is UNAVAILABLE.

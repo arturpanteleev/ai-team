@@ -24,6 +24,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
@@ -546,6 +547,91 @@ func TestWorkerAttestationUsesScopedUnixAPI(t *testing.T) {
 	invalid.Predicate.SchemaVersion = 999
 	if _, err := server.dispatch("attestation.write", workerAPICall{Attestation: invalid}); err == nil {
 		t.Fatal("API accepted invalid schema")
+	}
+}
+
+func TestWorkerContainmentReceiptUsesScopedUnixAPI(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "containment-api-run", TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "containment-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketDir); err != nil {
+			t.Errorf("cleanup controller socket directory: %v", err)
+		}
+	})
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := containment.DefaultTrustedLocalReceipt()
+	writer := NewWorkerAPIContainmentReceiptWriter(port)
+	if err := writer.WriteContainmentReceipt(receipt); err != nil {
+		t.Fatalf("write containment receipt: %v", err)
+	}
+	if err := writer.WriteContainmentReceipt(receipt); err != nil {
+		t.Fatalf("idempotent containment write: %v", err)
+	}
+	conflicting := containment.UnavailableReceipt()
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &conflicting}); err == nil {
+		t.Fatal("controller accepted a conflicting containment receipt replacement")
+	}
+	stored, err := server.containmentReceipts.Read(job.RunID)
+	if err != nil || !stored.IsTrustedLocal() {
+		t.Fatalf("controller receipt=%+v err=%v", stored, err)
+	}
+	invalid := containment.Receipt{Profile: "invalid"}
+	if err := writer.WriteContainmentReceipt(invalid); err == nil {
+		t.Fatal("writer accepted invalid receipt")
+	}
+	server.usageAllowed = false
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err == nil {
+		t.Fatal("controller accepted write without Unix transport")
+	}
+	server.usageAllowed = true
+	server.scope.Operation = OperationCancel
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err == nil {
+		t.Fatal("controller accepted containment write for Cancel operation")
+	}
+	server.scope.Operation = OperationStart
+	if _, err := server.dispatch("containment.write", workerAPICall{}); err == nil {
+		t.Fatal("controller accepted a missing containment receipt")
+	}
+	for _, operation := range []Operation{OperationResume, OperationRecover} {
+		server.scope.Operation = operation
+		server.scope.RunID = "containment-api-" + strings.ToLower(string(operation))
+		if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err != nil {
+			t.Fatalf("controller rejected containment write for %s: %v", operation, err)
+		}
+	}
+	server.scope.Operation = OperationStart
+	server.containmentReceipts.TargetDir = ""
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &receipt}); err == nil {
+		t.Fatal("controller accepted containment write without a configured store")
+	}
+}
+
+func TestWorkerContainmentReceiptWriterRejectsUnavailableTransport(t *testing.T) {
+	receipt := containment.DefaultTrustedLocalReceipt()
+	for _, writer := range []*workerAPIContainmentReceiptWriter{
+		nil,
+		{},
+		{port: &workerAPIPort{address: "http://127.0.0.1:1234"}},
+	} {
+		if err := writer.WriteContainmentReceipt(receipt); err == nil {
+			t.Fatal("WriteContainmentReceipt() unexpectedly succeeded without a Unix API")
+		}
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -88,6 +89,10 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	seedAttestation := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: "sandbox-probe"}}
 	seedAttestationBytes, _ := json.Marshal(seedAttestation)
 	if err := (attest.ControllerStore{TargetDir: target}).Write("sandbox-probe", seedAttestationBytes); err != nil {
+		t.Fatal(err)
+	}
+	seedContainment := containment.DefaultTrustedLocalReceipt()
+	if err := (containment.ControllerReceiptStore{TargetDir: target}).Write("sandbox-probe", seedContainment); err != nil {
 		t.Fatal(err)
 	}
 	briefStore := pipeline.NewFileBriefStore(target)
@@ -165,7 +170,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
 	if report.BriefSourceReadable || !report.BriefSourceWriteSucceeded || !report.BriefAPIListReadSucceeded {
@@ -186,6 +191,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if _, err := (attest.ControllerStore{TargetDir: target}).Read("sandbox-probe"); err != nil {
 		t.Fatalf("host controller attestation was modified or lost: %v", err)
+	}
+	if !report.ContainmentAPIWriteSucceeded {
+		t.Fatalf("worker could not submit containment receipt through controller API: %+v", report)
+	}
+	if _, err := (containment.ControllerReceiptStore{TargetDir: target}).Read("sandbox-probe"); err != nil {
+		t.Fatalf("host controller containment receipt was modified or lost: %v", err)
 	}
 	if stored, found, readErr := delivery.ReadControllerTerminalRecord(target, deliveryRecord.RunID); readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA {
 		t.Fatalf("controller delivery sentinel changed or disappeared: record=%+v found=%v err=%v", stored, found, readErr)
@@ -388,6 +399,86 @@ func TestBubblewrapRejectsNonRegularControllerAttestationRecord(t *testing.T) {
 		filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "controller attestation path") || !strings.Contains(err.Error(), "regular file") {
 		t.Fatalf("non-regular controller attestation record must fail closed, got %v", err)
+	}
+}
+
+func TestBubblewrapRejectsNonRegularControllerContainmentReceipt(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	target := makeBubblewrapTarget(t)
+	containmentDir := filepath.Join(target, ".ai-team", "state", "containment")
+	if err := os.MkdirAll(containmentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(containmentDir, "sandbox-test.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+		filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "controller containment path") || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("non-regular controller containment receipt must fail closed, got %v", err)
+	}
+}
+
+func TestBubblewrapRejectsUnsafeControllerContainmentDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		seedState func(t *testing.T, target string)
+		want      string
+	}{
+		{
+			name: "symlinked directory",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				stateDir := filepath.Join(target, ".ai-team", "state")
+				outside := filepath.Join(t.TempDir(), "containment")
+				if err := os.Mkdir(outside, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(stateDir, "containment")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "prepare controller containment mount",
+		},
+		{
+			name: "hard-linked entry",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				containmentDir := filepath.Join(target, ".ai-team", "state", "containment")
+				if err := os.Mkdir(containmentDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				entry := filepath.Join(containmentDir, "sentinel.json")
+				if err := os.WriteFile(entry, []byte("controller sentinel"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(entry, filepath.Join(target, "sentinel-alias.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "hard links",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			fakeBwrap := filepath.Join(fakeBin, "bwrap")
+			if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin)
+			target := makeBubblewrapTarget(t)
+			tc.seedState(t, target)
+			_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+				filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unsafe controller containment directory must fail closed with %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 
@@ -760,6 +851,9 @@ type sandboxProbeReport struct {
 	AttestationStateReadable        bool `json:"attestation_state_readable"`
 	AttestationDirectWriteSucceeded bool `json:"attestation_direct_write_succeeded"`
 	AttestationAPIWriteSucceeded    bool `json:"attestation_api_write_succeeded"`
+	ContainmentStateReadable        bool `json:"containment_state_readable"`
+	ContainmentDirectWriteSucceeded bool `json:"containment_direct_write_succeeded"`
+	ContainmentAPIWriteSucceeded    bool `json:"containment_api_write_succeeded"`
 	UsageAPIWriteSucceeded          bool `json:"usage_api_write_succeeded"`
 	BriefSourceReadable             bool `json:"brief_source_readable"`
 	BriefSourceWriteSucceeded       bool `json:"brief_source_write_succeeded"`
@@ -815,6 +909,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	attestationPath := filepath.Join(job.TargetDir, ".ai-team", "state", "attestation", job.RunID+".json")
 	attestationData, attestationErr := os.ReadFile(attestationPath)
 	attestationDirectWriteErr := os.WriteFile(attestationPath, []byte("worker-overwrite-attempt"), 0600)
+	containmentPath := filepath.Join(job.TargetDir, ".ai-team", "state", "containment", job.RunID+".json")
+	containmentData, containmentErr := os.ReadFile(containmentPath)
+	containmentDirectWriteErr := os.WriteFile(containmentPath, []byte("worker-overwrite-attempt"), 0600)
 	briefPath := filepath.Join(job.TargetDir, ".ai-team", "runs", job.RunID, "brief", "0001-intention.md")
 	_, briefErr := os.ReadFile(briefPath)
 	briefWriteErr := os.WriteFile(briefPath, []byte("worker-overwrite-attempt"), 0600)
@@ -827,6 +924,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	usageAPIWriteSucceeded := false
 	deliveryAPIWriteSucceeded := false
 	attestationAPIWriteSucceeded := false
+	containmentAPIWriteSucceeded := false
 	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
@@ -839,6 +937,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		deliveryAPIWriteSucceeded = NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(deliveryRecord) == nil
 		workerStatement := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: job.RunID}}
 		attestationAPIWriteSucceeded = NewWorkerAPIAttestationWriter(port).WriteAttestation(workerStatement) == nil
+		containmentAPIWriteSucceeded = NewWorkerAPIContainmentReceiptWriter(port).WriteContainmentReceipt(containment.DefaultTrustedLocalReceipt()) == nil
 		briefs := NewWorkerAPIBriefs(port)
 		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
 		versions, listErr := briefs.List(job.RunID)
@@ -871,6 +970,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		AttestationStateReadable:        attestationErr == nil && len(attestationData) > 0,
 		AttestationDirectWriteSucceeded: attestationDirectWriteErr == nil,
 		AttestationAPIWriteSucceeded:    attestationAPIWriteSucceeded,
+		ContainmentStateReadable:        containmentErr == nil && len(containmentData) > 0,
+		ContainmentDirectWriteSucceeded: containmentDirectWriteErr == nil,
+		ContainmentAPIWriteSucceeded:    containmentAPIWriteSucceeded,
 		UsageAPIWriteSucceeded:          usageAPIWriteSucceeded,
 		BriefSourceReadable:             briefErr == nil,
 		BriefSourceWriteSucceeded:       briefWriteErr == nil,

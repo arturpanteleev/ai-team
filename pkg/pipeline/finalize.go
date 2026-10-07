@@ -154,6 +154,9 @@ func usageToMetrics(u runtime.Usage) metrics.Usage {
 // legacy-раны без него валидны, verify трактует их как UNAVAILABLE.
 func (rs *runState) writeContainmentReceipt() error {
 	receipt := rs.containmentReceipt()
+	if rs.p.containmentWriter != nil {
+		return rs.p.containmentWriter.WriteContainmentReceipt(receipt)
+	}
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "containment.json"), receipt)
 }
 

@@ -216,7 +216,22 @@ func (rs *runState) writeAttestation(finishedAt time.Time, status string) error 
 	if err != nil {
 		return err
 	}
-	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "attestation.json"), statement)
+	digest, err := attest.Digest(statement)
+	if err != nil {
+		return fmt.Errorf("attestation digest: %w", err)
+	}
+	if rs.p.attestationWriter != nil {
+		if err := rs.p.attestationWriter.WriteAttestation(statement); err != nil {
+			return err
+		}
+		rs.attestationDigest = digest
+		return nil
+	}
+	if err := writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "attestation.json"), statement); err != nil {
+		return err
+	}
+	rs.attestationDigest = digest
+	return nil
 }
 
 // runStatus — финальный статус запуска для store.

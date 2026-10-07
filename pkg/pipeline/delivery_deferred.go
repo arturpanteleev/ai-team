@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -65,7 +66,7 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 			planHash, rs.approvedPlanHash)
 	}
 
-	attestationDigest, err := attestationDigestOfRun(rs.evidence.RunDir())
+	attestationDigest, err := rs.deferredAttestationDigest()
 	if err != nil {
 		return err
 	}
@@ -423,7 +424,7 @@ func canonicalPath(p string) string {
 // attestation.json (digest sha256). found=false для non-Git run'ов — там
 // workspace == control target и digest верифицировать нечем.
 func candidateWorkspaceDigestOfRun(runDir string) (digest string, found bool, err error) {
-	data, readErr := safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	data, readErr := attestationRecordForRun(runDir)
 	if readErr != nil {
 		return "", false, fmt.Errorf("deferred delivery: attestation: %w", readErr)
 	}
@@ -494,7 +495,7 @@ func terminalStatusOfRun(runDir, runID string) (string, error) {
 }
 
 func attestationDigestOfRun(runDir string) (string, error) {
-	data, err := safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	data, err := attestationRecordForRun(runDir)
 	if err != nil {
 		return "", fmt.Errorf("deferred delivery: attestation: %w", err)
 	}
@@ -507,6 +508,43 @@ func attestationDigestOfRun(runDir string) (string, error) {
 		return "", fmt.Errorf("deferred delivery: attestation digest: %w", err)
 	}
 	return digest, nil
+}
+
+// deferredAttestationDigest uses the exact statement digest computed during
+// finalize. In a bubblewrap child the controller-owned copy is masked and has
+// no read API; the in-memory value still binds delivery trailers to that write.
+// Host retry/recovery constructs a fresh state and falls back to stored evidence.
+func (rs *runState) deferredAttestationDigest() (string, error) {
+	if rs.attestationDigest != "" {
+		return rs.attestationDigest, nil
+	}
+	return attestationDigestOfRun(rs.evidence.RunDir())
+}
+
+// attestationRecordForRun prefers controller-owned state when present. A
+// corrupt controller record is an error and never falls back to worker evidence.
+func attestationRecordForRun(runDir string) ([]byte, error) {
+	runID := filepath.Base(filepath.Clean(runDir))
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
+	stored, err := (attest.ControllerStore{TargetDir: targetDir}).Read(runID)
+	if err == nil {
+		return stored, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("deferred delivery: controller attestation: %w", err)
+	}
+	legacy, err := safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	statement, err := attest.Parse(legacy)
+	if err != nil {
+		return nil, err
+	}
+	if statement.Predicate.RunID != runID {
+		return nil, errors.New("legacy attestation run mismatch")
+	}
+	return legacy, nil
 }
 
 func runtimeIdentityOfRun(runDir string) (string, error) {

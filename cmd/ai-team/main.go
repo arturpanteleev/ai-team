@@ -303,6 +303,7 @@ func cmdWorker() {
 	var candidateMetadataStore candidate.MetadataStore
 	var usageEnvelopeWriter pipeline.UsageEnvelopeWriter
 	var terminalRecordWriter pipeline.TerminalRecordWriter
+	var attestationWriter pipeline.AttestationWriter
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -317,6 +318,7 @@ func cmdWorker() {
 		if apiPort.SupportsControllerUsageStore() {
 			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
+			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
 		}
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
@@ -391,6 +393,9 @@ func cmdWorker() {
 	}
 	if terminalRecordWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithTerminalRecordWriter(terminalRecordWriter))
+	}
+	if attestationWriter != nil {
+		engineOptions = append(engineOptions, pipeline.WithAttestationWriter(attestationWriter))
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

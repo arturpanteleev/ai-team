@@ -175,6 +175,38 @@ func TestBundleBuildVerifyAndDeterminism(t *testing.T) {
 	}
 }
 
+func TestBuildExportsControllerStoredAttestation(t *testing.T) {
+	base := t.TempDir()
+	runsRoot := filepath.Join(base, ".ai-team", "runs")
+	if err := os.MkdirAll(runsRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runDir := buildTerminalRun(t, runsRoot)
+	legacyPath := filepath.Join(runDir, "attestation.json")
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (attest.ControllerStore{TargetDir: base}).Write(testRunID, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundle); err != nil {
+		t.Fatalf("build from controller attestation: %v", err)
+	}
+	exported, err := os.ReadFile(filepath.Join(bundle, "attestation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := attest.Parse(exported)
+	if err != nil || statement.Predicate.RunID != testRunID {
+		t.Fatalf("exported attestation invalid: run=%v err=%v", statement, err)
+	}
+}
+
 func TestVerifyEvidenceLiveRun(t *testing.T) {
 	base := t.TempDir()
 	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))

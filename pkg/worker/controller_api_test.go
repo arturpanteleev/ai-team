@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -494,6 +495,57 @@ func TestWorkerTerminalDeliveryRecordUsesScopedUnixAPI(t *testing.T) {
 	conflict.CommitSHA = strings.Repeat("b", 40)
 	if err := NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(conflict); err == nil {
 		t.Fatal("API accepted conflicting overwrite")
+	}
+}
+
+func TestWorkerAttestationUsesScopedUnixAPI(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attest-api-run", TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "attest-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketDir); err != nil {
+			t.Errorf("remove temporary worker API socket directory: %v", err)
+		}
+	})
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: job.RunID}}
+	writer := NewWorkerAPIAttestationWriter(port)
+	if err := writer.WriteAttestation(statement); err != nil {
+		t.Fatalf("write attestation: %v", err)
+	}
+	if err := writer.WriteAttestation(statement); err != nil {
+		t.Fatalf("idempotent write: %v", err)
+	}
+	if _, err := server.attestations.Read(job.RunID); err != nil {
+		t.Fatalf("controller record missing: %v", err)
+	}
+	wrong := *statement
+	wrong.Predicate.RunID = "other-run"
+	if err := writer.WriteAttestation(&wrong); err == nil {
+		t.Fatal("worker writer accepted other run")
+	}
+	if _, err := server.dispatch("attestation.write", workerAPICall{Attestation: wrong}); err == nil {
+		t.Fatal("controller API accepted another run's statement")
+	}
+	invalid := *statement
+	invalid.Predicate.SchemaVersion = 999
+	if _, err := server.dispatch("attestation.write", workerAPICall{Attestation: invalid}); err == nil {
+		t.Fatal("API accepted invalid schema")
 	}
 }
 

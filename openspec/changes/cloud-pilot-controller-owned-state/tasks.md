@@ -3,9 +3,15 @@
 - [ ] Agree the trust assumptions for worker-produced checks and artifacts.
 - [ ] Specify a versioned, bounded, job-scoped worker result protocol and
   controller validation/commit semantics.
-- [ ] Split human decision storage from worker-writable state; add tests proving
-  worker cannot alter an existing decision, event log, manifest, artifact,
-  lifecycle record, queue, or control database.
+- [x] Add an application-level worker approval adapter that rejects the
+  pipeline's `Decide` and `ResolveDeferred` calls; verify the row remains
+  pending and an authenticated controller route can resolve it. This is
+  defense in depth only and does not prove process isolation.
+- [ ] Remove worker access to the controller DB path and replace direct store
+  access with a controller-owned API; verify a worker cannot mutate approvals
+  through raw SQL or other filesystem access.
+- [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
+  worker-writable state; verify their integrity after worker-side attempts.
 - [ ] Add replay, wrong-job, wrong-action, expiry, oversized result, malformed
   schema, path traversal, and forged-decision negative protocol tests.
 - [ ] Test worker process/network policy on a real runtime and verify there is

@@ -299,10 +299,6 @@ func cmdWorker() {
 		fatal("Worker approval store: %v", err)
 	}
 	defer func() { _ = approvalStore.Close() }()
-	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
-		_ = recorderStore.Close()
-		fatal("Worker cannot import file approvals into controller DB: %v", err)
-	}
 	reg, err := newAgentRegistry(target)
 	if err != nil {
 		_ = recorderStore.Close()
@@ -323,7 +319,7 @@ func cmdWorker() {
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
-		pipeline.WithApprovalStore(approvalStore)))
+		pipeline.WithApprovalStore(approval.NewWorkerStore(approvalStore))))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var result pipeline.RunResult

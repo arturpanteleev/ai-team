@@ -40,6 +40,18 @@ type fakeRunController struct {
 	approvals    []approval.PendingApproval
 }
 
+type approvalBoundaryEngine struct{}
+
+func (approvalBoundaryEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{RunID: config.RunID}, nil
+}
+func (approvalBoundaryEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{RunID: config.RunID}, nil
+}
+func (approvalBoundaryEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, error) {
+	return pipeline.RunResult{RunID: config.RunID}, nil
+}
+
 type admissionCapturingController struct {
 	*control.Controller
 	runID string
@@ -798,6 +810,32 @@ func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *
 	return request
 }
 
+func authenticatedRequest(t *testing.T, srv *Server, token, method, target, body string) *http.Request {
+	t.Helper()
+	sessionRequest := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	sessionRequest.Header.Set("Authorization", "Bearer "+token)
+	sessionWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	if sessionWriter.Code != http.StatusOK {
+		t.Fatalf("authenticated session bootstrap: %d %s", sessionWriter.Code, sessionWriter.Body.String())
+	}
+	var session struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(sessionWriter.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	cookies := sessionWriter.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("authenticated session cookie отсутствует: %v", cookies)
+	}
+	request := newLoopbackRequest(method, target, strings.NewReader(body))
+	request.AddCookie(cookies[0])
+	request.Header.Set("X-CSRF-Token", session.CSRFToken)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
 func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	controller := &fakeRunController{}
 	artifactRoot := t.TempDir()
@@ -1009,6 +1047,87 @@ func TestQuestionApprovalRequiresNonEmptyAnswer(t *testing.T) {
 	srv.router.ServeHTTP(writer, answered)
 	if writer.Code != http.StatusOK || controller.decision.Comment != "B2B-клиенты среднего бизнеса" {
 		t.Fatalf("ответ должен сохраниться как решение: code=%d decision=%+v body=%s", writer.Code, controller.decision, writer.Body.String())
+	}
+}
+
+func TestWorkerApplicationPortDeniedAndAuthenticatedControllerCanDecide(t *testing.T) {
+	target := t.TempDir()
+	approvalStore, err := approval.NewSQLiteStore(filepath.Join(target, "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = approvalStore.Close() }()
+	pending, err := approvalStore.Create(approval.PendingApproval{
+		RunID: "boundary-run", AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "stage_completed", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": "coder", "reject": "$stop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workerStore := approval.NewWorkerStore(approvalStore)
+	if _, err := workerStore.Decide(pending.RunID, pending.ID, approval.Decision{
+		ActorID: "worker", ActorRole: "reviewer", Action: "approve", SubjectHash: pending.SubjectHash,
+	}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
+		t.Fatalf("worker application port should refuse decision writes: %v", err)
+	}
+	unchanged, err := approvalStore.Load(pending.RunID, pending.ID)
+	if err != nil || unchanged.Status != approval.StatusPending || len(unchanged.Decisions) != 0 {
+		t.Fatalf("worker denial must preserve the approval: %+v err=%v", unchanged, err)
+	}
+
+	controller, err := control.New(approvalBoundaryEngine{}, target, control.WithApprovalStore(approvalStore))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := cloudidentity.NewPrincipal("reviewer-1@example.com", []cloudidentity.Role{cloudidentity.RoleReviewer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.Issue(principal, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithAuthenticator(manager))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	ownerCookie, ownerCSRF := cloudSessionForTest(t, srv, manager, "owner@example.com", cloudidentity.RoleProductOwner)
+	invite := teamRequest(srv, ownerCookie, ownerCSRF, http.MethodPost, "/api/team/invitations", `{"email":"reviewer-1@example.com","roles":["reviewer"]}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite reviewer: %d %s", invite.Code, invite.Body.String())
+	}
+	var invitation struct {
+		Token string `json:"activation_token"`
+	}
+	if err := json.NewDecoder(invite.Body).Decode(&invitation); err != nil {
+		t.Fatal(err)
+	}
+	activation := newLoopbackRequest(http.MethodPost, "/api/team/activate", strings.NewReader(`{"token":"`+invitation.Token+`"}`))
+	activation.Header.Set("Content-Type", "application/json")
+	activationWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(activationWriter, activation)
+	if activationWriter.Code != http.StatusOK {
+		t.Fatalf("activate reviewer: %d %s", activationWriter.Code, activationWriter.Body.String())
+	}
+	request := authenticatedRequest(t, srv, token, http.MethodPost,
+		"/api/runs/"+pending.RunID+"/approvals/"+pending.ID+"/decisions",
+		`{"actor_id":"spoofed","actor_role":"reviewer","action":"approve","subject_hash":"`+pending.SubjectHash+`"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("authenticated controller decision: %d %s", response.Code, response.Body.String())
+	}
+	resolved, err := approvalStore.Load(pending.RunID, pending.ID)
+	if err != nil || resolved.Status != approval.StatusResolved || resolved.Decisions[0].ActorID != "reviewer-1@example.com" {
+		t.Fatalf("controller must record the authenticated principal: %+v err=%v", resolved, err)
 	}
 }
 

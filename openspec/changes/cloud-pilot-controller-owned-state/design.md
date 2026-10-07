@@ -18,9 +18,12 @@ controller-only writes.
 будет ложным свидетельством изоляции. `strict` сейчас корректно отказывает
 fail-closed и не должен обходиться deployment flag-ом.
 
-Текущая SQLite-backed approval persistence — лишь storage foundation: human
-decisions штатно приходят через authenticated controller route, однако worker
-может изменить те же SQLite rows напрямую. Effective isolation отсутствует;
+PR #197 добавил SQLite-backed approval persistence. Текущий worker pipeline
+получает application-level adapter, который отклоняет `Decide` и
+`ResolveDeferred`; authenticated controller route продолжает использовать
+полный store. Это defense in depth, а не граница изоляции: worker по-прежнему
+получает `--db` и доступ к целевой файловой системе, поэтому может обойти
+adapter прямой записью в SQLite. Effective isolation отсутствует;
 deployment manifests и пилотная приёмка остаются заблокированы до выделения
 controller-only API/credentials и отделения worker от writable controller DB.
 
@@ -89,9 +92,11 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
 1. Зафиксировать trust assumptions и модель attestation результата.
 2. Спроектировать и протестировать typed worker result / controller commit
    протокол без пересылки человеческих решений как обычных worker outputs.
-3. Уже добавлен SQLite approval store и общий persistence port. Следующий
-   незавершённый шаг — изолировать его от worker через controller-owned API и
-   отделить evidence от worker scratch с восстановлением существующих runs.
+3. Уже добавлены SQLite approval store, общий persistence port и
+   application-level worker adapter, блокирующий штатные вызовы изменения
+   решений. Следующий незавершённый шаг — убрать у worker прямой `--db` и
+   filesystem доступ и заменить его controller-owned API; отдельно отделить
+   evidence от worker scratch с восстановлением существующих runs.
 4. После позитивных и негативных протокольных тестов выбрать одну инфраструктуру
    и добавить воспроизводимый reference deployment, TLS, least-purpose secrets,
    persistent storage и backup/restore.

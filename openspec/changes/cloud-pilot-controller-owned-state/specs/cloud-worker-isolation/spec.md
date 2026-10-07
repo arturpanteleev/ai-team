@@ -7,6 +7,11 @@ authoritative run evidence. A worker MUST NOT receive writable access to those
 stores and MUST NOT be able to use its job capability to create or resolve a
 human decision.
 
+The current worker approval adapter rejects decision writes through the normal
+pipeline interface, but is only an application-level defense. The worker still
+receives the shared database path and target filesystem access, so this does
+not satisfy the requirement or prevent direct database writes.
+
 #### Scenario: Worker attempts to alter an approval or evidence
 
 - **WHEN** a compromised worker attempts to read a control-plane secret, alter

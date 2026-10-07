@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -56,6 +57,40 @@ func (f *fakeEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, e
 func TestNewRequiresEngine(t *testing.T) {
 	if _, err := New(nil, t.TempDir()); err == nil {
 		t.Fatal("controller без engine принят")
+	}
+}
+
+func TestControllerDecisionsUseInjectedApprovalStore(t *testing.T) {
+	target := t.TempDir()
+	store, err := approval.NewSQLiteStore(filepath.Join(target, "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	value, err := store.Create(approval.PendingApproval{
+		RunID: "controller-run", AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "stage_completed", SubjectHash: strings.Repeat("a", 64),
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"approve"}, Targets: map[string]string{"approve": "coder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(&fakeEngine{}, target, WithApprovalStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".ai-team", "state", "approvals")); !os.IsNotExist(err) {
+		t.Fatalf("injected store must not construct filesystem default, stat err=%v", err)
+	}
+	resolved, err := controller.Decide(value.RunID, value.ID, approval.Decision{
+		ActorID: "human-1", ActorRole: "reviewer", Action: "approve", SubjectHash: value.SubjectHash,
+	})
+	if err != nil || resolved.Status != approval.StatusResolved {
+		t.Fatalf("controller decision: %+v, %v", resolved, err)
+	}
+	loaded, err := store.Load(value.RunID, value.ID)
+	if err != nil || loaded.Status != approval.StatusResolved {
+		t.Fatalf("decision not in injected store: %+v, %v", loaded, err)
 	}
 }
 

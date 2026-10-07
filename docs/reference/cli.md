@@ -147,10 +147,23 @@ ai-team run --resume <run_id> --approve-plan <sha256-из-вывода>
 устаревшим хешем, чужой ролью или противоречащее уже записанному отклоняется.
 
 ```text
-ai-team decision --run <run_id> --approval <id> --actor <кто> --role <роль> --action <действие> --subject <sha256> [--comment "<текст>"] [--target <путь>]
+ai-team decision --run <run_id> --approval <id> --actor <кто> --role <роль> --action <действие> --subject <sha256> [--comment "<текст>"] [--target <путь>] [--db <путь-к-SQLite-в-.ai-team>]
 ```
 
-Все флаги, кроме `--comment` и `--target`, обязательны. Действие берётся из
+Все флаги, кроме `--comment`, `--target` и `--db`, обязательны. Без `--db`
+команда использует локальный файловый каталог approvals. Для SQLite approvals,
+используемых `web` и `scheduler-worker`, trusted-local администратор может
+указать существующий файл базы внутри `.ai-team`, например:
+
+```bash
+ai-team decision --target . --db .ai-team/web.db --run <run_id> \
+  --approval <id> --actor alice --role release_manager \
+  --action approve --subject <sha256>
+```
+
+Локальный `--db` даёт прямой доступ к базе и не выполняет web-аутентификацию;
+используйте его только на доверенном хосте. В облачном режиме обычный путь для
+решения — аутентифицированный API или дашборд web controller. Действие берётся из
 политики перехода: например `approve`, `reject`, `return_to_coder`,
 `override_approve`. Когда кворум собран, команда подсказывает продолжить:
 
@@ -160,8 +173,9 @@ ai-team decision --run <run_id> --approval <id> --actor alice \
 ai-team run --resume <run_id>
 ```
 
-Ожидающие подтверждения лежат в
-`.ai-team/state/approvals/<run_id>/<approval_id>.json`.
+Локальные файловые подтверждения лежат в
+`.ai-team/state/approvals/<run_id>/<approval_id>.json`. В web и scheduler-worker
+режимах approvals хранятся в SQLite `.ai-team/web.db`.
 
 ### ai-team deliver
 
@@ -401,15 +415,21 @@ ai-team scheduler-worker \
 работает параллельно с прогоном.
 
 ```text
-ai-team gc [--target <путь>] [--older-than 720h] [--keep-last 20] [--dry-run] [--prune-runs]
+ai-team gc [--target <путь>] [--older-than 720h] [--keep-last 20] [--dry-run] [--prune-runs] [--db <путь>]
 ```
 
 | Флаг | По умолчанию | Что делает |
 |---|---|---|
 | `--older-than` | `720h` | убирать завершённые прогоны старше этого возраста |
 | `--keep-last` | `20` | всегда сохранять столько последних прогонов |
-| `--dry-run` | выключен | только показать план: что и сколько байт удалится |
+| `--dry-run` | выключен | только показать план: физические байты к освобождению и логический объём удаляемых записей |
 | `--prune-runs` | выключен | разрешить удаление доказательств, но только у прогонов с проверенным экспортом |
+| `--db` | `.ai-team/web.db` | SQLite база, из которой удалять approval-записи старых завершённых прогонов |
+
+В таблице gc «Физ. байт» показывает ожидаемое уменьшение файлов на диске, а
+«Лог. байт» — размер данных SQLite-записей, которые будут удалены. Удаление
+строк из SQLite само по себе не уменьшает файл базы, поэтому для `approvals-db`
+физический объём остаётся равен нулю.
 
 Флаги командной строки важнее секции `retention` в конфиге
 (см. [Конфигурация](config.md#retention)).

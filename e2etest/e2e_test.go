@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
@@ -470,17 +471,20 @@ func TestE2E_DisposableWorkerPersistsPendingApproval(t *testing.T) {
 	if err != nil || !strings.Contains(string(state), `"phase": "waiting"`) {
 		t.Fatalf("worker не сохранил waiting lifecycle: err=%v\n%s", err, state)
 	}
-	approvals, err := filepath.Glob(filepath.Join(dir, ".ai-team", "state", "approvals", runID, "*.json"))
-	if err != nil || len(approvals) == 0 {
-		t.Fatalf("worker не сохранил pending approval: %v err=%v", approvals, err)
-	}
 	var waiting struct {
 		ApprovalID string `json:"pending_approval_id"`
 	}
 	if json.Unmarshal(state, &waiting) != nil || waiting.ApprovalID == "" {
 		t.Fatalf("waiting state без pending_approval_id:\n%s", state)
 	}
-	checkFile(t, filepath.Join(dir, ".ai-team", "state", "approvals", runID, waiting.ApprovalID+".json"))
+	approvalStore, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = approvalStore.Close() }()
+	if pending, err := approvalStore.Load(runID, waiting.ApprovalID); err != nil || pending.Status != approval.StatusPending {
+		t.Fatalf("worker не сохранил pending approval в web.db: %+v err=%v", pending, err)
+	}
 	checkFile(t, filepath.Join(dir, ".ai-team", "state", "candidates", runID+".json"))
 	checkFile(t, filepath.Join(dir, ".ai-team", "web.db"))
 }
@@ -786,6 +790,11 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		csrf = session.CSRF
 		return csrf != ""
 	}, func() string { return serverOutput.String() })
+	approvalStore, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = approvalStore.Close() }()
 
 	post := func(path string, body any) (int, map[string]any) {
 		t.Helper()
@@ -833,15 +842,11 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		if json.Unmarshal(stateData, &state) != nil || state.Phase != "waiting" {
 			return approvalState{}
 		}
-		approvalData, err := os.ReadFile(filepath.Join(
-			dir, ".ai-team", "state", "approvals", runID, state.ApprovalID+".json",
-		))
+		stored, err := approvalStore.Load(runID, state.ApprovalID)
 		if err != nil {
 			return approvalState{}
 		}
-		var value approvalState
-		_ = json.Unmarshal(approvalData, &value)
-		return value
+		return approvalState{ID: stored.ID, SubjectHash: stored.SubjectHash, RequiredRoles: stored.RequiredRoles}
 	}
 	var first approvalState
 	waitUntil(t, 10*time.Second, func() bool {

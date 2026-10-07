@@ -159,6 +159,7 @@ func printUsage() {
 
 Флаги gc:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
+  --db <path>               SQLite web DB для очистки approvals старых terminal runs
   --older-than <duration>   Возраст terminal-ранов для уборки state (по умолчанию 720h)
   --keep-last <n>           Защитить n самых свежих terminal-ранов (по умолчанию 20)
   --dry-run                 Только показать план: что удалится и сколько байт
@@ -292,6 +293,16 @@ func cmdWorker() {
 	if err != nil {
 		fatal("Worker recorder: %v", err)
 	}
+	approvalStore, err := approval.NewSQLiteStore(*dbPath)
+	if err != nil {
+		_ = recorderStore.Close()
+		fatal("Worker approval store: %v", err)
+	}
+	defer func() { _ = approvalStore.Close() }()
+	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
+		_ = recorderStore.Close()
+		fatal("Worker cannot import file approvals into controller DB: %v", err)
+	}
 	reg, err := newAgentRegistry(target)
 	if err != nil {
 		_ = recorderStore.Close()
@@ -311,7 +322,8 @@ func cmdWorker() {
 		}
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
-		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore))))
+		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
+		pipeline.WithApprovalStore(approvalStore)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var result pipeline.RunResult
@@ -552,6 +564,7 @@ func cmdSchedulerWorker() {
 func cmdDecision() {
 	flags := flag.NewFlagSet("decision", flag.ExitOnError)
 	target := flags.String("target", ".", "Путь к целевому проекту")
+	dbPath := flags.String("db", "", "SQLite approvals DB внутри .ai-team (для trusted-local администратора)")
 	runID := flags.String("run", "", "Идентификатор run")
 	approvalID := flags.String("approval", "", "Идентификатор approval")
 	actorID := flags.String("actor", "", "Идентификатор человека")
@@ -573,9 +586,46 @@ func cmdDecision() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
-	store, err := approval.NewStore(absolute)
-	if err != nil {
-		fatal("Ошибка approval store: %v", err)
+	var store interface {
+		Decide(string, string, approval.Decision) (approval.PendingApproval, error)
+	}
+	var closeStore func() error
+	if *dbPath == "" {
+		fileStore, storeErr := approval.NewStore(absolute)
+		if storeErr != nil {
+			fatal("Ошибка approval store: %v", storeErr)
+		}
+		store = fileStore
+	} else {
+		controlRoot := filepath.Join(absolute, ".ai-team")
+		if err := safeio.ValidateTree(controlRoot); err != nil {
+			fatal("Небезопасный control root: %v", err)
+		}
+		resolvedDB := *dbPath
+		if !filepath.IsAbs(resolvedDB) {
+			resolvedDB = filepath.Join(absolute, resolvedDB)
+		}
+		resolvedDB, err = filepath.Abs(resolvedDB)
+		if err != nil {
+			fatal("Ошибка пути SQLite DB: %v", err)
+		}
+		relativeDB, err := filepath.Rel(controlRoot, resolvedDB)
+		if err != nil || relativeDB == ".." || strings.HasPrefix(relativeDB, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeDB) {
+			fatal("SQLite DB должна находиться внутри %s", controlRoot)
+		}
+		info, statErr := os.Lstat(resolvedDB)
+		if statErr != nil || !info.Mode().IsRegular() {
+			fatal("SQLite DB должна быть существующим обычным файлом внутри .ai-team")
+		}
+		sqliteStore, storeErr := approval.NewSQLiteStore(resolvedDB)
+		if storeErr != nil {
+			fatal("Ошибка SQLite approval store: %v", storeErr)
+		}
+		store = sqliteStore
+		closeStore = sqliteStore.Close
+	}
+	if closeStore != nil {
+		defer func() { _ = closeStore() }()
 	}
 	value, err := store.Decide(*runID, *approvalID, approval.Decision{
 		ActorID: *actorID, ActorRole: *role, Action: *action,
@@ -1551,8 +1601,18 @@ func cmdWeb() {
 		fatal("Ошибка recorder store: %v", err)
 	}
 	defer func() { _ = recorderStore.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
+	approvalStore, err := approval.NewSQLiteStore(*dbPath)
+	if err != nil {
+		fatal("Ошибка approval store: %v", err)
+	}
+	defer func() { _ = approvalStore.Close() }() // общий web/controller approval store.
+	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
+		fatal("Не удалось безопасно перенести file approvals в web DB: %v", err)
+	}
 	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
-		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore))))
+		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
+		pipeline.WithApprovalStore(approvalStore)))
+	controllerOptions := []control.Option{control.WithApprovalStore(approvalStore)}
 	var runController *control.Controller
 	var schedulerQueue *scheduler.Queue
 	if *schedulerDB != "" {
@@ -1570,17 +1630,17 @@ func cmdWeb() {
 		if queueErr != nil {
 			fatal("Ошибка queue engine: %v", queueErr)
 		}
-		runController, err = control.New(queueEngine, target)
+		runController, err = control.New(queueEngine, target, controllerOptions...)
 	} else if *workerCommand != "" {
 		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath)
 		if processErr != nil {
 			fatal("Ошибка worker launcher: %v", processErr)
 		}
-		runController, err = control.New(processEngine, target,
-			control.WithPreflight(preflight.New(cfg, reg, target)))
+		controllerOptions = append(controllerOptions, control.WithPreflight(preflight.New(cfg, reg, target)))
+		runController, err = control.New(processEngine, target, controllerOptions...)
 	} else {
-		runController, err = control.New(localEngine, target,
-			control.WithPreflight(preflight.New(cfg, reg, target)))
+		controllerOptions = append(controllerOptions, control.WithPreflight(preflight.New(cfg, reg, target)))
+		runController, err = control.New(localEngine, target, controllerOptions...)
 	}
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)

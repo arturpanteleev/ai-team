@@ -26,6 +26,9 @@ const (
 	workerAPITokenEnv    = "AI_TEAM_WORKER_API_TOKEN"
 	workerAPIMaxBody     = 1 << 20
 	workerAPIErrorMarker = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
+	workerAPIRequestTTL  = 30 * time.Second
+	workerAPIFutureSkew  = 5 * time.Second
+	workerAPIMaxNonces   = 4096
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -38,8 +41,10 @@ type workerAPIScope struct {
 }
 type workerAPIRequest struct {
 	workerAPIScope
-	Method  string          `json:"method"`
-	Payload json.RawMessage `json:"payload"`
+	Method   string          `json:"method"`
+	Payload  json.RawMessage `json:"payload"`
+	Nonce    string          `json:"nonce"`
+	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
 	RunID    string                   `json:"run_id,omitempty"`
@@ -67,6 +72,8 @@ type workerAPIServer struct {
 	recorder   pipeline.Recorder
 	approvals  workerApprovalPort
 	dispatchMu sync.Mutex
+	nonceMu    sync.Mutex
+	nonces     map[string]time.Time
 }
 
 // startWorkerAPIServer creates a per-execution loopback capability. The worker
@@ -84,7 +91,7 @@ func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerA
 		_ = listener.Close()
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals}
+	api := &workerAPIServer{scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -120,6 +127,10 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
+	if !s.acceptRequest(time.Now(), request.Nonce, request.IssuedAt) {
+		http.Error(w, "invalid, expired, replayed, or exhausted request nonce", http.StatusUnauthorized)
+		return
+	}
 	result, err := s.dispatch(request.Method, call)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -130,6 +141,34 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		result = struct{}{}
 	}
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// acceptRequest binds one authenticated API operation to a fresh, short-lived
+// nonce. The map is capped per invocation; when it is full, requests fail
+// closed until expired entries can be reclaimed.
+func (s *workerAPIServer) acceptRequest(now time.Time, nonce string, issuedAt time.Time) bool {
+	if len(nonce) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(nonce)
+	if err != nil || len(decoded) != 32 || issuedAt.IsZero() || !issuedAt.After(now.Add(-workerAPIRequestTTL)) || issuedAt.After(now.Add(workerAPIFutureSkew)) {
+		return false
+	}
+	// Hex decoding accepts either case. Key by the decoded bytes' canonical
+	// representation so changing hex letter case cannot bypass replay checks.
+	nonceKey := hex.EncodeToString(decoded)
+	s.nonceMu.Lock()
+	defer s.nonceMu.Unlock()
+	for existing, expiresAt := range s.nonces {
+		if !now.Before(expiresAt) {
+			delete(s.nonces, existing)
+		}
+	}
+	if _, exists := s.nonces[nonceKey]; exists || len(s.nonces) >= workerAPIMaxNonces {
+		return false
+	}
+	s.nonces[nonceKey] = issuedAt.Add(workerAPIRequestTTL)
+	return true
 }
 func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) {
 	// Recorder implementations such as web.StoreRecorder keep per-run sequence
@@ -208,7 +247,11 @@ func (p *workerAPIPort) call(method string, value, out any) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(workerAPIRequest{p.scope, method, payload})
+	var nonceBytes [32]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		return err
+	}
+	data, err := json.Marshal(workerAPIRequest{workerAPIScope: p.scope, Method: method, Payload: payload, Nonce: hex.EncodeToString(nonceBytes[:]), IssuedAt: time.Now().UTC()})
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,11 +24,13 @@ import (
 )
 
 type apiApprovalStore struct {
-	values    map[string]approval.PendingApproval
-	createErr error
+	values      map[string]approval.PendingApproval
+	createErr   error
+	createCalls int
 }
 
 func (s *apiApprovalStore) Create(v approval.PendingApproval) (approval.PendingApproval, error) {
+	s.createCalls++
 	if s.createErr != nil {
 		return approval.PendingApproval{}, s.createErr
 	}
@@ -35,6 +39,123 @@ func (s *apiApprovalStore) Create(v approval.PendingApproval) (approval.PendingA
 	}
 	s.values[v.RunID+"/"+v.ID] = v
 	return v, nil
+}
+
+func workerAPIRequestBody(t *testing.T, scope workerAPIScope, method string, call workerAPICall, nonce string, issuedAt time.Time) string {
+	t.Helper()
+	if nonce == "random" {
+		var bytes [32]byte
+		if _, err := rand.Read(bytes[:]); err != nil {
+			t.Fatal(err)
+		}
+		nonce = hex.EncodeToString(bytes[:])
+	}
+	payload, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(workerAPIRequest{workerAPIScope: scope, Method: method, Payload: payload, Nonce: nonce, IssuedAt: issuedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func postWorkerAPIRequest(t *testing.T, server *workerAPIServer, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+server.listener.Addr().String()+"/v1/call", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+server.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestWorkerControllerAPIRejectsExpiredFutureMissingAndReplayedRequests(t *testing.T) {
+	job := Job{RunID: "run", Operation: OperationStart, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	recorder := &apiRecorderSpy{}
+	server, err := startWorkerAPIServer(job, recorder, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	scope := server.scope
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name     string
+		nonce    string
+		issuedAt time.Time
+	}{
+		{name: "expired", nonce: "random", issuedAt: now.Add(-workerAPIRequestTTL - time.Second)},
+		{name: "future", nonce: "random", issuedAt: now.Add(workerAPIFutureSkew + time.Second)},
+		{name: "missing nonce", nonce: "", issuedAt: now},
+		{name: "malformed hex nonce", nonce: strings.Repeat("g", 64), issuedAt: now},
+		{name: "missing timestamp", nonce: "random"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := workerAPIRequestBody(t, scope, "approval.create", workerAPICall{Approval: approval.PendingApproval{ID: tc.name}}, tc.nonce, tc.issuedAt)
+			if status := postWorkerAPIRequest(t, server, body); status != http.StatusUnauthorized {
+				t.Fatalf("status=%d want=%d", status, http.StatusUnauthorized)
+			}
+		})
+	}
+	if store.createCalls != 0 || len(store.values) != 0 || len(recorder.events) != 0 {
+		t.Fatalf("invalid requests reached dispatch: create calls=%d approvals=%d events=%v", store.createCalls, len(store.values), recorder.events)
+	}
+
+	// The nonce contains hex letters so the replay changes only their case.
+	nonce := strings.Repeat("ab", 32)
+	body := workerAPIRequestBody(t, scope, "approval.create", workerAPICall{Approval: approval.PendingApproval{ID: "replay"}}, nonce, now)
+	if status := postWorkerAPIRequest(t, server, body); status != http.StatusOK {
+		t.Fatalf("initial request status=%d", status)
+	}
+	caseVariantBody := workerAPIRequestBody(t, scope, "approval.create", workerAPICall{Approval: approval.PendingApproval{ID: "replay"}}, strings.ToUpper(nonce), now)
+	if status := postWorkerAPIRequest(t, server, caseVariantBody); status != http.StatusUnauthorized {
+		t.Fatalf("case-variant replay status=%d want=%d", status, http.StatusUnauthorized)
+	}
+	if store.createCalls != 1 || len(store.values) != 1 || recorder.decisions != 0 {
+		t.Fatalf("replayed request duplicated state: create calls=%d approvals=%d decisions=%d", store.createCalls, len(store.values), recorder.decisions)
+	}
+	if len(recorder.events) != 0 {
+		t.Fatalf("approval replay unexpectedly changed recorder state: %v", recorder.events)
+	}
+}
+
+func TestWorkerControllerAPINonceCacheIsBoundedAndFailsClosed(t *testing.T) {
+	server := &workerAPIServer{nonces: make(map[string]time.Time)}
+	now := time.Now().UTC()
+	for i := range workerAPIMaxNonces {
+		var raw [32]byte
+		raw[28] = byte(i >> 24)
+		raw[29] = byte(i >> 16)
+		raw[30] = byte(i >> 8)
+		raw[31] = byte(i)
+		if !server.acceptRequest(now, hex.EncodeToString(raw[:]), now) {
+			t.Fatalf("request %d unexpectedly rejected before capacity", i)
+		}
+	}
+	if len(server.nonces) != workerAPIMaxNonces {
+		t.Fatalf("nonce state grew to %d, max=%d", len(server.nonces), workerAPIMaxNonces)
+	}
+	var extra [32]byte
+	extra[0] = 0xff
+	if server.acceptRequest(now, hex.EncodeToString(extra[:]), now) {
+		t.Fatal("request beyond nonce capacity was accepted")
+	}
+	refreshed := now.Add(workerAPIRequestTTL + time.Second)
+	if !server.acceptRequest(refreshed, hex.EncodeToString(extra[:]), refreshed) {
+		t.Fatal("valid request was rejected after expired nonce entries could be reclaimed")
+	}
+	if len(server.nonces) != 1 {
+		t.Fatalf("expired nonce entries were not reclaimed: %d active entries", len(server.nonces))
+	}
 }
 func (s *apiApprovalStore) Load(run, id string) (approval.PendingApproval, error) {
 	v, ok := s.values[run+"/"+id]
@@ -153,9 +274,8 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 			if tc.scope.RunID == "" {
 				tc.scope = server.scope
 			}
-			payload, _ := json.Marshal(tc.call)
-			body, _ := json.Marshal(workerAPIRequest{workerAPIScope: tc.scope, Method: tc.method, Payload: payload})
-			resp, err := port.client.Post(port.address+"/v1/call", "application/json", strings.NewReader(string(body)))
+			body := workerAPIRequestBody(t, tc.scope, tc.method, tc.call, "random", time.Now().UTC())
+			resp, err := port.client.Post(port.address+"/v1/call", "application/json", strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
 			}

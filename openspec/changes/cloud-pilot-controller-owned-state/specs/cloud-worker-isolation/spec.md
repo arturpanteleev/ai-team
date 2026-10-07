@@ -1,5 +1,36 @@
 ## ADDED Requirements
 
+### Requirement: Replay-resistant per-invocation controller API
+
+Every authenticated worker controller API request MUST carry a cryptographically
+random 256-bit nonce and an issue timestamp. The server MUST reject a missing or
+malformed nonce, a missing timestamp, a request older than 30 seconds, a request
+more than 5 seconds in the future, and any nonce already accepted during that
+invocation. The server MUST enforce the guard before dispatch so rejected calls
+cannot change recorder or approval state. Replay state MUST be bounded to at
+most 4096 active nonces per invocation; once full, requests MUST fail closed
+until expired entries are reclaimed.
+
+#### Scenario: Worker replays a controller API request
+
+- **WHEN** a worker submits the same authenticated request and nonce twice
+- **THEN** the controller MUST accept at most the first request
+- **AND** the replay MUST NOT duplicate recorder events or approval writes
+
+#### Scenario: Worker submits a stale or invalidly timed request
+
+- **WHEN** a worker omits the nonce or timestamp, submits an expired request,
+  or claims an issue time beyond the permitted future skew
+- **THEN** the controller MUST reject it before dispatch
+- **AND** controller-owned recorder and approval state MUST remain unchanged
+
+#### Scenario: Worker exhausts per-invocation replay state
+
+- **WHEN** an invocation has 4096 unexpired accepted nonces
+- **THEN** the controller MUST reject additional requests until expired entries
+  can be reclaimed
+- **AND** its replay-state memory MUST remain bounded
+
 ### Requirement: Controller-owned human decisions and authoritative evidence
 
 The controller MUST be the only writer of human approval decisions and

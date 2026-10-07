@@ -91,7 +91,7 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 	if state.Phase == lifecycle.PhaseTerminal {
 		return RunResult{}, fmt.Errorf("run %s уже terminal", config.RunID)
 	}
-	evidenceStore, _, replayed, err := evidence.Resume(
+	evidenceStore, _, replayed, err := e.pipeline.evidence.Resume(
 		filepath.Join(config.TargetDir, ".ai-team", "runs"), config.RunID,
 	)
 	if err != nil {

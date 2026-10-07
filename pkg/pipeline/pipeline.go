@@ -78,6 +78,7 @@ type Pipeline struct {
 	recorder   Recorder
 	delivery   delivery.Service
 	approvals  ApprovalStore
+	evidence   EvidenceStoreFactory
 	reportsDir string
 }
 
@@ -116,6 +117,14 @@ func WithApprovalStore(store ApprovalStore) Option {
 	return func(p *Pipeline) { p.approvals = store }
 }
 
+// WithEvidenceStoreFactory injects the run evidence persistence port. The
+// filesystem-backed evidence store remains the default. This seam alone does
+// not move evidence or artifacts out of the target filesystem or isolate a
+// worker from controller-owned state.
+func WithEvidenceStoreFactory(factory EvidenceStoreFactory) Option {
+	return func(p *Pipeline) { p.evidence = factory }
+}
+
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 	if cfg == nil {
 		cfg = config.Default()
@@ -135,6 +144,9 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 	}
 	if p.delivery == nil {
 		p.delivery = delivery.NewController()
+	}
+	if p.evidence == nil {
+		p.evidence = filesystemEvidenceStoreFactory{}
 	}
 	return p
 }
@@ -185,7 +197,7 @@ type runState struct {
 	startTime                 time.Time
 	approvedPlanHash          string
 	runID                     string
-	evidence                  *evidence.Store
+	evidence                  EvidenceStore
 	attemptOrdinal            int
 	userOwnedPaths            map[string]bool
 	lifecycleStore            *lifecycle.Store
@@ -433,7 +445,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if err != nil {
 		return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resolved workflow evidence: %w", err)
 	}
-	var evidenceStore *evidence.Store
+	var evidenceStore EvidenceStore
 	var replayedRun evidence.ReplayedRun
 	var resumeInvalidated []string
 	var resumeMutations []string
@@ -454,7 +466,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", verifyErr)
 		}
-		evidenceStore, manifest, replayedRun, err = evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
+		evidenceStore, manifest, replayedRun, err = p.evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
 		}
@@ -582,7 +594,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if marshalErr != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("provenance manifest: %w", marshalErr)
 		}
-		evidenceStore, err = evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
+		evidenceStore, err = p.evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
 			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
 			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot, Provenance: provenanceData,
 		})
@@ -884,7 +896,7 @@ func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task strin
 		return err
 	}
 	runRoot := filepath.Join(targetDir, ".ai-team", "runs")
-	evidenceStore, manifest, replayed, err := evidence.Resume(runRoot, runID)
+	evidenceStore, manifest, replayed, err := p.evidence.Resume(runRoot, runID)
 	if err != nil {
 		return fmt.Errorf("recover initial lifecycle: verify evidence: %w", err)
 	}

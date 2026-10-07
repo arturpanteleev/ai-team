@@ -3280,7 +3280,8 @@ func TestRecoverInitialLifecycleRebuildsOnlyRunStartedCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry())
+	factory := &countingEvidenceFactory{delegate: filesystemEvidenceStoreFactory{}}
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(), WithEvidenceStoreFactory(factory))
 	configSnapshot, workflowSnapshot, err := p.resolvedEvidenceSnapshots()
 	if err != nil {
 		t.Fatal(err)
@@ -3301,6 +3302,9 @@ func TestRecoverInitialLifecycleRebuildsOnlyRunStartedCheckpoint(t *testing.T) {
 	// exist, while lifecycle.Create has not yet committed.
 	if err := p.recoverInitialLifecycle(runID, target, "feat", "тестовая задача"); err != nil {
 		t.Fatalf("restore startup checkpoint: %v", err)
+	}
+	if factory.resumes != 1 {
+		t.Fatalf("recovery must reopen evidence through injected factory: resumes=%d", factory.resumes)
 	}
 	lifecycleStore, err := lifecycle.NewStore(target)
 	if err != nil {
@@ -3357,8 +3361,10 @@ func TestRecoverInitialLifecycleRebuildsRunManifestBeforeRunStarted(t *testing.T
 func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
 	dir := env(t)
 	cfg := cfgFor(config.AgentConfig{Name: "analyst"})
+	factory := &countingEvidenceFactory{delegate: filesystemEvidenceStoreFactory{}}
 	p := New(cfg, testRegistry(),
-		WithRuntimeFactory(newScripted().factory), WithPrompter(&scriptedPrompter{}))
+		WithRuntimeFactory(newScripted().factory), WithPrompter(&scriptedPrompter{}),
+		WithEvidenceStoreFactory(factory))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	started, err := p.RunWithResult(ctx, RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir})
@@ -3368,6 +3374,9 @@ func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
 	result, err := NewRunEngine(p).Cancel(CancelConfig{RunID: started.RunID, TargetDir: dir})
 	if err != nil || result.Outcome != workflow.RunCanceled {
 		t.Fatalf("cancel: result=%+v err=%v", result, err)
+	}
+	if factory.resumes != 1 {
+		t.Fatalf("cancel must reopen evidence through injected factory: resumes=%d", factory.resumes)
 	}
 	stateStore, _ := lifecycle.NewStore(dir)
 	state, err := stateStore.Load(started.RunID)
@@ -3379,6 +3388,20 @@ func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
 	)
 	if err != nil || replayed.Status != workflow.RunCanceled {
 		t.Fatalf("cancel evidence: %+v err=%v", replayed, err)
+	}
+	events, err := evidence.VerifyEventLog(
+		filepath.Join(dir, ".ai-team", "runs", started.RunID, "events.jsonl"), started.RunID,
+	)
+	if err != nil {
+		t.Fatalf("cancel evidence chain: %v", err)
+	}
+	canceled, finished := false, false
+	for _, event := range events {
+		canceled = canceled || event.Type == "run_canceled"
+		finished = finished || event.Type == "run_finished"
+	}
+	if !canceled || !finished {
+		t.Fatalf("cancel evidence must include run_canceled and run_finished: canceled=%t finished=%t", canceled, finished)
 	}
 }
 

@@ -850,6 +850,184 @@ func TestWorkerCandidateEvidenceControllerStoreIsScopedAndImmutable(t *testing.T
 	}
 }
 
+func TestWorkerAPICandidateEvidenceStoreUsesScopedUnixAPI(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-evidence-client-run", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "candidate-evidence-client-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPICandidateEvidenceStore(port)
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: job.RunID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+
+	if err := store.WriteCandidateEvidence("review-candidate.json", document); err != nil {
+		t.Fatalf("write candidate evidence through worker API: %v", err)
+	}
+	if err := store.WriteCandidateEvidence("review-candidate.json", document); err != nil {
+		t.Fatalf("exact retry through worker API should be idempotent: %v", err)
+	}
+	loaded, err := store.ReadCandidateEvidence("review-candidate.json")
+	if err != nil || !reflect.DeepEqual(loaded, document) {
+		t.Fatalf("read candidate evidence through worker API: loaded=%+v err=%v", loaded, err)
+	}
+
+	badDocument := document
+	badDocument.RunID = "another-run"
+	if err := store.WriteCandidateEvidence("review-candidate.json", badDocument); err == nil {
+		t.Fatal("worker API store accepted evidence for another run")
+	}
+	if err := store.WriteCandidateEvidence("unsupported.json", document); err == nil {
+		t.Fatal("worker API store accepted an unsupported evidence name")
+	}
+	if _, err := store.ReadCandidateEvidence("unsupported.json"); err == nil {
+		t.Fatal("worker API store read an unsupported evidence name")
+	}
+	if _, err := store.ReadCandidateEvidence("verification-candidate.json"); err == nil {
+		t.Fatal("worker API store read missing evidence")
+	}
+
+	var nilStore *workerAPICandidateEvidenceStore
+	if err := nilStore.check("review-candidate.json"); err == nil {
+		t.Fatal("nil candidate evidence store was accepted")
+	}
+	if err := NewWorkerAPICandidateEvidenceStore(nil).(*workerAPICandidateEvidenceStore).WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("candidate evidence store without a port was accepted")
+	}
+
+	// A non-Unix scoped client must refuse this controller-owned store.
+	loopbackPort := &WorkerAPIPort{address: "http://127.0.0.1:1234", scope: port.scope}
+	if err := NewWorkerAPICandidateEvidenceStore(loopbackPort).WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("loopback worker API used controller-owned candidate evidence storage")
+	}
+
+	cancelJob := job
+	cancelJob.Operation = OperationCancel
+	cancelSocket := filepath.Join(socketDir, "cancel.sock")
+	cancelServer, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, cancelSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelServer.close()
+	t.Setenv(WorkerAPISocketEnv, cancelSocket)
+	t.Setenv(WorkerAPITokenEnv, cancelServer.token)
+	cancelPort, err := NewWorkerAPIPort(cancelJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelStore := NewWorkerAPICandidateEvidenceStore(cancelPort)
+	if err := cancelStore.WriteCandidateEvidence("review-candidate.json", document); err == nil {
+		t.Fatal("Cancel API accepted candidate evidence write")
+	}
+	if _, err := cancelStore.ReadCandidateEvidence("review-candidate.json"); err == nil {
+		t.Fatal("Cancel API accepted candidate evidence read")
+	}
+}
+
+func TestControllerCandidateEvidenceStorageRejectsInvalidState(t *testing.T) {
+	const runID = "candidate-evidence-invalid-state"
+	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+
+	for name, args := range map[string]struct{ root, runID, name string }{
+		"invalid run ID":   {root: root, runID: "../escape", name: "review-candidate.json"},
+		"unsupported name": {root: root, runID: runID, name: "other.json"},
+		"relative root":    {root: "relative", runID: runID, name: "review-candidate.json"},
+		"unclean root":     {root: root + "/../evidence", runID: runID, name: "review-candidate.json"},
+		"empty root":       {root: "", runID: runID, name: "review-candidate.json"},
+	} {
+		t.Run("path "+name, func(t *testing.T) {
+			if _, err := candidateEvidencePath(args.root, args.runID, args.name); err == nil {
+				t.Fatalf("candidate evidence path accepted invalid input: %+v", args)
+			}
+		})
+	}
+
+	badDocument := document
+	badDocument.RunID = "another-run"
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", badDocument); err == nil {
+		t.Fatal("controller accepted candidate evidence for another run")
+	}
+	if _, err := readControllerCandidateEvidence(root, "../escape", "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence for invalid run ID")
+	}
+	if _, err := readControllerCandidateEvidence("relative", runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence from a relative root")
+	}
+
+	// A non-directory component makes the controller's safe directory creation fail.
+	blockedParent := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blockedParent, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(filepath.Join(blockedParent, "evidence"), runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller wrote candidate evidence below a file")
+	}
+	directoryRoot := filepath.Join(t.TempDir(), "evidence")
+	directoryPath, err := candidateEvidencePath(directoryRoot, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(directoryRoot, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced a directory at the candidate evidence path")
+	}
+
+	path, err := candidateEvidencePath(root, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced malformed existing candidate evidence")
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read malformed candidate evidence")
+	}
+
+	stored, err := json.Marshal(badDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, stored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", document); err == nil {
+		t.Fatal("controller replaced stored candidate evidence with invalid run scope")
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); err == nil {
+		t.Fatal("controller read candidate evidence with invalid run scope")
+	}
+}
+
 func TestWriteControllerCandidateEvidenceConcurrentExactRetries(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
 	const runID = "candidate-evidence-concurrent-run"

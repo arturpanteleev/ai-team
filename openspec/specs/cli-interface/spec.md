@@ -3,7 +3,7 @@
 Единый безопасный CLI для инициализации, запуска, оценки и наблюдения workflow.
 ## Requirements
 ### Requirement: CLI commands and exit codes
-CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `version`, `help`; run MUST возвращать 0 для success, 1 для failure/rejection, 2 для BLOCKED и 3 для stopped.
+CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `db backup`, `version`, `help`; run MUST возвращать 0 для success, 1 для failure/rejection, 2 для BLOCKED и 3 для stopped.
 
 #### Scenario: Unknown command
 - **КОГДА** передана неизвестная команда
@@ -105,4 +105,3 @@ transition approval MUST NOT разрешать delivery side effects.
 #### Scenario: Несколько samples
 - **КОГДА** пользователь передаёт `--samples 3`
 - **ТОГДА** результат MUST содержать individual samples, median, mean и standard deviation
-

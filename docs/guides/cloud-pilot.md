@@ -146,6 +146,13 @@ SQLite и общий storage port упрощают подключение contro
    задаются TLS ingress, restart/health policy, persistent controller storage,
    least-purpose secrets, backup/restore и deny-by-default network policy.
 
+`ai-team db backup --db <path> --out <new-path>` создаёт согласованный онлайн
+snapshot только controller SQLite database, включая committed WAL state.
+Команда отказывает при существующем output и публикует snapshot с режимом
+0600. Это не полный backup: run evidence, artifacts и прочие файлы требуют
+отдельного backup/restore решения; восстановление пилота этой командой не
+проверяется.
+
 ## Threat model и критерии, которые должны блокировать release
 
 Считаем worker потенциально скомпрометированным через агент, проектный код,

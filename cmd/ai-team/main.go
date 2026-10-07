@@ -102,6 +102,8 @@ func main() {
 		cmdWeb()
 	case "gc":
 		cmdGC()
+	case "db":
+		cmdDB()
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -143,6 +145,8 @@ func printUsage() {
   ai-team eval                     Оценить качество артефакта или агента
   ai-team web                      Запустить web-дашборд
   ai-team gc                       Уборка растущих артефактов .ai-team
+  ai-team db backup --db <path> --out <path>
+                                   Снимок только SQLite controller database
   ai-team version                  Версия
   ai-team help                     Эта справка
 
@@ -167,6 +171,12 @@ func printUsage() {
   --prune-runs              Разрешить удаление immutable run evidence (.ai-team/runs),
                             но только для run с verified-записью state/exports (V0-4 guard;
                             пока нет экспорта — флаг безопасно не удаляет evidence)
+
+Флаги db backup:
+  --db <path>               Существующая SQLite controller database
+  --out <path>              Новый файл snapshot (существующий файл не перезаписывается)
+  Команда копирует только SQLite database; run evidence, artifacts и другие
+  файлы состояния нужно резервировать отдельно.
 
 Флаги gate:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)

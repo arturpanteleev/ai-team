@@ -84,6 +84,88 @@ func TestWorkerAPIStoresAttemptManifestThroughScopedControllerPort(t *testing.T)
 	}
 }
 
+func TestWorkerAPIAttemptManifestStoreRejectsUnavailableAndMismatchedPorts(t *testing.T) {
+	manifest := evidence.AttemptManifest{RunID: "manifest-run", AttemptID: "attempt-1"}
+	if err := (*workerAPIAttemptManifestStore)(nil).WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("nil store write error = %v, want unavailable", err)
+	}
+	if _, err := (*workerAPIAttemptManifestStore)(nil).ReadAttemptManifest("", "manifest-run", "attempt-1"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("nil store read error = %v, want unavailable", err)
+	}
+	if err := NewWorkerAPIAttemptManifestStore(nil).WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("nil port write error = %v, want unavailable", err)
+	}
+	if _, err := NewWorkerAPIAttemptManifestStore(nil).ReadAttemptManifest("", "manifest-run", "attempt-1"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("nil port read error = %v, want unavailable", err)
+	}
+
+	// The compatibility TCP port does not own controller state, even when a
+	// socket environment variable happens to be present.
+	t.Setenv(WorkerAPISocketEnv, "/tmp/unused-worker-api.sock")
+	unsupported := NewWorkerAPIAttemptManifestStore(&workerAPIPort{address: "http://127.0.0.1:1234", scope: workerAPIScope{RunID: "manifest-run"}})
+	if err := unsupported.WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("unsupported port write error = %v, want unavailable", err)
+	}
+	if _, err := unsupported.ReadAttemptManifest("", "manifest-run", "attempt-1"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("unsupported port read error = %v, want unavailable", err)
+	}
+
+	port := &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "manifest-run"}}
+	store := NewWorkerAPIAttemptManifestStore(port)
+	manifest.RunID = "another-run"
+	if err := store.WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "run mismatch") {
+		t.Fatalf("mismatched write error = %v, want run mismatch", err)
+	}
+	if _, err := store.ReadAttemptManifest("", "another-run", "attempt-1"); err == nil || !strings.Contains(err.Error(), "run mismatch") {
+		t.Fatalf("mismatched read error = %v, want run mismatch", err)
+	}
+}
+
+func TestWorkerAPIAttemptManifestStoreReturnsControllerErrors(t *testing.T) {
+	target := t.TempDir()
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-errors-%d.sock", os.Getpid()))
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attempt-api-errors", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPIAttemptManifestStore(port)
+	if _, err := store.ReadAttemptManifest("", job.RunID, "missing-attempt"); err == nil || !strings.Contains(err.Error(), "attempt_manifest.read") || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("controller read error = %v, want missing manifest details", err)
+	}
+}
+
+func TestWorkerAPIServerFailsClosedWhenAttemptManifestReservationCannotBeCreated(t *testing.T) {
+	target := t.TempDir()
+	manifestRoot := filepath.Join(target, ".ai-team", "state", "attempt-manifests")
+	if err := os.MkdirAll(filepath.Dir(manifestRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestRoot, []byte("block manifest storage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-reserve-failure-%d.sock", os.Getpid()))
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attempt-api-reserve-failure", TargetDir: target, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err == nil || !strings.Contains(err.Error(), "reserve controller attempt manifest store") {
+		if server != nil {
+			server.close()
+		}
+		t.Fatalf("controller API start error = %v, want attempt manifest reservation failure", err)
+	}
+	if _, statErr := os.Lstat(socket); !os.IsNotExist(statErr) {
+		t.Fatalf("failed controller API start left socket behind: %v", statErr)
+	}
+}
+
 func TestWorkerAPIAttemptManifestTransportBoundsAtStorageLimit(t *testing.T) {
 	target := t.TempDir()
 	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-boundary-%d.sock", os.Getpid()))

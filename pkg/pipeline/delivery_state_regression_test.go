@@ -136,15 +136,24 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	if err != nil || !found {
 		t.Fatalf("read initial terminal record: found=%v err=%v", found, err)
 	}
+	if err := delivery.WriteControllerTerminalRecord(dir, runID, *record); err != nil {
+		t.Fatalf("migrate test record to controller store: %v", err)
+	}
 	if err := os.Remove(filepath.Join(runDir, "delivery.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
+		t.Fatalf("reconcile should accept a valid controller-owned record: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".ai-team", "state", "delivery", runID+".json")); err != nil {
 		t.Fatal(err)
 	}
 	record.PlanHash = strings.Repeat("c", 64)
 	record.RecordSHA256 = ""
-	if err := delivery.WriteTerminalRecord(runDir, *record); err != nil {
+	if err := delivery.WriteControllerTerminalRecord(dir, runID, *record); err != nil {
 		t.Fatalf("write valid mismatched terminal record: %v", err)
 	}
-	if _, found, err := delivery.ReadTerminalRecord(runDir); err != nil || !found {
+	if _, found, err := delivery.ReadControllerTerminalRecord(dir, runID); err != nil || !found {
 		t.Fatalf("fixture must remain a valid delivery record: found=%v err=%v", found, err)
 	}
 

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
@@ -77,6 +78,10 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(usageDir, "controller-sentinel.json"), []byte("usage-envelope-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: "sandbox-probe", Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
+	if err := delivery.WriteControllerTerminalRecord(target, deliveryRecord.RunID, deliveryRecord); err != nil {
 		t.Fatal(err)
 	}
 	briefStore := pipeline.NewFileBriefStore(target)
@@ -154,7 +159,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
 	if report.BriefSourceReadable || !report.BriefSourceWriteSucceeded || !report.BriefAPIListReadSucceeded {
@@ -166,6 +171,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if !report.UsageAPIWriteSucceeded {
 		t.Fatalf("worker could not publish usage through the controller API: %+v", report)
+	}
+	if !report.DeliveryAPIWriteSucceeded {
+		t.Fatalf("worker could not submit terminal delivery through controller API: %+v", report)
+	}
+	if stored, found, readErr := delivery.ReadControllerTerminalRecord(target, deliveryRecord.RunID); readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA {
+		t.Fatalf("controller delivery sentinel changed or disappeared: record=%+v found=%v err=%v", stored, found, readErr)
 	}
 	if _, err := metrics.ReadUsageEnvelope(target, "sandbox-probe"); err != nil {
 		t.Fatalf("controller did not retain worker usage after process exit: %v", err)
@@ -651,6 +662,9 @@ type sandboxProbeReport struct {
 	LegacyApprovalReadable        bool `json:"legacy_approval_readable"`
 	CandidateMetadataReadable     bool `json:"candidate_metadata_readable"`
 	UsageStateReadable            bool `json:"usage_state_readable"`
+	DeliveryStateReadable         bool `json:"delivery_state_readable"`
+	DeliveryDirectWriteSucceeded  bool `json:"delivery_direct_write_succeeded"`
+	DeliveryAPIWriteSucceeded     bool `json:"delivery_api_write_succeeded"`
 	UsageAPIWriteSucceeded        bool `json:"usage_api_write_succeeded"`
 	BriefSourceReadable           bool `json:"brief_source_readable"`
 	BriefSourceWriteSucceeded     bool `json:"brief_source_write_succeeded"`
@@ -700,6 +714,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
 	usageData, usageErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "usage", "controller-sentinel.json"))
+	deliveryPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery", job.RunID+".json")
+	deliveryData, deliveryErr := os.ReadFile(deliveryPath)
+	deliveryDirectWriteErr := os.WriteFile(deliveryPath, []byte("worker-overwrite-attempt"), 0600)
 	briefPath := filepath.Join(job.TargetDir, ".ai-team", "runs", job.RunID, "brief", "0001-intention.md")
 	_, briefErr := os.ReadFile(briefPath)
 	briefWriteErr := os.WriteFile(briefPath, []byte("worker-overwrite-attempt"), 0600)
@@ -710,6 +727,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	apiReachable := false
 	adminControlPlaneCallRejected := false
 	usageAPIWriteSucceeded := false
+	deliveryAPIWriteSucceeded := false
 	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
@@ -718,6 +736,8 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
 		usageEnvelope := metrics.Build(job.RunID, "probe", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
 		usageAPIWriteSucceeded = port.call("usage.envelope.write", workerAPICall{Usage: usageEnvelope}, nil) == nil
+		deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID, Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
+		deliveryAPIWriteSucceeded = NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(deliveryRecord) == nil
 		briefs := NewWorkerAPIBriefs(port)
 		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
 		versions, listErr := briefs.List(job.RunID)
@@ -744,6 +764,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		LegacyApprovalReadable:        approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
 		CandidateMetadataReadable:     candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
 		UsageStateReadable:            usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
+		DeliveryStateReadable:         deliveryErr == nil && len(deliveryData) > 0,
+		DeliveryDirectWriteSucceeded:  deliveryDirectWriteErr == nil,
+		DeliveryAPIWriteSucceeded:     deliveryAPIWriteSucceeded,
 		UsageAPIWriteSucceeded:        usageAPIWriteSucceeded,
 		BriefSourceReadable:           briefErr == nil,
 		BriefSourceWriteSucceeded:     briefWriteErr == nil,

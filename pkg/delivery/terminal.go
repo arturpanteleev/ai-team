@@ -231,3 +231,157 @@ func ReadTerminalRecordFile(path string) (*TerminalRecord, bool, error) {
 	}
 	return &record, true, nil
 }
+
+// WriteControllerTerminalRecord stores a worker-submitted record outside the
+// run evidence directory. The caller must bind runID to an authenticated
+// per-run controller API scope; record contents remain worker-supplied.
+func WriteControllerTerminalRecord(targetDir, runID string, record TerminalRecord) error {
+	if err := validateTerminalRunID(runID); err != nil {
+		return fmt.Errorf("terminal delivery run id: %w", err)
+	}
+	if record.RunID != runID {
+		return fmt.Errorf("terminal delivery record run mismatch: scope=%q record=%q", runID, record.RunID)
+	}
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	dir, err := safeio.EnsureDir(targetDir, ".ai-team", "state", "delivery")
+	if err != nil {
+		return err
+	}
+	finalPath := filepath.Join(dir, runID+".json")
+	if existing, ok, err := ReadTerminalRecordAtPath(finalPath); err != nil {
+		return err
+	} else if ok {
+		if sameTerminalRecord(*existing, record) {
+			return nil
+		}
+		return fmt.Errorf("terminal delivery record already exists for run %s; conflicting overwrite rejected", runID)
+	}
+	digest, err := record.selfDigest()
+	if err != nil {
+		return err
+	}
+	record.RecordSHA256 = digest
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(dir, ".tmp-delivery-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmpPath, 0600); err != nil {
+		return err
+	}
+	if err = os.Link(tmpPath, finalPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			existing, ok, readErr := ReadTerminalRecordAtPath(finalPath)
+			if readErr != nil {
+				return readErr
+			}
+			if ok && sameTerminalRecord(*existing, record) {
+				return nil
+			}
+			return fmt.Errorf("terminal delivery record already exists for run %s; conflicting overwrite rejected", runID)
+		}
+		return err
+	}
+	if dirFile, openErr := os.Open(dir); openErr == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+	return nil
+}
+
+// ReadControllerTerminalRecord reads the controller-owned record. Missing is
+// distinct from corruption so callers can support the legacy runDir file.
+func ReadControllerTerminalRecord(targetDir, runID string) (*TerminalRecord, bool, error) {
+	if err := validateTerminalRunID(runID); err != nil {
+		return nil, false, fmt.Errorf("terminal delivery run id: %w", err)
+	}
+	path := filepath.Join(targetDir, ".ai-team", "state", "delivery", runID+".json")
+	record, ok, err := ReadTerminalRecordAtPath(path)
+	if err != nil || !ok {
+		return record, ok, err
+	}
+	if record.RunID != runID {
+		return nil, false, fmt.Errorf("terminal delivery record identity mismatch: requested=%q stored=%q", runID, record.RunID)
+	}
+	return record, true, nil
+}
+
+// ReadTerminalRecordForRun prefers controller-owned state, falling back to
+// the historical evidence-local delivery.json only when the new file is absent.
+func ReadTerminalRecordForRun(targetDir, runDir, runID string) (*TerminalRecord, bool, error) {
+	record, ok, err := ReadControllerTerminalRecord(targetDir, runID)
+	if err != nil || ok {
+		return record, ok, err
+	}
+	record, ok, err = ReadTerminalRecord(runDir)
+	if err != nil || !ok {
+		return record, ok, err
+	}
+	if record.RunID != runID {
+		return nil, false, fmt.Errorf("legacy terminal delivery record identity mismatch: requested=%q stored=%q", runID, record.RunID)
+	}
+	return record, true, nil
+}
+
+func ReadTerminalRecordAtPath(path string) (*TerminalRecord, bool, error) {
+	data, err := safeio.ReadRegularFile(path, deliveryRecordMaxSize)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var record TerminalRecord
+	if err := decoder.Decode(&record); err != nil {
+		return nil, false, fmt.Errorf("terminal delivery record decode: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return nil, false, errors.New("terminal delivery record: trailing JSON value")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, false, fmt.Errorf("terminal delivery record: trailing data: %w", err)
+	}
+	if err := record.Validate(); err != nil {
+		return nil, false, err
+	}
+	return &record, true, nil
+}
+
+func sameTerminalRecord(a, b TerminalRecord) bool {
+	aDigest, aErr := a.selfDigest()
+	bDigest, bErr := b.selfDigest()
+	return aErr == nil && bErr == nil && aDigest == bDigest
+}
+
+func validateTerminalRunID(runID string) error {
+	if runID == "" || runID == "." || runID == ".." || len(runID) > 255 || filepath.Base(runID) != runID || filepath.Clean(runID) != runID || strings.ContainsAny(runID, "/\\\x00") {
+		return fmt.Errorf("invalid run id %q", runID)
+	}
+	for _, r := range runID {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid run id %q", runID)
+		}
+	}
+	return nil
+}

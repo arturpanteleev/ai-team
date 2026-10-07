@@ -51,7 +51,10 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 		// delivery.json (deferred delivery). Attempt-манифесты stay immutable
 		// (CommitSHA пуст), поэтому сначала ищем record, и только при его
 		// отсутствии сканируем старые attempt-манифесты.
-		if record, recOK, recErr := delivery.ReadTerminalRecord(runDir); recErr == nil && recOK && record.Feature == feature {
+		targetDir := filepath.Dir(filepath.Dir(runsRoot))
+		if record, recOK, recErr := delivery.ReadTerminalRecordForRun(targetDir, runDir, entry.Name()); recErr != nil {
+			continue // corrupted controller or legacy record must not fall back to attempts
+		} else if recOK && record.Feature == feature {
 			if !ok || manifest.StartedAt.After(result.StartedAt) {
 				result = DeliveredRun{
 					RunID: manifest.RunID, StartedAt: manifest.StartedAt,

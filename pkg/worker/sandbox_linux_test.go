@@ -79,6 +79,11 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(usageDir, "controller-sentinel.json"), []byte("usage-envelope-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	briefStore := pipeline.NewFileBriefStore(target)
+	brief, err := briefStore.CreateInitial("sandbox-probe", "test worker filesystem boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
 	candidateWorktree := filepath.Join(target, ".ai-team", "worktrees", "probe")
 	if err := os.MkdirAll(candidateWorktree, 0700); err != nil {
 		t.Fatal(err)
@@ -151,6 +156,13 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
+	}
+	if report.BriefSourceReadable || !report.BriefSourceWriteSucceeded || !report.BriefAPIListReadSucceeded {
+		t.Fatalf("brief source/API boundary failed: %+v", report)
+	}
+	briefAfter, err := os.ReadFile(filepath.Join(target, ".ai-team", "runs", "sandbox-probe", filepath.FromSlash(brief.Version.Path)))
+	if err != nil || string(briefAfter) != string(brief.Content) {
+		t.Fatalf("worker changed or removed durable controller brief after child exit: content=%q err=%v", briefAfter, err)
 	}
 	if !report.UsageAPIWriteSucceeded {
 		t.Fatalf("worker could not publish usage through the controller API: %+v", report)
@@ -278,7 +290,7 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 		target := makeBubblewrapTarget(t)
 		home, temp := t.TempDir(), t.TempDir()
 		command, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
-			filepath.Join(target, "controller.db"), nil, []string{"HOME=" + home, "TMPDIR=" + temp})
+			filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + home, "TMPDIR=" + temp})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -291,6 +303,22 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 		}
 		if !found {
 			t.Fatalf("bubblewrap command must mask standard host sockets at /run: %v", command.Args)
+		}
+		briefCommand, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+			filepath.Join(target, "controller.db"), "brief-mask-test", nil, []string{"HOME=" + home, "TMPDIR=" + temp})
+		if err != nil {
+			t.Fatal(err)
+		}
+		briefDir := filepath.Join(target, ".ai-team", "runs", "brief-mask-test", "brief")
+		foundBriefMask := false
+		for i := 0; i+1 < len(briefCommand.Args); i++ {
+			if briefCommand.Args[i] == "--tmpfs" && briefCommand.Args[i+1] == briefDir {
+				foundBriefMask = true
+				break
+			}
+		}
+		if !foundBriefMask {
+			t.Fatalf("bubblewrap command must mask only the current run brief source: %v", briefCommand.Args)
 		}
 	})
 
@@ -331,7 +359,7 @@ func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 	})
 	t.Run("command builder rejects root before runtime lookup", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
-		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), string(filepath.Separator), "unused.db", nil, nil)
+		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), string(filepath.Separator), "unused.db", "sandbox-test", nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "filesystem root") {
 			t.Fatalf("root workspace must fail before looking up bwrap, got %v", err)
 		}
@@ -339,7 +367,7 @@ func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 	t.Run("command builder reports missing runtime", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
 		target := makeBubblewrapTarget(t)
-		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, filepath.Join(target, "controller.db"), nil, []string{"HOME=/tmp", "TMPDIR=/tmp"})
+		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=/tmp", "TMPDIR=/tmp"})
 		if err == nil || !strings.Contains(err.Error(), "bubblewrap unavailable") {
 			t.Fatalf("missing bwrap runtime must fail closed, got %v", err)
 		}
@@ -367,7 +395,7 @@ func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 			{name: "database parent unavailable", env: validEnv, target: target, dbPath: filepath.Join(target, "missing", "controller.db"), want: "resolve database parent"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				_, err := bubblewrapWorkerCommand(context.Background(), worker, tc.target, tc.dbPath, tc.agentPaths, tc.env)
+				_, err := bubblewrapWorkerCommand(context.Background(), worker, tc.target, tc.dbPath, "sandbox-test", tc.agentPaths, tc.env)
 				if err == nil || !strings.Contains(err.Error(), tc.want) {
 					t.Fatalf("expected %q failure, got %v", tc.want, err)
 				}
@@ -390,7 +418,7 @@ func TestBubblewrapCommandBuilderRejectsProtectedAliasesAndApprovalSymlinks(t *t
 		t.Fatal(err)
 	}
 	env := []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
-	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, nil, env)
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, "sandbox-test", nil, env)
 	if err == nil || !strings.Contains(err.Error(), "hard links") {
 		t.Fatalf("command builder must reject a DB alias before masking: %v", err)
 	}
@@ -405,7 +433,7 @@ func TestBubblewrapCommandBuilderRejectsProtectedAliasesAndApprovalSymlinks(t *t
 	if err := os.Symlink(approvalTarget, approvalPath); err != nil {
 		t.Fatal(err)
 	}
-	_, err = bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, nil, env)
+	_, err = bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, dbPath, "sandbox-test", nil, env)
 	if err == nil || !strings.Contains(err.Error(), "real directory") {
 		t.Fatalf("command builder must reject a symlinked approval directory: %v", err)
 	}
@@ -582,7 +610,7 @@ func TestBubblewrapRejectsRunMountReopeningPaths(t *testing.T) {
 				target := makeBubblewrapTarget(t)
 				home, temp := t.TempDir(), t.TempDir()
 				_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
-					filepath.Join(target, "controller.db"), []string{tc.path}, []string{"HOME=" + home, "TMPDIR=" + temp})
+					filepath.Join(target, "controller.db"), "sandbox-test", []string{tc.path}, []string{"HOME=" + home, "TMPDIR=" + temp})
 				if err == nil || !strings.Contains(err.Error(), "agent registry path") || !strings.Contains(err.Error(), "overlaps /run") {
 					t.Fatalf("agent registry bind %q must be rejected, got %v", tc.path, err)
 				}
@@ -624,6 +652,9 @@ type sandboxProbeReport struct {
 	CandidateMetadataReadable     bool `json:"candidate_metadata_readable"`
 	UsageStateReadable            bool `json:"usage_state_readable"`
 	UsageAPIWriteSucceeded        bool `json:"usage_api_write_succeeded"`
+	BriefSourceReadable           bool `json:"brief_source_readable"`
+	BriefSourceWriteSucceeded     bool `json:"brief_source_write_succeeded"`
+	BriefAPIListReadSucceeded     bool `json:"brief_api_list_read_succeeded"`
 	WorktreeReadable              bool `json:"worktree_readable"`
 	TargetReadable                bool `json:"target_readable"`
 	TargetWritable                bool `json:"target_writable"`
@@ -669,6 +700,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
 	usageData, usageErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "usage", "controller-sentinel.json"))
+	briefPath := filepath.Join(job.TargetDir, ".ai-team", "runs", job.RunID, "brief", "0001-intention.md")
+	_, briefErr := os.ReadFile(briefPath)
+	briefWriteErr := os.WriteFile(briefPath, []byte("worker-overwrite-attempt"), 0600)
 	worktreeData, worktreeErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "worktrees", "probe", "visible.txt"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
@@ -676,6 +710,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	apiReachable := false
 	adminControlPlaneCallRejected := false
 	usageAPIWriteSucceeded := false
+	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
 		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 0
@@ -683,6 +718,13 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
 		usageEnvelope := metrics.Build(job.RunID, "probe", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
 		usageAPIWriteSucceeded = port.call("usage.envelope.write", workerAPICall{Usage: usageEnvelope}, nil) == nil
+		briefs := NewWorkerAPIBriefs(port)
+		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
+		versions, listErr := briefs.List(job.RunID)
+		if listErr == nil && len(versions) == 1 {
+			document, readErr := briefs.Read(job.RunID, versions[0].ID)
+			briefAPIListReadSucceeded = createErr == nil && readErr == nil && string(document.Content) == "# Исходное намерение\n\ntest worker filesystem boundary\n"
+		}
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
@@ -703,6 +745,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		CandidateMetadataReadable:     candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
 		UsageStateReadable:            usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
 		UsageAPIWriteSucceeded:        usageAPIWriteSucceeded,
+		BriefSourceReadable:           briefErr == nil,
+		BriefSourceWriteSucceeded:     briefWriteErr == nil,
+		BriefAPIListReadSucceeded:     briefAPIListReadSucceeded,
 		WorktreeReadable:              worktreeErr == nil && string(worktreeData) == "worktree-visible",
 		TargetReadable:                targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:                writeErr == nil,

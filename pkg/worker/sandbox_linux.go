@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 func checkBubblewrapAvailable() error {
@@ -21,7 +23,7 @@ func checkBubblewrapAvailable() error {
 	return nil
 }
 
-func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPath string, agentPaths, environment []string) (*exec.Cmd, error) {
+func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPath, runID string, agentPaths, environment []string) (*exec.Cmd, error) {
 	canonicalTarget, err := resolveBubblewrapTarget(target)
 	if err != nil {
 		return nil, err
@@ -96,6 +98,16 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		return nil, fmt.Errorf("prepare usage envelope mount: %w", err)
 	}
 	if err := appendPrivateDirectoryMount(&args, usageDir, true); err != nil {
+		return nil, err
+	}
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return nil, fmt.Errorf("business brief run id: %w", err)
+	}
+	briefDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "runs", runID, "brief")
+	if err != nil {
+		return nil, fmt.Errorf("prepare business brief mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, briefDir, true); err != nil {
 		return nil, err
 	}
 	resolvedDB, err := resolveExistingPath(dbPath)

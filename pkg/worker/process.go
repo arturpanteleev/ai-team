@@ -304,7 +304,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 	}
 	if e.bubblewrap {
-		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, e.agentPaths, command.Env)
+		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, job.RunID, e.agentPaths, command.Env)
 		if err != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker bubblewrap isolation: %w", err)
 		}

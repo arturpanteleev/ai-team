@@ -45,6 +45,16 @@ cloud non-Git resume в этом режиме завершается fail-closed
 сохраняет совместимость со старыми non-Git runs по provenance из target-файла;
 этот путь не является trust boundary.
 
+Для bubblewrap worker текущий durable brief-каталог
+`.ai-team/runs/<run_id>/brief` также накрывается namespace-local tmpfs.
+Worker получает версии и содержимое через run-scoped `brief.list` и
+`brief.read` controller API, а затем материализует байты в своём workspace.
+Linux child probe проверяет, что заранее сохранённый brief нельзя прочитать
+напрямую, попытка записи не меняет host-копию, а scoped API продолжает его
+возвращать. Локальные и non-bubblewrap запуски сохраняют файловое поведение.
+Остальные файлы в `.ai-team/runs`, включая evidence/manifests, остаются
+доступны worker-у; эта узкая маска не закрывает MAJ-07.
+
 Финальная usage-сводка bubblewrap cloud-run формируется worker-ом, но
 сохраняется контроллером через write-only Unix API в
 `.ai-team/state/usage/<run_id>.json`.

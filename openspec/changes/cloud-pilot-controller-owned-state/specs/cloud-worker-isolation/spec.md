@@ -106,8 +106,15 @@ security boundary; abrupt termination MAY leave temporary `.brief-*`
 directories behind. Local CLI runs MAY continue to use the filesystem-backed
 implementation of the same typed store contract.
 This application/API ownership boundary MUST NOT be described as OS
-inaccessibility: the target remains mounted to the worker, and a compromised
-worker can still read or alter the controller's on-target brief files directly.
+inaccessibility by itself: the target remains mounted to the worker. In the
+opt-in Linux bubblewrap mode, the current run's
+`.ai-team/runs/<run_id>/brief` directory MUST be overlaid with a namespace-local
+tmpfs. The controller MUST continue to serve brief list/read operations from
+the host store through the run-scoped API, and the worker MAY materialize the
+returned content in its candidate workspace. Local and non-bubblewrap runs
+MUST retain their filesystem-backed behavior. This masks only the durable brief
+source for the active run; other files under `.ai-team/runs`, including evidence and
+manifests, remain visible and MAJ-07 remains open.
 
 #### Scenario: Worker creates and resumes a clarified business brief
 
@@ -125,6 +132,19 @@ worker can still read or alter the controller's on-target brief files directly.
 - **THEN** the controller MUST reject the cross-run request or return no
   matching version
 - **AND** no other run's brief content may be returned
+
+#### Scenario: Bubblewrap worker uses a masked durable brief
+
+- **WHEN** a bubblewrap child attempts to read and overwrite a pre-existing
+  brief file in its run's durable brief directory while calling `brief.list`
+  and `brief.read` through its scoped API
+- **THEN** direct reads MUST not return the durable brief and child writes MUST
+  not alter the host copy
+- **AND** the scoped API MUST still return the expected brief versions/content
+- **AND** after child exit the host store MUST retain the original brief
+- **AND** local and non-bubblewrap worker behavior MUST remain filesystem-backed
+- **AND** this narrow mask MUST NOT be treated as evidence/artifact isolation or
+  closure of MAJ-07
 
 ### Requirement: Run-scoped controller-owned candidate metadata API
 

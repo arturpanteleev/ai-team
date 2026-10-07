@@ -79,9 +79,13 @@
   per-invocation staging under the writable target path
   `{target}/.ai-team/artifacts`. This path is visible to the worker and is not a
   security boundary; abrupt termination can leave `.brief-*` staging
-  directories behind. The target still exposes the
-  controller's on-target brief files to a compromised worker, so this is API
-  ownership only and has no Linux OS-inaccessibility probe.
+  directories behind. In opt-in Linux bubblewrap, the current run's durable
+  `.ai-team/runs/<run_id>/brief` source is overlaid with tmpfs while the host
+  store serves scoped list/read and the worker materializes the API content.
+  The child probe checks direct read denial, an isolated write attempt, API
+  list/read, and host-copy preservation after exit. This masks only the brief
+  source; other run evidence/manifests and artifacts remain visible, and MAJ-07
+  remains open.
 - [x] Route candidate metadata create/read through a run/target-scoped
   controller API for disposable workers; retain the filesystem store for local
   CLI. Bubblewrap masks only `.ai-team/state/candidates`, while leaving the

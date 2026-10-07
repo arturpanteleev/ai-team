@@ -30,6 +30,7 @@ import (
 type apiApprovalStore struct {
 	values      map[string]approval.PendingApproval
 	createErr   error
+	loadErr     error
 	createCalls int
 }
 
@@ -227,6 +228,9 @@ func TestWorkerControllerAPINonceCacheIsBoundedAndFailsClosed(t *testing.T) {
 	}
 }
 func (s *apiApprovalStore) Load(run, id string) (approval.PendingApproval, error) {
+	if s.loadErr != nil {
+		return approval.PendingApproval{}, s.loadErr
+	}
 	v, ok := s.values[run+"/"+id]
 	if !ok {
 		return v, os.ErrNotExist

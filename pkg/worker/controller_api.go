@@ -482,12 +482,16 @@ func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 
 func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }
 func (p *workerAPIPort) call(method string, value, out any) error {
+	return p.callWithRandom(method, value, out, rand.Reader)
+}
+
+func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.Reader) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
 	var nonceBytes [32]byte
-	if _, err := rand.Read(nonceBytes[:]); err != nil {
+	if _, err := io.ReadFull(random, nonceBytes[:]); err != nil {
 		return err
 	}
 	data, err := json.Marshal(workerAPIRequest{workerAPIScope: p.scope, Method: method, Payload: payload, Nonce: hex.EncodeToString(nonceBytes[:]), IssuedAt: time.Now().UTC()})

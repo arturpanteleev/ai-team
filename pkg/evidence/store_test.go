@@ -13,6 +13,19 @@ func testRunManifest(runID string) RunManifest {
 	return RunManifest{RunID: runID, ConfigSnapshot: json.RawMessage(`{"schema_version":1}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`)}
 }
 
+func TestValidateRunIDRejectsControlAndPlatformUnsafeValues(t *testing.T) {
+	for _, runID := range []string{"", ".", "..", "../outside", `a\b`, strings.Repeat("x", 256), "bad\tvalue", "bad\x7fvalue", "bad\x01value"} {
+		if err := ValidateRunID(runID); err == nil {
+			t.Errorf("ValidateRunID accepted %q", runID)
+		}
+	}
+	for _, runID := range []string{"run-1", "2026-10-07T12:00:00Z-run"} {
+		if err := ValidateRunID(runID); err != nil {
+			t.Errorf("ValidateRunID rejected valid run id %q: %v", runID, err)
+		}
+	}
+}
+
 func TestStorePublishesImmutableAttemptWithHashes(t *testing.T) {
 	target := t.TempDir()
 	artifactRoot := filepath.Join(target, "artifacts")

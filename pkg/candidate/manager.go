@@ -49,11 +49,94 @@ type MetadataStore interface {
 	Read(controlTarget, runID string) (Metadata, error)
 }
 
+// AbsenceMarkerStore is a controller-owned proof that a run was admitted on a
+// target without a Git repository. Workers may read the proof through their
+// scoped controller API, but only the controller writes it before worker
+// execution begins.
+type AbsenceMarkerStore interface {
+	MarkAbsent(controlTarget, runID string) error
+	ReadAbsent(controlTarget, runID string) error
+}
+
+// GitAdmissionStore records controller-side proof that Start admitted a run
+// while its target was a Git repository. It prevents a pre-existing absence
+// marker from being reinterpreted as non-Git admission during recovery.
+type GitAdmissionStore interface {
+	MarkGitAdmission(controlTarget, runID string) error
+	ReadGitAdmission(controlTarget, runID string) error
+}
+
 type FileMetadataStore struct{}
 
-func (FileMetadataStore) Create(metadata Metadata) error { return saveMetadata(metadata) }
+func (FileMetadataStore) Create(metadata Metadata) error {
+	if err := rejectAbsenceMarker(metadata.ControlTarget, metadata.RunID); err != nil {
+		return err
+	}
+	return saveMetadata(metadata)
+}
 func (FileMetadataStore) Read(controlTarget, runID string) (Metadata, error) {
-	return readMetadata(controlTarget, runID)
+	metadata, err := readMetadata(controlTarget, runID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if err := rejectAbsenceMarker(controlTarget, runID); err != nil {
+		return Metadata{}, err
+	}
+	return metadata, nil
+}
+func (FileMetadataStore) MarkAbsent(controlTarget, runID string) error {
+	return markAbsent(controlTarget, runID)
+}
+func (FileMetadataStore) ReadAbsent(controlTarget, runID string) error {
+	return readAbsent(controlTarget, runID)
+}
+func (FileMetadataStore) MarkGitAdmission(controlTarget, runID string) error {
+	return markGitAdmission(controlTarget, runID)
+}
+func (FileMetadataStore) ReadGitAdmission(controlTarget, runID string) error {
+	return readGitAdmission(controlTarget, runID)
+}
+
+// DetectGitRepository determines whether target belongs to a Git repository.
+// A failed rev-parse is considered a non-Git target only when no .git marker
+// exists on the target's ancestor chain; a damaged or inaccessible repository
+// therefore fails closed instead of being recorded as candidate absence.
+func DetectGitRepository(ctx context.Context, target string) (bool, error) {
+	canonical, err := canonicalDirectory(target)
+	if err != nil {
+		return false, err
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return false, fmt.Errorf("detect candidate repository: git executable unavailable: %w", err)
+	}
+	command := exec.CommandContext(ctx, "git", "-C", canonical, "rev-parse", "--show-toplevel")
+	command.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(strings.ToUpper(key), "GIT_") {
+			command.Env = append(command.Env, entry)
+		}
+	}
+	if err := command.Run(); err == nil {
+		return true, nil
+	} else {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		for current := canonical; ; current = filepath.Dir(current) {
+			marker := filepath.Join(current, ".git")
+			if _, statErr := os.Lstat(marker); statErr == nil {
+				return false, fmt.Errorf("detect candidate repository: .git marker exists but Git cannot resolve target: %w", err)
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return false, fmt.Errorf("inspect Git marker %s: %w", marker, statErr)
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+		}
+		return false, nil
+	}
 }
 
 func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, error) {
@@ -309,6 +392,244 @@ func saveMetadata(metadata Metadata) error {
 		return fmt.Errorf("persist candidate metadata without replacing an existing identity: %w", err)
 	}
 	return nil
+}
+
+const absenceMarkerVersion = 1
+
+type absenceMarker struct {
+	SchemaVersion int       `json:"schema_version"`
+	RunID         string    `json:"run_id"`
+	ControlTarget string    `json:"control_target"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+func markAbsent(controlTarget, runID string) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if !safeID(runID) {
+		return fmt.Errorf("candidate: invalid run id")
+	}
+	if err := readGitAdmission(target, runID); err == nil {
+		return errors.New("candidate absence conflicts with prior Git admission")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check Git admission before candidate absence: %w", err)
+	}
+	if _, err := readMetadata(target, runID); err == nil {
+		return errors.New("candidate absence conflicts with existing candidate metadata")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check candidate metadata before absence marker: %w", err)
+	}
+	dir, err := safeio.EnsureDir(target, ".ai-team", "state", "candidates")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, runID+".absent.json")
+	if _, err := readAbsenceMarker(target, runID); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("existing candidate absence marker is invalid: %w", err)
+	}
+	marker := absenceMarker{SchemaVersion: absenceMarkerVersion, RunID: runID, ControlTarget: target, CreatedAt: time.Now().UTC()}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, ".candidate-absence-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(data, '\n')); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(temporaryPath, path); err != nil {
+		if _, readErr := readAbsenceMarker(target, runID); readErr == nil {
+			return nil
+		}
+		return fmt.Errorf("persist controller candidate absence marker without replacement: %w", err)
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open candidate absence directory for sync: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return fmt.Errorf("sync candidate absence directory: %w", err)
+	}
+	return nil
+}
+
+func readAbsent(controlTarget, runID string) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if !safeID(runID) {
+		return fmt.Errorf("candidate: invalid run id")
+	}
+	if err := readGitAdmission(target, runID); err == nil {
+		return errors.New("candidate absence conflicts with prior Git admission")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("candidate Git admission state is invalid: %w", err)
+	}
+	if _, err := readMetadata(target, runID); err == nil {
+		return errors.New("candidate absence conflicts with existing candidate metadata")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("candidate metadata state is invalid: %w", err)
+	}
+	_, err = readAbsenceMarker(target, runID)
+	return err
+}
+
+type gitAdmissionMarker struct {
+	SchemaVersion int       `json:"schema_version"`
+	RunID         string    `json:"run_id"`
+	ControlTarget string    `json:"control_target"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+func markGitAdmission(controlTarget, runID string) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if !safeID(runID) {
+		return fmt.Errorf("candidate: invalid run id")
+	}
+	if err := readGitAdmission(target, runID); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("existing Git admission marker is invalid: %w", err)
+	}
+	dir, err := safeio.EnsureDir(target, ".ai-team", "state", "candidates")
+	if err != nil {
+		return err
+	}
+	marker := gitAdmissionMarker{SchemaVersion: 1, RunID: runID, ControlTarget: target, CreatedAt: time.Now().UTC()}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, ".candidate-git-admission-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(data, '\n')); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, runID+".git-admitted.json")
+	if err := os.Link(temporaryPath, path); err != nil {
+		if readErr := readGitAdmission(target, runID); readErr == nil {
+			return nil
+		}
+		return fmt.Errorf("persist Git admission marker without replacement: %w", err)
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open candidate admission directory for sync: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
+}
+
+func readGitAdmission(controlTarget, runID string) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if !safeID(runID) {
+		return fmt.Errorf("candidate: invalid run id")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(target, ".ai-team", "state", "candidates", runID+".git-admitted.json"), 16<<10)
+	if err != nil {
+		return err
+	}
+	var marker gitAdmissionMarker
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marker); err != nil {
+		return fmt.Errorf("candidate Git admission marker: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("candidate Git admission marker contains trailing JSON")
+	}
+	if marker.SchemaVersion != 1 || marker.RunID != runID || marker.ControlTarget != target || marker.CreatedAt.IsZero() {
+		return errors.New("candidate Git admission marker identity mismatch")
+	}
+	return nil
+}
+
+func rejectAbsenceMarker(controlTarget, runID string) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if _, err := readAbsenceMarker(target, runID); err == nil {
+		return errors.New("candidate metadata conflicts with candidate absence marker")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("candidate absence marker state is invalid: %w", err)
+	}
+	return nil
+}
+
+func readAbsenceMarker(target, runID string) (absenceMarker, error) {
+	if !safeID(runID) {
+		return absenceMarker{}, fmt.Errorf("candidate: invalid run id")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(target, ".ai-team", "state", "candidates", runID+".absent.json"), 16<<10)
+	if err != nil {
+		return absenceMarker{}, err
+	}
+	var marker absenceMarker
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marker); err != nil {
+		return absenceMarker{}, fmt.Errorf("candidate absence marker: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return absenceMarker{}, errors.New("candidate absence marker contains trailing JSON")
+	}
+	canonical, err := canonicalDirectory(target)
+	if err != nil {
+		return absenceMarker{}, err
+	}
+	if marker.SchemaVersion != absenceMarkerVersion || marker.RunID != runID || marker.ControlTarget != canonical || marker.CreatedAt.IsZero() {
+		return absenceMarker{}, errors.New("candidate absence marker identity mismatch")
+	}
+	return marker, nil
 }
 
 func readMetadata(controlTarget, runID string) (Metadata, error) {

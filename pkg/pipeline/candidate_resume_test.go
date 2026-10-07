@@ -88,6 +88,56 @@ func TestLoadResumeCandidatePreservesLocalNonGitCompatibility(t *testing.T) {
 	}
 }
 
+func TestCloudNonGitResumeUsesControllerAbsenceMarkerAfterRunManifestTampering(t *testing.T) {
+	target := t.TempDir()
+	runID := "cloud-nongit-resume"
+	store := candidate.FileMetadataStore{}
+	if err := store.MarkAbsent(target, runID); err != nil {
+		t.Fatalf("controller admission marker: %v", err)
+	}
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A worker can rewrite run.json, so the marker must be the only basis for
+	// skipping candidate metadata in a controller-backed resume.
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), []byte(`{"schema_version":999,"run_id":"forged"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := loadResumeCandidate(context.Background(), target, runID, store)
+	if err != nil || manager != nil {
+		t.Fatalf("valid controller marker should resume a non-Git run: manager=%v err=%v", manager, err)
+	}
+}
+
+func TestCloudNonGitResumeFailsClosedWithoutOrWithCorruptAbsenceMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(string, string) error
+	}{
+		{name: "missing", prepare: func(string, string) error { return nil }},
+		{name: "corrupt", prepare: func(target, runID string) error {
+			path := filepath.Join(target, ".ai-team", "state", "candidates", runID+".absent.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte(`{"schema_version":1,"run_id":"other"}`), 0600)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := t.TempDir()
+			runID := "cloud-nongit-fail-closed"
+			if err := tc.prepare(target, runID); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := loadResumeCandidate(context.Background(), target, runID, candidate.FileMetadataStore{})
+			if err == nil || manager != nil {
+				t.Fatalf("missing/corrupt controller marker must fail closed: manager=%v err=%v", manager, err)
+			}
+		})
+	}
+}
+
 func TestTamperedRunManifestCannotBypassMissingCandidateMetadata(t *testing.T) {
 	target := t.TempDir()
 	runID := "resume-candidate-run"

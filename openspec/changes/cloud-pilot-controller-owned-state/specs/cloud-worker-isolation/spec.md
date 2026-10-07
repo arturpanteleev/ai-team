@@ -137,11 +137,17 @@ MUST be rejected. Symlinked parent components of the target path are accepted
 and resolved to the same canonical target; the candidate manager requires the
 final target component itself to be a directory, not a symlink.
 Resume MUST fail closed when candidate metadata is missing; worker-writable
-run provenance MUST NOT establish that a run had no candidate. Until a
-controller-owned absence marker exists, non-Git runs without candidate
-metadata cannot resume in controller-backed mode. Local CLI MAY retain legacy
-non-Git resume compatibility using target-file provenance, which is not a
-trust boundary.
+run provenance MUST NOT establish that a run had no candidate. Before a
+bubblewrap cloud worker starts, ProcessEngine MUST determine Git eligibility
+and may persist a durable absence marker only for a non-Git target. The marker
+MUST be stored under the already-masked candidate metadata directory. The
+worker API MUST expose only run/target-scoped marker reads for resume/recovery;
+workers MUST NOT create or repair the marker. Missing, corrupt, or mismatched
+markers MUST fail closed. If bubblewrap is disabled, the worker can write the
+target directly, so ProcessEngine MUST neither create nor trust absence
+markers; controller-backed non-Git resume remains unavailable in that mode.
+Local CLI MAY retain legacy non-Git resume compatibility using target-file
+provenance, which is not a trust boundary.
 Local CLI runs MAY use the filesystem-backed store. In the opt-in Linux
 bubblewrap mode, `.ai-team/state/candidates` MUST be overlaid with a
 namespace-local tmpfs so controller metadata is not readable by the worker;
@@ -163,8 +169,18 @@ isolation of candidate contents, evidence, or artifacts.
 - **WHEN** candidate metadata is missing and worker-writable `run.json` claims
   `candidate=sha256/unknown`
 - **THEN** resume MUST fail closed
-- **AND** non-Git runs without a controller-owned candidate record MUST NOT
-  resume in controller-backed mode
+- **AND** non-Git runs without a controller-owned candidate record or valid
+  controller absence marker MUST NOT resume in controller-backed mode
+
+#### Scenario: Bubblewrap non-Git resume uses controller admission marker
+
+- **WHEN** ProcessEngine admits a non-Git run before spawning a bubblewrap
+  worker and the worker later resumes after modifying `run.json`
+- **THEN** resume MAY skip candidate metadata only when the exact run/target
+  marker is valid
+- **AND** worker API calls MUST NOT create or repair that marker
+- **AND** missing or corrupt marker state MUST fail closed
+- **AND** without bubblewrap, the marker MUST NOT authorize resume
 
 #### Scenario: Candidate metadata is masked while worktree remains available
 

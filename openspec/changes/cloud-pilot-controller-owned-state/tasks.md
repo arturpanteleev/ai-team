@@ -88,6 +88,11 @@
   candidate worktree readable/writable. Linux CI probe verifies the metadata
   sentinel is unreadable and a worktree sentinel remains readable. This does
   not isolate candidate contents, evidence, or other artifacts.
+- [x] Admit non-Git absence only in bubblewrap mode before worker spawn and
+  persist a run/target-bound marker under the already-masked candidate metadata
+  directory. Expose read-only resume/recovery lookup; missing or corrupt
+  markers and non-bubblewrap mode fail closed. Git candidate lifecycle and
+  candidate metadata/worktree mask scope remain unchanged.
 - [ ] Test worker process/network policy on a real runtime and verify there is
   no route to admin control endpoints and no control-plane secrets in worker.
 - [ ] Preserve run/approval/evidence through worker loss, controller restart,

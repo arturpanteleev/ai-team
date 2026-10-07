@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -86,17 +87,25 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await expect(firstRun.getByText('queued', { exact: true })).toBeVisible({ timeout: 10_000 })
     await expect(firstRun.getByText(/Queue #\d+/)).toBeVisible()
 
-    // The wrapper pauses after the queue claim, making the running state
-    // observable in the real UI before the worker's deliberately empty PATH
-    // makes runtime preflight fail deterministically.
+    // Hold the claimed run in running until the browser has observed it. A
+    // fixed sleep can expire between dashboard polls, making this transient
+    // state disappear before the assertion gets a chance to see it.
     const wrapper = path.join(tempRoot, 'worker-wrapper.sh')
-    await writeFile(wrapper, `#!/bin/sh\n/bin/sleep 2\nexec '${binary}' "$@"\n`, { mode: 0o755 })
+    const releaseWorker = path.join(tempRoot, 'release-worker')
+    await writeFile(wrapper, `#!/bin/sh\nwhile [ ! -f '${releaseWorker}' ]; do /bin/sleep 0.05; done\nexec '${binary}' "$@"\n`, { mode: 0o755 })
+    // Admission now checks the repository before launching the worker. Keep
+    // Git available while leaving the runtime executable (opencode) absent,
+    // so the test still reaches the intended deterministic preflight failure.
+    const gitBinary = process.env.PATH.split(path.delimiter).map((directory) => path.join(directory, 'git')).find(existsSync)
+    if (!gitBinary) throw new Error('git executable is required for scheduler admission')
+    await symlink(gitBinary, path.join(tempRoot, 'git'))
     worker = start(binary, ['scheduler-worker', '--target', target, '--scheduler-db', '.ai-team/scheduler.db', '--worker-command', wrapper, '--worker-id', 'browser-e2e-worker', '--once', '--poll-interval', '50ms'], {
       cwd: target,
       env: { ...process.env, PATH: tempRoot },
     })
 
     await expect(firstRun.getByText('running', { exact: true })).toBeVisible({ timeout: 10_000 })
+    await writeFile(releaseWorker, 'continue')
     await expect(firstRun.getByText('failed', { exact: true })).toBeVisible({ timeout: 20_000 })
     await expect(firstRun.getByRole('alert')).toContainText(/preflight|opencode/i)
     await page.reload()

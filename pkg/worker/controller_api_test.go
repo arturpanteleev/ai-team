@@ -461,7 +461,7 @@ func TestWorkerTerminalDeliveryRecordUsesScopedUnixAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(socketDir)
+	defer func() { _ = os.RemoveAll(socketDir) }()
 	socket := filepath.Join(socketDir, "controller.sock")
 	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
 	if err != nil {
@@ -494,6 +494,115 @@ func TestWorkerTerminalDeliveryRecordUsesScopedUnixAPI(t *testing.T) {
 	conflict.CommitSHA = strings.Repeat("b", 40)
 	if err := NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(conflict); err == nil {
 		t.Fatal("API accepted conflicting overwrite")
+	}
+}
+
+func TestWorkerTerminalDeliveryRecordWriterRejectsUnavailableOrMismatchedScope(t *testing.T) {
+	record := delivery.TerminalRecord{RunID: "terminal-api-run"}
+	tests := []struct {
+		name   string
+		writer *workerAPITerminalRecordWriter
+	}{
+		{name: "nil writer"},
+		{name: "nil port", writer: &workerAPITerminalRecordWriter{}},
+		{name: "non Unix API", writer: &workerAPITerminalRecordWriter{port: &workerAPIPort{address: "http://127.0.0.1:1234"}}},
+		{name: "run mismatch", writer: &workerAPITerminalRecordWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "different-run"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.writer.WriteTerminalRecord(record); err == nil {
+				t.Fatal("WriteTerminalRecord unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T) {
+	target := t.TempDir()
+	socketDir, err := os.MkdirTemp("/tmp", "term-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "terminal-dispatch-run", TargetDir: target,
+		ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	record := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID,
+		Feature: "feat", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Now().UTC()}
+
+	loopback, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loopback.close()
+	if _, err := loopback.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
+		t.Fatal("loopback API accepted controller-owned delivery write")
+	}
+
+	socket := filepath.Join(socketDir, "cancel.sock")
+	cancelJob := job
+	cancelJob.Operation = OperationCancel
+	cancelAPI, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelAPI.close()
+	if _, err := cancelAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
+		t.Fatal("cancel API accepted terminal delivery write")
+	}
+
+	unixJob := job
+	unixJob.Operation = OperationStart
+	unixAPI, err := startWorkerAPIServerUnix(unixJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, filepath.Join(socketDir, "start.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unixAPI.close()
+	invalid := record
+	invalid.SchemaVersion = -1
+	if _, err := unixAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: invalid}); err == nil {
+		t.Fatal("Unix API accepted invalid terminal delivery record")
+	}
+
+	fileTarget, err := os.CreateTemp(target, "not-a-directory-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileTargetPath := fileTarget.Name()
+	if err := fileTarget.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unixAPI.scope.TargetDir = fileTargetPath
+	if _, err := unixAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
+		t.Fatal("Unix API accepted a non-directory target")
+	}
+}
+
+func TestProcessEngineBubblewrapBuilderFailureStopsBeforeSpawn(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			t.Skip("Linux database-path assertion requires bubblewrap on PATH")
+		}
+	}
+	target := t.TempDir()
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0]}, target, filepath.Join(target, "missing-db-parent", "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute through the controller API and egress setup, then exercise the
+	// bubblewrap builder's failure path before the worker process can spawn.
+	engine.bubblewrap = true
+	_, err = engine.Cancel(pipeline.CancelConfig{RunID: "bubblewrap-build-failure", TargetDir: target})
+	if runtime.GOOS == "linux" {
+		if err == nil || !strings.Contains(err.Error(), "controller database path") {
+			t.Fatalf("missing controller database parent must fail during bubblewrap construction before spawn, got %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "Linux bubblewrap worker isolation is only supported on Linux") {
+		t.Fatalf("unsupported-platform bubblewrap builder failure was not propagated before spawn, got %v", err)
 	}
 }
 
@@ -904,6 +1013,16 @@ func TestWorkerControllerCandidateAbsenceIsControllerProvenAndScoped(t *testing.
 		t.Fatal("candidate absence read accepted a different/unavailable target")
 	}
 	server.scope.TargetDir = target
+	server.candidateAbsenceAllowed = false
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err == nil {
+		t.Fatal("candidate absence read succeeded without controller admission")
+	}
+	server.candidateAbsenceAllowed = true
+	server.scope.TargetDir = t.TempDir()
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err == nil {
+		t.Fatal("candidate absence read succeeded without the controller marker")
+	}
+	server.scope.TargetDir = target
 
 	port := &WorkerAPIPort{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target}}
 	apiStore := NewWorkerAPICandidates(port)
@@ -915,6 +1034,10 @@ func TestWorkerControllerCandidateAbsenceIsControllerProvenAndScoped(t *testing.
 	}
 	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(filepath.Join(target, "missing"), runID); err == nil {
 		t.Fatal("candidate absence adapter accepted another target")
+	}
+	otherTarget := t.TempDir()
+	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(otherTarget, runID); err == nil {
+		t.Fatal("candidate absence adapter accepted a different valid target")
 	}
 	// Exercise the successful adapter path too: a correctly scoped worker read
 	// must go through the controller API, which owns the durable marker.
@@ -1498,6 +1621,18 @@ func TestWorkerControllerAPICandidateDispatchFailsClosedOnScopeAndStoreErrors(t 
 	if _, err := server.dispatch("candidate.metadata.create", workerAPICall{CandidateMetadata: candidate.Metadata{}}); err == nil {
 		t.Fatal("controller accepted metadata with no candidate identity")
 	}
+	targetFile, err := os.CreateTemp(t.TempDir(), "not-a-target-directory-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := targetFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server.scope.TargetDir = targetFile.Name()
+	if _, err := server.dispatch("candidate.metadata.create", workerAPICall{CandidateMetadata: metadata}); err == nil {
+		t.Fatal("controller accepted metadata when its target could not be canonicalized")
+	}
+	server.scope.TargetDir = target
 	if _, err := server.dispatch("candidate.metadata.create", workerAPICall{CandidateMetadata: metadata}); err == nil || !strings.Contains(err.Error(), "metadata volume unavailable") {
 		t.Fatalf("controller hid a metadata persistence error: %v", err)
 	}

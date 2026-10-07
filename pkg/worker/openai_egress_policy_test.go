@@ -183,6 +183,49 @@ func TestOpenAIEgressBridgeSetupErrors(t *testing.T) {
 	closeFn()
 }
 
+type delayedOpenAIEgressListener struct {
+	started chan struct{}
+	release chan struct{}
+	conn    net.Conn
+}
+
+func (l *delayedOpenAIEgressListener) Accept() (net.Conn, error) {
+	close(l.started)
+	<-l.release
+	return l.conn, nil
+}
+
+func (l *delayedOpenAIEgressListener) Close() error { return nil }
+func (l *delayedOpenAIEgressListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
+}
+
+func TestOpenAIEgressBridgeClosesConnectionAcceptedAfterShutdown(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	listener := &delayedOpenAIEgressListener{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		conn:    serverConn,
+	}
+	_, closeBridge, err := startOpenAIEgressBridge(context.Background(), "socket", "token", func() error {
+		return nil
+	}, func() (net.Listener, error) {
+		return listener, nil
+	})
+	mustNoError(t, err)
+	<-listener.started
+	closeBridge()
+	close(listener.release)
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := clientConn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection accepted after shutdown remained open")
+	} else if !errors.Is(err, io.EOF) {
+		t.Fatalf("read from connection accepted after shutdown = %v, want EOF", err)
+	}
+}
+
 func TestBridgeOpenAIClientRejectsMalformedAndUnavailableRequests(t *testing.T) {
 	for _, request := range []string{
 		"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",

@@ -13,9 +13,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 type apiApprovalStore struct {
@@ -1025,6 +1028,63 @@ func TestControllerCandidateEvidenceStorageRejectsInvalidState(t *testing.T) {
 	}
 	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); err == nil {
 		t.Fatal("controller read candidate evidence with invalid run scope")
+	}
+}
+
+func TestWriteControllerCandidateEvidenceRejectsReadOnlyRunDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions are required")
+	}
+	currentUser, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot determine current user for permission test: %v", err)
+	}
+	uid, err := strconv.Atoi(currentUser.Uid)
+	if err != nil {
+		t.Skipf("cannot determine current uid for permission test: %v", err)
+	}
+	if uid == 0 {
+		t.Skip("directory permission checks are ineffective as root")
+	}
+
+	const runID = "candidate-evidence-read-only-run"
+	root := filepath.Join(t.TempDir(), ".ai-team", "state", "evidence")
+	path, err := candidateEvidencePath(root, runID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Dir(path)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Restore permissions before TempDir cleanup so the test remains safe even
+	// when it fails after making the directory read-only.
+	defer func() {
+		if err := os.Chmod(runDir, 0o700); err != nil {
+			t.Errorf("restore evidence run directory permissions: %v", err)
+		}
+	}()
+
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+	if err := pipeline.ValidateCandidateEvidence(runID, "review-candidate.json", document); err != nil {
+		t.Fatalf("valid candidate evidence rejected before filesystem permission check: %v", err)
+	}
+	if _, err := readControllerCandidateEvidence(root, runID, "review-candidate.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing candidate evidence read err=%v, want os.ErrNotExist", err)
+	}
+	if err := safeio.EnsureDirPath(runDir); err != nil {
+		t.Fatalf("ensure existing evidence run directory: %v", err)
+	}
+	if err := os.Chmod(runDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	err = writeControllerCandidateEvidence(root, runID, "review-candidate.json", document)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write to read-only evidence run directory err=%v, want os.ErrPermission", err)
 	}
 }
 

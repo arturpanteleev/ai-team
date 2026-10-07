@@ -182,8 +182,11 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		if err := rs.saveWaiting(name, value.ID); err != nil {
 			return err
 		}
-		logging.Printf("Решение: ai-team decision --run %s --approval %s --actor <id> --role %s --action approve|reject --subject %s\n",
-			rs.runID, value.ID, deliveryApprovalRole, planHash)
+		rs.logSQLiteApprovalRoute(value)
+		if _, sqliteStore := rs.approvalStore.(*approval.SQLiteStore); !sqliteStore {
+			logging.Printf("Решение: ai-team decision --run %s --approval %s --actor <id> --role %s --action approve|reject --subject %s\n",
+				rs.runID, value.ID, deliveryApprovalRole, planHash)
+		}
 		logging.Printf("Для продолжения с явным подтверждением плана: ai-team run --resume %s --approve-plan %s\n",
 			rs.runID, planHash)
 		return &ApprovalRequiredError{

@@ -10,13 +10,24 @@ evidence. Отдельный процесс, контейнер, read-only root 
 
 `ai-team web --scheduler-db` ставит задания в durable очередь. Отдельный
 `ai-team scheduler-worker` забирает задание и запускает `ai-team worker`, но
-worker исполняет весь pipeline. Pipeline напрямую открывает и меняет состояние
-под `.ai-team` в target: lifecycle, approval files и run evidence. В частности,
-`pkg/approval.Store` создаёт и разрешает approval в filesystem store, а
-`pkg/evidence.Store` пишет event log и manifests. Worker обязан писать туда,
-чтобы запустить, приостановить и восстановить run. Если дать ему общий
-read-write volume, скомпрометированный harness или код проекта сможет менять
-эти данные с правами контейнера.
+worker исполняет весь pipeline. В scheduler и web worker режимах approvals
+теперь хранятся в SQLite `web.db`: controller читает их и принимает решения
+через аутентифицированный API, а worker pipeline открывает ту же базу и может
+читать и изменять те же строки. Такой общий read-write volume до файла базы
+фактически даёт ему ту же возможность. Это controller-owned persistence по
+размещению, но пока не защищённое от worker состояние. Скомпрометированный worker или код
+проекта с доступом к этой БД может подделать или удалить approval и human
+decision. Lifecycle и run evidence по-прежнему пишутся напрямую в target через
+filesystem stores, включая `pkg/evidence.Store`, event log и manifests. Поэтому
+worker имеет доступ к обоим классам состояния, которые cloud pilot должен
+защищать.
+
+При запуске web или worker файловые approvals из `.ai-team/state/approvals`
+импортируются в SQLite транзакционно и без удаления исходных файлов. Повторный
+импорт сохраняет более новую совместимую историю в DB; конфликтующие записи,
+некорректная identity или повреждённые файлы останавливают запуск с ошибкой,
+чтобы решения людей не терялись при переключении хранилища. Это переход данных,
+но он не меняет границу доступа: worker по-прежнему может писать в общий DB.
 
 `ProcessEngine` и очередь отделяют процессы и восстанавливают работу после
 потери worker. Они не являются OS containment. Переменная `strict` не создаёт
@@ -27,7 +38,9 @@ read-write volume, скомпрометированный harness или код 
 ## Минимальная архитектурная граница
 
 Следующее изменение должно разделить controller-owned state и worker-owned
-вычисления до добавления production deployment manifests:
+вычисления до добавления production deployment manifests. Перенос approvals в
+SQLite и общий storage port упрощают подключение controller storage, но не
+удовлетворяют этот gate, пока worker имеет доступ к той же базе:
 
 1. Контроллер остаётся единственным владельцем admission, очереди, lifecycle,
    human decisions, authoritative evidence, credentials доставки и внешних

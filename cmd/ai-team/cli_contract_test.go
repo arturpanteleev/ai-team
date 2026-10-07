@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -239,6 +240,59 @@ func TestWorkerOutcomeForSeparatesBusinessFromInfra(t *testing.T) {
 // набор идентифицирующих флагов обязан отклоняться, а не записывать решение
 // с пустым actor/subject.
 func TestDecisionFlagContract(t *testing.T) {
+	t.Run("SQLite DB targets the web approval store", func(t *testing.T) {
+		root := newControlRoot(t)
+		dbPath := filepath.Join(root, ".ai-team", "web.db")
+		store, err := approval.NewSQLiteStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const subject = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		_, err = store.Create(approval.PendingApproval{
+			RunID: "run-1", ID: "ap-1", AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "coder",
+			Trigger: "stage_completed", SubjectHash: subject,
+			RequiredRoles: []string{"release_manager"}, Actions: []string{"approve"}, Targets: map[string]string{"approve": "coder"},
+		})
+		if closeErr := store.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		stdout, code, stderr := runCLI(t, "decision", "--target", root, "--db", ".ai-team/web.db",
+			"--run", "run-1", "--approval", "ap-1", "--actor", "alice",
+			"--role", "release_manager", "--action", "approve", "--subject", subject)
+		if code != 0 {
+			t.Fatalf("decision --db failed with code %d; stderr: %s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Approval ap-1 разрешён") {
+			t.Fatalf("expected SQLite decision to resolve approval, got: %s", stdout)
+		}
+		store, err = approval.NewSQLiteStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = store.Close() }()
+		value, err := store.Load("run-1", "ap-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value.Status != approval.StatusResolved || value.ResolvedAction != "approve" || len(value.Decisions) != 1 {
+			t.Fatalf("decision did not resolve the SQLite approval row: %+v", value)
+		}
+	})
+
+	t.Run("SQLite DB вне control root отклоняется", func(t *testing.T) {
+		root := newControlRoot(t)
+		_, code, stderr := runCLI(t, "decision", "--target", root, "--db", filepath.Join(t.TempDir(), "web.db"),
+			"--run", "run-1", "--approval", "ap-1", "--actor", "alice",
+			"--role", "release_manager", "--action", "approve", "--subject", strings.Repeat("a", 64))
+		if code != 1 || !strings.Contains(stderr, "должна находиться внутри") {
+			t.Fatalf("expected outside SQLite DB to be rejected, code=%d stderr=%s", code, stderr)
+		}
+	})
+
 	t.Run("без обязательных флагов", func(t *testing.T) {
 		_, code, stderr := runCLI(t, "decision")
 		if code != 1 {
@@ -655,6 +709,54 @@ func TestGCCommandContract(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(runDir, "anchor.json")); err != nil {
 			t.Fatalf("dry-run удалил evidence: %v", err)
+		}
+	})
+
+	t.Run("SQLite approvals show logical bytes separately", func(t *testing.T) {
+		root := newControlRoot(t)
+		if err := os.MkdirAll(filepath.Join(root, ".ai-team", "state", "runs"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().UTC().Add(-48 * time.Hour)
+		state := fmt.Sprintf(`{"schema_version":1,"run_id":"old-run","phase":"terminal","updated_at":%q}`, old.Format(time.RFC3339Nano))
+		if err := os.WriteFile(filepath.Join(root, ".ai-team", "state", "runs", "old-run.json"), []byte(state), 0644); err != nil {
+			t.Fatal(err)
+		}
+		dbPath := filepath.Join(root, ".ai-team", "web.db")
+		store, err := approval.NewSQLiteStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.Create(approval.PendingApproval{
+			RunID: "old-run", AttemptID: "a1", FromStage: "reviewer", ToStage: "coder",
+			Trigger: "stage_completed", SubjectHash: strings.Repeat("a", 64),
+			RequiredRoles: []string{"reviewer"}, Actions: []string{"approve"}, Targets: map[string]string{"approve": "coder"},
+		})
+		if closeErr := store.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr := runCLI(t, "gc", "--target", root, "--dry-run", "--keep-last", "0", "--older-than", "1ns", "--db", ".ai-team/web.db")
+		if code != 0 {
+			t.Fatalf("gc --db failed with code %d: %s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Физ. байт") || !strings.Contains(stdout, "Лог. байт") {
+			t.Fatalf("gc plan must distinguish physical and logical bytes:\n%s", stdout)
+		}
+		found := false
+		for _, line := range strings.Split(stdout, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 4 && fields[0] == "approvals-db" {
+				found = true
+				if fields[2] != "0" || fields[3] == "0" {
+					t.Fatalf("SQLite delete should show 0 physical and positive logical bytes: %q", line)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("approval DB action missing from gc output:\n%s", stdout)
 		}
 	})
 }

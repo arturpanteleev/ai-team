@@ -210,20 +210,57 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 	if err != nil {
 		return PendingApproval{}, err
 	}
+	decisionCount := len(value.Decisions)
+	value, err = applyDecision(value, approvalID, decision)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	if len(value.Decisions) == decisionCount {
+		return value, nil
+	}
+	path, err := s.path(runID, approvalID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	if err := s.write(path, value); err != nil {
+		return PendingApproval{}, err
+	}
+	return value, nil
+}
+
+// ResolveDeferred разрешает deferred-approval одним consolidated
+// delivery-решением run'а (APF-1).
+func (s *Store) ResolveDeferred(runID, approvalID string, decision Decision) (PendingApproval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockRun(runID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	defer unlock()
+	value, err := s.Load(runID, approvalID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	value, err = applyDeferredDecision(value, approvalID, decision)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	path, err := s.path(runID, approvalID)
+	if err != nil {
+		return PendingApproval{}, err
+	}
+	if err := s.write(path, value); err != nil {
+		return PendingApproval{}, err
+	}
+	return value, nil
+}
+
+func applyDecision(value PendingApproval, approvalID string, decision Decision) (PendingApproval, error) {
 	if value.Deferred {
 		return PendingApproval{}, errors.New("deferred approval разрешается consolidated delivery-решением (ResolveDeferred)")
 	}
-	decision.ApprovalID = approvalID
-	decision.ActorID = strings.TrimSpace(decision.ActorID)
-	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
-	decision.Action = strings.TrimSpace(decision.Action)
-	decision.SubjectHash = strings.ToLower(strings.TrimSpace(decision.SubjectHash))
-	decision.Comment = strings.TrimSpace(decision.Comment)
-	if decision.DecidedAt.IsZero() {
-		decision.DecidedAt = time.Now().UTC()
-	} else {
-		decision.DecidedAt = decision.DecidedAt.UTC()
-	}
+	decision = normalizeDecision(approvalID, decision)
 	if decision.SubjectHash != value.SubjectHash {
 		return PendingApproval{}, errors.New("subject hash решения не совпадает с ожидаемым")
 	}
@@ -275,50 +312,17 @@ func (s *Store) Decide(runID, approvalID string, decision Decision) (PendingAppr
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
 	}
-	path, err := s.path(runID, approvalID)
-	if err != nil {
-		return PendingApproval{}, err
-	}
-	if err := s.write(path, value); err != nil {
-		return PendingApproval{}, err
-	}
 	return value, nil
 }
 
-// ResolveDeferred разрешает deferred-approval одним consolidated
-// delivery-решением run'а (APF-1). В отличие от Decide, не требует
-// принадлежности actor'а к RequiredRoles: для deferred-гейта роль и кворум
-// замещаются единым delivery-контрпоинтом, но subject/action проверяются
-// строго (exact subject hash, action из Actions).
-func (s *Store) ResolveDeferred(runID, approvalID string, decision Decision) (PendingApproval, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	unlock, err := s.lockRun(runID)
-	if err != nil {
-		return PendingApproval{}, err
-	}
-	defer unlock()
-	value, err := s.Load(runID, approvalID)
-	if err != nil {
-		return PendingApproval{}, err
-	}
+func applyDeferredDecision(value PendingApproval, approvalID string, decision Decision) (PendingApproval, error) {
 	if !value.Deferred {
 		return PendingApproval{}, errors.New("ResolveDeferred применяется только к deferred approval")
 	}
 	if value.Status == StatusResolved {
 		return PendingApproval{}, errors.New("deferred approval уже разрешён")
 	}
-	decision.ApprovalID = approvalID
-	decision.ActorID = strings.TrimSpace(decision.ActorID)
-	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
-	decision.Action = strings.TrimSpace(decision.Action)
-	decision.SubjectHash = strings.ToLower(strings.TrimSpace(decision.SubjectHash))
-	decision.Comment = strings.TrimSpace(decision.Comment)
-	if decision.DecidedAt.IsZero() {
-		decision.DecidedAt = time.Now().UTC()
-	} else {
-		decision.DecidedAt = decision.DecidedAt.UTC()
-	}
+	decision = normalizeDecision(approvalID, decision)
 	if decision.SubjectHash != value.SubjectHash {
 		return PendingApproval{}, errors.New("subject hash решения не совпадает с ожидаемым")
 	}
@@ -332,14 +336,22 @@ func (s *Store) ResolveDeferred(runID, approvalID string, decision Decision) (Pe
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
 	}
-	path, err := s.path(runID, approvalID)
-	if err != nil {
-		return PendingApproval{}, err
-	}
-	if err := s.write(path, value); err != nil {
-		return PendingApproval{}, err
-	}
 	return value, nil
+}
+
+func normalizeDecision(approvalID string, decision Decision) Decision {
+	decision.ApprovalID = approvalID
+	decision.ActorID = strings.TrimSpace(decision.ActorID)
+	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
+	decision.Action = strings.TrimSpace(decision.Action)
+	decision.SubjectHash = strings.ToLower(strings.TrimSpace(decision.SubjectHash))
+	decision.Comment = strings.TrimSpace(decision.Comment)
+	if decision.DecidedAt.IsZero() {
+		decision.DecidedAt = time.Now().UTC()
+	} else {
+		decision.DecidedAt = decision.DecidedAt.UTC()
+	}
+	return decision
 }
 
 func normalize(value *PendingApproval) {

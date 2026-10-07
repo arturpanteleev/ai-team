@@ -4,7 +4,7 @@
 
 **Статусы:** `Новая` → `В работе` → `На ревью` → `В PR` → `Готова к развёртыванию` → `Развёрнута`. `Блокирована` используется, когда нет обязательного процесса или внешнего решения.
 
-**Текущий статус:** MAJ-01–MAJ-06 — готовы к развёртыванию; MAJ-07 — в работе над документацией архитектурного gate; остальные 9 задач — новые. Deployment manifests и приёмка изолированного пилота остаются заблокированы до реализации границы controller-owned state/API.
+**Текущий статус:** MAJ-01–MAJ-06 — готовы к развёртыванию; MAJ-07 — в работе: влиты архитектурный gate (#193), worker-result v2 (#194) и file-shaped порты approvals/evidence (#195–#196); остальные 9 задач — новые. Deployment manifests и приёмка изолированного пилота остаются заблокированы до реализации границы controller-owned state/API.
 
 ## Приоритет: Major
 
@@ -99,7 +99,7 @@ Major означает блокер целевого пользовательс�
 
 ### MAJ-07. Воспроизводимый облачный пилот с изоляцией исполнителей
 
-**Статус:** В работе — документируется архитектурный gate; deployment manifests и приёмка изолированного пилота заблокированы до реализации границы controller-owned state/API
+**Статус:** В работе — PR [#193](https://github.com/arturpanteleev/ai-team/pull/193), [#194](https://github.com/arturpanteleev/ai-team/pull/194), [#195](https://github.com/arturpanteleev/ai-team/pull/195), [#196](https://github.com/arturpanteleev/ai-team/pull/196) влиты; остаются controller-owned lifecycle/evidence, защищённый job protocol, изоляция и проверенный deployment. deployment manifests и приёмка изолированного пилота заблокированы до реализации границы controller-owned state/API.
 
 **Тип:** недостающий deployment/operations слой. **Почему:** disposable subprocess не создаёт границу изоляции; strict containment сейчас отклоняет запуск; установку persistent volumes/TLS/secrets оператор собирает самостоятельно.
 

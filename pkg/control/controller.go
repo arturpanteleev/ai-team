@@ -43,10 +43,21 @@ func WithPreflight(checker PreflightChecker) Option {
 	return func(controller *Controller) { controller.preflight = checker }
 }
 
+// WithApprovalStore uses the same approval persistence as the worker pipeline.
+// In web mode this lets authenticated controller decisions survive process
+// restarts and be observed by scheduler workers.
+func WithApprovalStore(store pipeline.ApprovalStore) Option {
+	return func(controller *Controller) {
+		if store != nil {
+			controller.approvals = store
+		}
+	}
+}
+
 type Controller struct {
 	engine        runEngine
 	target        string
-	approvals     *approval.Store
+	approvals     pipeline.ApprovalStore
 	preflight     PreflightChecker
 	failureSink   FailureSink
 	admissionSink func(string, int64) error
@@ -59,16 +70,19 @@ func New(engine runEngine, target string, options ...Option) (*Controller, error
 	if engine == nil {
 		return nil, errors.New("run engine обязателен")
 	}
-	store, err := approval.NewStore(target)
-	if err != nil {
-		return nil, err
-	}
 	controller := &Controller{
-		engine: engine, target: target, approvals: store,
+		engine: engine, target: target,
 		active: make(map[string]*worker),
 	}
 	for _, option := range options {
 		option(controller)
+	}
+	if controller.approvals == nil {
+		store, err := approval.NewStore(target)
+		if err != nil {
+			return nil, err
+		}
+		controller.approvals = store
 	}
 	return controller, nil
 }

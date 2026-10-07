@@ -1,12 +1,16 @@
 package retention
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 )
 
 const (
@@ -221,6 +225,101 @@ func TestMutableStateCleanedWithoutPruneRuns(t *testing.T) {
 	}
 	if !exists(filepath.Join(base, "state", "runs", newTerminalRunID+".json")) {
 		t.Fatal("keep-last защищает свежий terminal run state")
+	}
+}
+
+func TestSQLiteApprovalsPrunedPerRunWithTerminalRetentionRules(t *testing.T) {
+	f := newFixture(t)
+	dbPath := filepath.Join(f.target, ".ai-team", "web.db")
+	store, err := approval.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var oldTerminalJSONBytes int
+	for _, runID := range []string{oldTerminalRunID, newTerminalRunID, activeRunID} {
+		value, err := store.Create(approval.PendingApproval{
+			RunID: runID, AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "coder",
+			Trigger: "stage_completed", SubjectHash: strings.Repeat("a", 64),
+			RequiredRoles: []string{"reviewer"}, Actions: []string{"approve"},
+			Targets: map[string]string{"approve": "coder"},
+			Payload: json.RawMessage(`{"описание":"нужна доработка"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runID == oldTerminalRunID {
+			serialized, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldTerminalJSONBytes = len(serialized)
+			if utf8.RuneCount(serialized) >= oldTerminalJSONBytes {
+				t.Fatalf("fixture must include raw multibyte UTF-8 so byte and character counts differ: bytes=%d chars=%d json=%s", oldTerminalJSONBytes, utf8.RuneCount(serialized), serialized)
+			}
+		}
+	}
+	plan, err := Build(Options{Target: f.target, OlderThan: 720 * time.Hour, KeepLast: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := actionsFor(plan, CategoryApprovals)
+	if len(actions) != 1 || actions[0].RunID != oldTerminalRunID || actions[0].Path != dbPath {
+		t.Fatalf("expected only old terminal run DB approval cleanup, got %+v", actions)
+	}
+	if actions[0].Bytes != 0 || actions[0].LogicalBytes != int64(oldTerminalJSONBytes) || plan.TotalLogicalBytes() != actions[0].LogicalBytes {
+		t.Fatalf("SQLite row deletion must report serialized JSON byte length without claiming disk reclamation: action=%+v expectedLogicalBytes=%d totalLogical=%d", actions[0], oldTerminalJSONBytes, plan.TotalLogicalBytes())
+	}
+	if err := plan.Execute(f.target); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{oldTerminalRunID, newTerminalRunID, activeRunID} {
+		values, err := store.List(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runID == oldTerminalRunID && len(values) != 0 {
+			t.Fatalf("old terminal approval remained: %+v", values)
+		}
+		if runID != oldTerminalRunID && len(values) != 1 {
+			t.Fatalf("approval for protected run %s was pruned: %+v", runID, values)
+		}
+	}
+}
+
+func TestApprovalDBPathRejectsSymlinkedParentAndLeavesExternalDBUntouched(t *testing.T) {
+	f := newFixture(t)
+	externalDir := t.TempDir()
+	externalDB := filepath.Join(externalDir, "web.db")
+	store, err := approval.NewSQLiteStore(externalDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	value, err := store.Create(approval.PendingApproval{
+		RunID: oldTerminalRunID, AttemptID: "attempt-1", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "stage_completed", SubjectHash: strings.Repeat("a", 64),
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"approve"},
+		Targets: map[string]string{"approve": "coder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	symlinkedParent := filepath.Join(f.target, ".ai-team", "linked-db")
+	if err := os.Symlink(externalDir, symlinkedParent); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	pathThroughLink := filepath.Join(symlinkedParent, "web.db")
+	if _, err := Build(Options{Target: f.target, OlderThan: 720 * time.Hour, KeepLast: 1, ApprovalDBPath: pathThroughLink}); err == nil {
+		t.Fatal("planning accepted approval DB beneath symlinked parent")
+	}
+	plan := &Plan{Actions: []Action{{Category: CategoryApprovals, Path: pathThroughLink, RunID: oldTerminalRunID}}}
+	if err := plan.Execute(f.target); err == nil {
+		t.Fatal("execution accepted approval DB beneath symlinked parent")
+	}
+	loaded, err := store.Load(value.RunID, value.ID)
+	if err != nil || loaded.Status != approval.StatusPending {
+		t.Fatalf("external DB row was modified through symlink: approval=%+v err=%v", loaded, err)
 	}
 }
 

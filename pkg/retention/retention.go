@@ -6,6 +6,8 @@
 package retention
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -17,27 +19,32 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	_ "modernc.org/sqlite"
 )
 
 const (
 	CategoryWorktrees = "worktrees"
 	CategoryRuns      = "runs"
 	CategoryState     = "state"
+	CategoryApprovals = "approvals-db"
 )
 
 // Options описывает параметры одного прохода gc.
 type Options struct {
-	Target    string
-	OlderThan time.Duration
-	KeepLast  int
-	PruneRuns bool
+	Target         string
+	OlderThan      time.Duration
+	KeepLast       int
+	PruneRuns      bool
+	ApprovalDBPath string
 }
 
 // Action — один объект, подлежащий удалению.
 type Action struct {
-	Category string
-	Path     string
-	Bytes    int64
+	Category     string
+	Path         string
+	RunID        string
+	Bytes        int64 // physical bytes expected to be reclaimed from the filesystem
+	LogicalBytes int64 // bytes of logical records removed; SQL deletes may not shrink the DB file
 }
 
 // Skipped — объект, который gc не тронул и почему.
@@ -61,20 +68,29 @@ func (p *Plan) TotalBytes() int64 {
 	return total
 }
 
+func (p *Plan) TotalLogicalBytes() int64 {
+	var total int64
+	for _, action := range p.Actions {
+		total += action.LogicalBytes
+	}
+	return total
+}
+
 type terminalRun struct {
 	runID     string
 	updatedAt time.Time
 }
 
 type planner struct {
-	options  Options
-	aiTeam   string
-	now      time.Time
-	plan     Plan
-	terminal map[string]time.Time
-	exports  map[string]bool
-	keepSet  map[string]bool
-	cutoff   time.Duration
+	options    Options
+	aiTeam     string
+	now        time.Time
+	plan       Plan
+	terminal   map[string]time.Time
+	exports    map[string]bool
+	keepSet    map[string]bool
+	cutoff     time.Duration
+	approvalDB string
 }
 
 // Build обходит control-каталог target и возвращает план удаления.
@@ -87,6 +103,12 @@ func Build(options Options) (*Plan, error) {
 		return nil, fmt.Errorf("retention: %w", err)
 	}
 	aiTeam := filepath.Join(options.Target, ".ai-team")
+	approvalDB := options.ApprovalDBPath
+	if approvalDB == "" {
+		approvalDB = filepath.Join(aiTeam, "web.db")
+	} else if !filepath.IsAbs(approvalDB) {
+		approvalDB = filepath.Join(options.Target, approvalDB)
+	}
 	p := &planner{
 		options:  options,
 		aiTeam:   aiTeam,
@@ -94,7 +116,7 @@ func Build(options Options) (*Plan, error) {
 		terminal: map[string]time.Time{},
 		exports:  map[string]bool{},
 		keepSet:  map[string]bool{},
-		cutoff:   options.OlderThan,
+		cutoff:   options.OlderThan, approvalDB: filepath.Clean(approvalDB),
 	}
 	if err := p.loadTerminalRuns(); err != nil {
 		return nil, err
@@ -109,13 +131,16 @@ func Build(options Options) (*Plan, error) {
 	if err := p.planState(); err != nil {
 		return nil, err
 	}
+	if err := p.planDatabaseApprovals(); err != nil {
+		return nil, err
+	}
 	if options.PruneRuns {
 		if err := p.planRuns(); err != nil {
 			return nil, err
 		}
 	}
 	sort.SliceStable(p.plan.Actions, func(i, j int) bool {
-		order := map[string]int{CategoryWorktrees: 0, CategoryRuns: 1, CategoryState: 2}
+		order := map[string]int{CategoryWorktrees: 0, CategoryRuns: 1, CategoryState: 2, CategoryApprovals: 3}
 		if order[p.plan.Actions[i].Category] != order[p.plan.Actions[j].Category] {
 			return order[p.plan.Actions[i].Category] < order[p.plan.Actions[j].Category]
 		}
@@ -132,6 +157,11 @@ func (p *Plan) Execute(target string) error {
 		if err := insideRoot(aiTeamRoot, action.Path); err != nil {
 			return fmt.Errorf("retention: %w", err)
 		}
+		if action.Category == CategoryApprovals {
+			if err := validateApprovalDBPath(target, action.Path); err != nil {
+				return fmt.Errorf("retention: unsafe approval DB path: %w", err)
+			}
+		}
 		info, err := os.Lstat(action.Path)
 		if os.IsNotExist(err) {
 			continue
@@ -145,6 +175,15 @@ func (p *Plan) Execute(target string) error {
 		if action.Category == CategoryWorktrees {
 			if err := removeGitWorktree(target, action.Path); err != nil {
 				return fmt.Errorf("retention: %w", err)
+			}
+			continue
+		}
+		if action.Category == CategoryApprovals {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("retention: approval DB %s must be a regular file", action.Path)
+			}
+			if err := deleteRunApprovals(action.Path, action.RunID); err != nil {
+				return fmt.Errorf("retention: удалить approvals для run %s: %w", action.RunID, err)
 			}
 			continue
 		}
@@ -301,6 +340,112 @@ func (p *planner) planState() error {
 			p.plan.Skipped = append(p.plan.Skipped, Skipped{
 				Path: approvals, Reason: "approvals должен быть каталогом без symlink",
 			})
+		}
+	}
+	return nil
+}
+
+// planDatabaseApprovals plans per-run deletion from the SQLite approval table
+// using the same terminal/age/keep-last rules as file-backed approvals.
+func (p *planner) planDatabaseApprovals() error {
+	if err := validateApprovalDBPath(p.options.Target, p.approvalDB); err != nil {
+		return fmt.Errorf("approval DB path: %w", err)
+	}
+	info, err := os.Lstat(p.approvalDB)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		p.plan.Skipped = append(p.plan.Skipped, Skipped{Path: p.approvalDB, Reason: "approval DB должен быть regular file без symlink"})
+		return nil
+	}
+	db, err := sql.Open("sqlite", p.approvalDB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	var tableCount int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='approval_records'`).Scan(&tableCount); err != nil {
+		return err
+	}
+	if tableCount == 0 {
+		return nil
+	}
+	for runID := range p.terminal {
+		if !p.eligibleForAge(runID) {
+			continue
+		}
+		var count, logicalBytes int64
+		if err := db.QueryRow(`SELECT count(*), COALESCE(sum(length(CAST(record_json AS BLOB))),0) FROM approval_records WHERE run_id=?`, runID).Scan(&count, &logicalBytes); err != nil {
+			return err
+		}
+		if count > 0 {
+			p.plan.Actions = append(p.plan.Actions, Action{Category: CategoryApprovals, Path: p.approvalDB, RunID: runID, LogicalBytes: logicalBytes})
+		}
+	}
+	return nil
+}
+
+func deleteRunApprovals(path, runID string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM approval_records WHERE run_id=?`, runID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// validateApprovalDBPath checks every existing component below .ai-team with
+// Lstat. Lexical containment alone is insufficient because a parent symlink
+// can redirect SQLite to a database outside the target.
+func validateApprovalDBPath(target, path string) error {
+	root, err := safeio.ExistingDir(target, ".ai-team")
+	if err != nil {
+		return err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(root, absPath)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return fmt.Errorf("approval DB path %s is outside %s", path, root)
+	}
+	current := root
+	components := strings.Split(relative, string(filepath.Separator))
+	for index, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return fmt.Errorf("invalid approval DB path component %q", component)
+		}
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("approval DB path contains symlink component %s", current)
+		}
+		if index < len(components)-1 && !info.IsDir() {
+			return fmt.Errorf("approval DB parent %s is not a directory", current)
+		}
+		if index == len(components)-1 && !info.Mode().IsRegular() {
+			return fmt.Errorf("approval DB %s must be a regular file", current)
 		}
 	}
 	return nil

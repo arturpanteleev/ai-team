@@ -58,9 +58,9 @@ type Recorder interface {
 }
 
 // ApprovalStore is the persistence port used by pipeline approval decisions.
-// The filesystem store remains the local default; a future controller adapter
-// can implement this port. This seam alone does not isolate a worker process.
-// Pipeline authorization never treats runtime output as a human decision.
+// Local CLI runs default to the filesystem store; web and scheduler workers
+// can use the shared SQLite store. Sharing that database does not isolate a
+// worker process. Runtime output is never treated as a human decision.
 type ApprovalStore interface {
 	Create(approval.PendingApproval) (approval.PendingApproval, error)
 	Load(runID, approvalID string) (approval.PendingApproval, error)
@@ -110,9 +110,10 @@ func WithDeliveryService(service delivery.Service) Option {
 	return func(p *Pipeline) { p.delivery = service }
 }
 
-// WithApprovalStore injects an ApprovalStore port. Local CLI runs currently
-// default to the filesystem-backed approval.Store for the target directory;
-// this seam does not yet move lifecycle or evidence persistence out of target.
+// WithApprovalStore injects an ApprovalStore port. Local CLI runs default to
+// the filesystem-backed approval.Store; web mode injects the SQLite store.
+// This seam does not isolate worker access to the shared database or move
+// lifecycle/evidence persistence out of the target.
 func WithApprovalStore(store ApprovalStore) Option {
 	return func(p *Pipeline) { p.approvals = store }
 }

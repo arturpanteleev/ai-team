@@ -21,6 +21,7 @@ func cmdGC() {
 	keepLast := flags.Int("keep-last", 20, "Сколько самых свежих terminal-ранов защищать всегда")
 	dryRun := flags.Bool("dry-run", false, "Только напечатать план удаления, ничего не трогая")
 	pruneRuns := flags.Bool("prune-runs", false, "Разрешить удаление immutable run evidence (.ai-team/runs)")
+	approvalDB := flags.String("db", ".ai-team/web.db", "SQLite web DB, из которой очищать approvals старых terminal runs")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов gc: %v", err)
 	}
@@ -75,7 +76,7 @@ func cmdGC() {
 
 	options := retention.Options{
 		Target: absTarget, OlderThan: *olderThan,
-		KeepLast: *keepLast, PruneRuns: *pruneRuns,
+		KeepLast: *keepLast, PruneRuns: *pruneRuns, ApprovalDBPath: *approvalDB,
 	}
 	plan, err := retention.Build(options)
 	if err != nil {
@@ -98,9 +99,10 @@ func cmdGC() {
 
 func printGCPlan(plan *retention.Plan) {
 	type row struct {
-		category string
-		objects  int
-		bytes    int64
+		category     string
+		objects      int
+		bytes        int64
+		logicalBytes int64
 	}
 	rows := map[string]*row{}
 	var order []string
@@ -113,15 +115,16 @@ func printGCPlan(plan *retention.Plan) {
 		}
 		current.objects++
 		current.bytes += action.Bytes
+		current.logicalBytes += action.LogicalBytes
 	}
 	sort.Slice(order, func(i, j int) bool {
-		rank := map[string]int{retention.CategoryWorktrees: 0, retention.CategoryRuns: 1, retention.CategoryState: 2}
+		rank := map[string]int{retention.CategoryWorktrees: 0, retention.CategoryRuns: 1, retention.CategoryState: 2, retention.CategoryApprovals: 3}
 		return rank[order[i]] < rank[order[j]]
 	})
-	fmt.Printf("%-12s %10s %14s\n", "Категория", "Объектов", "Байт")
+	fmt.Printf("%-12s %10s %14s %14s\n", "Категория", "Объектов", "Физ. байт", "Лог. байт")
 	for _, category := range order {
 		current := rows[category]
-		fmt.Printf("%-12s %10d %14d\n", current.category, current.objects, current.bytes)
+		fmt.Printf("%-12s %10d %14d %14d\n", current.category, current.objects, current.bytes, current.logicalBytes)
 	}
-	fmt.Printf("%-12s %10d %14d\n", "Итого", len(plan.Actions), plan.TotalBytes())
+	fmt.Printf("%-12s %10d %14d %14d\n", "Итого", len(plan.Actions), plan.TotalBytes(), plan.TotalLogicalBytes())
 }

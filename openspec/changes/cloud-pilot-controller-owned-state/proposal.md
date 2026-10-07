@@ -13,10 +13,13 @@ authoritative evidence, control-plane databases или admin API. До этой 
 
 ### ПОЧЕМУ
 
-Сейчас `ai-team worker` исполняет полный pipeline и непосредственно использует
-filesystem stores для approvals и evidence. Persistent workspace нужен для
-recovery, но тот же writable workspace позволяет скомпрометированному worker
-менять защищаемое состояние. Только контейнеризация/Compose этого не исправляет.
+Сейчас `ai-team worker` исполняет полный pipeline. Web/controller и worker
+используют один SQLite approval store, так что worker может напрямую подделать
+или изменить approvals, несмотря на то что легитимные human decisions проходят
+через authenticated controller. Lifecycle и evidence всё ещё используют
+filesystem stores в persistent workspace. Ни общий read-write volume, ни общая
+controller DB, ни контейнеризация/Compose сами по себе не создают границу
+изоляции.
 
 ### Границы
 

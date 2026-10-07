@@ -5,15 +5,24 @@
 Публичный control plane `web` в scheduler режиме пишет задания в SQLite.
 `scheduler-worker` читает эту очередь и передаёт задание `worker.ProcessEngine`.
 `ai-team worker` затем создаёт обычный `pipeline.RunEngine` и запускает pipeline
-изнутри worker process. Pipeline пишет `.ai-team/state/approvals`, lifecycle,
-`.ai-team/runs` и candidate metadata в целевом workspace. Поэтому в текущем
-контракте worker должен иметь доступ к защищённому state tree. Уменьшить права
-контейнера можно только ценой поломки durable run/approval/recovery или
-оставления файлов writable.
+изнутри worker process. В web и scheduler режимах approvals записываются в
+SQLite `web.db`, который также открыт у controller для чтения и принятия
+решений через authenticated API. Worker имеет прямой доступ к той же writable
+БД и потому может подделать или удалить approval и сохранённый human decision.
+Lifecycle, `.ai-team/runs`, evidence и candidate metadata по-прежнему пишутся
+в целевой workspace. Approval storage теперь controller-readable и durable,
+но такая общая база не является границей безопасности и не обеспечивает
+controller-only writes.
 
 Дизайн контейнерного volume/network deployment без изменения этого контракта
 будет ложным свидетельством изоляции. `strict` сейчас корректно отказывает
 fail-closed и не должен обходиться deployment flag-ом.
+
+Текущая SQLite-backed approval persistence — лишь storage foundation: human
+decisions штатно приходят через authenticated controller route, однако worker
+может изменить те же SQLite rows напрямую. Effective isolation отсутствует;
+deployment manifests и пилотная приёмка остаются заблокированы до выделения
+controller-only API/credentials и отделения worker от writable controller DB.
 
 ## Минимальная целевая архитектура
 
@@ -80,8 +89,9 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
 1. Зафиксировать trust assumptions и модель attestation результата.
 2. Спроектировать и протестировать typed worker result / controller commit
    протокол без пересылки человеческих решений как обычных worker outputs.
-3. Разделить approval decision storage и controller-owned evidence от worker
-   scratch с восстановлением существующих runs.
+3. Уже добавлен SQLite approval store и общий persistence port. Следующий
+   незавершённый шаг — изолировать его от worker через controller-owned API и
+   отделить evidence от worker scratch с восстановлением существующих runs.
 4. После позитивных и негативных протокольных тестов выбрать одну инфраструктуру
    и добавить воспроизводимый reference deployment, TLS, least-purpose secrets,
    persistent storage и backup/restore.

@@ -157,6 +157,7 @@ func (rs *runState) authorizeTransition(
 		if err := rs.saveWaiting(targets[actions[0]], value.ID); err != nil {
 			return "", err
 		}
+		rs.logSQLiteApprovalRoute(value)
 		return "", &ApprovalRequiredError{
 			Checkpoint: label, RunID: rs.runID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
 		}

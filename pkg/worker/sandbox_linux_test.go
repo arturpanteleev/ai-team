@@ -424,6 +424,64 @@ func TestBubblewrapRejectsNonRegularControllerContainmentReceipt(t *testing.T) {
 	}
 }
 
+func TestBubblewrapRejectsUnsafeControllerContainmentDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		seedState func(t *testing.T, target string)
+		want      string
+	}{
+		{
+			name: "symlinked directory",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				stateDir := filepath.Join(target, ".ai-team", "state")
+				outside := filepath.Join(t.TempDir(), "containment")
+				if err := os.Mkdir(outside, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(stateDir, "containment")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "prepare controller containment mount",
+		},
+		{
+			name: "hard-linked entry",
+			seedState: func(t *testing.T, target string) {
+				t.Helper()
+				containmentDir := filepath.Join(target, ".ai-team", "state", "containment")
+				if err := os.Mkdir(containmentDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				entry := filepath.Join(containmentDir, "sentinel.json")
+				if err := os.WriteFile(entry, []byte("controller sentinel"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(entry, filepath.Join(target, "sentinel-alias.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "hard links",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			fakeBwrap := filepath.Join(fakeBin, "bwrap")
+			if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin)
+			target := makeBubblewrapTarget(t)
+			tc.seedState(t, target)
+			_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+				filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unsafe controller containment directory must fail closed with %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestBubblewrapRejectsUnsafeControllerAttestationDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

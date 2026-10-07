@@ -138,6 +138,9 @@ func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 		if err := checkBubblewrapAvailable(); err == nil || !strings.Contains(err.Error(), "requires bubblewrap") {
 			t.Fatalf("missing bubblewrap must be rejected, got %v", err)
 		}
+		if _, err := NewProcessEngine([]string{"worker"}, makeBubblewrapTarget(t), "controller.db", WithLinuxBubblewrapIsolation()); err == nil || !strings.Contains(err.Error(), "requires bubblewrap") {
+			t.Fatalf("bubblewrap option must fail closed when runtime is missing, got %v", err)
+		}
 	})
 	t.Run("command builder rejects root before runtime lookup", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())

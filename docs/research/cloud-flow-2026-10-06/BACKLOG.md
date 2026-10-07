@@ -4,7 +4,7 @@
 
 **Статусы:** `Новая` → `В работе` → `На ревью` → `В PR` → `Готова к развёртыванию` → `Развёрнута`. `Блокирована` используется, когда нет обязательного процесса или внешнего решения.
 
-**Текущий статус:** MAJ-01–MAJ-06 — готовы к развёртыванию; MAJ-07 — в работе: влиты архитектурный gate (#193), worker-result v2 (#194), file-shaped порты approvals/evidence (#195–#196) и SQLite approval persistence (#197). Добавлен application-level worker adapter, который отклоняет штатные вызовы записи решений, но worker всё ещё имеет `--db` и доступ к target filesystem; это не изоляция. Остальные 9 задач — новые. Deployment manifests и приёмка изолированного пилота остаются заблокированы до controller-only API и отделения worker от writable controller state.
+**Текущий статус:** MAJ-01–MAJ-06 — готовы к развёртыванию; MAJ-07 — в работе: влиты архитектурный gate (#193), worker-result v2 (#194), file-shaped порты approvals/evidence (#195–#196), SQLite approval persistence (#197), worker approval guard (#198) и process-bound execution identity (#199). Добавлена фильтрация переменных окружения disposable worker через `AI_TEAM_WORKER_ENV_ALLOW` и временный HOME; это не OS isolation и не ограничивает доступ к файлам того же пользователя. Worker всё ещё имеет `--db` и target filesystem доступ. Остальные 9 задач — новые. Deployment manifests и приёмка изолированного пилота остаются заблокированы до controller-only API и отделения worker от writable controller state.
 
 ## Приоритет: Major
 

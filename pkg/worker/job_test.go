@@ -52,6 +52,21 @@ func TestQueuedLegacyJobIsUpgradedOnlyAtProcessSpawn(t *testing.T) {
 	if err := legacy.ValidateQueued(target); err == nil {
 		t.Fatal("durable queue не должен сохранять process-specific execution_id")
 	}
+	legacy.ExecutionID = ""
+	legacy.SchemaVersion = SchemaVersion + 1
+	if err := legacy.ValidateQueued(target); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Fatalf("unsupported queued schema must be rejected: %v", err)
+	}
+}
+
+type failedJobReader struct{}
+
+func (failedJobReader) Read([]byte) (int, error) { return 0, fmt.Errorf("read failed") }
+
+func TestDecodeJobPropagatesReaderFailure(t *testing.T) {
+	if _, err := DecodeJob(failedJobReader{}, t.TempDir()); err == nil || err.Error() != "read failed" {
+		t.Fatalf("reader failure should be propagated unchanged: %v", err)
+	}
 }
 
 func TestProcessEnginePassesStrictJob(t *testing.T) {
@@ -83,6 +98,7 @@ func TestProcessEngineHonorsContextCancellation(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "worker-started")
 	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "wait")
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MARKER", "AI_TEAM_WORKER_TEST_MODE")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=TestWorkerProtocolHelper", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),
@@ -124,6 +140,7 @@ func TestControlPlaneStartsDisposableWorkerProcess(t *testing.T) {
 	target := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "worker-job.json")
 	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MARKER")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=TestProcessEngineHelper", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),

@@ -8,20 +8,52 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const maxDiagnostics = 64 << 10
 
+// WorkerEnvAllowVar controls which parent environment variables are copied to
+// disposable worker processes. Values are a comma-separated list of variable
+// names; the selected names are also exposed to the nested agent runtime via
+// AI_TEAM_HARNESS_ENV_ALLOW.
+const WorkerEnvAllowVar = "AI_TEAM_WORKER_ENV_ALLOW"
+const WorkerAgentPathsEnvVar = "AI_TEAM_WORKER_AGENT_PATHS"
+
+var workerEnvironmentBaseline = []string{
+	"PATH", "USER", "LOGNAME", "SHELL", "PWD",
+	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "NO_COLOR",
+}
+
+var workerEnvironmentReserved = map[string]bool{
+	"HOME": true, "PATH": true, "TMPDIR": true,
+	"TEMP": true, "TMP": true,
+	"USERPROFILE": true, "APPDATA": true, "LOCALAPPDATA": true,
+	"HOMEDRIVE": true, "HOMEPATH": true,
+	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
+	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	"AI_TEAM_AGENT_PATH": true, WorkerAgentPathsEnvVar: true,
+	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
+	WorkerEnvAllowVar: true, "AI_TEAM_HARNESS_ENV_ALLOW": true,
+}
+
+type ProcessOption func(*ProcessEngine) error
+
 type ProcessEngine struct {
-	argv   []string
-	target string
-	dbPath string
+	argv       []string
+	target     string
+	dbPath     string
+	agentPaths []string
 }
 
 type ProcessError struct {
@@ -37,7 +69,7 @@ func (e *ProcessError) Error() string {
 
 func (e *ProcessError) Unwrap() error { return e.Err }
 
-func NewProcessEngine(argv []string, target, dbPath string) (*ProcessEngine, error) {
+func NewProcessEngine(argv []string, target, dbPath string, options ...ProcessOption) (*ProcessEngine, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return nil, errors.New("worker command обязателен")
 	}
@@ -53,9 +85,54 @@ func NewProcessEngine(argv []string, target, dbPath string) (*ProcessEngine, err
 	if err != nil {
 		return nil, err
 	}
-	return &ProcessEngine{
+	engine := &ProcessEngine{
 		argv: append([]string(nil), argv...), target: filepath.Clean(absoluteTarget), dbPath: filepath.Clean(absoluteDB),
-	}, nil
+	}
+	for _, option := range options {
+		if err := option(engine); err != nil {
+			return nil, err
+		}
+	}
+	return engine, nil
+}
+
+// WithAgentRegistryPaths supplies the exact non-project agent definition
+// directories used by controller-side preflight to the disposable worker.
+// The worker never inherits the controller's HOME or XDG config tree.
+func WithAgentRegistryPaths(paths []string) ProcessOption {
+	return func(engine *ProcessEngine) error {
+		engine.agentPaths = make([]string, 0, len(paths))
+		for _, path := range paths {
+			if path == "" {
+				return errors.New("пустой путь agent registry")
+			}
+			absolute, err := filepath.Abs(path)
+			if err != nil {
+				return err
+			}
+			engine.agentPaths = append(engine.agentPaths, filepath.Clean(absolute))
+		}
+		return nil
+	}
+}
+
+// AgentRegistryPathsFromEnvironment returns the exact agent path snapshot
+// attached to a disposable worker invocation.
+func AgentRegistryPathsFromEnvironment() ([]string, bool, error) {
+	raw, exists := os.LookupEnv(WorkerAgentPathsEnvVar)
+	if !exists {
+		return nil, false, nil
+	}
+	var paths []string
+	if err := strictjson.Unmarshal([]byte(raw), 1<<20, &paths); err != nil {
+		return nil, true, fmt.Errorf("worker agent registry paths: %w", err)
+	}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, true, fmt.Errorf("worker agent registry path must be absolute and clean: %q", path)
+		}
+	}
+	return paths, true, nil
 }
 
 // TargetDir is the mounted persistent workspace this worker is allowed to
@@ -112,6 +189,12 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	args := append(append([]string(nil), e.argv[1:]...), "worker", "--target", e.target, "--db", e.dbPath)
 	command := exec.CommandContext(ctx, e.argv[0], args...)
 	configureWorkerProcess(command)
+	environment, cleanupEnvironment, err := workerProcessEnvironment(os.Environ(), e.agentPaths)
+	if err != nil {
+		return pipeline.RunResult{}, fmt.Errorf("worker environment: %w", err)
+	}
+	defer cleanupEnvironment()
+	command.Env = environment
 	command.Stdin = bytes.NewReader(payload)
 	output := &limitedOutput{limit: maxDiagnostics}
 	command.Stdout = output
@@ -146,6 +229,183 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 	}
 	return result, processErr
+}
+
+// workerProcessEnvironment constructs a purpose-limited environment for a
+// disposable worker. HOME and TMPDIR point to private empty directories for
+// this invocation; the controller's user config and credentials are not
+// inherited through their conventional paths.
+func workerProcessEnvironment(parent []string, agentPaths []string) ([]string, func(), error) {
+	return workerProcessEnvironmentForOS(parent, agentPaths, runtime.GOOS)
+}
+
+func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos string) ([]string, func(), error) {
+	return workerProcessEnvironmentForOSWithFileOps(parent, agentPaths, goos, os.Chmod, os.Mkdir)
+}
+
+// workerProcessEnvironmentForOSWithFileOps isolates filesystem setup so
+// failure cleanup can be verified without relying on host filesystem quirks.
+func workerProcessEnvironmentForOSWithFileOps(parent []string, agentPaths []string, goos string, chmod func(string, os.FileMode) error, mkdir func(string, os.FileMode) error) ([]string, func(), error) {
+	keyForOS := func(key string) string { return environmentKeyForOS(key, goos) }
+	values := make(map[string]string, len(parent))
+	for _, item := range parent {
+		key, value, ok := strings.Cut(item, "=")
+		if ok && key != "" {
+			values[keyForOS(key)] = value
+		}
+	}
+	reserved := make(map[string]bool, len(workerEnvironmentReserved))
+	for name := range workerEnvironmentReserved {
+		reserved[keyForOS(name)] = true
+	}
+
+	var allowed []string
+	seen := make(map[string]bool)
+	for _, item := range strings.Split(values[keyForOS(WorkerEnvAllowVar)], ",") {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		if !validEnvironmentName(key) {
+			return nil, func() {}, fmt.Errorf("недопустимое имя переменной в %s: %q", WorkerEnvAllowVar, key)
+		}
+		key = keyForOS(key)
+		if reserved[key] {
+			return nil, func() {}, fmt.Errorf("%s не может переопределить изолированную переменную %s", WorkerEnvAllowVar, key)
+		}
+		if !seen[key] {
+			seen[key] = true
+			allowed = append(allowed, key)
+		}
+	}
+	sort.Strings(allowed)
+
+	workerHome, err := os.MkdirTemp("", "ai-team-worker-home-*")
+	if err != nil {
+		return nil, func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(workerHome) }
+	if err := chmod(workerHome, 0700); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	workerTemp := filepath.Join(workerHome, "tmp")
+	if err := mkdir(workerTemp, 0700); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+
+	baseline := append([]string(nil), workerEnvironmentBaseline...)
+	if goos == "windows" {
+		baseline = append(baseline, "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+	}
+	environment := make(map[string]string, len(baseline)+len(allowed)+10)
+	for _, key := range baseline {
+		if value, ok := values[key]; ok {
+			environment[key] = value
+		}
+	}
+	if environment[keyForOS("PATH")] == "" {
+		cleanup()
+		return nil, func() {}, errors.New("PATH отсутствует в окружении контроллера")
+	}
+	environment["HOME"] = workerHome
+	environment["TMPDIR"] = workerTemp
+	if goos == "windows" {
+		environment["TEMP"] = workerTemp
+		environment["TMP"] = workerTemp
+		appData := filepath.Join(workerHome, "AppData", "Roaming")
+		localAppData := filepath.Join(workerHome, "AppData", "Local")
+		if err := os.MkdirAll(appData, 0700); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		if err := os.MkdirAll(localAppData, 0700); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		environment["USERPROFILE"] = workerHome
+		environment["APPDATA"] = appData
+		environment["LOCALAPPDATA"] = localAppData
+		if drive, homePath := windowsHomeDriveAndPath(workerHome, filepath.VolumeName); drive != "" {
+			environment["HOMEDRIVE"] = drive
+			environment["HOMEPATH"] = homePath
+		}
+	}
+	environment["XDG_CONFIG_HOME"] = filepath.Join(workerHome, ".config")
+	environment["XDG_CACHE_HOME"] = filepath.Join(workerHome, ".cache")
+	environment["XDG_DATA_HOME"] = filepath.Join(workerHome, ".local", "share")
+	environment["XDG_STATE_HOME"] = filepath.Join(workerHome, ".local", "state")
+	if goos == "windows" {
+		if environment["SYSTEMROOT"] == "" {
+			environment["SYSTEMROOT"] = values["WINDIR"]
+		}
+		if environment["WINDIR"] == "" {
+			environment["WINDIR"] = values["SYSTEMROOT"]
+		}
+		if environment["SYSTEMROOT"] == "" {
+			cleanup()
+			return nil, func() {}, errors.New("SystemRoot отсутствует в окружении Windows контроллера")
+		}
+		for _, key := range []string{"COMSPEC", "PATHEXT"} {
+			if value, ok := values[key]; ok {
+				environment[key] = value
+			}
+		}
+	}
+	for _, key := range allowed {
+		if value, ok := values[key]; ok {
+			environment[key] = value
+		}
+	}
+	// Rebuild the downstream runtime allow-list from the selected names. Never
+	// inherit a potentially broader or stale controller-side selector value.
+	if len(allowed) > 0 {
+		environment["AI_TEAM_HARNESS_ENV_ALLOW"] = strings.Join(allowed, ",")
+	}
+	registryPathsJSON, err := json.Marshal(agentPaths)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	environment[WorkerAgentPathsEnvVar] = string(registryPathsJSON)
+
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+environment[key])
+	}
+	return result, cleanup, nil
+}
+
+func windowsHomeDriveAndPath(home string, volumeName func(string) string) (string, string) {
+	drive := volumeName(home)
+	if drive == "" {
+		return "", ""
+	}
+	return drive, strings.TrimPrefix(home, drive)
+}
+
+func environmentKeyForOS(value, goos string) string {
+	if goos == "windows" {
+		return strings.ToUpper(value)
+	}
+	return value
+}
+
+func validEnvironmentName(value string) bool {
+	for index, char := range value {
+		if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '_' ||
+			(index > 0 && char >= '0' && char <= '9') {
+			continue
+		}
+		return false
+	}
+	return value != ""
 }
 
 type limitedOutput struct {

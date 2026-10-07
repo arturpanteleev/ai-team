@@ -27,6 +27,14 @@ adapter прямой записью в SQLite. Effective isolation отсутс�
 deployment manifests и пилотная приёмка остаются заблокированы до выделения
 controller-only API/credentials и отделения worker от writable controller DB.
 
+После PR #199 `ProcessEngine` добавляет свежий `execution_id` каждому запуску и
+проверяет его в результате. Disposable worker получает только документированный
+runtime baseline и переменные из `AI_TEAM_WORKER_ENV_ALLOW`; его `HOME`, `TMPDIR`
+и XDG-каталоги принадлежат временному каталогу задания. Это предотвращает
+обычное наследование control-plane секретов из переменных окружения, но не
+ограничивает доступ того же OS-пользователя к файлам и не меняет прямой доступ
+worker к общей базе и workspace.
+
 ## Минимальная целевая архитектура
 
 ### Controller

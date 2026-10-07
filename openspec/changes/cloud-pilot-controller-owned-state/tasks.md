@@ -11,6 +11,12 @@
   `execution_id`; reject wrong or replayed invocation identities, and safely
   upgrade schema 1 durable queue jobs at spawn. This is correlation/replay
   hardening only; it does not prove worker honesty or process isolation.
+- [x] Filter disposable worker environment inheritance: retain the documented
+  runtime baseline, pass provider/runtime variables only by explicit
+  `AI_TEAM_WORKER_ENV_ALLOW`, use per-invocation HOME/TMPDIR/XDG locations,
+  and test that controller auth/signing/database variables are absent by
+  default. This reduces accidental environment exposure; it is not OS
+  isolation and does not prevent same-user filesystem access.
 - [ ] Remove worker access to the controller DB path and replace direct store
   access with a controller-owned API; verify a worker cannot mutate approvals
   through raw SQL or other filesystem access.

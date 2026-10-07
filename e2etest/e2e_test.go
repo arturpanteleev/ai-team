@@ -447,6 +447,7 @@ func TestE2E_DisposableWorkerPersistsPendingApproval(t *testing.T) {
 	job, err := json.Marshal(worker.Job{
 		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
 		RunID: runID, TargetDir: dir, Feature: "worker-e2e", Task: "worker task",
+		ExecutionID: strings.Repeat("e", worker.ExecutionIDBytes*2),
 	})
 	if err != nil {
 		t.Fatal(err)

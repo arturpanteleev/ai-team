@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +93,15 @@ func (e *ProcessEngine) Execute(ctx context.Context, job Job) (pipeline.RunResul
 }
 
 func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResult, error) {
+	if err := job.ValidateQueued(e.target); err != nil {
+		return pipeline.RunResult{}, err
+	}
+	var executionNonce [ExecutionIDBytes]byte
+	if _, err := rand.Read(executionNonce[:]); err != nil {
+		return pipeline.RunResult{}, fmt.Errorf("worker execution identity: %w", err)
+	}
+	job.SchemaVersion = SchemaVersion
+	job.ExecutionID = hex.EncodeToString(executionNonce[:])
 	if err := job.Validate(e.target); err != nil {
 		return pipeline.RunResult{}, err
 	}

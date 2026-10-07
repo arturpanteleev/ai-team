@@ -13,7 +13,7 @@ import (
 const ResultPrefix = "ai-team-worker-result: "
 
 // ResultSchemaVersion — версия контракта строки результата.
-const ResultSchemaVersion = 2
+const ResultSchemaVersion = 3
 const MaxResultBytes = 4 << 10
 const MaxResultErrorBytes = 2 << 10
 
@@ -45,6 +45,7 @@ type Result struct {
 	SchemaVersion int       `json:"schema_version"`
 	RunID         string    `json:"run_id"`
 	Operation     Operation `json:"operation"`
+	ExecutionID   string    `json:"execution_id"`
 	Outcome       string    `json:"outcome"`
 	Error         string    `json:"error,omitempty"`
 }
@@ -77,7 +78,7 @@ func ParseResult(output string) (Result, error) {
 	if parsed.SchemaVersion != ResultSchemaVersion {
 		return Result{}, fmt.Errorf("worker result line: неподдерживаемая schema_version %d (ожидается %d)", parsed.SchemaVersion, ResultSchemaVersion)
 	}
-	if parsed.RunID == "" || parsed.Operation == "" || !validOutcome(parsed.Outcome) ||
+	if parsed.RunID == "" || parsed.Operation == "" || !validExecutionID(parsed.ExecutionID) || !validOutcome(parsed.Outcome) ||
 		len(parsed.Error) > MaxResultErrorBytes {
 		return Result{}, fmt.Errorf("worker result line: недопустимый результат")
 	}
@@ -93,6 +94,9 @@ func (r Result) ValidateFor(job Job) error {
 	}
 	if r.Operation != job.Operation {
 		return errors.New("worker result: operation не совпадает с job")
+	}
+	if !validExecutionID(r.ExecutionID) || r.ExecutionID != job.ExecutionID {
+		return errors.New("worker result: execution_id не совпадает с invocation")
 	}
 	return nil
 }

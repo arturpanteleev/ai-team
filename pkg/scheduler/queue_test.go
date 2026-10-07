@@ -3,6 +3,7 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -19,6 +20,44 @@ func testJob(target, runID string) worker.Job {
 	return worker.Job{
 		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
 		RunID: runID, TargetDir: target, Feature: "feature", Task: "задача",
+	}
+}
+
+func TestQueueLoadsLegacyDurableJobForFreshInvocationUpgrade(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	queue, err := Open(filepath.Join(t.TempDir(), "queue.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	payload, err := json.Marshal(worker.Job{
+		SchemaVersion: worker.LegacyQueueSchemaVersion, Operation: worker.OperationStart,
+		RunID: "legacy-run", TargetDir: target, Feature: "feature", Task: "persisted task",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixMilli()
+	insert, err := queue.db.Exec(`INSERT INTO worker_jobs
+		(run_id, operation, target_dir, payload_json, status, created_ms, updated_ms)
+		VALUES (?, ?, ?, ?, 'queued', ?, ?)`, "legacy-run", worker.OperationStart,
+		target, string(payload), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := insert.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, exists, err := queue.Get(id)
+	if err != nil || !exists {
+		t.Fatalf("legacy queued row не загрузился: exists=%v err=%v", exists, err)
+	}
+	if record.Job.SchemaVersion != worker.LegacyQueueSchemaVersion || record.Job.ExecutionID != "" {
+		t.Fatalf("legacy logical job должен сохраниться без process identity: %+v", record.Job)
+	}
+	if err := record.Job.ValidateQueued(target); err != nil {
+		t.Fatalf("legacy queued job должен быть передаваем ProcessEngine для reissue: %v", err)
 	}
 }
 

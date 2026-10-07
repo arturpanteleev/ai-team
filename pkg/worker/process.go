@@ -45,15 +45,18 @@ var workerEnvironmentReserved = map[string]bool{
 	"AI_TEAM_AGENT_PATH": true, WorkerAgentPathsEnvVar: true,
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
 	WorkerEnvAllowVar: true, "AI_TEAM_HARNESS_ENV_ALLOW": true,
+	WorkerAPIAddressEnv: true, WorkerAPITokenEnv: true,
 }
 
 type ProcessOption func(*ProcessEngine) error
 
 type ProcessEngine struct {
-	argv       []string
-	target     string
-	dbPath     string
-	agentPaths []string
+	argv               []string
+	target             string
+	dbPath             string
+	agentPaths         []string
+	apiRecorderFactory func() pipeline.Recorder
+	apiApprovals       workerApprovalPort
 }
 
 type ProcessError struct {
@@ -112,6 +115,19 @@ func WithAgentRegistryPaths(paths []string) ProcessOption {
 			}
 			engine.agentPaths = append(engine.agentPaths, filepath.Clean(absolute))
 		}
+		return nil
+	}
+}
+
+// WithControllerAPI moves worker recorder and approval traffic back to the
+// controller process. The worker receives a short-lived, run-scoped loopback
+// capability and no controller database path.
+func WithControllerAPI(recorderFactory func() pipeline.Recorder, approvals pipeline.ApprovalStore) ProcessOption {
+	return func(engine *ProcessEngine) error {
+		if recorderFactory == nil || approvals == nil {
+			return errors.New("controller API requires recorder and approval stores")
+		}
+		engine.apiRecorderFactory, engine.apiApprovals = recorderFactory, approvals
 		return nil
 	}
 }
@@ -186,7 +202,20 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	if err != nil {
 		return pipeline.RunResult{}, err
 	}
-	args := append(append([]string(nil), e.argv[1:]...), "worker", "--target", e.target, "--db", e.dbPath)
+	args := append(append([]string(nil), e.argv[1:]...), "worker", "--target", e.target)
+	var api *workerAPIServer
+	if e.apiRecorderFactory != nil {
+		recorder := e.apiRecorderFactory()
+		api, err = startWorkerAPIServer(job, recorder, e.apiApprovals)
+		if err != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
+		}
+		defer api.close()
+	} else {
+		// Compatibility path for local scheduler CLI configurations that have
+		// not yet attached a controller-owned store API.
+		args = append(args, "--db", e.dbPath)
+	}
 	command := exec.CommandContext(ctx, e.argv[0], args...)
 	configureWorkerProcess(command)
 	environment, cleanupEnvironment, err := workerProcessEnvironment(os.Environ(), e.agentPaths)
@@ -195,12 +224,18 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	}
 	defer cleanupEnvironment()
 	command.Env = environment
+	if api != nil {
+		command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+	}
 	command.Stdin = bytes.NewReader(payload)
 	output := &limitedOutput{limit: maxDiagnostics}
 	command.Stdout = output
 	command.Stderr = output
 	err = command.Run()
 	result := pipeline.RunResult{RunID: job.RunID}
+	if apiFailure := workerAPIRecorderFailure(output.String()); apiFailure != "" {
+		return result, &ProcessError{ExitCode: processExitCode(err), Diagnostics: output.String(), Err: fmt.Errorf("worker controller API recorder failed: %s", apiFailure)}
+	}
 	if err == nil {
 		// Успешный exit без строки результата — чужой binary: не считаем
 		// это контролируемым завершением job.
@@ -229,6 +264,17 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 	}
 	return result, processErr
+}
+
+func processExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		return exitError.ExitCode()
+	}
+	return -1
 }
 
 // workerProcessEnvironment constructs a purpose-limited environment for a
@@ -409,15 +455,19 @@ func validEnvironmentName(value string) bool {
 }
 
 type limitedOutput struct {
-	mu        sync.Mutex
-	value     []byte
-	limit     int
-	truncated bool
+	mu         sync.Mutex
+	value      []byte
+	limit      int
+	truncated  bool
+	apiFailure string
 }
 
 func (w *limitedOutput) Write(value []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if failure := workerAPIRecorderFailure(string(value)); failure != "" {
+		w.apiFailure = failure
+	}
 	remaining := w.limit - len(w.value)
 	if remaining > 0 {
 		count := len(value)
@@ -438,6 +488,9 @@ func (w *limitedOutput) String() string {
 	value := string(w.value)
 	if w.truncated {
 		value += "\n[diagnostics truncated]"
+	}
+	if w.apiFailure != "" && workerAPIRecorderFailure(value) == "" {
+		value += "\n" + workerAPIErrorMarker + w.apiFailure
 	}
 	return value
 }

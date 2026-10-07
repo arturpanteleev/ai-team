@@ -27,7 +27,11 @@
   isolation and does not prevent same-user filesystem access.
 - [ ] Remove worker access to the controller DB path and replace direct store
   access with a controller-owned API; verify a worker cannot mutate approvals
-  through raw SQL or other filesystem access.
+  through raw SQL or other filesystem access. The supported web/scheduler
+  launcher slice now omits `--db` and relays recorder/approval calls over a
+  per-invocation scoped loopback API; hostile API tests reject forged decisions,
+  admin calls, and cross-run scope. The task stays open until OS-level filesystem
+  isolation proves raw SQL/other filesystem access is denied.
 - [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
   worker-writable state; verify their integrity after worker-side attempts.
 - [ ] Add replay, wrong-job, wrong-action, expiry, oversized result, malformed

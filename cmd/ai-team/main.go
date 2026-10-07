@@ -281,27 +281,49 @@ func cmdWorker() {
 	if err != nil {
 		fatal("Невалидный worker job: %v", err)
 	}
-	if *dbPath == "" {
-		*dbPath = filepath.Join(target, ".ai-team", "web.db")
-	} else if !filepath.IsAbs(*dbPath) {
-		fatal("worker --db должен быть absolute path")
+	_, apiAddressSet := os.LookupEnv(worker.WorkerAPIAddressEnv)
+	_, apiTokenSet := os.LookupEnv(worker.WorkerAPITokenEnv)
+	controllerAPI := apiAddressSet || apiTokenSet
+	if controllerAPI && *dbPath != "" {
+		fatal("worker controller API mode rejects --db")
 	}
-	if err := safeio.RejectSymlink(*dbPath); err != nil {
-		fatal("Небезопасный worker DB: %v", err)
+	var recorderStore *webstore.Store
+	var approvalStore pipeline.ApprovalStore
+	var recorder pipeline.Recorder
+	if controllerAPI {
+		apiPort, apiErr := worker.NewWorkerAPIPort(job)
+		if apiErr != nil {
+			fatal("Worker controller API: %v", apiErr)
+		}
+		recorder = worker.NewWorkerAPIRecorder(apiPort)
+		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
+	} else {
+		if *dbPath == "" {
+			*dbPath = filepath.Join(target, ".ai-team", "web.db")
+		} else if !filepath.IsAbs(*dbPath) {
+			fatal("worker --db должен быть absolute path")
+		}
+		if err := safeio.RejectSymlink(*dbPath); err != nil {
+			fatal("Небезопасный worker DB: %v", err)
+		}
+		recorderStore, err = webstore.New(*dbPath)
+		if err != nil {
+			fatal("Worker recorder: %v", err)
+		}
+		localApprovalStore, storeErr := approval.NewSQLiteStore(*dbPath)
+		if storeErr != nil {
+			_ = recorderStore.Close()
+			fatal("Worker approval store: %v", storeErr)
+		}
+		defer func() { _ = localApprovalStore.Close() }()
+		approvalStore = approval.NewWorkerStore(localApprovalStore)
+		recorder = web.NewStoreRecorder(recorderStore)
 	}
-	recorderStore, err := webstore.New(*dbPath)
-	if err != nil {
-		fatal("Worker recorder: %v", err)
-	}
-	approvalStore, err := approval.NewSQLiteStore(*dbPath)
-	if err != nil {
-		_ = recorderStore.Close()
-		fatal("Worker approval store: %v", err)
-	}
-	defer func() { _ = approvalStore.Close() }()
 	registryPaths, hasRegistrySnapshot, registryErr := worker.AgentRegistryPathsFromEnvironment()
 	if registryErr != nil {
-		_ = recorderStore.Close()
+		if recorderStore != nil {
+			_ = recorderStore.Close()
+		}
 		fatal("Worker agent registry paths: %v", registryErr)
 	}
 	var reg *agent.Registry
@@ -311,14 +333,18 @@ func cmdWorker() {
 		reg, err = newAgentRegistry(target)
 	}
 	if err != nil {
-		_ = recorderStore.Close()
+		if recorderStore != nil {
+			_ = recorderStore.Close()
+		}
 		fatal("Worker agent registry: %v", err)
 	}
 	cfg := loadValidatedConfig(target, reg)
 	if job.Operation != worker.OperationCancel {
 		report := preflight.New(cfg, reg, target).Check(context.Background())
 		if !report.Ready {
-			_ = recorderStore.Close()
+			if recorderStore != nil {
+				_ = recorderStore.Close()
+			}
 			printWorkerResult(job.RunID, worker.Result{
 				SchemaVersion: worker.ResultSchemaVersion, RunID: job.RunID,
 				Operation: job.Operation, ExecutionID: job.ExecutionID,
@@ -328,8 +354,8 @@ func cmdWorker() {
 		}
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
-		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
-		pipeline.WithApprovalStore(approval.NewWorkerStore(approvalStore))))
+		pipeline.WithRecorder(recorder),
+		pipeline.WithApprovalStore(approvalStore)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var result pipeline.RunResult
@@ -346,7 +372,9 @@ func cmdWorker() {
 	case worker.OperationCancel:
 		result, err = engine.Cancel(pipeline.CancelConfig{RunID: job.RunID, TargetDir: target})
 	}
-	_ = recorderStore.Close()
+	if recorderStore != nil {
+		_ = recorderStore.Close()
+	}
 	if err != nil {
 		outcome := workerOutcomeFor(err)
 		printWorkerResult(job.RunID, worker.Result{
@@ -528,8 +556,19 @@ func cmdSchedulerWorker() {
 		fatal("Scheduler queue: %v", err)
 	}
 	defer func() { _ = queue.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
+	controllerRecorderStore, err := webstore.New(*webDB)
+	if err != nil {
+		fatal("Scheduler controller recorder: %v", err)
+	}
+	defer func() { _ = controllerRecorderStore.Close() }()
+	controllerApprovalStore, err := approval.NewSQLiteStore(*webDB)
+	if err != nil {
+		fatal("Scheduler controller approvals: %v", err)
+	}
+	defer func() { _ = controllerApprovalStore.Close() }()
 	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB,
-		worker.WithAgentRegistryPaths(configuredAgentRegistryPaths()))
+		worker.WithAgentRegistryPaths(configuredAgentRegistryPaths()),
+		worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(controllerRecorderStore) }, controllerApprovalStore))
 	if err != nil {
 		fatal("Scheduler ProcessEngine: %v", err)
 	}
@@ -1655,7 +1694,8 @@ func cmdWeb() {
 		runController, err = control.New(queueEngine, target, controllerOptions...)
 	} else if *workerCommand != "" {
 		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath,
-			worker.WithAgentRegistryPaths(agentPaths))
+			worker.WithAgentRegistryPaths(agentPaths),
+			worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(recorderStore) }, approvalStore))
 		if processErr != nil {
 			fatal("Ошибка worker launcher: %v", processErr)
 		}

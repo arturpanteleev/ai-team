@@ -5,10 +5,11 @@
 Публичный control plane `web` в scheduler режиме пишет задания в SQLite.
 `scheduler-worker` читает эту очередь и передаёт задание `worker.ProcessEngine`.
 `ai-team worker` затем создаёт обычный `pipeline.RunEngine` и запускает pipeline
-изнутри worker process. В web и scheduler режимах approvals записываются в
-SQLite `web.db`, который также открыт у controller для чтения и принятия
-решений через authenticated API. Worker имеет прямой доступ к той же writable
-БД и потому может подделать или удалить approval и сохранённый human decision.
+изнутри worker process. Раньше в web и scheduler режимах approvals записывались
+в SQLite `web.db`, который был доступен worker напрямую. Теперь штатные web и
+scheduler launchers пересылают worker recorder/approval операции через
+run-scoped controller API без `--db`; общая OS identity и доступ к target
+filesystem всё ещё позволяют worker попробовать открыть известный путь к БД.
 Lifecycle, `.ai-team/runs`, evidence и candidate metadata по-прежнему пишутся
 в целевой workspace. Approval storage теперь controller-readable и durable,
 но такая общая база не является границей безопасности и не обеспечивает
@@ -18,22 +19,41 @@ controller-only writes.
 будет ложным свидетельством изоляции. `strict` сейчас корректно отказывает
 fail-closed и не должен обходиться deployment flag-ом.
 
-PR #197 добавил SQLite-backed approval persistence. Текущий worker pipeline
-получает application-level adapter, который отклоняет `Decide` и
-`ResolveDeferred`; authenticated controller route продолжает использовать
-полный store. Это defense in depth, а не граница изоляции: worker по-прежнему
-получает `--db` и доступ к целевой файловой системе, поэтому может обойти
-adapter прямой записью в SQLite. Effective isolation отсутствует;
+PR #197 добавил SQLite-backed approval persistence. Worker application adapter
+отклоняет `Decide` и `ResolveDeferred`; authenticated controller route сохраняет
+полный store. Новый loopback API убирает `--db` из штатного worker launch и
+пересылает recorder/approval операции в controller. Это снижает доступность
+прямой записи через приложение, но не является границей изоляции: worker всё
+ещё имеет ту же OS identity и доступ к target filesystem, откуда может
+попытаться открыть SQLite по известному пути. Effective OS isolation отсутствует;
 deployment manifests и пилотная приёмка остаются заблокированы до выделения
-controller-only API/credentials и отделения worker от writable controller DB.
+controller-only filesystem/credentials и разделения writable state.
 
 После PR #199 `ProcessEngine` добавляет свежий `execution_id` каждому запуску и
 проверяет его в результате. Disposable worker получает только документированный
 runtime baseline и переменные из `AI_TEAM_WORKER_ENV_ALLOW`; его `HOME`, `TMPDIR`
 и XDG-каталоги принадлежат временному каталогу задания. Это предотвращает
 обычное наследование control-plane секретов из переменных окружения, но не
-ограничивает доступ того же OS-пользователя к файлам и не меняет прямой доступ
-worker к общей базе и workspace.
+ограничивает доступ того же OS-пользователя к файлам и не скрывает target и его
+данные от worker процесса.
+
+В текущем implementation slice web и scheduler launcher больше не передают
+`--db` worker-процессу и не открывают в нём recorder/approval SQLite stores.
+Вместо этого controller поднимает на время одного invocation loopback API с
+одноразовым случайным bearer token. Каждый запрос несёт `run_id`, `operation`
+и свежий `execution_id`; сервер принимает только точную scope-связку этого
+запуска. API позволяет сообщать pipeline recorder events и создавать/читать
+approvals только текущего run. Endpoint для decision/resolution и admin
+операций отсутствует, а неизвестные методы отвергаются. Негативные тесты
+проверяют чужой run, forged decision и admin method.
+
+Эта граница ограничивает штатный worker protocol, но НЕ является OS или
+filesystem isolation: дочерний процесс работает под тем же OS identity и всё
+ещё имеет доступ к target filesystem, включая возможность попытаться открыть
+известный путь к БД напрямую. API listener доступен локально этому процессу,
+а token передаётся ему через environment. Поэтому MAJ-07 остаётся незавершённой;
+нужны отдельная identity/filesystem/network policy, writable-state separation,
+tamper tests и восстановление после потери worker/controller.
 
 ## Минимальная целевая архитектура
 

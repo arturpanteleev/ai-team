@@ -62,7 +62,7 @@ func questionAnswer(decisions []approval.Decision) string {
 // decision and running lifecycle state have been persisted, before the stage
 // consumes its extra inputs. On the next resume, the lifecycle no longer has a
 // pending approval ID, so reconstruct these inputs from the approval store.
-func recoveredQuestionApproval(store *approval.Store, runID, nextStage string) (*approval.PendingApproval, error) {
+func recoveredQuestionApproval(store ApprovalStore, runID, nextStage string) (*approval.PendingApproval, error) {
 	if nextStage != "analyst" {
 		return nil, nil
 	}
@@ -98,7 +98,7 @@ func recoveredQuestionApproval(store *approval.Store, runID, nextStage string) (
 // attempt is abandoned and retried on resume, so it must keep the handoff
 // inputs. A completed target attempt means execution advanced past this
 // approval and makes it stale.
-func recoveredGraphInputApproval(store *approval.Store, runID, nextStage string, graph workflow.Graph, replayed evidence.ReplayedRun) (*approval.PendingApproval, error) {
+func recoveredGraphInputApproval(store ApprovalStore, runID, nextStage string, graph workflow.Graph, replayed evidence.ReplayedRun) (*approval.PendingApproval, error) {
 	if nextStage == "" || workflow.IsTerminal(nextStage) {
 		return nil, nil
 	}
@@ -143,7 +143,7 @@ func recoveredGraphInputApproval(store *approval.Store, runID, nextStage string,
 	return nil, nil
 }
 
-func countQuestionApprovals(store *approval.Store, runID string) (int, error) {
+func countQuestionApprovals(store ApprovalStore, runID string) (int, error) {
 	values, err := store.List(runID)
 	if err != nil {
 		return 0, err

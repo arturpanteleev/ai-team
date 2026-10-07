@@ -369,6 +369,28 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 	})
 }
 
+func TestBubblewrapRejectsNonRegularControllerAttestationRecord(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	target := makeBubblewrapTarget(t)
+	attestationDir := filepath.Join(target, ".ai-team", "state", "attestation")
+	if err := os.MkdirAll(attestationDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(attestationDir, "sandbox-test.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+		filepath.Join(target, "controller.db"), "sandbox-test", nil, []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "controller attestation path") || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("non-regular controller attestation record must fail closed, got %v", err)
+	}
+}
+
 func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
 	t.Run("missing bubblewrap", func(t *testing.T) {
 		path := t.TempDir()

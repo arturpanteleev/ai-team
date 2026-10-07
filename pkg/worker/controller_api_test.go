@@ -549,6 +549,68 @@ func TestWorkerAttestationUsesScopedUnixAPI(t *testing.T) {
 	}
 }
 
+func TestWorkerAttestationWriterRejectsUnavailableOrMismatchedScope(t *testing.T) {
+	statement := &attest.Statement{Predicate: attest.Predicate{RunID: "attest-api-run"}}
+	tests := []struct {
+		name   string
+		writer *workerAPIAttestationWriter
+	}{
+		{name: "nil writer"},
+		{name: "nil port", writer: &workerAPIAttestationWriter{}},
+		{name: "non Unix API", writer: &workerAPIAttestationWriter{port: &workerAPIPort{address: "http://127.0.0.1:1234", scope: workerAPIScope{RunID: statement.Predicate.RunID}}}},
+		{name: "run mismatch", writer: &workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "different-run"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.writer.WriteAttestation(statement); err == nil {
+				t.Fatal("WriteAttestation() unexpectedly succeeded")
+			}
+		})
+	}
+	if err := (&workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: statement.Predicate.RunID}}}).WriteAttestation(nil); err == nil {
+		t.Fatal("WriteAttestation() accepted a nil statement")
+	}
+}
+
+func TestWorkerAttestationDispatchRejectsUnavailableTransportAndOperation(t *testing.T) {
+	call := workerAPICall{Attestation: attest.Statement{Predicate: attest.Predicate{RunID: "attest-dispatch-run"}}}
+	tests := []struct {
+		name   string
+		server *workerAPIServer
+		want   string
+	}{
+		{
+			name:   "non Unix transport",
+			server: &workerAPIServer{scope: workerAPIScope{RunID: call.Attestation.Predicate.RunID, Operation: OperationStart}},
+			want:   "require bubblewrap Unix transport",
+		},
+		{
+			name: "missing controller store",
+			server: &workerAPIServer{
+				scope:        workerAPIScope{RunID: call.Attestation.Predicate.RunID, Operation: OperationStart},
+				usageAllowed: true,
+			},
+			want: "require bubblewrap Unix transport",
+		},
+		{
+			name: "disallowed operation",
+			server: &workerAPIServer{
+				scope:        workerAPIScope{RunID: call.Attestation.Predicate.RunID, Operation: OperationCancel},
+				usageAllowed: true,
+				attestations: attest.ControllerStore{TargetDir: t.TempDir()},
+			},
+			want: "not allowed for operation",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.server.dispatch("attestation.write", call); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("dispatch error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkerTerminalDeliveryRecordWriterRejectsUnavailableOrMismatchedScope(t *testing.T) {
 	record := delivery.TerminalRecord{RunID: "terminal-api-run"}
 	tests := []struct {

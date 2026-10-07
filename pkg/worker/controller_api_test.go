@@ -583,6 +583,10 @@ func TestWorkerContainmentReceiptUsesScopedUnixAPI(t *testing.T) {
 	if err := writer.WriteContainmentReceipt(receipt); err != nil {
 		t.Fatalf("idempotent containment write: %v", err)
 	}
+	conflicting := containment.UnavailableReceipt()
+	if _, err := server.dispatch("containment.write", workerAPICall{ContainmentReceipt: &conflicting}); err == nil {
+		t.Fatal("controller accepted a conflicting containment receipt replacement")
+	}
 	stored, err := server.containmentReceipts.Read(job.RunID)
 	if err != nil || !stored.IsTrustedLocal() {
 		t.Fatalf("controller receipt=%+v err=%v", stored, err)

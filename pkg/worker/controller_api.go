@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
@@ -38,6 +39,7 @@ type workerAPIScope struct {
 	RunID       string    `json:"run_id"`
 	Operation   Operation `json:"operation"`
 	ExecutionID string    `json:"execution_id"`
+	TargetDir   string    `json:"target_dir"`
 }
 type workerAPIRequest struct {
 	workerAPIScope
@@ -47,17 +49,19 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID    string                   `json:"run_id,omitempty"`
-	A        string                   `json:"a,omitempty"`
-	B        string                   `json:"b,omitempty"`
-	C        string                   `json:"c,omitempty"`
-	Index    int                      `json:"index,omitempty"`
-	At       time.Time                `json:"at,omitempty"`
-	Data     map[string]any           `json:"data,omitempty"`
-	IDs      []string                 `json:"ids,omitempty"`
-	Stage    notifier.StageResult     `json:"stage,omitempty"`
-	Error    string                   `json:"error,omitempty"`
-	Approval approval.PendingApproval `json:"approval,omitempty"`
+	RunID     string                   `json:"run_id,omitempty"`
+	A         string                   `json:"a,omitempty"`
+	B         string                   `json:"b,omitempty"`
+	C         string                   `json:"c,omitempty"`
+	Index     int                      `json:"index,omitempty"`
+	At        time.Time                `json:"at,omitempty"`
+	Data      map[string]any           `json:"data,omitempty"`
+	IDs       []string                 `json:"ids,omitempty"`
+	Stage     notifier.StageResult     `json:"stage,omitempty"`
+	Error     string                   `json:"error,omitempty"`
+	Approval  approval.PendingApproval `json:"approval,omitempty"`
+	Lifecycle lifecycle.State          `json:"lifecycle,omitempty"`
+	Previous  lifecycle.State          `json:"previous_lifecycle,omitempty"`
 }
 type workerApprovalPort interface {
 	Create(approval.PendingApproval) (approval.PendingApproval, error)
@@ -71,6 +75,7 @@ type workerAPIServer struct {
 	server     *http.Server
 	recorder   pipeline.Recorder
 	approvals  workerApprovalPort
+	lifecycle  lifecycle.StorePort
 	dispatchMu sync.Mutex
 	nonceMu    sync.Mutex
 	nonces     map[string]time.Time
@@ -91,7 +96,7 @@ func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerA
 		_ = listener.Close()
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -192,6 +197,48 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return s.approvals.List(s.scope.RunID)
 	case "approval.decide", "approval.resolve_deferred":
 		return nil, errors.New("worker API cannot make human approval decisions")
+	case "lifecycle.create":
+		if s.lifecycle == nil {
+			return nil, errors.New("worker lifecycle API unavailable")
+		}
+		if c.Lifecycle.RunID != s.scope.RunID || c.Lifecycle.TargetDir != s.scope.TargetDir || c.Lifecycle.TargetDir == "" {
+			return nil, errors.New("lifecycle create identity mismatch")
+		}
+		return nil, s.lifecycle.Create(c.Lifecycle)
+	case "lifecycle.load":
+		if s.lifecycle == nil {
+			return nil, errors.New("worker lifecycle API unavailable")
+		}
+		if c.A != s.scope.RunID {
+			return nil, errors.New("lifecycle load run mismatch")
+		}
+		state, err := s.lifecycle.Load(s.scope.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if state.RunID != s.scope.RunID || state.TargetDir != s.scope.TargetDir {
+			return nil, errors.New("lifecycle store returned another run or target")
+		}
+		return state, nil
+	case "lifecycle.save":
+		if s.lifecycle == nil {
+			return nil, errors.New("worker lifecycle API unavailable")
+		}
+		if c.Previous.RunID != s.scope.RunID || c.Lifecycle.RunID != s.scope.RunID ||
+			c.Previous.TargetDir != s.scope.TargetDir || c.Lifecycle.TargetDir != s.scope.TargetDir || c.Previous.TargetDir == "" {
+			return nil, errors.New("lifecycle save identity mismatch")
+		}
+		current, err := s.lifecycle.Load(s.scope.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if current.RunID != s.scope.RunID || current.TargetDir != s.scope.TargetDir {
+			return nil, errors.New("lifecycle store returned another run or target")
+		}
+		if !sameLifecycleState(current, c.Previous) {
+			return nil, errors.New("stale lifecycle state: previous checkpoint does not match controller state")
+		}
+		return nil, s.lifecycle.Save(c.Previous, c.Lifecycle)
 	case "recorder.run_started":
 		s.recorder.RunStarted(s.scope.RunID, c.A, c.B, c.At)
 	case "recorder.run_resumed":
@@ -224,6 +271,18 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 	return nil, nil
 }
 
+// sameLifecycleState compares the complete persisted checkpoint. time.Time.Equal
+// avoids treating equivalent instants with different location metadata as a
+// stale checkpoint after a JSON round trip.
+func sameLifecycleState(a, b lifecycle.State) bool {
+	return a.SchemaVersion == b.SchemaVersion && a.RunID == b.RunID &&
+		a.Feature == b.Feature && a.TargetDir == b.TargetDir && a.Task == b.Task &&
+		a.Phase == b.Phase && a.NextStage == b.NextStage &&
+		a.PendingApprovalID == b.PendingApprovalID && a.AttemptOrdinal == b.AttemptOrdinal &&
+		a.ConfigSHA256 == b.ConfigSHA256 && a.WorkflowSHA256 == b.WorkflowSHA256 &&
+		a.CreatedAt.Equal(b.CreatedAt) && a.UpdatedAt.Equal(b.UpdatedAt)
+}
+
 type workerAPIPort struct {
 	address, token string
 	scope          workerAPIScope
@@ -238,7 +297,7 @@ func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 	if !okA || !okT || !strings.HasPrefix(address, "http://127.0.0.1:") || token == "" {
 		return nil, errors.New("worker controller API environment is missing or invalid")
 	}
-	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{job.RunID, job.Operation, job.ExecutionID}, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, client: &http.Client{Timeout: 5 * time.Second}}, nil
 }
 
 func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }
@@ -392,5 +451,27 @@ func (*workerAPIApprovals) ResolveDeferred(string, string, approval.Decision) (a
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
 }
 
+type workerAPILifecycle struct{ port *workerAPIPort }
+type WorkerAPILifecycle = workerAPILifecycle
+
+func NewWorkerAPILifecycle(port *WorkerAPIPort) *WorkerAPILifecycle {
+	return &workerAPILifecycle{port: port}
+}
+func (s *workerAPILifecycle) Create(state lifecycle.State) error {
+	return s.port.call("lifecycle.create", workerAPICall{Lifecycle: state}, nil)
+}
+func (s *workerAPILifecycle) Load(runID string) (lifecycle.State, error) {
+	if runID != s.port.scope.RunID {
+		return lifecycle.State{}, errors.New("lifecycle load run mismatch")
+	}
+	var state lifecycle.State
+	err := s.port.call("lifecycle.load", workerAPICall{A: runID}, &state)
+	return state, err
+}
+func (s *workerAPILifecycle) Save(previous, next lifecycle.State) error {
+	return s.port.call("lifecycle.save", workerAPICall{Previous: previous, Lifecycle: next}, nil)
+}
+
 var _ pipeline.Recorder = (*workerAPIRecorder)(nil)
 var _ pipeline.ApprovalStore = (*workerAPIApprovals)(nil)
+var _ lifecycle.StorePort = (*workerAPILifecycle)(nil)

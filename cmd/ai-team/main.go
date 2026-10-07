@@ -290,6 +290,7 @@ func cmdWorker() {
 	var recorderStore *webstore.Store
 	var approvalStore pipeline.ApprovalStore
 	var recorder pipeline.Recorder
+	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
 		apiPort, apiErr := worker.NewWorkerAPIPort(job)
 		if apiErr != nil {
@@ -297,6 +298,7 @@ func cmdWorker() {
 		}
 		recorder = worker.NewWorkerAPIRecorder(apiPort)
 		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
+		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
 		if *dbPath == "" {
 			*dbPath = filepath.Join(target, ".ai-team", "web.db")
@@ -355,7 +357,8 @@ func cmdWorker() {
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
 		pipeline.WithRecorder(recorder),
-		pipeline.WithApprovalStore(approvalStore)))
+		pipeline.WithApprovalStore(approvalStore),
+		pipeline.WithLifecycleStore(lifecycleStore)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var result pipeline.RunResult
@@ -398,14 +401,12 @@ type recoveryEngine interface {
 	Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error)
 	RecoverInitialLifecycle(runID, targetDir, feature, task string) error
 	ReconcileTerminalDelivery(context.Context, string, string) error
+	LoadLifecycle(targetDir, runID string) (lifecycle.State, error)
+	SaveLifecycle(targetDir string, previous, next lifecycle.State) error
 }
 
 func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target string, job worker.Job) (pipeline.RunResult, error) {
-	stateStore, err := lifecycle.NewStore(target)
-	if err != nil {
-		return pipeline.RunResult{}, err
-	}
-	state, err := stateStore.Load(job.RunID)
+	state, err := engine.LoadLifecycle(target, job.RunID)
 	if errors.Is(err, fs.ErrNotExist) {
 		runDir := filepath.Join(target, ".ai-team", "runs", job.RunID)
 		if _, statErr := os.Stat(runDir); errors.Is(statErr, fs.ErrNotExist) {
@@ -416,7 +417,7 @@ func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target stri
 		if err := engine.RecoverInitialLifecycle(job.RunID, target, job.Feature, job.Task); err != nil {
 			return pipeline.RunResult{}, err
 		}
-		state, err = stateStore.Load(job.RunID)
+		state, err = engine.LoadLifecycle(target, job.RunID)
 	}
 	if err != nil {
 		return pipeline.RunResult{}, err
@@ -428,7 +429,7 @@ func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target stri
 			terminal.NextStage = ""
 			terminal.PendingApprovalID = ""
 			terminal.AttemptOrdinal = attemptCount
-			if err := stateStore.Save(state, terminal); err != nil {
+			if err := engine.SaveLifecycle(target, state, terminal); err != nil {
 				return pipeline.RunResult{}, fmt.Errorf("reconcile terminal lifecycle: %w", err)
 			}
 		}

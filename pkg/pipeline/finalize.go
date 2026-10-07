@@ -112,10 +112,11 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	terminal := rs.lifecycleState
 	terminal.Phase, terminal.NextStage, terminal.PendingApprovalID, terminal.AttemptOrdinal =
 		lifecycle.PhaseTerminal, "", "", rs.attemptOrdinal
-	if err := rs.lifecycleStore.Save(rs.lifecycleState, terminal); err != nil {
+	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, terminal)
+	if err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("terminal lifecycle state: %w", err))
 	} else {
-		rs.lifecycleState = terminal
+		rs.lifecycleState = saved
 	}
 	combinedErr := errors.Join(runErr, finalizeErr)
 	outcome := workflow.RunOutcome(status)

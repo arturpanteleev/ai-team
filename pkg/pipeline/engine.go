@@ -80,9 +80,12 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 		return RunResult{}, err
 	}
 	defer func() { _ = lock.Close() }() // снятие файловой блокировки: значимый результат уже посчитан.
-	stateStore, err := lifecycle.NewStore(config.TargetDir)
-	if err != nil {
-		return RunResult{}, err
+	stateStore := e.pipeline.lifecycle
+	if stateStore == nil {
+		stateStore, err = lifecycle.NewStore(config.TargetDir)
+		if err != nil {
+			return RunResult{}, err
+		}
 	}
 	state, err := stateStore.Load(config.RunID)
 	if err != nil {
@@ -125,4 +128,30 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 		e.pipeline.recorder.RunFinished(config.RunID, string(workflow.RunCanceled), now)
 	}
 	return RunResult{RunID: config.RunID, Outcome: workflow.RunCanceled}, nil
+}
+
+// LoadLifecycle and SaveLifecycle expose the same narrow
+// checkpoint port to the worker recovery dispatcher without opening the
+// lifecycle directory in the child process.
+func (e *RunEngine) LoadLifecycle(targetDir, runID string) (lifecycle.State, error) {
+	store, err := e.lifecycleStore(targetDir)
+	if err != nil {
+		return lifecycle.State{}, err
+	}
+	return store.Load(runID)
+}
+
+func (e *RunEngine) SaveLifecycle(targetDir string, previous, next lifecycle.State) error {
+	store, err := e.lifecycleStore(targetDir)
+	if err != nil {
+		return err
+	}
+	return store.Save(previous, next)
+}
+
+func (e *RunEngine) lifecycleStore(targetDir string) (lifecycle.StorePort, error) {
+	if e.pipeline.lifecycle != nil {
+		return e.pipeline.lifecycle, nil
+	}
+	return lifecycle.NewStore(targetDir)
 }

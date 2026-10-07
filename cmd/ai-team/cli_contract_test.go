@@ -1104,6 +1104,20 @@ func (mustNotResumeEngine) RecoverInitialLifecycle(string, string, string, strin
 func (mustNotResumeEngine) ReconcileTerminalDelivery(context.Context, string, string) error {
 	return nil
 }
+func (mustNotResumeEngine) LoadLifecycle(target, runID string) (lifecycle.State, error) {
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		return lifecycle.State{}, err
+	}
+	return store.Load(runID)
+}
+func (mustNotResumeEngine) SaveLifecycle(target string, previous, next lifecycle.State) error {
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		return err
+	}
+	return store.Save(previous, next)
+}
 
 func TestRecoveryDispatchCompletesQueueFromFinishedEvidenceBeforeTerminalLifecycle(t *testing.T) {
 	target := t.TempDir()

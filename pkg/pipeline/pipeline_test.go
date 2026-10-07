@@ -199,6 +199,24 @@ func newScripted() *scriptedRuntime {
 	}
 }
 
+type trackingLifecycleStore struct {
+	store                 *lifecycle.Store
+	creates, loads, saves int
+}
+
+func (s *trackingLifecycleStore) Create(state lifecycle.State) error {
+	s.creates++
+	return s.store.Create(state)
+}
+func (s *trackingLifecycleStore) Load(runID string) (lifecycle.State, error) {
+	s.loads++
+	return s.store.Load(runID)
+}
+func (s *trackingLifecycleStore) Save(previous, next lifecycle.State) error {
+	s.saves++
+	return s.store.Save(previous, next)
+}
+
 func (r *scriptedRuntime) factory(string) (runtime.Runtime, error) { return r, nil }
 
 // Usage — UsageReporter для тестов (P1-7): имитирует attested usage.
@@ -671,6 +689,11 @@ func TestRun_StrictProfileBlockedBeforeExecution(t *testing.T) {
 
 func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.T) {
 	dir := env(t)
+	filesystemStore, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointPort := &trackingLifecycleStore{store: filesystemStore}
 	rt := newScripted()
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
@@ -679,7 +702,7 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 			Actions: map[string]string{"approve": "reviewer", "reject": "$stop"},
 		}
 	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"})
-	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithLifecycleStore(checkpointPort))
 
 	first, err := p.RunWithResult(context.Background(), RunConfig{
 		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir,
@@ -691,11 +714,7 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 	if rt.calls["analyst"] != 1 || rt.calls["reviewer"] != 0 {
 		t.Fatalf("до решения выполнены неверные этапы: %+v", rt.calls)
 	}
-	stateStore, err := lifecycle.NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := stateStore.Load(first.RunID)
+	state, err := checkpointPort.Load(first.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,9 +744,12 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 	if second.RunID != first.RunID || rt.calls["analyst"] != 1 || rt.calls["reviewer"] != 1 {
 		t.Fatalf("resume изменил identity или повторил этап: first=%+v second=%+v calls=%+v", first, second, rt.calls)
 	}
-	state, err = stateStore.Load(first.RunID)
+	state, err = checkpointPort.Load(first.RunID)
 	if err != nil || state.Phase != lifecycle.PhaseTerminal {
 		t.Fatalf("run не стал terminal: %+v err=%v", state, err)
+	}
+	if checkpointPort.creates != 1 || checkpointPort.loads < 2 || checkpointPort.saves < 2 {
+		t.Fatalf("pipeline bypassed injected lifecycle port: creates=%d loads=%d saves=%d", checkpointPort.creates, checkpointPort.loads, checkpointPort.saves)
 	}
 }
 

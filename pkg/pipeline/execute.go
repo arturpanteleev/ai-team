@@ -266,10 +266,11 @@ func (rs *runState) saveLifecycle(phase lifecycle.Phase, nextStage string) error
 	next.NextStage = nextStage
 	next.PendingApprovalID = ""
 	next.AttemptOrdinal = rs.attemptOrdinal
-	if err := rs.lifecycleStore.Save(rs.lifecycleState, next); err != nil {
+	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
+	if err != nil {
 		return fmt.Errorf("lifecycle checkpoint: %w", err)
 	}
-	rs.lifecycleState = next
+	rs.lifecycleState = saved
 	return nil
 }
 
@@ -279,11 +280,22 @@ func (rs *runState) saveWaiting(nextStage, approvalID string) error {
 	next.NextStage = nextStage
 	next.PendingApprovalID = approvalID
 	next.AttemptOrdinal = rs.attemptOrdinal
-	if err := rs.lifecycleStore.Save(rs.lifecycleState, next); err != nil {
+	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
+	if err != nil {
 		return fmt.Errorf("lifecycle approval checkpoint: %w", err)
 	}
-	rs.lifecycleState = next
+	rs.lifecycleState = saved
 	return nil
+}
+
+// saveLifecycleCheckpoint reloads the canonical state because Store.Save may
+// normalize schema/timestamps in its persisted copy. Keeping that returned
+// checkpoint prevents stale compare-and-save requests on the next transition.
+func saveLifecycleCheckpoint(store lifecycle.StorePort, previous, next lifecycle.State) (lifecycle.State, error) {
+	if err := store.Save(previous, next); err != nil {
+		return lifecycle.State{}, err
+	}
+	return store.Load(next.RunID)
 }
 
 func (rs *runState) invalidateAttempts(fromStageIndex int) error {

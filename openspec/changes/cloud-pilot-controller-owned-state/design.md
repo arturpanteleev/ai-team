@@ -10,10 +10,14 @@
 scheduler launchers пересылают worker recorder/approval операции через
 run-scoped controller API без `--db`; общая OS identity и доступ к target
 filesystem всё ещё позволяют worker попробовать открыть известный путь к БД.
-Lifecycle, `.ai-team/runs`, evidence и candidate metadata по-прежнему пишутся
-в целевой workspace. Approval storage теперь controller-readable и durable,
-но такая общая база не является границей безопасности и не обеспечивает
-controller-only writes.
+В текущем slice lifecycle `Create`/`Load`/`Save` обычного pipeline и recovery
+dispatcher проходят через run/target-scoped controller API; реальный
+`lifecycle.Store` создаётся и вызывается в controller-процессе. Локальный CLI
+по-прежнему использует filesystem store. `.ai-team/runs`, evidence и candidate
+metadata продолжают писаться в целевой workspace из worker-процесса. Общая OS
+identity и доступ к target filesystem позволяют worker-у обойти API и напрямую
+изменить lifecycle-файл или открыть известный путь к SQLite. Это application-
+level ownership, а не граница безопасности.
 
 Дизайн контейнерного volume/network deployment без изменения этого контракта
 будет ложным свидетельством изоляции. `strict` сейчас корректно отказывает
@@ -45,9 +49,9 @@ runtime baseline и переменные из `AI_TEAM_WORKER_ENV_ALLOW`; его
 запуска. API позволяет сообщать pipeline recorder events и создавать/читать
 approvals только текущего run. Endpoint для decision/resolution и admin
 операций отсутствует, а неизвестные методы отвергаются. Негативные тесты
-проверяют чужой run, forged decision и admin method. В следующей доработке
-поверх PR #202 каждый
-запрос также несёт случайный 256-битный nonce и `issued_at`: сервер допускает
+проверяют чужой run, forged decision и admin method. Каждый
+аутентифицированный запрос несёт случайный 256-битный nonce и `issued_at`:
+сервер допускает
 окно 30 секунд с 5 секундами допустимого опережения, отклоняет повтор nonce и
 хранит не более 4096 активных nonce на invocation. При заполнении таблицы API
 отказывает до освобождения истёкших записей. Тесты проверяют, что повторный,
@@ -55,6 +59,16 @@ approvals только текущего run. Endpoint для decision/resolution
 approval/recorder state. Это защита от случайного или повторного вызова
 протокола, не защита от скомпрометированного процесса с доступом к токену:
 worker может подписать новый nonce, пока жив invocation.
+
+В следующем application-level slice pipeline получает узкий lifecycle store
+port. В штатном web/scheduler worker он реализован typed вызовами
+`lifecycle.create`, `lifecycle.load` и `lifecycle.save`; controller проверяет
+run и target, а dispatch сериализован вместе с recorder и approval вызовами.
+Load сверяет идентичности полученной записи; create/save не принимают чужой run
+или target. Recovery dispatcher использует тот же injected port. CLI без
+worker API по-прежнему создаёт локальный filesystem store. Перенос вызовов не
+закрывает прямой filesystem доступ: lifecycle файлы остаются доступны общей OS
+identity, а evidence и candidate файлы по-прежнему находятся в target.
 
 Эта граница ограничивает штатный worker protocol, но НЕ является OS или
 filesystem isolation: дочерний процесс работает под тем же OS identity и всё
@@ -171,11 +185,13 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
    только correlation и собственные независимые проверки.
 2. Спроектировать и протестировать typed worker result / controller commit
    протокол без пересылки человеческих решений как обычных worker outputs.
-3. Уже добавлены SQLite approval store, общий persistence port и
-   application-level worker adapter, блокирующий штатные вызовы изменения
-   решений. Следующий незавершённый шаг — убрать у worker прямой `--db` и
-   filesystem доступ и заменить его controller-owned API; отдельно отделить
-   evidence от worker scratch с восстановлением существующих runs.
+3. Уже добавлены SQLite approval store, общий persistence port, application-
+   level worker adapter для approvals и controller API для recorder, approvals
+   и lifecycle checkpoint calls. Worker launch не получает `--db`; pipeline
+   использует controller-owned lifecycle port, а локальный CLI — filesystem
+   store. Это не закрывает worker-у filesystem: отдельно нужны OS-enforced
+   separation, отделение evidence/artifacts от worker scratch и восстановление
+   существующих runs.
 4. После позитивных и негативных протокольных тестов выбрать одну инфраструктуру
    и добавить воспроизводимый reference deployment, TLS, least-purpose secrets,
    persistent storage и backup/restore.

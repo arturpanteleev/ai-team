@@ -293,6 +293,20 @@ func TestNewProcessEngineRejectsUnusableConfig(t *testing.T) {
 	}
 }
 
+func TestBubblewrapWorkerRequiresControllerAPI(t *testing.T) {
+	target := t.TempDir()
+	engine, err := NewProcessEngine([]string{"unused-worker"}, target, filepath.Join(target, "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.bubblewrap = true
+	if _, err := engine.Start(context.Background(), pipeline.RunConfig{
+		RunID: "sandbox-api-required", Feature: "feature", TaskDesc: "task", TargetDir: target,
+	}); err == nil || !strings.Contains(err.Error(), "requires the controller API") {
+		t.Fatalf("sandbox without controller API must fail before spawning: %v", err)
+	}
+}
+
 // newTestEngine — ProcessEngine, запускающий helper-тест этого пакета в роли
 // `ai-team worker`.
 func newTestEngine(t *testing.T, target string) *ProcessEngine {

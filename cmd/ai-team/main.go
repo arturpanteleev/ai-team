@@ -567,9 +567,14 @@ func cmdSchedulerWorker() {
 		fatal("Scheduler controller approvals: %v", err)
 	}
 	defer func() { _ = controllerApprovalStore.Close() }()
-	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB,
+	workerOptions, err := configuredWorkerProcessOptions(
 		worker.WithAgentRegistryPaths(configuredAgentRegistryPaths()),
-		worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(controllerRecorderStore) }, controllerApprovalStore))
+		worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(controllerRecorderStore) }, controllerApprovalStore),
+	)
+	if err != nil {
+		fatal("Scheduler worker sandbox: %v", err)
+	}
+	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB, workerOptions...)
 	if err != nil {
 		fatal("Scheduler ProcessEngine: %v", err)
 	}
@@ -1611,6 +1616,18 @@ func sigNote(key ed25519.PublicKey) string {
 	return " — подпись DSSE ed25519 подтверждена"
 }
 
+func configuredWorkerProcessOptions(base ...worker.ProcessOption) ([]worker.ProcessOption, error) {
+	options := append([]worker.ProcessOption(nil), base...)
+	switch os.Getenv(worker.WorkerSandboxEnvVar) {
+	case "":
+		return options, nil
+	case "bubblewrap":
+		return append(options, worker.WithLinuxBubblewrapIsolation()), nil
+	default:
+		return nil, fmt.Errorf("%s поддерживает только пустое значение или bubblewrap", worker.WorkerSandboxEnvVar)
+	}
+}
+
 func cmdWeb() {
 	webFlags := flag.NewFlagSet("web", flag.ExitOnError)
 	port := webFlags.String("port", "8080", "Port for web server")
@@ -1694,9 +1711,14 @@ func cmdWeb() {
 		}
 		runController, err = control.New(queueEngine, target, controllerOptions...)
 	} else if *workerCommand != "" {
-		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath,
+		workerOptions, optionErr := configuredWorkerProcessOptions(
 			worker.WithAgentRegistryPaths(agentPaths),
-			worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(recorderStore) }, approvalStore))
+			worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(recorderStore) }, approvalStore),
+		)
+		if optionErr != nil {
+			fatal("Worker sandbox: %v", optionErr)
+		}
+		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath, workerOptions...)
 		if processErr != nil {
 			fatal("Ошибка worker launcher: %v", processErr)
 		}

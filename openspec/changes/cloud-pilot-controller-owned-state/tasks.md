@@ -30,8 +30,12 @@
   through raw SQL or other filesystem access. The supported web/scheduler
   launcher slice now omits `--db` and relays recorder/approval calls over a
   per-invocation scoped loopback API; hostile API tests reject forged decisions,
-  admin calls, and cross-run scope. The task stays open until OS-level filesystem
-  isolation proves raw SQL/other filesystem access is denied.
+  admin calls, and cross-run scope. An opt-in Linux bubblewrap slice now masks
+  the configured SQLite database and lifecycle/legacy-approval directories;
+  its integration probe verifies controller DB/lifecycle sentinels are unreadable
+  while the workspace remains writable. The task stays open for independent
+  approval-store placement, evidence/artifact isolation and runtime/recovery
+  acceptance; this bounded filesystem slice does not establish network isolation.
 - [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
   worker-writable state; verify their integrity after worker-side attempts.
 - [x] Add a negative test matrix for the currently implemented worker result

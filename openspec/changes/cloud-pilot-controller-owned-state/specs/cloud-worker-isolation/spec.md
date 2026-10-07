@@ -89,6 +89,71 @@ filesystem until a separately verified runtime boundary is deployed.
 - **THEN** the controller MUST reject the request without changing lifecycle
   state
 
+### Requirement: Opt-in Linux controller-state filesystem masking
+
+The system MUST wrap a child in bubblewrap mount, user, PID, IPC, and UTS
+namespaces when `AI_TEAM_WORKER_SANDBOX=bubblewrap` is set for a web or
+scheduler worker. The launcher MUST canonicalize the writable target after
+resolving symlinks and MUST reject it if it resolves to the filesystem root;
+otherwise the writable target bind would make the entire host filesystem
+writable inside the sandbox. The worker MUST see the target workspace as
+writable, while the configured controller SQLite DB and its WAL/SHM/journal
+paths, plus `.ai-team/state/runs` and `.ai-team/state/approvals`, MUST be masked
+from direct reads. The launcher MUST
+canonicalize the configured DB and existing sidecar paths and fail closed if
+any existing DB or sidecar is not a regular file or
+has more than one hard link; otherwise an unmasked alias could expose the same
+contents. Files below the private lifecycle and legacy-approval directories
+MUST also be regular files with no hard-link aliases; symlinks and special
+files MUST fail closed. Missing bubblewrap or a failed sandbox launch MUST fail
+the invocation; the launcher MUST NOT retry the worker without the sandbox.
+The feature is opt-in and Linux-only.
+
+This slice does not isolate `.ai-team/runs` evidence/manifests, candidate or
+other target artifacts, agent registry files, host files other than the
+configured DB paths, or the network. In particular, the read-only `/` bind
+still exposes other host paths. The worker `HOME` is a fresh per-invocation
+temporary directory, not the operator's home, although the operator's original
+home may still be reachable by its absolute host path through the `/` bind,
+subject to host permissions. This is not general host-secret isolation. The
+target remains writable. It MUST NOT
+be recorded as an `ENFORCED` containment receipt or represented as full cloud
+worker isolation.
+
+#### Scenario: Sandboxed worker accesses its workspace and controller state
+
+- **WHEN** a bubblewrap worker reads/writes a target file and tries to read the
+  configured controller DB, WAL, SHM, rollback-journal, or lifecycle sentinel
+- **THEN** target access MUST continue to work
+- **AND** the controller DB bytes and lifecycle state MUST not be readable
+
+#### Scenario: A protected database path has a hard-link alias
+
+- **WHEN** the configured canonical DB or any existing canonical SQLite
+  sidecar has more than one hard link
+- **THEN** the launcher MUST fail before starting the child
+- **AND** it MUST NOT launch the worker unsandboxed
+
+#### Scenario: A private state file has a hard-link alias
+
+- **WHEN** a file under a masked lifecycle or legacy-approval directory has
+  more than one hard link
+- **THEN** the launcher MUST fail before starting the child
+- **AND** it MUST NOT launch the worker unsandboxed
+
+#### Scenario: Writable target resolves to the filesystem root
+
+- **WHEN** the configured target resolves to `/` after absolute-path and
+  symlink canonicalization
+- **THEN** the launcher MUST reject it before spawning bubblewrap or the worker
+- **AND** it MUST NOT run the worker with a writable bind of the host root
+
+#### Scenario: Bubblewrap runtime is unavailable
+
+- **WHEN** bubblewrap is selected but missing or cannot create its namespaces
+- **THEN** the worker invocation MUST fail
+- **AND** the worker MUST NOT execute unsandboxed
+
 ### Requirement: Job-scoped worker result capability
 
 The controller MUST issue a short-lived capability scoped to one active job and

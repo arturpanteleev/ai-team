@@ -30,6 +30,7 @@ const maxDiagnostics = 64 << 10
 // AI_TEAM_HARNESS_ENV_ALLOW.
 const WorkerEnvAllowVar = "AI_TEAM_WORKER_ENV_ALLOW"
 const WorkerAgentPathsEnvVar = "AI_TEAM_WORKER_AGENT_PATHS"
+const WorkerSandboxEnvVar = "AI_TEAM_WORKER_SANDBOX"
 
 var workerEnvironmentBaseline = []string{
 	"PATH", "USER", "LOGNAME", "SHELL", "PWD",
@@ -46,6 +47,7 @@ var workerEnvironmentReserved = map[string]bool{
 	"AI_TEAM_AGENT_PATH": true, WorkerAgentPathsEnvVar: true,
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
 	WorkerEnvAllowVar: true, "AI_TEAM_HARNESS_ENV_ALLOW": true,
+	WorkerSandboxEnvVar: true,
 	WorkerAPIAddressEnv: true, WorkerAPITokenEnv: true,
 }
 
@@ -56,6 +58,7 @@ type ProcessEngine struct {
 	target             string
 	dbPath             string
 	agentPaths         []string
+	bubblewrap         bool
 	apiRecorderFactory func() pipeline.Recorder
 	apiApprovals       workerApprovalPort
 }
@@ -133,6 +136,19 @@ func WithControllerAPI(recorderFactory func() pipeline.Recorder, approvals pipel
 	}
 }
 
+// WithLinuxBubblewrapIsolation opts disposable workers into the Linux
+// bubblewrap filesystem namespace. It fails closed if the runtime is missing
+// or unsupported; it never silently falls back to an unsandboxed process.
+func WithLinuxBubblewrapIsolation() ProcessOption {
+	return func(engine *ProcessEngine) error {
+		if err := checkBubblewrapAvailable(); err != nil {
+			return err
+		}
+		engine.bubblewrap = true
+		return nil
+	}
+}
+
 // AgentRegistryPathsFromEnvironment returns the exact agent path snapshot
 // attached to a disposable worker invocation.
 func AgentRegistryPathsFromEnvironment() ([]string, bool, error) {
@@ -187,6 +203,9 @@ func (e *ProcessEngine) Execute(ctx context.Context, job Job) (pipeline.RunResul
 }
 
 func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResult, error) {
+	if e.bubblewrap && e.apiRecorderFactory == nil {
+		return pipeline.RunResult{}, errors.New("bubblewrap cloud worker requires the controller API")
+	}
 	if err := job.ValidateQueued(e.target); err != nil {
 		return pipeline.RunResult{}, err
 	}
@@ -232,6 +251,17 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	command.Env = environment
 	if api != nil {
 		command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+	}
+	if e.bubblewrap {
+		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, e.agentPaths, command.Env)
+		if err != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker bubblewrap isolation: %w", err)
+		}
+		configureWorkerProcess(command)
+		command.Env = environment
+		if api != nil {
+			command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+		}
 	}
 	command.Stdin = bytes.NewReader(payload)
 	output := &limitedOutput{limit: maxDiagnostics}

@@ -8,6 +8,23 @@ import (
 	"testing"
 )
 
+func TestIOCTLOpenAIEgressInterfaceReportsKernelResult(t *testing.T) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	var request openAIEgressIfreq
+	copy(request.name[:], "lo")
+	if err := ioctlOpenAIEgressInterface(fd, 0x8913, &request); err != nil {
+		t.Fatalf("query loopback flags: %v", err)
+	}
+	if err := ioctlOpenAIEgressInterface(-1, 0x8913, &request); err == nil {
+		t.Fatal("invalid socket descriptor must return the kernel error")
+	}
+}
+
 func TestEnsureOpenAIEgressLoopbackSetupAndFailurePaths(t *testing.T) {
 	socketErr := errors.New("socket failure")
 	if err := ensureOpenAIEgressLoopbackWith(func(int, int, int) (int, error) { return -1, socketErr }, nil, nil); !errors.Is(err, socketErr) {

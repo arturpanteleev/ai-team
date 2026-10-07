@@ -54,19 +54,59 @@ route к административным endpoints. Worker container удаля
 
 ### Job result protocol
 
-Ответ должен иметь версию схемы, job/run identity, action, bounded artifacts,
-digests, exit outcomes и nonce. Controller связывает ответ с выданной capability,
-проверяет размер/пути/digests, допускаемые transitions, срок действия и
-одноразовость. Структура ответа от worker сама по себе не аттестует честность
-модели или проверки; trusted controller записывает, что именно он получил и
-какие независимые checks провёл. Decisions для human-gated перехода приходят
-только через аутентифицированную session/RBAC control plane и никогда не
-выполняются по worker result.
+### Trust assumptions и граница утверждений
 
-До реализации надо отдельно решить, какие проверки допустимо считать доверенными
-при возможной компрометации runner, как возвращать артефакты и как сериализовать
-resume. Не переносить в API произвольный filesystem path или команду, выбранную
-worker-ом.
+Worker — недоверенный исполнитель, а его stdout, exit code, check summary,
+артефакты, логи и заявленные digests — недоверенные входные данные. Мы не
+предполагаем, что worker честен, что модель выполнила инструкцию или что команда
+проверки действительно запускалась. Принятый результат доказывает только, что
+controller получил ограниченный ответ от invocation с указанными job/run/action
+и `execution_id`; он не доказывает корректность кода, успешное прохождение тестов,
+происхождение файла от конкретного инструмента или отсутствие изменений worker-а.
+
+Controller может самостоятельно проверить границы протокола: версию и строгую
+схему, job/run/action/execution identity, активность job и lease, capability,
+срок и одноразовость, nonce, лимиты байтов/количества, допустимое имя артефакта,
+фактический digest полученных байтов и допустимость перехода. Digest связывает
+записанные байты с manifest, но не подтверждает их смысл и не делает заявленный
+worker-ом digest доверенным. Проверка содержимого считается успешной только если
+её повторно выполнил controller либо отдельный доверенный verifier в изолированной
+среде, которая получила те же зафиксированные байты и записала собственные
+identity/version/result. Если результат проверки вычислил сам worker, controller
+может сохранить это как worker claim, но MUST NOT трактовать как подтверждённый
+успех проверки.
+
+Артефакты принимаются как недоверенные candidate bytes: только через ограниченный
+transfer в controller-owned staging, с лимитом размера и числа, allowlist
+логических имён/типов и вычислением digest по реально принятым байтам. Запись в
+authoritative evidence/run state делается controller-ом после валидации; worker
+не передаёт произвольный абсолютный/относительный filesystem path, destination,
+команду для controller-а или готовую запись evidence. Сначала staging, затем
+валидация и commit; невалидный или частичный transfer не меняет authoritative
+state. Повтор того же принятого результата идемпотентен; повтор capability или
+результат другого invocation отклоняется. В durable evidence controller
+различает `worker_reported` и `controller_verified` и хранит, кем/чем выполнена
+каждая принятая проверка.
+
+Human decision не является типом/полем worker result и не может быть получен из
+`outcome`, artifact, check claim или capability. Решение создаётся только
+аутентифицированным пользователем через controller session с RBAC и CSRF
+защитой, сохраняется controller-ом с actor, timestamp и audit event. Worker
+capability даёт право только передать результат своей job; у worker нет API
+credential или маршрута для создания/изменения/разрешения human decision.
+
+Текущая реализация уже ограничивает stdout result schema v3 до 4 KiB, принимает
+только одно result line и сверяет run, operation и свежий `execution_id`; строгий
+JSON отвергает неизвестные поля, включая поддельное поле решения. Это узкий
+status protocol, не передача артефактов, capability, nonce или проверок: worker
+сейчас имеет общий DB/workspace access, поэтому перечисленные controller-side
+проверки и commit semantics являются требованиями будущего API refactor, а не
+свойствами текущей системы.
+
+До реализации protocol refactor нельзя объявлять worker-produced checks
+подтверждёнными. Не переносить в API произвольный filesystem path или команду,
+выбранную worker-ом; определить typed transfer, controller-side validation и
+atomic commit по этим правилам.
 
 ## Проверяемые негативные сценарии
 
@@ -97,7 +137,9 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
 
 ## Последовательность
 
-1. Зафиксировать trust assumptions и модель attestation результата.
+1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
+   здесь:** worker result/checks/artifacts недоверен; controller подтверждает
+   только correlation и собственные независимые проверки.
 2. Спроектировать и протестировать typed worker result / controller commit
    протокол без пересылки человеческих решений как обычных worker outputs.
 3. Уже добавлены SQLite approval store, общий persistence port и

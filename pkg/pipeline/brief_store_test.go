@@ -9,11 +9,11 @@ import (
 
 func TestMaterializeBriefDocumentRejectsInvalidControllerData(t *testing.T) {
 	validContent := []byte("# intention\n")
-	digestVersion, _, err := writeInitialBrief(t.TempDir(), "source-run", "intention")
+	initial, err := NewFileBriefStore(t.TempDir()).CreateInitial("source-run", "intention")
 	if err != nil {
 		t.Fatal(err)
 	}
-	digestVersion.Path = "brief/0001-intention.md"
+	digestVersion := initial.Version
 
 	cases := []struct {
 		name      string
@@ -41,6 +41,14 @@ func TestMaterializeBriefDocumentRejectsInvalidControllerData(t *testing.T) {
 				t.Fatal("invalid controller brief data was accepted")
 			}
 		})
+	}
+}
+
+func TestWithBusinessBriefStoreInjectsStoreThroughNew(t *testing.T) {
+	store := NewFileBriefStore(t.TempDir())
+	p := New(nil, nil, WithBusinessBriefStore(store))
+	if p.briefs != store {
+		t.Fatalf("pipeline business brief store=%T, want injected %T", p.briefs, store)
 	}
 }
 

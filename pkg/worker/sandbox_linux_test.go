@@ -122,6 +122,153 @@ func TestBubblewrapRejectsHardLinkedControllerDatabaseAndSidecar(t *testing.T) {
 	}
 }
 
+func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
+	t.Run("missing bubblewrap", func(t *testing.T) {
+		path := t.TempDir()
+		t.Setenv("PATH", path)
+		if err := checkBubblewrapAvailable(); err == nil || !strings.Contains(err.Error(), "requires bubblewrap") {
+			t.Fatalf("missing bubblewrap must be rejected, got %v", err)
+		}
+	})
+	t.Run("command builder rejects root before runtime lookup", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), string(filepath.Separator), "unused.db", nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "filesystem root") {
+			t.Fatalf("root workspace must fail before looking up bwrap, got %v", err)
+		}
+	})
+	t.Run("command builder reports missing runtime", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		target := makeBubblewrapTarget(t)
+		_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target, filepath.Join(target, "controller.db"), nil, []string{"HOME=/tmp", "TMPDIR=/tmp"})
+		if err == nil || !strings.Contains(err.Error(), "bubblewrap unavailable") {
+			t.Fatalf("missing bwrap runtime must fail closed, got %v", err)
+		}
+	})
+
+	t.Run("invalid worker command environment and paths", func(t *testing.T) {
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			t.Skip("bubblewrap is installed by Linux CI; validation cases require it on PATH")
+		}
+		target := makeBubblewrapTarget(t)
+		worker := exec.Command("/bin/true")
+		validEnv := []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+		for _, tc := range []struct {
+			name       string
+			env        []string
+			agentPaths []string
+			target     string
+			dbPath     string
+			want       string
+		}{
+			{name: "missing home", env: []string{"TMPDIR=" + t.TempDir()}, target: target, dbPath: filepath.Join(target, "controller.db"), want: "HOME and TMPDIR"},
+			{name: "relative temp", env: []string{"HOME=" + t.TempDir(), "TMPDIR=relative"}, target: target, dbPath: filepath.Join(target, "controller.db"), want: "HOME and TMPDIR"},
+			{name: "missing agent registry", env: validEnv, agentPaths: []string{filepath.Join(target, "missing-agents")}, target: target, dbPath: filepath.Join(target, "controller.db"), want: "agent registry path"},
+			{name: "missing lifecycle directory", env: validEnv, target: t.TempDir(), dbPath: filepath.Join(target, "controller.db"), want: "private worker path"},
+			{name: "database parent unavailable", env: validEnv, target: target, dbPath: filepath.Join(target, "missing", "controller.db"), want: "resolve database parent"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := bubblewrapWorkerCommand(context.Background(), worker, tc.target, tc.dbPath, tc.agentPaths, tc.env)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("expected %q failure, got %v", tc.want, err)
+				}
+			})
+		}
+	})
+}
+
+func TestBubblewrapPrivateStateRejectsUnsafeEntries(t *testing.T) {
+	t.Run("missing required directory", func(t *testing.T) {
+		if err := appendPrivateDirectoryMount(&[]string{}, filepath.Join(t.TempDir(), "missing"), true); err == nil {
+			t.Fatal("missing required private directory must fail closed")
+		}
+	})
+	t.Run("missing optional directory", func(t *testing.T) {
+		args := []string{}
+		if err := appendPrivateDirectoryMount(&args, filepath.Join(t.TempDir(), "missing"), false); err != nil {
+			t.Fatalf("missing optional private directory should be ignored: %v", err)
+		}
+		if len(args) != 0 {
+			t.Fatalf("unexpected mount for missing optional directory: %v", args)
+		}
+	})
+	t.Run("non-directory path", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "state")
+		if err := os.WriteFile(file, []byte("state"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := appendPrivateDirectoryMount(&[]string{}, file, true); err == nil || !strings.Contains(err.Error(), "real directory") {
+			t.Fatalf("non-directory state path must fail closed: %v", err)
+		}
+	})
+	t.Run("symlink entry", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Symlink("missing-target", filepath.Join(dir, "linked.json")); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyPrivateDirectory(dir); err == nil || !strings.Contains(err.Error(), "regular files and directories") {
+			t.Fatalf("symlink state entry must fail closed: %v", err)
+		}
+	})
+	t.Run("missing directory", func(t *testing.T) {
+		if err := verifyPrivateDirectory(filepath.Join(t.TempDir(), "missing")); err == nil {
+			t.Fatal("missing private directory must fail closed")
+		}
+	})
+	t.Run("looping database symlink", func(t *testing.T) {
+		loop := filepath.Join(t.TempDir(), "loop")
+		if err := os.Symlink(loop, loop); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveExistingPath(loop); err == nil {
+			t.Fatal("looping database path must fail closed")
+		}
+	})
+	t.Run("missing database sidecar parent", func(t *testing.T) {
+		if _, err := resolveAndCheckDatabasePath(filepath.Join(t.TempDir(), "missing", "database.db")); err == nil {
+			t.Fatal("missing database parent must fail closed")
+		}
+	})
+	t.Run("missing database path with existing parent", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "database.db")
+		resolved, err := resolveAndCheckDatabasePath(path)
+		if err != nil || resolved != path {
+			t.Fatalf("missing database leaf should resolve to its canonical future path: %q, %v", resolved, err)
+		}
+	})
+	t.Run("database directory", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "database")
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveAndCheckDatabasePath(dir); err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("database directory must fail closed: %v", err)
+		}
+	})
+}
+
+func makeBubblewrapTarget(t *testing.T) string {
+	t.Helper()
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team", "state", "runs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func TestBubblewrapRejectsMissingAndNonDirectoryWorkspace(t *testing.T) {
+	if _, err := resolveBubblewrapTarget(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing workspace must fail closed")
+	}
+	file := filepath.Join(t.TempDir(), "workspace")
+	if err := os.WriteFile(file, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveBubblewrapTarget(file); err == nil || !strings.Contains(err.Error(), "must be a directory") {
+		t.Fatalf("non-directory workspace must fail closed: %v", err)
+	}
+}
+
 func TestBubblewrapRejectsFilesystemRootAsTarget(t *testing.T) {
 	for _, target := range []string{string(filepath.Separator), filepath.Join(string(filepath.Separator), ".")} {
 		t.Run(target, func(t *testing.T) {

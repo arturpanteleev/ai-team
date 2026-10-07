@@ -4,8 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
 func TestCheckControlRootDistinguishesUninitializedFromUnsafe(t *testing.T) {
@@ -45,6 +48,43 @@ func TestCheckControlRootDistinguishesUninitializedFromUnsafe(t *testing.T) {
 		}
 		if err := checkControlRoot(target); err != nil {
 			t.Fatalf("валидный control root не должен возвращать ошибку: %v", err)
+		}
+	})
+}
+
+func TestConfiguredWorkerProcessOptions(t *testing.T) {
+	t.Run("default has no sandbox override", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "")
+		options, err := configuredWorkerProcessOptions()
+		if err != nil || len(options) != 0 {
+			t.Fatalf("default worker options = %d, %v; want none", len(options), err)
+		}
+	})
+
+	t.Run("unknown sandbox fails closed", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "unknown")
+		if _, err := configuredWorkerProcessOptions(); err == nil || !strings.Contains(err.Error(), worker.WorkerSandboxEnvVar) {
+			t.Fatalf("unknown sandbox selector must fail closed, got %v", err)
+		}
+	})
+
+	t.Run("bubblewrap selector", func(t *testing.T) {
+		t.Setenv(worker.WorkerSandboxEnvVar, "bubblewrap")
+		options, err := configuredWorkerProcessOptions()
+		if err != nil || len(options) != 1 {
+			t.Fatalf("bubblewrap worker options = %d, %v; want one option", len(options), err)
+		}
+		target := t.TempDir()
+		_, engineErr := worker.NewProcessEngine([]string{"worker"}, target, filepath.Join(target, "controller.db"), options...)
+		_, bwrapErr := exec.LookPath("bwrap")
+		if runtime.GOOS != "linux" || bwrapErr != nil {
+			if engineErr == nil {
+				t.Fatal("unsupported or unavailable bubblewrap selector must fail closed")
+			}
+			return
+		}
+		if engineErr != nil {
+			t.Fatalf("available Linux bubblewrap option rejected: %v", engineErr)
 		}
 	})
 }

@@ -10,6 +10,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -1035,6 +1038,46 @@ func TestWorkerCommandContract(t *testing.T) {
 			t.Fatalf("относительный --db обязан отклоняться, получено: %q", stderr)
 		}
 	})
+}
+
+func TestWorkerControllerAPIModeUsesControllerOwnedState(t *testing.T) {
+	root := newControlRoot(t)
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBytes, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".ai-team", "config.yaml"), configBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "lifecycle state not found", http.StatusNotFound)
+	}))
+	defer api.Close()
+	job, err := json.Marshal(worker.Job{
+		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationCancel,
+		RunID: "run-controller-api-db", TargetDir: filepath.Clean(root),
+		ExecutionID: strings.Repeat("e", worker.ExecutionIDBytes*2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(worker.WorkerAPIAddressEnv, api.URL)
+	t.Setenv(worker.WorkerAPITokenEnv, "test-capability")
+	_, code, stderr := runCLIStdin(t, string(job), "worker", "--target", root)
+	if code != 1 || !strings.Contains(stderr, "worker API lifecycle.load") {
+		t.Fatalf("controller API mode should reach controller-owned lifecycle state after wiring its stores, got exit %d: %s", code, stderr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".ai-team", "web.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("controller API mode created a local worker database: %v", statErr)
+	}
+	_, code, stderr = runCLIStdin(t, string(job), "worker", "--target", root, "--db", filepath.Join(root, "local.db"))
+	if code != 1 || !strings.Contains(stderr, "controller API mode rejects --db") {
+		t.Fatalf("controller API mode must reject an explicit worker-local database, got exit %d: %s", code, stderr)
+	}
 }
 
 func TestWorkerOpenAIEgressRequiresMatchingCredentials(t *testing.T) {

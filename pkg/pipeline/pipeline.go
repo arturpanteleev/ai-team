@@ -70,18 +70,19 @@ type ApprovalStore interface {
 }
 
 type Pipeline struct {
-	cfg        *config.Config
-	reg        *agent.Registry
-	notifier   notifier.Notifier
-	prompter   Prompter
-	newRuntime runtime.Factory
-	recorder   Recorder
-	delivery   delivery.Service
-	approvals  ApprovalStore
-	lifecycle  lifecycle.StorePort
-	evidence   EvidenceStoreFactory
-	briefs     BriefStore
-	reportsDir string
+	cfg               *config.Config
+	reg               *agent.Registry
+	notifier          notifier.Notifier
+	prompter          Prompter
+	newRuntime        runtime.Factory
+	recorder          Recorder
+	delivery          delivery.Service
+	approvals         ApprovalStore
+	lifecycle         lifecycle.StorePort
+	evidence          EvidenceStoreFactory
+	briefs            BriefStore
+	candidateMetadata candidate.MetadataStore
+	reportsDir        string
 }
 
 type Option func(*Pipeline)
@@ -138,6 +139,12 @@ func WithEvidenceStoreFactory(factory EvidenceStoreFactory) Option {
 // controller-owned typed store. The default remains the local filesystem store.
 func WithBusinessBriefStore(store BriefStore) Option {
 	return func(p *Pipeline) { p.briefs = store }
+}
+
+// WithCandidateMetadataStore routes candidate identity persistence through the
+// controller API. Local CLI runs keep the candidate package file-store default.
+func WithCandidateMetadataStore(store candidate.MetadataStore) Option {
+	return func(p *Pipeline) { p.candidateMetadata = store }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
@@ -428,13 +435,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	sourceTarget := runCfg.TargetDir
 	var candidateManager *candidate.Manager
 	if runCfg.ResumeRunID != "" {
-		candidateManager, err = candidate.Load(ctx, runCfg.TargetDir, runID)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		candidateManager, err = loadResumeCandidate(ctx, runCfg.TargetDir, runID, p.candidateMetadata)
+		if err != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume candidate: %w", err)
 		}
 	} else {
 		var gitAvailable bool
-		candidateManager, gitAvailable, err = candidate.Create(ctx, runCfg.TargetDir, runID)
+		if p.candidateMetadata != nil {
+			candidateManager, gitAvailable, err = candidate.CreateWithMetadataStore(ctx, runCfg.TargetDir, runID, p.candidateMetadata)
+		} else {
+			candidateManager, gitAvailable, err = candidate.Create(ctx, runCfg.TargetDir, runID)
+		}
 		if err != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, err
 		}

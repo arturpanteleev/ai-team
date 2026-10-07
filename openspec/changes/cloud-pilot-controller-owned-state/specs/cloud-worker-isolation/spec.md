@@ -126,6 +126,53 @@ worker can still read or alter the controller's on-target brief files directly.
   matching version
 - **AND** no other run's brief content may be returned
 
+### Requirement: Run-scoped controller-owned candidate metadata API
+
+Disposable worker pipelines MUST create and load candidate metadata through
+typed controller API operations scoped to the invocation's run and target.
+The controller MUST validate schema, run identity, canonical target, and the
+exact candidate worktree path before persistence and before returning metadata.
+Conflicting existing metadata and symlinked candidate worktree/metadata paths
+MUST be rejected. Symlinked parent components of the target path are accepted
+and resolved to the same canonical target; the candidate manager requires the
+final target component itself to be a directory, not a symlink.
+Resume MUST fail closed when candidate metadata is missing; worker-writable
+run provenance MUST NOT establish that a run had no candidate. Until a
+controller-owned absence marker exists, non-Git runs without candidate
+metadata cannot resume in controller-backed mode. Local CLI MAY retain legacy
+non-Git resume compatibility using target-file provenance, which is not a
+trust boundary.
+Local CLI runs MAY use the filesystem-backed store. In the opt-in Linux
+bubblewrap mode, `.ai-team/state/candidates` MUST be overlaid with a
+namespace-local tmpfs so controller metadata is not readable by the worker;
+the candidate worktree remains mounted and available for normal pipeline work.
+This requirement covers candidate metadata only and MUST NOT be represented as
+isolation of candidate contents, evidence, or artifacts.
+
+#### Scenario: Worker creates and resumes the same candidate
+
+- **WHEN** a disposable worker creates candidate metadata and later resumes or
+  recovers that run
+- **THEN** create and read operations MUST reach the controller store with the
+  same run/target identity
+- **AND** the returned worktree MUST match the exact target/run candidate path
+- **AND** a local CLI run MUST retain its filesystem-backed behavior
+
+#### Scenario: Missing metadata cannot be bypassed with run provenance
+
+- **WHEN** candidate metadata is missing and worker-writable `run.json` claims
+  `candidate=sha256/unknown`
+- **THEN** resume MUST fail closed
+- **AND** non-Git runs without a controller-owned candidate record MUST NOT
+  resume in controller-backed mode
+
+#### Scenario: Candidate metadata is masked while worktree remains available
+
+- **WHEN** a Linux bubblewrap worker attempts to read a controller-owned
+  candidate-metadata sentinel and a separate candidate-worktree sentinel
+- **THEN** the metadata sentinel MUST be unreadable
+- **AND** the worktree sentinel MUST remain readable
+
 ### Requirement: Opt-in Linux controller-state filesystem masking
 
 The system MUST wrap a child in bubblewrap mount, user, PID, IPC, UTS, and network

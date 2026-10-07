@@ -42,7 +42,28 @@ type Manager struct {
 	metadata Metadata
 }
 
+// MetadataStore lets cloud workers access candidate identity through their
+// controller API while preserving the local filesystem default.
+type MetadataStore interface {
+	Create(Metadata) error
+	Read(controlTarget, runID string) (Metadata, error)
+}
+
+type FileMetadataStore struct{}
+
+func (FileMetadataStore) Create(metadata Metadata) error { return saveMetadata(metadata) }
+func (FileMetadataStore) Read(controlTarget, runID string) (Metadata, error) {
+	return readMetadata(controlTarget, runID)
+}
+
 func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, error) {
+	return CreateWithMetadataStore(ctx, controlTarget, runID, FileMetadataStore{})
+}
+
+func CreateWithMetadataStore(ctx context.Context, controlTarget, runID string, store MetadataStore) (*Manager, bool, error) {
+	if store == nil {
+		return nil, false, errors.New("candidate metadata store is required")
+	}
 	target, err := canonicalDirectory(controlTarget)
 	if err != nil {
 		return nil, false, err
@@ -75,7 +96,7 @@ func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, e
 		// A worker can die after `git worktree add` and before publishing the
 		// candidate metadata. Under the run's workspace lock, recover that exact
 		// detached worktree only when it still points at the current baseline.
-		manager, recoverErr := recoverCreatedWorktree(ctx, target, runID, worktree, strings.TrimSpace(baseCommit), strings.TrimSpace(baseTree))
+		manager, recoverErr := recoverCreatedWorktree(ctx, target, runID, worktree, strings.TrimSpace(baseCommit), strings.TrimSpace(baseTree), store)
 		return manager, true, recoverErr
 	} else if !os.IsNotExist(err) {
 		return nil, true, err
@@ -92,17 +113,16 @@ func Create(ctx context.Context, controlTarget, runID string) (*Manager, bool, e
 	if err := manager.ensureArtifactRoot(); err != nil {
 		return nil, true, err
 	}
-	if err := manager.save(); err != nil {
+	if err := manager.save(store); err != nil {
 		return nil, true, err
 	}
 	return manager, true, nil
 }
 
-func recoverCreatedWorktree(ctx context.Context, target, runID, worktree, baseCommit, baseTree string) (*Manager, error) {
-	metadataPath := filepath.Join(target, ".ai-team", "state", "candidates", runID+".json")
-	if _, err := os.Lstat(metadataPath); err == nil {
-		return Load(ctx, target, runID)
-	} else if !os.IsNotExist(err) {
+func recoverCreatedWorktree(ctx context.Context, target, runID, worktree, baseCommit, baseTree string, store MetadataStore) (*Manager, error) {
+	if _, err := store.Read(target, runID); err == nil {
+		return LoadWithMetadataStore(ctx, target, runID, store)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	actualRoot, err := canonicalDirectory(worktree)
@@ -133,13 +153,20 @@ func recoverCreatedWorktree(ctx context.Context, target, runID, worktree, baseCo
 	if err := manager.ensureArtifactRoot(); err != nil {
 		return nil, err
 	}
-	if err := manager.save(); err != nil {
+	if err := manager.save(store); err != nil {
 		return nil, err
 	}
 	return manager, nil
 }
 
 func Load(ctx context.Context, controlTarget, runID string) (*Manager, error) {
+	return LoadWithMetadataStore(ctx, controlTarget, runID, FileMetadataStore{})
+}
+
+func LoadWithMetadataStore(ctx context.Context, controlTarget, runID string, store MetadataStore) (*Manager, error) {
+	if store == nil {
+		return nil, errors.New("candidate metadata store is required")
+	}
 	target, err := canonicalDirectory(controlTarget)
 	if err != nil {
 		return nil, err
@@ -147,31 +174,32 @@ func Load(ctx context.Context, controlTarget, runID string) (*Manager, error) {
 	if !safeID(runID) {
 		return nil, fmt.Errorf("candidate: invalid run id")
 	}
-	data, err := safeio.ReadRegularFile(
-		filepath.Join(target, ".ai-team", "state", "candidates", runID+".json"), 64<<10,
-	)
+	metadata, err := store.Read(target, runID)
 	if err != nil {
 		return nil, err
 	}
-	var metadata Metadata
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("candidate metadata: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("candidate metadata содержит trailing JSON")
-	}
-	if metadata.SchemaVersion != metadataVersion || metadata.RunID != runID ||
-		metadata.ControlTarget != target || metadata.Worktree != filepath.Join(target, ".ai-team", "worktrees", runID) {
-		return nil, fmt.Errorf("candidate metadata identity mismatch")
+	if err := ValidateMetadata(target, runID, metadata); err != nil {
+		return nil, err
 	}
 	manager := &Manager{metadata: metadata}
 	if err := manager.verify(ctx); err != nil {
 		return nil, err
 	}
 	return manager, nil
+}
+
+// ValidateMetadata enforces target/run-bound candidate identity.
+func ValidateMetadata(controlTarget, runID string, metadata Metadata) error {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return err
+	}
+	if !safeID(runID) || metadata.SchemaVersion != metadataVersion || metadata.RunID != runID ||
+		metadata.ControlTarget != target || metadata.Worktree != filepath.Join(target, ".ai-team", "worktrees", runID) ||
+		metadata.BaseCommit == "" || metadata.BaseTree == "" || metadata.CreatedAt.IsZero() {
+		return fmt.Errorf("candidate metadata identity mismatch")
+	}
+	return nil
 }
 
 func (m *Manager) Root() string       { return m.metadata.Worktree }
@@ -226,16 +254,29 @@ func (m *Manager) ensureArtifactRoot() error {
 	return nil
 }
 
-func (m *Manager) save() error {
-	dir, err := safeio.EnsureDir(m.metadata.ControlTarget, ".ai-team", "state", "candidates")
+func (m *Manager) save(store MetadataStore) error { return store.Create(m.metadata) }
+
+func saveMetadata(metadata Metadata) error {
+	if err := ValidateMetadata(metadata.ControlTarget, metadata.RunID, metadata); err != nil {
+		return err
+	}
+	if stored, err := readMetadata(metadata.ControlTarget, metadata.RunID); err == nil {
+		if stored == metadata {
+			return nil
+		}
+		return fmt.Errorf("candidate metadata conflicts with existing run identity")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir, err := safeio.EnsureDir(metadata.ControlTarget, ".ai-team", "state", "candidates")
 	if err != nil {
 		return err
 	}
-	destination := filepath.Join(dir, m.metadata.RunID+".json")
+	destination := filepath.Join(dir, metadata.RunID+".json")
 	if err := safeio.RejectSymlink(destination); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(m.metadata, "", "  ")
+	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -261,7 +302,41 @@ func (m *Manager) save() error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, destination)
+	if err := os.Link(tempPath, destination); err != nil {
+		if stored, readErr := readMetadata(metadata.ControlTarget, metadata.RunID); readErr == nil && stored == metadata {
+			return nil
+		}
+		return fmt.Errorf("persist candidate metadata without replacing an existing identity: %w", err)
+	}
+	return nil
+}
+
+func readMetadata(controlTarget, runID string) (Metadata, error) {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if !safeID(runID) {
+		return Metadata{}, fmt.Errorf("candidate: invalid run id")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(target, ".ai-team", "state", "candidates", runID+".json"), 64<<10)
+	if err != nil {
+		return Metadata{}, err
+	}
+	var metadata Metadata
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&metadata); err != nil {
+		return Metadata{}, fmt.Errorf("candidate metadata: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Metadata{}, fmt.Errorf("candidate metadata contains trailing JSON")
+	}
+	if err := ValidateMetadata(target, runID, metadata); err != nil {
+		return Metadata{}, err
+	}
+	return metadata, nil
 }
 
 func canonicalDirectory(value string) (string, error) {
@@ -276,6 +351,28 @@ func canonicalDirectory(value string) (string, error) {
 	canonical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return "", err
+	}
+	return filepath.Clean(canonical), nil
+}
+
+// CanonicalTargetDir resolves a target path (including a final symlink) to the
+// absolute directory used as the worker API namespace. Candidate metadata
+// itself is still validated against the resolved path before it is stored.
+func CanonicalTargetDir(value string) (string, error) {
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s должен быть каталогом", canonical)
 	}
 	return filepath.Clean(canonical), nil
 }

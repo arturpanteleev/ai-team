@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,15 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	}
 	legacyApprovalsDir := filepath.Join(canonicalTarget, ".ai-team", "state", "approvals")
 	if err := appendPrivateDirectoryMount(&args, legacyApprovalsDir, false); err != nil {
+		return nil, err
+	}
+	// Candidate identity is persisted by the controller API. Keep candidate
+	// worktree files writable, while masking this controller metadata directory.
+	candidateMetadataDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "candidates")
+	if err != nil {
+		return nil, fmt.Errorf("prepare candidate metadata mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, candidateMetadataDir, true); err != nil {
 		return nil, err
 	}
 	resolvedDB, err := resolveExistingPath(dbPath)

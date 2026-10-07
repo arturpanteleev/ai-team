@@ -8,17 +8,21 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
-// MaxAttemptManifestSize bounds attempt manifests read through source-backed
-// APIs and written by PublishAttempt. Legacy standalone replay streams the
-// filesystem digest and can still verify larger pre-existing manifests.
+// MaxAttemptManifestSize bounds attempt manifests accepted by source-backed
+// APIs and written by PublishAttempt. Injected sources return a []byte before
+// the adapter enforces this limit, so their allocation is not bounded here.
+// Legacy standalone replay streams the filesystem digest and can still verify
+// larger pre-existing manifests.
 const MaxAttemptManifestSize = 8 << 20
 
 const maxAttemptManifestSize = MaxAttemptManifestSize
 
 // AttemptManifestSource provides the bytes for an attempt manifest. Keeping
 // the source explicit lets replay, resume, and verification share the same
-// manifest identity checks while allowing a controller-owned backend. Reads
-// through this interface are limited to MaxAttemptManifestSize bytes.
+// manifest identity checks while allowing a controller-owned backend. The
+// adapter rejects returned payloads larger than MaxAttemptManifestSize, after
+// the source has produced the []byte; this does not bound a custom source's
+// allocation. The filesystem source enforces the limit while reading.
 type AttemptManifestSource interface {
 	ReadAttemptManifest(runDir, runID, attemptID string) ([]byte, error)
 }
@@ -51,6 +55,9 @@ func readAttemptManifest(source AttemptManifestSource, runDir, runID, attemptID 
 }
 
 func readAttemptManifestBytes(source AttemptManifestSource, runDir, runID, attemptID string) ([]byte, error) {
+	if err := validateAttemptManifestIdentity(runID, attemptID); err != nil {
+		return nil, err
+	}
 	if source == nil {
 		source = filesystemAttemptManifestSource{}
 	}
@@ -93,7 +100,7 @@ func validateAttemptManifestIdentity(runID, attemptID string) error {
 	if err := ValidateRunID(runID); err != nil {
 		return err
 	}
-	if attemptID == "" || filepath.Base(attemptID) != attemptID || filepath.Clean(attemptID) != attemptID {
+	if attemptID == "" || attemptID == "." || attemptID == ".." || filepath.Base(attemptID) != attemptID || filepath.Clean(attemptID) != attemptID {
 		return fmt.Errorf("invalid attempt id %q", attemptID)
 	}
 	return nil

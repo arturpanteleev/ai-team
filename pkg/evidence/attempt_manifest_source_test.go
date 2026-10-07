@@ -14,6 +14,47 @@ type memoryAttemptManifestSource struct {
 	data map[string][]byte
 }
 
+type recordingAttemptManifestSource struct {
+	calls int
+}
+
+func (s *recordingAttemptManifestSource) ReadAttemptManifest(_, _, _ string) ([]byte, error) {
+	s.calls++
+	return []byte(`{}`), nil
+}
+
+func TestAttemptManifestSourcesRejectDotTraversalIDs(t *testing.T) {
+	const runID = "run-manifest-path-traversal"
+	runDir := t.TempDir()
+	for _, test := range []struct {
+		attemptID string
+		path      string
+	}{
+		{attemptID: ".", path: filepath.Join(runDir, "attempts", "manifest.json")},
+		{attemptID: "..", path: filepath.Join(runDir, "manifest.json")},
+	} {
+		t.Run(test.attemptID, func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Dir(test.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(test.path, []byte(`{"outside":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FilesystemAttemptManifestSource().ReadAttemptManifest(runDir, runID, test.attemptID); err == nil {
+				t.Fatalf("filesystem source accepted traversal attempt id %q", test.attemptID)
+			}
+
+			source := &recordingAttemptManifestSource{}
+			if _, err := readAttemptManifestBytes(source, runDir, runID, test.attemptID); err == nil {
+				t.Fatalf("custom source path accepted traversal attempt id %q", test.attemptID)
+			}
+			if source.calls != 0 {
+				t.Fatalf("custom source was called %d times for invalid attempt id %q", source.calls, test.attemptID)
+			}
+		})
+	}
+}
+
 func TestAttemptManifestSourceRejectsOversizedBytes(t *testing.T) {
 	const runID = "run-oversized-manifest"
 	const attemptID = "attempt-oversized-manifest"

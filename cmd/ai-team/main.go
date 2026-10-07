@@ -304,7 +304,8 @@ func cmdWorker() {
 			_ = recorderStore.Close()
 			printWorkerResult(job.RunID, worker.Result{
 				SchemaVersion: worker.ResultSchemaVersion, RunID: job.RunID,
-				Outcome: worker.OutcomeInfraFailed, Error: report.Error().Error(),
+				Operation: job.Operation,
+				Outcome:   worker.OutcomeInfraFailed, Error: report.Error().Error(),
 			})
 			fatal("Worker preflight: %v", report.Error())
 		}
@@ -332,14 +333,16 @@ func cmdWorker() {
 		outcome := workerOutcomeFor(err)
 		printWorkerResult(job.RunID, worker.Result{
 			SchemaVersion: worker.ResultSchemaVersion, RunID: job.RunID,
-			Outcome: outcome, Error: err.Error(),
+			Operation: job.Operation,
+			Outcome:   outcome, Error: err.Error(),
 		})
 		fmt.Fprintf(os.Stderr, "worker %s остановлен: %v\n", job.RunID, err)
 		os.Exit(exitCodeFor(err))
 	}
 	printWorkerResult(job.RunID, worker.Result{
 		SchemaVersion: worker.ResultSchemaVersion, RunID: result.RunID,
-		Outcome: string(result.Outcome),
+		Operation: job.Operation,
+		Outcome:   string(result.Outcome),
 	})
 	logging.Printf("worker %s завершён: %s\n", result.RunID, result.Outcome)
 }

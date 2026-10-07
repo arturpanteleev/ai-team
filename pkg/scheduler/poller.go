@@ -107,11 +107,11 @@ func (p *Poller) RunOnce(ctx context.Context, owner string) (claimed bool, err e
 	return true, nil
 }
 
-// classifyExecution отличает durable business-исходы run (waiting/blocked/
-// stopped/canceled/completed) от инфраструктурного сбоя воркера. Решение
-// принимает строка результата `ai-team worker`, а не exit code: crash,
-// preflight fatal или чужой binary строки не пишут и классифицируются как
-// инфраструктурный сбой.
+// classifyExecution отличает заявленный worker-ом durable outcome от
+// инфраструктурного сбоя. Результат влияет только на queue retry policy:
+// он не является доказательством approval и не создаёт человеческое решение.
+// Crash, preflight fatal или чужой binary без валидной строки — инфраструктурный
+// сбой. До отдельной controller/worker изоляции status остается недоверенным.
 func classifyExecution(err error) (success bool, diagnostic string) {
 	if err == nil {
 		return true, ""

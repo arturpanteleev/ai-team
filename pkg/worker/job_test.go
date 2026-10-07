@@ -158,7 +158,7 @@ func TestProcessEngineHelper(t *testing.T) {
 		}
 	}
 	result, encodeErr := json.Marshal(Result{
-		SchemaVersion: ResultSchemaVersion, RunID: job.RunID, Outcome: OutcomeCompleted,
+		SchemaVersion: ResultSchemaVersion, RunID: job.RunID, Operation: job.Operation, Outcome: OutcomeCompleted,
 	})
 	if encodeErr != nil {
 		t.Fatal(encodeErr)

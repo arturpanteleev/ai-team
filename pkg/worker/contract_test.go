@@ -112,7 +112,7 @@ func TestJobRunConfigCarriesIdentityAndApproval(t *testing.T) {
 // job завершённым контролируемо. Чужой binary, старая схема и мусор обязаны
 // отличаться от честного результата.
 func TestParseResultRejectsMalformed(t *testing.T) {
-	valid := fmt.Sprintf(`%s{"schema_version":%d,"run_id":"run-1","outcome":"completed"}`,
+	valid := fmt.Sprintf(`%s{"schema_version":%d,"run_id":"run-1","operation":"start","outcome":"completed"}`,
 		ResultPrefix, ResultSchemaVersion)
 
 	parsed, err := ParseResult("шум\n" + valid + "\nхвост\n")
@@ -122,25 +122,27 @@ func TestParseResultRejectsMalformed(t *testing.T) {
 	if parsed.Outcome != OutcomeCompleted || parsed.RunID != "run-1" {
 		t.Fatalf("неожиданный результат: %+v", parsed)
 	}
-
-	// Побеждает последняя строка результата: воркер мог напечатать
-	// промежуточный результат до финального.
-	last := fmt.Sprintf(`%s{"schema_version":%d,"run_id":"run-1","outcome":"blocked"}`,
-		ResultPrefix, ResultSchemaVersion)
-	parsed, err = ParseResult(valid + "\n" + last + "\n")
-	if err != nil {
-		t.Fatal(err)
+	legacy := ResultPrefix + `{"schema_version":1,"run_id":"run-1","operation":"start","outcome":"completed"}` + "\n"
+	if _, err := ParseResult(legacy); err == nil || !strings.Contains(err.Error(), "неподдерживаемая schema_version 1") {
+		t.Fatalf("v1 result must be rejected with an explicit version error, got %v", err)
 	}
-	if parsed.Outcome != OutcomeBlocked {
-		t.Fatalf("должна побеждать последняя строка результата, получено %q", parsed.Outcome)
+
+	if _, err := ParseResult(valid + "\n" + valid + "\n"); err == nil {
+		t.Fatal("повторный result line обязан отклоняться")
 	}
 
 	cases := map[string]string{
 		"без строки результата": "просто вывод\n",
 		"не JSON":          ResultPrefix + "not-json\n",
-		"неизвестное поле": ResultPrefix + `{"schema_version":1,"outcome":"completed","extra":1}` + "\n",
+		"неизвестное поле": ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","extra":1}` + "\n",
 		"чужая схема":      ResultPrefix + `{"schema_version":99,"outcome":"completed"}` + "\n",
-		"пустой outcome":   ResultPrefix + `{"schema_version":1,"outcome":""}` + "\n",
+		"пустой outcome":   ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":""}` + "\n",
+		"admin operation":  ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","admin_operation":"grant_role"}` + "\n",
+		"human decision":   ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","approval_decision":{"action":"approve"}}` + "\n",
+		"artifact path":    ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","artifacts":[{"path":"../../approvals.json"}]}` + "\n",
+		"oversized error":  ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","error":"` + strings.Repeat("x", MaxResultErrorBytes+1) + `"}` + "\n",
+		"oversized":        ResultPrefix + `{"schema_version":2,"run_id":"run-1","operation":"start","outcome":"completed","error":"` + strings.Repeat("x", MaxResultBytes) + `"}` + "\n",
+		"trailing JSON":    valid + ` {"run_id":"other"}` + "\n",
 	}
 	for name, output := range cases {
 		if _, err := ParseResult(output); err == nil {
@@ -163,6 +165,46 @@ func TestResultControlledSeparatesDurableFromRetryable(t *testing.T) {
 		if (Result{Outcome: outcome}).Controlled() {
 			t.Fatalf("исход %q не должен считаться controlled (job перезапускаем)", outcome)
 		}
+	}
+}
+
+func TestResultMustMatchTheLaunchedJob(t *testing.T) {
+	job := Job{RunID: "run-1", Operation: OperationResume}
+	valid := Result{RunID: job.RunID, Operation: job.Operation, Outcome: OutcomeWaitingApproval}
+	if err := valid.ValidateFor(job); err != nil {
+		t.Fatalf("matching result rejected: %v", err)
+	}
+	for name, result := range map[string]Result{
+		"other run":    {RunID: "run-2", Operation: job.Operation, Outcome: OutcomeCompleted},
+		"other action": {RunID: job.RunID, Operation: OperationCancel, Outcome: OutcomeCompleted},
+	} {
+		if err := result.ValidateFor(job); err == nil {
+			t.Errorf("%s result should be rejected", name)
+		}
+	}
+}
+
+func TestProcessEngineRejectsWrongJobAndOperationResults(t *testing.T) {
+	target := t.TempDir()
+	for _, mode := range []string{"wrong-run", "wrong-operation"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("AI_TEAM_WORKER_TEST_MODE", mode)
+			engine, err := NewProcessEngine(
+				[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
+				target, filepath.Join(target, "web.db"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = engine.Execute(context.Background(), Job{
+				SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "expected-run",
+				TargetDir: target, Feature: "feature", Task: "task",
+			})
+			var processErr *ProcessError
+			if !errors.As(err, &processErr) || processErr.Result != nil {
+				t.Fatalf("untrusted mismatched result must fail closed, got %v", err)
+			}
+		})
 	}
 }
 
@@ -376,9 +418,9 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "паника воркера: nil map")
 		os.Exit(7)
 	case "fail-with-result":
-		printHelperResult(t, "run-blocked", OutcomeBlocked)
+		printHelperResult(t, "run-blocked", OperationStart, OutcomeBlocked)
 		os.Exit(2)
-	case "echo":
+	case "echo", "wrong-run", "wrong-operation":
 		target := ""
 		for index := range os.Args {
 			if os.Args[index] == "--target" && index+1 < len(os.Args) {
@@ -395,16 +437,23 @@ func TestWorkerProtocolHelper(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		printHelperResult(t, job.RunID, OutcomeCompleted)
+		resultRunID, resultOperation := job.RunID, job.Operation
+		if os.Getenv("AI_TEAM_WORKER_TEST_MODE") == "wrong-run" {
+			resultRunID = "forged-run"
+		}
+		if os.Getenv("AI_TEAM_WORKER_TEST_MODE") == "wrong-operation" {
+			resultOperation = OperationCancel
+		}
+		printHelperResult(t, resultRunID, resultOperation, OutcomeCompleted)
 		os.Exit(0)
 	}
 	os.Exit(0)
 }
 
-func printHelperResult(t *testing.T, runID, outcome string) {
+func printHelperResult(t *testing.T, runID string, operation Operation, outcome string) {
 	t.Helper()
 	data, err := json.Marshal(Result{
-		SchemaVersion: ResultSchemaVersion, RunID: runID, Outcome: outcome,
+		SchemaVersion: ResultSchemaVersion, RunID: runID, Operation: operation, Outcome: outcome,
 	})
 	if err != nil {
 		t.Fatal(err)

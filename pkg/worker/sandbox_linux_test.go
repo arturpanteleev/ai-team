@@ -395,6 +395,95 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 	})
 }
 
+func TestBubblewrapMountsControllerCandidateEvidenceReadOnly(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	for _, tc := range []struct {
+		name  string
+		files []string
+	}{
+		{name: "review candidate only", files: []string{"review-candidate.json"}},
+		{name: "both candidate documents", files: []string{"review-candidate.json", "verification-candidate.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := makeBubblewrapTarget(t)
+			runID := "candidate-mount-test"
+			runDir := filepath.Join(target, ".ai-team", "state", "evidence", runID)
+			if err := os.MkdirAll(runDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(runDir, name), []byte("controller-owned candidate evidence"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			command, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+				filepath.Join(target, "controller.db"), runID, nil,
+				[]string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			wantPaths := make(map[string]bool, len(tc.files))
+			for _, name := range tc.files {
+				wantPaths[filepath.Join(runDir, name)] = false
+			}
+			dirMounts := 0
+			for i := 0; i+2 < len(command.Args); i++ {
+				if command.Args[i] == "--dir" && command.Args[i+1] == runDir {
+					dirMounts++
+				}
+				if command.Args[i] == "--ro-bind" && command.Args[i+1] == "/dev/null" {
+					if _, expected := wantPaths[command.Args[i+2]]; expected {
+						wantPaths[command.Args[i+2]] = true
+					}
+				}
+			}
+			if dirMounts != 1 {
+				t.Fatalf("candidate evidence run directory must be recreated exactly once after its private mask; got %d mounts in %v", dirMounts, command.Args)
+			}
+			for path, found := range wantPaths {
+				if !found {
+					t.Errorf("controller candidate evidence must be masked with a read-only /dev/null bind: %s; args=%v", path, command.Args)
+				}
+			}
+		})
+	}
+}
+
+func TestBubblewrapRejectsSymlinkedControllerCandidateEvidence(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	target := makeBubblewrapTarget(t)
+	runDir := filepath.Join(target, ".ai-team", "state", "evidence", "sandbox-test")
+	if err := os.MkdirAll(runDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "candidate.json")
+	if err := os.WriteFile(outside, []byte("outside controller state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(runDir, "review-candidate.json")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+		filepath.Join(target, "controller.db"), "sandbox-test", nil,
+		[]string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "controller candidate evidence path") || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlinked controller candidate evidence must fail closed, got %v", err)
+	}
+}
+
 func TestBubblewrapRejectsNonRegularControllerAttestationRecord(t *testing.T) {
 	fakeBin := t.TempDir()
 	fakeBwrap := filepath.Join(fakeBin, "bwrap")

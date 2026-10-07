@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -54,21 +55,22 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID        string                   `json:"run_id,omitempty"`
-	A            string                   `json:"a,omitempty"`
-	B            string                   `json:"b,omitempty"`
-	C            string                   `json:"c,omitempty"`
-	Index        int                      `json:"index,omitempty"`
-	At           time.Time                `json:"at,omitempty"`
-	Data         map[string]any           `json:"data,omitempty"`
-	IDs          []string                 `json:"ids,omitempty"`
-	Stage        notifier.StageResult     `json:"stage,omitempty"`
-	Error        string                   `json:"error,omitempty"`
-	Approval     approval.PendingApproval `json:"approval,omitempty"`
-	Lifecycle    lifecycle.State          `json:"lifecycle,omitempty"`
-	Previous     lifecycle.State          `json:"previous_lifecycle,omitempty"`
-	BriefVersion pipeline.BriefVersion    `json:"brief_version,omitempty"`
-	BriefContent []byte                   `json:"brief_content,omitempty"`
+	RunID             string                   `json:"run_id,omitempty"`
+	A                 string                   `json:"a,omitempty"`
+	B                 string                   `json:"b,omitempty"`
+	C                 string                   `json:"c,omitempty"`
+	Index             int                      `json:"index,omitempty"`
+	At                time.Time                `json:"at,omitempty"`
+	Data              map[string]any           `json:"data,omitempty"`
+	IDs               []string                 `json:"ids,omitempty"`
+	Stage             notifier.StageResult     `json:"stage,omitempty"`
+	Error             string                   `json:"error,omitempty"`
+	Approval          approval.PendingApproval `json:"approval,omitempty"`
+	Lifecycle         lifecycle.State          `json:"lifecycle,omitempty"`
+	Previous          lifecycle.State          `json:"previous_lifecycle,omitempty"`
+	BriefVersion      pipeline.BriefVersion    `json:"brief_version,omitempty"`
+	BriefContent      []byte                   `json:"brief_content,omitempty"`
+	CandidateMetadata candidate.Metadata       `json:"candidate_metadata,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -102,6 +104,7 @@ type workerAPIServer struct {
 	approvals  workerApprovalPort
 	lifecycle  lifecycle.StorePort
 	briefs     pipeline.BriefStore
+	candidates candidate.MetadataStore
 	briefTask  string
 	dispatchMu sync.Mutex
 	nonceMu    sync.Mutex
@@ -184,7 +187,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, briefTask: expectedTask, nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: candidate.FileMetadataStore{}, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -229,7 +232,11 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.dispatch(request.Method, call)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -237,6 +244,16 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		result = struct{}{}
 	}
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+type workerAPIResponseError struct {
+	status  int
+	message string
+}
+
+func (e workerAPIResponseError) Error() string { return e.message }
+func (e workerAPIResponseError) Is(target error) bool {
+	return e.status == http.StatusNotFound && target == os.ErrNotExist
 }
 
 // acceptRequest binds one authenticated API operation to a fresh, short-lived
@@ -350,6 +367,37 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return s.briefs.List(s.scope.RunID)
 	case "brief.read":
 		return s.briefs.Read(s.scope.RunID, c.A)
+	case "candidate.metadata.create":
+		switch s.scope.Operation {
+		case OperationStart, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API candidate metadata create is not allowed for operation %q", s.scope.Operation)
+		}
+		m := c.CandidateMetadata
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		if err := candidate.ValidateMetadata(target, s.scope.RunID, m); err != nil {
+			return nil, err
+		}
+		return nil, s.candidates.Create(m)
+	case "candidate.metadata.read":
+		if c.A != s.scope.RunID {
+			return nil, errors.New("candidate metadata run mismatch")
+		}
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		m, err := s.candidates.Read(target, s.scope.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if err := candidate.ValidateMetadata(target, s.scope.RunID, m); err != nil {
+			return nil, err
+		}
+		return m, nil
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -517,7 +565,7 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 		return errors.New("worker API response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("worker API %s: %s", method, strings.TrimSpace(string(body)))
+		return workerAPIResponseError{status: resp.StatusCode, message: fmt.Sprintf("worker API %s: %s", method, strings.TrimSpace(string(body)))}
 	}
 	if out != nil {
 		return json.Unmarshal(body, out)
@@ -647,6 +695,45 @@ func (b *workerAPIBriefs) checkRun(runID string) error {
 	return nil
 }
 
+type workerAPICandidates struct{ port *workerAPIPort }
+type WorkerAPICandidates = workerAPICandidates
+
+func NewWorkerAPICandidates(port *WorkerAPIPort) candidate.MetadataStore {
+	return &workerAPICandidates{port: port}
+}
+func (c *workerAPICandidates) Create(metadata candidate.Metadata) error {
+	if c == nil || c.port == nil {
+		return errors.New("worker candidate metadata API unavailable")
+	}
+	target, err := candidate.CanonicalTargetDir(c.port.scope.TargetDir)
+	if err != nil {
+		return fmt.Errorf("worker candidate metadata target: %w", err)
+	}
+	if err := candidate.ValidateMetadata(target, c.port.scope.RunID, metadata); err != nil {
+		return fmt.Errorf("worker candidate metadata identity mismatch (run=%q target=%q metadata=%+v): %w", c.port.scope.RunID, c.port.scope.TargetDir, metadata, err)
+	}
+	return c.port.call("candidate.metadata.create", workerAPICall{CandidateMetadata: metadata}, nil)
+}
+func (c *workerAPICandidates) Read(target, runID string) (candidate.Metadata, error) {
+	if c == nil || c.port == nil || runID != c.port.scope.RunID {
+		return candidate.Metadata{}, errors.New("worker candidate metadata scope mismatch")
+	}
+	canonicalTarget, err := candidate.CanonicalTargetDir(target)
+	if err != nil {
+		return candidate.Metadata{}, fmt.Errorf("worker candidate metadata target: %w", err)
+	}
+	canonicalScope, err := candidate.CanonicalTargetDir(c.port.scope.TargetDir)
+	if err != nil || canonicalTarget != canonicalScope {
+		return candidate.Metadata{}, errors.New("worker candidate metadata scope mismatch")
+	}
+	var result candidate.Metadata
+	err = c.port.call("candidate.metadata.read", workerAPICall{A: runID}, &result)
+	if err == nil {
+		err = candidate.ValidateMetadata(canonicalTarget, runID, result)
+	}
+	return result, err
+}
+
 func (b *workerAPIBriefs) CreateInitial(runID, intention string) (pipeline.BriefDocument, error) {
 	if err := b.checkRun(runID); err != nil {
 		return pipeline.BriefDocument{}, err
@@ -707,4 +794,5 @@ func (s *workerAPILifecycle) Save(previous, next lifecycle.State) error {
 var _ pipeline.Recorder = (*workerAPIRecorder)(nil)
 var _ pipeline.ApprovalStore = (*workerAPIApprovals)(nil)
 var _ pipeline.BriefStore = (*workerAPIBriefs)(nil)
+var _ candidate.MetadataStore = (*workerAPICandidates)(nil)
 var _ lifecycle.StorePort = (*workerAPILifecycle)(nil)

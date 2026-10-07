@@ -63,6 +63,20 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(approvalDir, "pending.json"), []byte("legacy-approval-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	candidateMetadataDir := filepath.Join(target, ".ai-team", "state", "candidates")
+	if err := os.MkdirAll(candidateMetadataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateMetadataDir, "controller-sentinel.json"), []byte("candidate-metadata-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidateWorktree := filepath.Join(target, ".ai-team", "worktrees", "probe")
+	if err := os.MkdirAll(candidateWorktree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateWorktree, "visible.txt"), []byte("worktree-visible"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(target, "visible.txt"), []byte("target-visible"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +132,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
 	if !report.ControllerAPIReachable {
@@ -127,7 +141,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if report.HostTCPReachable || report.OutboundTCPReachable {
 		t.Fatalf("worker escaped its private network namespace: %+v", report)
 	}
-	if !report.TargetReadable || !report.TargetWritable || report.AgentRegistryWritable {
+	if !report.TargetReadable || !report.TargetWritable || !report.WorktreeReadable || report.AgentRegistryWritable {
 		t.Fatalf("unexpected workspace or agent-registry access: %+v", report)
 	}
 	if !report.OpenAIProxyReachable || !report.OpenAIDeniedOtherHost || !report.OpenAIDeniedOtherPort {
@@ -572,21 +586,23 @@ func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 }
 
 type sandboxProbeReport struct {
-	DatabaseReadable       bool `json:"database_readable"`
-	WALReadable            bool `json:"wal_readable"`
-	SHMReadable            bool `json:"shm_readable"`
-	JournalReadable        bool `json:"journal_readable"`
-	LifecycleReadable      bool `json:"lifecycle_readable"`
-	LegacyApprovalReadable bool `json:"legacy_approval_readable"`
-	TargetReadable         bool `json:"target_readable"`
-	TargetWritable         bool `json:"target_writable"`
-	AgentRegistryWritable  bool `json:"agent_registry_writable"`
-	ControllerAPIReachable bool `json:"controller_api_reachable"`
-	HostTCPReachable       bool `json:"host_tcp_reachable"`
-	OutboundTCPReachable   bool `json:"outbound_tcp_reachable"`
-	OpenAIProxyReachable   bool `json:"openai_proxy_reachable"`
-	OpenAIDeniedOtherHost  bool `json:"openai_denied_other_host"`
-	OpenAIDeniedOtherPort  bool `json:"openai_denied_other_port"`
+	DatabaseReadable          bool `json:"database_readable"`
+	WALReadable               bool `json:"wal_readable"`
+	SHMReadable               bool `json:"shm_readable"`
+	JournalReadable           bool `json:"journal_readable"`
+	LifecycleReadable         bool `json:"lifecycle_readable"`
+	LegacyApprovalReadable    bool `json:"legacy_approval_readable"`
+	CandidateMetadataReadable bool `json:"candidate_metadata_readable"`
+	WorktreeReadable          bool `json:"worktree_readable"`
+	TargetReadable            bool `json:"target_readable"`
+	TargetWritable            bool `json:"target_writable"`
+	AgentRegistryWritable     bool `json:"agent_registry_writable"`
+	ControllerAPIReachable    bool `json:"controller_api_reachable"`
+	HostTCPReachable          bool `json:"host_tcp_reachable"`
+	OutboundTCPReachable      bool `json:"outbound_tcp_reachable"`
+	OpenAIProxyReachable      bool `json:"openai_proxy_reachable"`
+	OpenAIDeniedOtherHost     bool `json:"openai_denied_other_host"`
+	OpenAIDeniedOtherPort     bool `json:"openai_denied_other_port"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -615,6 +631,8 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	journalData, journalErr := os.ReadFile(value("--probe-journal"))
 	lifecycleData, lifecycleErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "runs", "controller-state.json"))
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
+	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
+	worktreeData, worktreeErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "worktrees", "probe", "visible.txt"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
 	agentWriteErr := os.WriteFile(filepath.Join(job.TargetDir, ".ai-team", "agents", "role.md"), []byte("modified"), 0600)
@@ -633,21 +651,23 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	}
 	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
 	report := sandboxProbeReport{
-		DatabaseReadable:       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
-		WALReadable:            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
-		SHMReadable:            shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
-		JournalReadable:        journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
-		LifecycleReadable:      lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
-		LegacyApprovalReadable: approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
-		TargetReadable:         targetErr == nil && string(targetData) == "target-visible",
-		TargetWritable:         writeErr == nil,
-		AgentRegistryWritable:  agentWriteErr == nil,
-		ControllerAPIReachable: apiReachable,
-		HostTCPReachable:       canDial(value("--probe-host-tcp")),
-		OutboundTCPReachable:   canDial("1.1.1.1:443"),
-		OpenAIProxyReachable:   openAIProxyReachable,
-		OpenAIDeniedOtherHost:  deniedOtherHost,
-		OpenAIDeniedOtherPort:  deniedOtherPort,
+		DatabaseReadable:          dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
+		WALReadable:               walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
+		SHMReadable:               shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
+		JournalReadable:           journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
+		LifecycleReadable:         lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
+		LegacyApprovalReadable:    approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
+		CandidateMetadataReadable: candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
+		WorktreeReadable:          worktreeErr == nil && string(worktreeData) == "worktree-visible",
+		TargetReadable:            targetErr == nil && string(targetData) == "target-visible",
+		TargetWritable:            writeErr == nil,
+		AgentRegistryWritable:     agentWriteErr == nil,
+		ControllerAPIReachable:    apiReachable,
+		HostTCPReachable:          canDial(value("--probe-host-tcp")),
+		OutboundTCPReachable:      canDial("1.1.1.1:443"),
+		OpenAIProxyReachable:      openAIProxyReachable,
+		OpenAIDeniedOtherHost:     deniedOtherHost,
+		OpenAIDeniedOtherPort:     deniedOtherPort,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

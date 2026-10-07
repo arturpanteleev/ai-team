@@ -35,6 +35,67 @@ func TestCreateAndLoadKeepsLiveCheckoutUnchanged(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsSymlinkAsFinalTargetComponent(t *testing.T) {
+	target := gitRepository(t)
+	link := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, err := Create(context.Background(), link, "final-link-create"); err == nil {
+		t.Fatal("Create accepted a symlink as the final target component")
+	}
+	manager, available, err := Create(context.Background(), target, "final-link-load")
+	if err != nil || !available || manager == nil {
+		t.Fatalf("create canonical target: available=%v manager=%v err=%v", available, manager, err)
+	}
+	if _, err := Load(context.Background(), link, "final-link-load"); err == nil {
+		t.Fatal("Load accepted a symlink as the final target component")
+	}
+}
+
+type recordingMetadataStore struct {
+	FileMetadataStore
+	creates, reads int
+}
+
+func (s *recordingMetadataStore) Create(m Metadata) error {
+	s.creates++
+	return s.FileMetadataStore.Create(m)
+}
+func (s *recordingMetadataStore) Read(target, runID string) (Metadata, error) {
+	s.reads++
+	return s.FileMetadataStore.Read(target, runID)
+}
+
+func TestCreateAndResumeUseInjectedMetadataStore(t *testing.T) {
+	target := gitRepository(t)
+	store := &recordingMetadataStore{}
+	manager, available, err := CreateWithMetadataStore(context.Background(), target, "api-run", store)
+	if err != nil || !available || manager == nil || store.creates != 1 {
+		t.Fatalf("create: available=%v manager=%v calls=%+v err=%v", available, manager, store, err)
+	}
+	loaded, err := LoadWithMetadataStore(context.Background(), target, "api-run", store)
+	if err != nil || loaded.Root() != manager.Root() || store.reads != 1 {
+		t.Fatalf("load through store: manager=%v calls=%+v err=%v", loaded, store, err)
+	}
+}
+
+func TestMetadataStoreRejectsConflictingIdentityAndTraversal(t *testing.T) {
+	target := gitRepository(t)
+	manager, available, err := Create(context.Background(), target, "bound-run")
+	if err != nil || !available {
+		t.Fatal(err)
+	}
+	metadata := manager.Metadata()
+	metadata.Worktree = filepath.Join(target, "outside")
+	if err := (FileMetadataStore{}).Create(metadata); err == nil {
+		t.Fatal("accepted metadata for a different worktree")
+	}
+	if _, err := (FileMetadataStore{}).Read(target, "../bound-run"); err == nil {
+		t.Fatal("accepted traversal run id")
+	}
+}
+
 func TestCreateRecoversWorktreeCreatedBeforeMetadata(t *testing.T) {
 	target := gitRepository(t)
 	base := command(t, target, "rev-parse", "HEAD")
@@ -51,6 +112,25 @@ func TestCreateRecoversWorktreeCreatedBeforeMetadata(t *testing.T) {
 	canonicalWorktree, canonicalErr := filepath.EvalSymlinks(worktree)
 	if err != nil || canonicalErr != nil || loaded.Root() != canonicalWorktree {
 		t.Fatalf("recovered candidate metadata: manager=%v err=%v", loaded, err)
+	}
+}
+
+func TestCreateRecoversWorktreeCreatedBeforeMetadataThroughInjectedStore(t *testing.T) {
+	target := gitRepository(t)
+	base := command(t, target, "rev-parse", "HEAD")
+	worktree := filepath.Join(target, ".ai-team", "worktrees", "api-recovered")
+	if err := os.MkdirAll(filepath.Dir(worktree), 0755); err != nil {
+		t.Fatal(err)
+	}
+	command(t, target, "worktree", "add", "--detach", worktree, base)
+	store := &recordingMetadataStore{}
+	manager, available, err := CreateWithMetadataStore(context.Background(), target, "api-recovered", store)
+	if err != nil || !available || manager == nil || store.reads != 1 || store.creates != 1 {
+		t.Fatalf("recover through injected store: available=%v manager=%v store=%+v err=%v", available, manager, store, err)
+	}
+	loaded, err := LoadWithMetadataStore(context.Background(), target, "api-recovered", store)
+	if err != nil || loaded.Root() != manager.Root() {
+		t.Fatalf("load recovered candidate: manager=%v err=%v", loaded, err)
 	}
 }
 

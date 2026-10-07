@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -402,6 +403,174 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 	}
 	if _, err := workerApprovals.ResolveDeferred("run-active", "approval-1", approval.Decision{}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
 		t.Fatalf("deferred decision adapter allowed write: %v", err)
+	}
+}
+
+func TestWorkerControllerAPICandidateMetadataIsRunAndTargetBound(t *testing.T) {
+	canonicalTarget := t.TempDir()
+	targetLink := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(canonicalTarget, targetLink); err != nil {
+		t.Fatal(err)
+	}
+	target, err := filepath.EvalSymlinks(targetLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-api-run", TargetDir: targetLink,
+		ExecutionID: strings.Repeat("c", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPICandidates(port)
+	if _, err := store.Read(targetLink, job.RunID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing controller metadata must preserve not-exist semantics for recovery, got %v", err)
+	}
+	metadata := candidate.Metadata{SchemaVersion: 1, RunID: job.RunID, ControlTarget: target,
+		Worktree: filepath.Join(target, ".ai-team", "worktrees", job.RunID), BaseCommit: "base", BaseTree: "tree", CreatedAt: time.Now().UTC()}
+	if err := store.Create(metadata); err != nil {
+		t.Fatalf("create candidate metadata through API: %v", err)
+	}
+	loaded, err := store.Read(targetLink, job.RunID)
+	if err != nil || loaded != metadata {
+		t.Fatalf("read candidate metadata: %+v %v", loaded, err)
+	}
+	if _, err := store.Read(target, job.RunID); err != nil {
+		t.Fatalf("API store rejected the canonical form of a scoped symlink target: %v", err)
+	}
+	if _, err := store.Read(t.TempDir(), job.RunID); err == nil {
+		t.Fatal("API store accepted a different target")
+	}
+	if _, err := store.Read(target, "other-run"); err == nil {
+		t.Fatal("API store accepted a different run")
+	}
+	for _, tc := range []struct {
+		name     string
+		metadata candidate.Metadata
+	}{
+		{"foreign run", func() candidate.Metadata { m := metadata; m.RunID = "other-run"; return m }()},
+		{"foreign target", func() candidate.Metadata { m := metadata; m.ControlTarget = t.TempDir(); return m }()},
+		{"traversal worktree", func() candidate.Metadata {
+			m := metadata
+			m.Worktree = filepath.Join(target, "..", "outside")
+			return m
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := store.Create(tc.metadata); err == nil {
+				t.Fatal("accepted invalid candidate identity")
+			}
+		})
+	}
+}
+
+func TestWorkerControllerAPICandidateCreateAndLoadResolveSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "real-parent")
+	target := filepath.Join(parent, "workspace")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(root, "parent-link")
+	if err := os.Symlink(parent, linkParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	linkedTarget := filepath.Join(linkParent, "workspace")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
+		cmd := exec.Command("git", append([]string{"-C", target}, args...)...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(target, "README.md"), []byte("base"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "initial"}} {
+		cmd := exec.Command("git", append([]string{"-C", target}, args...)...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-parent-link",
+		TargetDir: linkedTarget, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPICandidates(port)
+	manager, available, err := candidate.CreateWithMetadataStore(context.Background(), linkedTarget, job.RunID, store)
+	if err != nil || !available || manager == nil {
+		t.Fatalf("create through symlinked parent: available=%v manager=%v err=%v", available, manager, err)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.Metadata().ControlTarget != canonicalTarget {
+		t.Fatalf("candidate target was not canonicalized: got %q want %q", manager.Metadata().ControlTarget, canonicalTarget)
+	}
+	loaded, err := candidate.LoadWithMetadataStore(context.Background(), linkedTarget, job.RunID, store)
+	if err != nil || loaded.Root() != manager.Root() {
+		t.Fatalf("load through symlinked parent: manager=%v err=%v", loaded, err)
+	}
+}
+
+func TestWorkerControllerAPICandidateMetadataCreateIsLimitedToStartAndRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		operation Operation
+		allowed   bool
+	}{{OperationStart, true}, {OperationRecover, true}, {OperationResume, false}, {OperationCancel, false}} {
+		t.Run(string(tc.operation), func(t *testing.T) {
+			target := t.TempDir()
+			target, err := filepath.EvalSymlinks(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := Job{SchemaVersion: SchemaVersion, Operation: tc.operation, RunID: "candidate-operation-run", TargetDir: target,
+				ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+			server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.close()
+			t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+			t.Setenv(WorkerAPITokenEnv, server.token)
+			port, err := NewWorkerAPIPort(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := NewWorkerAPICandidates(port)
+			metadata := candidate.Metadata{SchemaVersion: 1, RunID: job.RunID, ControlTarget: target,
+				Worktree: filepath.Join(target, ".ai-team", "worktrees", job.RunID), BaseCommit: "base", BaseTree: "tree", CreatedAt: time.Now().UTC()}
+			err = store.Create(metadata)
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("operation %s should publish candidate metadata: %v", tc.operation, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("operation %s unexpectedly published candidate metadata", tc.operation)
+			}
+			if _, readErr := (candidate.FileMetadataStore{}).Read(target, job.RunID); !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("rejected create changed controller state: %v", readErr)
+			}
+		})
 	}
 }
 

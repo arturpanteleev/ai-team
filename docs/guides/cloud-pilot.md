@@ -23,6 +23,22 @@ filesystem stores, включая `pkg/evidence.Store`, event log и manifests. 
 worker имеет доступ к обоим классам состояния, которые cloud pilot должен
 защищать.
 
+В опциональном Linux bubblewrap режиме `.ai-team/state/candidates` накрывается
+отдельным namespace-local tmpfs: controller хранит candidate identity через
+run/target-scoped `candidate.metadata.create/read` API, а pipeline использует
+тот же worktree для start, resume и recovery. Локальный CLI сохраняет
+filesystem store. Эта маска закрывает только metadata directory: candidate
+worktree остаётся доступен worker-у для чтения и записи, как и прочие evidence,
+artifact и target файлы. Linux CI probe проверяет sentinel в скрытом metadata
+каталоге и чтение отдельного worktree sentinel. Это ограниченный slice, не
+полная изоляция candidate/artifact state и не закрытие MAJ-07. В облачном
+controller-backed режиме resume требует controller-owned candidate metadata и
+завершится ошибкой, если она потеряна, независимо от содержимого
+worker-writable `run.json`. Поэтому resume non-Git runs в этом режиме пока не
+поддерживается; для него нужен отдельный controller-owned маркер подтверждённого
+отсутствия кандидата. Локальный CLI сохраняет совместимость со старыми
+non-Git runs по provenance из target-файла; этот путь не является trust boundary.
+
 При запуске web/controller файловые approvals из `.ai-team/state/approvals`
 импортируются в SQLite транзакционно и без удаления исходных файлов; worker
 использует эту базу, но сам импорт не выполняет. Повторный

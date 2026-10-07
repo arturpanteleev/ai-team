@@ -270,16 +270,39 @@ ownership, but the persistent brief remains under the writable target mount and
 is still directly readable/modifiable by a compromised worker. It does not
 justify a Linux filesystem-isolation claim or a brief sentinel probe. Other
 target evidence and artifacts remain outside this slice.
-The isolated network namespace has no external IP egress. Remote model calls,
-including OpenAI/OpenCode providers, do not work in this opt-in mode until a
-separately configured allowlisted egress proxy is available; this slice does
-not provide one. The target is still writable, and independent OS identity,
-artifact transfer, recovery, backups, and deployment smoke remain open. Linux
-CI installs bubblewrap and runs a child-process probe that checks the scoped
-controller API over the Unix socket, verifies host-loopback and outbound TCP
-connections fail, attempts to read DB/lifecycle sentinels, and confirms target
-read/write still works. Passing this probe is evidence for only these specific
-properties, not full worker isolation.
+
+Candidate worktree identity now has a separate bounded ownership slice. The
+pipeline uses a run/target-scoped typed controller API for candidate metadata
+create and read; local CLI continues using the existing filesystem store.
+The API validates schema, run ID, canonical target, and exact
+`{target}/.ai-team/worktrees/{run_id}` identity, and rejects conflicting
+metadata. Symlinked parent components in the target spelling resolve to the
+same canonical target; the candidate manager rejects a symlink at the final
+target component. Bubblewrap overlays only `{target}/.ai-team/state/candidates` with a
+namespace-local tmpfs. The Linux probe reads a controller metadata sentinel and
+a separate worktree sentinel to verify that metadata is hidden while worktree
+access remains. This does not isolate candidate contents, artifacts, or the
+remaining target evidence; it is not full candidate isolation or MAJ-07
+acceptance. Resume fails closed when controller candidate metadata is missing;
+worker-writable `run.json` provenance cannot establish that a candidate was
+absent. Consequently, non-Git runs without a candidate record cannot currently
+resume in controller-backed mode. Supporting them requires a separate
+controller-owned absence marker. Local CLI retains legacy compatibility based
+on target-file provenance, which is not a trust boundary.
+The isolated network namespace has no direct external IP egress. A separate,
+run-scoped TCP proxy now permits only `api.openai.com:443` for the selected
+OpenAI provider; other hosts, ports, and providers remain blocked. The proxy
+does not inspect HTTPS requests or responses, and the worker still receives
+its provider credential, so this is destination restriction rather than
+credential isolation or application-level mediation. Linux CI exercises the
+proxy with a constrained fake TLS upstream; it does not perform a real OpenAI
+model round-trip or establish compatibility with every OpenCode installation.
+The target is still writable, and independent OS identity, artifact transfer,
+recovery, backups, and deployment smoke remain open. Linux CI installs
+bubblewrap and runs child-process probes for the scoped controller API,
+loopback/direct-egress blocking, controller-state sentinels, and target
+read/write. Passing these probes is evidence for only the specific properties
+they exercise, not full worker isolation.
 
 1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
    здесь:** worker result/checks/artifacts недоверен; controller подтверждает

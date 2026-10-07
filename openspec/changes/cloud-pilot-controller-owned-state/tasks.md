@@ -82,6 +82,12 @@
   directories behind. The target still exposes the
   controller's on-target brief files to a compromised worker, so this is API
   ownership only and has no Linux OS-inaccessibility probe.
+- [x] Route candidate metadata create/read through a run/target-scoped
+  controller API for disposable workers; retain the filesystem store for local
+  CLI. Bubblewrap masks only `.ai-team/state/candidates`, while leaving the
+  candidate worktree readable/writable. Linux CI probe verifies the metadata
+  sentinel is unreadable and a worktree sentinel remains readable. This does
+  not isolate candidate contents, evidence, or other artifacts.
 - [ ] Test worker process/network policy on a real runtime and verify there is
   no route to admin control endpoints and no control-plane secrets in worker.
 - [ ] Preserve run/approval/evidence through worker loss, controller restart,

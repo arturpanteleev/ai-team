@@ -23,6 +23,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/ciimport"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -299,6 +300,7 @@ func cmdWorker() {
 	var recorderStore *webstore.Store
 	var approvalStore pipeline.ApprovalStore
 	var businessBriefStore pipeline.BriefStore
+	var candidateMetadataStore candidate.MetadataStore
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -309,6 +311,7 @@ func cmdWorker() {
 		recorder = worker.NewWorkerAPIRecorder(apiPort)
 		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
 		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
+		candidateMetadataStore = worker.NewWorkerAPICandidates(apiPort)
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
 		if *dbPath == "" {
@@ -373,6 +376,9 @@ func cmdWorker() {
 	}
 	if businessBriefStore != nil {
 		engineOptions = append(engineOptions, pipeline.WithBusinessBriefStore(businessBriefStore))
+	}
+	if candidateMetadataStore != nil {
+		engineOptions = append(engineOptions, pipeline.WithCandidateMetadataStore(candidateMetadataStore))
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -1,8 +1,16 @@
 # MAJ-07 architecture gate tasks
 
-- [ ] Agree the trust assumptions for worker-produced checks and artifacts.
+- [x] Agree the trust assumptions for worker-produced checks and artifacts:
+  worker output and artifacts are untrusted claims/bytes; digests bind bytes but
+  do not establish correctness; checks count as verified only after an
+  independent trusted verifier runs against the accepted bytes; the controller
+  owns staging, validation, authoritative commit, and human decisions. See
+  `design.md` and `specs/cloud-worker-isolation/spec.md`.
 - [ ] Specify a versioned, bounded, job-scoped worker result protocol and
-  controller validation/commit semantics.
+  implement controller validation/commit semantics (capability, nonce,
+  allowlisted artifact transfer, independently verified check provenance, and
+  atomic/idempotent commit). The design constraints are now documented; the
+  protocol/API and its implementation/tests remain outstanding.
 - [x] Add an application-level worker approval adapter that rejects the
   pipeline's `Decide` and `ResolveDeferred` calls; verify the row remains
   pending and an authenticated controller route can resolve it (#198). This

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -95,6 +96,14 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	probePath := filepath.Join(target, "sandbox-probe.json")
 	t.Setenv("AI_TEAM_BUBBLEWRAP_PROBE", "1")
+	// These sentinels are deliberately present in the controller's parent
+	// environment. The runtime probe verifies that none crosses the worker
+	// environment boundary. OPENAI_API_KEY is provider-scoped and is not part
+	// of this control-plane secret assertion.
+	t.Setenv("AI_TEAM_AUTH_SECRET", "probe-auth-control-secret")
+	t.Setenv("AI_TEAM_SIGNING_KEY", "probe-signing-control-secret")
+	t.Setenv("AI_TEAM_DB_PASSWORD", "probe-db-control-secret")
+	t.Setenv("AI_TEAM_HOSTING_WRITE_TOKEN", "probe-hosting-control-secret")
 	allowWorkerTestEnvironment(t, "AI_TEAM_BUBBLEWRAP_PROBE")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestBubblewrapWorkerProbeHelper$", "--", "--probe-db", dbPath,
@@ -137,6 +146,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if !report.ControllerAPIReachable {
 		t.Fatalf("scoped controller API unavailable over isolated network: %+v", report)
+	}
+	if !report.AdminControlPlaneCallRejected {
+		t.Fatalf("admin/control-plane API call was not rejected by the worker API: %+v", report)
+	}
+	if !report.AuthSecretAbsent || !report.SigningKeyAbsent || !report.DatabasePasswordAbsent || !report.HostingWriteTokenAbsent {
+		t.Fatalf("control-plane secret sentinel reached the worker environment: %+v", report)
 	}
 	if report.HostTCPReachable || report.OutboundTCPReachable {
 		t.Fatalf("worker escaped its private network namespace: %+v", report)
@@ -586,23 +601,28 @@ func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 }
 
 type sandboxProbeReport struct {
-	DatabaseReadable          bool `json:"database_readable"`
-	WALReadable               bool `json:"wal_readable"`
-	SHMReadable               bool `json:"shm_readable"`
-	JournalReadable           bool `json:"journal_readable"`
-	LifecycleReadable         bool `json:"lifecycle_readable"`
-	LegacyApprovalReadable    bool `json:"legacy_approval_readable"`
-	CandidateMetadataReadable bool `json:"candidate_metadata_readable"`
-	WorktreeReadable          bool `json:"worktree_readable"`
-	TargetReadable            bool `json:"target_readable"`
-	TargetWritable            bool `json:"target_writable"`
-	AgentRegistryWritable     bool `json:"agent_registry_writable"`
-	ControllerAPIReachable    bool `json:"controller_api_reachable"`
-	HostTCPReachable          bool `json:"host_tcp_reachable"`
-	OutboundTCPReachable      bool `json:"outbound_tcp_reachable"`
-	OpenAIProxyReachable      bool `json:"openai_proxy_reachable"`
-	OpenAIDeniedOtherHost     bool `json:"openai_denied_other_host"`
-	OpenAIDeniedOtherPort     bool `json:"openai_denied_other_port"`
+	DatabaseReadable              bool `json:"database_readable"`
+	WALReadable                   bool `json:"wal_readable"`
+	SHMReadable                   bool `json:"shm_readable"`
+	JournalReadable               bool `json:"journal_readable"`
+	LifecycleReadable             bool `json:"lifecycle_readable"`
+	LegacyApprovalReadable        bool `json:"legacy_approval_readable"`
+	CandidateMetadataReadable     bool `json:"candidate_metadata_readable"`
+	WorktreeReadable              bool `json:"worktree_readable"`
+	TargetReadable                bool `json:"target_readable"`
+	TargetWritable                bool `json:"target_writable"`
+	AgentRegistryWritable         bool `json:"agent_registry_writable"`
+	ControllerAPIReachable        bool `json:"controller_api_reachable"`
+	AdminControlPlaneCallRejected bool `json:"admin_control_plane_call_rejected"`
+	AuthSecretAbsent              bool `json:"auth_secret_absent"`
+	SigningKeyAbsent              bool `json:"signing_key_absent"`
+	DatabasePasswordAbsent        bool `json:"database_password_absent"`
+	HostingWriteTokenAbsent       bool `json:"hosting_write_token_absent"`
+	HostTCPReachable              bool `json:"host_tcp_reachable"`
+	OutboundTCPReachable          bool `json:"outbound_tcp_reachable"`
+	OpenAIProxyReachable          bool `json:"openai_proxy_reachable"`
+	OpenAIDeniedOtherHost         bool `json:"openai_denied_other_host"`
+	OpenAIDeniedOtherPort         bool `json:"openai_denied_other_port"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -637,9 +657,11 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
 	agentWriteErr := os.WriteFile(filepath.Join(job.TargetDir, ".ai-team", "agents", "role.md"), []byte("modified"), 0600)
 	apiReachable := false
+	adminControlPlaneCallRejected := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
 		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 0
+		adminControlPlaneCallRejected = isExpectedAdminControlPlaneRejection(port.call("admin.control_plane", workerAPICall{RunID: job.RunID}, nil))
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
@@ -651,23 +673,28 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	}
 	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
 	report := sandboxProbeReport{
-		DatabaseReadable:          dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
-		WALReadable:               walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
-		SHMReadable:               shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
-		JournalReadable:           journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
-		LifecycleReadable:         lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
-		LegacyApprovalReadable:    approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
-		CandidateMetadataReadable: candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
-		WorktreeReadable:          worktreeErr == nil && string(worktreeData) == "worktree-visible",
-		TargetReadable:            targetErr == nil && string(targetData) == "target-visible",
-		TargetWritable:            writeErr == nil,
-		AgentRegistryWritable:     agentWriteErr == nil,
-		ControllerAPIReachable:    apiReachable,
-		HostTCPReachable:          canDial(value("--probe-host-tcp")),
-		OutboundTCPReachable:      canDial("1.1.1.1:443"),
-		OpenAIProxyReachable:      openAIProxyReachable,
-		OpenAIDeniedOtherHost:     deniedOtherHost,
-		OpenAIDeniedOtherPort:     deniedOtherPort,
+		DatabaseReadable:              dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
+		WALReadable:                   walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
+		SHMReadable:                   shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
+		JournalReadable:               journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
+		LifecycleReadable:             lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
+		LegacyApprovalReadable:        approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
+		CandidateMetadataReadable:     candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
+		WorktreeReadable:              worktreeErr == nil && string(worktreeData) == "worktree-visible",
+		TargetReadable:                targetErr == nil && string(targetData) == "target-visible",
+		TargetWritable:                writeErr == nil,
+		AgentRegistryWritable:         agentWriteErr == nil,
+		ControllerAPIReachable:        apiReachable,
+		AdminControlPlaneCallRejected: adminControlPlaneCallRejected,
+		AuthSecretAbsent:              os.Getenv("AI_TEAM_AUTH_SECRET") == "",
+		SigningKeyAbsent:              os.Getenv("AI_TEAM_SIGNING_KEY") == "",
+		DatabasePasswordAbsent:        os.Getenv("AI_TEAM_DB_PASSWORD") == "",
+		HostingWriteTokenAbsent:       os.Getenv("AI_TEAM_HOSTING_WRITE_TOKEN") == "",
+		HostTCPReachable:              canDial(value("--probe-host-tcp")),
+		OutboundTCPReachable:          canDial("1.1.1.1:443"),
+		OpenAIProxyReachable:          openAIProxyReachable,
+		OpenAIDeniedOtherHost:         deniedOtherHost,
+		OpenAIDeniedOtherPort:         deniedOtherPort,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {
@@ -681,6 +708,38 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Printf("%s%s\n", ResultPrefix, result)
+}
+
+func isExpectedAdminControlPlaneRejection(err error) bool {
+	var responseErr workerAPIResponseError
+	return errors.As(err, &responseErr) &&
+		responseErr.status == http.StatusBadRequest &&
+		responseErr.message == `worker API admin.control_plane: worker API method "admin.control_plane" is not allowed`
+}
+
+func TestExpectedAdminControlPlaneRejection(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "expected worker API denial",
+			err:  workerAPIResponseError{status: http.StatusBadRequest, message: `worker API admin.control_plane: worker API method "admin.control_plane" is not allowed`},
+			want: true,
+		},
+		{name: "transport error", err: errors.New("connection reset")},
+		{name: "authentication error", err: workerAPIResponseError{status: http.StatusUnauthorized, message: "worker API unauthorized"}},
+		{name: "wrong response status", err: workerAPIResponseError{status: http.StatusInternalServerError, message: `worker API admin.control_plane: worker API method "admin.control_plane" is not allowed`}},
+		{name: "wrong rejection message", err: workerAPIResponseError{status: http.StatusBadRequest, message: "worker API admin.control_plane: invalid request"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isExpectedAdminControlPlaneRejection(tt.err); got != tt.want {
+				t.Fatalf("isExpectedAdminControlPlaneRejection(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
+	}
 }
 
 func argsAfterDoubleDash(args []string) []string {

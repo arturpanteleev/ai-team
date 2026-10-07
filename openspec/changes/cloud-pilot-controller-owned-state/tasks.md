@@ -93,8 +93,17 @@
   directory. Expose read-only resume/recovery lookup; missing or corrupt
   markers and non-bubblewrap mode fail closed. Git candidate lifecycle and
   candidate metadata/worktree mask scope remain unchanged.
-- [ ] Test worker process/network policy on a real runtime and verify there is
-  no route to admin control endpoints and no control-plane secrets in worker.
+- [x] Extend the real Linux bubblewrap child probe: a typed scoped worker API
+  request succeeds, an `admin.*` API request is rejected, and parent-provided
+  `AI_TEAM_AUTH_SECRET`, `AI_TEAM_SIGNING_KEY`, `AI_TEAM_DB_PASSWORD`, and
+  `AI_TEAM_HOSTING_WRITE_TOKEN` sentinels are absent from the child environment.
+  Keep the existing host/direct-TCP denial, OpenAI-only proxy, masked state,
+  and workspace access assertions. This is bounded runtime evidence only;
+  runtime coverage for other control-plane routes, credentials, state, and
+  deployment configurations remains outstanding.
+- [ ] Test the complete worker process/network policy on supported deployment
+  runtimes and verify there is no route to admin control endpoints and no
+  control-plane secrets in worker.
 - [ ] Preserve run/approval/evidence through worker loss, controller restart,
   and backup/restore tests.
 - [ ] Select one supported infrastructure; add TLS ingress, isolated worker,

@@ -329,15 +329,8 @@ func (rs *runState) invalidateAttempts(fromStageIndex int) error {
 func (rs *runState) stageOutputs(stage, attemptID string) ([]runtime.Artifact, error) {
 	if attemptID != "" {
 		runDir := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID)
-		manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
-		data, err := safeio.ReadRegularFile(manifestPath, maxArtifactFileBytes)
+		_, manifest, err := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, runDir, rs.runID, attemptID)
 		if err != nil {
-			return nil, fmt.Errorf("approval source manifest: %w", err)
-		}
-		var manifest evidence.AttemptManifest
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&manifest); err != nil {
 			return nil, fmt.Errorf("approval source manifest: %w", err)
 		}
 		if manifest.RunID != rs.runID || manifest.AttemptID != attemptID || manifest.Stage != stage {

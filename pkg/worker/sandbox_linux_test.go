@@ -24,6 +24,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
@@ -93,6 +94,16 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: "sandbox-probe", Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
 	if err := delivery.WriteControllerTerminalRecord(target, deliveryRecord.RunID, deliveryRecord); err != nil {
+		t.Fatal(err)
+	}
+	manifestStore := evidence.ControllerAttemptManifestStore{TargetDir: target}
+	if err := manifestStore.Reserve("sandbox-probe"); err != nil {
+		t.Fatal(err)
+	}
+	manifestNow := time.Now().UTC()
+	manifestSentinel := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: "sandbox-probe", AttemptID: "controller-sentinel", Stage: "probe", StageIndex: 1,
+		StartedAt: manifestNow.Add(-time.Minute), FinishedAt: manifestNow, Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+	if err := manifestStore.Write("sandbox-probe", manifestSentinel); err != nil {
 		t.Fatal(err)
 	}
 	seedAttestation := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: "sandbox-probe"}}
@@ -197,6 +208,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if !report.CandidateEvidenceAPIWriteReadSucceeded {
 		t.Fatalf("worker could not round-trip candidate evidence through controller API: %+v", report)
+	}
+	if report.AttemptManifestReadable || report.AttemptManifestDirectWriteSucceeded || !report.AttemptManifestAPIWriteReadSucceeded {
+		t.Fatalf("controller attempt manifest direct/API boundary failed: %+v", report)
+	}
+	if _, err := manifestStore.ReadAttemptManifest("", "sandbox-probe", manifestSentinel.AttemptID); err != nil {
+		t.Fatalf("worker directly modified controller attempt manifest: %v", err)
 	}
 	if stored, readErr := readControllerCandidateEvidence(candidateEvidenceRoot, probeCandidateEvidence.RunID, "review-candidate.json"); readErr != nil || stored.WorkspaceSHA256 != probeCandidateEvidence.WorkspaceSHA256 {
 		t.Fatalf("controller candidate evidence sentinel was modified or lost: document=%+v err=%v", stored, readErr)
@@ -1044,6 +1061,9 @@ type sandboxProbeReport struct {
 	CandidateEvidenceReadable              bool `json:"candidate_evidence_readable"`
 	CandidateEvidenceDirectWriteSucceeded  bool `json:"candidate_evidence_direct_write_succeeded"`
 	CandidateEvidenceAPIWriteReadSucceeded bool `json:"candidate_evidence_api_write_read_succeeded"`
+	AttemptManifestReadable                bool `json:"attempt_manifest_readable"`
+	AttemptManifestDirectWriteSucceeded    bool `json:"attempt_manifest_direct_write_succeeded"`
+	AttemptManifestAPIWriteReadSucceeded   bool `json:"attempt_manifest_api_write_read_succeeded"`
 	UsageStateReadable                     bool `json:"usage_state_readable"`
 	DeliveryStateReadable                  bool `json:"delivery_state_readable"`
 	DeliveryDirectWriteSucceeded           bool `json:"delivery_direct_write_succeeded"`
@@ -1106,6 +1126,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	candidateEvidenceData, candidateEvidenceErr := os.ReadFile(candidateEvidencePath)
 	candidateEvidenceDirectWriteErr := os.WriteFile(candidateEvidencePath, []byte("worker-overwrite-attempt"), 0600)
 	usageData, usageErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "usage", "controller-sentinel.json"))
+	attemptManifestPath := filepath.Join(job.TargetDir, ".ai-team", "state", "attempt-manifests", job.RunID, "controller-sentinel.json")
+	attemptManifestData, attemptManifestErr := os.ReadFile(attemptManifestPath)
+	attemptManifestDirectWriteErr := os.WriteFile(attemptManifestPath, []byte("worker-overwrite-attempt"), 0600)
 	deliveryPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery", job.RunID+".json")
 	deliveryData, deliveryErr := os.ReadFile(deliveryPath)
 	deliveryDirectWriteErr := os.WriteFile(deliveryPath, []byte("worker-overwrite-attempt"), 0600)
@@ -1129,6 +1152,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	attestationAPIWriteSucceeded := false
 	containmentAPIWriteSucceeded := false
 	candidateEvidenceAPIWriteReadSucceeded := false
+	attemptManifestAPIWriteReadSucceeded := false
 	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
@@ -1151,6 +1175,14 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		if writeErr := candidateEvidenceStore.WriteCandidateEvidence("review-candidate.json", probeDocument); writeErr == nil {
 			loaded, readErr := candidateEvidenceStore.ReadCandidateEvidence("review-candidate.json")
 			candidateEvidenceAPIWriteReadSucceeded = readErr == nil && loaded.WorkspaceSHA256 == probeDocument.WorkspaceSHA256
+		}
+		attemptManifestStore := NewWorkerAPIAttemptManifestStore(port)
+		manifestNow := time.Now().UTC()
+		probeManifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: job.RunID, AttemptID: "api-probe", Stage: "probe", StageIndex: 1,
+			StartedAt: manifestNow.Add(-time.Minute), FinishedAt: manifestNow, Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+		if writeErr := attemptManifestStore.WriteAttemptManifest(probeManifest); writeErr == nil {
+			loaded, readErr := attemptManifestStore.ReadAttemptManifest("", job.RunID, probeManifest.AttemptID)
+			attemptManifestAPIWriteReadSucceeded = readErr == nil && len(loaded) > 0
 		}
 		briefs := NewWorkerAPIBriefs(port)
 		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
@@ -1180,6 +1212,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		CandidateEvidenceReadable:              candidateEvidenceErr == nil && len(candidateEvidenceData) > 0,
 		CandidateEvidenceDirectWriteSucceeded:  candidateEvidenceDirectWriteErr == nil,
 		CandidateEvidenceAPIWriteReadSucceeded: candidateEvidenceAPIWriteReadSucceeded,
+		AttemptManifestReadable:                attemptManifestErr == nil && len(attemptManifestData) > 0,
+		AttemptManifestDirectWriteSucceeded:    attemptManifestDirectWriteErr == nil,
+		AttemptManifestAPIWriteReadSucceeded:   attemptManifestAPIWriteReadSucceeded,
 		UsageStateReadable:                     usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
 		DeliveryStateReadable:                  deliveryErr == nil && len(deliveryData) > 0,
 		DeliveryDirectWriteSucceeded:           deliveryDirectWriteErr == nil,

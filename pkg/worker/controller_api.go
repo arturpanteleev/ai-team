@@ -38,10 +38,15 @@ const (
 	workerAPITokenEnv                 = "AI_TEAM_WORKER_API_TOKEN"
 	workerAPIMaxBody                  = 1 << 20
 	workerAPIMaxCandidateEvidenceBody = 9 << 20
-	workerAPIErrorMarker              = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
-	workerAPIRequestTTL               = 30 * time.Second
-	workerAPIFutureSkew               = 5 * time.Second
-	workerAPIMaxNonces                = 4096
+	// Attempt manifest bytes are base64 encoded once in the request Payload and
+	// again in the read response. Leave room for both JSON envelopes while
+	// keeping this allowance scoped to the typed manifest methods.
+	workerAPIMaxAttemptManifestEnvelope = 12 << 20
+	workerAPIMaxAttemptManifestPayload  = evidence.MaxAttemptManifestSize + workerAPIMaxBody
+	workerAPIErrorMarker                = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
+	workerAPIRequestTTL                 = 30 * time.Second
+	workerAPIFutureSkew                 = 5 * time.Second
+	workerAPIMaxNonces                  = 4096
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -84,6 +89,7 @@ type workerAPICall struct {
 	ContainmentReceipt    *containment.Receipt       `json:"containment_receipt,omitempty"`
 	CandidateEvidenceName string                     `json:"candidate_evidence_name,omitempty"`
 	CandidateEvidence     pipeline.CandidateEvidence `json:"candidate_evidence,omitempty"`
+	AttemptManifest       evidence.AttemptManifest   `json:"attempt_manifest,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -123,6 +129,7 @@ type workerAPIServer struct {
 	attestations            attest.ControllerStore
 	containmentReceipts     containment.ControllerReceiptStore
 	candidateEvidenceRoot   string
+	attemptManifests        evidence.ControllerAttemptManifestStore
 	usageAllowed            bool
 	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
@@ -214,6 +221,13 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 			}
 			return nil, fmt.Errorf("prepare controller usage store: %w", err)
 		}
+		if job.Operation == OperationStart {
+			if err := (evidence.ControllerAttemptManifestStore{TargetDir: canonicalTarget}).Reserve(job.RunID); err != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("reserve controller attempt manifest store: %w", err)
+			}
+		}
 	}
 	var nonce [32]byte
 	if _, err := io.ReadFull(random, nonce[:]); err != nil {
@@ -238,6 +252,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		api.candidateEvidenceRoot = filepath.Join(canonicalTarget, ".ai-team", "state", "evidence")
 	}
 	api.attestations = attest.ControllerStore{TargetDir: canonicalTarget}
+	api.attemptManifests = evidence.ControllerAttemptManifestStore{TargetDir: canonicalTarget}
 	api.containmentReceipts = containment.ControllerReceiptStore{TargetDir: canonicalTarget}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
@@ -262,28 +277,37 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, workerAPIMaxCandidateEvidenceBody+1))
-	if err != nil || len(data) > workerAPIMaxCandidateEvidenceBody {
+	const maxWorkerAPIRequestBody = workerAPIMaxAttemptManifestEnvelope
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxWorkerAPIRequestBody+1))
+	if err != nil || len(data) > maxWorkerAPIRequestBody {
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if len(data) > workerAPIMaxBody {
 		var largeRequest workerAPIRequest
 		if json.Unmarshal(data, &largeRequest) != nil ||
-			(largeRequest.Method != "candidate.evidence.write" && largeRequest.Method != "candidate.evidence.read") {
+			(largeRequest.Method != "candidate.evidence.write" && largeRequest.Method != "candidate.evidence.read" && largeRequest.Method != "attempt_manifest.write" && largeRequest.Method != "attempt_manifest.read") ||
+			(len(data) > workerAPIMaxCandidateEvidenceBody && largeRequest.Method != "attempt_manifest.write" && largeRequest.Method != "attempt_manifest.read") {
 			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 	}
 	var request workerAPIRequest
-	if strictjson.Unmarshal(data, workerAPIMaxCandidateEvidenceBody, &request) != nil || request.workerAPIScope != s.scope {
+	requestLimit := workerAPIMaxCandidateEvidenceBody
+	if len(data) > workerAPIMaxCandidateEvidenceBody {
+		requestLimit = workerAPIMaxAttemptManifestEnvelope
+	}
+	if strictjson.Unmarshal(data, int64(requestLimit), &request) != nil || request.workerAPIScope != s.scope {
 		http.Error(w, "invalid invocation scope", http.StatusForbidden)
 		return
 	}
 	var call workerAPICall
 	payloadLimit := workerAPIMaxBody
-	if request.Method == "candidate.evidence.write" || request.Method == "candidate.evidence.read" {
+	if request.Method == "candidate.evidence.write" || request.Method == "candidate.evidence.read" || request.Method == "attempt_manifest.write" {
 		payloadLimit = workerAPIMaxCandidateEvidenceBody
+	}
+	if request.Method == "attempt_manifest.write" {
+		payloadLimit = workerAPIMaxAttemptManifestPayload
 	}
 	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, int64(payloadLimit), &call) != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
@@ -512,6 +536,41 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, fmt.Errorf("worker API candidate evidence read is not allowed for operation %q", s.scope.Operation)
 		}
 		return readControllerCandidateEvidence(s.candidateEvidenceRoot, s.scope.RunID, c.CandidateEvidenceName)
+	case "attempt_manifest.write":
+		if !s.usageAllowed {
+			return nil, errors.New("controller attempt manifest writes require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API attempt manifest write is not allowed for operation %q", s.scope.Operation)
+		}
+		reserved, err := s.attemptManifests.IsReserved(s.scope.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if !reserved {
+			// Older runs have no reservation and keep their filesystem layout.
+			// New bubblewrap starts reserve before spawn, so this path can only be
+			// used for legacy recovery/resume.
+			return nil, nil
+		}
+		return nil, s.attemptManifests.Write(s.scope.RunID, c.AttemptManifest)
+	case "attempt_manifest.read":
+		if !s.usageAllowed {
+			return nil, errors.New("controller attempt manifest reads require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API attempt manifest read is not allowed for operation %q", s.scope.Operation)
+		}
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		runDir := filepath.Join(target, ".ai-team", "runs", s.scope.RunID)
+		return (evidence.ReservedAttemptManifestSource{TargetDir: target}).ReadAttemptManifest(runDir, s.scope.RunID, c.A)
 	case "usage.envelope.write":
 		if !s.usageAllowed {
 			return nil, errors.New("controller usage writes require bubblewrap Unix transport")
@@ -898,8 +957,11 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 	}
 	defer func() { _ = resp.Body.Close() }()
 	responseLimit := workerAPIMaxBody
-	if method == "candidate.evidence.read" {
+	if method == "candidate.evidence.read" || method == "attempt_manifest.read" {
 		responseLimit = workerAPIMaxCandidateEvidenceBody
+	}
+	if method == "attempt_manifest.read" {
+		responseLimit = workerAPIMaxAttemptManifestEnvelope
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 	if err != nil {
@@ -915,6 +977,39 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 		return json.Unmarshal(body, out)
 	}
 	return nil
+}
+
+type workerAPIAttemptManifestStore struct{ port *workerAPIPort }
+type WorkerAPIAttemptManifestStore = workerAPIAttemptManifestStore
+
+// NewWorkerAPIAttemptManifestStore exposes the scoped controller-owned
+// attempt-manifest read/write port to pipeline workers.
+func NewWorkerAPIAttemptManifestStore(port *WorkerAPIPort) *WorkerAPIAttemptManifestStore {
+	return &workerAPIAttemptManifestStore{port: port}
+}
+
+func (s *workerAPIAttemptManifestStore) WriteAttemptManifest(manifest evidence.AttemptManifest) error {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return errors.New("worker attempt manifest API unavailable")
+	}
+	if manifest.RunID != "" && manifest.RunID != s.port.scope.RunID {
+		return errors.New("worker attempt manifest API run mismatch")
+	}
+	return s.port.call("attempt_manifest.write", workerAPICall{AttemptManifest: manifest}, nil)
+}
+
+func (s *workerAPIAttemptManifestStore) ReadAttemptManifest(_ string, runID, attemptID string) ([]byte, error) {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return nil, errors.New("worker attempt manifest API unavailable")
+	}
+	if runID != s.port.scope.RunID {
+		return nil, errors.New("worker attempt manifest API run mismatch")
+	}
+	var data []byte
+	if err := s.port.call("attempt_manifest.read", workerAPICall{A: attemptID}, &data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 type workerAPIRecorder struct {

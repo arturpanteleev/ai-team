@@ -29,10 +29,18 @@ type EvidenceStoreFactory interface {
 
 type filesystemEvidenceStoreFactory struct{}
 
+type attemptManifestResumeFactory interface {
+	ResumeWithAttemptManifestSource(root, runID string, source evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error)
+}
+
 func (filesystemEvidenceStoreFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
 	return evidence.Start(root, manifest)
 }
 
 func (filesystemEvidenceStoreFactory) Resume(root, runID string) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
 	return evidence.Resume(root, runID)
+}
+
+func (filesystemEvidenceStoreFactory) ResumeWithAttemptManifestSource(root, runID string, source evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
+	return evidence.ResumeWithAttemptManifestSource(root, runID, source)
 }

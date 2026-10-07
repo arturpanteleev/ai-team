@@ -169,7 +169,11 @@ func Build(runDir, outDir string) (*Index, error) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		rel := filepath.Join("attempts", id, "manifest.json")
-		sum, err := copyRecord(runDir, rel, outDir, RecordAttemptManifest)
+		data, _, readErr := evidence.ReadAttemptManifest(nil, runDir, manifest.RunID, id)
+		if readErr != nil {
+			return nil, fmt.Errorf("export attempt manifest %s: %w", id, readErr)
+		}
+		sum, err := writeRecordBytes(data, rel, outDir, RecordAttemptManifest)
 		if err != nil {
 			return nil, err
 		}
@@ -476,10 +480,11 @@ func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record,
 	sort.Strings(ids)
 	for _, id := range ids {
 		rel := filepath.Join("attempts", id, "manifest.json")
-		sum, err := fileDigest(filepath.Join(runDir, rel), maxAttemptManifest)
-		if err != nil {
-			return nil, err
+		data, _, readErr := evidence.ReadAttemptManifest(nil, runDir, manifest.RunID, id)
+		if readErr != nil {
+			return nil, readErr
 		}
+		sum := sha256Bytes(data)
 		records = append(records, Record{Type: RecordAttemptManifest, Path: rel, SHA256: sum})
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })

@@ -103,6 +103,20 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := appendPrivateDirectoryMount(&args, candidateEvidenceDir, true); err != nil {
 		return nil, err
 	}
+	// Canonical attempt manifests are controller-owned. Keep the worker-visible
+	// attempts/<id>/inputs and artifacts snapshots under .ai-team/runs intact,
+	// but hide only the separate authority store from direct child access.
+	attemptManifestDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "attempt-manifests")
+	if err != nil {
+		return nil, fmt.Errorf("prepare attempt manifest authority mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, attemptManifestDir, true); err != nil {
+		return nil, err
+	}
+	// The namespace-local shadow is read-only too: otherwise a child could
+	// create a counterfeit file at the controller authority path and confuse
+	// tools running in the same sandbox, even though host storage stayed safe.
+	args = append(args, "--chmod", "0555", attemptManifestDir)
 	candidateEvidenceRunDir := filepath.Join(candidateEvidenceDir, runID)
 	candidateEvidenceRunDirAdded := false
 	for _, name := range []string{"review-candidate.json", "verification-candidate.json"} {

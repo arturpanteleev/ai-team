@@ -901,7 +901,8 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		len(analystAttempts) != 1 ||
 		!strings.Contains(string(events), `"type":"transition_selected"`) ||
 		!strings.Contains(string(events), `"stage":"architect"`) {
-		t.Fatalf("web resume повторил этап или сменил identity:\n%s", events)
+		stateData, _ := os.ReadFile(statePath)
+		t.Fatalf("web resume повторил этап или сменил identity:\nevents:\n%s\nlifecycle:\n%s\nweb output:\n%s", events, stateData, serverOutput.String())
 	}
 }
 

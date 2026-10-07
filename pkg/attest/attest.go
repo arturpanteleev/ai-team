@@ -211,13 +211,9 @@ func Build(opt Options) (*Statement, error) {
 	predicate.Run.AttemptCount = len(attemptIDs)
 
 	for _, attemptID := range attemptIDs {
-		data, readErr := os.ReadFile(filepath.Join(opt.RunDir, "attempts", attemptID, "manifest.json"))
+		_, attempt, readErr := evidence.ReadAttemptManifest(nil, opt.RunDir, run.RunID, attemptID)
 		if readErr != nil {
 			return nil, fmt.Errorf("attestation attempt %s: %w", attemptID, readErr)
-		}
-		var attempt evidence.AttemptManifest
-		if json.Unmarshal(data, &attempt) != nil {
-			return nil, fmt.Errorf("attestation attempt manifest %s повреждён", attemptID)
 		}
 		for _, check := range attempt.Checks {
 			predicate.Checks = append(predicate.Checks, CheckSummary{

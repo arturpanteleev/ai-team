@@ -863,9 +863,11 @@ func TestWorkerAPIClientAndDispatchRejectBadPeerResponsesAndScope(t *testing.T) 
 func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	target := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "argv.txt")
+	environmentMarker := filepath.Join(t.TempDir(), "environment.json")
 	t.Setenv("AI_TEAM_WORKER_ARGS_MARKER", marker)
+	t.Setenv("AI_TEAM_WORKER_TEST_ENV_MARKER", environmentMarker)
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "echo")
-	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_ARGS_MARKER", "AI_TEAM_WORKER_TEST_MODE")
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_ARGS_MARKER", "AI_TEAM_WORKER_TEST_ENV_MARKER", "AI_TEAM_WORKER_TEST_MODE")
 	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
 	var factoryCalls int
 	engine, err := NewProcessEngine([]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"}, target, filepath.Join(target, "controller-secret.db"), WithControllerAPI(func() pipeline.Recorder {
@@ -891,6 +893,19 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	}
 	if strings.Contains(string(args), "--db") || strings.Contains(string(args), "controller-secret.db") {
 		t.Fatalf("worker launch exposed controller DB arguments: %s", args)
+	}
+	childEnvironment, err := os.ReadFile(environmentMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var environment map[string]string
+	if err := json.Unmarshal(childEnvironment, &environment); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{OpenAIEgressSocketEnv, OpenAIEgressTokenEnv, "AI_TEAM_OPENAI_EGRESS_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
+		if _, exists := environment[name]; exists {
+			t.Fatalf("unsandboxed controller-API worker received egress setting %s", name)
+		}
 	}
 }
 

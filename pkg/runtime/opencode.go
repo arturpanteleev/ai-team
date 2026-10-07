@@ -174,6 +174,7 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 	}
 	cleanup := func() { _ = os.RemoveAll(configHome) }
 	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())
+	env = withControlledOpenAIEgressProxy(env)
 	env = append(env,
 		"OPENCODE_PERMISSION="+string(permissionJSON),
 		"OPENCODE_CONFIG_CONTENT="+string(configJSON),
@@ -242,6 +243,33 @@ const HarnessEnvAllowVar = "AI_TEAM_HARNESS_ENV_ALLOW"
 const EnvAllowVar = "AI_TEAM_OPENCODE_ENV_ALLOW"
 
 const HarnessEnvAllowLegacyVar = EnvAllowVar
+
+// OpenAIEgressProxyEnv is set only by a controller-launched bubblewrap worker.
+// The value must not be supplied through the user environment allow-list.
+const OpenAIEgressProxyEnv = "AI_TEAM_OPENAI_EGRESS_PROXY"
+
+func withControlledOpenAIEgressProxy(environment []string) []string {
+	proxy := os.Getenv(OpenAIEgressProxyEnv)
+	if proxy == "" {
+		return environment
+	}
+	filtered := make([]string, 0, len(environment)+3)
+	for _, item := range environment {
+		key := strings.ToUpper(strings.SplitN(item, "=", 2)[0])
+		switch key {
+		case "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY":
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	filtered = append(filtered,
+		"HTTP_PROXY="+proxy,
+		"HTTPS_PROXY="+proxy,
+		"NO_PROXY=localhost,127.0.0.1,::1",
+	)
+	sort.Strings(filtered)
+	return filtered
+}
 
 // LookPath проверяет доступность бинарника харнесса в PATH.
 func (a *OpenCodeAdapter) LookPath(cli string) error {

@@ -1037,6 +1037,64 @@ func TestWorkerCommandContract(t *testing.T) {
 	})
 }
 
+func TestWorkerOpenAIEgressRequiresMatchingCredentials(t *testing.T) {
+	root := newControlRoot(t)
+	job, err := json.Marshal(worker.Job{
+		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationStart,
+		RunID: "run-egress-env", TargetDir: filepath.Clean(root), Feature: "f", Task: "t",
+		ExecutionID: strings.Repeat("e", worker.ExecutionIDBytes*2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The child CLI inherits the test process environment. Preserve and restore
+	// both variables while making exactly one present in each subprocess.
+	setOnlyEgressEnv := func(t *testing.T, name, value string) {
+		t.Helper()
+		keys := []string{worker.OpenAIEgressSocketEnv, worker.OpenAIEgressTokenEnv}
+		previous := make(map[string]string, len(keys))
+		present := make(map[string]bool, len(keys))
+		for _, key := range keys {
+			previous[key], present[key] = os.LookupEnv(key)
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(func() {
+			for _, key := range keys {
+				if present[key] {
+					_ = os.Setenv(key, previous[key])
+				} else {
+					_ = os.Unsetenv(key)
+				}
+			}
+		})
+		if err := os.Setenv(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		env  string
+	}{
+		{name: "socket without capability", env: worker.OpenAIEgressSocketEnv},
+		{name: "capability without socket", env: worker.OpenAIEgressTokenEnv},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setOnlyEgressEnv(t, tc.env, "/run/ai-team/egress.sock")
+			_, code, stderr := runCLIStdin(t, string(job), "worker", "--target", root)
+			if code != 1 {
+				t.Fatalf("mismatched egress credentials must fail closed with exit 1, got %d; stderr: %s", code, stderr)
+			}
+			if !strings.Contains(stderr, "worker OpenAI egress требует одновременно Unix socket и capability") {
+				t.Fatalf("expected fail-closed OpenAI egress diagnostic, got: %q", stderr)
+			}
+		})
+	}
+}
+
 func TestRecoverReconcilesTerminalEvidenceWithoutResume(t *testing.T) {
 	target := t.TempDir()
 	runID := "run-terminal-recovery"

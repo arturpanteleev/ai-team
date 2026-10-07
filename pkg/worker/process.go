@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,8 +48,12 @@ var workerEnvironmentReserved = map[string]bool{
 	"AI_TEAM_AGENT_PATH": true, WorkerAgentPathsEnvVar: true,
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
 	WorkerEnvAllowVar: true, "AI_TEAM_HARNESS_ENV_ALLOW": true,
-	WorkerSandboxEnvVar: true,
-	WorkerAPIAddressEnv: true, WorkerAPISocketEnv: true, WorkerAPITokenEnv: true,
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
+	"http_proxy": true, "https_proxy": true, "no_proxy": true, "all_proxy": true,
+	"AI_TEAM_OPENAI_EGRESS_PROXY": true,
+	WorkerSandboxEnvVar:           true,
+	WorkerAPIAddressEnv:           true, WorkerAPISocketEnv: true, WorkerAPITokenEnv: true,
+	openAIEgressSocketEnv: true, openAIEgressTokenEnv: true,
 }
 
 type ProcessOption func(*ProcessEngine) error
@@ -61,6 +66,7 @@ type ProcessEngine struct {
 	bubblewrap         bool
 	apiRecorderFactory func() pipeline.Recorder
 	apiApprovals       workerApprovalPort
+	openAIEgressDial   func(context.Context) (net.Conn, error)
 }
 
 type ProcessError struct {
@@ -237,6 +243,8 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	defer cleanupEnvironment()
 	command.Env = environment
 	var api *workerAPIServer
+	var openAIEgress *openAIEgressServer
+	var openAIEgressSocket, openAIEgressToken string
 	if e.apiRecorderFactory != nil {
 		apiLifecycle, lifecycleErr := lifecycle.NewStore(e.target)
 		if lifecycleErr != nil {
@@ -247,8 +255,8 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API task: %w", taskErr)
 		}
 		recorder := e.apiRecorderFactory()
+		tempDir := ""
 		if e.bubblewrap {
-			tempDir := ""
 			for _, item := range environment {
 				if key, value, ok := strings.Cut(item, "="); ok && key == "TMPDIR" {
 					tempDir = value
@@ -274,6 +282,20 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 		api.lifecycle = apiLifecycle
 		defer api.close()
+		if e.bubblewrap {
+			openAIEgressSocket = filepath.Join(tempDir, "openai-egress.sock")
+			dial := e.openAIEgressDial
+			if dial == nil {
+				dial = dialOpenAIHost
+			}
+			openAIEgress, err = startOpenAIEgressServerWithDial(openAIEgressSocket, dial)
+			if err != nil {
+				return pipeline.RunResult{}, fmt.Errorf("worker OpenAI egress proxy: %w", err)
+			}
+			defer openAIEgress.close()
+			openAIEgressToken = openAIEgress.token
+			command.Env = append(command.Env, openAIEgressSocketEnv+"="+openAIEgressSocket, openAIEgressTokenEnv+"="+openAIEgressToken)
+		}
 	}
 	if e.bubblewrap {
 		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, e.agentPaths, command.Env)
@@ -284,6 +306,9 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		command.Env = environment
 		if api != nil {
 			command.Env = append(command.Env, workerAPIAddressEnv+"=http://unix", workerAPISocketEnv+"="+api.socketPath, workerAPITokenEnv+"="+api.token)
+		}
+		if openAIEgress != nil {
+			command.Env = append(command.Env, openAIEgressSocketEnv+"="+openAIEgressSocket, openAIEgressTokenEnv+"="+openAIEgressToken)
 		}
 	}
 	command.Stdin = bytes.NewReader(payload)

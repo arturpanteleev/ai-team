@@ -842,6 +842,51 @@ func TestBubblewrapRejectsMissingAndNonDirectoryWorkspace(t *testing.T) {
 	}
 }
 
+func TestBubblewrapRejectsRunOverlappingEnvironmentAndPartialOpenAIEgress(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	target := makeBubblewrapTarget(t)
+	worker := exec.Command("worker")
+	baseEnv := []string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	build := func(env []string) error {
+		t.Helper()
+		_, err := bubblewrapWorkerCommand(context.Background(), worker, target,
+			filepath.Join(target, "controller.db"), "sandbox-test", nil, env)
+		return err
+	}
+
+	t.Run("HOME cannot reopen private run mount", func(t *testing.T) {
+		err := build([]string{"HOME=/run", baseEnv[1]})
+		if err == nil || !strings.Contains(err.Error(), "worker HOME") || !strings.Contains(err.Error(), "overlaps /run") {
+			t.Fatalf("HOME overlapping the private /run mount must fail closed, got %v", err)
+		}
+	})
+	t.Run("TMPDIR cannot reopen private run mount", func(t *testing.T) {
+		err := build([]string{baseEnv[0], "TMPDIR=/run"})
+		if err == nil || !strings.Contains(err.Error(), "worker TMPDIR") || !strings.Contains(err.Error(), "overlaps /run") {
+			t.Fatalf("TMPDIR overlapping the private /run mount must fail closed, got %v", err)
+		}
+	})
+	t.Run("OpenAI socket requires capability", func(t *testing.T) {
+		env := append(append([]string(nil), baseEnv...), openAIEgressSocketEnv+"=/tmp/openai-egress.sock")
+		err := build(env)
+		if err == nil || !strings.Contains(err.Error(), "socket and capability must be configured together") {
+			t.Fatalf("partial OpenAI egress configuration must fail closed, got %v", err)
+		}
+	})
+	t.Run("OpenAI capability requires socket", func(t *testing.T) {
+		env := append(append([]string(nil), baseEnv...), openAIEgressTokenEnv+"=scoped-capability")
+		err := build(env)
+		if err == nil || !strings.Contains(err.Error(), "socket and capability must be configured together") {
+			t.Fatalf("partial OpenAI egress configuration must fail closed, got %v", err)
+		}
+	})
+}
+
 func TestBubblewrapRejectsFilesystemRootAsTarget(t *testing.T) {
 	for _, target := range []string{string(filepath.Separator), filepath.Join(string(filepath.Separator), ".")} {
 		t.Run(target, func(t *testing.T) {

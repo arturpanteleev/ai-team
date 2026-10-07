@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -22,6 +21,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 )
 
 // candidate_evidence.go — controller-owned evidence о кандидате:
@@ -263,6 +263,13 @@ func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
 	if rs.p != nil && rs.p.candidateEvidence != nil && name == "review-candidate.json" {
 		var err error
 		candidate, err = rs.p.candidateEvidence.ReadCandidateEvidence(name)
+		if errors.Is(err, os.ErrNotExist) {
+			// Runs created before controller-owned candidate storage may have only
+			// the worker-visible projection. Import it once through the same scoped
+			// writer; it remains worker-supplied data and is still checked against
+			// the current workspace identity below.
+			candidate, err = rs.importLegacyCandidateEvidence(name)
+		}
 		if err != nil {
 			return err
 		}
@@ -272,15 +279,7 @@ func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
 		if err != nil {
 			return err
 		}
-		decoder := json.NewDecoder(strings.NewReader(string(data)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&candidate); err != nil {
-			return err
-		}
-		var trailing any
-		if err := decoder.Decode(&trailing); err == nil {
-			return fmt.Errorf("candidate evidence has trailing JSON")
-		} else if !errors.Is(err, io.EOF) {
+		if err := decodeCandidateEvidence(data, &candidate); err != nil {
 			return err
 		}
 	}
@@ -295,6 +294,40 @@ func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
 		return fmt.Errorf("reviewed candidate identity changed before test authoring")
 	}
 	return nil
+}
+
+func (rs *runState) importLegacyCandidateEvidence(name string) (candidateEvidence, error) {
+	if rs.task == nil {
+		return candidateEvidence{}, errors.New("legacy candidate evidence has no task context")
+	}
+	if name != "review-candidate.json" {
+		return candidateEvidence{}, fmt.Errorf("unsupported legacy candidate evidence name %q", name)
+	}
+	// ExistingDir validates every directory component without following symlinks
+	// and requires feature to be a single safe path component.
+	controlDir, err := safeio.ExistingDir(rs.task.ArtifactRoot, rs.runCfg.Feature, ".control")
+	if err != nil {
+		return candidateEvidence{}, err
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(controlDir, name), maxArtifactFileBytes)
+	if err != nil {
+		return candidateEvidence{}, err
+	}
+	var candidate candidateEvidence
+	if err := decodeCandidateEvidence(data, &candidate); err != nil {
+		return candidateEvidence{}, err
+	}
+	if err := ValidateCandidateEvidence(rs.runID, name, candidate); err != nil {
+		return candidateEvidence{}, err
+	}
+	if err := rs.p.candidateEvidence.WriteCandidateEvidence(name, candidate); err != nil {
+		return candidateEvidence{}, err
+	}
+	return candidate, nil
+}
+
+func decodeCandidateEvidence(data []byte, candidate *candidateEvidence) error {
+	return strictjson.Unmarshal(data, maxArtifactFileBytes, candidate)
 }
 
 func syncArtifactProjection(sourceRoot, destinationRoot, feature string) error {

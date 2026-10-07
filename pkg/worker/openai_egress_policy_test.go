@@ -202,7 +202,8 @@ func (l *delayedOpenAIEgressListener) Addr() net.Addr {
 
 func TestOpenAIEgressBridgeClosesConnectionAcceptedAfterShutdown(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 	listener := &delayedOpenAIEgressListener{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -274,6 +275,7 @@ func TestBridgeOpenAIClientForwardsControllerDenial(t *testing.T) {
 		_, _ = io.WriteString(upstream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
 	}()
 	client, proxy := net.Pipe()
+	defer func() { _ = client.Close() }()
 	go bridgeOpenAIClient(proxy, socket, "secret-token", make(chan struct{}))
 	_, err = io.WriteString(client, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\nProxy-Authorization: Bearer client-value\r\n\r\n")
 	mustNoError(t, err)
@@ -284,6 +286,108 @@ func TestBridgeOpenAIClientForwardsControllerDenial(t *testing.T) {
 		t.Fatalf("status = %d, want 403", response.StatusCode)
 	}
 	_ = client.Close()
+}
+
+func TestBridgeOpenAIClientClosesOnMalformedControllerResponse(t *testing.T) {
+	socket := shortOpenAIEgressSocket(t)
+	listener, err := net.Listen("unix", socket)
+	mustNoError(t, err)
+	defer func() { _ = listener.Close() }()
+	responseWritten := make(chan error, 1)
+	go func() {
+		upstream, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			responseWritten <- acceptErr
+			return
+		}
+		defer func() { _ = upstream.Close() }()
+		if _, readErr := http.ReadRequest(bufio.NewReader(upstream)); readErr != nil {
+			responseWritten <- readErr
+			return
+		}
+		_, writeErr := io.WriteString(upstream, "this is not an HTTP response\r\n\r\n")
+		responseWritten <- writeErr
+	}()
+	client, proxy := net.Pipe()
+	defer func() { _ = client.Close() }()
+	go bridgeOpenAIClient(proxy, socket, "secret-token", make(chan struct{}))
+	_, err = io.WriteString(client, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n")
+	mustNoError(t, err)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, readErr := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	if readErr == nil {
+		t.Fatal("malformed controller response unexpectedly produced a client response")
+	}
+	var timeout net.Error
+	if errors.As(readErr, &timeout) && timeout.Timeout() {
+		t.Fatalf("timed out waiting for malformed controller response to be rejected: %v", readErr)
+	}
+	if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected bridge closure after malformed controller response, got %T: %v", readErr, readErr)
+	}
+	select {
+	case writeErr := <-responseWritten:
+		if writeErr != nil {
+			t.Fatalf("controller failed to write malformed response: %v", writeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controller did not finish writing malformed response")
+	}
+	_ = client.Close()
+}
+
+func TestBridgeOpenAIClientHandlesDisconnectedWorker(t *testing.T) {
+	socket := shortOpenAIEgressSocket(t)
+	listener, err := net.Listen("unix", socket)
+	mustNoError(t, err)
+	defer func() { _ = listener.Close() }()
+	requestRead := make(chan struct{})
+	upstreamClosed := make(chan struct{})
+	go func() {
+		upstream, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = upstream.Close() }()
+		_, _ = http.ReadRequest(bufio.NewReader(upstream))
+		close(requestRead)
+		if _, writeErr := io.WriteString(upstream, "HTTP/1.1 200 Connection Established\r\n\r\n"); writeErr != nil {
+			close(upstreamClosed)
+			return
+		}
+		_, _ = io.Copy(io.Discard, upstream)
+		close(upstreamClosed)
+	}()
+	client, proxy := net.Pipe()
+	defer func() { _ = client.Close() }()
+	bridgeExited := make(chan struct{})
+	go func() {
+		bridgeOpenAIClient(proxy, socket, "secret-token", make(chan struct{}))
+		close(bridgeExited)
+	}()
+	_, err = io.WriteString(client, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n")
+	mustNoError(t, err)
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("controller did not receive CONNECT request")
+	}
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read successful CONNECT response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	_ = client.Close()
+	for name, ch := range map[string]<-chan struct{}{"upstream close": upstreamClosed, "bridge exit": bridgeExited} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s after worker disconnect", name)
+		}
+	}
 }
 
 func TestOpenAIEgressServerSocketPermissions(t *testing.T) {

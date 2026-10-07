@@ -833,6 +833,41 @@ func TestBubblewrapPrivateStateRejectsUnsafeEntries(t *testing.T) {
 	})
 }
 
+func TestBubblewrapMasksOrdinaryControllerDatabase(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeBwrap := filepath.Join(fakeBin, "bwrap")
+	if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	target := makeBubblewrapTarget(t)
+	dbPath := filepath.Join(target, ".ai-team", "controller.db")
+	if err := os.WriteFile(dbPath, []byte("ordinary controller database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+		dbPath, "ordinary-database-mask-test", nil,
+		[]string{"HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()})
+	if err != nil {
+		t.Fatalf("builder must allow a regular controller database without aliases: %v", err)
+	}
+
+	wantPaths := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"}
+	for _, path := range wantPaths {
+		found := false
+		for i := 0; i+2 < len(command.Args); i++ {
+			if command.Args[i] == "--ro-bind" && command.Args[i+1] == "/dev/null" && command.Args[i+2] == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("controller database path must be masked with --ro-bind /dev/null: %s; args=%v", path, command.Args)
+		}
+	}
+}
+
 func makeBubblewrapTarget(t *testing.T) string {
 	t.Helper()
 	target := t.TempDir()

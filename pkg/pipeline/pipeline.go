@@ -57,6 +57,18 @@ type Recorder interface {
 	RunFinished(runID, status string, completedAt time.Time)
 }
 
+// ApprovalStore is the persistence port used by pipeline approval decisions.
+// The filesystem store remains the local default; a future controller adapter
+// can implement this port. This seam alone does not isolate a worker process.
+// Pipeline authorization never treats runtime output as a human decision.
+type ApprovalStore interface {
+	Create(approval.PendingApproval) (approval.PendingApproval, error)
+	Load(runID, approvalID string) (approval.PendingApproval, error)
+	List(runID string) ([]approval.PendingApproval, error)
+	Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
+	ResolveDeferred(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
+}
+
 type Pipeline struct {
 	cfg        *config.Config
 	reg        *agent.Registry
@@ -65,6 +77,7 @@ type Pipeline struct {
 	newRuntime runtime.Factory
 	recorder   Recorder
 	delivery   delivery.Service
+	approvals  ApprovalStore
 	reportsDir string
 }
 
@@ -94,6 +107,13 @@ func WithRecorder(r Recorder) Option {
 
 func WithDeliveryService(service delivery.Service) Option {
 	return func(p *Pipeline) { p.delivery = service }
+}
+
+// WithApprovalStore injects an ApprovalStore port. Local CLI runs currently
+// default to the filesystem-backed approval.Store for the target directory;
+// this seam does not yet move lifecycle or evidence persistence out of target.
+func WithApprovalStore(store ApprovalStore) Option {
+	return func(p *Pipeline) { p.approvals = store }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
@@ -170,7 +190,7 @@ type runState struct {
 	userOwnedPaths            map[string]bool
 	lifecycleStore            *lifecycle.Store
 	lifecycleState            lifecycle.State
-	approvalStore             *approval.Store
+	approvalStore             ApprovalStore
 	resumedApproval           *approval.PendingApproval
 	selectedArtifactRevisions map[string]string
 	resumed                   bool
@@ -264,9 +284,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if err != nil {
 		return RunResult{}, fmt.Errorf("lifecycle store: %w", err)
 	}
-	approvalStore, err := approval.NewStore(runCfg.TargetDir)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("approval store: %w", err)
+	approvalStore := p.approvals
+	if approvalStore == nil {
+		approvalStore, err = approval.NewStore(runCfg.TargetDir)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("approval store: %w", err)
+		}
 	}
 	var resumedState lifecycle.State
 	var resumedApproval *approval.PendingApproval

@@ -574,6 +574,167 @@ func TestWorkerControllerAPICandidateMetadataCreateIsLimitedToStartAndRecovery(t
 	}
 }
 
+type candidateMetadataStoreStub struct {
+	metadata  candidate.Metadata
+	createErr error
+	readErr   error
+}
+
+func (s *candidateMetadataStoreStub) Create(metadata candidate.Metadata) error {
+	s.metadata = metadata
+	return s.createErr
+}
+
+func (s *candidateMetadataStoreStub) Read(string, string) (candidate.Metadata, error) {
+	return s.metadata, s.readErr
+}
+
+func TestWorkerControllerAPICandidateMetadataRejectsCorruptControllerState(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-corrupt-state", TargetDir: target,
+		ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPICandidates(port)
+	metadata := candidate.Metadata{SchemaVersion: 1, RunID: job.RunID, ControlTarget: target,
+		Worktree: filepath.Join(target, ".ai-team", "worktrees", job.RunID), BaseCommit: "base", BaseTree: "tree", CreatedAt: time.Now().UTC()}
+
+	server.candidates = &candidateMetadataStoreStub{createErr: errors.New("controller disk is read-only")}
+	if err := store.Create(metadata); err == nil || !strings.Contains(err.Error(), "controller disk is read-only") {
+		t.Fatalf("controller persistence failure should reach the worker: %v", err)
+	}
+
+	// A corrupt durable record must be stopped at the controller boundary. It
+	// must not be returned to the worker, where it could be mistaken for a
+	// recoverable candidate identity.
+	corrupt := metadata
+	corrupt.ControlTarget = filepath.Join(target, "foreign")
+	server.candidates = &candidateMetadataStoreStub{metadata: corrupt}
+	if _, err := store.Read(target, job.RunID); err == nil || !strings.Contains(err.Error(), "candidate metadata") {
+		t.Fatalf("controller returned corrupt candidate identity: %v", err)
+	}
+}
+
+func TestWorkerAPICandidateAdapterRejectsUnavailableAndOutOfScopeRequests(t *testing.T) {
+	var missing *workerAPICandidates
+	if err := missing.Create(candidate.Metadata{}); err == nil {
+		t.Fatal("nil candidate adapter accepted a create")
+	}
+	if _, err := missing.Read("/tmp/target", "run"); err == nil {
+		t.Fatal("nil candidate adapter accepted a read")
+	}
+	if err := (NewWorkerAPICandidates(nil)).Create(candidate.Metadata{}); err == nil {
+		t.Fatal("candidate adapter without a port accepted a create")
+	}
+	if _, err := (NewWorkerAPICandidates(nil)).Read("/tmp/target", "run"); err == nil {
+		t.Fatal("candidate adapter without a port accepted a read")
+	}
+
+	target := t.TempDir()
+	port := &workerAPIPort{scope: workerAPIScope{RunID: "candidate-scope", TargetDir: target}}
+	store := NewWorkerAPICandidates(port)
+	if _, err := store.Read(target, "another-run"); err == nil {
+		t.Fatal("candidate adapter accepted a foreign run")
+	}
+	if _, err := store.Read(filepath.Join(target, "missing"), "candidate-scope"); err == nil {
+		t.Fatal("candidate adapter accepted a different target")
+	}
+	if err := store.Create(candidate.Metadata{}); err == nil {
+		t.Fatal("candidate adapter sent invalid metadata to the controller")
+	}
+	if _, err := store.Read(filepath.Join(target, "missing"), "candidate-scope"); err == nil {
+		t.Fatal("candidate adapter accepted a target that does not exist")
+	}
+	missingScope := NewWorkerAPICandidates(&WorkerAPIPort{scope: workerAPIScope{RunID: "candidate-scope", TargetDir: filepath.Join(target, "missing")}})
+	if err := missingScope.Create(candidate.Metadata{}); err == nil {
+		t.Fatal("candidate adapter accepted a controller scope that does not exist")
+	}
+	if _, err := missingScope.Read(target, "candidate-scope"); err == nil {
+		t.Fatal("candidate adapter accepted an invalid controller scope")
+	}
+}
+
+func TestWorkerAPICandidateAdapterRejectsInvalidMetadataReturnedByPeer(t *testing.T) {
+	target := t.TempDir()
+	var err error
+	target, err = filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "candidate-invalid-peer", TargetDir: target,
+		ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"schema_version":1,"run_id":"foreign-run"}`)
+	}))
+	defer peer.Close()
+	t.Setenv(WorkerAPIAddressEnv, peer.URL)
+	t.Setenv(WorkerAPITokenEnv, "test-capability")
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewWorkerAPICandidates(port).Read(target, job.RunID); err == nil || !strings.Contains(err.Error(), "candidate metadata identity mismatch") {
+		t.Fatalf("candidate adapter accepted invalid metadata from its controller peer: %v", err)
+	}
+}
+
+func TestWorkerControllerAPICandidateDispatchFailsClosedOnScopeAndStoreErrors(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "candidate-dispatch-boundary"
+	metadata := candidate.Metadata{SchemaVersion: 1, RunID: runID, ControlTarget: target,
+		Worktree: filepath.Join(target, ".ai-team", "worktrees", runID), BaseCommit: "base", BaseTree: "tree", CreatedAt: time.Now().UTC()}
+	server := &workerAPIServer{
+		scope:      workerAPIScope{RunID: runID, Operation: OperationStart, TargetDir: target},
+		candidates: &candidateMetadataStoreStub{createErr: errors.New("metadata volume unavailable")},
+	}
+	if _, err := server.dispatch("candidate.metadata.read", workerAPICall{RunID: "another-run", A: runID}); err == nil {
+		t.Fatal("controller accepted a worker call carrying a foreign run identity")
+	}
+	server.scope.RunID = "invalid run id"
+	if _, err := server.dispatch("candidate.metadata.read", workerAPICall{}); err == nil {
+		t.Fatal("controller accepted an invalid run identity in its own scope")
+	}
+	server.scope.RunID = runID
+
+	if _, err := server.dispatch("candidate.metadata.create", workerAPICall{CandidateMetadata: candidate.Metadata{}}); err == nil {
+		t.Fatal("controller accepted metadata with no candidate identity")
+	}
+	if _, err := server.dispatch("candidate.metadata.create", workerAPICall{CandidateMetadata: metadata}); err == nil || !strings.Contains(err.Error(), "metadata volume unavailable") {
+		t.Fatalf("controller hid a metadata persistence error: %v", err)
+	}
+	if _, err := server.dispatch("candidate.metadata.read", workerAPICall{A: "another-run"}); err == nil {
+		t.Fatal("controller returned candidate metadata for a different run")
+	}
+
+	server.candidates = &candidateMetadataStoreStub{readErr: errors.New("metadata volume unavailable")}
+	if _, err := server.dispatch("candidate.metadata.read", workerAPICall{A: runID}); err == nil || !strings.Contains(err.Error(), "metadata volume unavailable") {
+		t.Fatalf("controller hid a metadata read failure: %v", err)
+	}
+
+	server.scope.TargetDir = filepath.Join(target, "missing-controller-target")
+	if _, err := server.dispatch("candidate.metadata.read", workerAPICall{A: runID}); err == nil {
+		t.Fatal("controller read candidate metadata for an unavailable target")
+	}
+}
+
 func TestWorkerControllerAPILifecycleScopedCreateResumeCheckpointRoundTrip(t *testing.T) {
 	target := t.TempDir()
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "lifecycle-run", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}

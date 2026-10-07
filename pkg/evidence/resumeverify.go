@@ -87,6 +87,14 @@ func resumeErr(reason ResumeEvidenceReason, format string, args ...interface{}) 
 // digests, event hash chain, attempt manifest digests. Терминальный run
 // отклоняется отдельной причиной.
 func VerifyResumeEvidence(runDir string) error {
+	return VerifyResumeEvidenceWithAttemptManifestSource(runDir, nil)
+}
+
+// VerifyResumeEvidenceWithAttemptManifestSource performs the same fail-closed
+// checks as VerifyResumeEvidence, using source for attempt manifest bytes.
+// Source-backed reads are limited to MaxAttemptManifestSize; a nil source uses
+// streaming filesystem digests for compatibility with large legacy files.
+func VerifyResumeEvidenceWithAttemptManifestSource(runDir string, source AttemptManifestSource) error {
 	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
 	if err != nil {
 		return resumeErr(ReasonManifestIdentity, "run.json: %v", err)
@@ -110,11 +118,11 @@ func VerifyResumeEvidence(runDir string) error {
 		return resumeErr(ReasonWorkflowSnapshot, "resolved workflow snapshot identity mismatch")
 	}
 
-	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), manifest.RunID)
+	replayed, err := ReplayEventLogWithAttemptManifestSource(filepath.Join(runDir, "events.jsonl"), manifest.RunID, source)
 	if err != nil {
 		return resumeErr(ReasonEventChain, "event chain: %v", err)
 	}
-	if err := verifyAttemptManifests(runDir, replayed.Attempts); err != nil {
+	if err := verifyAttemptManifestsWithSource(runDir, manifest.RunID, replayed.Attempts, source); err != nil {
 		return err
 	}
 	if !replayed.FinishedAt.IsZero() {
@@ -124,18 +132,23 @@ func VerifyResumeEvidence(runDir string) error {
 }
 
 func verifyAttemptManifests(runDir string, attempts []ReplayedAttempt) error {
+	return verifyAttemptManifestsWithSource(runDir, inferRunID(runDir), attempts, nil)
+}
+
+func verifyAttemptManifestsWithSource(runDir, runID string, attempts []ReplayedAttempt, source AttemptManifestSource) error {
 	for _, attempt := range attempts {
 		if attempt.ManifestSHA256 == "" {
 			continue
 		}
-		manifestPath := filepath.Join(runDir, "attempts", attempt.AttemptID, "manifest.json")
-		artifactType, size, digest, digestErr := ArtifactDigest(manifestPath)
-		if digestErr != nil || artifactType != "file" || size == 0 || digest != attempt.ManifestSHA256 {
+		digest, size, digestErr := attemptManifestDigest(source, runDir, runID, attempt.AttemptID)
+		if digestErr != nil || size == 0 || digest != attempt.ManifestSHA256 {
 			return resumeErr(ReasonAttemptManifest, "attempt %s manifest digest mismatch", attempt.AttemptID)
 		}
 	}
 	return nil
 }
+
+func inferRunID(runDir string) string { return filepath.Base(filepath.Clean(runDir)) }
 
 // VerifyTerminalEvidence verifies the immutable manifest, snapshots, hash
 // chain, attempts, and terminal event for a run that must not be resumed.

@@ -41,17 +41,29 @@ type ReplayedAttempt struct {
 // ReplayEventLog verifies the hash chain and rebuilds the run lifecycle. It
 // fails closed on impossible transitions or manifest identity mismatches.
 func ReplayEventLog(path, runID string) (ReplayedRun, error) {
+	return ReplayEventLogWithAttemptManifestSource(path, runID, nil)
+}
+
+// ReplayEventLogWithAttemptManifestSource replays a verified event log using
+// the supplied source for attempt manifest bytes. A nil source preserves the
+// filesystem-backed streaming digest used by ReplayEventLog; supplied sources
+// are rejected when they return manifests larger than MaxAttemptManifestSize.
+func ReplayEventLogWithAttemptManifestSource(path, runID string, source AttemptManifestSource) (ReplayedRun, error) {
 	events, err := VerifyEventLog(path, runID)
 	if err != nil {
 		return ReplayedRun{}, err
 	}
-	return replayEvents(events, runID, filepath.Dir(path))
+	return replayEventsWithAttemptManifestSource(events, runID, filepath.Dir(path), source)
 }
 
 // replayEvents rebuilds lifecycle state from an already verified event chain.
 // Keeping replay separate from filesystem access lets the package persistence
 // seam share the exact existing transition validation.
 func replayEvents(events []Event, runID, runDir string) (ReplayedRun, error) {
+	return replayEventsWithAttemptManifestSource(events, runID, runDir, nil)
+}
+
+func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string, source AttemptManifestSource) (ReplayedRun, error) {
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	var err error
 	byID := make(map[string]int)
@@ -130,9 +142,8 @@ func replayEvents(events []Event, runID, runDir string) (ReplayedRun, error) {
 				if !validSHA256(attempt.ManifestSHA256) {
 					return ReplayedRun{}, fmt.Errorf("attempt_finished %q manifest digest is invalid", event.AttemptID)
 				}
-				manifestPath := filepath.Join(runDir, "attempts", event.AttemptID, "manifest.json")
-				artifactType, _, digest, digestErr := ArtifactDigest(manifestPath)
-				if digestErr != nil || artifactType != "file" || digest != attempt.ManifestSHA256 {
+				digest, _, digestErr := attemptManifestDigest(source, runDir, runID, event.AttemptID)
+				if digestErr != nil || digest != attempt.ManifestSHA256 {
 					return ReplayedRun{}, fmt.Errorf("attempt_finished %q manifest identity mismatch", event.AttemptID)
 				}
 			} else if attempt.Error == "" {

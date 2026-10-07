@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -667,6 +668,74 @@ func TestWorkerControllerAPIUsesPrivateUnixSocket(t *testing.T) {
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("API socket remained after server close: %v", err)
 	}
+}
+
+func TestWorkerControllerAPIUnixSetupFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain worker API transport is used only by Linux bubblewrap")
+	}
+	job := Job{RunID: "unix-failure", Operation: OperationStart, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	socketDir, err := os.MkdirTemp("/tmp", "worker-api-fail-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socketPath := filepath.Join(socketDir, "api.sock")
+	for _, tc := range []struct {
+		name      string
+		recorder  pipeline.Recorder
+		approvals workerApprovalPort
+		path      string
+		want      string
+	}{
+		{name: "nil recorder", approvals: store, path: socketPath, want: "requires recorder"},
+		{name: "nil approvals", recorder: &apiRecorderSpy{}, path: socketPath, want: "requires recorder"},
+		{name: "relative socket path", recorder: &apiRecorderSpy{}, approvals: store, path: "relative.sock", want: "absolute and clean"},
+		{name: "unclean socket path", recorder: &apiRecorderSpy{}, approvals: store, path: socketDir + "/../" + filepath.Base(socketDir) + "/api.sock", want: "absolute and clean"},
+		{name: "socket parent unavailable", recorder: &apiRecorderSpy{}, approvals: store, path: filepath.Join(socketDir, "missing", "api.sock"), want: "listen on worker controller API socket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := startWorkerAPIServerUnix(job, tc.recorder, tc.approvals, tc.path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q setup failure, got %v", tc.want, err)
+			}
+		})
+	}
+
+	t.Run("TCP listen failure propagates", func(t *testing.T) {
+		listenErr := errors.New("injected listener failure")
+		_, err := startWorkerAPIServerWithListener(job, &apiRecorderSpy{}, store, func() (net.Listener, error) {
+			return nil, listenErr
+		}, strings.NewReader("entropy"))
+		if !errors.Is(err, listenErr) {
+			t.Fatalf("listener failure not propagated: %v", err)
+		}
+	})
+
+	t.Run("chmod failure closes and removes socket", func(t *testing.T) {
+		path := filepath.Join(socketDir, "chmod-failure.sock")
+		chmodErr := errors.New("injected chmod failure")
+		_, err := startWorkerAPIServerUnixWith(job, &apiRecorderSpy{}, store, path, net.Listen,
+			func(string, os.FileMode) error { return chmodErr }, strings.NewReader("unused"))
+		if !errors.Is(err, chmodErr) {
+			t.Fatalf("socket chmod failure not propagated: %v", err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("socket path remained after chmod failure: %v", err)
+		}
+	})
+
+	t.Run("entropy failure closes and removes socket", func(t *testing.T) {
+		path := filepath.Join(socketDir, "entropy-failure.sock")
+		_, err := startWorkerAPIServerUnixWith(job, &apiRecorderSpy{}, store, path, net.Listen, os.Chmod, strings.NewReader(""))
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("entropy failure must abort API startup, got %v", err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("socket path remained after entropy failure: %v", err)
+		}
+	})
 }
 
 type concurrentAPIRecorder struct {

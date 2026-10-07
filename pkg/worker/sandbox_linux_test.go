@@ -416,6 +416,12 @@ func TestBubblewrapRejectsFilesystemRootAsTarget(t *testing.T) {
 }
 
 func TestBubblewrapRejectsRunMountReopeningPaths(t *testing.T) {
+	t.Run("missing bind source", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing-registry")
+		if err := rejectRunBindPath(missing, "agent registry path"); err == nil || !strings.Contains(err.Error(), "resolve agent registry path bind path") {
+			t.Fatalf("missing bind source must fail before mount construction, got %v", err)
+		}
+	})
 	t.Run("direct run target", func(t *testing.T) {
 		if _, err := resolveBubblewrapTarget("/run"); err == nil || !strings.Contains(err.Error(), "/run") {
 			t.Fatalf("/run workspace must be rejected before mount construction, got %v", err)

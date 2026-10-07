@@ -91,38 +91,48 @@ type workerAPIServer struct {
 // The worker
 // can report pipeline events and request/read approvals only for this run.
 func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerApprovalPort) (*workerAPIServer, error) {
+	return startWorkerAPIServerWithListener(job, recorder, approvals, func() (net.Listener, error) {
+		return net.Listen("tcp", "127.0.0.1:0")
+	}, rand.Reader)
+}
+
+func startWorkerAPIServerWithListener(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listen func() (net.Listener, error), random io.Reader) (*workerAPIServer, error) {
 	if recorder == nil || approvals == nil {
 		return nil, errors.New("worker controller API requires recorder and approval ports")
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := listen()
 	if err != nil {
 		return nil, err
 	}
-	return serveWorkerAPI(job, recorder, approvals, listener, "")
+	return serveWorkerAPI(job, recorder, approvals, listener, "", random)
 }
 
 func startWorkerAPIServerUnix(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string) (*workerAPIServer, error) {
+	return startWorkerAPIServerUnixWith(job, recorder, approvals, socketPath, net.Listen, os.Chmod, rand.Reader)
+}
+
+func startWorkerAPIServerUnixWith(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string, listen func(string, string) (net.Listener, error), chmod func(string, os.FileMode) error, random io.Reader) (*workerAPIServer, error) {
 	if recorder == nil || approvals == nil {
 		return nil, errors.New("worker controller API requires recorder and approval ports")
 	}
 	if !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath {
 		return nil, errors.New("worker controller API socket path must be absolute and clean")
 	}
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := listen("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("listen on worker controller API socket: %w", err)
 	}
-	if err := os.Chmod(socketPath, 0600); err != nil {
+	if err := chmod(socketPath, 0600); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 		return nil, fmt.Errorf("secure worker controller API socket: %w", err)
 	}
-	return serveWorkerAPI(job, recorder, approvals, listener, socketPath)
+	return serveWorkerAPI(job, recorder, approvals, listener, socketPath, random)
 }
 
-func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listener net.Listener, socketPath string) (*workerAPIServer, error) {
+func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listener net.Listener, socketPath string, random io.Reader) (*workerAPIServer, error) {
 	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
+	if _, err := io.ReadFull(random, nonce[:]); err != nil {
 		_ = listener.Close()
 		if socketPath != "" {
 			_ = os.Remove(socketPath)

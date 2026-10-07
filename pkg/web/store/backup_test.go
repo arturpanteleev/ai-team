@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -156,6 +158,55 @@ func TestRestoreDatabaseSnapshotRejectsCorruptAndSymlinkSources(t *testing.T) {
 	if _, err := os.Lstat(out); !os.IsNotExist(err) {
 		t.Fatalf("failed restore published a destination: %v", err)
 	}
+	badIntegrity := filepath.Join(dir, "bad-integrity.sqlite")
+	badIntegrityStore, err := New(badIntegrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`CREATE TABLE integrity_fixture (value INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`INSERT INTO integrity_fixture (value) VALUES (0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA writable_schema = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`UPDATE sqlite_schema SET sql = 'CREATE TABLE integrity_fixture (value INTEGER CHECK(value > 0))' WHERE name = 'integrity_fixture'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA writable_schema = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA schema_version = 1000`); err != nil {
+		t.Fatal(err)
+	}
+	if err := badIntegrityStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixtureDB, err := sql.Open("sqlite", badIntegrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureDB.SetMaxOpenConns(1)
+	var integrity string
+	if err := fixtureDB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if integrity == "ok" {
+		t.Fatal("test fixture unexpectedly passes SQLite integrity_check")
+	}
+	badIntegrityOut := filepath.Join(dir, "bad-integrity-restored.db")
+	if err := RestoreDatabaseSnapshot(context.Background(), badIntegrity, badIntegrityOut); err == nil || !strings.Contains(err.Error(), "failed integrity check") {
+		t.Fatalf("restore error = %v, want integrity_check rejection", err)
+	}
+	if _, err := os.Lstat(badIntegrityOut); !os.IsNotExist(err) {
+		t.Fatalf("integrity failure published a destination: %v", err)
+	}
+
 	valid := filepath.Join(dir, "valid.sqlite")
 	store, err := New(valid)
 	if err != nil {

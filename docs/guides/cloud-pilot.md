@@ -148,10 +148,11 @@ SQLite и общий storage port упрощают подключение contro
 
 `ai-team db backup --db <path> --out <new-path>` создаёт согласованный онлайн
 snapshot только controller SQLite database, включая committed WAL state.
-Команда отказывает при существующем output и публикует snapshot с режимом
-0600. Это не полный backup: run evidence, artifacts и прочие файлы требуют
-отдельного backup/restore решения; восстановление пилота этой командой не
-проверяется.
+`ai-team db restore --from <snapshot> --out <new-path>` проверяет целостность
+и копирует snapshot в новый database path. Обе команды отказывают при
+существующем output и публикуют файл с режимом 0600. Это не полный
+backup/restore: run evidence, artifacts и прочие файлы требуют отдельной
+процедуры; восстановление всего пилота этими командами не проверяется.
 
 ## Threat model и критерии, которые должны блокировать release
 

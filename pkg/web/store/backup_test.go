@@ -97,3 +97,78 @@ func TestBackupDatabaseRejectsUnsafeArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreDatabaseSnapshotValidatesAndPublishesToNewPath(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "controller.db")
+	sourceStore, err := New(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &PipelineRun{RunID: "restore-run", Feature: "restore", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: `{"schema_version":1}`}
+	if err := sourceStore.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(dir, "controller.snapshot.db")
+	if err := BackupDatabase(context.Background(), source, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(dir, "restored", "controller.db")
+	if err := os.Mkdir(filepath.Dir(restored), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), snapshot, restored); err != nil {
+		t.Fatalf("restore validated snapshot: %v", err)
+	}
+	restoredInfo, err := os.Stat(restored)
+	if err != nil || restoredInfo.Mode().Perm() != 0600 {
+		t.Fatalf("restored database mode/info=%v err=%v; want mode 0600", restoredInfo, err)
+	}
+	restoredStore, err := New(restored)
+	if err != nil {
+		t.Fatalf("open restored database: %v", err)
+	}
+	got, err := restoredStore.GetPipelineRunByRunID(run.RunID)
+	if err != nil || got.Feature != run.Feature {
+		t.Fatalf("restored database row=%+v err=%v", got, err)
+	}
+	if err := restoredStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), snapshot, restored); err == nil {
+		t.Fatal("restore replaced an existing database")
+	}
+}
+
+func TestRestoreDatabaseSnapshotRejectsCorruptAndSymlinkSources(t *testing.T) {
+	dir := t.TempDir()
+	corrupt := filepath.Join(dir, "corrupt.sqlite")
+	if err := os.WriteFile(corrupt, []byte("not a SQLite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "restored.db")
+	if err := RestoreDatabaseSnapshot(context.Background(), corrupt, out); err == nil {
+		t.Fatal("restore accepted a corrupt SQLite snapshot")
+	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Fatalf("failed restore published a destination: %v", err)
+	}
+	valid := filepath.Join(dir, "valid.sqlite")
+	store, err := New(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "snapshot-link.sqlite")
+	if err := os.Symlink(valid, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), link, out); err == nil {
+		t.Fatal("restore followed a snapshot symlink")
+	}
+}

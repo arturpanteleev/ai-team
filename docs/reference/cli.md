@@ -457,16 +457,19 @@ ai-team gc --dry-run
 
 ### ai-team db
 
-Создаёт новый согласованный онлайн snapshot controller SQLite database,
-включая committed WAL-состояние. Существующий output не перезаписывается.
+`backup` создаёт новый согласованный онлайн snapshot controller SQLite
+database, включая committed WAL state. `restore` проверяет целостность SQLite
+и копирует snapshot в новый database path. Существующий output не
+перезаписывается.
 
 ```text
 ai-team db backup --db <существующая-база.sqlite> --out <новый-снимок.sqlite>
+ai-team db restore --from <снимок.sqlite> --out <новая-база.sqlite>
 ```
 
-Snapshot ограничен одним SQLite-файлом и записывается с правами `0600`. Он не
-включает run evidence, artifacts, конфигурацию или другие файлы; процедура
-восстановления пилота этой командой не предоставляется.
+Выходные файлы ограничены SQLite database и записываются с правами `0600`.
+Они не включают run evidence, artifacts, конфигурацию или другие файлы; это
+не полный backup/restore пилота.
 
 ### ai-team version
 

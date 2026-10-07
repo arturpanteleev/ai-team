@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
@@ -254,6 +255,10 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		if taskErr != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API task: %w", taskErr)
 		}
+		absenceAllowed, absenceErr := e.prepareCandidateAbsence(ctx, job, apiLifecycle)
+		if absenceErr != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker candidate admission: %w", absenceErr)
+		}
 		recorder := e.apiRecorderFactory()
 		tempDir := ""
 		if e.bubblewrap {
@@ -281,6 +286,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
 		}
 		api.lifecycle = apiLifecycle
+		api.candidateAbsenceAllowed = absenceAllowed
 		defer api.close()
 		if e.bubblewrap {
 			openAIEgressSocket = filepath.Join(tempDir, "openai-egress.sock")
@@ -348,6 +354,110 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 	}
 	return result, processErr
+}
+
+// prepareCandidateAbsence records non-Git eligibility before an untrusted
+// worker starts. Resume can use only this controller-created proof; a worker
+// cannot create or repair the marker through the API.
+func (e *ProcessEngine) prepareCandidateAbsence(ctx context.Context, job Job, store lifecycle.StorePort) (bool, error) {
+	metadataStore := candidate.FileMetadataStore{}
+	absenceStore := candidate.AbsenceMarkerStore(metadataStore)
+	switch job.Operation {
+	case OperationStart:
+		hasGit, err := candidate.DetectGitRepository(ctx, e.target)
+		if err != nil {
+			return false, err
+		}
+		if hasGit {
+			// Persist positive Git admission before returning. A stale or
+			// pre-seeded absence marker must never authorize a later Recover if
+			// the repository marker disappears after this Start.
+			if err := metadataStore.MarkGitAdmission(e.target, job.RunID); err != nil {
+				return false, err
+			}
+			_, markerErr := os.Lstat(filepath.Join(e.target, ".ai-team", "state", "candidates", job.RunID+".absent.json"))
+			if markerErr == nil {
+				return false, errors.New("Git Start conflicts with a pre-existing candidate absence marker")
+			} else if !errors.Is(markerErr, os.ErrNotExist) {
+				return false, fmt.Errorf("check candidate absence marker during Git admission: %w", markerErr)
+			}
+			return false, nil
+		}
+		if !e.bubblewrap {
+			// The target volume is directly writable without namespace masking,
+			// so a marker stored there cannot be treated as controller-owned.
+			return false, nil
+		}
+		markerPath := filepath.Join(e.target, ".ai-team", "state", "candidates", job.RunID+".absent.json")
+		if _, markerErr := os.Lstat(markerPath); markerErr == nil {
+			return false, errors.New("non-Git Start refuses a pre-existing candidate absence marker")
+		} else if !errors.Is(markerErr, os.ErrNotExist) {
+			return false, fmt.Errorf("check candidate absence marker before non-Git admission: %w", markerErr)
+		}
+		if err := absenceStore.MarkAbsent(e.target, job.RunID); err != nil {
+			return false, err
+		}
+		return true, nil
+	case OperationRecover:
+		if store == nil {
+			return false, errors.New("worker lifecycle store unavailable")
+		}
+		_, lifecycleErr := store.Load(job.RunID)
+		if lifecycleErr != nil && !errors.Is(lifecycleErr, os.ErrNotExist) {
+			return false, lifecycleErr
+		}
+		// Recover may consume durable admission evidence, but must never mint
+		// non-Git proof. Otherwise a Git Start that crashed before publishing
+		// lifecycle state could be downgraded if its .git marker disappeared.
+		if _, err := metadataStore.Read(e.target, job.RunID); err == nil {
+			return false, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("read candidate metadata: %w", err)
+		}
+		if err := metadataStore.ReadGitAdmission(e.target, job.RunID); err == nil {
+			return false, errors.New("recover candidate admission was recorded as Git; absence proof is not trusted")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("read Git candidate admission: %w", err)
+		}
+		if e.bubblewrap {
+			if err := absenceStore.ReadAbsent(e.target, job.RunID); err == nil {
+				return true, nil
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("read candidate absence marker: %w", err)
+			}
+		}
+		hasGit, detectErr := candidate.DetectGitRepository(ctx, e.target)
+		if detectErr != nil {
+			return false, detectErr
+		}
+		if hasGit {
+			return false, nil
+		}
+		return false, errors.New("recover candidate admission has no prior Git metadata or controller absence marker")
+	case OperationResume:
+		if !e.bubblewrap {
+			return false, nil
+		}
+		if err := metadataStore.ReadGitAdmission(e.target, job.RunID); err == nil {
+			return false, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("read Git candidate admission: %w", err)
+		}
+		if _, err := metadataStore.Read(e.target, job.RunID); err == nil {
+			return false, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("read candidate metadata: %w", err)
+		}
+		if err := absenceStore.ReadAbsent(e.target, job.RunID); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read candidate absence marker: %w", err)
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func workerAPICanonicalTask(job Job, store lifecycle.StorePort) (string, error) {

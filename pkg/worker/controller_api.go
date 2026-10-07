@@ -95,20 +95,22 @@ type workerApprovalPort interface {
 	List(string) ([]approval.PendingApproval, error)
 }
 type workerAPIServer struct {
-	scope      workerAPIScope
-	token      string
-	listener   net.Listener
-	socketPath string
-	server     *http.Server
-	recorder   pipeline.Recorder
-	approvals  workerApprovalPort
-	lifecycle  lifecycle.StorePort
-	briefs     pipeline.BriefStore
-	candidates candidate.MetadataStore
-	briefTask  string
-	dispatchMu sync.Mutex
-	nonceMu    sync.Mutex
-	nonces     map[string]time.Time
+	scope                   workerAPIScope
+	token                   string
+	listener                net.Listener
+	socketPath              string
+	server                  *http.Server
+	recorder                pipeline.Recorder
+	approvals               workerApprovalPort
+	lifecycle               lifecycle.StorePort
+	briefs                  pipeline.BriefStore
+	candidates              candidate.MetadataStore
+	absences                candidate.AbsenceMarkerStore
+	candidateAbsenceAllowed bool
+	briefTask               string
+	dispatchMu              sync.Mutex
+	nonceMu                 sync.Mutex
+	nonces                  map[string]time.Time
 }
 
 // startWorkerAPIServer creates a per-execution loopback capability for
@@ -187,7 +189,8 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: candidate.FileMetadataStore{}, briefTask: expectedTask, nonces: make(map[string]time.Time)}
+	fileCandidateStore := candidate.FileMetadataStore{}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -398,6 +401,28 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, err
 		}
 		return m, nil
+	case "candidate.absence.read":
+		switch s.scope.Operation {
+		case OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API candidate absence read is not allowed for operation %q", s.scope.Operation)
+		}
+		if c.A != s.scope.RunID {
+			return nil, errors.New("candidate absence run mismatch")
+		}
+		if !s.candidateAbsenceAllowed || s.absences == nil {
+			return nil, errors.New("controller has no candidate absence admission for this run")
+		}
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.absences.ReadAbsent(target, s.scope.RunID); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	case "candidate.absence.create":
+		return nil, errors.New("worker API cannot create candidate absence markers")
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -732,6 +757,25 @@ func (c *workerAPICandidates) Read(target, runID string) (candidate.Metadata, er
 		err = candidate.ValidateMetadata(canonicalTarget, runID, result)
 	}
 	return result, err
+}
+
+func (c *workerAPICandidates) MarkAbsent(string, string) error {
+	return errors.New("worker candidate API cannot create candidate absence markers")
+}
+
+func (c *workerAPICandidates) ReadAbsent(target, runID string) error {
+	if c == nil || c.port == nil || runID != c.port.scope.RunID {
+		return errors.New("worker candidate absence API scope mismatch")
+	}
+	canonicalTarget, err := candidate.CanonicalTargetDir(target)
+	if err != nil {
+		return fmt.Errorf("worker candidate absence target: %w", err)
+	}
+	canonicalScope, err := candidate.CanonicalTargetDir(c.port.scope.TargetDir)
+	if err != nil || canonicalTarget != canonicalScope {
+		return errors.New("worker candidate absence API scope mismatch")
+	}
+	return c.port.call("candidate.absence.read", workerAPICall{A: runID}, nil)
 }
 
 func (b *workerAPIBriefs) CreateInitial(runID, intention string) (pipeline.BriefDocument, error) {

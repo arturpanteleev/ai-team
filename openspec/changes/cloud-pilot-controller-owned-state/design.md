@@ -285,10 +285,25 @@ access remains. This does not isolate candidate contents, artifacts, or the
 remaining target evidence; it is not full candidate isolation or MAJ-07
 acceptance. Resume fails closed when controller candidate metadata is missing;
 worker-writable `run.json` provenance cannot establish that a candidate was
-absent. Consequently, non-Git runs without a candidate record cannot currently
-resume in controller-backed mode. Supporting them requires a separate
-controller-owned absence marker. Local CLI retains legacy compatibility based
-on target-file provenance, which is not a trust boundary.
+absent. For bubblewrap cloud starts, ProcessEngine determines Git eligibility
+before spawning the worker and records a durable absence marker only for a
+non-Git target. A Git Start also records positive Git-admission evidence before
+the worker runs; that evidence takes precedence over any stale or pre-seeded
+absence marker during resume/recovery. Git Start fails closed if such an
+absence marker already exists. The markers share the already-masked candidate metadata
+directory, and the worker API exposes read-only run/target-scoped access for
+resume/recovery. Missing or corrupt markers fail closed. Without bubblewrap,
+the worker can write the target directly, so ProcessEngine neither creates nor
+trusts an absence marker; non-Git runs remain non-resumable in that mode. Local
+CLI retains legacy compatibility based on target-file provenance, which is
+not a trust boundary.
+
+Metadata and admission markers use atomic no-replace publication but do not
+share a cross-process transaction. If independent controllers race to publish
+candidate metadata and absence evidence for the same run, conflicting files
+can remain; every read rejects the conflict, preserving fail-closed authority
+at the cost of that run's availability. Normal ProcessEngine ordering writes
+admission before worker execution.
 The isolated network namespace has no direct external IP egress. A separate,
 run-scoped TCP proxy now permits only `api.openai.com:443` for the selected
 OpenAI provider; other hosts, ports, and providers remain blocked. The proxy

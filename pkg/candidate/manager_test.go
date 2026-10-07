@@ -3,10 +3,12 @@ package candidate
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCreateAndLoadKeepsLiveCheckoutUnchanged(t *testing.T) {
@@ -141,6 +143,82 @@ func TestCreateRejectsDirtyLiveWorkspace(t *testing.T) {
 	}
 	if _, available, err := Create(context.Background(), target, "run-dirty"); err == nil || !available {
 		t.Fatalf("dirty workspace принят: available=%t err=%v", available, err)
+	}
+}
+
+func TestControllerAbsenceMarkerIsRunTargetBoundAndFailClosed(t *testing.T) {
+	target := t.TempDir()
+	store := FileMetadataStore{}
+	runID := "absence-marker-run"
+	if err := store.MarkAbsent(target, runID); err != nil {
+		t.Fatalf("mark absent: %v", err)
+	}
+	if err := store.ReadAbsent(target, runID); err != nil {
+		t.Fatalf("read valid marker: %v", err)
+	}
+	if err := store.ReadAbsent(t.TempDir(), runID); err == nil {
+		t.Fatal("absence marker crossed target scope")
+	}
+	if err := store.ReadAbsent(target, "another-run"); err == nil {
+		t.Fatal("absence marker crossed run scope")
+	}
+	if err := store.MarkAbsent(target, runID); err != nil {
+		t.Fatalf("idempotent mark: %v", err)
+	}
+	markerPath := filepath.Join(target, ".ai-team", "state", "candidates", runID+".absent.json")
+	if err := os.WriteFile(markerPath, []byte(`{"schema_version":1,"run_id":"forged"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReadAbsent(target, runID); err == nil {
+		t.Fatal("corrupt marker was accepted")
+	}
+}
+
+func TestControllerAbsenceMarkerCannotReplaceGitCandidateMetadata(t *testing.T) {
+	target := gitRepository(t)
+	runID := "git-candidate-no-absence"
+	manager, available, err := Create(context.Background(), target, runID)
+	if err != nil || !available || manager == nil {
+		t.Fatalf("create Git candidate: available=%v err=%v", available, err)
+	}
+	store := FileMetadataStore{}
+	if err := store.MarkAbsent(target, runID); err == nil {
+		t.Fatal("candidate absence marker replaced an existing Git candidate")
+	}
+	if err := store.ReadAbsent(target, runID); err == nil {
+		t.Fatal("candidate metadata and absence marker were accepted together")
+	}
+	markerPath := filepath.Join(target, ".ai-team", "state", "candidates", runID+".absent.json")
+	marker := absenceMarker{SchemaVersion: absenceMarkerVersion, RunID: runID, ControlTarget: target, CreatedAt: time.Now().UTC()}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read(target, runID); err == nil {
+		t.Fatal("candidate metadata read ignored a conflicting absence marker")
+	}
+}
+
+func TestDetectGitRepositoryRejectsBrokenRepositoryAsAbsence(t *testing.T) {
+	target := gitRepository(t)
+	hasGit, err := DetectGitRepository(context.Background(), target)
+	if err != nil || !hasGit {
+		t.Fatalf("Git target detection: hasGit=%v err=%v", hasGit, err)
+	}
+	gitPath := filepath.Join(target, ".git")
+	if err := os.RemoveAll(gitPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitPath, []byte("gitdir: missing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt state in an ancestor .git marker must not be converted into
+	// controller proof that the run has no candidate.
+	if _, err := DetectGitRepository(context.Background(), target); err == nil {
+		t.Fatal("broken .git repository was treated as a non-Git target")
 	}
 }
 

@@ -574,6 +574,219 @@ func TestWorkerControllerAPICandidateMetadataCreateIsLimitedToStartAndRecovery(t
 	}
 }
 
+func TestWorkerControllerCandidateAbsenceIsControllerProvenAndScoped(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "controller-absence-run"
+	store := candidate.FileMetadataStore{}
+	if err := store.MarkAbsent(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: runID, TargetDir: target,
+		ExecutionID: strings.Repeat("1", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	server.candidateAbsenceAllowed = true
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err != nil {
+		t.Fatalf("controller-established absence marker not readable: %v", err)
+	}
+	forged, err := server.dispatch("candidate.absence.create", workerAPICall{A: runID})
+	if err == nil || forged != nil {
+		t.Fatalf("worker created its own candidate absence marker: value=%v err=%v", forged, err)
+	}
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: "foreign-run"}); err == nil {
+		t.Fatal("candidate absence read accepted another run")
+	}
+	server.scope.Operation = OperationStart
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err == nil {
+		t.Fatal("candidate absence read accepted an unsupported operation")
+	}
+	server.scope.Operation = OperationResume
+	server.scope.TargetDir = filepath.Join(target, "missing")
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: runID}); err == nil {
+		t.Fatal("candidate absence read accepted a different/unavailable target")
+	}
+
+	port := &WorkerAPIPort{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target}}
+	apiStore := NewWorkerAPICandidates(port)
+	if err := apiStore.(candidate.AbsenceMarkerStore).MarkAbsent(target, runID); err == nil {
+		t.Fatal("candidate absence adapter let worker pre-seed or replace a marker")
+	}
+	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(target, "foreign-run"); err == nil {
+		t.Fatal("candidate absence adapter accepted another run")
+	}
+	if err := apiStore.(candidate.AbsenceMarkerStore).ReadAbsent(filepath.Join(target, "missing"), runID); err == nil {
+		t.Fatal("candidate absence adapter accepted another target")
+	}
+}
+
+func TestGitCandidateCannotBeDowngradedByHidingGitMarkerAfterControllerSetup(t *testing.T) {
+	target := t.TempDir()
+	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	engine := &ProcessEngine{target: target}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), Job{Operation: OperationStart, RunID: "git-target-forged-absence"}, nil)
+	if err != nil || allowed {
+		t.Fatalf("Git target absence admission: allowed=%v err=%v", allowed, err)
+	}
+	gitMarker := filepath.Join(target, ".git")
+	hiddenMarker := filepath.Join(target, ".git.hidden")
+	if err := os.Rename(gitMarker, hiddenMarker); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "git-target-forged-absence", TargetDir: target,
+		ExecutionID: strings.Repeat("2", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	server.candidateAbsenceAllowed = allowed
+	if _, err := server.dispatch("candidate.absence.read", workerAPICall{A: job.RunID}); err == nil {
+		t.Fatal("worker hid .git and forged candidate absence after controller Git admission")
+	}
+	if _, err := server.dispatch("candidate.absence.create", workerAPICall{A: job.RunID}); err == nil {
+		t.Fatal("worker forged candidate absence through create endpoint")
+	}
+}
+
+func TestRecoverCannotCreateAbsenceProofAfterGitStartAdmission(t *testing.T) {
+	target := t.TempDir()
+	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Operation: OperationStart, RunID: "recover-git-admission", TargetDir: canonicalTarget}
+	engine := &ProcessEngine{target: canonicalTarget, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || allowed {
+		t.Fatalf("Git Start admission: allowed=%v err=%v", allowed, err)
+	}
+
+	if err := os.Rename(filepath.Join(canonicalTarget, ".git"), filepath.Join(canonicalTarget, ".git.hidden")); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(canonicalTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoverJob := job
+	recoverJob.Operation = OperationRecover
+	allowed, err = engine.prepareCandidateAbsence(context.Background(), recoverJob, lifecycleStore)
+	if err == nil || allowed {
+		t.Fatalf("Recover must fail closed without prior proof after Git disappears: allowed=%v err=%v", allowed, err)
+	}
+	markerPath := filepath.Join(canonicalTarget, ".ai-team", "state", "candidates", job.RunID+".absent.json")
+	if _, markerErr := os.Lstat(markerPath); !errors.Is(markerErr, os.ErrNotExist) {
+		t.Fatalf("Recover must not create an absence marker: %v", markerErr)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadGitAdmission(canonicalTarget, job.RunID); err != nil {
+		t.Fatalf("Git Start admission evidence missing: %v", err)
+	}
+}
+
+func TestRecoverRejectsPreseededAbsenceMarkerAfterGitStart(t *testing.T) {
+	target := t.TempDir()
+	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Operation: OperationStart, RunID: "recover-preseeded-absence", TargetDir: target}
+	store := candidate.FileMetadataStore{}
+	if err := store.MarkAbsent(target, job.RunID); err != nil {
+		t.Fatalf("preseed absence marker: %v", err)
+	}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err == nil || allowed {
+		t.Fatalf("Git Start must reject a pre-existing absence marker: allowed=%v err=%v", allowed, err)
+	}
+	if err := os.Rename(filepath.Join(target, ".git"), filepath.Join(target, ".git.hidden")); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Operation = OperationRecover
+	allowed, err = engine.prepareCandidateAbsence(context.Background(), job, lifecycleStore)
+	if err == nil || allowed {
+		t.Fatalf("Recover must reject preseeded absence after Git Start even when .git is hidden: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestRecoverAcceptsPreexistingNonGitStartAbsenceMarker(t *testing.T) {
+	target := t.TempDir()
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Operation: OperationStart, RunID: "recover-nongit-admission", TargetDir: target}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || !allowed {
+		t.Fatalf("non-Git Start admission: allowed=%v err=%v", allowed, err)
+	}
+
+	job.Operation = OperationRecover
+	allowed, err = engine.prepareCandidateAbsence(context.Background(), job, lifecycleStore)
+	if err != nil || !allowed {
+		t.Fatalf("Recover should trust the preexisting Start marker: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestProcessEngineCandidateAbsenceRequiresBubblewrapMask(t *testing.T) {
+	target := t.TempDir()
+	job := Job{Operation: OperationStart, RunID: "cloud-nongit-admission"}
+	plainEngine := &ProcessEngine{target: target}
+	allowed, err := plainEngine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || allowed {
+		t.Fatalf("unmasked target must not establish absence authority: allowed=%v err=%v", allowed, err)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadAbsent(target, job.RunID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unmasked start should not persist an authoritative marker: %v", err)
+	}
+
+	isolatedEngine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err = isolatedEngine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || !allowed {
+		t.Fatalf("bubblewrap start should establish absence authority: allowed=%v err=%v", allowed, err)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadAbsent(target, job.RunID); err != nil {
+		t.Fatalf("controller did not persist durable marker: %v", err)
+	}
+	resume := job
+	resume.Operation = OperationResume
+	allowed, err = plainEngine.prepareCandidateAbsence(context.Background(), resume, nil)
+	if err != nil || allowed {
+		t.Fatalf("unmasked resume must not trust target marker: allowed=%v err=%v", allowed, err)
+	}
+	allowed, err = isolatedEngine.prepareCandidateAbsence(context.Background(), resume, nil)
+	if err != nil || !allowed {
+		t.Fatalf("bubblewrap resume should accept controller marker: allowed=%v err=%v", allowed, err)
+	}
+}
+
 type candidateMetadataStoreStub struct {
 	metadata  candidate.Metadata
 	createErr error

@@ -27,7 +27,15 @@ func loadResumeCandidate(ctx context.Context, target, runID string, store candid
 		return manager, err
 	}
 	if store != nil {
-		return nil, fmt.Errorf("candidate metadata is required to resume run %s: %w", runID, err)
+		absenceStore, ok := store.(candidate.AbsenceMarkerStore)
+		if !ok {
+			return nil, fmt.Errorf("candidate metadata is required to resume run %s: %w", runID, err)
+		}
+		if absenceErr := absenceStore.ReadAbsent(target, runID); absenceErr == nil {
+			return nil, nil
+		} else {
+			return nil, fmt.Errorf("candidate metadata or controller absence marker is required to resume run %s: %w", runID, errors.Join(err, absenceErr))
+		}
 	}
 	// Local CLI keeps compatibility with older non-Git runs. This uses mutable
 	// target files and is not a trust boundary; controller-backed workers never

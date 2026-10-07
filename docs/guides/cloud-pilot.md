@@ -31,13 +31,19 @@ filesystem store. Эта маска закрывает только metadata dir
 worktree остаётся доступен worker-у для чтения и записи, как и прочие evidence,
 artifact и target файлы. Linux CI probe проверяет sentinel в скрытом metadata
 каталоге и чтение отдельного worktree sentinel. Это ограниченный slice, не
-полная изоляция candidate/artifact state и не закрытие MAJ-07. В облачном
-controller-backed режиме resume требует controller-owned candidate metadata и
-завершится ошибкой, если она потеряна, независимо от содержимого
-worker-writable `run.json`. Поэтому resume non-Git runs в этом режиме пока не
-поддерживается; для него нужен отдельный controller-owned маркер подтверждённого
-отсутствия кандидата. Локальный CLI сохраняет совместимость со старыми
-non-Git runs по provenance из target-файла; этот путь не является trust boundary.
+полная изоляция candidate/artifact state и не закрытие MAJ-07. При
+controller-backed start под bubblewrap ProcessEngine до запуска worker
+определяет Git eligibility и для non-Git target сохраняет durable absence
+marker в этом же замаскированном каталоге. На resume worker может только читать
+run/target-scoped подтверждение через controller API; создать или восстановить
+его worker не может. Git Start отдельно фиксирует Git admission; такая запись
+блокирует доверие к заранее существовавшему absence marker при Recover, даже
+если `.git` позже исчезнет. Тамперинг `run.json`, отсутствие или повреждение
+marker не разрешают пропустить candidate metadata. Без bubblewrap target остаётся
+worker-writable, поэтому marker не записывается и не считается authoritative;
+cloud non-Git resume в этом режиме завершается fail-closed. Локальный CLI
+сохраняет совместимость со старыми non-Git runs по provenance из target-файла;
+этот путь не является trust boundary.
 
 При запуске web/controller файловые approvals из `.ai-team/state/approvals`
 импортируются в SQLite транзакционно и без удаления исходных файлов; worker

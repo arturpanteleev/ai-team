@@ -226,7 +226,28 @@ slice.
 
 The slice leaves `.ai-team/runs` evidence/manifests, candidate and artifact
 paths, and host files outside the configured database potentially reachable
-through the read-only host-root bind, subject to host permissions. The worker's
+through the read-only host-root bind, subject to host permissions. The evidence
+directory cannot safely be overlaid with tmpfs as another path-only masking
+step: the child executes the pipeline and the current filesystem evidence
+factory stores authoritative run data at `{target}/.ai-team/runs/<run_id>`.
+`pipeline.RunEngine.Start` enters `Pipeline.RunWithResult` (and local callers may
+use `Pipeline.Run`/`RunWithResult` directly); resume also reaches
+`RunWithResult`. These flows write initial/versioned business briefs, read and
+replay evidence, and append events and attempt manifests. Masking that directory
+would break resume and hide new evidence from the controller after the worker
+exits. A follow-up evidence boundary must replace the filesystem-shaped store
+contract with a controller-owned typed evidence API/store. The current direct
+file-dependency inventory is intentionally non-exhaustive and includes
+`RunDir`/`LogDir`, attempt manifests and runtime logs, durable question answers
+and answer inputs, immutable human return-feedback inputs, cancellation request
+markers and recovery, candidate/artifact publication, usage, containment,
+attestation, prepared-workspace and digest verification, and terminal delivery
+records/recovery. The implementation must trace and migrate all current file
+reads and writes, including brief/version, human feedback/answer, cancellation,
+recovery, and delivery-verification flows; this list is not an exhaustive
+acceptance boundary. Only after those operations no longer depend on paths in
+the writable target can a Linux probe assert that controller evidence is
+unreadable while candidate workspace access remains available. The worker's
 `HOME` points to a fresh per-invocation temporary directory, so the original
 host home is not exposed through `HOME`;
 its original absolute path may still be reachable through the read-only `/`

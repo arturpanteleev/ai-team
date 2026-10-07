@@ -46,6 +46,24 @@
   evidence/artifact isolation and runtime/recovery acceptance.
 - [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
   worker-writable state; verify their integrity after worker-side attempts.
+  The evidence part is blocked on replacing the current filesystem-shaped
+  `pipeline.EvidenceStore` contract. The inventory below is intentionally
+  non-exhaustive and must be refreshed by tracing current call sites before the
+  boundary is declared complete: `pipeline.RunEngine.Start` calls
+  `Pipeline.RunWithResult` (also exposed through `Pipeline.Run`), while resume
+  also enters `RunWithResult`; these flows create and verify evidence, replay
+  events, read attempt manifests, and use `RunDir`/`LogDir`. Other direct file
+  flows include immutable initial and versioned business briefs, durable
+  question answers and answer inputs, human return-feedback inputs, cancellation
+  request markers and recovery, and delivery verification/recovery (prepared
+  workspace digests, attestations, and terminal delivery records). Stage,
+  finalize, reporting, usage, containment, candidate/artifact publication, and
+  runtime logs also depend on filesystem paths. Do not mask
+  `.ai-team/runs/<run_id>` with tmpfs before a controller-owned typed store can
+  preserve start/resume, cancellation/recovery, brief and human-input history,
+  event append, attempt/artifact/log publication, and delivery verification
+  semantics. A real Linux sentinel probe is required after that store boundary
+  exists; a mount-plan-only test is not evidence of isolation.
 - [x] Add a negative test matrix for the currently implemented worker result
   and controller API contracts: wrong run/operation/execution identity,
   replayed result and API request, expired/future/malformed API nonce,

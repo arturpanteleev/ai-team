@@ -4,9 +4,14 @@ package worker
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,6 +94,17 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	fakeOpenAI := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fake-openai" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprint(w, "fake-openai-ok")
+	}))
+	defer fakeOpenAI.Close()
+	engine.openAIEgressDial = func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", strings.TrimPrefix(fakeOpenAI.URL, "https://"))
+	}
 	if _, err := engine.Start(context.Background(), pipeline.RunConfig{
 		RunID: "sandbox-probe", Feature: "probe", TaskDesc: "test worker filesystem boundary", TargetDir: target,
 	}); err != nil {
@@ -114,6 +130,70 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if !report.TargetReadable || !report.TargetWritable || report.AgentRegistryWritable {
 		t.Fatalf("unexpected workspace or agent-registry access: %+v", report)
 	}
+	if !report.OpenAIProxyReachable || !report.OpenAIDeniedOtherHost || !report.OpenAIDeniedOtherPort {
+		t.Fatalf("OpenAI CONNECT proxy policy failed: %+v", report)
+	}
+}
+
+func runOpenAIEgressProbe(t *testing.T) (bool, bool, bool) {
+	t.Helper()
+	socket, token := os.Getenv(openAIEgressSocketEnv), os.Getenv(openAIEgressTokenEnv)
+	if socket == "" || token == "" {
+		return false, false, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxyURL, closeBridge, err := StartOpenAIEgressBridge(ctx, socket, token)
+	if err != nil {
+		return false, false, false
+	}
+	defer closeBridge()
+	_ = os.Setenv("HTTP_PROXY", proxyURL)
+	_ = os.Setenv("HTTPS_PROXY", proxyURL)
+	_ = os.Setenv("NO_PROXY", "localhost,127.0.0.1,::1")
+
+	proxy, err := url.Parse(proxyURL)
+	if err != nil {
+		return false, false, false
+	}
+	transport := &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // fake upstream only
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 4 * time.Second}
+	allowedRequest, err := http.NewRequest(http.MethodGet, "https://api.openai.com/fake-openai", nil)
+	if err != nil {
+		return false, false, false
+	}
+	chosenProxy, err := http.ProxyFromEnvironment(allowedRequest)
+	if err != nil || chosenProxy == nil || !strings.EqualFold(chosenProxy.Host, proxy.Host) {
+		return false, false, false
+	}
+	response, err := client.Do(allowedRequest)
+	if err != nil {
+		return false, false, false
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	allowed := readErr == nil && response.StatusCode == http.StatusOK && string(body) == "fake-openai-ok"
+
+	denied := func(target string) bool {
+		request, reqErr := http.NewRequest(http.MethodGet, target, nil)
+		if reqErr != nil {
+			return false
+		}
+		selected, proxyErr := http.ProxyFromEnvironment(request)
+		if proxyErr != nil || selected == nil || !strings.EqualFold(selected.Host, proxy.Host) {
+			return false
+		}
+		result, requestErr := client.Do(request)
+		if result != nil {
+			_ = result.Body.Close()
+		}
+		return requestErr != nil
+	}
+	return allowed, denied("https://example.invalid/"), denied("https://api.openai.com:444/")
 }
 
 func TestBubblewrapRejectsHardLinkedControllerDatabaseAndSidecar(t *testing.T) {
@@ -504,6 +584,9 @@ type sandboxProbeReport struct {
 	ControllerAPIReachable bool `json:"controller_api_reachable"`
 	HostTCPReachable       bool `json:"host_tcp_reachable"`
 	OutboundTCPReachable   bool `json:"outbound_tcp_reachable"`
+	OpenAIProxyReachable   bool `json:"openai_proxy_reachable"`
+	OpenAIDeniedOtherHost  bool `json:"openai_denied_other_host"`
+	OpenAIDeniedOtherPort  bool `json:"openai_denied_other_port"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -548,6 +631,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		_ = conn.Close()
 		return true
 	}
+	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
 	report := sandboxProbeReport{
 		DatabaseReadable:       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
 		WALReadable:            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
@@ -561,6 +645,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		ControllerAPIReachable: apiReachable,
 		HostTCPReachable:       canDial(value("--probe-host-tcp")),
 		OutboundTCPReachable:   canDial("1.1.1.1:443"),
+		OpenAIProxyReachable:   openAIProxyReachable,
+		OpenAIDeniedOtherHost:  deniedOtherHost,
+		OpenAIDeniedOtherPort:  deniedOtherPort,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

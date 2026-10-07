@@ -51,6 +51,15 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		"--bind", home, home,
 		"--bind", temp, temp,
 	}
+	if env[openAIEgressSocketEnv] != "" || env[openAIEgressTokenEnv] != "" {
+		if env[openAIEgressSocketEnv] == "" || env[openAIEgressTokenEnv] == "" {
+			return nil, errors.New("OpenAI egress socket and capability must be configured together")
+		}
+		// The worker-side HTTP proxy binds namespace-local loopback. Giving it
+		// NET_ADMIN inside this private network namespace lets it bring `lo` up;
+		// this does not grant access to the host network namespace.
+		args = append(args, "--cap-add", "CAP_NET_ADMIN")
+	}
 	for _, path := range agentPaths {
 		resolved, resolveErr := filepath.EvalSymlinks(path)
 		if resolveErr != nil {

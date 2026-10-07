@@ -50,11 +50,28 @@ filesystem isolation.
 Опциональный Linux-режим `AI_TEAM_WORKER_SANDBOX=bubblewrap` скрывает стандартные
 host service sockets под `/run` отдельным tmpfs. Нестандартные pathname AF_UNIX
 sockets вне `/run` всё ещё могут быть доступны по host path из-за read-only bind
-`/`. Режим использует network namespace без внешнего IP egress, поэтому удалённые
-model calls OpenAI/OpenCode заблокированы до отдельной настройки allowlisted
-egress proxy; этот slice proxy не добавляет. Если scoped API Unix socket нельзя
-создать или bubblewrap не запускается, worker завершается без TCP или
-unsandboxed fallback.
+`/`. Network namespace сохраняет запрет прямого IP egress. Для OpenCode
+controller-owned proxy пропускает только HTTPS CONNECT к `api.openai.com:443`
+через per-invocation Unix socket с random capability; другие host/port
+отвергаются. `HTTPS_PROXY`/`HTTP_PROXY` указывают на namespace-local bridge,
+`NO_PROXY` содержит localhost адреса. Proxy не записывает headers, body,
+capability или CONNECT destination в logs. Controller также отбрасывает DNS
+ответы из частных, shared/carrier-grade NAT, loopback, link-local, documentation,
+benchmarking, transition, reserved и других специальных IPv4/IPv6 диапазонов
+([IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml),
+[IANA IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml));
+публичные unicast-адреса остаются допустимыми. Это консервативный deny-list
+специального назначения, а не полноценная проверка BGP-маршрутизации. Linux fake-TLS-upstream probe
+проверяет туннель, отказы для других host/port и запрет прямого TCP. Это не
+подтверждает реальный OpenAI model round-trip или совместимость всех версий
+OpenCode; официальная [сетевая документация OpenCode](https://docs.opencode.ai/docs/network/)
+описывает поддержку этих proxy variables, но конкретная установка требует
+отдельной проверки с настроенным OpenAI API key. Этот путь покрывает стандартный
+OpenAI API endpoint с API key; ChatGPT/Codex OAuth и custom `baseURL` на другом
+host не разрешены. Если scoped API/egress Unix socket нельзя создать или
+bubblewrap не запускается, worker завершается без fallback. API key по-прежнему
+передаётся только явным `AI_TEAM_WORKER_ENV_ALLOW=OPENAI_API_KEY`; isolated
+`HOME` не наследует OpenCode `auth.json`.
 
 ## Минимальная архитектурная граница
 

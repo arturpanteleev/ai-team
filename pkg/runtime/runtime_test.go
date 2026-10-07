@@ -236,6 +236,30 @@ func TestOpenCodeIsolationEnvironmentIsAllowListed(t *testing.T) {
 	}
 }
 
+func TestOpenCodeEnvironmentOverridesProxyWithControllerOpenAIEgress(t *testing.T) {
+	t.Setenv(OpenAIEgressProxyEnv, "http://127.0.0.1:43129")
+	t.Setenv(HarnessEnvAllowVar, "HTTPS_PROXY,HTTP_PROXY,NO_PROXY")
+	t.Setenv("HTTPS_PROXY", "http://attacker.example:8080")
+	t.Setenv("HTTP_PROXY", "http://attacker.example:8080")
+	t.Setenv("NO_PROXY", "*")
+	target := t.TempDir()
+	environment, cleanup, err := OpenCodeIsolationEnvironment(&Agent{Name: "coder"}, &Task{
+		TargetDir: target, ArtifactRoot: filepath.Join(target, ".ai-team", "artifacts"), Feature: "feat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY"} {
+		if got := environmentValue(environment, key); got != "http://127.0.0.1:43129" {
+			t.Fatalf("%s = %q, want controller bridge", key, got)
+		}
+	}
+	if got := environmentValue(environment, "NO_PROXY"); got != "localhost,127.0.0.1,::1" {
+		t.Fatalf("NO_PROXY = %q", got)
+	}
+}
+
 func TestOpenCodeIsolationRejectsProjectExecutionSurfaces(t *testing.T) {
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(target, ".opencode", "plugins"), 0755); err != nil {

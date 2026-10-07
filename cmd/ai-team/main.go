@@ -284,7 +284,15 @@ func cmdWorker() {
 	_, apiAddressSet := os.LookupEnv(worker.WorkerAPIAddressEnv)
 	_, apiSocketSet := os.LookupEnv(worker.WorkerAPISocketEnv)
 	_, apiTokenSet := os.LookupEnv(worker.WorkerAPITokenEnv)
+	egressSocket, egressSocketSet := os.LookupEnv(worker.OpenAIEgressSocketEnv)
+	egressToken, egressTokenSet := os.LookupEnv(worker.OpenAIEgressTokenEnv)
 	controllerAPI := apiAddressSet || apiSocketSet || apiTokenSet
+	if egressSocketSet != egressTokenSet {
+		fatal("worker OpenAI egress требует одновременно Unix socket и capability")
+	}
+	if egressSocketSet && !controllerAPI {
+		fatal("worker OpenAI egress разрешён только в controller API mode")
+	}
 	if controllerAPI && *dbPath != "" {
 		fatal("worker controller API mode rejects --db")
 	}
@@ -369,6 +377,16 @@ func cmdWorker() {
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if egressSocketSet {
+		proxyURL, closeProxy, proxyErr := worker.StartOpenAIEgressBridge(ctx, egressSocket, egressToken)
+		if proxyErr != nil {
+			fatal("Worker OpenAI egress: %v", proxyErr)
+		}
+		defer closeProxy()
+		if err := os.Setenv(runtime.OpenAIEgressProxyEnv, proxyURL); err != nil {
+			fatal("Worker OpenAI egress environment: %v", err)
+		}
+	}
 	var result pipeline.RunResult
 	switch job.Operation {
 	case worker.OperationStart:

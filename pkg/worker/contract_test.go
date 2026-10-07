@@ -595,7 +595,9 @@ func TestWorkerProcessEnvironmentRejectsInvalidAndReservedNames(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar, WorkerAPIAddressEnv, WorkerAPISocketEnv, WorkerAPITokenEnv} {
+	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar,
+		WorkerAPIAddressEnv, WorkerAPISocketEnv, WorkerAPITokenEnv, OpenAIEgressSocketEnv, OpenAIEgressTokenEnv,
+		"AI_TEAM_OPENAI_EGRESS_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"} {
 		t.Run("reserved/"+name, func(t *testing.T) {
 			parent := []string{"PATH=/bin", WorkerEnvAllowVar + "=" + name}
 			if _, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "linux"); err == nil {
@@ -989,6 +991,7 @@ func decodeHelperJob(t *testing.T) Job {
 		for _, key := range []string{
 			"OPENAI_API_KEY", "AI_TEAM_AUTH_SECRET", "AI_TEAM_SIGNING_KEY", "AI_TEAM_DB_PASSWORD",
 			"AI_TEAM_HARNESS_ENV_ALLOW", "AI_TEAM_WORKER_ENV_ALLOW", "HOME",
+			OpenAIEgressSocketEnv, OpenAIEgressTokenEnv, "AI_TEAM_OPENAI_EGRESS_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 		} {
 			if value, exists := os.LookupEnv(key); exists {
 				environment[key] = value

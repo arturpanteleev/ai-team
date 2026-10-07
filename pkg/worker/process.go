@@ -240,12 +240,12 @@ func workerProcessEnvironment(parent []string, agentPaths []string) ([]string, f
 }
 
 func workerProcessEnvironmentForOS(parent []string, agentPaths []string, goos string) ([]string, func(), error) {
-	return workerProcessEnvironmentForOSWithChmod(parent, agentPaths, goos, os.Chmod)
+	return workerProcessEnvironmentForOSWithFileOps(parent, agentPaths, goos, os.Chmod, os.Mkdir)
 }
 
-// workerProcessEnvironmentForOSWithChmod isolates the permission-setting step
-// so failure cleanup can be verified without relying on host filesystem quirks.
-func workerProcessEnvironmentForOSWithChmod(parent []string, agentPaths []string, goos string, chmod func(string, os.FileMode) error) ([]string, func(), error) {
+// workerProcessEnvironmentForOSWithFileOps isolates filesystem setup so
+// failure cleanup can be verified without relying on host filesystem quirks.
+func workerProcessEnvironmentForOSWithFileOps(parent []string, agentPaths []string, goos string, chmod func(string, os.FileMode) error, mkdir func(string, os.FileMode) error) ([]string, func(), error) {
 	keyForOS := func(key string) string { return environmentKeyForOS(key, goos) }
 	values := make(map[string]string, len(parent))
 	for _, item := range parent {
@@ -290,7 +290,7 @@ func workerProcessEnvironmentForOSWithChmod(parent []string, agentPaths []string
 		return nil, func() {}, err
 	}
 	workerTemp := filepath.Join(workerHome, "tmp")
-	if err := os.Mkdir(workerTemp, 0700); err != nil {
+	if err := mkdir(workerTemp, 0700); err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}

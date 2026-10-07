@@ -645,13 +645,13 @@ func TestWorkerProcessEnvironmentReportsTempCreationFailure(t *testing.T) {
 func TestWorkerProcessEnvironmentCleansHomeAfterPermissionFailure(t *testing.T) {
 	permissionErr := errors.New("chmod denied")
 	var createdHome string
-	_, _, err := workerProcessEnvironmentForOSWithChmod([]string{"PATH=/bin"}, nil, "linux", func(path string, mode os.FileMode) error {
+	_, _, err := workerProcessEnvironmentForOSWithFileOps([]string{"PATH=/bin"}, nil, "linux", func(path string, mode os.FileMode) error {
 		createdHome = path
 		if mode != 0700 {
 			t.Errorf("worker home mode = %o, want 0700", mode)
 		}
 		return permissionErr
-	})
+	}, os.Mkdir)
 	if !errors.Is(err, permissionErr) {
 		t.Fatalf("permission error should be returned unchanged: %v", err)
 	}
@@ -659,6 +659,30 @@ func TestWorkerProcessEnvironmentCleansHomeAfterPermissionFailure(t *testing.T) 
 		t.Fatal("permission callback was not invoked")
 	}
 	if _, err := os.Stat(createdHome); !os.IsNotExist(err) {
+		t.Fatalf("partially initialized worker home should be removed, stat err=%v", err)
+	}
+}
+
+func TestWorkerProcessEnvironmentCleansHomeAfterTempDirectoryFailure(t *testing.T) {
+	mkdirErr := errors.New("worker temp directory unavailable")
+	var workerTemp string
+	_, _, err := workerProcessEnvironmentForOSWithFileOps([]string{"PATH=/bin"}, nil, "linux", os.Chmod, func(path string, mode os.FileMode) error {
+		workerTemp = path
+		if mode != 0700 {
+			t.Errorf("worker temp mode = %o, want 0700", mode)
+		}
+		if filepath.Base(path) != "tmp" {
+			t.Errorf("mkdir path = %q, want private tmp directory", path)
+		}
+		return mkdirErr
+	})
+	if !errors.Is(err, mkdirErr) {
+		t.Fatalf("temp directory error should be returned unchanged: %v", err)
+	}
+	if workerTemp == "" {
+		t.Fatal("mkdir callback was not invoked")
+	}
+	if _, err := os.Stat(filepath.Dir(workerTemp)); !os.IsNotExist(err) {
 		t.Fatalf("partially initialized worker home should be removed, stat err=%v", err)
 	}
 }

@@ -12,11 +12,13 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -25,7 +27,7 @@ import (
 // candidate_evidence.go — controller-owned evidence о кандидате:
 // baseline identity, changed files, tracked patch и digests проверок.
 
-type candidateCheck struct {
+type CandidateCheck struct {
 	AttemptID             string   `json:"attempt_id"`
 	Name                  string   `json:"name"`
 	Class                 string   `json:"class"`
@@ -43,33 +45,119 @@ type candidateCheck struct {
 	StructuredSHA256      string   `json:"structured_output_sha256,omitempty"`
 }
 
-type candidateAttempt struct {
+type CandidateAttempt struct {
 	AttemptID string `json:"attempt_id"`
 	Stage     string `json:"stage"`
 	Outcome   string `json:"outcome"`
 	Verdict   string `json:"verdict,omitempty"`
 }
 
-type candidateEvidence struct {
+type CandidateEvidence struct {
 	SchemaVersion        int                `json:"schema_version"`
 	RunID                string             `json:"run_id"`
 	Purpose              string             `json:"purpose"`
 	BaselineHead         string             `json:"baseline_head,omitempty"`
 	BaselineTree         string             `json:"baseline_tree,omitempty"`
 	WorkspaceSHA256      string             `json:"workspace_sha256"`
-	ChangedFiles         []candidateFile    `json:"changed_files"`
+	ChangedFiles         []CandidateFile    `json:"changed_files"`
 	TrackedPatchSHA256   string             `json:"tracked_patch_sha256,omitempty"`
 	TrackedPatchBytes    int64              `json:"tracked_patch_bytes,omitempty"`
 	TrackedPatchIncluded bool               `json:"tracked_patch_included"`
 	TrackedPatch         string             `json:"tracked_patch,omitempty"`
-	Checks               []candidateCheck   `json:"checks"`
-	Attempts             []candidateAttempt `json:"attempts"`
+	Checks               []CandidateCheck   `json:"checks"`
+	Attempts             []CandidateAttempt `json:"attempts"`
 }
 
-type candidateFile struct {
+type CandidateFile struct {
 	Path        string `json:"path"`
 	Fingerprint string `json:"fingerprint"`
 	Mode        string `json:"mode"`
+}
+
+// Keep package-local names for existing pipeline tests and callsites.
+type candidateCheck = CandidateCheck
+type candidateAttempt = CandidateAttempt
+type candidateEvidence = CandidateEvidence
+type candidateFile = CandidateFile
+
+// ValidateCandidateEvidence limits the API to the two controller-generated
+// gate identity documents. Their bytes still describe worker-observed state.
+func ValidateCandidateEvidence(runID, name string, document CandidateEvidence) error {
+	purpose := ""
+	switch name {
+	case "review-candidate.json":
+		purpose = "semantic_code_review"
+	case "verification-candidate.json":
+		purpose = "final_verification"
+	default:
+		return fmt.Errorf("unsupported candidate evidence name %q", name)
+	}
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return fmt.Errorf("candidate evidence run id: %w", err)
+	}
+	if document.SchemaVersion != 1 || document.RunID != runID || document.Purpose != purpose {
+		return errors.New("candidate evidence schema, run id, or purpose mismatch")
+	}
+	if !validSHA256(document.WorkspaceSHA256) || document.ChangedFiles == nil || document.Checks == nil || document.Attempts == nil {
+		return errors.New("candidate evidence required fields are invalid")
+	}
+	if document.BaselineHead != "" && !validGitObjectID(document.BaselineHead) {
+		return errors.New("candidate evidence baseline head is invalid")
+	}
+	if document.BaselineTree != "" && !validGitObjectID(document.BaselineTree) {
+		return errors.New("candidate evidence baseline tree is invalid")
+	}
+	if document.TrackedPatchSHA256 != "" && !validSHA256(document.TrackedPatchSHA256) {
+		return errors.New("candidate evidence tracked patch digest is invalid")
+	}
+	if document.TrackedPatchBytes < 0 ||
+		(!document.TrackedPatchIncluded && document.TrackedPatch != "") ||
+		(document.TrackedPatchIncluded && (document.TrackedPatchSHA256 == "" || document.TrackedPatchBytes != int64(len(document.TrackedPatch)))) {
+		return errors.New("candidate evidence tracked patch fields are inconsistent")
+	}
+	for _, file := range document.ChangedFiles {
+		relative := strings.ReplaceAll(file.Path, "\\", "/")
+		if relative == "" || path.IsAbs(relative) || path.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, "../") || file.Fingerprint == "" || file.Mode == "" {
+			return errors.New("candidate evidence changed file is invalid")
+		}
+	}
+	for _, check := range document.Checks {
+		if check.AttemptID == "" || check.Name == "" || check.Status == "" || !validSHA256(check.WorkspaceDigestBefore) || !validSHA256(check.WorkspaceDigestAfter) {
+			return errors.New("candidate evidence check is invalid")
+		}
+		if check.EvidenceDigest != "" && !validSHA256(check.EvidenceDigest) || check.StructuredSHA256 != "" && !validSHA256(check.StructuredSHA256) {
+			return errors.New("candidate evidence check digest is invalid")
+		}
+	}
+	for _, attempt := range document.Attempts {
+		if attempt.AttemptID == "" || attempt.Stage == "" || attempt.Outcome == "" {
+			return errors.New("candidate evidence attempt is invalid")
+		}
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	if len(data) > maxArtifactFileBytes {
+		return fmt.Errorf("candidate evidence exceeds %d bytes", maxArtifactFileBytes)
+	}
+	return nil
+}
+
+func validSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitObjectID(value string) bool {
+	return len(value) == 40 || len(value) == 64
 }
 
 func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose string) error {
@@ -155,6 +243,14 @@ func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose st
 			})
 		}
 	}
+	if rs.p != nil && rs.p.candidateEvidence != nil && (name == "review-candidate.json" || name == "verification-candidate.json") {
+		if err := ValidateCandidateEvidence(rs.runID, name, evidenceDocument); err != nil {
+			return err
+		}
+		if err := rs.p.candidateEvidence.WriteCandidateEvidence(name, evidenceDocument); err != nil {
+			return err
+		}
+	}
 	directory, err := safeio.EnsureDir(rs.task.ArtifactRoot, rs.runCfg.Feature, ".control")
 	if err != nil {
 		return err
@@ -163,21 +259,32 @@ func (rs *runState) writeCandidateEvidence(ctx context.Context, name, purpose st
 }
 
 func (rs *runState) verifyCandidateEvidence(name, purpose string) error {
-	path := filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".control", name)
-	data, err := safeio.ReadRegularFile(path, maxArtifactFileBytes)
-	if err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
 	var candidate candidateEvidence
-	if err := decoder.Decode(&candidate); err != nil {
-		return err
+	if rs.p != nil && rs.p.candidateEvidence != nil && name == "review-candidate.json" {
+		var err error
+		candidate, err = rs.p.candidateEvidence.ReadCandidateEvidence(name)
+		if err != nil {
+			return err
+		}
+	} else {
+		path := filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".control", name)
+		data, err := safeio.ReadRegularFile(path, maxArtifactFileBytes)
+		if err != nil {
+			return err
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(data)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&candidate); err != nil {
+			return err
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err == nil {
+			return fmt.Errorf("candidate evidence has trailing JSON")
+		} else if !errors.Is(err, io.EOF) {
+			return err
+		}
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return fmt.Errorf("candidate evidence has trailing JSON")
-	} else if !errors.Is(err, io.EOF) {
+	if err := ValidateCandidateEvidence(rs.runID, name, candidate); err != nil {
 		return err
 	}
 	current, err := checks.WorkspaceDigest(rs.sourceDir())

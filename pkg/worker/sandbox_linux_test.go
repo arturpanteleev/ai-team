@@ -75,6 +75,15 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(candidateMetadataDir, "controller-sentinel.json"), []byte("candidate-metadata-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	candidateEvidenceRoot := filepath.Join(target, ".ai-team", "state", "evidence")
+	probeCandidateEvidence := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: "sandbox-probe", Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+	if err := writeControllerCandidateEvidence(candidateEvidenceRoot, probeCandidateEvidence.RunID, "review-candidate.json", probeCandidateEvidence); err != nil {
+		t.Fatal(err)
+	}
 	usageDir := filepath.Join(target, ".ai-team", "state", "usage")
 	if err := os.MkdirAll(usageDir, 0700); err != nil {
 		t.Fatal(err)
@@ -170,7 +179,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.CandidateEvidenceReadable || report.CandidateEvidenceDirectWriteSucceeded || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
 	if report.BriefSourceReadable || !report.BriefSourceWriteSucceeded || !report.BriefAPIListReadSucceeded {
@@ -185,6 +194,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if !report.DeliveryAPIWriteSucceeded {
 		t.Fatalf("worker could not submit terminal delivery through controller API: %+v", report)
+	}
+	if !report.CandidateEvidenceAPIWriteReadSucceeded {
+		t.Fatalf("worker could not round-trip candidate evidence through controller API: %+v", report)
+	}
+	if stored, readErr := readControllerCandidateEvidence(candidateEvidenceRoot, probeCandidateEvidence.RunID, "review-candidate.json"); readErr != nil || stored.WorkspaceSHA256 != probeCandidateEvidence.WorkspaceSHA256 {
+		t.Fatalf("controller candidate evidence sentinel was modified or lost: document=%+v err=%v", stored, readErr)
 	}
 	if report.AttestationStateReadable || report.AttestationDirectWriteSucceeded || !report.AttestationAPIWriteSucceeded {
 		t.Fatalf("controller attestation isolation/API boundary failed: %+v", report)
@@ -837,42 +852,45 @@ func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 }
 
 type sandboxProbeReport struct {
-	DatabaseReadable                bool `json:"database_readable"`
-	WALReadable                     bool `json:"wal_readable"`
-	SHMReadable                     bool `json:"shm_readable"`
-	JournalReadable                 bool `json:"journal_readable"`
-	LifecycleReadable               bool `json:"lifecycle_readable"`
-	LegacyApprovalReadable          bool `json:"legacy_approval_readable"`
-	CandidateMetadataReadable       bool `json:"candidate_metadata_readable"`
-	UsageStateReadable              bool `json:"usage_state_readable"`
-	DeliveryStateReadable           bool `json:"delivery_state_readable"`
-	DeliveryDirectWriteSucceeded    bool `json:"delivery_direct_write_succeeded"`
-	DeliveryAPIWriteSucceeded       bool `json:"delivery_api_write_succeeded"`
-	AttestationStateReadable        bool `json:"attestation_state_readable"`
-	AttestationDirectWriteSucceeded bool `json:"attestation_direct_write_succeeded"`
-	AttestationAPIWriteSucceeded    bool `json:"attestation_api_write_succeeded"`
-	ContainmentStateReadable        bool `json:"containment_state_readable"`
-	ContainmentDirectWriteSucceeded bool `json:"containment_direct_write_succeeded"`
-	ContainmentAPIWriteSucceeded    bool `json:"containment_api_write_succeeded"`
-	UsageAPIWriteSucceeded          bool `json:"usage_api_write_succeeded"`
-	BriefSourceReadable             bool `json:"brief_source_readable"`
-	BriefSourceWriteSucceeded       bool `json:"brief_source_write_succeeded"`
-	BriefAPIListReadSucceeded       bool `json:"brief_api_list_read_succeeded"`
-	WorktreeReadable                bool `json:"worktree_readable"`
-	TargetReadable                  bool `json:"target_readable"`
-	TargetWritable                  bool `json:"target_writable"`
-	AgentRegistryWritable           bool `json:"agent_registry_writable"`
-	ControllerAPIReachable          bool `json:"controller_api_reachable"`
-	AdminControlPlaneCallRejected   bool `json:"admin_control_plane_call_rejected"`
-	AuthSecretAbsent                bool `json:"auth_secret_absent"`
-	SigningKeyAbsent                bool `json:"signing_key_absent"`
-	DatabasePasswordAbsent          bool `json:"database_password_absent"`
-	HostingWriteTokenAbsent         bool `json:"hosting_write_token_absent"`
-	HostTCPReachable                bool `json:"host_tcp_reachable"`
-	OutboundTCPReachable            bool `json:"outbound_tcp_reachable"`
-	OpenAIProxyReachable            bool `json:"openai_proxy_reachable"`
-	OpenAIDeniedOtherHost           bool `json:"openai_denied_other_host"`
-	OpenAIDeniedOtherPort           bool `json:"openai_denied_other_port"`
+	DatabaseReadable                       bool `json:"database_readable"`
+	WALReadable                            bool `json:"wal_readable"`
+	SHMReadable                            bool `json:"shm_readable"`
+	JournalReadable                        bool `json:"journal_readable"`
+	LifecycleReadable                      bool `json:"lifecycle_readable"`
+	LegacyApprovalReadable                 bool `json:"legacy_approval_readable"`
+	CandidateMetadataReadable              bool `json:"candidate_metadata_readable"`
+	CandidateEvidenceReadable              bool `json:"candidate_evidence_readable"`
+	CandidateEvidenceDirectWriteSucceeded  bool `json:"candidate_evidence_direct_write_succeeded"`
+	CandidateEvidenceAPIWriteReadSucceeded bool `json:"candidate_evidence_api_write_read_succeeded"`
+	UsageStateReadable                     bool `json:"usage_state_readable"`
+	DeliveryStateReadable                  bool `json:"delivery_state_readable"`
+	DeliveryDirectWriteSucceeded           bool `json:"delivery_direct_write_succeeded"`
+	DeliveryAPIWriteSucceeded              bool `json:"delivery_api_write_succeeded"`
+	AttestationStateReadable               bool `json:"attestation_state_readable"`
+	AttestationDirectWriteSucceeded        bool `json:"attestation_direct_write_succeeded"`
+	AttestationAPIWriteSucceeded           bool `json:"attestation_api_write_succeeded"`
+	ContainmentStateReadable               bool `json:"containment_state_readable"`
+	ContainmentDirectWriteSucceeded        bool `json:"containment_direct_write_succeeded"`
+	ContainmentAPIWriteSucceeded           bool `json:"containment_api_write_succeeded"`
+	UsageAPIWriteSucceeded                 bool `json:"usage_api_write_succeeded"`
+	BriefSourceReadable                    bool `json:"brief_source_readable"`
+	BriefSourceWriteSucceeded              bool `json:"brief_source_write_succeeded"`
+	BriefAPIListReadSucceeded              bool `json:"brief_api_list_read_succeeded"`
+	WorktreeReadable                       bool `json:"worktree_readable"`
+	TargetReadable                         bool `json:"target_readable"`
+	TargetWritable                         bool `json:"target_writable"`
+	AgentRegistryWritable                  bool `json:"agent_registry_writable"`
+	ControllerAPIReachable                 bool `json:"controller_api_reachable"`
+	AdminControlPlaneCallRejected          bool `json:"admin_control_plane_call_rejected"`
+	AuthSecretAbsent                       bool `json:"auth_secret_absent"`
+	SigningKeyAbsent                       bool `json:"signing_key_absent"`
+	DatabasePasswordAbsent                 bool `json:"database_password_absent"`
+	HostingWriteTokenAbsent                bool `json:"hosting_write_token_absent"`
+	HostTCPReachable                       bool `json:"host_tcp_reachable"`
+	OutboundTCPReachable                   bool `json:"outbound_tcp_reachable"`
+	OpenAIProxyReachable                   bool `json:"openai_proxy_reachable"`
+	OpenAIDeniedOtherHost                  bool `json:"openai_denied_other_host"`
+	OpenAIDeniedOtherPort                  bool `json:"openai_denied_other_port"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -902,6 +920,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	lifecycleData, lifecycleErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "runs", "controller-state.json"))
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
+	candidateEvidencePath := filepath.Join(job.TargetDir, ".ai-team", "state", "evidence", job.RunID, "review-candidate.json")
+	candidateEvidenceData, candidateEvidenceErr := os.ReadFile(candidateEvidencePath)
+	candidateEvidenceDirectWriteErr := os.WriteFile(candidateEvidencePath, []byte("worker-overwrite-attempt"), 0600)
 	usageData, usageErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "usage", "controller-sentinel.json"))
 	deliveryPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery", job.RunID+".json")
 	deliveryData, deliveryErr := os.ReadFile(deliveryPath)
@@ -925,6 +946,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	deliveryAPIWriteSucceeded := false
 	attestationAPIWriteSucceeded := false
 	containmentAPIWriteSucceeded := false
+	candidateEvidenceAPIWriteReadSucceeded := false
 	briefAPIListReadSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
@@ -938,6 +960,16 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		workerStatement := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: job.RunID}}
 		attestationAPIWriteSucceeded = NewWorkerAPIAttestationWriter(port).WriteAttestation(workerStatement) == nil
 		containmentAPIWriteSucceeded = NewWorkerAPIContainmentReceiptWriter(port).WriteContainmentReceipt(containment.DefaultTrustedLocalReceipt()) == nil
+		candidateEvidenceStore := NewWorkerAPICandidateEvidenceStore(port)
+		probeDocument := pipeline.CandidateEvidence{
+			SchemaVersion: 1, RunID: job.RunID, Purpose: "semantic_code_review",
+			WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: []pipeline.CandidateFile{},
+			Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+		}
+		if writeErr := candidateEvidenceStore.WriteCandidateEvidence("review-candidate.json", probeDocument); writeErr == nil {
+			loaded, readErr := candidateEvidenceStore.ReadCandidateEvidence("review-candidate.json")
+			candidateEvidenceAPIWriteReadSucceeded = readErr == nil && loaded.WorkspaceSHA256 == probeDocument.WorkspaceSHA256
+		}
 		briefs := NewWorkerAPIBriefs(port)
 		_, createErr := briefs.CreateInitial(job.RunID, job.Task)
 		versions, listErr := briefs.List(job.RunID)
@@ -956,42 +988,45 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	}
 	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
 	report := sandboxProbeReport{
-		DatabaseReadable:                dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
-		WALReadable:                     walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
-		SHMReadable:                     shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
-		JournalReadable:                 journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
-		LifecycleReadable:               lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
-		LegacyApprovalReadable:          approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
-		CandidateMetadataReadable:       candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
-		UsageStateReadable:              usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
-		DeliveryStateReadable:           deliveryErr == nil && len(deliveryData) > 0,
-		DeliveryDirectWriteSucceeded:    deliveryDirectWriteErr == nil,
-		DeliveryAPIWriteSucceeded:       deliveryAPIWriteSucceeded,
-		AttestationStateReadable:        attestationErr == nil && len(attestationData) > 0,
-		AttestationDirectWriteSucceeded: attestationDirectWriteErr == nil,
-		AttestationAPIWriteSucceeded:    attestationAPIWriteSucceeded,
-		ContainmentStateReadable:        containmentErr == nil && len(containmentData) > 0,
-		ContainmentDirectWriteSucceeded: containmentDirectWriteErr == nil,
-		ContainmentAPIWriteSucceeded:    containmentAPIWriteSucceeded,
-		UsageAPIWriteSucceeded:          usageAPIWriteSucceeded,
-		BriefSourceReadable:             briefErr == nil,
-		BriefSourceWriteSucceeded:       briefWriteErr == nil,
-		BriefAPIListReadSucceeded:       briefAPIListReadSucceeded,
-		WorktreeReadable:                worktreeErr == nil && string(worktreeData) == "worktree-visible",
-		TargetReadable:                  targetErr == nil && string(targetData) == "target-visible",
-		TargetWritable:                  writeErr == nil,
-		AgentRegistryWritable:           agentWriteErr == nil,
-		ControllerAPIReachable:          apiReachable,
-		AdminControlPlaneCallRejected:   adminControlPlaneCallRejected,
-		AuthSecretAbsent:                os.Getenv("AI_TEAM_AUTH_SECRET") == "",
-		SigningKeyAbsent:                os.Getenv("AI_TEAM_SIGNING_KEY") == "",
-		DatabasePasswordAbsent:          os.Getenv("AI_TEAM_DB_PASSWORD") == "",
-		HostingWriteTokenAbsent:         os.Getenv("AI_TEAM_HOSTING_WRITE_TOKEN") == "",
-		HostTCPReachable:                canDial(value("--probe-host-tcp")),
-		OutboundTCPReachable:            canDial("1.1.1.1:443"),
-		OpenAIProxyReachable:            openAIProxyReachable,
-		OpenAIDeniedOtherHost:           deniedOtherHost,
-		OpenAIDeniedOtherPort:           deniedOtherPort,
+		DatabaseReadable:                       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
+		WALReadable:                            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
+		SHMReadable:                            shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
+		JournalReadable:                        journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
+		LifecycleReadable:                      lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
+		LegacyApprovalReadable:                 approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
+		CandidateMetadataReadable:              candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
+		CandidateEvidenceReadable:              candidateEvidenceErr == nil && len(candidateEvidenceData) > 0,
+		CandidateEvidenceDirectWriteSucceeded:  candidateEvidenceDirectWriteErr == nil,
+		CandidateEvidenceAPIWriteReadSucceeded: candidateEvidenceAPIWriteReadSucceeded,
+		UsageStateReadable:                     usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
+		DeliveryStateReadable:                  deliveryErr == nil && len(deliveryData) > 0,
+		DeliveryDirectWriteSucceeded:           deliveryDirectWriteErr == nil,
+		DeliveryAPIWriteSucceeded:              deliveryAPIWriteSucceeded,
+		AttestationStateReadable:               attestationErr == nil && len(attestationData) > 0,
+		AttestationDirectWriteSucceeded:        attestationDirectWriteErr == nil,
+		AttestationAPIWriteSucceeded:           attestationAPIWriteSucceeded,
+		ContainmentStateReadable:               containmentErr == nil && len(containmentData) > 0,
+		ContainmentDirectWriteSucceeded:        containmentDirectWriteErr == nil,
+		ContainmentAPIWriteSucceeded:           containmentAPIWriteSucceeded,
+		UsageAPIWriteSucceeded:                 usageAPIWriteSucceeded,
+		BriefSourceReadable:                    briefErr == nil,
+		BriefSourceWriteSucceeded:              briefWriteErr == nil,
+		BriefAPIListReadSucceeded:              briefAPIListReadSucceeded,
+		WorktreeReadable:                       worktreeErr == nil && string(worktreeData) == "worktree-visible",
+		TargetReadable:                         targetErr == nil && string(targetData) == "target-visible",
+		TargetWritable:                         writeErr == nil,
+		AgentRegistryWritable:                  agentWriteErr == nil,
+		ControllerAPIReachable:                 apiReachable,
+		AdminControlPlaneCallRejected:          adminControlPlaneCallRejected,
+		AuthSecretAbsent:                       os.Getenv("AI_TEAM_AUTH_SECRET") == "",
+		SigningKeyAbsent:                       os.Getenv("AI_TEAM_SIGNING_KEY") == "",
+		DatabasePasswordAbsent:                 os.Getenv("AI_TEAM_DB_PASSWORD") == "",
+		HostingWriteTokenAbsent:                os.Getenv("AI_TEAM_HOSTING_WRITE_TOKEN") == "",
+		HostTCPReachable:                       canDial(value("--probe-host-tcp")),
+		OutboundTCPReachable:                   canDial("1.1.1.1:443"),
+		OpenAIProxyReachable:                   openAIProxyReachable,
+		OpenAIDeniedOtherHost:                  deniedOtherHost,
+		OpenAIDeniedOtherPort:                  deniedOtherPort,
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

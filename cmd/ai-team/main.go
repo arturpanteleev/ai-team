@@ -320,6 +320,7 @@ func cmdWorker() {
 	var terminalRecordWriter pipeline.TerminalRecordWriter
 	var attestationWriter pipeline.AttestationWriter
 	var containmentReceiptWriter pipeline.ContainmentReceiptWriter
+	var candidateEvidenceStore pipeline.CandidateEvidenceStore
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -336,6 +337,7 @@ func cmdWorker() {
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
 			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
 			containmentReceiptWriter = worker.NewWorkerAPIContainmentReceiptWriter(apiPort)
+			candidateEvidenceStore = worker.NewWorkerAPICandidateEvidenceStore(apiPort)
 		}
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
@@ -416,6 +418,9 @@ func cmdWorker() {
 	}
 	if containmentReceiptWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithContainmentReceiptWriter(containmentReceiptWriter))
+	}
+	if candidateEvidenceStore != nil {
+		engineOptions = append(engineOptions, pipeline.WithCandidateEvidenceStore(candidateEvidenceStore))
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -96,6 +96,30 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := appendPrivateDirectoryMount(&args, candidateMetadataDir, true); err != nil {
 		return nil, err
 	}
+	candidateEvidenceDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "evidence")
+	if err != nil {
+		return nil, fmt.Errorf("prepare candidate evidence mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, candidateEvidenceDir, true); err != nil {
+		return nil, err
+	}
+	candidateEvidenceRunDir := filepath.Join(candidateEvidenceDir, runID)
+	candidateEvidenceRunDirAdded := false
+	for _, name := range []string{"review-candidate.json", "verification-candidate.json"} {
+		candidateEvidencePath := filepath.Join(candidateEvidenceDir, runID, name)
+		if info, statErr := os.Lstat(candidateEvidencePath); statErr == nil {
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("controller candidate evidence path %q must be a regular file", candidateEvidencePath)
+			}
+			if !candidateEvidenceRunDirAdded {
+				args = append(args, "--dir", candidateEvidenceRunDir)
+				candidateEvidenceRunDirAdded = true
+			}
+			args = append(args, "--ro-bind", "/dev/null", candidateEvidencePath)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect controller candidate evidence path: %w", statErr)
+		}
+	}
 	usageDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "usage")
 	if err != nil {
 		return nil, fmt.Errorf("prepare usage envelope mount: %w", err)

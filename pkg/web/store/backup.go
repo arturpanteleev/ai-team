@@ -96,3 +96,42 @@ func BackupDatabase(ctx context.Context, sourcePath, destination string) (retErr
 	}
 	return errors.Join(dir.Sync(), dir.Close())
 }
+
+// RestoreDatabaseSnapshot validates a SQLite snapshot and writes it to a new
+// database path without replacing existing files. It restores only database
+// contents; callers must restore evidence and artifacts separately.
+func RestoreDatabaseSnapshot(ctx context.Context, snapshotPath, destination string) error {
+	if ctx == nil {
+		return errors.New("database restore context is nil")
+	}
+	if snapshotPath == "" || destination == "" {
+		return errors.New("database restore snapshot and destination are required")
+	}
+	snapshot, err := filepath.Abs(snapshotPath)
+	if err != nil {
+		return fmt.Errorf("resolve database restore snapshot: %w", err)
+	}
+	info, err := os.Lstat(snapshot)
+	if err != nil {
+		return fmt.Errorf("inspect database restore snapshot: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("database restore snapshot must be a regular file")
+	}
+	db, err := sql.Open("sqlite", snapshot)
+	if err != nil {
+		return fmt.Errorf("open SQLite restore snapshot: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	var integrity string
+	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		return errors.Join(fmt.Errorf("check SQLite restore snapshot integrity: %w", err), db.Close())
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close SQLite restore snapshot after integrity check: %w", err)
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("SQLite restore snapshot failed integrity check: %s", integrity)
+	}
+	return BackupDatabase(ctx, snapshot, destination)
+}

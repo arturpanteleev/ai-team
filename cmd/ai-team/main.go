@@ -146,7 +146,9 @@ func printUsage() {
   ai-team web                      Запустить web-дашборд
   ai-team gc                       Уборка растущих артефактов .ai-team
   ai-team db backup --db <path> --out <path>
-                                   Снимок только SQLite controller database
+                                   Снимок SQLite controller database
+  ai-team db restore --from <snapshot> --out <new-path>
+                                   Восстановить SQLite snapshot в новый путь
   ai-team version                  Версия
   ai-team help                     Эта справка
 
@@ -175,8 +177,11 @@ func printUsage() {
 Флаги db backup:
   --db <path>               Существующая SQLite controller database
   --out <path>              Новый файл snapshot (существующий файл не перезаписывается)
-  Команда копирует только SQLite database; run evidence, artifacts и другие
-  файлы состояния нужно резервировать отдельно.
+Флаги db restore:
+  --from <path>             SQLite snapshot, прошедший integrity check
+  --out <path>              Новый путь для восстановленной базы
+  Обе команды затрагивают только SQLite database; run evidence, artifacts и
+  другие файлы состояния нужно резервировать отдельно.
 
 Флаги gate:
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)

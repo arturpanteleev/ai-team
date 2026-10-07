@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,5 +97,129 @@ func TestBackupDatabaseRejectsUnsafeArguments(t *testing.T) {
 				t.Fatal("unsafe backup arguments unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestRestoreDatabaseSnapshotValidatesAndPublishesToNewPath(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "controller.db")
+	sourceStore, err := New(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &PipelineRun{RunID: "restore-run", Feature: "restore", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: `{"schema_version":1}`}
+	if err := sourceStore.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(dir, "controller.snapshot.db")
+	if err := BackupDatabase(context.Background(), source, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(dir, "restored", "controller.db")
+	if err := os.Mkdir(filepath.Dir(restored), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), snapshot, restored); err != nil {
+		t.Fatalf("restore validated snapshot: %v", err)
+	}
+	restoredInfo, err := os.Stat(restored)
+	if err != nil || restoredInfo.Mode().Perm() != 0600 {
+		t.Fatalf("restored database mode/info=%v err=%v; want mode 0600", restoredInfo, err)
+	}
+	restoredStore, err := New(restored)
+	if err != nil {
+		t.Fatalf("open restored database: %v", err)
+	}
+	got, err := restoredStore.GetPipelineRunByRunID(run.RunID)
+	if err != nil || got.Feature != run.Feature {
+		t.Fatalf("restored database row=%+v err=%v", got, err)
+	}
+	if err := restoredStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), snapshot, restored); err == nil {
+		t.Fatal("restore replaced an existing database")
+	}
+}
+
+func TestRestoreDatabaseSnapshotRejectsCorruptAndSymlinkSources(t *testing.T) {
+	dir := t.TempDir()
+	corrupt := filepath.Join(dir, "corrupt.sqlite")
+	if err := os.WriteFile(corrupt, []byte("not a SQLite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "restored.db")
+	if err := RestoreDatabaseSnapshot(context.Background(), corrupt, out); err == nil {
+		t.Fatal("restore accepted a corrupt SQLite snapshot")
+	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Fatalf("failed restore published a destination: %v", err)
+	}
+	badIntegrity := filepath.Join(dir, "bad-integrity.sqlite")
+	badIntegrityStore, err := New(badIntegrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`CREATE TABLE integrity_fixture (value INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`INSERT INTO integrity_fixture (value) VALUES (0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA writable_schema = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`UPDATE sqlite_schema SET sql = 'CREATE TABLE integrity_fixture (value INTEGER CHECK(value > 0))' WHERE name = 'integrity_fixture'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA writable_schema = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badIntegrityStore.db.Exec(`PRAGMA schema_version = 1000`); err != nil {
+		t.Fatal(err)
+	}
+	if err := badIntegrityStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixtureDB, err := sql.Open("sqlite", badIntegrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureDB.SetMaxOpenConns(1)
+	var integrity string
+	if err := fixtureDB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if integrity == "ok" {
+		t.Fatal("test fixture unexpectedly passes SQLite integrity_check")
+	}
+	badIntegrityOut := filepath.Join(dir, "bad-integrity-restored.db")
+	if err := RestoreDatabaseSnapshot(context.Background(), badIntegrity, badIntegrityOut); err == nil || !strings.Contains(err.Error(), "failed integrity check") {
+		t.Fatalf("restore error = %v, want integrity_check rejection", err)
+	}
+	if _, err := os.Lstat(badIntegrityOut); !os.IsNotExist(err) {
+		t.Fatalf("integrity failure published a destination: %v", err)
+	}
+
+	valid := filepath.Join(dir, "valid.sqlite")
+	store, err := New(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "snapshot-link.sqlite")
+	if err := os.Symlink(valid, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabaseSnapshot(context.Background(), link, out); err == nil {
+		t.Fatal("restore followed a snapshot symlink")
 	}
 }

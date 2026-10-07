@@ -119,7 +119,7 @@ func TestCLIDispatchContract(t *testing.T) {
 			}
 			// Справка обязана перечислять подкоманды: она — единственный
 			// источник контракта для пользователя без документации.
-			for _, command := range []string{"ai-team run", "ai-team gate", "ai-team verify", "ai-team export", "ai-team db backup"} {
+			for _, command := range []string{"ai-team run", "ai-team gate", "ai-team verify", "ai-team export", "ai-team db backup", "ai-team db restore"} {
 				if !strings.Contains(stdout, command) {
 					t.Fatalf("%s: справка не упоминает %q:\n%s", arg, command, stdout)
 				}
@@ -160,6 +160,26 @@ func TestCLIDatabaseBackupContract(t *testing.T) {
 	if _, err := backupStore.GetPipelineRunByRunID("cli-backup-run"); err != nil {
 		t.Fatalf("CLI snapshot lost controller database state: %v", err)
 	}
+	restoredPath := filepath.Join(dir, "restored.db")
+	stdout, code, stderr = runCLI(t, "db", "restore", "--from", destination, "--out", restoredPath)
+	if code != 0 || !strings.Contains(stdout, "restored to new path") || !strings.Contains(stdout, "run evidence") {
+		t.Fatalf("database restore must succeed and state its limited scope: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	restoredStore, err := webstore.New(restoredPath)
+	if err != nil {
+		t.Fatalf("open CLI restored database: %v", err)
+	}
+	if _, err := restoredStore.GetPipelineRunByRunID("cli-backup-run"); err != nil {
+		_ = restoredStore.Close()
+		t.Fatalf("CLI restore lost controller database state: %v", err)
+	}
+	if err := restoredStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, code, stderr = runCLI(t, "db", "restore", "--from", destination, "--out", restoredPath)
+	if code == 0 || !strings.Contains(stderr, "already exists") {
+		t.Fatalf("restore command must not replace an existing database: code=%d stderr=%q", code, stderr)
+	}
 	_, code, stderr = runCLI(t, "db", "backup", "--db", source, "--out", destination)
 	if code == 0 || !strings.Contains(stderr, "already exists") {
 		t.Fatalf("backup command must not replace an existing snapshot: code=%d stderr=%q", code, stderr)
@@ -167,6 +187,10 @@ func TestCLIDatabaseBackupContract(t *testing.T) {
 	_, code, stderr = runCLI(t, "db", "backup", "--db", source)
 	if code == 0 || !strings.Contains(stderr, "Использование") {
 		t.Fatalf("backup command must require an output path: code=%d stderr=%q", code, stderr)
+	}
+	_, code, stderr = runCLI(t, "db", "restore", "--from", destination)
+	if code == 0 || !strings.Contains(stderr, "Использование") {
+		t.Fatalf("restore command must require an output path: code=%d stderr=%q", code, stderr)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,68 @@ import (
 	"testing"
 	"time"
 )
+
+func TestOpenAIEgressRejectsIncompleteBridgeConfiguration(t *testing.T) {
+	if _, err := startOpenAIEgressServerWith("", "capability", func(context.Context) (net.Conn, error) {
+		t.Fatal("dial must not run without a socket path")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("server accepted an empty socket path")
+	}
+	if _, err := startOpenAIEgressServerWith("unused.sock", "", func(context.Context) (net.Conn, error) {
+		t.Fatal("dial must not run without a capability")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("server accepted an empty capability")
+	}
+
+	if _, closeBridge, err := startOpenAIEgressBridge(context.Background(), "socket", "capability", func() error {
+		return errors.New("loopback unavailable")
+	}, func() (net.Listener, error) {
+		t.Fatal("listener must not start when loopback setup fails")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("bridge accepted a failed loopback setup")
+	} else {
+		closeBridge()
+	}
+
+	listenErr := errors.New("listener unavailable")
+	if _, closeBridge, err := startOpenAIEgressBridge(context.Background(), "socket", "capability", func() error { return nil }, func() (net.Listener, error) {
+		return nil, listenErr
+	}); !errors.Is(err, listenErr) {
+		closeBridge()
+		t.Fatalf("bridge listener error = %v, want %v", err, listenErr)
+	}
+}
+
+func TestOpenAIEgressBridgeRejectsInvalidRequestAndMissingSocket(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		request string
+		want    int
+	}{
+		{name: "non-CONNECT method", request: "GET / HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n", want: http.StatusForbidden},
+		{name: "missing controller socket", request: "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n", want: http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			go bridgeOpenAIClient(server, filepath.Join(t.TempDir(), "missing.sock"), "capability", make(chan struct{}))
+			if _, err := io.WriteString(client, test.request); err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != test.want {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.want)
+			}
+		})
+	}
+}
 
 func TestOpenAIEgressBridgeTunnelsOnlyExactOpenAIConnect(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -34,10 +34,18 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if home == "" || temp == "" || !filepath.IsAbs(home) || !filepath.IsAbs(temp) {
 		return nil, errors.New("worker HOME and TMPDIR must be absolute for bubblewrap")
 	}
+	for _, bind := range []struct{ role, path string }{{"worker HOME", home}, {"worker TMPDIR", temp}} {
+		if err := rejectRunBindPath(bind.path, bind.role); err != nil {
+			return nil, err
+		}
+	}
 	args := []string{
 		"--die-with-parent", "--new-session",
-		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
 		"--ro-bind", "/", "/",
+		// Hide standard host service sockets (for example docker.sock and
+		// system D-Bus sockets) while keeping a writable namespace-local /run.
+		"--tmpfs", "/run",
 		"--dev", "/dev", "--proc", "/proc",
 		"--bind", canonicalTarget, canonicalTarget,
 		"--bind", home, home,
@@ -47,6 +55,9 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		resolved, resolveErr := filepath.EvalSymlinks(path)
 		if resolveErr != nil {
 			return nil, fmt.Errorf("agent registry path %q: %w", path, resolveErr)
+		}
+		if err := rejectRunBindPath(resolved, "agent registry path"); err != nil {
+			return nil, err
 		}
 		args = append(args, "--ro-bind", resolved, resolved)
 	}
@@ -101,6 +112,9 @@ func resolveBubblewrapTarget(target string) (string, error) {
 	if resolved == string(filepath.Separator) {
 		return "", errors.New("worker target must not resolve to the filesystem root")
 	}
+	if err := rejectRunBindPath(resolved, "worker target"); err != nil {
+		return "", err
+	}
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", fmt.Errorf("inspect worker target %q: %w", resolved, err)
@@ -109,6 +123,34 @@ func resolveBubblewrapTarget(target string) (string, error) {
 		return "", fmt.Errorf("worker target %q must be a directory", resolved)
 	}
 	return resolved, nil
+}
+
+// rejectRunBindPath prevents a later bind from covering the private /run
+// tmpfs with host content. Resolve both sides so symlink aliases cannot bypass
+// the check.
+func rejectRunBindPath(path, role string) error {
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s bind path %q: %w", role, path, err)
+	}
+	runRoot, err := filepath.EvalSymlinks("/run")
+	if err != nil {
+		return fmt.Errorf("resolve private /run mount root: %w", err)
+	}
+	relative, err := filepath.Rel(filepath.Clean(runRoot), filepath.Clean(canonical))
+	if err != nil {
+		return fmt.Errorf("compare %s bind path with /run: %w", role, err)
+	}
+	insideRun := relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+	runRelative, err := filepath.Rel(filepath.Clean(canonical), filepath.Clean(runRoot))
+	if err != nil {
+		return fmt.Errorf("compare /run with %s bind path: %w", role, err)
+	}
+	pathContainsRun := runRelative == "." || (runRelative != ".." && !strings.HasPrefix(runRelative, ".."+string(filepath.Separator)))
+	if insideRun || pathContainsRun {
+		return fmt.Errorf("%s bind path %q overlaps /run; refusing to reopen the private /run mount", role, canonical)
+	}
+	return nil
 }
 
 // resolveAndCheckDatabasePath canonicalizes an existing DB/sidecar before it

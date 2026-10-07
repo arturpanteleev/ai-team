@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -59,6 +61,11 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(target, "visible.txt"), []byte("target-visible"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	hostListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hostListener.Close() }()
 	agentDir := filepath.Join(target, ".ai-team", "agents")
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		t.Fatal(err)
@@ -73,7 +80,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestBubblewrapWorkerProbeHelper$", "--", "--probe-db", dbPath,
 			"--probe-wal", dbPath + "-wal", "--probe-shm", dbPath + "-shm", "--probe-journal", dbPath + "-journal",
-			"--probe-output", probePath},
+			"--probe-host-tcp", hostListener.Addr().String(), "--probe-output", probePath},
 		target, dbPath,
 		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
 		WithAgentRegistryPaths([]string{agentDir}),
@@ -97,6 +104,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
+	}
+	if !report.ControllerAPIReachable {
+		t.Fatalf("scoped controller API unavailable over isolated network: %+v", report)
+	}
+	if report.HostTCPReachable || report.OutboundTCPReachable {
+		t.Fatalf("worker escaped its private network namespace: %+v", report)
 	}
 	if !report.TargetReadable || !report.TargetWritable || report.AgentRegistryWritable {
 		t.Fatalf("unexpected workspace or agent-registry access: %+v", report)
@@ -129,6 +142,57 @@ func TestBubblewrapRejectsHardLinkedControllerDatabaseAndSidecar(t *testing.T) {
 	if _, err := resolveAndCheckDatabasePath(sidecar); err == nil || !strings.Contains(err.Error(), "hard links") {
 		t.Fatalf("hard-linked sidecar must fail closed, got %v", err)
 	}
+}
+
+func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testing.T) {
+	t.Run("command masks standard host sockets", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		fakeBwrap := filepath.Join(fakeBin, "bwrap")
+		if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin)
+		target := makeBubblewrapTarget(t)
+		home, temp := t.TempDir(), t.TempDir()
+		command, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+			filepath.Join(target, "controller.db"), nil, []string{"HOME=" + home, "TMPDIR=" + temp})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for i := 0; i+1 < len(command.Args); i++ {
+			if command.Args[i] == "--tmpfs" && command.Args[i+1] == "/run" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("bubblewrap command must mask standard host sockets at /run: %v", command.Args)
+		}
+	})
+
+	t.Run("Unix socket setup failure does not fall back to TCP or unsandboxed worker", func(t *testing.T) {
+		target := makeBubblewrapTarget(t)
+		longTempRoot := filepath.Join(t.TempDir(), strings.Repeat("x", 100))
+		if err := os.Mkdir(longTempRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", longTempRoot)
+		engine, err := NewProcessEngine([]string{"/bin/true"}, target, filepath.Join(target, "controller.db"),
+			WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Exercise the bubblewrap execution path without requiring the host to
+		// permit namespace creation: Unix socket setup fails before bwrap lookup.
+		engine.bubblewrap = true
+		_, err = engine.Start(context.Background(), pipeline.RunConfig{
+			RunID: "socket-setup-failure", Feature: "probe", TaskDesc: "test fail-closed socket setup", TargetDir: target,
+		})
+		if err == nil || !strings.Contains(err.Error(), "worker controller API") {
+			t.Fatalf("socket setup failure must stop the worker invocation without fallback, got %v", err)
+		}
+	})
 }
 
 func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
@@ -351,6 +415,53 @@ func TestBubblewrapRejectsFilesystemRootAsTarget(t *testing.T) {
 	}
 }
 
+func TestBubblewrapRejectsRunMountReopeningPaths(t *testing.T) {
+	t.Run("direct run target", func(t *testing.T) {
+		if _, err := resolveBubblewrapTarget("/run"); err == nil || !strings.Contains(err.Error(), "/run") {
+			t.Fatalf("/run workspace must be rejected before mount construction, got %v", err)
+		}
+	})
+	t.Run("symlink target to run", func(t *testing.T) {
+		alias := filepath.Join(t.TempDir(), "run-target")
+		if err := os.Symlink("/run", alias); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveBubblewrapTarget(alias); err == nil || !strings.Contains(err.Error(), "/run") {
+			t.Fatalf("symlink target resolving to /run must be rejected, got %v", err)
+		}
+	})
+	t.Run("agent registry bind cannot overlap run", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		fakeBwrap := filepath.Join(fakeBin, "bwrap")
+		if err := os.WriteFile(fakeBwrap, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin)
+		alias := filepath.Join(t.TempDir(), "root-agent-registry")
+		if err := os.Symlink("/", alias); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			name string
+			path string
+		}{
+			{name: "run", path: "/run"},
+			{name: "filesystem root", path: "/"},
+			{name: "symlink to filesystem root", path: alias},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				target := makeBubblewrapTarget(t)
+				home, temp := t.TempDir(), t.TempDir()
+				_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"), target,
+					filepath.Join(target, "controller.db"), []string{tc.path}, []string{"HOME=" + home, "TMPDIR=" + temp})
+				if err == nil || !strings.Contains(err.Error(), "agent registry path") || !strings.Contains(err.Error(), "overlaps /run") {
+					t.Fatalf("agent registry bind %q must be rejected, got %v", tc.path, err)
+				}
+			})
+		}
+	})
+}
+
 func TestBubblewrapRejectsHardLinkedPrivateState(t *testing.T) {
 	target := t.TempDir()
 	privateDir := filepath.Join(target, "private")
@@ -384,6 +495,9 @@ type sandboxProbeReport struct {
 	TargetReadable         bool `json:"target_readable"`
 	TargetWritable         bool `json:"target_writable"`
 	AgentRegistryWritable  bool `json:"agent_registry_writable"`
+	ControllerAPIReachable bool `json:"controller_api_reachable"`
+	HostTCPReachable       bool `json:"host_tcp_reachable"`
+	OutboundTCPReachable   bool `json:"outbound_tcp_reachable"`
 }
 
 // TestBubblewrapWorkerProbeHelper is executed as the child command by the
@@ -415,6 +529,19 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
 	agentWriteErr := os.WriteFile(filepath.Join(job.TargetDir, ".ai-team", "agents", "role.md"), []byte("modified"), 0600)
+	apiReachable := false
+	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
+		var approvals []approval.PendingApproval
+		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 0
+	}
+	canDial := func(address string) bool {
+		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
+		if dialErr != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}
 	report := sandboxProbeReport{
 		DatabaseReadable:       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
 		WALReadable:            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
@@ -425,6 +552,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		TargetReadable:         targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:         writeErr == nil,
 		AgentRegistryWritable:  agentWriteErr == nil,
+		ControllerAPIReachable: apiReachable,
+		HostTCPReachable:       canDial(value("--probe-host-tcp")),
+		OutboundTCPReachable:   canDial("1.1.1.1:443"),
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {

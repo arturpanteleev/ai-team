@@ -47,6 +47,15 @@ controller auth/signing/database переменных, но не доказыв�
 секретов в файлах, доступных тому же OS-пользователю, и не создаёт process или
 filesystem isolation.
 
+Опциональный Linux-режим `AI_TEAM_WORKER_SANDBOX=bubblewrap` скрывает стандартные
+host service sockets под `/run` отдельным tmpfs. Нестандартные pathname AF_UNIX
+sockets вне `/run` всё ещё могут быть доступны по host path из-за read-only bind
+`/`. Режим использует network namespace без внешнего IP egress, поэтому удалённые
+model calls OpenAI/OpenCode заблокированы до отдельной настройки allowlisted
+egress proxy; этот slice proxy не добавляет. Если scoped API Unix socket нельзя
+создать или bubblewrap не запускается, worker завершается без TCP или
+unsandboxed fallback.
+
 ## Минимальная архитектурная граница
 
 Следующее изменение должно разделить controller-owned state и worker-owned

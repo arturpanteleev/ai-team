@@ -48,7 +48,7 @@ var workerEnvironmentReserved = map[string]bool{
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
 	WorkerEnvAllowVar: true, "AI_TEAM_HARNESS_ENV_ALLOW": true,
 	WorkerSandboxEnvVar: true,
-	WorkerAPIAddressEnv: true, WorkerAPITokenEnv: true,
+	WorkerAPIAddressEnv: true, WorkerAPISocketEnv: true, WorkerAPITokenEnv: true,
 }
 
 type ProcessOption func(*ProcessEngine) error
@@ -124,8 +124,8 @@ func WithAgentRegistryPaths(paths []string) ProcessOption {
 }
 
 // WithControllerAPI moves worker recorder and approval traffic back to the
-// controller process. The worker receives a short-lived, run-scoped loopback
-// capability and no controller database path.
+// controller process. The worker receives a short-lived, run-scoped capability
+// and no controller database path; Linux bubblewrap launches use a Unix socket.
 func WithControllerAPI(recorderFactory func() pipeline.Recorder, approvals pipeline.ApprovalStore) ProcessOption {
 	return func(engine *ProcessEngine) error {
 		if recorderFactory == nil || approvals == nil {
@@ -223,20 +223,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		return pipeline.RunResult{}, err
 	}
 	args := append(append([]string(nil), e.argv[1:]...), "worker", "--target", e.target)
-	var api *workerAPIServer
-	if e.apiRecorderFactory != nil {
-		recorder := e.apiRecorderFactory()
-		api, err = startWorkerAPIServer(job, recorder, e.apiApprovals)
-		if err != nil {
-			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
-		}
-		api.lifecycle, err = lifecycle.NewStore(e.target)
-		if err != nil {
-			api.close()
-			return pipeline.RunResult{}, fmt.Errorf("worker lifecycle store: %w", err)
-		}
-		defer api.close()
-	} else {
+	if e.apiRecorderFactory == nil {
 		// Compatibility path for local scheduler CLI configurations that have
 		// not yet attached a controller-owned store API.
 		args = append(args, "--db", e.dbPath)
@@ -249,8 +236,40 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	}
 	defer cleanupEnvironment()
 	command.Env = environment
-	if api != nil {
-		command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+	var api *workerAPIServer
+	if e.apiRecorderFactory != nil {
+		recorder := e.apiRecorderFactory()
+		if e.bubblewrap {
+			tempDir := ""
+			for _, item := range environment {
+				if key, value, ok := strings.Cut(item, "="); ok && key == "TMPDIR" {
+					tempDir = value
+					break
+				}
+			}
+			if tempDir == "" {
+				return pipeline.RunResult{}, errors.New("worker private TMPDIR is missing")
+			}
+			socketPath := filepath.Join(tempDir, "controller-api.sock")
+			api, err = startWorkerAPIServerUnix(job, recorder, e.apiApprovals, socketPath)
+			if err == nil {
+				command.Env = append(command.Env, workerAPIAddressEnv+"=http://unix", workerAPISocketEnv+"="+socketPath, workerAPITokenEnv+"="+api.token)
+			}
+		} else {
+			api, err = startWorkerAPIServer(job, recorder, e.apiApprovals)
+			if err == nil {
+				command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+			}
+		}
+		if err != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
+		}
+		api.lifecycle, err = lifecycle.NewStore(e.target)
+		if err != nil {
+			api.close()
+			return pipeline.RunResult{}, fmt.Errorf("worker lifecycle store: %w", err)
+		}
+		defer api.close()
 	}
 	if e.bubblewrap {
 		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, e.agentPaths, command.Env)
@@ -260,7 +279,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		configureWorkerProcess(command)
 		command.Env = environment
 		if api != nil {
-			command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
+			command.Env = append(command.Env, workerAPIAddressEnv+"=http://unix", workerAPISocketEnv+"="+api.socketPath, workerAPITokenEnv+"="+api.token)
 		}
 	}
 	command.Stdin = bytes.NewReader(payload)

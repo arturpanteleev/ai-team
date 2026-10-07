@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -618,6 +619,53 @@ func TestWorkerControllerAPIOptionsRejectMissingPortsAndEnvironment(t *testing.T
 	}
 	if _, err := NewProcessEngine([]string{"worker"}, t.TempDir(), filepath.Join(t.TempDir(), "db"), func(*ProcessEngine) error { return errors.New("option failure") }); err == nil {
 		t.Fatal("process engine accepted a failing option")
+	}
+}
+
+func TestWorkerControllerAPIUsesPrivateUnixSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain worker API transport is used only by Linux bubblewrap")
+	}
+	job := Job{RunID: "unix-run", Operation: OperationStart, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2), TargetDir: t.TempDir()}
+	socketDir, err := os.MkdirTemp("/tmp", "worker-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socketPath := filepath.Join(socketDir, "api.sock")
+	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	if _, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, store, filepath.Join(socketDir, "missing", "api.sock")); err == nil {
+		t.Fatal("Unix API socket setup failure was accepted")
+	}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, store, socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("API socket mode=%#o want 0600", info.Mode().Perm())
+	}
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socketPath)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approvals []approval.PendingApproval
+	if err := port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals); err != nil {
+		t.Fatalf("scoped API call over unix socket failed: %v", err)
+	}
+	if len(approvals) != 0 {
+		t.Fatalf("unexpected approvals from empty scoped store: %+v", approvals)
+	}
+	server.close()
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("API socket remained after server close: %v", err)
 	}
 }
 

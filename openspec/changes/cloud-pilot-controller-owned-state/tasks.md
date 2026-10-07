@@ -29,13 +29,21 @@
   access with a controller-owned API; verify a worker cannot mutate approvals
   through raw SQL or other filesystem access. The supported web/scheduler
   launcher slice now omits `--db` and relays recorder/approval calls over a
-  per-invocation scoped loopback API; hostile API tests reject forged decisions,
+  per-invocation scoped controller API; hostile API tests reject forged decisions,
   admin calls, and cross-run scope. An opt-in Linux bubblewrap slice now masks
   the configured SQLite database and lifecycle/legacy-approval directories;
   its integration probe verifies controller DB/lifecycle sentinels are unreadable
-  while the workspace remains writable. The task stays open for independent
-  approval-store placement, evidence/artifact isolation and runtime/recovery
-  acceptance; this bounded filesystem slice does not establish network isolation.
+  while the workspace remains writable. Bubblewrap workers now use a private
+  Unix socket for the scoped API in an isolated network namespace; `/run` is
+  overlaid with tmpfs to hide standard host service sockets there, while custom
+  pathname sockets outside `/run` remain a residual risk. A command-plan test
+  checks the mount and a failure-path test checks that inability to create the
+  private API socket cannot fall back to TCP or an unsandboxed worker.
+  Integration probes check API reachability and denied host/outbound TCP. The
+  network namespace also blocks remote model-provider calls; OpenAI/OpenCode
+  need a separately configured allowlisted egress proxy, which this slice does
+  not provide. The task stays open for independent approval-store placement,
+  evidence/artifact isolation and runtime/recovery acceptance.
 - [ ] Split lifecycle, evidence, manifests, artifacts, and queue from
   worker-writable state; verify their integrity after worker-side attempts.
 - [x] Add a negative test matrix for the currently implemented worker result

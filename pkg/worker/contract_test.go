@@ -595,7 +595,7 @@ func TestWorkerProcessEnvironmentRejectsInvalidAndReservedNames(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar, WorkerAPIAddressEnv, WorkerAPITokenEnv} {
+	for _, name := range []string{"HOME", "PATH", "TMPDIR", "AI_TEAM_AGENT_PATH", WorkerAgentPathsEnvVar, WorkerEnvAllowVar, WorkerAPIAddressEnv, WorkerAPISocketEnv, WorkerAPITokenEnv} {
 		t.Run("reserved/"+name, func(t *testing.T) {
 			parent := []string{"PATH=/bin", WorkerEnvAllowVar + "=" + name}
 			if _, cleanup, err := workerProcessEnvironmentForOS(parent, nil, "linux"); err == nil {

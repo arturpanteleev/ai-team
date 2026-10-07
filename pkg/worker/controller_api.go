@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 
 const (
 	workerAPIAddressEnv  = "AI_TEAM_WORKER_API_ADDRESS"
+	workerAPISocketEnv   = "AI_TEAM_WORKER_API_SOCKET"
 	workerAPITokenEnv    = "AI_TEAM_WORKER_API_TOKEN"
 	workerAPIMaxBody     = 1 << 20
 	workerAPIErrorMarker = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
@@ -33,6 +36,7 @@ const (
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
+const WorkerAPISocketEnv = workerAPISocketEnv
 const WorkerAPITokenEnv = workerAPITokenEnv
 
 type workerAPIScope struct {
@@ -72,6 +76,7 @@ type workerAPIServer struct {
 	scope      workerAPIScope
 	token      string
 	listener   net.Listener
+	socketPath string
 	server     *http.Server
 	recorder   pipeline.Recorder
 	approvals  workerApprovalPort
@@ -81,22 +86,60 @@ type workerAPIServer struct {
 	nonces     map[string]time.Time
 }
 
-// startWorkerAPIServer creates a per-execution loopback capability. The worker
+// startWorkerAPIServer creates a per-execution loopback capability for
+// unsandboxed launches. Sandboxed Linux launches use startWorkerAPIServerUnix.
+// The worker
 // can report pipeline events and request/read approvals only for this run.
 func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerApprovalPort) (*workerAPIServer, error) {
+	return startWorkerAPIServerWithListener(job, recorder, approvals, func() (net.Listener, error) {
+		return net.Listen("tcp", "127.0.0.1:0")
+	}, rand.Reader)
+}
+
+func startWorkerAPIServerWithListener(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listen func() (net.Listener, error), random io.Reader) (*workerAPIServer, error) {
 	if recorder == nil || approvals == nil {
 		return nil, errors.New("worker controller API requires recorder and approval ports")
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := listen()
 	if err != nil {
 		return nil, err
 	}
-	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
+	return serveWorkerAPI(job, recorder, approvals, listener, "", random)
+}
+
+func startWorkerAPIServerUnix(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string) (*workerAPIServer, error) {
+	return startWorkerAPIServerUnixWith(job, recorder, approvals, socketPath, net.Listen, os.Chmod, rand.Reader)
+}
+
+func startWorkerAPIServerUnixWith(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string, listen func(string, string) (net.Listener, error), chmod func(string, os.FileMode) error, random io.Reader) (*workerAPIServer, error) {
+	if recorder == nil || approvals == nil {
+		return nil, errors.New("worker controller API requires recorder and approval ports")
+	}
+	if !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath {
+		return nil, errors.New("worker controller API socket path must be absolute and clean")
+	}
+	listener, err := listen("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("listen on worker controller API socket: %w", err)
+	}
+	if err := chmod(socketPath, 0600); err != nil {
 		_ = listener.Close()
+		_ = os.Remove(socketPath)
+		return nil, fmt.Errorf("secure worker controller API socket: %w", err)
+	}
+	return serveWorkerAPI(job, recorder, approvals, listener, socketPath, random)
+}
+
+func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listener net.Listener, socketPath string, random io.Reader) (*workerAPIServer, error) {
+	var nonce [32]byte
+	if _, err := io.ReadFull(random, nonce[:]); err != nil {
+		_ = listener.Close()
+		if socketPath != "" {
+			_ = os.Remove(socketPath)
+		}
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -106,6 +149,9 @@ func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerA
 func (s *workerAPIServer) close() {
 	if s != nil && s.server != nil {
 		_ = s.server.Close()
+		if s.socketPath != "" {
+			_ = os.Remove(s.socketPath)
+		}
 	}
 }
 func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -294,10 +340,22 @@ type WorkerAPIPort = workerAPIPort
 func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 	address, okA := os.LookupEnv(workerAPIAddressEnv)
 	token, okT := os.LookupEnv(workerAPITokenEnv)
-	if !okA || !okT || !strings.HasPrefix(address, "http://127.0.0.1:") || token == "" {
+	socketPath, hasSocket := os.LookupEnv(workerAPISocketEnv)
+	if !okA || !okT || token == "" {
 		return nil, errors.New("worker controller API environment is missing or invalid")
 	}
-	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	client := &http.Client{Timeout: 5 * time.Second}
+	switch {
+	case strings.HasPrefix(address, "http://127.0.0.1:") && !hasSocket:
+		// Compatibility transport for non-bubblewrap worker launches.
+	case address == "http://unix" && hasSocket && filepath.IsAbs(socketPath) && filepath.Clean(socketPath) == socketPath:
+		client.Transport = &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		}}
+	default:
+		return nil, errors.New("worker controller API environment is missing or invalid")
+	}
+	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, client: client}, nil
 }
 
 func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }

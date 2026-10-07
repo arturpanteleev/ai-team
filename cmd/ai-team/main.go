@@ -282,8 +282,9 @@ func cmdWorker() {
 		fatal("Невалидный worker job: %v", err)
 	}
 	_, apiAddressSet := os.LookupEnv(worker.WorkerAPIAddressEnv)
+	_, apiSocketSet := os.LookupEnv(worker.WorkerAPISocketEnv)
 	_, apiTokenSet := os.LookupEnv(worker.WorkerAPITokenEnv)
-	controllerAPI := apiAddressSet || apiTokenSet
+	controllerAPI := apiAddressSet || apiSocketSet || apiTokenSet
 	if controllerAPI && *dbPath != "" {
 		fatal("worker controller API mode rejects --db")
 	}

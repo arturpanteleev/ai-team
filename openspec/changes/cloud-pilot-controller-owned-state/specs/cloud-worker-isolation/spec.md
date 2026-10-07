@@ -91,7 +91,7 @@ filesystem until a separately verified runtime boundary is deployed.
 
 ### Requirement: Opt-in Linux controller-state filesystem masking
 
-The system MUST wrap a child in bubblewrap mount, user, PID, IPC, and UTS
+The system MUST wrap a child in bubblewrap mount, user, PID, IPC, UTS, and network
 namespaces when `AI_TEAM_WORKER_SANDBOX=bubblewrap` is set for a web or
 scheduler worker. The launcher MUST canonicalize the writable target after
 resolving symlinks and MUST reject it if it resolves to the filesystem root;
@@ -112,9 +112,25 @@ namespace; package presence alone is not sufficient. If host policy denies
 namespace setup, the invocation MUST fail closed. The feature is opt-in and
 Linux-only.
 
+In this mode, the worker MUST NOT share host TCP loopback or outbound TCP
+connectivity. The per-invocation scoped controller API MUST remain available
+only through a mode-0600 Unix-domain socket under the worker's private
+temporary directory. The socket MUST be removed when the invocation ends.
+The launcher MUST overlay `/run` with a private tmpfs so standard host pathname
+service sockets under `/run` are not exposed. Host Unix sockets at nonstandard
+paths outside `/run` remain a documented residual risk and MUST NOT be described
+as isolated by this slice. Before adding later mounts, the launcher MUST reject
+a canonical writable target, HOME/TMPDIR, or agent-registry source/destination
+that overlaps `/run` in either direction, including symlink aliases. This
+rejects paths equal to or beneath `/run` and paths that contain `/run` (such as
+`/`); otherwise a later bind could reveal host `/run` contents over the tmpfs. This network
+namespace has no external IP egress;
+remote model calls, including OpenAI/OpenCode providers, require a separately
+configured allowlisted egress proxy, which this slice does not provide.
+
 This slice does not isolate `.ai-team/runs` evidence/manifests, candidate or
-other target artifacts, agent registry files, host files other than the
-configured DB paths, or the network. In particular, the read-only `/` bind
+other target artifacts, agent registry files, or host files other than the
+configured DB paths. In particular, the read-only `/` bind
 still exposes other host paths. The worker `HOME` is a fresh per-invocation
 temporary directory, not the operator's home, although the operator's original
 home may still be reachable by its absolute host path through the `/` bind,
@@ -123,12 +139,28 @@ target remains writable. It MUST NOT
 be recorded as an `ENFORCED` containment receipt or represented as full cloud
 worker isolation.
 
-#### Scenario: Sandboxed worker accesses its workspace and controller state
+#### Scenario: Sandboxed worker accesses its workspace and controller API
 
 - **WHEN** a bubblewrap worker reads/writes a target file and tries to read the
   configured controller DB, WAL, SHM, rollback-journal, or lifecycle sentinel
 - **THEN** target access MUST continue to work
 - **AND** the controller DB bytes and lifecycle state MUST not be readable
+- **AND** the scoped controller API MUST remain callable over its Unix socket
+- **AND** TCP connections to host loopback and an external endpoint MUST fail
+- **AND** standard host pathname sockets under `/run` MUST not be visible
+
+#### Scenario: Remote model provider is configured without an egress proxy
+
+- **WHEN** an operator selects this opt-in mode with a remote model provider
+  and no separately configured allowlisted egress proxy
+- **THEN** provider network calls MUST fail in the isolated network namespace
+- **AND** documentation MUST state that remote model calls require that proxy
+
+#### Scenario: Controller API Unix socket setup fails
+
+- **WHEN** the controller cannot create or secure the per-invocation Unix socket
+- **THEN** the worker invocation MUST fail before the child starts
+- **AND** it MUST NOT fall back to a shared-network TCP API or unsandboxed launch
 
 #### Scenario: A protected database path has a hard-link alias
 

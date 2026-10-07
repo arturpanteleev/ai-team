@@ -25,7 +25,7 @@ fail-closed и не должен обходиться deployment flag-ом.
 
 PR #197 добавил SQLite-backed approval persistence. Worker application adapter
 отклоняет `Decide` и `ResolveDeferred`; authenticated controller route сохраняет
-полный store. Новый loopback API убирает `--db` из штатного worker launch и
+полный store. Новый scoped controller API убирает `--db` из штатного worker launch и
 пересылает recorder/approval операции в controller. Это снижает доступность
 прямой записи через приложение, но не является границей изоляции: worker всё
 ещё имеет ту же OS identity и доступ к target filesystem, откуда может
@@ -43,8 +43,11 @@ runtime baseline и переменные из `AI_TEAM_WORKER_ENV_ALLOW`; его
 
 В текущем implementation slice web и scheduler launcher больше не передают
 `--db` worker-процессу и не открывают в нём recorder/approval SQLite stores.
-Вместо этого controller поднимает на время одного invocation loopback API с
-одноразовым случайным bearer token. Каждый запрос несёт `run_id`, `operation`
+Вместо этого controller поднимает на время одного invocation API с одноразовым
+случайным bearer token. В Linux bubblewrap режиме API слушает Unix-domain socket
+в private `TMPDIR`; worker запускается в отдельном network namespace без host
+loopback и TCP egress. В остальных режимах API сохраняет loopback transport.
+Каждый запрос несёт `run_id`, `operation`
 и свежий `execution_id`; сервер принимает только точную scope-связку этого
 запуска. API позволяет сообщать pipeline recorder events и создавать/читать
 approvals только текущего run. Endpoint для decision/resolution и admin
@@ -183,11 +186,20 @@ backup/restore. Compose/Kubernetes policy проверяется на работ
 ### Bounded Linux bubblewrap filesystem slice
 
 Web/scheduler launchers can opt in with `AI_TEAM_WORKER_SANDBOX=bubblewrap`.
-On Linux, `ProcessEngine` wraps the child in bubblewrap user/PID/IPC/UTS and
-mount namespaces, exposes the host root read-only, rebinds the configured
+On Linux, `ProcessEngine` wraps the child in bubblewrap user/PID/IPC/UTS/network
+and mount namespaces, exposes the host root read-only, rebinds the configured
 target read-write, and masks the configured SQLite database plus sidecars and
-the lifecycle/legacy-approval state directories. The worker still needs the
-shared network namespace to reach its per-invocation loopback controller API.
+the lifecycle/legacy-approval state directories. A mode-0600 per-invocation
+Unix socket under the worker's private `TMPDIR` carries the existing scoped
+controller API, so the worker does not share the host network namespace. The
+launcher overlays `/run` with a fresh tmpfs to hide standard host pathname
+sockets there, such as Docker and system D-Bus sockets. Nonstandard host Unix
+sockets outside `/run` remain potentially reachable through the read-only root
+bind, subject to host permissions. Before creating later mounts, the launcher
+resolves writable target, worker HOME/TMPDIR, and each agent-registry source /
+destination and rejects any canonical path that overlaps `/run` in either
+direction: equality, descendants, and ancestors such as `/`. This prevents
+those mounts from reopening host `/run` over the tmpfs.
 Before process creation, the launcher resolves and cleans the target and rejects
 it if it resolves to `/`; otherwise the writable target bind would override the
 read-only host-root bind for the entire filesystem.
@@ -220,11 +232,16 @@ host home is not exposed through `HOME`;
 its original absolute path may still be reachable through the read-only `/`
 bind, subject to host permissions. The read-only root bind does not provide
 general host-secret isolation.
-The target is still writable, and network policy, independent OS identity,
-artifact transfer, recovery, backups, and deployment smoke remain open. Linux CI installs
-bubblewrap and runs a child-process probe that attempts to read DB/lifecycle
-sentinels while confirming target read/write still works. Passing this probe is
-evidence for only these specific mounts, not full worker isolation.
+The isolated network namespace has no external IP egress. Remote model calls,
+including OpenAI/OpenCode providers, do not work in this opt-in mode until a
+separately configured allowlisted egress proxy is available; this slice does
+not provide one. The target is still writable, and independent OS identity,
+artifact transfer, recovery, backups, and deployment smoke remain open. Linux
+CI installs bubblewrap and runs a child-process probe that checks the scoped
+controller API over the Unix socket, verifies host-loopback and outbound TCP
+connections fail, attempts to read DB/lifecycle sentinels, and confirms target
+read/write still works. Passing this probe is evidence for only these specific
+properties, not full worker isolation.
 
 1. Зафиксировать trust assumptions и модель attestation результата. **Зафиксировано
    здесь:** worker result/checks/artifacts недоверен; controller подтверждает

@@ -902,7 +902,13 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		!strings.Contains(string(events), `"type":"transition_selected"`) ||
 		!strings.Contains(string(events), `"stage":"architect"`) {
 		stateData, _ := os.ReadFile(statePath)
-		t.Fatalf("web resume повторил этап или сменил identity:\nevents:\n%s\nlifecycle:\n%s\nweb output:\n%s", events, stateData, serverOutput.String())
+		projectionResponse, projectionErr := client.Get(baseURL + "/api/pipelines")
+		var projectionData []byte
+		if projectionErr == nil {
+			projectionData, _ = io.ReadAll(projectionResponse.Body)
+			_ = projectionResponse.Body.Close()
+		}
+		t.Fatalf("web resume повторил этап или сменил identity:\nevents:\n%s\nlifecycle:\n%s\nweb projection (%v):\n%s\nweb output:\n%s", events, stateData, projectionErr, projectionData, serverOutput.String())
 	}
 }
 

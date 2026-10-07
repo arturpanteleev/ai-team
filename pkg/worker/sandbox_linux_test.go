@@ -645,6 +645,19 @@ func TestBubblewrapRejectsUnsafeControllerAttestationDirectory(t *testing.T) {
 }
 
 func TestBubblewrapPathAndFileValidationFailsClosed(t *testing.T) {
+	t.Run("command builder rejects invalid run ids before filesystem or runtime lookup", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		for _, runID := range []string{"", "../escape", "bad\nid"} {
+			t.Run(fmt.Sprintf("run id %q", runID), func(t *testing.T) {
+				_, err := bubblewrapWorkerCommand(context.Background(), exec.Command("worker"),
+					filepath.Join(t.TempDir(), "missing-target"), "unused.db", runID, nil, nil)
+				if err == nil || !strings.Contains(err.Error(), "bubblewrap run id") {
+					t.Fatalf("invalid run id must be rejected before target or bwrap lookup, got %v", err)
+				}
+			})
+		}
+	})
+
 	t.Run("missing bubblewrap", func(t *testing.T) {
 		path := t.TempDir()
 		t.Setenv("PATH", path)

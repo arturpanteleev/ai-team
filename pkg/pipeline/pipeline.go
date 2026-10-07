@@ -100,25 +100,31 @@ type CandidateEvidenceStore interface {
 	ReadCandidateEvidence(name string) (CandidateEvidence, error)
 }
 
+type AttemptManifestWriter interface {
+	WriteAttemptManifest(evidence.AttemptManifest) error
+}
+
 type Pipeline struct {
-	cfg                  *config.Config
-	reg                  *agent.Registry
-	notifier             notifier.Notifier
-	prompter             Prompter
-	newRuntime           runtime.Factory
-	recorder             Recorder
-	delivery             delivery.Service
-	approvals            ApprovalStore
-	lifecycle            lifecycle.StorePort
-	evidence             EvidenceStoreFactory
-	briefs               BriefStore
-	candidateMetadata    candidate.MetadataStore
-	usageEnvelopeWriter  UsageEnvelopeWriter
-	terminalRecordWriter TerminalRecordWriter
-	attestationWriter    AttestationWriter
-	containmentWriter    ContainmentReceiptWriter
-	candidateEvidence    CandidateEvidenceStore
-	reportsDir           string
+	cfg                   *config.Config
+	reg                   *agent.Registry
+	notifier              notifier.Notifier
+	prompter              Prompter
+	newRuntime            runtime.Factory
+	recorder              Recorder
+	delivery              delivery.Service
+	approvals             ApprovalStore
+	lifecycle             lifecycle.StorePort
+	evidence              EvidenceStoreFactory
+	briefs                BriefStore
+	candidateMetadata     candidate.MetadataStore
+	usageEnvelopeWriter   UsageEnvelopeWriter
+	terminalRecordWriter  TerminalRecordWriter
+	attestationWriter     AttestationWriter
+	containmentWriter     ContainmentReceiptWriter
+	candidateEvidence     CandidateEvidenceStore
+	attemptManifestSource evidence.AttemptManifestSource
+	attemptManifestWriter AttemptManifestWriter
+	reportsDir            string
 }
 
 type Option func(*Pipeline)
@@ -202,6 +208,15 @@ func WithContainmentReceiptWriter(writer ContainmentReceiptWriter) Option {
 
 func WithCandidateEvidenceStore(store CandidateEvidenceStore) Option {
 	return func(p *Pipeline) { p.candidateEvidence = store }
+}
+
+// WithAttemptManifestStore routes canonical manifest reads and writes through
+// a controller-owned source while the legacy snapshots remain in the run tree.
+func WithAttemptManifestStore(source evidence.AttemptManifestSource, writer AttemptManifestWriter) Option {
+	return func(p *Pipeline) {
+		p.attemptManifestSource = source
+		p.attemptManifestWriter = writer
+	}
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
@@ -543,7 +558,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		// OPS-3: fail-closed проверка применимой evidence chain/snapshots перед
 		// продолжением. Если цепочка/снимки повреждены — отклоняем resume и явно
 		// фиксируем причину в evidence (resume_blocked), пока лог аппендабелен.
-		verifyErr := evidence.VerifyResumeEvidence(runEvidenceDir)
+		verifyErr := evidence.VerifyResumeEvidenceWithAttemptManifestSource(runEvidenceDir, p.attemptManifestSource)
 		if verifyErr != nil {
 			recErr := &evidence.ResumeEvidenceError{}
 			if errors.As(verifyErr, &recErr) && recErr.Reason != evidence.ReasonEventChain &&
@@ -553,7 +568,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", verifyErr)
 		}
-		evidenceStore, manifest, replayedRun, err = p.evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
+		if sourceFactory, ok := p.evidence.(attemptManifestResumeFactory); ok {
+			evidenceStore, manifest, replayedRun, err = sourceFactory.ResumeWithAttemptManifestSource(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID, p.attemptManifestSource)
+		} else {
+			evidenceStore, manifest, replayedRun, err = p.evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
+		}
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
 		}
@@ -592,14 +611,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 		for _, attempt := range replayedRun.Attempts {
 			if attempt.ManifestSHA256 != "" {
-				manifestPath := filepath.Join(evidenceStore.RunDir(), "attempts", attempt.AttemptID, "manifest.json")
-				data, readErr := safeio.ReadRegularFile(manifestPath, maxArtifactFileBytes)
+				_, attemptManifest, readErr := evidence.ReadAttemptManifest(p.attemptManifestSource, evidenceStore.RunDir(), runID, attempt.AttemptID)
 				if readErr != nil {
 					return RunResult{}, readErr
-				}
-				var attemptManifest evidence.AttemptManifest
-				if json.Unmarshal(data, &attemptManifest) != nil {
-					return RunResult{}, fmt.Errorf("resume attempt manifest %s повреждён", attempt.AttemptID)
 				}
 				resumeMutations = append(resumeMutations, attemptManifest.Mutations...)
 			}

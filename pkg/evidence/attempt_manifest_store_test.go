@@ -1,0 +1,164 @@
+package evidence
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
+)
+
+func testAttemptManifest(runID, attemptID string) AttemptManifest {
+	now := time.Now().UTC()
+	return AttemptManifest{SchemaVersion: SchemaVersion, RunID: runID, AttemptID: attemptID,
+		Stage: "analyst", StageIndex: 1, StartedAt: now.Add(-time.Minute), FinishedAt: now,
+		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+}
+
+func TestReservedAttemptManifestStoreReadsCanonicalAndPreservesLegacyFallback(t *testing.T) {
+	target := t.TempDir()
+	runID, attemptID := "manifest-source-run", "attempt-1"
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	local := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{"schema_version":7,"run_id":"manifest-source-run","attempt_id":"attempt-1","stage":"legacy"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := ReadAttemptManifest(nil, runDir, runID, attemptID)
+	if err != nil || got.Stage != "legacy" {
+		t.Fatalf("legacy filesystem fallback failed: manifest=%+v err=%v", got, err)
+	}
+
+	store := ControllerAttemptManifestStore{TargetDir: target}
+	if err := store.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadAttemptManifest(nil, runDir, runID, attemptID); err == nil {
+		t.Fatal("reserved run fell back to target-side manifest when canonical record was missing")
+	}
+	manifest := testAttemptManifest(runID, attemptID)
+	if err := store.Write(runID, manifest); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err = ReadAttemptManifest(nil, runDir, runID, attemptID)
+	if err != nil || got.Stage != manifest.Stage {
+		t.Fatalf("reserved canonical manifest read failed: manifest=%+v err=%v", got, err)
+	}
+	reservation := filepath.Join(target, ".ai-team", "state", "attempt-manifests", runID, attemptManifestReservationName)
+	if err := os.Remove(reservation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadAttemptManifest(nil, runDir, runID, attemptID); err == nil {
+		t.Fatal("missing reservation marker fell back to a target-side manifest")
+	}
+}
+
+func TestControllerAttemptManifestStoreEnforcesIdentityRetryConflictAndSize(t *testing.T) {
+	target := t.TempDir()
+	store := ControllerAttemptManifestStore{TargetDir: target}
+	runID, attemptID := "manifest-write-run", "attempt-1"
+	if err := store.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	manifest := testAttemptManifest(runID, attemptID)
+	if err := store.Write(runID, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write(runID, manifest); err != nil {
+		t.Fatalf("exact retry must be idempotent: %v", err)
+	}
+	conflict := manifest
+	conflict.Status = "failed"
+	if err := store.Write(runID, conflict); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflicting overwrite was accepted: %v", err)
+	}
+	if err := store.Write("other-run", manifest); err == nil {
+		t.Fatal("cross-run write was accepted")
+	}
+	invalid := manifest
+	invalid.AttemptID = "../escape"
+	if err := store.Write(runID, invalid); err == nil {
+		t.Fatal("path traversal attempt id was accepted")
+	}
+	large := manifest
+	large.Error = strings.Repeat("x", MaxAttemptManifestSize)
+	if err := store.Write(runID, large); err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("oversized typed manifest was accepted: %v", err)
+	}
+}
+
+func TestControllerAttemptManifestStoreRejectsSymlinkedRunDirectory(t *testing.T) {
+	target := t.TempDir()
+	store := ControllerAttemptManifestStore{TargetDir: target}
+	root, err := safeio.EnsureDir(target, ".ai-team", "state", "attempt-manifests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "manifest-symlink-run")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := store.Reserve("manifest-symlink-run"); err == nil {
+		t.Fatal("reservation followed a run-directory symlink")
+	}
+}
+
+func TestReservedCanonicalAttemptManifestSupportsReplayAndResumeWithoutLocalManifest(t *testing.T) {
+	target := t.TempDir()
+	runID, attemptID := "canonical-resume-run", "attempt-1"
+	root := filepath.Join(target, ".ai-team", "runs")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Start(root, testRunManifest(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := store.Append(Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "attempt_started", Stage: "analyst", AttemptID: attemptID, Timestamp: started.Add(time.Second), Data: map[string]any{"stage_index": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishAttempt(AttemptManifest{AttemptID: attemptID, Stage: "analyst", StageIndex: 1, StartedAt: started.Add(time.Second),
+		FinishedAt: started.Add(2 * time.Second), Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed"}, target, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	digest, _, err := AttemptManifestDigest(nil, store.RunDir(), runID, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "attempt_finished", Stage: "analyst", AttemptID: attemptID, Timestamp: started.Add(2 * time.Second), Data: map[string]any{
+		"status": "passed", "execution": "succeeded", "decision": "approved", "outcome": "passed", "manifest_sha256": digest,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, manifest, err := ReadAttemptManifest(FilesystemAttemptManifestSource(), store.RunDir(), runID, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := ControllerAttemptManifestStore{TargetDir: target}
+	if err := canonical.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := canonical.Write(runID, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.RunDir(), "attempts", attemptID, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReplayEventLog(filepath.Join(store.RunDir(), "events.jsonl"), runID); err != nil {
+		t.Fatalf("replay did not use canonical manifest: %v", err)
+	}
+	if err := VerifyResumeEvidence(store.RunDir()); err != nil {
+		t.Fatalf("resume verification did not use canonical manifest: %v", err)
+	}
+	if _, _, replayed, err := Resume(root, runID); err != nil || len(replayed.Attempts) != 1 {
+		t.Fatalf("resume did not use canonical manifest: attempts=%+v err=%v", replayed.Attempts, err)
+	}
+}

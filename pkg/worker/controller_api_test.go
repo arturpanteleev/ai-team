@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -41,6 +43,163 @@ type apiApprovalStore struct {
 	createErr   error
 	loadErr     error
 	createCalls int
+}
+
+func TestWorkerAPIStoresAttemptManifestThroughScopedControllerPort(t *testing.T) {
+	target := t.TempDir()
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-%d.sock", os.Getpid()))
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attempt-api-run", TargetDir: target, ExecutionID: strings.Repeat("c", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPIAttemptManifestStore(port)
+	now := time.Now().UTC()
+	manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: job.RunID, AttemptID: "attempt-1", Stage: "analyst", StageIndex: 1,
+		StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+	if err := store.WriteAttemptManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.ReadAttemptManifest("", job.RunID, manifest.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, got, err := evidence.ReadAttemptManifest(memoryAttemptManifestSourceForWorker{data}, "", job.RunID, manifest.AttemptID); err != nil || got.AttemptID != manifest.AttemptID {
+		t.Fatalf("API read returned invalid manifest: %+v err=%v", got, err)
+	}
+	if err := store.WriteAttemptManifest(manifest); err != nil {
+		t.Fatalf("API exact retry failed: %v", err)
+	}
+	manifest.Status = "failed"
+	if err := store.WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("API conflicting retry accepted: %v", err)
+	}
+}
+
+func TestWorkerAPIAttemptManifestTransportBoundsAtStorageLimit(t *testing.T) {
+	target := t.TempDir()
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-boundary-%d.sock", os.Getpid()))
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attempt-api-boundary", TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPIAttemptManifestStore(port)
+	manifestAtSize := func(attemptID string, size int) evidence.AttemptManifest {
+		manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: job.RunID, AttemptID: attemptID, Stage: "analyst", StageIndex: 1,
+			StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(), Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+		manifest.Error = "x"
+		base, marshalErr := json.MarshalIndent(manifest, "", "  ")
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		manifest.Error = strings.Repeat("x", size-len(base))
+		encoded, marshalErr := json.MarshalIndent(manifest, "", "  ")
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		encoded = append(encoded, '\n')
+		if len(encoded) != size {
+			t.Fatalf("stored manifest fixture is %d bytes, want %d", len(encoded), size)
+		}
+		return manifest
+	}
+
+	// The maximum store-sized record must survive both base64 JSON envelopes.
+	maxManifest := manifestAtSize("at-store-limit", evidence.MaxAttemptManifestSize)
+	if err := store.WriteAttemptManifest(maxManifest); err != nil {
+		t.Fatalf("maximum accepted attempt manifest write failed: %v", err)
+	}
+	got, err := store.ReadAttemptManifest("", job.RunID, maxManifest.AttemptID)
+	if err != nil {
+		t.Fatalf("maximum accepted attempt manifest read failed: %v", err)
+	}
+	want, err := json.MarshalIndent(maxManifest, "", "  ")
+	want = append(want, '\n')
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("maximum manifest read mismatch: bytes=%d want=%d err=%v", len(got), len(want), err)
+	}
+
+	// The transport admits this request, then the controller store rejects it
+	// because its canonical JSON representation exceeds the storage maximum.
+	tooLargeForStore := manifestAtSize("over-store-limit", evidence.MaxAttemptManifestSize+1)
+	if err := store.WriteAttemptManifest(tooLargeForStore); err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("manifest above storage maximum was not rejected by store: %v", err)
+	}
+
+	// This record exceeds the manifest-specific API payload allowance. The
+	// server must reject it before dispatch, without raising other API limits.
+	tooLargeForAPI := manifestAtSize("over-api-limit", 11<<20)
+	if err := store.WriteAttemptManifest(tooLargeForAPI); err == nil || !strings.Contains(err.Error(), "invalid payload") {
+		t.Fatalf("manifest above API payload maximum was not rejected: %v", err)
+	}
+}
+
+func TestWorkerAPIAttemptManifestPortPreservesUnreservedLegacyRuns(t *testing.T) {
+	target := t.TempDir()
+	runID, attemptID := "attempt-api-legacy", "attempt-1"
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "analyst", StageIndex: 1,
+		StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(), Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-legacy-%d.sock", os.Getpid()))
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewWorkerAPIAttemptManifestStore(port)
+	if _, err := store.ReadAttemptManifest("", runID, attemptID); err != nil {
+		t.Fatalf("legacy filesystem read through API failed: %v", err)
+	}
+	manifest.Status = "failed"
+	if err := store.WriteAttemptManifest(manifest); err != nil {
+		t.Fatalf("legacy filesystem write compatibility failed: %v", err)
+	}
+	loaded, err := os.ReadFile(manifestPath)
+	if err != nil || string(loaded) != string(data) {
+		t.Fatalf("legacy target-side manifest was unexpectedly changed: %v", err)
+	}
+}
+
+type memoryAttemptManifestSourceForWorker struct{ data []byte }
+
+func (s memoryAttemptManifestSourceForWorker) ReadAttemptManifest(_, _, _ string) ([]byte, error) {
+	return s.data, nil
 }
 
 func (s *apiApprovalStore) Create(v approval.PendingApproval) (approval.PendingApproval, error) {

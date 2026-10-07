@@ -3,7 +3,6 @@ package pipeline
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,13 +59,11 @@ func writeReturnFeedback(targetDir string, value approval.PendingApproval) (runt
 
 func returnArtifactReferences(targetDir string, value approval.PendingApproval) (string, error) {
 	runRoot := filepath.Join(targetDir, ".ai-team", "runs", value.RunID)
-	manifestPath := filepath.Join(runRoot, "attempts", value.AttemptID, "manifest.json")
-	data, err := safeio.ReadRegularFile(manifestPath, maxArtifactFileBytes)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runRoot, value.RunID, value.AttemptID)
 	if err != nil {
 		return "", fmt.Errorf("return feedback attempt manifest: %w", err)
 	}
-	var manifest evidence.AttemptManifest
-	if err := json.Unmarshal(data, &manifest); err != nil || manifest.RunID != value.RunID || manifest.AttemptID != value.AttemptID {
+	if manifest.RunID != value.RunID || manifest.AttemptID != value.AttemptID {
 		return "", fmt.Errorf("return feedback attempt manifest identity mismatch")
 	}
 	var builder strings.Builder

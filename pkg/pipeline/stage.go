@@ -101,6 +101,17 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			rs.deriveStageState(&r)
 		} else {
 			manifestPublished = true
+			if rs.p.attemptManifestWriter != nil {
+				_, canonicalCandidate, readErr := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), rs.evidence.RunDir(), rs.runID, attemptID)
+				if readErr == nil {
+					readErr = rs.p.attemptManifestWriter.WriteAttemptManifest(canonicalCandidate)
+				}
+				if readErr != nil {
+					r.Err = errors.Join(r.Err, fmt.Errorf("controller attempt manifest %s: %w", attemptID, readErr))
+					rs.deriveStageState(&r)
+					manifestPublished = false
+				}
+			}
 		}
 		cleanupEvidenceInputs()
 		data := map[string]any{
@@ -108,8 +119,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			"outcome": r.State.Outcome, "verdict": r.Verdict,
 		}
 		if manifestPublished {
-			manifestPath := filepath.Join(rs.evidence.RunDir(), "attempts", attemptID, "manifest.json")
-			_, _, digest, digestErr := evidence.ArtifactDigest(manifestPath)
+			digest, _, digestErr := evidence.AttemptManifestDigest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, attemptID)
 			if digestErr != nil {
 				r.Err = errors.Join(r.Err, fmt.Errorf("attempt manifest digest %s: %w", attemptID, digestErr))
 				rs.deriveStageState(&r)

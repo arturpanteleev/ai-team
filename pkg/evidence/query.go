@@ -35,6 +35,11 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 			continue
 		}
 		runDir := filepath.Join(runsRoot, entry.Name())
+		manifestSource, sourceErr := defaultAttemptManifestSource(runDir, entry.Name())
+		if sourceErr != nil {
+			return DeliveredRun{}, false, sourceErr
+		}
+		_, reserved := manifestSource.(ControllerAttemptManifestStore)
 		runData, readErr := os.ReadFile(filepath.Join(runDir, "run.json"))
 		if readErr != nil {
 			continue
@@ -76,12 +81,11 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 			if !attemptEntry.IsDir() {
 				continue
 			}
-			attemptData, readErr := os.ReadFile(filepath.Join(runDir, "attempts", attemptEntry.Name(), "manifest.json"))
+			_, attempt, readErr := ReadAttemptManifest(nil, runDir, manifest.RunID, attemptEntry.Name())
 			if readErr != nil {
-				continue
-			}
-			var attempt AttemptManifest
-			if jsonErr := json.Unmarshal(attemptData, &attempt); jsonErr != nil {
+				if reserved {
+					return DeliveredRun{}, false, readErr
+				}
 				continue
 			}
 			// Delivery-стадию опознаём по наличию delivery-результата, а не

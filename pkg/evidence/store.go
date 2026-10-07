@@ -593,18 +593,10 @@ func VerifyCheckEvidence(runsRoot, runID, checkDigest, workspaceDigest string) e
 		if !entry.IsDir() {
 			continue
 		}
-		manifestPath := filepath.Join(attemptsDir, entry.Name(), "manifest.json")
-		info, statErr := os.Lstat(manifestPath)
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		data, readErr := os.ReadFile(manifestPath)
+		runDir := filepath.Join(runsRoot, runID)
+		_, manifest, readErr := ReadAttemptManifest(nil, runDir, runID, entry.Name())
 		if readErr != nil {
 			return readErr
-		}
-		var manifest AttemptManifest
-		if json.Unmarshal(data, &manifest) != nil || manifest.SchemaVersion != SchemaVersion || manifest.RunID != runID {
-			continue
 		}
 		for _, check := range manifest.Checks {
 			if checks.VerifyResultDigest(check) && check.EvidenceDigest == checkDigest && check.WorkspaceDigestBefore == workspaceDigest && check.WorkspaceDigestAfter == workspaceDigest &&

@@ -19,7 +19,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
-	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
@@ -489,16 +488,14 @@ func (s *Server) latestAttemptRevisions(runID, attemptID string) (map[string]str
 	if !safeIdentity(runID) || !safeIdentity(attemptID) {
 		return nil, nil
 	}
-	manifestPath := filepath.Join(s.runRoot, runID, "attempts", attemptID, "manifest.json")
-	data, err := safeio.ReadRegularFile(manifestPath, maxArtifactSize)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, filepath.Join(s.runRoot, runID), runID, attemptID)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var manifest evidence.AttemptManifest
-	if err := json.Unmarshal(data, &manifest); err != nil || manifest.RunID != runID || manifest.AttemptID != attemptID {
+	if manifest.RunID != runID || manifest.AttemptID != attemptID {
 		return nil, errors.New("approval attempt manifest identity mismatch")
 	}
 	selection := make(map[string]string)

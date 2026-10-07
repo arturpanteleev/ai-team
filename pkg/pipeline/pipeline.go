@@ -19,6 +19,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -87,6 +88,10 @@ type TerminalRecordWriter interface {
 // controller-owned storage for sandboxed workers.
 type AttestationWriter interface{ WriteAttestation(*attest.Statement) error }
 
+type ContainmentReceiptWriter interface {
+	WriteContainmentReceipt(containment.Receipt) error
+}
+
 type Pipeline struct {
 	cfg                  *config.Config
 	reg                  *agent.Registry
@@ -103,6 +108,7 @@ type Pipeline struct {
 	usageEnvelopeWriter  UsageEnvelopeWriter
 	terminalRecordWriter TerminalRecordWriter
 	attestationWriter    AttestationWriter
+	containmentWriter    ContainmentReceiptWriter
 	reportsDir           string
 }
 
@@ -179,6 +185,10 @@ func WithTerminalRecordWriter(writer TerminalRecordWriter) Option {
 
 func WithAttestationWriter(writer AttestationWriter) Option {
 	return func(p *Pipeline) { p.attestationWriter = writer }
+}
+
+func WithContainmentReceiptWriter(writer ContainmentReceiptWriter) Option {
+	return func(p *Pipeline) { p.containmentWriter = writer }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {

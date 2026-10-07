@@ -117,6 +117,22 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := appendPrivateDirectoryMount(&args, attestationDir, true); err != nil {
 		return nil, err
 	}
+	containmentDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "containment")
+	if err != nil {
+		return nil, fmt.Errorf("prepare controller containment mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, containmentDir, true); err != nil {
+		return nil, err
+	}
+	containmentRecordPath := filepath.Join(containmentDir, runID+".json")
+	if info, statErr := os.Lstat(containmentRecordPath); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("controller containment path %q must be a regular file", containmentRecordPath)
+		}
+		args = append(args, "--ro-bind", "/dev/null", containmentRecordPath)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect controller containment path: %w", statErr)
+	}
 	attestationRecordPath := filepath.Join(attestationDir, runID+".json")
 	if info, statErr := os.Lstat(attestationRecordPath); statErr == nil {
 		if !info.Mode().IsRegular() {

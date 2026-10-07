@@ -2,6 +2,9 @@ package containment
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -131,5 +134,41 @@ func TestReceiptIsEnforced(t *testing.T) {
 	}
 	if !allEnforced.IsEnforced() {
 		t.Fatal("все четыре ENFORCED оси должны давать IsEnforced=true")
+	}
+}
+
+func TestControllerReceiptStoreValidatesIdempotencyAndConflicts(t *testing.T) {
+	target := t.TempDir()
+	store := ControllerReceiptStore{TargetDir: target}
+	receipt := DefaultTrustedLocalReceipt()
+	if err := store.Write("containment-run", receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("containment-run", receipt); err != nil {
+		t.Fatalf("exact retry: %v", err)
+	}
+	loaded, err := store.Read("containment-run")
+	if err != nil || !loaded.IsTrustedLocal() {
+		t.Fatalf("stored receipt: %+v, err=%v", loaded, err)
+	}
+	conflicting := UnavailableReceipt()
+	if err := store.Write("containment-run", conflicting); err == nil {
+		t.Fatal("conflicting rewrite was accepted")
+	}
+	if err := store.Write("../escape", receipt); err == nil {
+		t.Fatal("invalid run ID was accepted")
+	}
+	if err := store.Write("invalid-receipt", Receipt{Profile: "unknown"}); err == nil {
+		t.Fatal("invalid receipt was accepted")
+	}
+	path := filepath.Join(target, ".ai-team", "state", "containment", "containment-run.json")
+	if err := os.WriteFile(path, []byte(`{"profile":"unknown","axes":{},"unexpected":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("containment-run"); err == nil {
+		t.Fatal("corrupt controller receipt was accepted")
+	}
+	if _, err := store.Read("missing-run"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing receipt error=%v, want os.ErrNotExist", err)
 	}
 }

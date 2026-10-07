@@ -304,6 +304,7 @@ func cmdWorker() {
 	var usageEnvelopeWriter pipeline.UsageEnvelopeWriter
 	var terminalRecordWriter pipeline.TerminalRecordWriter
 	var attestationWriter pipeline.AttestationWriter
+	var containmentReceiptWriter pipeline.ContainmentReceiptWriter
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -319,6 +320,7 @@ func cmdWorker() {
 			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
 			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
+			containmentReceiptWriter = worker.NewWorkerAPIContainmentReceiptWriter(apiPort)
 		}
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
@@ -396,6 +398,9 @@ func cmdWorker() {
 	}
 	if attestationWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttestationWriter(attestationWriter))
+	}
+	if containmentReceiptWriter != nil {
+		engineOptions = append(engineOptions, pipeline.WithContainmentReceiptWriter(containmentReceiptWriter))
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1526,15 +1531,23 @@ func cmdUsage() {
 	}
 	logging.Printf("Токены:   %s\n\n", tokens)
 	// Containment receipt (V0-P1-4) — если присутствует.
-	if cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20); cerr == nil {
-		var receipt containment.Receipt
-		if err := json.Unmarshal(cdata, &receipt); err == nil {
-			logging.Printf("Containment (%s):\n", receipt.Profile)
-			for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
-				logging.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
-			}
-			fmt.Println()
+	receipt, receiptErr := containment.ControllerReceiptStore{TargetDir: absolute}.Read(runID)
+	if errors.Is(receiptErr, os.ErrNotExist) {
+		cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20)
+		if cerr == nil {
+			receiptErr = json.Unmarshal(cdata, &receipt)
+		} else {
+			receiptErr = cerr
 		}
+	}
+	if receiptErr == nil {
+		logging.Printf("Containment (%s):\n", receipt.Profile)
+		for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
+			logging.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
+		}
+		fmt.Println()
+	} else if !errors.Is(receiptErr, os.ErrNotExist) {
+		fatal("Повреждённый containment receipt: %v", receiptErr)
 	}
 	if err := envelope.Format(os.Stdout); err != nil {
 		fatal("Ошибка вывода usage: %v", err)

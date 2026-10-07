@@ -21,6 +21,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -59,25 +60,26 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID             string                   `json:"run_id,omitempty"`
-	A                 string                   `json:"a,omitempty"`
-	B                 string                   `json:"b,omitempty"`
-	C                 string                   `json:"c,omitempty"`
-	Index             int                      `json:"index,omitempty"`
-	At                time.Time                `json:"at,omitempty"`
-	Data              map[string]any           `json:"data,omitempty"`
-	IDs               []string                 `json:"ids,omitempty"`
-	Stage             notifier.StageResult     `json:"stage,omitempty"`
-	Error             string                   `json:"error,omitempty"`
-	Approval          approval.PendingApproval `json:"approval,omitempty"`
-	Lifecycle         lifecycle.State          `json:"lifecycle,omitempty"`
-	Previous          lifecycle.State          `json:"previous_lifecycle,omitempty"`
-	BriefVersion      pipeline.BriefVersion    `json:"brief_version,omitempty"`
-	BriefContent      []byte                   `json:"brief_content,omitempty"`
-	CandidateMetadata candidate.Metadata       `json:"candidate_metadata,omitempty"`
-	Usage             metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
-	TerminalRecord    delivery.TerminalRecord  `json:"terminal_record,omitempty"`
-	Attestation       attest.Statement         `json:"attestation,omitempty"`
+	RunID              string                   `json:"run_id,omitempty"`
+	A                  string                   `json:"a,omitempty"`
+	B                  string                   `json:"b,omitempty"`
+	C                  string                   `json:"c,omitempty"`
+	Index              int                      `json:"index,omitempty"`
+	At                 time.Time                `json:"at,omitempty"`
+	Data               map[string]any           `json:"data,omitempty"`
+	IDs                []string                 `json:"ids,omitempty"`
+	Stage              notifier.StageResult     `json:"stage,omitempty"`
+	Error              string                   `json:"error,omitempty"`
+	Approval           approval.PendingApproval `json:"approval,omitempty"`
+	Lifecycle          lifecycle.State          `json:"lifecycle,omitempty"`
+	Previous           lifecycle.State          `json:"previous_lifecycle,omitempty"`
+	BriefVersion       pipeline.BriefVersion    `json:"brief_version,omitempty"`
+	BriefContent       []byte                   `json:"brief_content,omitempty"`
+	CandidateMetadata  candidate.Metadata       `json:"candidate_metadata,omitempty"`
+	Usage              metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
+	TerminalRecord     delivery.TerminalRecord  `json:"terminal_record,omitempty"`
+	Attestation        attest.Statement         `json:"attestation,omitempty"`
+	ContainmentReceipt *containment.Receipt     `json:"containment_receipt,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -115,6 +117,7 @@ type workerAPIServer struct {
 	absences                candidate.AbsenceMarkerStore
 	usage                   metrics.FileUsageEnvelopeStore
 	attestations            attest.ControllerStore
+	containmentReceipts     containment.ControllerReceiptStore
 	usageAllowed            bool
 	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
@@ -227,6 +230,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	api.usageAllowed = socketPath != ""
 	api.attestations = attest.ControllerStore{TargetDir: canonicalTarget}
+	api.containmentReceipts = containment.ControllerReceiptStore{TargetDir: canonicalTarget}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -531,6 +535,19 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, err
 		}
 		return nil, s.attestations.Write(s.scope.RunID, raw)
+	case "containment.write":
+		if !s.usageAllowed || s.containmentReceipts.TargetDir == "" {
+			return nil, errors.New("controller containment writes require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API containment write is not allowed for operation %q", s.scope.Operation)
+		}
+		if c.ContainmentReceipt == nil {
+			return nil, errors.New("containment receipt is required")
+		}
+		return nil, s.containmentReceipts.Write(s.scope.RunID, *c.ContainmentReceipt)
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -673,6 +690,10 @@ func (p *workerAPIPort) SupportsControllerAttestationStore() bool {
 	return p != nil && p.SupportsControllerUsageStore()
 }
 
+func (p *workerAPIPort) SupportsControllerContainmentStore() bool {
+	return p != nil && p.SupportsControllerUsageStore()
+}
+
 type workerAPIAttestationWriter struct{ port *workerAPIPort }
 type WorkerAPIAttestationWriter = workerAPIAttestationWriter
 
@@ -680,13 +701,30 @@ func NewWorkerAPIAttestationWriter(port *WorkerAPIPort) pipeline.AttestationWrit
 	return &workerAPIAttestationWriter{port: port}
 }
 func (w *workerAPIAttestationWriter) WriteAttestation(statement *attest.Statement) error {
-	if w == nil || w.port == nil || !w.port.SupportsControllerAttestationStore() {
+	if w == nil || w.port == nil || !w.port.SupportsControllerContainmentStore() {
 		return errors.New("worker attestation API unavailable")
 	}
 	if statement == nil || statement.Predicate.RunID != w.port.scope.RunID {
 		return errors.New("worker attestation API run mismatch")
 	}
 	return w.port.call("attestation.write", workerAPICall{Attestation: *statement}, nil)
+}
+
+type workerAPIContainmentReceiptWriter struct{ port *workerAPIPort }
+type WorkerAPIContainmentReceiptWriter = workerAPIContainmentReceiptWriter
+
+func NewWorkerAPIContainmentReceiptWriter(port *WorkerAPIPort) pipeline.ContainmentReceiptWriter {
+	return &workerAPIContainmentReceiptWriter{port: port}
+}
+
+func (w *workerAPIContainmentReceiptWriter) WriteContainmentReceipt(receipt containment.Receipt) error {
+	if w == nil || w.port == nil || !w.port.SupportsControllerAttestationStore() {
+		return errors.New("worker containment API unavailable")
+	}
+	if err := receipt.Validate(); err != nil {
+		return err
+	}
+	return w.port.call("containment.write", workerAPICall{ContainmentReceipt: &receipt}, nil)
 }
 
 type workerAPITerminalRecordWriter struct{ port *workerAPIPort }

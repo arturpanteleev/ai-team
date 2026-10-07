@@ -368,6 +368,22 @@ ai-team worker --target <путь> [--db <абсолютный путь>]
 репозитория и лимитами файловой системы, процессов и сети: сам процесс —
 не песочница.
 
+Дочерний worker не получает всё окружение контроллера. Переменные runtime или
+провайдера, которые нужны внутри worker, разрешаются отдельным списком имён
+`AI_TEAM_WORKER_ENV_ALLOW`. Worker передаёт эти же имена своему runtime через
+`AI_TEAM_HARNESS_ENV_ALLOW`. Например:
+
+```bash
+export OPENAI_API_KEY='<ваш-ключ>'
+AI_TEAM_WORKER_ENV_ALLOW=OPENAI_API_KEY ai-team web --worker-command /opt/ai-team/bin/ai-team
+```
+
+Список содержит имена, не значения; `HOME`, `TMPDIR` и XDG config/cache/data/state
+не могут быть переопределены allow-list. Worker получает временный пустой
+`HOME`, удаляемый после задания. Это не запрещает тому же OS-пользователю читать
+доступные файлы и не заменяет изоляцию ОС. Не разрешайте имена control-plane
+секретов без конкретной необходимости.
+
 ### ai-team scheduler-worker
 
 Забирает задания из постоянной очереди (SQLite) и исполняет каждое через

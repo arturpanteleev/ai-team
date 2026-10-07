@@ -193,6 +193,7 @@ func TestProcessEngineRejectsWrongJobAndOperationResults(t *testing.T) {
 	for _, mode := range []string{"wrong-run", "wrong-operation", "wrong-execution"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("AI_TEAM_WORKER_TEST_MODE", mode)
+			allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MODE")
 			engine, err := NewProcessEngine(
 				[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
 				target, filepath.Join(target, "web.db"),
@@ -217,6 +218,7 @@ func TestProcessEngineRejectsReplayedExecutionResult(t *testing.T) {
 	replayPath := filepath.Join(t.TempDir(), "execution-id")
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "replay-execution")
 	t.Setenv("AI_TEAM_WORKER_REPLAY_ID", replayPath)
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MODE", "AI_TEAM_WORKER_REPLAY_ID")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
 		target, filepath.Join(target, "web.db"),
@@ -241,6 +243,7 @@ func TestProcessEngineAssignsFreshExecutionIdentityAndUpgradesQueuedV1(t *testin
 	marker := filepath.Join(t.TempDir(), "worker-job.json")
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "echo")
 	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MODE", "AI_TEAM_WORKER_TEST_MARKER")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
 		target, filepath.Join(target, "web.db"),
@@ -293,6 +296,7 @@ func TestNewProcessEngineRejectsUnusableConfig(t *testing.T) {
 // `ai-team worker`.
 func newTestEngine(t *testing.T, target string) *ProcessEngine {
 	t.Helper()
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MODE", "AI_TEAM_WORKER_TEST_MARKER", "AI_TEAM_WORKER_REPLAY_ID")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),
@@ -301,6 +305,114 @@ func newTestEngine(t *testing.T, target string) *ProcessEngine {
 		t.Fatal(err)
 	}
 	return engine
+}
+
+func allowWorkerTestEnvironment(t *testing.T, names ...string) {
+	t.Helper()
+	t.Setenv(WorkerEnvAllowVar, strings.Join(names, ","))
+}
+
+func TestProcessEngineDoesNotInheritControllerSecrets(t *testing.T) {
+	target := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "worker-environment.json")
+	controllerHome := t.TempDir()
+	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "env")
+	t.Setenv("HOME", controllerHome)
+	t.Setenv("OPENAI_API_KEY", "provider-test-key")
+	t.Setenv("AI_TEAM_AUTH_SECRET", "auth-test-secret")
+	t.Setenv("AI_TEAM_SIGNING_KEY", "signing-test-secret")
+	t.Setenv("AI_TEAM_DB_PASSWORD", "database-test-secret")
+	t.Setenv("AI_TEAM_WORKER_TEST_ENV_MARKER", marker)
+	allowWorkerTestEnvironment(t, "OPENAI_API_KEY", "AI_TEAM_WORKER_TEST_ENV_MARKER", "AI_TEAM_WORKER_TEST_MODE")
+
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"},
+		target, filepath.Join(target, "web.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Start(context.Background(), pipeline.RunConfig{
+		RunID: "run-env", Feature: "feature", TaskDesc: "task", TargetDir: target,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var environment map[string]string
+	if err := json.Unmarshal(data, &environment); err != nil {
+		t.Fatal(err)
+	}
+	if environment["OPENAI_API_KEY"] != "provider-test-key" {
+		t.Fatalf("explicit provider key missing from worker: %v", environment)
+	}
+	for _, key := range []string{"AI_TEAM_AUTH_SECRET", "AI_TEAM_SIGNING_KEY", "AI_TEAM_DB_PASSWORD"} {
+		if _, exists := environment[key]; exists {
+			t.Fatalf("controller secret %s leaked to worker", key)
+		}
+	}
+	if environment["AI_TEAM_HARNESS_ENV_ALLOW"] != "AI_TEAM_WORKER_TEST_ENV_MARKER,AI_TEAM_WORKER_TEST_MODE,OPENAI_API_KEY" {
+		t.Fatalf("nested harness allow-list not reconstructed: %q", environment["AI_TEAM_HARNESS_ENV_ALLOW"])
+	}
+	if environment["HOME"] == controllerHome || environment["HOME"] == "" {
+		t.Fatalf("worker inherited controller HOME: %q", environment["HOME"])
+	}
+	if _, err := os.Stat(environment["HOME"]); !os.IsNotExist(err) {
+		t.Fatalf("per-invocation worker HOME should be removed after exit, stat err=%v", err)
+	}
+}
+
+func TestWorkerEnvironmentWindowsNamesAndSystemBaseline(t *testing.T) {
+	parent := []string{
+		"Path=C:\\Windows\\System32;C:\\Tools",
+		"SystemRoot=C:\\Windows",
+		"TEMP=C:\\ControllerTemp",
+		"TMP=C:\\ControllerTemp",
+		"AI_TEAM_WORKER_ENV_ALLOW=OPENAI_API_KEY",
+		"openai_api_key=selected-key",
+		"HOME=C:\\ControllerHome",
+	}
+	result, cleanup, err := workerProcessEnvironmentForOS(parent, []string{`C:\agents`}, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	values := make(map[string]string, len(result))
+	for _, entry := range result {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("invalid environment entry %q", entry)
+		}
+		if _, exists := values[key]; exists {
+			t.Fatalf("duplicate environment key after normalization: %s", key)
+		}
+		values[key] = value
+	}
+	if values["PATH"] != `C:\Windows\System32;C:\Tools` || values["SYSTEMROOT"] != `C:\Windows` {
+		t.Fatalf("Windows system baseline was not preserved: %v", values)
+	}
+	if values["OPENAI_API_KEY"] != "selected-key" {
+		t.Fatalf("case-insensitive selected variable missing: %v", values)
+	}
+	for _, key := range []string{"TEMP", "TMP", "TMPDIR"} {
+		if values[key] == "" || strings.Contains(values[key], "ControllerTemp") {
+			t.Fatalf("worker temp variable %s was not isolated: %q", key, values[key])
+		}
+	}
+	if values["USERPROFILE"] != values["HOME"] || values["APPDATA"] == "" || values["LOCALAPPDATA"] == "" {
+		t.Fatalf("Windows profile paths must stay in private worker home: %v", values)
+	}
+	if values["AI_TEAM_WORKER_AGENT_PATHS"] != `["C:\\agents"]` {
+		t.Fatalf("worker agent registry snapshot missing: %q", values["AI_TEAM_WORKER_AGENT_PATHS"])
+	}
+	for _, reserved := range []string{"home", "pAtH", "Temp", "SystemRoot", "UserProfile", "aPpDaTa", "AI_TEAM_AGENT_PATH"} {
+		bad := append(append([]string(nil), parent...), "AI_TEAM_WORKER_ENV_ALLOW="+reserved)
+		if _, _, err := workerProcessEnvironmentForOS(bad, nil, "windows"); err == nil {
+			t.Errorf("case-variant reserved name %q was accepted", reserved)
+		}
+	}
 }
 
 // TestProcessEngineResumeAndCancelBuildTypedJobs — Resume/Cancel обязаны
@@ -486,7 +598,7 @@ func TestWorkerProtocolHelper(t *testing.T) {
 		job := decodeHelperJob(t)
 		printHelperResult(t, job.ExecutionID, "run-blocked", OperationStart, OutcomeBlocked)
 		os.Exit(2)
-	case "echo", "wrong-run", "wrong-operation", "wrong-execution", "replay-execution":
+	case "echo", "env", "wrong-run", "wrong-operation", "wrong-execution", "replay-execution":
 		job := decodeHelperJob(t)
 		data, _ := json.Marshal(job)
 		if marker := os.Getenv("AI_TEAM_WORKER_TEST_MARKER"); marker != "" {
@@ -532,6 +644,21 @@ func decodeHelperJob(t *testing.T) Job {
 	job, err := DecodeJob(os.Stdin, target)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if marker := os.Getenv("AI_TEAM_WORKER_TEST_ENV_MARKER"); marker != "" {
+		environment := make(map[string]string)
+		for _, key := range []string{
+			"OPENAI_API_KEY", "AI_TEAM_AUTH_SECRET", "AI_TEAM_SIGNING_KEY", "AI_TEAM_DB_PASSWORD",
+			"AI_TEAM_HARNESS_ENV_ALLOW", "AI_TEAM_WORKER_ENV_ALLOW", "HOME",
+		} {
+			if value, exists := os.LookupEnv(key); exists {
+				environment[key] = value
+			}
+		}
+		data, _ := json.Marshal(environment)
+		if err := writeMarkerAtomically(marker, data); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return job
 }

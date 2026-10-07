@@ -83,6 +83,7 @@ func TestProcessEngineHonorsContextCancellation(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "worker-started")
 	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "wait")
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MARKER", "AI_TEAM_WORKER_TEST_MODE")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=TestWorkerProtocolHelper", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),
@@ -124,6 +125,7 @@ func TestControlPlaneStartsDisposableWorkerProcess(t *testing.T) {
 	target := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "worker-job.json")
 	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MARKER")
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=TestProcessEngineHelper", "--"},
 		target, filepath.Join(target, ".ai-team", "web.db"),

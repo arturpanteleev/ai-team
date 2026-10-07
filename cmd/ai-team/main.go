@@ -299,7 +299,17 @@ func cmdWorker() {
 		fatal("Worker approval store: %v", err)
 	}
 	defer func() { _ = approvalStore.Close() }()
-	reg, err := newAgentRegistry(target)
+	registryPaths, hasRegistrySnapshot, registryErr := worker.AgentRegistryPathsFromEnvironment()
+	if registryErr != nil {
+		_ = recorderStore.Close()
+		fatal("Worker agent registry paths: %v", registryErr)
+	}
+	var reg *agent.Registry
+	if hasRegistrySnapshot {
+		reg, err = newAgentRegistryWithPaths(target, registryPaths)
+	} else {
+		reg, err = newAgentRegistry(target)
+	}
 	if err != nil {
 		_ = recorderStore.Close()
 		fatal("Worker agent registry: %v", err)
@@ -518,7 +528,8 @@ func cmdSchedulerWorker() {
 		fatal("Scheduler queue: %v", err)
 	}
 	defer func() { _ = queue.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
-	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB)
+	processEngine, err := worker.NewProcessEngine([]string{*workerCommand}, target, *webDB,
+		worker.WithAgentRegistryPaths(configuredAgentRegistryPaths()))
 	if err != nil {
 		fatal("Scheduler ProcessEngine: %v", err)
 	}
@@ -659,23 +670,37 @@ func agentsFS() fs.FS {
 }
 
 func newAgentRegistry(target string) (*agent.Registry, error) {
-	projectAgents := filepath.Join(target, ".ai-team", "agents")
-	if err := safeio.ValidateTree(projectAgents); err != nil {
-		return nil, err
-	}
-	layers := []agent.Layer{{Name: "project", FS: os.DirFS(filepath.Join(target, ".ai-team", "agents"))}}
-	for index, pluginDir := range filepath.SplitList(os.Getenv("AI_TEAM_AGENT_PATH")) {
+	return newAgentRegistryWithPaths(target, configuredAgentRegistryPaths())
+}
+
+func configuredAgentRegistryPaths() []string {
+	paths := make([]string, 0)
+	for _, pluginDir := range filepath.SplitList(os.Getenv("AI_TEAM_AGENT_PATH")) {
 		if pluginDir == "" {
 			continue
 		}
 		if absolute, err := filepath.Abs(pluginDir); err == nil {
 			pluginDir = absolute
 		}
-		layers = append(layers, agent.Layer{Name: fmt.Sprintf("plugin-%d:%s", index, pluginDir), FS: os.DirFS(pluginDir)})
+		paths = append(paths, pluginDir)
 	}
 	if configDir, err := os.UserConfigDir(); err == nil {
-		userDir := filepath.Join(configDir, "ai-team", "agents")
-		layers = append(layers, agent.Layer{Name: "user:" + userDir, FS: os.DirFS(userDir)})
+		paths = append(paths, filepath.Join(configDir, "ai-team", "agents"))
+	}
+	return paths
+}
+
+func newAgentRegistryWithPaths(target string, extraPaths []string) (*agent.Registry, error) {
+	projectAgents := filepath.Join(target, ".ai-team", "agents")
+	if err := safeio.ValidateTree(projectAgents); err != nil {
+		return nil, err
+	}
+	layers := []agent.Layer{{Name: "project", FS: os.DirFS(filepath.Join(target, ".ai-team", "agents"))}}
+	for index, pluginDir := range extraPaths {
+		if pluginDir == "" {
+			continue
+		}
+		layers = append(layers, agent.Layer{Name: fmt.Sprintf("plugin-%d:%s", index, pluginDir), FS: os.DirFS(pluginDir)})
 	}
 	layers = append(layers, agent.Layer{Name: "builtin", FS: agentsFS()})
 	return agent.NewLayered(layers...), nil
@@ -1587,7 +1612,8 @@ func cmdWeb() {
 		}
 	}
 
-	reg, err := newAgentRegistry(target)
+	agentPaths := configuredAgentRegistryPaths()
+	reg, err := newAgentRegistryWithPaths(target, agentPaths)
 	if err != nil {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
@@ -1628,7 +1654,8 @@ func cmdWeb() {
 		}
 		runController, err = control.New(queueEngine, target, controllerOptions...)
 	} else if *workerCommand != "" {
-		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath)
+		processEngine, processErr := worker.NewProcessEngine([]string{*workerCommand}, target, *dbPath,
+			worker.WithAgentRegistryPaths(agentPaths))
 		if processErr != nil {
 			fatal("Ошибка worker launcher: %v", processErr)
 		}

@@ -30,6 +30,24 @@ import (
 // deterministic lifecycle replay.
 const SchemaVersion = 7
 
+// ValidateRunID checks that a run identity is a single safe path component.
+// Run IDs are used in filesystem-backed stores as well as controller API
+// scopes, so reject traversal and platform-specific separators at every
+// boundary that accepts an externally supplied identity.
+func ValidateRunID(runID string) error {
+	if runID == "" || runID == "." || runID == ".." || len(runID) > 255 ||
+		filepath.Base(runID) != runID || filepath.Clean(runID) != runID ||
+		strings.ContainsAny(runID, "/\\\x00") {
+		return fmt.Errorf("недопустимый run_id %q", runID)
+	}
+	for _, r := range runID {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("недопустимый run_id %q", runID)
+		}
+	}
+	return nil
+}
+
 const (
 	// chainGenesisDomain — domain separator корня hash-chain событий.
 	// Версия внутри строки отделяет схему привязки от SchemaVersion: смена
@@ -166,8 +184,8 @@ func NewRunID(now time.Time) (string, error) {
 }
 
 func Start(root string, manifest RunManifest) (*Store, error) {
-	if manifest.RunID == "" || manifest.RunID == "." || manifest.RunID == ".." || filepath.Base(manifest.RunID) != manifest.RunID {
-		return nil, fmt.Errorf("недопустимый run_id %q", manifest.RunID)
+	if err := ValidateRunID(manifest.RunID); err != nil {
+		return nil, err
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {

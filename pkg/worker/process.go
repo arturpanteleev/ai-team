@@ -238,6 +238,14 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	command.Env = environment
 	var api *workerAPIServer
 	if e.apiRecorderFactory != nil {
+		apiLifecycle, lifecycleErr := lifecycle.NewStore(e.target)
+		if lifecycleErr != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker lifecycle store: %w", lifecycleErr)
+		}
+		expectedTask, taskErr := workerAPICanonicalTask(job, apiLifecycle)
+		if taskErr != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker controller API task: %w", taskErr)
+		}
 		recorder := e.apiRecorderFactory()
 		if e.bubblewrap {
 			tempDir := ""
@@ -251,12 +259,12 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 				return pipeline.RunResult{}, errors.New("worker private TMPDIR is missing")
 			}
 			socketPath := filepath.Join(tempDir, "controller-api.sock")
-			api, err = startWorkerAPIServerUnix(job, recorder, e.apiApprovals, socketPath)
+			api, err = startWorkerAPIServerUnixForTask(job, recorder, e.apiApprovals, socketPath, expectedTask)
 			if err == nil {
 				command.Env = append(command.Env, workerAPIAddressEnv+"=http://unix", workerAPISocketEnv+"="+socketPath, workerAPITokenEnv+"="+api.token)
 			}
 		} else {
-			api, err = startWorkerAPIServer(job, recorder, e.apiApprovals)
+			api, err = startWorkerAPIServerForTask(job, recorder, e.apiApprovals, expectedTask)
 			if err == nil {
 				command.Env = append(command.Env, workerAPIAddressEnv+"=http://"+api.listener.Addr().String(), workerAPITokenEnv+"="+api.token)
 			}
@@ -264,11 +272,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		if err != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
 		}
-		api.lifecycle, err = lifecycle.NewStore(e.target)
-		if err != nil {
-			api.close()
-			return pipeline.RunResult{}, fmt.Errorf("worker lifecycle store: %w", err)
-		}
+		api.lifecycle = apiLifecycle
 		defer api.close()
 	}
 	if e.bubblewrap {
@@ -319,6 +323,29 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
 	}
 	return result, processErr
+}
+
+func workerAPICanonicalTask(job Job, store lifecycle.StorePort) (string, error) {
+	if job.Operation == OperationStart {
+		return job.Task, nil
+	}
+	if job.Operation != OperationResume && job.Operation != OperationRecover {
+		return "", nil
+	}
+	if store == nil {
+		return "", errors.New("controller lifecycle store unavailable")
+	}
+	state, err := store.Load(job.RunID)
+	if err != nil {
+		if job.Operation == OperationRecover && errors.Is(err, os.ErrNotExist) {
+			return job.Task, nil
+		}
+		return "", err
+	}
+	if state.RunID != job.RunID || filepath.Clean(state.TargetDir) != filepath.Clean(job.TargetDir) || strings.TrimSpace(state.Task) == "" {
+		return "", errors.New("persisted lifecycle task identity mismatch")
+	}
+	return state.Task, nil
 }
 
 func processExitCode(err error) int {

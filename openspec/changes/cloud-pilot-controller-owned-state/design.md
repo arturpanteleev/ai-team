@@ -253,6 +253,23 @@ host home is not exposed through `HOME`;
 its original absolute path may still be reachable through the read-only `/`
 bind, subject to host permissions. The read-only root bind does not provide
 general host-secret isolation.
+
+The durable business brief is now a bounded API-owned slice of this work. The
+pipeline's brief store contract accepts a run ID and typed brief data only;
+worker create/append/list/read operations are dispatched through the scoped
+controller API. The controller persists immutable versions and returns the
+selected version content. Initial creation is bound to the immutable job task
+on start and the persisted lifecycle task on resume/recovery, so a worker
+cannot create a different first intention. The child materializes that content
+under per-invocation temporary staging at the writable target path
+`{target}/.ai-team/artifacts`; it is visible to the worker process and is not a
+security boundary. Cleanup is a
+deferred `RemoveAll`, so abrupt worker termination may leave `.brief-*` staging
+directories behind. This routes normal pipeline access through controller
+ownership, but the persistent brief remains under the writable target mount and
+is still directly readable/modifiable by a compromised worker. It does not
+justify a Linux filesystem-isolation claim or a brief sentinel probe. Other
+target evidence and artifacts remain outside this slice.
 The isolated network namespace has no external IP egress. Remote model calls,
 including OpenAI/OpenCode providers, do not work in this opt-in mode until a
 separately configured allowlisted egress proxy is available; this slice does

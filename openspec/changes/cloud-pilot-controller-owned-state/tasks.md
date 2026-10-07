@@ -73,6 +73,15 @@
   tests validate the current application protocol only; they do not complete
   the capability, typed artifact transfer/commit, trusted check provenance,
   or OS/runtime isolation requirements above and below.
+- [x] Route durable initial and clarified business-brief create/append/list/read
+  through a run-scoped typed controller API for disposable workers. Preserve
+  immutable versions and resume behavior; materialize returned bytes in
+  per-invocation staging under the writable target path
+  `{target}/.ai-team/artifacts`. This path is visible to the worker and is not a
+  security boundary; abrupt termination can leave `.brief-*` staging
+  directories behind. The target still exposes the
+  controller's on-target brief files to a compromised worker, so this is API
+  ownership only and has no Linux OS-inaccessibility probe.
 - [ ] Test worker process/network policy on a real runtime and verify there is
   no route to admin control endpoints and no control-plane secrets in worker.
 - [ ] Preserve run/approval/evidence through worker loss, controller restart,

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -53,20 +54,39 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID     string                   `json:"run_id,omitempty"`
-	A         string                   `json:"a,omitempty"`
-	B         string                   `json:"b,omitempty"`
-	C         string                   `json:"c,omitempty"`
-	Index     int                      `json:"index,omitempty"`
-	At        time.Time                `json:"at,omitempty"`
-	Data      map[string]any           `json:"data,omitempty"`
-	IDs       []string                 `json:"ids,omitempty"`
-	Stage     notifier.StageResult     `json:"stage,omitempty"`
-	Error     string                   `json:"error,omitempty"`
-	Approval  approval.PendingApproval `json:"approval,omitempty"`
-	Lifecycle lifecycle.State          `json:"lifecycle,omitempty"`
-	Previous  lifecycle.State          `json:"previous_lifecycle,omitempty"`
+	RunID        string                   `json:"run_id,omitempty"`
+	A            string                   `json:"a,omitempty"`
+	B            string                   `json:"b,omitempty"`
+	C            string                   `json:"c,omitempty"`
+	Index        int                      `json:"index,omitempty"`
+	At           time.Time                `json:"at,omitempty"`
+	Data         map[string]any           `json:"data,omitempty"`
+	IDs          []string                 `json:"ids,omitempty"`
+	Stage        notifier.StageResult     `json:"stage,omitempty"`
+	Error        string                   `json:"error,omitempty"`
+	Approval     approval.PendingApproval `json:"approval,omitempty"`
+	Lifecycle    lifecycle.State          `json:"lifecycle,omitempty"`
+	Previous     lifecycle.State          `json:"previous_lifecycle,omitempty"`
+	BriefVersion pipeline.BriefVersion    `json:"brief_version,omitempty"`
+	BriefContent []byte                   `json:"brief_content,omitempty"`
 }
+type workerQuestionPayload struct {
+	Kind     string `json:"kind"`
+	Markdown string `json:"markdown"`
+}
+
+type taskBoundBriefStore struct {
+	pipeline.BriefStore
+	expectedTask string
+}
+
+func (s *taskBoundBriefStore) CreateInitial(runID, intention string) (pipeline.BriefDocument, error) {
+	if s == nil || s.BriefStore == nil || s.expectedTask == "" || intention != s.expectedTask {
+		return pipeline.BriefDocument{}, errors.New("initial brief must match the controller's canonical task")
+	}
+	return s.BriefStore.CreateInitial(runID, s.expectedTask)
+}
+
 type workerApprovalPort interface {
 	Create(approval.PendingApproval) (approval.PendingApproval, error)
 	Load(string, string) (approval.PendingApproval, error)
@@ -81,6 +101,8 @@ type workerAPIServer struct {
 	recorder   pipeline.Recorder
 	approvals  workerApprovalPort
 	lifecycle  lifecycle.StorePort
+	briefs     pipeline.BriefStore
+	briefTask  string
 	dispatchMu sync.Mutex
 	nonceMu    sync.Mutex
 	nonces     map[string]time.Time
@@ -91,12 +113,20 @@ type workerAPIServer struct {
 // The worker
 // can report pipeline events and request/read approvals only for this run.
 func startWorkerAPIServer(job Job, recorder pipeline.Recorder, approvals workerApprovalPort) (*workerAPIServer, error) {
-	return startWorkerAPIServerWithListener(job, recorder, approvals, func() (net.Listener, error) {
+	return startWorkerAPIServerForTask(job, recorder, approvals, job.Task)
+}
+
+func startWorkerAPIServerForTask(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, expectedTask string) (*workerAPIServer, error) {
+	return startWorkerAPIServerWithTaskAndListener(job, recorder, approvals, func() (net.Listener, error) {
 		return net.Listen("tcp", "127.0.0.1:0")
-	}, rand.Reader)
+	}, rand.Reader, expectedTask)
 }
 
 func startWorkerAPIServerWithListener(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listen func() (net.Listener, error), random io.Reader) (*workerAPIServer, error) {
+	return startWorkerAPIServerWithTaskAndListener(job, recorder, approvals, listen, random, job.Task)
+}
+
+func startWorkerAPIServerWithTaskAndListener(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listen func() (net.Listener, error), random io.Reader, expectedTask string) (*workerAPIServer, error) {
 	if recorder == nil || approvals == nil {
 		return nil, errors.New("worker controller API requires recorder and approval ports")
 	}
@@ -104,14 +134,22 @@ func startWorkerAPIServerWithListener(job Job, recorder pipeline.Recorder, appro
 	if err != nil {
 		return nil, err
 	}
-	return serveWorkerAPI(job, recorder, approvals, listener, "", random)
+	return serveWorkerAPI(job, recorder, approvals, listener, "", random, expectedTask)
 }
 
 func startWorkerAPIServerUnix(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string) (*workerAPIServer, error) {
-	return startWorkerAPIServerUnixWith(job, recorder, approvals, socketPath, net.Listen, os.Chmod, rand.Reader)
+	return startWorkerAPIServerUnixForTask(job, recorder, approvals, socketPath, job.Task)
+}
+
+func startWorkerAPIServerUnixForTask(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath, expectedTask string) (*workerAPIServer, error) {
+	return startWorkerAPIServerUnixWithTask(job, recorder, approvals, socketPath, net.Listen, os.Chmod, rand.Reader, expectedTask)
 }
 
 func startWorkerAPIServerUnixWith(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string, listen func(string, string) (net.Listener, error), chmod func(string, os.FileMode) error, random io.Reader) (*workerAPIServer, error) {
+	return startWorkerAPIServerUnixWithTask(job, recorder, approvals, socketPath, listen, chmod, random, job.Task)
+}
+
+func startWorkerAPIServerUnixWithTask(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, socketPath string, listen func(string, string) (net.Listener, error), chmod func(string, os.FileMode) error, random io.Reader, expectedTask string) (*workerAPIServer, error) {
 	if recorder == nil || approvals == nil {
 		return nil, errors.New("worker controller API requires recorder and approval ports")
 	}
@@ -127,10 +165,17 @@ func startWorkerAPIServerUnixWith(job Job, recorder pipeline.Recorder, approvals
 		_ = os.Remove(socketPath)
 		return nil, fmt.Errorf("secure worker controller API socket: %w", err)
 	}
-	return serveWorkerAPI(job, recorder, approvals, listener, socketPath, random)
+	return serveWorkerAPI(job, recorder, approvals, listener, socketPath, random, expectedTask)
 }
 
-func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listener net.Listener, socketPath string, random io.Reader) (*workerAPIServer, error) {
+func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprovalPort, listener net.Listener, socketPath string, random io.Reader, expectedTask string) (*workerAPIServer, error) {
+	if err := evidence.ValidateRunID(job.RunID); err != nil {
+		_ = listener.Close()
+		if socketPath != "" {
+			_ = os.Remove(socketPath)
+		}
+		return nil, fmt.Errorf("worker controller API run id: %w", err)
+	}
 	var nonce [32]byte
 	if _, err := io.ReadFull(random, nonce[:]); err != nil {
 		_ = listener.Close()
@@ -139,7 +184,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, err
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -221,16 +266,90 @@ func (s *workerAPIServer) acceptRequest(now time.Time, nonce string, issuedAt ti
 	s.nonces[nonceKey] = issuedAt.Add(workerAPIRequestTTL)
 	return true
 }
+
+func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, submittedAnswer string) (any, error) {
+	if approvalID == "" {
+		return nil, errors.New("clarification approval id is required")
+	}
+	value, err := s.approvals.Load(s.scope.RunID, approvalID)
+	if err != nil {
+		return nil, fmt.Errorf("load clarification approval: %w", err)
+	}
+	if value.RunID != s.scope.RunID || value.ID != approvalID {
+		return nil, errors.New("clarification approval identity mismatch")
+	}
+	if value.Status != approval.StatusResolved || value.ResolvedAction != "answer_questions" || value.ResolvedAt.IsZero() {
+		return nil, errors.New("clarification requires a resolved answer_questions approval")
+	}
+	if value.FromStage != "analyst" || value.Trigger != "graph_outcome:blocked" ||
+		value.Targets["answer_questions"] != "analyst" || !containsWorkerString(value.Actions, "answer_questions") ||
+		!containsWorkerString(value.RequiredRoles, "product_owner") {
+		return nil, errors.New("approval is not a Product Owner analyst clarification")
+	}
+	var payload workerQuestionPayload
+	if len(value.Payload) == 0 || json.Unmarshal(value.Payload, &payload) != nil ||
+		payload.Kind != "questions" || strings.TrimSpace(payload.Markdown) == "" {
+		return nil, errors.New("clarification approval has no durable analyst questions")
+	}
+	if questions != payload.Markdown {
+		return nil, errors.New("clarification questions do not match the durable approval")
+	}
+	var answer string
+	for _, decision := range value.Decisions {
+		if decision.Action != "answer_questions" || decision.ActorRole != "product_owner" {
+			continue
+		}
+		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
+			decision.SubjectHash != value.SubjectHash || decision.DecidedAt.IsZero() || strings.TrimSpace(decision.Comment) == "" {
+			return nil, errors.New("clarification decision is invalid")
+		}
+		if answer != "" {
+			return nil, errors.New("clarification approval has multiple Product Owner answers")
+		}
+		answer = strings.TrimSpace(decision.Comment)
+	}
+	if answer == "" {
+		return nil, errors.New("clarification approval has no durable Product Owner answer")
+	}
+	if strings.TrimSpace(submittedAnswer) != answer {
+		return nil, errors.New("clarification answer does not match the durable decision")
+	}
+	return s.briefs.AppendClarification(s.scope.RunID, value.ID, payload.Markdown, answer)
+}
+
+func containsWorkerString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) {
 	// Recorder implementations such as web.StoreRecorder keep per-run sequence
 	// and stage state. Requests from one child can arrive concurrently, so keep
 	// each invocation's projection ordered and race-free.
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
+	if err := evidence.ValidateRunID(s.scope.RunID); err != nil {
+		return nil, fmt.Errorf("worker API scope run id: %w", err)
+	}
 	if c.RunID != "" && c.RunID != s.scope.RunID {
 		return nil, errors.New("worker API run mismatch")
 	}
 	switch method {
+	case "brief.create_initial":
+		if s.briefTask == "" || c.A != s.briefTask {
+			return nil, errors.New("initial brief must match the controller's canonical task")
+		}
+		return s.briefs.CreateInitial(s.scope.RunID, c.A)
+	case "brief.append_clarification":
+		return s.appendVerifiedClarification(c.A, c.B, c.C)
+	case "brief.list":
+		return s.briefs.List(s.scope.RunID)
+	case "brief.read":
+		return s.briefs.Read(s.scope.RunID, c.A)
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -338,6 +457,9 @@ type workerAPIPort struct {
 type WorkerAPIPort = workerAPIPort
 
 func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
+	if err := evidence.ValidateRunID(job.RunID); err != nil {
+		return nil, fmt.Errorf("worker controller API run id: %w", err)
+	}
 	address, okA := os.LookupEnv(workerAPIAddressEnv)
 	token, okT := os.LookupEnv(workerAPITokenEnv)
 	socketPath, hasSocket := os.LookupEnv(workerAPISocketEnv)
@@ -509,6 +631,54 @@ func (*workerAPIApprovals) ResolveDeferred(string, string, approval.Decision) (a
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
 }
 
+type workerAPIBriefs struct{ port *workerAPIPort }
+type WorkerAPIBriefs = workerAPIBriefs
+
+func NewWorkerAPIBriefs(port *WorkerAPIPort) pipeline.BriefStore { return &workerAPIBriefs{port: port} }
+
+func (b *workerAPIBriefs) checkRun(runID string) error {
+	if b == nil || b.port == nil || runID == "" || runID != b.port.scope.RunID {
+		return errors.New("worker brief API run mismatch")
+	}
+	return nil
+}
+
+func (b *workerAPIBriefs) CreateInitial(runID, intention string) (pipeline.BriefDocument, error) {
+	if err := b.checkRun(runID); err != nil {
+		return pipeline.BriefDocument{}, err
+	}
+	var result pipeline.BriefDocument
+	err := b.port.call("brief.create_initial", workerAPICall{A: intention}, &result)
+	return result, err
+}
+
+func (b *workerAPIBriefs) AppendClarification(runID, approvalID, questions, answer string) (pipeline.BriefDocument, error) {
+	if err := b.checkRun(runID); err != nil {
+		return pipeline.BriefDocument{}, err
+	}
+	var result pipeline.BriefDocument
+	err := b.port.call("brief.append_clarification", workerAPICall{A: approvalID, B: questions, C: answer}, &result)
+	return result, err
+}
+
+func (b *workerAPIBriefs) List(runID string) ([]pipeline.BriefVersion, error) {
+	if err := b.checkRun(runID); err != nil {
+		return nil, err
+	}
+	var result []pipeline.BriefVersion
+	err := b.port.call("brief.list", workerAPICall{}, &result)
+	return result, err
+}
+
+func (b *workerAPIBriefs) Read(runID, versionID string) (pipeline.BriefDocument, error) {
+	if err := b.checkRun(runID); err != nil {
+		return pipeline.BriefDocument{}, err
+	}
+	var result pipeline.BriefDocument
+	err := b.port.call("brief.read", workerAPICall{A: versionID}, &result)
+	return result, err
+}
+
 type workerAPILifecycle struct{ port *workerAPIPort }
 type WorkerAPILifecycle = workerAPILifecycle
 
@@ -532,4 +702,5 @@ func (s *workerAPILifecycle) Save(previous, next lifecycle.State) error {
 
 var _ pipeline.Recorder = (*workerAPIRecorder)(nil)
 var _ pipeline.ApprovalStore = (*workerAPIApprovals)(nil)
+var _ pipeline.BriefStore = (*workerAPIBriefs)(nil)
 var _ lifecycle.StorePort = (*workerAPILifecycle)(nil)

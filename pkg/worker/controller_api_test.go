@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -246,6 +247,29 @@ func (s *apiApprovalStore) Decide(string, string, approval.Decision) (approval.P
 }
 func (s *apiApprovalStore) ResolveDeferred(string, string, approval.Decision) (approval.PendingApproval, error) {
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
+}
+
+func workerQuestionApproval(runID, approvalID, questions, answer string, status approval.Status) approval.PendingApproval {
+	payload, _ := json.Marshal(workerQuestionPayload{Kind: "questions", Markdown: questions})
+	value := approval.PendingApproval{
+		SchemaVersion: approval.SchemaVersion, ID: approvalID, RunID: runID,
+		AttemptID: "attempt-analyst", FromStage: "analyst", ToStage: "analyst",
+		Trigger: "graph_outcome:blocked", SubjectHash: strings.Repeat("a", 64),
+		RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+		Actions: []string{"answer_questions", "stop"},
+		Targets: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+		Status:  status, Payload: payload,
+	}
+	if status == approval.StatusResolved {
+		now := time.Now().UTC()
+		value.ResolvedAction = "answer_questions"
+		value.ResolvedAt = now
+		value.Decisions = []approval.Decision{{
+			ApprovalID: approvalID, ActorID: "owner@example.com", ActorRole: "product_owner",
+			Action: "answer_questions", Comment: answer, SubjectHash: value.SubjectHash, DecidedAt: now,
+		}}
+	}
+	return value
 }
 
 type apiRecorderSpy struct {
@@ -908,3 +932,215 @@ func TestProcessExitCodeHelper(t *testing.T) {
 }
 
 func httpClient() *http.Client { return &http.Client{Timeout: time.Second * 5} }
+
+func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
+	target := t.TempDir()
+	const intention = "Увеличить выручку"
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-run", TargetDir: target, Task: intention, ExecutionID: strings.Repeat("7", ExecutionIDBytes*2)}
+	const approvalID = "approval-1"
+	const questions = "Какая аудитория?"
+	const answer = "B2B"
+	approvalStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
+		job.RunID + "/" + approvalID: workerQuestionApproval(job.RunID, approvalID, questions, answer, approval.StatusResolved),
+	}}
+	api, err := startWorkerAPIServer(job, &apiRecorderSpy{}, approvalStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { api.close() }()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+api.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, api.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	briefs := NewWorkerAPIBriefs(port)
+	forged := workerAPIRequestBody(t, api.scope, "brief.create_initial", workerAPICall{A: "чужое намерение"}, "random", time.Now().UTC())
+	if status := postWorkerAPIRequest(t, api, forged); status == http.StatusOK {
+		t.Fatal("worker API accepted an initial brief that differs from the controller task")
+	}
+	versions, err := briefs.List(job.RunID)
+	if err != nil || len(versions) != 0 {
+		t.Fatalf("forged initial brief created durable versions: versions=%+v err=%v", versions, err)
+	}
+	created, err := briefs.CreateInitial(job.RunID, intention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Version.ID == "" || created.Version.SHA256 == "" || !strings.Contains(string(created.Content), intention) {
+		t.Fatalf("invalid initial brief response: %+v", created)
+	}
+	versions, err = briefs.List(job.RunID)
+	if err != nil || len(versions) != 1 || versions[0].ID != created.Version.ID {
+		t.Fatalf("brief list=%+v err=%v", versions, err)
+	}
+	clarified, err := briefs.AppendClarification(job.RunID, approvalID, questions, answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clarified.Version.ParentID != created.Version.ID || clarified.Version.ID == created.Version.ID {
+		t.Fatalf("clarification is not a new immutable child version: initial=%+v clarified=%+v", created.Version, clarified.Version)
+	}
+	api.close() // A fresh controller API instance must resume from durable storage.
+	resumeStateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := resumeStateStore.Create(lifecycle.State{
+		RunID: job.RunID, Feature: "feature", TargetDir: target, Task: intention,
+		Phase: lifecycle.PhaseRunning, NextStage: "analyst", ConfigSHA256: strings.Repeat("a", 64),
+		WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumeJob := job
+	resumeJob.Operation = OperationResume
+	resumeJob.Task = ""
+	canonicalTask, err := workerAPICanonicalTask(resumeJob, resumeStateStore)
+	if err != nil || canonicalTask != intention {
+		t.Fatalf("resume canonical task=%q err=%v", canonicalTask, err)
+	}
+	api, err = startWorkerAPIServerForTask(resumeJob, &apiRecorderSpy{}, approvalStore, canonicalTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(WorkerAPIAddressEnv, "http://"+api.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, api.token)
+	port, err = NewWorkerAPIPort(resumeJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	briefs = NewWorkerAPIBriefs(port)
+	resumeForgery := workerAPIRequestBody(t, api.scope, "brief.create_initial", workerAPICall{A: "чужое намерение"}, "random", time.Now().UTC())
+	if status := postWorkerAPIRequest(t, api, resumeForgery); status == http.StatusOK {
+		t.Fatal("resumed worker API accepted a forged initial brief")
+	}
+	resumedInitial, err := briefs.CreateInitial(resumeJob.RunID, intention)
+	if err != nil || resumedInitial.Version.ID != created.Version.ID {
+		t.Fatalf("resume initial brief should remain idempotent: version=%+v err=%v", resumedInitial.Version, err)
+	}
+	loaded, err := briefs.Read(resumeJob.RunID, clarified.Version.ID)
+	if err != nil || loaded.Version.SHA256 != clarified.Version.SHA256 || loaded.Version.ParentID != created.Version.ID ||
+		loaded.Version.ApprovalID != approvalID || string(loaded.Content) != string(clarified.Content) {
+		t.Fatalf("persisted brief read=%+v err=%v", loaded, err)
+	}
+	retry, err := briefs.AppendClarification(resumeJob.RunID, approvalID, questions, answer)
+	if err != nil || retry.Version.ID != clarified.Version.ID {
+		t.Fatalf("retry of the same durable answer should be idempotent: version=%+v err=%v", retry.Version, err)
+	}
+	if _, err := briefs.List("other-run"); err == nil {
+		t.Fatal("brief API accepted another run id")
+	}
+	if _, err := briefs.Read(job.RunID, "../outside"); err == nil {
+		t.Fatal("brief API accepted a path instead of a version id")
+	}
+	path := filepath.Join(target, ".ai-team", "runs", job.RunID, filepath.FromSlash(clarified.Version.Path))
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("durable brief is not immutable: mode=%v err=%v", info, err)
+	}
+}
+
+func TestWorkerControllerBriefAppendRequiresDurableProductOwnerClarification(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-auth-run", TargetDir: target, Task: "Grow B2B revenue", ExecutionID: strings.Repeat("8", ExecutionIDBytes*2)}
+	const questions = "Какая аудитория?"
+	const answer = "B2B"
+	values := map[string]approval.PendingApproval{
+		job.RunID + "/pending": workerQuestionApproval(job.RunID, "pending", questions, answer, approval.StatusPending),
+		job.RunID + "/wrong-action": func() approval.PendingApproval {
+			v := workerQuestionApproval(job.RunID, "wrong-action", questions, answer, approval.StatusResolved)
+			v.ResolvedAction = "stop"
+			v.Decisions[0].Action = "stop"
+			return v
+		}(),
+		job.RunID + "/wrong-role": func() approval.PendingApproval {
+			v := workerQuestionApproval(job.RunID, "wrong-role", questions, answer, approval.StatusResolved)
+			v.Decisions[0].ActorRole = "developer"
+			return v
+		}(),
+		job.RunID + "/wrong-questions": workerQuestionApproval(job.RunID, "wrong-questions", "Different durable questions", answer, approval.StatusResolved),
+		job.RunID + "/wrong-answer":    workerQuestionApproval(job.RunID, "wrong-answer", questions, "Different durable answer", approval.StatusResolved),
+		job.RunID + "/foreign": func() approval.PendingApproval {
+			v := workerQuestionApproval("other-run", "foreign", questions, answer, approval.StatusResolved)
+			return v
+		}(),
+	}
+	approvalStore := &apiApprovalStore{values: values}
+	api, err := startWorkerAPIServer(job, &apiRecorderSpy{}, approvalStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer api.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+api.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, api.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	briefs := NewWorkerAPIBriefs(port)
+	if _, err := briefs.CreateInitial(job.RunID, "Grow B2B revenue"); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, approvalID, questions, answer string
+	}{
+		{name: "unknown approval", approvalID: "not-found", questions: questions, answer: answer},
+		{name: "foreign run approval", approvalID: "foreign", questions: questions, answer: answer},
+		{name: "pending approval", approvalID: "pending", questions: questions, answer: answer},
+		{name: "wrong resolved action", approvalID: "wrong-action", questions: questions, answer: answer},
+		{name: "non Product Owner answer", approvalID: "wrong-role", questions: questions, answer: answer},
+		{name: "forged questions", approvalID: "wrong-questions", questions: questions, answer: answer},
+		{name: "forged answer", approvalID: "wrong-answer", questions: questions, answer: answer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := briefs.AppendClarification(job.RunID, tc.approvalID, tc.questions, tc.answer); err == nil {
+				t.Fatal("unverified clarification input was accepted")
+			}
+		})
+	}
+	versions, err := briefs.List(job.RunID)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("failed clarification attempts must not append brief versions: versions=%+v err=%v", versions, err)
+	}
+}
+
+func TestWorkerControllerAPIBriefAndJobBoundariesRejectUnsafeRunIDs(t *testing.T) {
+	target := t.TempDir()
+	unsafeIDs := []string{"", ".", "..", "../outside", "a/b", `a\b`, "/absolute", "a\x00b"}
+	for _, runID := range unsafeIDs {
+		t.Run(fmt.Sprintf("file brief %q", runID), func(t *testing.T) {
+			if _, err := pipeline.NewFileBriefStore(target).CreateInitial(runID, "intention"); err == nil {
+				t.Fatal("FileBriefStore accepted unsafe run id")
+			}
+		})
+		t.Run(fmt.Sprintf("worker job %q", runID), func(t *testing.T) {
+			job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID,
+				TargetDir: target, Feature: "feature", Task: "task", ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+			if err := job.Validate(target); err == nil {
+				t.Fatal("worker job accepted unsafe run id")
+			}
+		})
+		t.Run(fmt.Sprintf("controller dispatch %q", runID), func(t *testing.T) {
+			api := &workerAPIServer{scope: workerAPIScope{RunID: runID}}
+			if _, err := api.dispatch("brief.create_initial", workerAPICall{A: "intention"}); err == nil {
+				t.Fatal("controller dispatch accepted unsafe run scope")
+			}
+		})
+	}
+	// Directory components are checked as well as the run ID; a valid ID must
+	// not let a pre-existing symlink redirect controller-owned writes outside
+	// the target.
+	symlinkTarget := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team", "runs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(symlinkTarget, filepath.Join(target, ".ai-team", "runs", "symlink-run")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := pipeline.NewFileBriefStore(target).CreateInitial("symlink-run", "intention"); err == nil {
+		t.Fatal("FileBriefStore followed a symlinked run directory")
+	}
+}

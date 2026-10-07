@@ -46,6 +46,14 @@ type Store struct {
 	root string
 }
 
+// StorePort is the narrow persistence contract used by the execution pipeline.
+// Local runs use Store; disposable workers can use a controller-owned API port.
+type StorePort interface {
+	Create(State) error
+	Load(runID string) (State, error)
+	Save(previous, next State) error
+}
+
 func NewStore(target string) (*Store, error) {
 	root, err := safeio.EnsureDir(target, ".ai-team", "state", "runs")
 	if err != nil {

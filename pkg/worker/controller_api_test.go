@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
@@ -373,6 +374,170 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 		t.Fatalf("deferred decision adapter allowed write: %v", err)
 	}
 }
+
+func TestWorkerControllerAPILifecycleScopedCreateResumeCheckpointRoundTrip(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "lifecycle-run", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.lifecycle = store
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://"+server.listener.Addr().String())
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoints := NewWorkerAPILifecycle(port)
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	state := lifecycle.State{
+		RunID: job.RunID, Feature: "feature", TargetDir: target, Task: "business request",
+		Phase: lifecycle.PhaseRunning, NextStage: "analyst", ConfigSHA256: strings.Repeat("a", 64),
+		WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: createdAt,
+	}
+	if err := checkpoints.Create(state); err != nil {
+		t.Fatalf("controller create: %v", err)
+	}
+	loaded, err := checkpoints.Load(job.RunID)
+	if err != nil || loaded.RunID != state.RunID || loaded.TargetDir != target || loaded.Phase != lifecycle.PhaseRunning || loaded.NextStage != "analyst" {
+		t.Fatalf("controller load after create: state=%+v err=%v", loaded, err)
+	}
+	resumed := loaded
+	resumed.Phase, resumed.NextStage, resumed.PendingApprovalID = lifecycle.PhaseWaiting, "analyst", "approval-1"
+	if err := checkpoints.Save(loaded, resumed); err != nil {
+		t.Fatalf("controller save checkpoint: %v", err)
+	}
+	reloaded, err := store.Load(job.RunID)
+	if err != nil || reloaded.Phase != lifecycle.PhaseWaiting || reloaded.PendingApprovalID != "approval-1" || !reloaded.CreatedAt.Equal(loaded.CreatedAt) {
+		t.Fatalf("controller-owned persisted checkpoint: state=%+v err=%v", reloaded, err)
+	}
+	staleNext := reloaded
+	staleNext.Phase, staleNext.NextStage, staleNext.PendingApprovalID = lifecycle.PhaseTerminal, "", ""
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: loaded, Lifecycle: staleNext}); err == nil {
+		t.Fatal("controller accepted stale previous checkpoint after a valid update")
+	}
+	afterStale, err := store.Load(job.RunID)
+	if err != nil || !sameLifecycleState(afterStale, reloaded) {
+		t.Fatalf("stale checkpoint changed persisted state: state=%+v err=%v", afterStale, err)
+	}
+	terminal := reloaded
+	terminal.Phase, terminal.NextStage, terminal.PendingApprovalID = lifecycle.PhaseTerminal, "", ""
+	if err := checkpoints.Save(reloaded, terminal); err != nil {
+		t.Fatalf("controller save terminal checkpoint: %v", err)
+	}
+	terminal, err = store.Load(job.RunID)
+	if err != nil {
+		t.Fatalf("load terminal checkpoint: %v", err)
+	}
+	forgedPrevious := terminal
+	forgedPrevious.Phase, forgedPrevious.NextStage = lifecycle.PhaseRunning, "analyst"
+	forgedNext := forgedPrevious
+	forgedNext.Phase, forgedNext.NextStage = lifecycle.PhaseResumable, "coder"
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: forgedPrevious, Lifecycle: forgedNext}); err == nil {
+		t.Fatal("controller accepted forged nonterminal previous checkpoint for terminal state")
+	}
+	afterForgery, err := store.Load(job.RunID)
+	if err != nil || !sameLifecycleState(afterForgery, terminal) {
+		t.Fatalf("forged previous checkpoint changed persisted terminal state: state=%+v err=%v", afterForgery, err)
+	}
+	if _, err := checkpoints.Load("another-run"); err == nil {
+		t.Fatal("worker port loaded another run")
+	}
+
+	wrongRun := state
+	wrongRun.RunID = "another-run"
+	if _, err := server.dispatch("lifecycle.create", workerAPICall{Lifecycle: wrongRun}); err == nil {
+		t.Fatal("controller accepted lifecycle create for another run")
+	}
+	wrongTarget := state
+	wrongTarget.TargetDir = filepath.Join(target, "elsewhere")
+	if _, err := server.dispatch("lifecycle.create", workerAPICall{Lifecycle: wrongTarget}); err == nil {
+		t.Fatal("controller accepted lifecycle create for another target")
+	}
+	if _, err := server.dispatch("lifecycle.load", workerAPICall{A: "another-run"}); err == nil {
+		t.Fatal("controller accepted lifecycle load for another run")
+	}
+	server.lifecycle = wrongTargetLifecyclePort{}
+	if _, err := server.dispatch("lifecycle.load", workerAPICall{A: job.RunID}); err == nil {
+		t.Fatal("controller returned lifecycle state for another target")
+	}
+	wrongPrevious := loaded
+	wrongPrevious.TargetDir = filepath.Join(target, "elsewhere")
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: wrongPrevious, Lifecycle: resumed}); err == nil {
+		t.Fatal("controller accepted lifecycle save for another target")
+	}
+}
+
+func TestWorkerControllerAPILifecycleRejectsUnavailableAndOutOfScopeCalls(t *testing.T) {
+	target := t.TempDir()
+	job := Job{RunID: "scoped", Operation: OperationResume, TargetDir: target, ExecutionID: strings.Repeat("9", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServer(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	state := lifecycle.State{RunID: job.RunID, TargetDir: target}
+	for _, tc := range []struct {
+		method string
+		call   workerAPICall
+	}{
+		{"lifecycle.create", workerAPICall{Lifecycle: state}},
+		{"lifecycle.load", workerAPICall{A: job.RunID}},
+		{"lifecycle.save", workerAPICall{Previous: state, Lifecycle: state}},
+	} {
+		if _, err := server.dispatch(tc.method, tc.call); err == nil {
+			t.Fatalf("%s succeeded without controller store", tc.method)
+		}
+	}
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.lifecycle = store
+	wrongRun := state
+	wrongRun.RunID = "foreign"
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: wrongRun, Lifecycle: wrongRun}); err == nil {
+		t.Fatal("controller accepted lifecycle save for another run")
+	}
+	wrongTarget := state
+	wrongTarget.TargetDir = filepath.Join(target, "foreign")
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: state, Lifecycle: wrongTarget}); err == nil {
+		t.Fatal("controller accepted lifecycle save with a different target")
+	}
+	server.lifecycle = lifecycleLoadErrorPort{err: errors.New("simulated checkpoint read failure")}
+	if _, err := server.dispatch("lifecycle.load", workerAPICall{A: job.RunID}); err == nil {
+		t.Fatal("controller hid lifecycle load failure")
+	}
+	server.lifecycle = wrongTargetLifecyclePort{}
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: state, Lifecycle: state}); err == nil {
+		t.Fatal("controller accepted lifecycle store state for another target during save")
+	}
+	if _, err := server.dispatch("unknown.method", workerAPICall{}); err == nil {
+		t.Fatal("controller accepted unknown worker API method")
+	}
+}
+
+type wrongTargetLifecyclePort struct{}
+
+func (wrongTargetLifecyclePort) Create(lifecycle.State) error { return nil }
+func (wrongTargetLifecyclePort) Load(runID string) (lifecycle.State, error) {
+	return lifecycle.State{RunID: runID, TargetDir: filepath.Join(os.TempDir(), "wrong-target")}, nil
+}
+func (wrongTargetLifecyclePort) Save(lifecycle.State, lifecycle.State) error { return nil }
+
+type lifecycleLoadErrorPort struct{ err error }
+
+func (p lifecycleLoadErrorPort) Create(lifecycle.State) error { return nil }
+func (p lifecycleLoadErrorPort) Load(string) (lifecycle.State, error) {
+	return lifecycle.State{}, p.err
+}
+func (p lifecycleLoadErrorPort) Save(lifecycle.State, lifecycle.State) error { return nil }
 
 func TestWorkerControllerAPIRejectsMalformedAndUnauthenticatedRequests(t *testing.T) {
 	job := Job{RunID: "run", Operation: OperationStart, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}

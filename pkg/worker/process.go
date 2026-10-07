@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -209,6 +210,11 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		api, err = startWorkerAPIServer(job, recorder, e.apiApprovals)
 		if err != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
+		}
+		api.lifecycle, err = lifecycle.NewStore(e.target)
+		if err != nil {
+			api.close()
+			return pipeline.RunResult{}, fmt.Errorf("worker lifecycle store: %w", err)
 		}
 		defer api.close()
 	} else {

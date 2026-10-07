@@ -78,6 +78,7 @@ type Pipeline struct {
 	recorder   Recorder
 	delivery   delivery.Service
 	approvals  ApprovalStore
+	lifecycle  lifecycle.StorePort
 	evidence   EvidenceStoreFactory
 	reportsDir string
 }
@@ -116,6 +117,12 @@ func WithDeliveryService(service delivery.Service) Option {
 // lifecycle/evidence persistence out of the target.
 func WithApprovalStore(store ApprovalStore) Option {
 	return func(p *Pipeline) { p.approvals = store }
+}
+
+// WithLifecycleStore injects the mutable checkpoint port. The filesystem
+// lifecycle store remains the default for local CLI runs.
+func WithLifecycleStore(store lifecycle.StorePort) Option {
+	return func(p *Pipeline) { p.lifecycle = store }
 }
 
 // WithEvidenceStoreFactory injects the run evidence persistence port. The
@@ -201,7 +208,7 @@ type runState struct {
 	evidence                  EvidenceStore
 	attemptOrdinal            int
 	userOwnedPaths            map[string]bool
-	lifecycleStore            *lifecycle.Store
+	lifecycleStore            lifecycle.StorePort
 	lifecycleState            lifecycle.State
 	approvalStore             ApprovalStore
 	resumedApproval           *approval.PendingApproval
@@ -293,9 +300,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 	}()
 
-	lifecycleStore, err := lifecycle.NewStore(runCfg.TargetDir)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("lifecycle store: %w", err)
+	lifecycleStore := p.lifecycle
+	if lifecycleStore == nil {
+		lifecycleStore, err = lifecycle.NewStore(runCfg.TargetDir)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("lifecycle store: %w", err)
+		}
 	}
 	approvalStore := p.approvals
 	if approvalStore == nil {
@@ -577,10 +587,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		nextState.Phase = lifecycle.PhaseRunning
 		nextState.PendingApprovalID = ""
 		nextState.NextStage = runCfg.retryFrom
-		if err := lifecycleStore.Save(resumedState, nextState); err != nil {
+		savedState, err := saveLifecycleCheckpoint(lifecycleStore, resumedState, nextState)
+		if err != nil {
 			return RunResult{}, err
 		}
-		resumedState = nextState
+		resumedState = savedState
 	} else {
 		identity, identityErr := evidence.CurrentControllerIdentity()
 		if identityErr != nil {
@@ -615,6 +626,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 		if err := lifecycleStore.Create(resumedState); err != nil {
 			return RunResult{}, fmt.Errorf("создание lifecycle state: %w", err)
+		}
+		resumedState, err = lifecycleStore.Load(runID)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("чтение созданного lifecycle state: %w", err)
 		}
 	}
 	var currentBrief briefVersion
@@ -887,9 +902,12 @@ func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task strin
 	if err != nil {
 		return err
 	}
-	store, err := lifecycle.NewStore(targetDir)
-	if err != nil {
-		return err
+	store := p.lifecycle
+	if store == nil {
+		store, err = lifecycle.NewStore(targetDir)
+		if err != nil {
+			return err
+		}
 	}
 	if _, err := store.Load(runID); err == nil {
 		return errors.New("recover initial lifecycle: lifecycle state already exists")

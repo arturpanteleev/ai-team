@@ -38,10 +38,14 @@ authoritative run evidence. A worker MUST NOT receive writable access to those
 stores and MUST NOT be able to use its job capability to create or resolve a
 human decision.
 
-The current worker approval adapter rejects decision writes through the normal
-pipeline interface, but is only an application-level defense. The worker still
-receives the shared database path and target filesystem access, so this does
-not satisfy the requirement or prevent direct database writes.
+The worker approval adapter rejects decision writes through the normal
+pipeline interface. Lifecycle create/load/save now use a run/target-scoped
+controller API for ordinary web/scheduler worker execution, while local CLI
+runs retain the filesystem store. These are application-level controls only:
+the child does not receive `--db`, but it still has the same OS identity and
+target filesystem access, so it may open known database paths or alter
+lifecycle/evidence/artifact files directly. This does not satisfy the OS/API
+boundary requirement.
 
 #### Scenario: Worker attempts to alter an approval or evidence
 
@@ -51,6 +55,39 @@ not satisfy the requirement or prevent direct database writes.
 - **THEN** the filesystem/API boundary MUST deny the operation
 - **AND** the original controller-owned state MUST still pass its integrity
   verification
+
+This destructive scenario remains unverified and unsatisfied until the worker
+runs under an enforced OS/filesystem boundary; routing normal pipeline lifecycle
+calls through the controller API alone does not prevent direct file access.
+
+### Requirement: Controller-owned lifecycle checkpoint port
+
+For ordinary disposable worker execution, the pipeline MUST request lifecycle
+create/load/save operations through a typed controller API scoped to the active
+run and target. The controller MUST reject a request for a different run or
+target, and MUST serialize checkpoint operations with other stateful calls for
+the invocation. The API MUST use the existing bounded strict request schema and
+nonce/expiry/replay guard. Local CLI runs MAY continue using the filesystem
+lifecycle store. This application-level routing MUST NOT be described as
+filesystem isolation: the worker still shares the OS identity and target
+filesystem until a separately verified runtime boundary is deployed.
+
+#### Scenario: Worker creates, resumes and advances its checkpoint
+
+- **WHEN** a disposable worker starts a run, loads it on resume, and saves the
+  next checkpoint
+- **THEN** each operation MUST be scoped to the same run and target and reach
+  the controller-owned lifecycle store
+- **AND** the saved phase and approval/stage checkpoint MUST survive a fresh
+  load through that store
+- **AND** the local CLI MUST continue to create and update its filesystem store
+
+#### Scenario: Worker requests lifecycle state outside its scope
+
+- **WHEN** a worker requests another run, supplies a mismatched target, or
+  attempts an unsupported lifecycle method
+- **THEN** the controller MUST reject the request without changing lifecycle
+  state
 
 ### Requirement: Job-scoped worker result capability
 

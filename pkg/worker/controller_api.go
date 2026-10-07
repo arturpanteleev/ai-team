@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
@@ -71,6 +73,7 @@ type workerAPICall struct {
 	BriefVersion      pipeline.BriefVersion    `json:"brief_version,omitempty"`
 	BriefContent      []byte                   `json:"brief_content,omitempty"`
 	CandidateMetadata candidate.Metadata       `json:"candidate_metadata,omitempty"`
+	Usage             metrics.UsageEnvelope    `json:"usage_envelope,omitempty"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -106,6 +109,9 @@ type workerAPIServer struct {
 	briefs                  pipeline.BriefStore
 	candidates              candidate.MetadataStore
 	absences                candidate.AbsenceMarkerStore
+	usage                   metrics.FileUsageEnvelopeStore
+	usageAllowed            bool
+	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
 	briefTask               string
 	dispatchMu              sync.Mutex
@@ -181,6 +187,21 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, fmt.Errorf("worker controller API run id: %w", err)
 	}
+	if socketPath != "" {
+		canonicalTarget, targetErr := candidate.CanonicalTargetDir(job.TargetDir)
+		if targetErr != nil {
+			_ = listener.Close()
+			_ = os.Remove(socketPath)
+			return nil, fmt.Errorf("canonicalize controller usage target: %w", targetErr)
+		}
+		if err := (metrics.FileUsageEnvelopeStore{}).Reserve(canonicalTarget, job.RunID); err != nil {
+			_ = listener.Close()
+			if socketPath != "" {
+				_ = os.Remove(socketPath)
+			}
+			return nil, fmt.Errorf("prepare controller usage store: %w", err)
+		}
+	}
 	var nonce [32]byte
 	if _, err := io.ReadFull(random, nonce[:]); err != nil {
 		_ = listener.Close()
@@ -191,6 +212,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 	}
 	fileCandidateStore := candidate.FileMetadataStore{}
 	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
+	api.usageAllowed = socketPath != ""
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -423,6 +445,40 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return nil, nil
 	case "candidate.absence.create":
 		return nil, errors.New("worker API cannot create candidate absence markers")
+	case "usage.envelope.write":
+		if !s.usageAllowed {
+			return nil, errors.New("controller usage writes require bubblewrap Unix transport")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API usage write is not allowed for operation %q", s.scope.Operation)
+		}
+		if err := metrics.ValidateUsageEnvelope(s.scope.RunID, c.Usage); err != nil {
+			return nil, err
+		}
+		target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+		if err != nil {
+			return nil, err
+		}
+		if s.usageEnvelopeWritten {
+			stored, readErr := metrics.ReadUsageEnvelope(target, s.scope.RunID)
+			if readErr == nil && reflect.DeepEqual(stored, c.Usage) {
+				return nil, nil
+			}
+			return nil, errors.New("usage envelope already submitted by this invocation")
+		}
+		var writeErr error
+		if s.scope.Operation == OperationResume || s.scope.Operation == OperationRecover {
+			writeErr = s.usage.Replace(target, s.scope.RunID, c.Usage)
+		} else {
+			writeErr = s.usage.Write(target, s.scope.RunID, c.Usage)
+		}
+		if writeErr != nil {
+			return nil, writeErr
+		}
+		s.usageEnvelopeWritten = true
+		return nil, nil
 	case "approval.create":
 		if c.Approval.RunID != "" && c.Approval.RunID != s.scope.RunID {
 			return nil, errors.New("approval run mismatch")
@@ -554,6 +610,13 @@ func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 }
 
 func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }
+
+// SupportsControllerUsageStore reports whether this worker API uses the Unix
+// transport that is reachable only from the bubblewrap worker namespace.
+func (p *workerAPIPort) SupportsControllerUsageStore() bool {
+	return p != nil && p.address == "http://unix" && os.Getenv(workerAPISocketEnv) != ""
+}
+
 func (p *workerAPIPort) call(method string, value, out any) error {
 	return p.callWithRandom(method, value, out, rand.Reader)
 }
@@ -835,8 +898,26 @@ func (s *workerAPILifecycle) Save(previous, next lifecycle.State) error {
 	return s.port.call("lifecycle.save", workerAPICall{Previous: previous, Lifecycle: next}, nil)
 }
 
+type workerAPIUsageEnvelopeWriter struct{ port *workerAPIPort }
+type WorkerAPIUsageEnvelopeWriter = workerAPIUsageEnvelopeWriter
+
+func NewWorkerAPIUsageEnvelopeWriter(port *WorkerAPIPort) pipeline.UsageEnvelopeWriter {
+	return &workerAPIUsageEnvelopeWriter{port: port}
+}
+
+func (w *workerAPIUsageEnvelopeWriter) WriteUsageEnvelope(envelope metrics.UsageEnvelope) error {
+	if w == nil || w.port == nil {
+		return errors.New("worker usage API unavailable")
+	}
+	if err := metrics.ValidateUsageEnvelope(w.port.scope.RunID, envelope); err != nil {
+		return err
+	}
+	return w.port.call("usage.envelope.write", workerAPICall{Usage: envelope}, nil)
+}
+
 var _ pipeline.Recorder = (*workerAPIRecorder)(nil)
 var _ pipeline.ApprovalStore = (*workerAPIApprovals)(nil)
 var _ pipeline.BriefStore = (*workerAPIBriefs)(nil)
 var _ candidate.MetadataStore = (*workerAPICandidates)(nil)
 var _ lifecycle.StorePort = (*workerAPILifecycle)(nil)
+var _ pipeline.UsageEnvelopeWriter = (*workerAPIUsageEnvelopeWriter)(nil)

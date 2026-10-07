@@ -301,6 +301,7 @@ func cmdWorker() {
 	var approvalStore pipeline.ApprovalStore
 	var businessBriefStore pipeline.BriefStore
 	var candidateMetadataStore candidate.MetadataStore
+	var usageEnvelopeWriter pipeline.UsageEnvelopeWriter
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -312,6 +313,9 @@ func cmdWorker() {
 		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
 		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
 		candidateMetadataStore = worker.NewWorkerAPICandidates(apiPort)
+		if apiPort.SupportsControllerUsageStore() {
+			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
+		}
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
 		if *dbPath == "" {
@@ -379,6 +383,9 @@ func cmdWorker() {
 	}
 	if candidateMetadataStore != nil {
 		engineOptions = append(engineOptions, pipeline.WithCandidateMetadataStore(candidateMetadataStore))
+	}
+	if usageEnvelopeWriter != nil {
+		engineOptions = append(engineOptions, pipeline.WithUsageEnvelopeWriter(usageEnvelopeWriter))
 	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, engineOptions...))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1452,7 +1459,7 @@ func defaultEvalOutput(target, agentName string) string {
 	return filepath.Join(target, ".ai-team", "evals", time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+safeAgent+".json")
 }
 
-// cmdUsage печатает usage-сводку завершённого run из {target}/.ai-team/runs/<run_id>/usage.json.
+// cmdUsage печатает usage-сводку из controller state (cloud) или legacy local evidence.
 func cmdUsage() {
 	flags := flag.NewFlagSet("usage", flag.ExitOnError)
 	target := flags.String("target", ".", "Путь к целевому проекту")
@@ -1471,16 +1478,31 @@ func cmdUsage() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
-	path := filepath.Join(absolute, ".ai-team", "runs", runID, "usage.json")
-	data, err := safeio.ReadRegularFile(path, 8<<20)
-	if err != nil {
+	envelope, err := metrics.ReadUsageEnvelope(absolute, runID)
+	if errors.Is(err, os.ErrNotExist) {
+		controllerStorePresent, stateErr := metrics.UsageEnvelopeReservation(absolute, runID)
+		if stateErr != nil {
+			fatal("Не удалось проверить controller usage state: %v", stateErr)
+		}
+		if controllerStorePresent {
+			fatal("Не удалось прочитать controller usage envelope для run %s: %v", runID, err)
+		}
+		// Local CLI compatibility: older/local runs keep usage beside run.json.
+		path := filepath.Join(absolute, ".ai-team", "runs", runID, "usage.json")
+		data, readErr := safeio.ReadRegularFile(path, 8<<20)
+		if readErr != nil {
+			fatal("Не удалось прочитать usage: %v", readErr)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if decodeErr := decoder.Decode(&envelope); decodeErr != nil {
+			fatal("Повреждённый usage.json: %v", decodeErr)
+		}
+		if validateErr := metrics.ValidateUsageEnvelope(runID, envelope); validateErr != nil {
+			fatal("Повреждённый usage.json: %v", validateErr)
+		}
+	} else if err != nil {
 		fatal("Не удалось прочитать usage: %v", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var envelope metrics.UsageEnvelope
-	if err := decoder.Decode(&envelope); err != nil {
-		fatal("Повреждённый usage.json: %v", err)
 	}
 	logging.Printf("Run:      %s\n", envelope.RunID)
 	logging.Printf("Feature:  %s\n", envelope.Feature)

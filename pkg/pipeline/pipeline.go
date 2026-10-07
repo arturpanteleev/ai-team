@@ -21,6 +21,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -69,20 +70,27 @@ type ApprovalStore interface {
 	ResolveDeferred(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
 }
 
+// UsageEnvelopeWriter publishes the final run summary. Cloud workers use a
+// per-invocation controller API; local CLI runs retain the filesystem path.
+type UsageEnvelopeWriter interface {
+	WriteUsageEnvelope(metrics.UsageEnvelope) error
+}
+
 type Pipeline struct {
-	cfg               *config.Config
-	reg               *agent.Registry
-	notifier          notifier.Notifier
-	prompter          Prompter
-	newRuntime        runtime.Factory
-	recorder          Recorder
-	delivery          delivery.Service
-	approvals         ApprovalStore
-	lifecycle         lifecycle.StorePort
-	evidence          EvidenceStoreFactory
-	briefs            BriefStore
-	candidateMetadata candidate.MetadataStore
-	reportsDir        string
+	cfg                 *config.Config
+	reg                 *agent.Registry
+	notifier            notifier.Notifier
+	prompter            Prompter
+	newRuntime          runtime.Factory
+	recorder            Recorder
+	delivery            delivery.Service
+	approvals           ApprovalStore
+	lifecycle           lifecycle.StorePort
+	evidence            EvidenceStoreFactory
+	briefs              BriefStore
+	candidateMetadata   candidate.MetadataStore
+	usageEnvelopeWriter UsageEnvelopeWriter
+	reportsDir          string
 }
 
 type Option func(*Pipeline)
@@ -145,6 +153,11 @@ func WithBusinessBriefStore(store BriefStore) Option {
 // controller API. Local CLI runs keep the candidate package file-store default.
 func WithCandidateMetadataStore(store candidate.MetadataStore) Option {
 	return func(p *Pipeline) { p.candidateMetadata = store }
+}
+
+// WithUsageEnvelopeWriter routes cloud usage summaries through the controller.
+func WithUsageEnvelopeWriter(writer UsageEnvelopeWriter) Option {
+	return func(p *Pipeline) { p.usageEnvelopeWriter = writer }
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {

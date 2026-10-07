@@ -126,11 +126,14 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	return outcome, nil
 }
 
-// writeUsageEnvelope публикует attempt-independent usage-сводку run в
-// {RunDir}/usage.json — рядом с run.json, вне attempts/.
+// writeUsageEnvelope publishes the final run summary through the controller
+// API for cloud workers, while local CLI runs retain the filesystem format.
 func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) error {
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
 		rs.results, rs.loopbackCycles, status, usageToMetrics(rs.usageTotal))
+	if rs.p.usageEnvelopeWriter != nil {
+		return rs.p.usageEnvelopeWriter.WriteUsageEnvelope(envelope)
+	}
 	return writeControllerJSON(filepath.Join(rs.evidence.RunDir(), "usage.json"), envelope)
 }
 

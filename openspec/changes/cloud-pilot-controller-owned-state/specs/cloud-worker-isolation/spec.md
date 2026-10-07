@@ -189,6 +189,60 @@ isolation of candidate contents, evidence, or artifacts.
 - **THEN** the metadata sentinel MUST be unreadable
 - **AND** the worktree sentinel MUST remain readable
 
+### Requirement: Controller-owned final usage envelope
+
+Bubblewrap cloud workers MUST publish the final usage envelope through a write-only
+controller API scoped to the invocation's run, operation, and target. The
+controller MUST validate schema and run identity and store the envelope outside
+the worker-visible run evidence directory. The envelope contents remain
+worker-supplied and untrusted. The API MUST NOT offer usage read or
+arbitrary-path write operations. Exact retries within one invocation MAY be
+idempotent; a conflicting second write in that invocation MUST fail. A later
+Resume/Recover invocation MAY atomically advance the summary to support recovery
+after interrupted finalization.
+The controller MUST create an immutable per-run reservation before worker
+spawn. The CLI MUST select controller state by that reservation and fail closed
+if its envelope is missing or corrupt; reservations for other runs MUST NOT
+change local-run behavior.
+Local CLI runs MUST retain their filesystem-backed usage output.
+
+In opt-in Linux bubblewrap mode, `.ai-team/state/usage` MUST be masked from
+direct worker reads while the worker can finish by submitting its envelope
+through the scoped API.
+Workers launched with the loopback API without bubblewrap MUST NOT receive
+controller usage write authority; their target-file summary is not
+controller-owned or authoritative.
+This boundary protects against the bubblewrap child in the reserved
+invocation, not a process or user with direct write access to the target.
+
+#### Scenario: Cloud worker submits its final usage envelope
+
+- **WHEN** a cloud worker finalizes a run and submits a schema-valid envelope
+  with the invocation's run ID
+- **THEN** the controller MUST store it under `.ai-team/state/usage`
+- **AND** the worker API MUST reject another run's envelope and expose no
+  read operation
+
+#### Scenario: Usage state is hidden while a sandboxed run finishes
+
+- **WHEN** a Linux bubblewrap worker reads a controller usage sentinel and
+  submits a valid final envelope through the API
+- **THEN** the sentinel MUST be unreadable to the worker
+- **AND** the controller MUST retain the submitted envelope after worker exit
+
+#### Scenario: Usage CLI rejects corrupt controller state
+
+- **WHEN** a controller-owned usage envelope is missing or corrupt
+- **THEN** the CLI MUST report the error and MUST NOT fall back to
+  worker-visible run evidence
+
+#### Scenario: A reservation selects only its own run
+
+- **WHEN** controller state contains a reservation for one run and the CLI
+  requests a different run
+- **THEN** the unrelated reservation MUST NOT suppress that run's legacy local
+  evidence lookup
+
 ### Requirement: Opt-in Linux controller-state filesystem masking
 
 The system MUST wrap a child in bubblewrap mount, user, PID, IPC, UTS, and network

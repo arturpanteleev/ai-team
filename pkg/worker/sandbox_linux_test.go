@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
 
@@ -69,6 +70,13 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(candidateMetadataDir, "controller-sentinel.json"), []byte("candidate-metadata-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	usageDir := filepath.Join(target, ".ai-team", "state", "usage")
+	if err := os.MkdirAll(usageDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usageDir, "controller-sentinel.json"), []byte("usage-envelope-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	candidateWorktree := filepath.Join(target, ".ai-team", "worktrees", "probe")
@@ -141,8 +149,14 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.UsageStateReadable {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
+	}
+	if !report.UsageAPIWriteSucceeded {
+		t.Fatalf("worker could not publish usage through the controller API: %+v", report)
+	}
+	if _, err := metrics.ReadUsageEnvelope(target, "sandbox-probe"); err != nil {
+		t.Fatalf("controller did not retain worker usage after process exit: %v", err)
 	}
 	if !report.ControllerAPIReachable {
 		t.Fatalf("scoped controller API unavailable over isolated network: %+v", report)
@@ -608,6 +622,8 @@ type sandboxProbeReport struct {
 	LifecycleReadable             bool `json:"lifecycle_readable"`
 	LegacyApprovalReadable        bool `json:"legacy_approval_readable"`
 	CandidateMetadataReadable     bool `json:"candidate_metadata_readable"`
+	UsageStateReadable            bool `json:"usage_state_readable"`
+	UsageAPIWriteSucceeded        bool `json:"usage_api_write_succeeded"`
 	WorktreeReadable              bool `json:"worktree_readable"`
 	TargetReadable                bool `json:"target_readable"`
 	TargetWritable                bool `json:"target_writable"`
@@ -652,16 +668,21 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	lifecycleData, lifecycleErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "runs", "controller-state.json"))
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
+	usageData, usageErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "usage", "controller-sentinel.json"))
 	worktreeData, worktreeErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "worktrees", "probe", "visible.txt"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
 	agentWriteErr := os.WriteFile(filepath.Join(job.TargetDir, ".ai-team", "agents", "role.md"), []byte("modified"), 0600)
 	apiReachable := false
 	adminControlPlaneCallRejected := false
+	usageAPIWriteSucceeded := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
 		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 0
 		adminControlPlaneCallRejected = isExpectedAdminControlPlaneRejection(port.call("admin.control_plane", workerAPICall{RunID: job.RunID}, nil))
+		started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+		usageEnvelope := metrics.Build(job.RunID, "probe", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
+		usageAPIWriteSucceeded = port.call("usage.envelope.write", workerAPICall{Usage: usageEnvelope}, nil) == nil
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
@@ -680,6 +701,8 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		LifecycleReadable:             lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
 		LegacyApprovalReadable:        approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
 		CandidateMetadataReadable:     candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
+		UsageStateReadable:            usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
+		UsageAPIWriteSucceeded:        usageAPIWriteSucceeded,
 		WorktreeReadable:              worktreeErr == nil && string(worktreeData) == "worktree-visible",
 		TargetReadable:                targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:                writeErr == nil,

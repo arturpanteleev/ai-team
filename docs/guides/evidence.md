@@ -27,6 +27,7 @@
 | `.ai-team/runs/<run_id>/` | Неизменяемые доказательства прогона | Нет |
 | `.ai-team/state/runs/<run_id>.json` | Текущая точка остановки прогона, нужна для `--resume` | Нет, это рабочее состояние контроллера |
 | `.ai-team/state/approvals/<run_id>/` | Запросы подтверждений и решения по ним | Нет |
+| `.ai-team/state/usage/<run_id>.json` | Worker-supplied итоговая сводка usage, сохранённая bubblewrap cloud-контроллером | Нет |
 | `.ai-team/state/exports/` | Записи о проверенных экспортах | Нет |
 | `.ai-team/worktrees/<run_id>/` | Каталог [кандидата](../start/concepts.md#кандидат) (candidate worktree) | Не трогайте, пока нужны `--resume` или `deliver` |
 | `.ai-team/artifacts/<feature>/` | Рабочие артефакты агентов: спецификации, дизайн, ревью | Читать можно; это не доказательство |
@@ -42,7 +43,7 @@
 | `events.jsonl` | Журнал событий: каждое событие ссылается на хеш предыдущего |
 | `attempts/<attempt_id>/` | Манифест попытки этапа, его входы и выходные артефакты |
 | `logs/` | Логи runtime по попыткам |
-| `usage.json` | Время и число попыток по этапам |
+| `usage.json` | Время и число попыток по этапам (локальные CLI runs; cloud сводка хранится в `.ai-team/state/usage/`) |
 | `delivery.json` | Итог delivery, если она была |
 | `attestation.json`, `anchor.json` | Сводная аттестация и якорь; появляются, когда прогон завершён |
 
@@ -82,8 +83,12 @@ deployer   2        156ms
 профиля `trusted-local` — честная оценка, а не ошибка. Подробнее — в
 [Граница безопасности](../reference/security.md).
 
-Сводка есть только у завершённого прогона. Для незавершённого команда
-сообщит `Не удалось прочитать usage: …usage.json: no such file or directory`.
+Сводка есть только после финализации прогона. Для bubblewrap cloud runs команда
+читает `.ai-team/state/usage/<run_id>.json`, если controller создал reservation
+этого run до spawn; при reservation отсутствие или повреждение envelope — ошибка.
+Worker не видит каталог в sandbox. Loopback API workers без bubblewrap используют
+обычный target-file summary, который не считается controller-owned. Локальный CLI сохраняет прежний
+`.ai-team/runs/<run_id>/usage.json`.
 
 ## 2. Проверить целостность прогона
 

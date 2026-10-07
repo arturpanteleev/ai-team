@@ -101,6 +101,17 @@
   and workspace access assertions. This is bounded runtime evidence only;
   runtime coverage for other control-plane routes, credentials, state, and
   deployment configurations remains outstanding.
+- [x] Route final `metrics.UsageEnvelope` writes from bubblewrap cloud workers through a
+  run/operation/target-scoped write-only controller API. Store immutable
+  envelopes under `.ai-team/state/usage`, validate schema/run identity, and
+  mask that directory in bubblewrap. Keep local CLI filesystem writes
+  compatible and let `ai-team usage` read the controller location first.
+- [x] Extend the Linux child probe to confirm the usage state sentinel is
+  unreadable, a scoped envelope write succeeds, and the controller retains the
+  envelope after worker exit. This is one bounded state path; MAJ-07 remains
+  open for other evidence/artifact paths and deployment/recovery validation.
+  Loopback API workers without bubblewrap are explicitly denied this authority
+  and retain the legacy target-file output.
 - [ ] Test the complete worker process/network policy on supported deployment
   runtimes and verify there is no route to admin control endpoints and no
   control-plane secrets in worker.

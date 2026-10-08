@@ -581,26 +581,38 @@ func VerifyResultDigest(result Result) bool {
 	return result.EvidenceDigest != "" && result.EvidenceDigest == resultDigest(result)
 }
 
-// DefaultIgnoreDirs is the single canonical ignore list for workspace tree
-// hashing: controller metadata (.git, .ai-team) plus dependency/build
-// directories that are never part of a mutation contract. Directories are
-// matched by name at any depth of the walk. Project-specific additions from
-// config (OPS-2) are merged in; the canonical baseline is never removable.
+// DefaultIgnoreDirs is the workspace identity hash ignore set: controller
+// metadata plus explicitly configured project-specific directories. Build and
+// dependency directories are deliberately included because they may contain
+// files relevant to mutation attribution.
 func DefaultIgnoreDirs() map[string]bool {
 	extra := loadExtraIgnoreDirs()
 	result := map[string]bool{
-		".git":         true,
-		".ai-team":     true,
-		"node_modules": true,
-		"vendor":       true,
-		"dist":         true,
-		".venv":        true,
-		"__pycache__":  true,
+		".git":     true,
+		".ai-team": true,
 	}
 	for name := range extra {
 		if name == "" {
 			continue
 		}
+		result[name] = true
+	}
+	return result
+}
+
+// MutationGuardIgnoreDirs excludes only controller-owned metadata. In
+// particular, dependency and build directories remain visible to the guard
+// even when the workspace identity digest has explicit configured excludes.
+func MutationGuardIgnoreDirs() map[string]bool {
+	return map[string]bool{".git": true, ".ai-team": true}
+}
+
+// FastTraversalIgnoreDirs is available to non-authoritative scans that trade
+// completeness for speed. It must never be used for workspace identity,
+// mutation attribution, or delivery decisions.
+func FastTraversalIgnoreDirs() map[string]bool {
+	result := DefaultIgnoreDirs()
+	for _, name := range []string{"node_modules", "vendor", "dist", ".venv", "__pycache__"} {
 		result[name] = true
 	}
 	return result
@@ -694,7 +706,7 @@ func WorkspaceFileDigests(target string, ignoredDirs map[string]bool) (files map
 // исключением declared side-effect файлов (junit report), которые обязаны
 // появляться в результате выполнения проверки.
 func (r Runner) workspaceDigestExcluding(exclude string) (string, error) {
-	files, _, err := WorkspaceFileDigests(r.TargetDir, DefaultIgnoreDirs())
+	files, _, err := WorkspaceFileDigests(r.TargetDir, MutationGuardIgnoreDirs())
 	if err != nil {
 		return "", err
 	}
@@ -714,9 +726,10 @@ func (r Runner) workspaceDigestExcluding(exclude string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// WorkspaceDigest is the canonical source-tree digest used to bind checks to
-// delivery. Controller metadata and dependency directories from
-// DefaultIgnoreDirs are excluded.
+// WorkspaceDigest is the canonical source-tree identity digest used to bind
+// checks to delivery. It excludes controller metadata and explicitly
+// configured tree-hash directories; build and dependency directories remain
+// included by default.
 func WorkspaceDigest(target string) (string, error) {
 	_, fingerprint, err := WorkspaceFileDigests(target, DefaultIgnoreDirs())
 	return fingerprint, err

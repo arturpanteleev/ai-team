@@ -1,8 +1,11 @@
 package evidence
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 )
@@ -98,6 +101,40 @@ func TestFindDeliveredOnMissingRunsRootReturnsNotFound(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("ожидалось not-found, получено: %+v", found)
+	}
+}
+
+func TestFindDeliveredDoesNotSwallowCorruptTerminalRecord(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runsRoot := filepath.Join(target, ".ai-team", "runs")
+	manifest := testRunManifest("run-corrupt-delivery")
+	manifest.Feature = "feature"
+	store, err := Start(runsRoot, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteTerminalRecord(store.RunDir(), delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion,
+		RunID:         manifest.RunID, Feature: manifest.Feature,
+		PlanHash: strings.Repeat("a", 64), CommitSHA: strings.Repeat("b", 40),
+		PerformedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.RunDir(), "delivery.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), strings.Repeat("b", 40), strings.Repeat("c", 40), 1)
+	if err := os.WriteFile(path, []byte(tampered), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := FindDelivered(runsRoot, manifest.Feature); err == nil {
+		t.Fatal("FindDelivered swallowed corrupt delivery evidence")
 	}
 }
 

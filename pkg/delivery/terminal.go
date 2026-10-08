@@ -133,7 +133,7 @@ func WriteTerminalRecord(runDir string, record TerminalRecord) error {
 	finalPath := filepath.Join(runDir, "delivery.json")
 	if existing, ok, err := ReadTerminalRecord(runDir); err != nil {
 		return err
-	} else if ok && existing.CommitSHA == record.CommitSHA && existing.PlanHash == record.PlanHash {
+	} else if ok && sameTerminalRecord(*existing, record) {
 		return nil // идемпотентный повтор (retry) с тем же результатом
 	} else if ok {
 		return fmt.Errorf("terminal delivery record уже записан (%s): перезапись запрещена", existing.CommitSHA)
@@ -329,17 +329,26 @@ func ReadControllerTerminalRecord(targetDir, runID string) (*TerminalRecord, boo
 // the historical evidence-local delivery.json only when the new file is absent.
 func ReadTerminalRecordForRun(targetDir, runDir, runID string) (*TerminalRecord, bool, error) {
 	record, ok, err := ReadControllerTerminalRecord(targetDir, runID)
-	if err != nil || ok {
+	if err != nil {
 		return record, ok, err
 	}
-	record, ok, err = ReadTerminalRecord(runDir)
-	if err != nil || !ok {
-		return record, ok, err
+	localRecord, localOK, localErr := ReadTerminalRecord(runDir)
+	if localErr != nil {
+		return nil, false, localErr
 	}
-	if record.RunID != runID {
-		return nil, false, fmt.Errorf("legacy terminal delivery record identity mismatch: requested=%q stored=%q", runID, record.RunID)
+	if ok {
+		if localOK && !sameTerminalRecord(*record, *localRecord) {
+			return nil, false, fmt.Errorf("terminal delivery record conflict between controller state and run evidence for run %s", runID)
+		}
+		return record, true, nil
 	}
-	return record, true, nil
+	if !localOK {
+		return nil, false, nil
+	}
+	if localRecord.RunID != runID {
+		return nil, false, fmt.Errorf("legacy terminal delivery record identity mismatch: requested=%q stored=%q", runID, localRecord.RunID)
+	}
+	return localRecord, true, nil
 }
 
 func ReadTerminalRecordAtPath(path string) (*TerminalRecord, bool, error) {

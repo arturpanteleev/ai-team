@@ -18,9 +18,10 @@ type EvidenceStore interface {
 	LogDir() string
 	NewAttemptID(stage string, ordinal int) string
 	Append(evidence.Event) error
-	SnapshotInputs(attemptID string, inputs []evidence.Artifact) ([]evidence.Artifact, func(), error)
+	SnapshotInputs(attemptID string, inputs []evidence.Artifact) ([]evidence.Artifact, func() error, error)
 	PublishAttempt(evidence.AttemptManifest, string, []evidence.Artifact, []evidence.Artifact) error
 	PublishReportTree(name, source string) error
+	SealTerminalEvidence() error
 }
 
 // EvidenceStoreFactory owns opening and creating run evidence for a pipeline.

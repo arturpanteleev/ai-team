@@ -26,9 +26,41 @@ Hash-chain событий MUST начинаться с корня, выведе�
 ### Requirement: Artifact provenance
 Every published artifact MUST record producer, run, attempt, size and SHA-256 hash.
 
+Terminal run verification MUST follow every input and output `evidence_path` in
+each attempt manifest and compare the artifact type, total size and SHA-256
+with the manifest. Exported bundles MUST carry the referenced attempt
+artifacts so the same checks can be repeated without the source run directory.
+
 #### Scenario: Stale output
 - **WHEN** a stage exits without publishing a fresh output for its current attempt
 - **THEN** an output from an earlier attempt MUST NOT satisfy the contract
+
+#### Scenario: Attempt artifact is changed or removed
+- **WHEN** an attempt artifact is modified, truncated, or removed after the run
+- **THEN** `verify` and `export` MUST fail before reporting the run as verified
+
+### Requirement: Terminal run integrity
+The terminal anchor MUST bind the exact `run.json` bytes and the run's
+supplemental evidence files. Live-run verification MUST also check the
+referenced attempt artifacts, logs, reports, candidate and usage evidence,
+containment receipt, and any terminal delivery record when present. Export
+MUST complete this live-run verification before building a bundle.
+
+#### Scenario: Run manifest or supplemental evidence changes
+- **WHEN** `run.json`, a log, report, candidate, usage or containment file is
+  added, removed or changed after sealing
+- **THEN** live-run verification MUST fail
+
+#### Scenario: Delivery record is changed
+- **WHEN** a terminal delivery record has invalid identity, self-digest, or no
+  matching `delivery_deferred` event
+- **THEN** `verify`, `export` and delivery queries MUST fail closed
+
+#### Scenario: Portable bundle verification
+- **WHEN** an exported bundle is verified without the source run directory
+- **THEN** verification MUST use only bundle-local event, manifest, artifact,
+  delivery and containment records, and MUST NOT resolve authorities from a
+  surrounding workspace
 
 ### Requirement: Retry invalidation
 Retry and loopback MUST invalidate downstream evidence from superseded attempts.

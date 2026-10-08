@@ -1,12 +1,15 @@
 # configurable-tree-hash-ignore Specification
 
 ## Purpose
-Проектно-настраиваемые дополнительные ignore-каталоги для workspace tree hash поверх неослабляемого канонического baseline, со строгой валидацией имён.
+Проектно-настраиваемые дополнительные исключения для workspace identity hash
+поверх `.git` и `.ai-team`, со строгой валидацией имён. Mutation guard
+использует отдельный набор и всегда видит файлы проекта в этих каталогах.
 ## Requirements
 ### Requirement: Project-specific tree-hash ignore directories
 
 A project MUST be able to configure additional directory names that are excluded
-from workspace tree hashing, without weakening the canonical baseline ignore set.
+from workspace identity hashing, without weakening the `.git` and `.ai-team`
+baseline. Mutation attribution MUST use its own stricter ignore set.
 
 #### Scenario: Ignore directories excluded from digest
 
@@ -14,14 +17,22 @@ from workspace tree hashing, without weakening the canonical baseline ignore set
   directory names (e.g. `coverage`)
 - **THEN** those directories MUST be excluded from the workspace digest
 - **AND** the digest MUST differ from the digest computed without the extra ignore
-- **AND** every digest computation in the process (checks, pipeline, delivery
-  planning and execution) MUST use the same expanded ignore set
+- **AND** checks, pipeline, delivery planning and execution MUST use the same
+  identity digest policy
 
-#### Scenario: Baseline is never weakened
+#### Scenario: Identity baseline
 
 - **WHEN** a project config declares extra ignore directories
-- **THEN** the canonical baseline entries (`.git`, `.ai-team`, `node_modules`,
-  `vendor`, `dist`, `.venv`, `__pycache__`) MUST remain ignored
+- **THEN** `.git` and `.ai-team` MUST remain ignored
+- **AND** dependency and build directories MUST remain included unless named
+  explicitly in project configuration
+
+#### Scenario: Mutation guard keeps full attribution
+
+- **WHEN** an agent or check changes a file in a configured or conventional
+  build/dependency directory
+- **THEN** mutation guard MUST detect and attribute the change
+- **AND** it MUST ignore only `.git` and `.ai-team`
 
 ### Requirement: Strict validation of ignore directory names
 
@@ -38,4 +49,3 @@ accepted; paths, glob patterns and unsafe names are rejected.
 
 - **WHEN** the same directory name appears more than once in `ignore_dirs`
 - **THEN** configuration validation MUST reject it with an error
-

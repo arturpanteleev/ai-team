@@ -192,7 +192,7 @@ ai-team verify <run_id>
 ```
 
 ```text
-✓ Run 20261006T152959.266311000Z-a661d54efaecd972: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы
+✓ Run 20261006T152959.266311000Z-a661d54efaecd972: anchor OK — run manifest, event chain, attempt artifacts, supplemental evidence и attestation v1 согласованы
 ✓ Run OK
 ```
 

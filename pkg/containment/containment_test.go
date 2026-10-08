@@ -22,6 +22,9 @@ func TestDefaultTrustedLocalReceipt(t *testing.T) {
 	if !r.IsTrustedLocal() {
 		t.Fatal("IsTrustedLocal() should return true")
 	}
+	if r.Details[AxisProc]["cleanup_verified"] {
+		t.Fatal("run-level receipt must not claim cleanup verification without a per-run result")
+	}
 }
 
 func TestUnavailableReceipt(t *testing.T) {

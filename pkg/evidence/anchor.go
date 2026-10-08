@@ -2,6 +2,8 @@ package evidence
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,11 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 // AnchorSchemaVersion is the schema of the terminal anchor.json manifest.
-const AnchorSchemaVersion = 1
+const AnchorSchemaVersion = 2
 
 const (
 	anchorFileName    = "anchor.json"
@@ -32,13 +35,17 @@ func isTerminalEventType(eventType string) bool {
 // hash-chained event log, корень цепочки и digest всех attempt manifests на
 // момент завершения run.
 type Anchor struct {
-	SchemaVersion   int       `json:"schema_version"`
-	RunID           string    `json:"run_id"`
-	TerminalEvent   string    `json:"terminal_event"`
-	EventCount      uint64    `json:"event_count"`
-	ChainRootSHA256 string    `json:"chain_root_sha256"`
-	ManifestsDigest string    `json:"manifests_digest"`
-	CreatedAt       time.Time `json:"created_at"`
+	SchemaVersion        int       `json:"schema_version"`
+	RunID                string    `json:"run_id"`
+	TerminalEvent        string    `json:"terminal_event"`
+	EventCount           uint64    `json:"event_count"`
+	ChainRootSHA256      string    `json:"chain_root_sha256"`
+	ManifestsDigest      string    `json:"manifests_digest"`
+	RunManifestSHA256    string    `json:"run_manifest_sha256"`
+	SupplementalSHA256   string    `json:"supplemental_sha256"`
+	AttestationSHA256    string    `json:"attestation_sha256,omitempty"`
+	DeliveryRecordSHA256 string    `json:"delivery_record_sha256,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // manifestsDigest вычисляет sha256 отсортированного списка
@@ -76,14 +83,48 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 	if err != nil {
 		return err
 	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(s.RunDir(), "run.json"), 1<<20)
+	if err != nil {
+		return fmt.Errorf("read run.json for anchor: %w", err)
+	}
+	var manifest RunManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("decode run.json for anchor: %w", err)
+	}
+	if manifest.RunID != s.runID {
+		return fmt.Errorf("run.json identity %q does not match anchor run %q", manifest.RunID, s.runID)
+	}
+	runManifestSHA256 := sha256Bytes(manifestData)
+	supplementalSHA256, err := supplementalDigest(s.RunDir(), manifest.TargetDir, s.runID)
+	if err != nil {
+		return err
+	}
+	var deliverySHA256 string
+	if record, found, readErr := delivery.ReadTerminalRecordForRun(manifest.TargetDir, s.RunDir(), s.runID); readErr != nil {
+		return fmt.Errorf("read terminal delivery record for anchor: %w", readErr)
+	} else if found {
+		deliveryBytes, marshalErr := json.MarshalIndent(record, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		deliverySHA256 = sha256Bytes(append(deliveryBytes, '\n'))
+	}
+	attestationSHA256, _, err := terminalAttestationDigest(s.RunDir())
+	if err != nil {
+		return fmt.Errorf("read terminal attestation for anchor: %w", err)
+	}
 	anchor := Anchor{
-		SchemaVersion:   AnchorSchemaVersion,
-		RunID:           s.runID,
-		TerminalEvent:   terminalEvent,
-		EventCount:      events[len(events)-1].Sequence,
-		ChainRootSHA256: events[len(events)-1].SHA256,
-		ManifestsDigest: digest,
-		CreatedAt:       time.Now().UTC(),
+		SchemaVersion:        AnchorSchemaVersion,
+		RunID:                s.runID,
+		TerminalEvent:        terminalEvent,
+		EventCount:           events[len(events)-1].Sequence,
+		ChainRootSHA256:      events[len(events)-1].SHA256,
+		ManifestsDigest:      digest,
+		RunManifestSHA256:    runManifestSHA256,
+		SupplementalSHA256:   supplementalSHA256,
+		AttestationSHA256:    attestationSHA256,
+		DeliveryRecordSHA256: deliverySHA256,
+		CreatedAt:            time.Now().UTC(),
 	}
 	data, err := json.MarshalIndent(anchor, "", "  ")
 	if err != nil {
@@ -120,6 +161,76 @@ func VerifyAnchor(runDir string) error {
 	return VerifyAnchorWithSources(runDir, nil, nil)
 }
 
+// ResealTerminalEvidence refreshes the terminal anchor after a post-terminal
+// delivery record is persisted. The event chain remains unchanged; the anchor
+// gains a digest of the immutable delivery record for live and bundle verify.
+func ResealTerminalEvidence(runDir string, eventSource EventLog) error {
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return fmt.Errorf("read run manifest for terminal reseal: %w", err)
+	}
+	var manifest RunManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("decode run manifest for terminal reseal: %w", err)
+	}
+	if manifest.RunID == "" {
+		return errors.New("terminal reseal: run manifest has no run_id")
+	}
+	if eventSource == nil {
+		eventSource = NewFileEventLog(filepath.Join(runDir, "events.jsonl"))
+	}
+	store := &Store{root: filepath.Dir(runDir), runID: manifest.RunID, eventLog: eventSource}
+	return store.SealTerminalEvidence()
+}
+
+// terminalAttestationDigest follows the same controller-first authority as
+// export and delivery. The canonical JSON value binds every statement claim,
+// including claims not otherwise derivable from run evidence.
+func terminalAttestationDigest(runDir string) (string, bool, error) {
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
+	controllerPath := filepath.Join(targetDir, ".ai-team", "state", "attestation", filepath.Base(filepath.Clean(runDir))+".json")
+	data, err := safeio.ReadRegularFile(controllerPath, 1<<20)
+	if err == nil {
+		digest, digestErr := AttestationDigest(data)
+		return digest, true, digestErr
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	data, err = safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	digest, err := AttestationDigest(data)
+	return digest, true, err
+}
+
+// AttestationDigest hashes the canonical JSON value so equivalent whitespace
+// and key ordering do not change the binding while every claim remains bound.
+func AttestationDigest(data []byte) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return "", err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", errors.New("attestation contains trailing JSON")
+		}
+		return "", err
+	}
+	canonical, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return sha256Bytes(canonical), nil
+}
+
 func VerifyAnchorWithEventSource(runDir string, eventSource EventLog) error {
 	return VerifyAnchorWithSources(runDir, eventSource, nil)
 }
@@ -137,6 +248,17 @@ func VerifyAnchorWithSources(runDir string, eventSource EventLog, manifestSource
 // The target is used only for lexical delivery-state identity checks; replay
 // never opens a path named by an event.
 func VerifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manifestSource AttemptManifestSource, deliveryTargetDir string) error {
+	return verifyAnchorWithSourcesAndTarget(runDir, eventSource, manifestSource, deliveryTargetDir, true)
+}
+
+// VerifyBundleAnchor verifies the immutable run and event/attempt bindings in
+// a portable bundle. Supplemental run files are intentionally omitted from
+// bundles, so their source-side digest is checked by Build before export.
+func VerifyBundleAnchor(runDir string, eventSource EventLog, manifestSource AttemptManifestSource, deliveryTargetDir string) error {
+	return verifyAnchorWithSourcesAndTarget(runDir, eventSource, manifestSource, deliveryTargetDir, false)
+}
+
+func verifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manifestSource AttemptManifestSource, deliveryTargetDir string, verifySupplemental bool) error {
 	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
 	if err != nil {
 		return fmt.Errorf("anchor verify: %w", err)
@@ -169,6 +291,22 @@ func VerifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manif
 	if anchor.SchemaVersion != AnchorSchemaVersion {
 		return fmt.Errorf("anchor verify: неожиданная schema_version %d", anchor.SchemaVersion)
 	}
+	manifestDigest := sha256Bytes(manifestData)
+	if anchor.RunManifestSHA256 == "" || manifestDigest != anchor.RunManifestSHA256 {
+		return fmt.Errorf("anchor verify: run.json tampering обнаружен — run_manifest_sha256 не совпадает")
+	}
+	if anchor.SupplementalSHA256 == "" {
+		return fmt.Errorf("anchor verify: supplemental_sha256 отсутствует")
+	}
+	if verifySupplemental {
+		supplementalDigest, digestErr := supplementalDigest(runDir, manifest.TargetDir, manifest.RunID)
+		if digestErr != nil {
+			return fmt.Errorf("anchor verify: supplemental evidence: %w", digestErr)
+		}
+		if supplementalDigest != anchor.SupplementalSHA256 {
+			return fmt.Errorf("anchor verify: supplemental evidence tampering обнаружен — supplemental_sha256 не совпадает")
+		}
+	}
 	if anchor.RunID != manifest.RunID {
 		return fmt.Errorf("anchor verify: anchor run_id %q не совпадает с manifest %q — evidence подменён", anchor.RunID, manifest.RunID)
 	}
@@ -198,6 +336,159 @@ func VerifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manif
 	}
 	if digest != anchor.ManifestsDigest {
 		return fmt.Errorf("anchor verify: tampering обнаружен — manifests_digest не совпадает")
+	}
+	return nil
+}
+
+// supplementalDigest binds all ordinary files in a run directory outside the
+// event, manifest, attempt and delivery authorities. In particular, logs,
+// reports, candidate.json, usage.json and containment.json are included.
+// Attempt files are verified against their manifests separately; leftover
+// inflight-inputs are supplemental evidence so a failed scratch cleanup remains
+// integrity-bound. Attestation is validated separately and delivery.json is
+// post-terminal with its own validated record digest. Controller-owned usage
+// and containment receipts are included under stable synthetic names.
+func supplementalDigest(runDir, targetDir, runID string) (string, error) {
+	files := make(map[string]string)
+	err := filepath.WalkDir(runDir, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(runDir, current)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		first, _, _ := strings.Cut(rel, "/")
+		if first == "attempts" || rel == "events.jsonl" || rel == "run.json" || rel == "anchor.json" || rel == "delivery.json" || rel == "attestation.json" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("supplemental evidence %s has unsupported type", rel)
+		}
+		_, size, digest, err := ArtifactDigestAt(runDir, rel)
+		if err != nil {
+			return fmt.Errorf("digest supplemental evidence %s: %w", rel, err)
+		}
+		files[rel] = fmt.Sprintf("%d:%s", size, digest)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if targetDir != "" {
+		for _, name := range []string{"containment", "usage"} {
+			path := filepath.Join(targetDir, ".ai-team", "state", name, runID+".json")
+			data, readErr := safeio.ReadRegularFile(path, 1<<20)
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			if readErr != nil {
+				return "", fmt.Errorf("read controller %s evidence: %w", name, readErr)
+			}
+			files["@controller/"+name+".json"] = fmt.Sprintf("%d:%s", len(data), sha256Bytes(data))
+		}
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, path := range paths {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00", path, files[path])
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// SealTerminalEvidence refreshes the terminal anchor after post-terminal
+// controller evidence such as usage, containment and attestation is published.
+// It preserves the event-chain root and attempt manifest binding.
+func (s *Store) SealTerminalEvidence() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.eventLog == nil {
+		return errors.New("event log is unavailable")
+	}
+	events, err := s.eventLog.Read(s.runID)
+	if err != nil {
+		return fmt.Errorf("terminal evidence read: %w", err)
+	}
+	if len(events) == 0 || !isTerminalEventType(events[len(events)-1].Type) {
+		return errors.New("terminal evidence seal requires a terminal event")
+	}
+	anchorPath := filepath.Join(s.RunDir(), anchorFileName)
+	if _, statErr := os.Lstat(anchorPath); statErr == nil {
+		if err := s.verifyResealTransition(); err != nil {
+			return fmt.Errorf("terminal evidence reseal rejected: %w", err)
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
+		return errors.New("terminal evidence reseal requires the existing terminal anchor")
+	} else {
+		return fmt.Errorf("inspect existing terminal anchor: %w", statErr)
+	}
+	return s.writeAnchor(events[len(events)-1].Type, events)
+}
+
+// verifyResealTransition requires the old anchor to match all evidence that it
+// already bound. The only permitted changes are the first appearance of an
+// attestation and the first addition of a validated delivery record.
+func (s *Store) verifyResealTransition() error {
+	if err := VerifyAnchorWithSources(s.RunDir(), s.eventLog, nil); err != nil {
+		return err
+	}
+	anchorData, err := safeio.ReadRegularFile(filepath.Join(s.RunDir(), anchorFileName), maxAnchorFileSize)
+	if err != nil {
+		return err
+	}
+	var anchor Anchor
+	if err := json.Unmarshal(anchorData, &anchor); err != nil {
+		return fmt.Errorf("decode existing anchor: %w", err)
+	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(s.RunDir(), "run.json"), 1<<20)
+	if err != nil {
+		return err
+	}
+	var manifest RunManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return err
+	}
+	if anchor.AttestationSHA256 != "" {
+		attestationDigest, found, readErr := terminalAttestationDigest(s.RunDir())
+		if readErr != nil {
+			return fmt.Errorf("read existing attestation binding: %w", readErr)
+		}
+		if !found || attestationDigest != anchor.AttestationSHA256 {
+			return errors.New("existing attestation does not match terminal anchor")
+		}
+	}
+	record, found, err := delivery.ReadTerminalRecordForRun(manifest.TargetDir, s.RunDir(), s.runID)
+	if err != nil {
+		return fmt.Errorf("read existing delivery binding: %w", err)
+	}
+	var deliveryDigest string
+	if found {
+		data, marshalErr := json.MarshalIndent(record, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		deliveryDigest = sha256Bytes(append(data, '\n'))
+	}
+	if anchor.DeliveryRecordSHA256 != "" && anchor.DeliveryRecordSHA256 != deliveryDigest {
+		return errors.New("existing delivery record does not match terminal anchor")
 	}
 	return nil
 }

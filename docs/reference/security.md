@@ -89,10 +89,29 @@ invocation. Прочие run evidence, manifests, artifacts и файлы target
 
 Это два разных вопроса: «не изменено ли» и «кто создал».
 
-**Целостность (integrity) гарантируется.** Доказательства прогона и bundle
-связаны цепочкой хешей. `ai-team verify` подтверждает, что ни одна запись не
-изменена после создания. Для bundle проверка самодостаточна: не нужны ни
-репозиторий, ни `.ai-team/`.
+**Целостность (integrity) проверяется.** `ai-team verify <run_id>` сверяет
+anchor с точными байтами `run.json`, event chain и attempt manifests; затем
+проверяет размер и SHA-256 каждого сохранённого input/output artifact. Anchor
+также связывает обычные файлы run-каталога: логи, reports, `candidate.json`,
+`usage.json` и `containment.json`. Если присутствует terminal `delivery.json`,
+его identity, self-digest и связь с `delivery_deferred` event тоже проверяются.
+Изменённое доказательство приводит к ошибке проверки. `ai-team export` сначала
+выполняет ту же live-проверку; bundle содержит attempt artifacts, а его
+проверка не зависит от исходного каталога.
+
+Bundle намеренно не включает raw logs и reports: экспорт проверяет их до
+сборки, а переносит только whitelisted records. Поэтому получатель bundle
+может проверить включённые records и attempt artifacts, но не получить
+исключённые файлы обратно.
+
+Workspace identity digest и mutation guard используют разные ignore-наборы.
+Identity digest исключает `.git`, `.ai-team` и явно заданные
+`tree_hash.ignore_dirs`; mutation guard исключает только `.git` и `.ai-team`,
+поэтому изменения в `vendor`, `dist`, `node_modules` и `.venv` остаются
+видимыми и проверкам, и attribution.
+
+Anchors старой схемы без `run_manifest_sha256` и `supplemental_sha256` текущий
+`verify` отклоняет: он не может заявить о проверке новых привязок.
 
 **Подлинность (authenticity) — по подписи.** Bundle можно подписать своим
 ключом ed25519 в формате DSSE (по спецификации in-toto):

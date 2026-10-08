@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
@@ -64,12 +66,16 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 		t.Fatal(err)
 	}
 	defer func() { _ = os.RemoveAll(artifactRoot) }()
+	outputPath := filepath.Join(artifactRoot, "review.json")
+	if err := os.WriteFile(outputPath, []byte(`{"review":"approved"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	attemptID := store.NewAttemptID("coder", 1)
 	err = store.PublishAttempt(evidence.AttemptManifest{
 		AttemptID: attemptID, Stage: "coder", StageIndex: 1,
 		StartedAt: at(time.Second), FinishedAt: at(90 * time.Second),
 		Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed", Verdict: "APPROVED",
-	}, artifactRoot, nil, nil)
+	}, artifactRoot, nil, []evidence.Artifact{{Name: "review", Path: outputPath}})
 	if err != nil {
 		t.Fatalf("publish attempt: %v", err)
 	}
@@ -104,6 +110,33 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 	}); err != nil {
 		t.Fatalf("attempt_finished: %v", err)
 	}
+	// The real finalizer publishes supplemental run files before appending the
+	// terminal event. Keep this fixture's first anchor faithful to that order.
+	if err := os.MkdirAll(filepath.Join(store.RunDir(), "logs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "logs", "attempt.log"), []byte("runtime output\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(store.RunDir(), "reports", testFeature), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "reports", testFeature, "index.html"), []byte("<p>ok</p>\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "candidate.json"), []byte(`{"candidate":"stable"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "usage.json"), []byte(`{"run_id":"r-export-0001"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := json.Marshal(containment.DefaultTrustedLocalReceipt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "containment.json"), receipt, 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Append(evidence.Event{
 		Type: "run_finished", Timestamp: at(2 * time.Minute),
 		Data: map[string]any{"status": "completed", "stage_attempts": 1},
@@ -126,6 +159,9 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 	}
 	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.SealTerminalEvidence(); err != nil {
+		t.Fatalf("seal terminal evidence: %v", err)
 	}
 	return store.RunDir()
 }
@@ -167,6 +203,9 @@ func buildTerminalRunWithoutAttempts(t *testing.T, target string) string {
 	}
 	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.SealTerminalEvidence(); err != nil {
+		t.Fatalf("seal terminal evidence: %v", err)
 	}
 	return store.RunDir()
 }
@@ -342,8 +381,8 @@ func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	if err := evidence.VerifyAnchorWithEventSource(bundleDir, bundleEventSource); err == nil {
 		t.Fatal("event-only anchor verification unexpectedly selected bundle-local manifests")
 	}
-	if err := evidence.VerifyAnchorWithSources(bundleDir, bundleEventSource, evidence.FilesystemAttemptManifestSource()); err != nil {
-		t.Fatalf("explicit bundle-local event and manifest authorities: %v", err)
+	if err := evidence.VerifyBundleAnchor(bundleDir, bundleEventSource, evidence.FilesystemAttemptManifestSource(), ""); err != nil {
+		t.Fatalf("portable anchor should validate bundle-local authorities: %v", err)
 	}
 	if err := VerifyBundle(bundleDir); err != nil {
 		t.Fatalf("VerifyBundle should use local event and manifest bytes despite live reservations: %v", err)
@@ -390,11 +429,103 @@ func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundleDir, indexFileName), indexData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := evidence.VerifyAnchor(bundleDir); err != nil {
-		t.Fatalf("fixture anchor should be valid only against live controller sources: %v", err)
+	if err := evidence.VerifyAnchor(bundleDir); err == nil {
+		t.Fatal("live verification must reject a bundle-shaped directory with omitted supplemental evidence")
 	}
 	if err := VerifyBundle(bundleDir); err == nil {
 		t.Fatal("VerifyBundle accepted an anchor from live controller sources instead of bundle-local evidence")
+	}
+}
+
+func TestVerifyBundleAttemptArtifactsStayBundleLocalAtRunShapedPath(t *testing.T) {
+	target := t.TempDir()
+	localRun := buildTerminalRunAt(t, filepath.Join(t.TempDir(), "runs"), now())
+	bundleDir := filepath.Join(target, ".ai-team", "runs", testRunID)
+	if _, err := Build(localRun, bundleDir); err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	attemptID := testRunID + "-001-coder"
+	controllerManifests := evidence.ControllerAttemptManifestStore{TargetDir: target}
+	if err := controllerManifests.Reserve(testRunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerManifests.Write(testRunID, evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: testRunID, AttemptID: attemptID,
+		Stage: "coder", StageIndex: 1, StartedAt: now().Add(time.Second), FinishedAt: now().Add(2 * time.Second),
+		Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed",
+	}); err != nil {
+		t.Fatalf("write reserved empty controller manifest: %v", err)
+	}
+
+	indexPath := filepath.Join(bundleDir, indexFileName)
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index Index
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatal(err)
+	}
+	var removedArtifact string
+	filtered := index.Records[:0]
+	for _, record := range index.Records {
+		if record.Type == RecordArtifact {
+			removedArtifact = record.Path
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	if removedArtifact == "" {
+		t.Fatal("fixture did not contain an attempt artifact")
+	}
+	index.Records = filtered
+	if err := os.RemoveAll(filepath.Join(bundleDir, filepath.FromSlash(removedArtifact))); err != nil {
+		t.Fatal(err)
+	}
+	indexData, err = indexBytes(&index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(indexPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, indexData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted a bundle after its manifest-referenced artifact was removed")
+	}
+}
+
+func TestVerifyBundleRejectsAliasedRecordPaths(t *testing.T) {
+	base := t.TempDir()
+	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+	bundleDir := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundleDir); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(bundleDir, indexFileName)
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	index.Records = append(index.Records, Record{Type: RecordRunManifest, Path: "./run.json", SHA256: index.Records[0].SHA256})
+	data, err = indexBytes(&index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(indexPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted a noncanonical alias path for run.json")
 	}
 }
 
@@ -436,6 +567,502 @@ func TestVerifyEvidenceLiveRun(t *testing.T) {
 	if err := VerifyEvidence(runDir); err != nil {
 		t.Fatalf("VerifyEvidence live run: %v", err)
 	}
+}
+
+func TestArtifactParentSymlinkRejectedByLiveVerifyAndBuild(t *testing.T) {
+	runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+	attemptArtifacts := filepath.Join(runDir, "attempts", testRunID+"-001-coder", "artifacts")
+	outside := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "review.json"), []byte(`{"review":"approved"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEvidence(runDir); err == nil {
+		t.Fatal("VerifyEvidence accepted an attempt artifact below a symlink parent")
+	}
+	if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+		t.Fatal("Build accepted an attempt artifact below a symlink parent")
+	}
+}
+
+func TestVerifyBundleRejectsArtifactSymlinkParent(t *testing.T) {
+	runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if _, err := Build(runDir, bundleDir); err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	attemptArtifacts := filepath.Join(bundleDir, "attempts", testRunID+"-001-coder", "artifacts")
+	outside := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Rename(attemptArtifacts, outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted an artifact below a symlink parent")
+	}
+}
+
+func TestVerifyEvidenceAndExportRejectTamperedRunContents(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{"attempt artifact content and size", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "attempts", "r-export-0001-001-coder", "artifacts", "review.json"), []byte(`{"review":"changed and longer"}`), 0644)
+		}},
+		{"attempt artifacts removed", func(runDir string) error {
+			return os.RemoveAll(filepath.Join(runDir, "attempts", "r-export-0001-001-coder", "artifacts"))
+		}},
+		{"logs changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "logs", "attempt.log"), []byte("changed\n"), 0644)
+		}},
+		{"candidate changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "candidate.json"), []byte(`{"candidate":"forged"}`), 0644)
+		}},
+		{"usage changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "usage.json"), []byte(`{"run_id":"forged"}`), 0644)
+		}},
+		{"reports changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "reports", testFeature, "index.html"), []byte("<p>forged</p>\n"), 0644)
+		}},
+		{"containment changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "containment.json"), []byte(`{"axes":{},"profile":"strict"}`), 0644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			if err := tc.mutate(runDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("VerifyEvidence accepted modified run evidence")
+			}
+			if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+				t.Fatal("export accepted modified run evidence")
+			}
+		})
+	}
+}
+
+func TestVerifyEvidenceAndExportBindControllerAndProvenanceFields(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(map[string]any) error
+	}{
+		{"controller.executable_sha256", func(run map[string]any) error {
+			controller, ok := run["controller"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing controller identity")
+			}
+			controller["executable_sha256"] = strings.Repeat("0", 64)
+			return nil
+		}},
+		{"provenance.items[0].digest.value", func(run map[string]any) error {
+			provenance, ok := run["provenance"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing provenance")
+			}
+			items, ok := provenance["items"].([]any)
+			if !ok || len(items) == 0 {
+				return fmt.Errorf("missing provenance items")
+			}
+			item, ok := items[0].(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid provenance item")
+			}
+			digest, ok := item["digest"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing provenance digest")
+			}
+			digest["value"] = strings.Repeat("0", 64)
+			return nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			path := filepath.Join(runDir, "run.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest map[string]any
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.edit(manifest); err != nil {
+				t.Fatal(err)
+			}
+			data, err = json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("verify accepted altered run.json identity")
+			}
+			if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+				t.Fatal("export accepted altered run.json identity")
+			}
+		})
+	}
+}
+
+func TestVerifyEvidenceAndExportRejectTamperedDeliveryFields(t *testing.T) {
+	for _, field := range []string{"commit_sha", "pr_url"} {
+		t.Run(field, func(t *testing.T) {
+			target := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			runDir := buildTerminalRunAtForTarget(t, filepath.Join(target, ".ai-team", "runs"), now(), target,
+				filepath.Join(target, ".ai-team", "delivery", "prepared.json"))
+			if err := delivery.WriteTerminalRecord(runDir, delivery.TerminalRecord{
+				SchemaVersion: delivery.TerminalRecordSchemaVersion,
+				RunID:         testRunID, Feature: testFeature, PlanHash: strings.Repeat("a", 64),
+				CommitSHA: strings.Repeat("b", 40), PRURL: "https://example.test/pull/1", PerformedAt: now().Add(3 * time.Minute),
+			}); err != nil {
+				t.Fatalf("write delivery record: %v", err)
+			}
+			if err := evidence.ResealTerminalEvidence(runDir, nil); err != nil {
+				t.Fatalf("reseal terminal evidence: %v", err)
+			}
+			path := filepath.Join(runDir, "delivery.json")
+			rewriteDeliveryRecord(t, path, func(record *delivery.TerminalRecord) {
+				switch field {
+				case "commit_sha":
+					record.CommitSHA = strings.Repeat("c", 40)
+				case "pr_url":
+					record.PRURL = "https://example.test/pull/2"
+				}
+			})
+			if _, _, err := delivery.ReadTerminalRecord(runDir); err != nil {
+				t.Fatalf("regression setup must preserve a valid self-digest: %v", err)
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatalf("verify accepted delivery.json with changed %s and recomputed record_sha256", field)
+			}
+			if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+				t.Fatalf("export accepted delivery.json with changed %s and recomputed record_sha256", field)
+			}
+		})
+	}
+}
+
+func TestResealRejectsTamperingSinceTerminalAnchor(t *testing.T) {
+	for _, mutation := range []string{"run.json", "supplemental", "removed-anchor"} {
+		t.Run(mutation, func(t *testing.T) {
+			base := t.TempDir()
+			runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+			anchorPath := filepath.Join(runDir, "anchor.json")
+			oldAnchor, err := os.ReadFile(anchorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mutation == "run.json" {
+				path := filepath.Join(runDir, "run.json")
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, ' '), 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				path := filepath.Join(runDir, "logs", "attempt.log")
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("changed after terminal seal\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "removed-anchor" {
+					if err := os.Remove(anchorPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := delivery.WriteTerminalRecord(runDir, delivery.TerminalRecord{
+				SchemaVersion: delivery.TerminalRecordSchemaVersion,
+				RunID:         testRunID, Feature: testFeature, PlanHash: strings.Repeat("a", 64),
+				CommitSHA: strings.Repeat("b", 40), PerformedAt: now().Add(3 * time.Minute),
+			}); err != nil {
+				t.Fatalf("write post-terminal delivery record: %v", err)
+			}
+			if err := evidence.ResealTerminalEvidence(runDir, nil); err == nil {
+				t.Fatal("reseal accepted altered evidence")
+			}
+			newAnchor, err := os.ReadFile(anchorPath)
+			if mutation == "removed-anchor" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("failed reseal recreated a removed anchor: err=%v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(oldAnchor, newAnchor) {
+					t.Fatal("failed reseal replaced the previous anchor")
+				}
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("live verification accepted altered evidence with an unsealed delivery")
+			}
+			if _, err := Build(runDir, filepath.Join(base, "bundle")); err == nil {
+				t.Fatal("standalone delivery export accepted altered evidence")
+			}
+		})
+	}
+}
+
+func TestAttestationClaimsAreBoundByTerminalAnchor(t *testing.T) {
+	for _, field := range []string{"outcome", "timestamps", "subject"} {
+		t.Run(field, func(t *testing.T) {
+			liveDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			mutateAttestation(t, filepath.Join(liveDir, "attestation.json"), field)
+			if err := VerifyEvidence(liveDir); err == nil {
+				t.Fatalf("VerifyEvidence accepted mutated attestation %s", field)
+			}
+
+			bundleBase := t.TempDir()
+			bundleRun := buildTerminalRun(t, filepath.Join(bundleBase, "runs"))
+			bundleDir := filepath.Join(bundleBase, "bundle")
+			if _, err := Build(bundleRun, bundleDir); err != nil {
+				t.Fatalf("build bundle: %v", err)
+			}
+			mutateAttestation(t, filepath.Join(bundleDir, "attestation.json"), field)
+			if err := refreshBundleRecordDigest(bundleDir, "attestation.json"); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyBundle(bundleDir); err == nil {
+				t.Fatalf("VerifyBundle accepted mutated attestation %s with refreshed index digest", field)
+			}
+		})
+	}
+}
+
+func TestVerifyBundleRejectsDeliveryTamperingWithRecomputedSelfDigest(t *testing.T) {
+	for _, field := range []string{"commit_sha", "pr_url"} {
+		t.Run(field, func(t *testing.T) {
+			target := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			runDir := buildTerminalRunAtForTarget(t, filepath.Join(target, ".ai-team", "runs"), now(), target,
+				filepath.Join(target, ".ai-team", "delivery", "prepared.json"))
+			if err := delivery.WriteTerminalRecord(runDir, delivery.TerminalRecord{
+				SchemaVersion: delivery.TerminalRecordSchemaVersion,
+				RunID:         testRunID, Feature: testFeature, PlanHash: strings.Repeat("a", 64),
+				CommitSHA: strings.Repeat("b", 40), PRURL: "https://example.test/pull/1", PerformedAt: now().Add(3 * time.Minute),
+			}); err != nil {
+				t.Fatalf("write delivery record: %v", err)
+			}
+			if err := evidence.ResealTerminalEvidence(runDir, nil); err != nil {
+				t.Fatalf("reseal terminal evidence: %v", err)
+			}
+			bundle := filepath.Join(target, "bundle")
+			if _, err := Build(runDir, bundle); err != nil {
+				t.Fatalf("build bundle: %v", err)
+			}
+			path := filepath.Join(bundle, "delivery.json")
+			rewriteDeliveryRecord(t, path, func(record *delivery.TerminalRecord) {
+				if field == "commit_sha" {
+					record.CommitSHA = strings.Repeat("c", 40)
+				} else {
+					record.PRURL = "https://example.test/pull/2"
+				}
+			})
+			if err := refreshBundleRecordDigest(bundle, "delivery.json"); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyBundle(bundle); err == nil {
+				t.Fatalf("VerifyBundle accepted changed %s with recomputed record and index digests", field)
+			}
+		})
+	}
+}
+
+func TestVerifyEvidenceRejectsConflictingControllerAndRunLocalDelivery(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runDir := buildTerminalRunAtForTarget(t, filepath.Join(target, ".ai-team", "runs"), now(), target,
+		filepath.Join(target, ".ai-team", "delivery", "prepared.json"))
+	controllerRecord := delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: testRunID, Feature: testFeature,
+		PlanHash: strings.Repeat("a", 64), CommitSHA: strings.Repeat("b", 40), PerformedAt: now().Add(3 * time.Minute),
+	}
+	if err := delivery.WriteControllerTerminalRecord(target, testRunID, controllerRecord); err != nil {
+		t.Fatal(err)
+	}
+	runRecord := controllerRecord
+	runRecord.CommitSHA = strings.Repeat("c", 40)
+	if err := delivery.WriteTerminalRecord(runDir, runRecord); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEvidence(runDir); err == nil {
+		t.Fatal("VerifyEvidence ignored conflicting run-local delivery.json when controller state existed")
+	}
+	if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+		t.Fatal("Build ignored conflicting run-local delivery.json when controller state existed")
+	}
+}
+
+func TestAttestationControllerAndProvenanceMustMatchRunManifest(t *testing.T) {
+	for _, field := range []string{"controller_executable_sha256", "provenance"} {
+		t.Run(field, func(t *testing.T) {
+			target := t.TempDir()
+			runDir := buildTerminalRunWithoutAttempts(t, target)
+			mutateAttestation(t, filepath.Join(runDir, "attestation.json"), field)
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatalf("VerifyEvidence accepted attestation mutation of %s", field)
+			}
+			if _, err := Build(runDir, filepath.Join(target, "bundle")); err == nil {
+				t.Fatalf("Build accepted attestation mutation of %s", field)
+			}
+		})
+	}
+}
+
+func TestVerifyBundleAttestationControllerAndProvenanceMustMatchRunManifest(t *testing.T) {
+	for _, field := range []string{"controller_executable_sha256", "provenance"} {
+		t.Run(field, func(t *testing.T) {
+			target := t.TempDir()
+			runDir := buildTerminalRunWithoutAttempts(t, target)
+			bundle := filepath.Join(target, "bundle")
+			if _, err := Build(runDir, bundle); err != nil {
+				t.Fatalf("build bundle: %v", err)
+			}
+			mutateAttestation(t, filepath.Join(bundle, "attestation.json"), field)
+			if err := refreshBundleRecordDigest(bundle, "attestation.json"); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyBundle(bundle); err == nil {
+				t.Fatalf("VerifyBundle accepted attestation mutation of %s with refreshed index digest", field)
+			}
+		})
+	}
+}
+
+func rewriteDeliveryRecord(t *testing.T, path string, mutate func(*delivery.TerminalRecord)) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record delivery.TerminalRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&record)
+	record.RecordSHA256 = ""
+	canonical, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	record.RecordSHA256 = hex.EncodeToString(sum[:])
+	data, err = json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mutateAttestation(t *testing.T, path, field string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := attest.Parse(data)
+	if err != nil {
+		t.Fatalf("parse original attestation: %v", err)
+	}
+	switch field {
+	case "controller_executable_sha256":
+		statement.Predicate.Run.ControllerExecutableSHA = strings.Repeat("d", 64)
+	case "outcome":
+		statement.Predicate.Outcome = "failed"
+	case "timestamps":
+		statement.Predicate.StartedAt = statement.Predicate.StartedAt.Add(time.Second)
+	case "subject":
+		if len(statement.Subject) == 0 {
+			t.Fatal("attestation fixture has no subject")
+		}
+		statement.Subject[0].Name = "other-candidate"
+	case "provenance":
+		if statement.Predicate.Provenance == nil || len(statement.Predicate.Provenance.Items) == 0 {
+			t.Fatal("attestation fixture has no provenance item")
+		}
+		statement.Predicate.Provenance.Items[0].Digest.Value = "mutated-but-valid"
+	default:
+		t.Fatalf("unsupported attestation mutation %q", field)
+	}
+	data, err = attest.Serialize(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attest.Parse(data); err != nil {
+		t.Fatalf("mutated attestation must remain valid JSON: %v", err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func refreshBundleRecordDigest(bundleDir, relPath string) error {
+	indexData, err := os.ReadFile(filepath.Join(bundleDir, indexFileName))
+	if err != nil {
+		return err
+	}
+	var index Index
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(bundleDir, relPath))
+	if err != nil {
+		return err
+	}
+	for i := range index.Records {
+		if index.Records[i].Path == relPath {
+			index.Records[i].SHA256 = sha256Bytes(data)
+			serialized, marshalErr := indexBytes(&index)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if chmodErr := os.Chmod(filepath.Join(bundleDir, indexFileName), 0644); chmodErr != nil {
+				return chmodErr
+			}
+			return os.WriteFile(filepath.Join(bundleDir, indexFileName), serialized, 0644)
+		}
+	}
+	return fmt.Errorf("bundle index has no record %s", relPath)
 }
 
 func TestVerifyEvidenceUsesControllerEventAndAttestationStores(t *testing.T) {

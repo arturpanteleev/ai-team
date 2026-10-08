@@ -3491,6 +3491,86 @@ func TestRun_FailedStage_GeneratesStageReport(t *testing.T) {
 	}
 }
 
+type cleanupFailureEvidenceStore struct {
+	EvidenceStore
+	cleanupErr   error
+	cleanupCalls int
+	snapshots    []evidence.Artifact
+}
+
+func (s *cleanupFailureEvidenceStore) SnapshotInputs(attemptID string, inputs []evidence.Artifact) ([]evidence.Artifact, func() error, error) {
+	snapshots, _, err := s.EvidenceStore.SnapshotInputs(attemptID, inputs)
+	if err != nil {
+		return nil, func() error { return nil }, err
+	}
+	s.snapshots = append([]evidence.Artifact(nil), snapshots...)
+	return snapshots, func() error {
+		s.cleanupCalls++
+		// Simulate a filesystem cleanup failure while leaving the immutable
+		// snapshot in place for terminal evidence sealing.
+		return s.cleanupErr
+	}, nil
+}
+
+type cleanupFailureEvidenceFactory struct {
+	delegate EvidenceStoreFactory
+	store    *cleanupFailureEvidenceStore
+}
+
+func (f *cleanupFailureEvidenceFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
+	store, err := f.delegate.Start(root, manifest)
+	if err != nil {
+		return nil, err
+	}
+	f.store = &cleanupFailureEvidenceStore{EvidenceStore: store, cleanupErr: errors.New("injected cleanup failure")}
+	return f.store, nil
+}
+
+func (f *cleanupFailureEvidenceFactory) Resume(root, runID string) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
+	return f.delegate.Resume(root, runID)
+}
+
+func TestRun_CleanupFailureLeavesInputBoundInTerminalEvidence(t *testing.T) {
+	dir := env(t)
+	factory := &cleanupFailureEvidenceFactory{delegate: filesystemEvidenceStoreFactory{}}
+	p := New(cfgFor(config.AgentConfig{Name: "analyst"}), testRegistry(),
+		WithRuntimeFactory(newScripted().factory),
+		WithPrompter(&scriptedPrompter{}),
+		WithEvidenceStoreFactory(factory))
+
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ApproveGates: true,
+	})
+	if err != nil {
+		t.Fatalf("run with a reported scratch cleanup failure: %v", err)
+	}
+	if factory.store == nil || factory.store.cleanupCalls != 1 || len(factory.store.snapshots) == 0 {
+		t.Fatalf("snapshot cleanup was not attempted exactly once: store=%+v", factory.store)
+	}
+	inputPath := factory.store.snapshots[0].Path
+	if _, err := os.Stat(inputPath); err != nil {
+		t.Fatalf("failed cleanup should leave the input snapshot for evidence sealing: %v", err)
+	}
+	runDir := filepath.Join(dir, ".ai-team", "runs", result.RunID)
+	targetDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evidence.VerifyTerminalEvidence(runDir, result.RunID, targetDir); err != nil {
+		t.Fatalf("terminal evidence must verify with the leftover input bound: %v", err)
+	}
+	if err := evidence.VerifyAnchor(runDir); err != nil {
+		t.Fatalf("terminal anchor must bind the leftover input: %v", err)
+	}
+
+	if err := os.WriteFile(inputPath, []byte("tampered after terminal seal"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.VerifyAnchor(runDir); err == nil || !strings.Contains(err.Error(), "supplemental") {
+		t.Fatalf("terminal evidence must reject tampering with leftover input, got %v", err)
+	}
+}
+
 func TestNewPipeline_Defaults(t *testing.T) {
 	p := New(nil, nil)
 	if p.cfg == nil || p.notifier == nil || p.prompter == nil || p.newRuntime == nil {

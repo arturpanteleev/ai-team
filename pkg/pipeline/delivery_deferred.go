@@ -105,11 +105,15 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	var writeErr error
 	if rs.p.terminalRecordWriter != nil {
 		writeErr = rs.p.terminalRecordWriter.WriteTerminalRecord(record)
-	} else {
-		writeErr = delivery.WriteTerminalRecord(rs.evidence.RunDir(), record)
 	}
 	if writeErr != nil {
 		return fmt.Errorf("deferred delivery: запись terminal record: %w", writeErr)
+	}
+	if err := delivery.WriteTerminalRecord(rs.evidence.RunDir(), record); err != nil {
+		return fmt.Errorf("deferred delivery: run-local terminal record: %w", err)
+	}
+	if err := rs.evidence.SealTerminalEvidence(); err != nil {
+		return fmt.Errorf("deferred delivery: reseal terminal evidence: %w", err)
 	}
 	logging.Printf("\n%s delivery по run %s: commit=%s pr=%s\n",
 		ui.Colorize("✓", ui.ColorGreen), rs.runID, result.CommitSHA, result.PRURL)
@@ -272,6 +276,9 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	}
 	if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
 		return delivery.TerminalRecord{}, err
+	}
+	if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: reseal terminal evidence: %w", err)
 	}
 	return record, nil
 }
@@ -437,6 +444,9 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	if found {
 		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record, p.eventLogSource); err != nil {
 			return fmt.Errorf("recover delivery record identity mismatch: %w", err)
+		}
+		if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
+			return fmt.Errorf("recover delivery anchor: %w", err)
 		}
 		return nil
 	}

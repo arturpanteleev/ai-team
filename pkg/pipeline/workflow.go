@@ -26,12 +26,11 @@ type gitMetadataSnapshot struct {
 	Tracked     map[string]bool
 }
 
-// captureWorkspaceSnapshot provides the same per-attempt attribution when the
-// target is not a git repository. Controller-owned metadata and dependency
-// directories from checks.DefaultIgnoreDirs are excluded; all other regular
-// files and symlinks are hashed.
+// captureWorkspaceSnapshot provides per-attempt attribution when the target is
+// not a git repository. It excludes only controller-owned metadata; project
+// files in build and dependency directories remain visible to the guard.
 func captureWorkspaceSnapshot(root string) (filesystemSnapshot, error) {
-	return captureFilesystemSnapshot(root, checks.DefaultIgnoreDirs())
+	return captureFilesystemSnapshot(root, checks.MutationGuardIgnoreDirs())
 }
 
 // captureArtifactSnapshot attributes changes inside the controller's artifact

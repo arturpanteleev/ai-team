@@ -43,14 +43,17 @@
 | `events.jsonl` | Журнал событий: каждое событие ссылается на хеш предыдущего |
 | `attempts/<attempt_id>/` | Манифест попытки этапа, его входы и выходные артефакты |
 | `logs/` | Логи runtime по попыткам |
+| `reports/`, `candidate.json` | Неизменяемые отчёты и candidate evidence прогона |
 | `usage.json` | Время и число попыток по этапам (локальные CLI runs; cloud сводка хранится в `.ai-team/state/usage/`) |
+| `containment.json` | Фактический профиль и оси containment (локальные CLI runs; cloud receipt хранится в `.ai-team/state/containment/`) |
 | `delivery.json` | Итог delivery, если она была |
 | `attestation.json`, `anchor.json` | Сводная аттестация и якорь; появляются, когда прогон завершён |
 
 > [!WARNING]
-> Не редактируйте файлы в `.ai-team/runs/` и `.ai-team/state/`, даже чтобы
-> обойти ошибку. Любая правка ломает проверку целостности, а прогон после
-> этого нельзя ни продолжить, ни экспортировать.
+> Не редактируйте evidence в `.ai-team/runs/` и controller records в
+> `.ai-team/state/`, даже чтобы обойти ошибку. `verify` сверяет контролируемые
+> records и откажет, если покрытый файл или record не совпадает с сохранёнными
+> привязками.
 
 ## 1. Посмотреть сводку прогона
 
@@ -97,13 +100,15 @@ ai-team verify --target /path/to/project <run_id>
 ```
 
 ```text
-✓ Run 20261006T141426.383969000Z-ae522603a9518b5a: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы
+✓ Run 20261006T141426.383969000Z-ae522603a9518b5a: anchor OK — run manifest, event chain, attempt artifacts, supplemental evidence и attestation v1 согласованы
 ✓ Run OK
 ```
 
-Команда пересчитывает хеши журнала событий, манифестов попыток и аттестации и
-сверяет их с якорем. Код 0 — всё согласовано, код 1 — что-то не сходится или
-прогон ещё не завершён (`run <run_id> не terminal`).
+Команда пересчитывает хеши `run.json`, журнала событий, манифестов попыток,
+artifact inputs/outputs и supplemental evidence (логи, reports, candidate,
+usage, containment), а также проверяет delivery record, если он есть. Код 0 —
+всё согласовано, код 1 — что-то не сходится или прогон ещё не завершён
+(`run <run_id> не terminal`).
 
 ## 3. Проверить, нет ли секретов
 
@@ -199,7 +204,7 @@ ai-team verify --verify-key signing-key.pub /path/to/signed-bundle
 ```
 
 ```text
-✓ Bundle /path/to/signed-bundle: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы — подпись DSSE ed25519 подтверждена
+✓ Bundle /path/to/signed-bundle: OK — records, event chain, anchor, attempt artifacts, delivery/containment records и attestation v1 согласованы — подпись DSSE ed25519 подтверждена
 ✓ Bundle OK
 ```
 

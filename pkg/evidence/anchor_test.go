@@ -128,6 +128,69 @@ func TestVerifyAnchorDetectsRemovedLastEvent(t *testing.T) {
 	}
 }
 
+func TestVerifyAnchorBindsRunManifestAndSupplementalEvidence(t *testing.T) {
+	t.Run("run.json", func(t *testing.T) {
+		runDir := buildAnchoredRun(t, "run-anchor-manifest")
+		path := filepath.Join(runDir, "run.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(data, ' '), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := VerifyAnchor(runDir); err == nil || !strings.Contains(err.Error(), "run_manifest_sha256") {
+			t.Fatalf("run.json mutation should fail its anchor digest, got %v", err)
+		}
+	})
+
+	t.Run("logs and sidecars", func(t *testing.T) {
+		runDir := buildAnchoredRun(t, "run-anchor-sidecars")
+		if err := os.MkdirAll(filepath.Join(runDir, "logs"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(runDir, "logs", "attempt.log")
+		if err := os.WriteFile(path, []byte("runtime log\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := VerifyAnchor(runDir); err == nil || !strings.Contains(err.Error(), "supplemental_sha256") {
+			t.Fatalf("added log should fail its anchor digest, got %v", err)
+		}
+	})
+}
+
+func TestTerminalAnchorBindsStaleInflightInputs(t *testing.T) {
+	const runID = "run-anchor-stale-input"
+	store, err := Start(filepath.Join(t.TempDir(), "runs"), testRunManifest(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := store.Append(Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	runDir := store.RunDir()
+	scratch := filepath.Join(runDir, "inflight-inputs", "crashed-attempt", "001-source", "payload.txt")
+	if err := os.MkdirAll(filepath.Dir(scratch), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scratch, []byte("snapshot input\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Event{Type: "run_finished", Timestamp: started.Add(time.Second), Data: map[string]any{"status": "completed", "stage_attempts": 0}}); err != nil {
+		t.Fatalf("write terminal event with stale input scratch: %v", err)
+	}
+	if err := VerifyAnchor(runDir); err != nil {
+		t.Fatalf("terminal run with stale scratch should verify before tampering: %v", err)
+	}
+	if err := os.WriteFile(scratch, []byte("tampered input\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyAnchor(runDir); err == nil || !strings.Contains(err.Error(), "supplemental_sha256") {
+		t.Fatalf("tampered stale input scratch should fail its supplemental anchor, got %v", err)
+	}
+}
+
 // Ключевой кейс: злоумышленник пересобирает цепочку целиком (пересчитывает
 // previous_sha256/sha256 после подмены), но anchor.json остался от исходной
 // цепочки — VerifyAnchor обязан это обнаружить по chain_root_sha256.

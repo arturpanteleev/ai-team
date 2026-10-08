@@ -3,6 +3,7 @@ package evidence
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,60 @@ func TestArtifactDigestAtRejectsSymlinkParent(t *testing.T) {
 	}
 	if _, _, _, err := ArtifactDigestAt(root, "attempts/a-001/artifacts/payload"); err == nil {
 		t.Fatal("ArtifactDigestAt followed a symlink parent")
+	}
+}
+
+func TestArtifactDigestAtRejectsSymlinkParentForAttemptInputs(t *testing.T) {
+	root := t.TempDir()
+	inputRoot := filepath.Join(root, "attempts", "a-001", "inputs")
+	if err := os.MkdirAll(inputRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "payload"), []byte("outside input"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(inputRoot, "001-source")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, _, _, err := ArtifactDigestAt(root, "attempts/a-001/inputs/001-source/payload"); err == nil {
+		t.Fatal("ArtifactDigestAt followed a symlink parent for attempt inputs")
+	}
+}
+
+func TestArtifactTraversalRejectsSymlinkSwapAfterInitialStat(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "attempts", "a-001", "artifacts")
+	if err := os.MkdirAll(artifactDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(artifactDir, "payload.md")
+	replacement := filepath.Join(artifactDir, "replacement.md")
+	if err := os.WriteFile(payload, []byte("approved bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("replacement bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	swapped := false
+	_, _, _, err := artifactAtWithOpenHook(root, "attempts/a-001/artifacts", "", false, func(name string) {
+		if name != "payload.md" || swapped {
+			return
+		}
+		swapped = true
+		if renameErr := os.Rename(payload, filepath.Join(artifactDir, "approved.md")); renameErr != nil {
+			t.Fatalf("move original artifact out of the way: %v", renameErr)
+		}
+		if linkErr := os.Symlink("replacement.md", payload); linkErr != nil {
+			t.Fatalf("replace artifact with in-root symlink: %v", linkErr)
+		}
+	})
+	if !swapped {
+		t.Fatal("test hook did not replace the artifact during traversal")
+	}
+	if err == nil || !strings.Contains(err.Error(), "changed while opening") {
+		t.Fatalf("artifact traversal must reject a symlink swapped after lstat, got %v", err)
 	}
 }

@@ -77,6 +77,18 @@ export function PipelineDetail() {
     },
   });
 
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void fetchData();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [fetchData]);
+
   // Редкий recovery fallback на случай длительной недоступности WebSocket.
   useEffect(() => {
     if (run?.status !== 'running' && run?.status !== 'waiting_for_approval') return;

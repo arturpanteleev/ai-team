@@ -5,8 +5,10 @@
 }
 
 .back {
-  display: inline-block;
-  padding: 4px 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 4px;
   margin-bottom: 16px;
   border: 0;
   background: transparent;
@@ -182,7 +184,7 @@
 
 @media (max-width: 640px) {
   .container {
-    padding: 18px 14px 28px;
+    padding: calc(18px + env(safe-area-inset-top, 0px)) 14px calc(28px + env(safe-area-inset-bottom, 0px));
   }
 
   .content {
@@ -195,5 +197,49 @@
 
   .toolbar button {
     flex: 1 1 auto;
+    min-height: 44px;
+  }
+
+  .toggle {
+    min-height: 44px;
+    white-space: normal;
+  }
+
+  .history {
+    padding: 12px;
+  }
+
+  .history article {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .history .toggle {
+    width: 100%;
+  }
+
+  .content {
+    padding: 16px;
+  }
+
+  .editor textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .editor button {
+    min-height: 44px;
+    justify-self: stretch;
+  }
+
+  .markdown pre {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .raw {
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 }

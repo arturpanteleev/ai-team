@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
-import { decideApproval, getPipelineRun, retryDelivery } from '../api';
+import { decideApproval, getPipelineRun, resumeRun, retryDelivery } from '../api';
 import { PipelineDetail } from './PipelineDetail';
 
 const session = vi.hoisted(() => ({ principal: null as null | { actor_id: string; roles: ('product_owner' | 'developer')[] } }));
@@ -196,5 +196,19 @@ describe('PipelineDetail graph', () => {
     renderDetail();
     expect(await screen.findByText('Статус: pending')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Повторить одобренную Git-доставку' })).not.toBeInTheDocument();
+  });
+
+  it('сохраняет решение по ТЗ и продолжает тот же run', async () => {
+    renderDetail();
+
+    expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }));
+    await waitFor(() => expect(vi.mocked(decideApproval)).toHaveBeenCalledWith('run-graph', expect.objectContaining({
+      id: 'approval-spec',
+    }), expect.objectContaining({ action: 'approve_spec', actor_role: 'product_owner' })));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить задачу' }));
+    await waitFor(() => expect(vi.mocked(resumeRun)).toHaveBeenCalledWith('run-graph'));
+    await waitFor(() => expect(vi.mocked(getPipelineRun).mock.calls.length).toBeGreaterThanOrEqual(3));
   });
 });

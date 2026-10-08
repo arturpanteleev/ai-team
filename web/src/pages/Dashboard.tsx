@@ -43,6 +43,7 @@ export function Dashboard() {
   const canSubmitIntention = !principal || principal.roles.includes('product_owner');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [feature, setFeature] = useState('');
   const [task, setTask] = useState('');
@@ -77,6 +78,18 @@ export function Dashboard() {
     return () => window.clearInterval(t);
   }, [fetchRuns]);
 
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void fetchRuns();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [fetchRuns]);
+
   const filtered = filter === 'all' ? runs : runs.filter((r) => r.status === filter);
   const readiness = preflight?.readiness ?? (preflight?.unknown ? 'unknown' : preflight?.ready ? 'ready' : preflight ? 'blocked' : 'unknown');
 
@@ -98,13 +111,22 @@ export function Dashboard() {
     <div className={styles.container}>
       <div className={styles.header}>
         <h1 className={styles.title}>Задачи</h1>
-        <div className={styles.filters}>
+        <button
+          type="button"
+          className={styles.filtersToggle}
+          aria-expanded={filtersExpanded}
+          aria-controls="pipeline-status-filters"
+          onClick={() => setFiltersExpanded((expanded) => !expanded)}
+        >
+          Статус: {filterLabels[filter]} · Фильтры
+        </button>
+        <div id="pipeline-status-filters" className={styles.filters} data-expanded={filtersExpanded} aria-label="Фильтр по статусу">
           {filters.map((f) => (
             <button
               key={f}
               className={`${styles.filterBtn} ${filter === f ? styles.active : ''}`}
               aria-pressed={filter === f}
-              onClick={() => setFilter(f)}
+              onClick={() => { setFilter(f); setFiltersExpanded(false); }}
             >
               {filterLabels[f]}
             </button>

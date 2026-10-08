@@ -5,8 +5,10 @@
 }
 
 .back {
-  display: inline-block;
-  padding: 4px 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 4px;
   margin-bottom: 16px;
   color: var(--link);
   font-size: 14px;
@@ -159,7 +161,9 @@
 }
 
 .questionText a {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   margin: 0 4px 4px 0;
   overflow-wrap: anywhere;
 }
@@ -203,8 +207,13 @@
 
 .actions button {
   max-width: 100%;
+  min-height: 44px;
   white-space: normal;
   text-align: left;
+}
+
+.controlHeader button {
+  min-height: 44px;
 }
 
 .controlError {
@@ -241,7 +250,9 @@
 }
 
 .edges a {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
@@ -266,20 +277,96 @@
 
 @media (max-width: 640px) {
   .container {
-    padding: 18px 14px 28px;
+    padding: calc(18px + env(safe-area-inset-top, 0px)) 14px calc(28px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .header {
+    margin-bottom: 18px;
   }
 
   .title {
-    font-size: 21px;
+    font-size: 22px;
+  }
+
+  .meta {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    font-size: 13px;
   }
 
   .controls,
   .workflow {
+    margin: 16px 0;
     padding: 12px;
   }
 
+  .controlHeader {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .controlHeader h2 {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 17px;
+  }
+
+  .controlHeader > span,
+  .controlHeader input {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  .controlHeader input,
+  .controlHeader button,
+  .actions button {
+    min-height: 44px;
+  }
+
+  .controlHeader input {
+    box-sizing: border-box;
+  }
+
   .approval {
+    padding: 11px;
+  }
+
+  .question {
     padding: 10px;
+    overflow-wrap: anywhere;
+  }
+
+  .question textarea {
+    min-height: 96px;
+    box-sizing: border-box;
+    padding: 10px;
+    font: inherit;
+    font-size: 16px;
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .actions button {
+    width: 100%;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .workflowHeader {
+    align-items: flex-start;
+    gap: 8px 12px;
+  }
+
+  .workflowHeader h2 {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 17px;
   }
 
   .hashes > span:first-child {
@@ -288,6 +375,7 @@
 
   .edges article {
     grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
+    gap: 5px;
+    overflow-wrap: anywhere;
   }
 }

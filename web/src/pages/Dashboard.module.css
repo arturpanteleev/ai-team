@@ -27,6 +27,10 @@
   scrollbar-color: var(--border-strong) transparent;
 }
 
+.filtersToggle {
+  display: none;
+}
+
 .filterBtn {
   flex: 0 0 auto;
   min-height: 36px;
@@ -170,20 +174,63 @@
   }
 
   .header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
     gap: 10px;
     margin-bottom: 18px;
   }
 
   .title {
+    min-width: 0;
     font-size: 22px;
+  }
+
+  .filtersToggle {
+    display: block;
+    min-height: 44px;
+    padding: 9px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .filters {
+    display: none;
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 2px 0 4px;
+    overflow: visible;
+  }
+
+  .filters[data-expanded='true'] {
+    display: flex;
+  }
+
+  .filterBtn {
+    min-height: 44px;
+    padding: 8px 12px;
   }
 
   .runForm {
     padding: 12px;
   }
 
+  .runForm input,
+  .runForm textarea {
+    min-height: 44px;
+    padding: 12px;
+  }
+
   .runForm button {
     width: 100%;
+    min-height: 48px;
+    line-height: 1.35;
   }
 
   .preflight div {

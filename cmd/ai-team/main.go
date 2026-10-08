@@ -838,7 +838,13 @@ func configuredAgentRegistryPaths() []string {
 		paths = append(paths, pluginDir)
 	}
 	if configDir, err := os.UserConfigDir(); err == nil {
-		paths = append(paths, filepath.Join(configDir, "ai-team", "agents"))
+		userAgents := filepath.Join(configDir, "ai-team", "agents")
+		// The built-in user registry is optional on a clean install. Keep it
+		// when present, and preserve other filesystem errors so downstream path
+		// validation still fails closed instead of silently hiding a problem.
+		if _, statErr := os.Lstat(userAgents); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			paths = append(paths, userAgents)
+		}
 	}
 	return paths
 }

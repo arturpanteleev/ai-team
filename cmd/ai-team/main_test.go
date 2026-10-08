@@ -90,6 +90,11 @@ func TestConfiguredWorkerProcessOptions(t *testing.T) {
 }
 
 func TestConfiguredAgentRegistryPathsNormalizesPlugins(t *testing.T) {
+	configDir := setUserConfigDirForTest(t)
+	userAgents := filepath.Join(configDir, "ai-team", "agents")
+	if err := os.MkdirAll(userAgents, 0755); err != nil {
+		t.Fatal(err)
+	}
 	pluginPath := filepath.Join("relative", "plugins")
 	t.Setenv("AI_TEAM_AGENT_PATH", pluginPath+string(os.PathListSeparator))
 	paths := configuredAgentRegistryPaths()
@@ -103,12 +108,77 @@ func TestConfiguredAgentRegistryPathsNormalizesPlugins(t *testing.T) {
 	if paths[0] != wantPlugin {
 		t.Fatalf("plugin path = %q, want %q", paths[0], wantPlugin)
 	}
-	configDir, err := os.UserConfigDir()
+	userConfigDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(configDir, "ai-team", "agents"); paths[1] != want {
+	if want := filepath.Join(userConfigDir, "ai-team", "agents"); paths[1] != want {
 		t.Fatalf("user agent path = %q, want %q", paths[1], want)
+	}
+}
+
+func TestConfiguredAgentRegistryPathsOptionalUserRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{
+		{name: "missing is omitted"},
+		{name: "existing is included", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := setUserConfigDirForTest(t)
+			userAgents := filepath.Join(configDir, "ai-team", "agents")
+			if tc.existing {
+				if err := os.MkdirAll(userAgents, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("AI_TEAM_AGENT_PATH", "")
+
+			paths := configuredAgentRegistryPaths()
+			if tc.existing {
+				if len(paths) != 1 || paths[0] != userAgents {
+					t.Fatalf("agent registry paths = %v; want existing user registry %q", paths, userAgents)
+				}
+				return
+			}
+			if len(paths) != 0 {
+				t.Fatalf("agent registry paths = %v; absent optional user registry should be omitted", paths)
+			}
+		})
+	}
+}
+
+func TestConfiguredAgentRegistryPathsRetainsMissingExplicitPlugin(t *testing.T) {
+	configDir := setUserConfigDirForTest(t)
+	missingPlugin := filepath.Join(t.TempDir(), "missing-plugin-agents")
+	t.Setenv("AI_TEAM_AGENT_PATH", missingPlugin)
+	paths := configuredAgentRegistryPaths()
+	want, err := filepath.Abs(missingPlugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != want {
+		t.Fatalf("agent registry paths = %v; explicit missing plugin must be preserved as %q (user config %q)", paths, want, configDir)
+	}
+}
+
+func setUserConfigDirForTest(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", base)
+		return base
+	case "darwin":
+		t.Setenv("HOME", base)
+		return filepath.Join(base, "Library", "Application Support")
+	case "plan9":
+		t.Setenv("home", base)
+		return filepath.Join(base, "lib")
+	default:
+		t.Setenv("XDG_CONFIG_HOME", base)
+		return base
 	}
 }
 

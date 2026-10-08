@@ -156,11 +156,6 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if err := p.validateControllerBackedLegacyDelivery(targetDir, runDir, runID); err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: validate controller delivery authority: %w", err)
 	}
-	if _, ok, err := delivery.ReadTerminalRecordForRun(targetDir, runDir, runID); err != nil {
-		return delivery.TerminalRecord{}, err
-	} else if ok {
-		return delivery.TerminalRecord{}, fmt.Errorf("deliver: run %s уже доставлен (delivery.json существует)", runID)
-	}
 
 	// evidence.Resume не применим: он открывает только НЕ-терминальные run
 	// (терминальный отклоняется «already terminal»), а DeliverDeferred работает
@@ -255,7 +250,7 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if existing, found, readErr := delivery.ReadControllerDeliveryReceipt(targetDir, runID); readErr != nil {
 		return delivery.TerminalRecord{}, readErr
 	} else if found {
-		if err := validateRecoveredTerminalRecord(runDir, runID, feature, marker, *existing); err != nil {
+		if err := validateRecoveredTerminalRecord(runDir, runID, feature, marker, *existing, p.eventLogSource); err != nil {
 			return delivery.TerminalRecord{}, fmt.Errorf("deliver: existing controller receipt mismatch: %w", err)
 		}
 		return *existing, nil

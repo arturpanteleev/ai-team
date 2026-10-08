@@ -794,6 +794,53 @@ func TestProcessEngineRejectsInvalidWorkerEnvironmentBeforeSpawn(t *testing.T) {
 	}
 }
 
+func TestProcessEngineReconcilesCompletedRecoveryInTrustedParent(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		reconcile error
+		wantErr   bool
+	}{
+		{name: "success"},
+		{name: "receipt failure", reconcile: errors.New("simulated receipt IO outage"), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := t.TempDir()
+			t.Setenv("AI_TEAM_WORKER_TEST_MODE", "echo")
+			engine := newTestEngine(t, target)
+			calls := 0
+			engine.terminalDeliveryReconciler = func(_ context.Context, runID, targetDir string) error {
+				calls++
+				if runID != "run-recovery" || targetDir != engine.TargetDir() {
+					t.Fatalf("reconciliation scope run=%q target=%q", runID, targetDir)
+				}
+				return test.reconcile
+			}
+
+			result, err := engine.Execute(context.Background(), Job{
+				SchemaVersion: SchemaVersion, Operation: OperationRecover,
+				RunID: "run-recovery", TargetDir: target, Feature: "feature", Task: "task",
+			})
+			if test.wantErr {
+				var processErr *ProcessError
+				if !errors.As(err, &processErr) || !strings.Contains(err.Error(), "trusted terminal delivery reconciliation") {
+					t.Fatalf("receipt reconciliation failure should fail the parent job: %v", err)
+				}
+				if !errors.Is(err, test.reconcile) {
+					t.Fatalf("reconciliation cause was lost: %v", err)
+				}
+				if result.Outcome != workflow.RunOutcome(OutcomeCompleted) {
+					t.Fatalf("completed worker outcome must remain visible: %+v", result)
+				}
+			} else if err != nil || result.Outcome != workflow.RunOutcome(OutcomeCompleted) {
+				t.Fatalf("completed recovery should succeed after parent reconciliation: result=%+v err=%v", result, err)
+			}
+			if calls != 1 {
+				t.Fatalf("trusted parent reconciler called %d times, want 1", calls)
+			}
+		})
+	}
+}
+
 // TestProcessEngineClassifiesChildFailures — падение дочернего процесса:
 // с честной строкой результата исход бизнесовый (job не перезапускается),
 // без неё — инфраструктурный сбой с диагностикой.

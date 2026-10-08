@@ -534,19 +534,24 @@ func sameControllerDeliveryReceipt(a, b controllerDeliveryReceipt) bool {
 // exists, it preserves compatibility with worker API records and the historical
 // evidence-local delivery.json for older consumers.
 func ReadTerminalRecordForRun(targetDir, runDir, runID string) (*TerminalRecord, bool, error) {
-	record, ok, err := ReadControllerDeliveryReceipt(targetDir, runID)
-	if err != nil || ok {
-		return record, ok, err
+	receipt, receiptFound, err := ReadControllerDeliveryReceipt(targetDir, runID)
+	if err != nil {
+		return nil, false, err
 	}
-	record, ok, err = ReadControllerTerminalRecord(targetDir, runID)
-	if err != nil || ok {
-		return record, ok, err
+	if receiptFound {
+		// The dedicated controller receipt is proof of trusted delivery. It
+		// deliberately outranks older API and run-local compatibility mirrors.
+		return receipt, true, nil
+	}
+	record, controllerFound, err := ReadControllerTerminalRecord(targetDir, runID)
+	if err != nil {
+		return nil, false, err
 	}
 	localRecord, localOK, localErr := ReadTerminalRecord(runDir)
 	if localErr != nil {
 		return nil, false, localErr
 	}
-	if ok {
+	if controllerFound {
 		if localOK && !sameTerminalRecord(*record, *localRecord) {
 			return nil, false, fmt.Errorf("terminal delivery record conflict between controller state and run evidence for run %s", runID)
 		}

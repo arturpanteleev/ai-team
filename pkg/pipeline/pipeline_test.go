@@ -1751,7 +1751,7 @@ func TestDeliverDeferredRequiresControllerResolvedExactApprovalAfterForgedMarker
 	runID := filepath.Base(runDir)
 	logPath := filepath.Join(runDir, "events.jsonl")
 	rewriteEventLogWithWorkerMarkerEdit(t, logPath, runID)
-	if _, err := firstDeferredMarker(runDir); err != nil {
+	if _, err := firstDeferredMarker(runDir, nil); err != nil {
 		t.Fatalf("worker-edited but re-hashed event log should still parse its marker: %v", err)
 	}
 
@@ -2370,6 +2370,22 @@ func TestRun_DeliveryApprovalSurvivesSamePlanResumeAttempt(t *testing.T) {
 	}
 	if service.calls != 1 {
 		t.Fatalf("same approved plan should execute exactly once after resume, got %d executions", service.calls)
+	}
+	runDir := onlyRunDir(t, dir)
+	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), approvalErr.RunID)
+	if err != nil {
+		t.Fatalf("same-plan approval replay must leave a valid event chain: %v", err)
+	}
+	foundReuse := false
+	for _, event := range events {
+		if event.Type == "delivery_plan_approved" && event.Data["reused"] == true &&
+			event.Data["mode"] == "resolved_approval" {
+			foundReuse = true
+			break
+		}
+	}
+	if !foundReuse {
+		t.Fatalf("same-plan resume must record the canonical approval mode and reuse fact: events=%+v", events)
 	}
 	resolved, err := store.Load(value.RunID, value.ID)
 	if err != nil {

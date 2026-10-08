@@ -141,10 +141,18 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 			return errors.New("delivery approval does not identify the saved run, attempt, stage, and plan")
 		}
 		rs.approvedPlanHash = planHash
-		return rs.evidence.Append(evidence.Event{Type: "delivery_plan_approved", AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
-			"plan_hash": planHash, "mode": mode, "approver": "local-user",
+		eventMode := mode
+		eventData := map[string]any{
+			"plan_hash": planHash, "mode": eventMode, "approver": "local-user",
 			"approval_attempt_id": resolved.AttemptID, "operation_attempt_id": result.AttemptID,
-		}})
+		}
+		if mode == "resolved_approval_reused" {
+			// Replay accepts the canonical authority mode; retain reuse as a
+			// separate fact instead of making it an unsupported mode value.
+			eventData["mode"] = "resolved_approval"
+			eventData["reused"] = true
+		}
+		return rs.evidence.Append(evidence.Event{Type: "delivery_plan_approved", AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: eventData})
 	}
 	if rs.approvedPlanHash != "" {
 		if rs.approvedPlanHash != planHash {

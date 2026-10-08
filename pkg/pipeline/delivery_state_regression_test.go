@@ -24,6 +24,40 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 )
 
+func copyRunAttemptManifestsToControllerStore(t *testing.T, targetDir, runDir, runID string) evidence.ControllerAttemptManifestStore {
+	t.Helper()
+	store := evidence.ControllerAttemptManifestStore{TargetDir: targetDir}
+	if err := store.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(runDir, "attempts"))
+	if errors.Is(err, os.ErrNotExist) {
+		return store
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		manifestPath := filepath.Join(runDir, "attempts", entry.Name(), "manifest.json")
+		if _, err := os.Lstat(manifestPath); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		_, manifest, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), runDir, runID, entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Write(runID, manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store
+}
+
 func TestControllerEventSourceFeedsDeliveryAnchorAndAttestation(t *testing.T) {
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
@@ -209,26 +243,16 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	if err := os.Remove(filepath.Join(runDir, "delivery.json")); err != nil {
 		t.Fatal(err)
 	}
-	marker, err := firstDeferredMarker(runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attemptStore := evidence.ControllerAttemptManifestStore{TargetDir: dir}
-	_, attempt, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), runDir, runID, marker.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := attemptStore.Reserve(runID); err != nil {
-		t.Fatal(err)
-	}
-	if err := attemptStore.Write(runID, attempt); err != nil {
-		t.Fatal(err)
-	}
+	copyRunAttemptManifestsToControllerStore(t, dir, runDir, runID)
 	approvalStore, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore))
+	eventSource := evidence.ControllerEventStore{TargetDir: dir}
+	if err := eventSource.MigrateLegacy(runID, runDir); err != nil {
+		t.Fatal(err)
+	}
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventSource))
 	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("reconcile should accept a valid controller-owned record: %v", err)
 	}
@@ -276,6 +300,16 @@ func TestReconcileTerminalDeliveryResealsExistingRecordAndRejectsTamperedAnchor(
 	if before.DeliveryRecordSHA256 != "" {
 		t.Fatal("fixture delivery record must be written after the initial terminal anchor")
 	}
+	copyRunAttemptManifestsToControllerStore(t, dir, runDir, runID)
+	eventStore := evidence.ControllerEventStore{TargetDir: dir}
+	if err := eventStore.MigrateLegacy(runID, runDir); err != nil {
+		t.Fatal(err)
+	}
+	approvalStore, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventStore))
 
 	attestationDigest, err := attestationDigestOfRun(runDir)
 	if err != nil {
@@ -296,10 +330,13 @@ func TestReconcileTerminalDeliveryResealsExistingRecordAndRejectsTamperedAnchor(
 		},
 		PerformedAt: time.Now().UTC(),
 	}
+	if err := delivery.WriteControllerDeliveryReceipt(dir, record); err != nil {
+		t.Fatalf("simulate crash after controller receipt write: %v", err)
+	}
 	if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
 		t.Fatalf("simulate crash after terminal record write: %v", err)
 	}
-	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
+	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("recovery should reseal validated delivery: %v", err)
 	}
 	if err := export.VerifyEvidence(runDir); err != nil {
@@ -327,7 +364,7 @@ func TestReconcileTerminalDeliveryResealsExistingRecordAndRejectsTamperedAnchor(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err == nil {
+	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err == nil {
 		t.Fatal("recovery accepted a changed supplemental file")
 	}
 	currentAnchor, err := os.ReadFile(anchorPath)

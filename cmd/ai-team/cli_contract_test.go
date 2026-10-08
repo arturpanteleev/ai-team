@@ -1393,7 +1393,10 @@ func TestRecoveryDispatchLeavesReceiptIOToTrustedParent(t *testing.T) {
 	}
 	for _, event := range []evidence.Event{
 		{Type: "run_started", Timestamp: started},
-		{Type: "delivery_deferred", Timestamp: started.Add(time.Second), Data: map[string]any{"plan_hash": strings.Repeat("a", 64)}},
+		{Type: "delivery_deferred", AttemptID: "delivery-attempt", Timestamp: started.Add(time.Second), Data: map[string]any{
+			"plan_hash":  strings.Repeat("a", 64),
+			"state_path": filepath.Join(target, ".ai-team", "delivery", "feature.json"),
+		}},
 		{Type: "run_finished", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"status": string(workflow.RunCompleted), "stage_attempts": 0}},
 	} {
 		if err := evidenceStore.Append(event); err != nil {

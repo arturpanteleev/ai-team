@@ -186,7 +186,7 @@ func TestReconcileTerminalDeliveryRequiresControllerApprovalAndAttempt(t *testin
 	}
 	runDir := onlyRunDir(t, dir)
 	runID := filepath.Base(runDir)
-	marker, err := firstDeferredMarker(runDir)
+	marker, err := firstDeferredMarker(runDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,22 +194,17 @@ func TestReconcileTerminalDeliveryRequiresControllerApprovalAndAttempt(t *testin
 		t.Fatalf("delivery marker lost event attempt identity: %+v", marker)
 	}
 
-	controllerAttempts := evidence.ControllerAttemptManifestStore{TargetDir: dir}
-	_, attempt, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), runDir, runID, marker.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := controllerAttempts.Reserve(runID); err != nil {
-		t.Fatal(err)
-	}
-	if err := controllerAttempts.Write(runID, attempt); err != nil {
-		t.Fatal(err)
-	}
+	controllerAttempts := copyRunAttemptManifestsToControllerStore(t, dir, runDir, runID)
 	approvalStore, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithDeliveryService(&fakeDeliveryService{}))
+	eventSource := evidence.ControllerEventStore{TargetDir: dir}
+	if err := eventSource.MigrateLegacy(runID, runDir); err != nil {
+		t.Fatal(err)
+	}
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore),
+		WithEventLogSource(eventSource), WithDeliveryService(&fakeDeliveryService{}))
 	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("reconcile from matching controller approvals and attempt should pass: %v", err)
 	}
@@ -219,7 +214,7 @@ func TestReconcileTerminalDeliveryRequiresControllerApprovalAndAttempt(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := New(nil, nil, WithApprovalStore(otherApprovalStore)).ReconcileTerminalDelivery(context.Background(), runID, dir); err == nil || !strings.Contains(err.Error(), "no resolved release-manager approval") {
+	if err := New(nil, nil, WithApprovalStore(otherApprovalStore), WithEventLogSource(eventSource)).ReconcileTerminalDelivery(context.Background(), runID, dir); err == nil || !strings.Contains(err.Error(), "no resolved release-manager approval") {
 		t.Fatalf("recovery without the controller-resolved approval should fail closed: %v", err)
 	}
 

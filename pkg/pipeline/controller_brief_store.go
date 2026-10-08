@@ -27,6 +27,9 @@ func prepareControllerBriefRoot(targetDir, runID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := recoverLegacyBriefQuarantine(targetDir, runID); err != nil {
+		return "", fmt.Errorf("recover interrupted legacy business brief cleanup: %w", err)
+	}
 	canonical := filepath.Join(stateRoot, runID)
 	legacyPath, legacyExists, err := existingLegacyBrief(targetDir, runID)
 	if err != nil {
@@ -41,6 +44,9 @@ func prepareControllerBriefRoot(targetDir, runID string) (string, error) {
 		switch {
 		case errors.Is(canonicalErr, os.ErrNotExist):
 			if len(legacyTree) == 0 {
+				if _, err := safeio.EnsureDir(stateRoot, runID); err != nil {
+					return "", fmt.Errorf("create controller brief root for empty legacy cleanup: %w", err)
+				}
 				if err := removeLegacyBrief(targetDir, runID, legacyTree); err != nil {
 					return "", err
 				}
@@ -72,13 +78,23 @@ func prepareControllerBriefRoot(targetDir, runID string) (string, error) {
 				if err := removeLegacyBrief(targetDir, runID, legacyTree); err != nil {
 					return "", err
 				}
+			case briefTreeIsSubset(legacyTree, canonicalTree):
+				// An interrupted legacy cleanup may already have removed some
+				// duplicate files. Every remaining legacy byte is still present
+				// in the controller-owned canonical tree, so cleanup is lossless.
+				if err := removeLegacyBrief(targetDir, runID, legacyTree); err != nil {
+					return "", err
+				}
 			default:
 				return "", fmt.Errorf("legacy and controller business brief stores conflict for run %q", runID)
 			}
 		}
-		if err := secureRemoveEmptyLegacyRunRoot(targetDir, runID); err != nil {
-			return "", err
-		}
+	}
+	// A prior cleanup can crash after removing runs/<runID>/brief but before
+	// removing the now-empty run root. Retry this idempotent removal even when
+	// no legacy brief leaf remains; non-empty run roots are preserved.
+	if err := secureRemoveEmptyLegacyRunRoot(targetDir, runID); err != nil {
+		return "", err
 	}
 	return safeio.EnsureDir(stateRoot, runID)
 }
@@ -217,6 +233,19 @@ func equalBriefTrees(left, right map[string][]byte) bool {
 	}
 	for name, data := range left {
 		if !bytes.Equal(data, right[name]) {
+			return false
+		}
+	}
+	return true
+}
+
+func briefTreeIsSubset(subset, superset map[string][]byte) bool {
+	if len(subset) > len(superset) {
+		return false
+	}
+	for name, data := range subset {
+		other, ok := superset[name]
+		if !ok || !bytes.Equal(data, other) {
 			return false
 		}
 	}

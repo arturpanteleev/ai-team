@@ -18,6 +18,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	legacyBriefQuarantineDirectory      = ".legacy-quarantine"
+	legacyBriefDirectoryQuarantineEntry = ".legacy-brief-directory-quarantine"
+)
+
 func closeControllerBriefRoot(rootFD int) error { return unix.Close(rootFD) }
 
 func closeBriefFD(fd int) error {
@@ -270,24 +275,21 @@ func secureMigrateLegacyBrief(targetDir, runID string, expected map[string][]byt
 		return err
 	}
 	// Confirm that the moved entry is a directory without following a raced
-	// symlink. If the leaf was swapped immediately before rename, remove a
-	// resulting symlink using unlinkat (which never follows it) and fail closed.
+	// symlink. If the leaf was swapped immediately before rename, atomically
+	// move the unexpected entry back to its source name. Never unlink the leaf:
+	// it may be user data substituted after the earlier validation.
 	movedFD, err := openBriefDirectoryAt(briefsFD, runID)
 	if err != nil {
-		var st unix.Stat_t
-		if statErr := unix.Fstatat(briefsFD, runID, &st, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && st.Mode&unix.S_IFMT != unix.S_IFDIR {
-			_ = unix.Unlinkat(briefsFD, runID, 0)
-		}
-		return fmt.Errorf("verify migrated brief directory: %w", err)
+		return restoreMovedBriefAfterOpenFailure(runFD, briefsFD, runID, err)
 	}
 	movedTree, readErr := readBriefTreeAt(movedFD, filepath.Join(targetDir, ".ai-team", "state", "briefs", runID))
 	closeErr := closeBriefFD(movedFD)
 	if readErr != nil || !equalBriefTrees(expected, movedTree) {
 		rollbackErr := renameBriefNoReplace(briefsFD, runID, runFD, "brief")
 		if readErr != nil {
-			return errors.Join(fmt.Errorf("validate migrated brief contents: %w (rollback: %v)", readErr, rollbackErr), closeErr)
+			return errors.Join(fmt.Errorf("validate migrated brief contents: %w", readErr), rollbackErr, closeErr)
 		}
-		return errors.Join(fmt.Errorf("legacy brief contents changed during migration (rollback: %v)", rollbackErr), closeErr)
+		return errors.Join(errors.New("legacy brief contents changed during migration"), rollbackErr, closeErr)
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close migrated brief directory: %w", closeErr)
@@ -327,11 +329,29 @@ func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte
 	if !equalBriefTrees(expected, actual) {
 		return fmt.Errorf("legacy brief contents changed before cleanup")
 	}
-	if err := removeBriefDirectoryContents(briefFD, expected); err != nil {
+	canonicalFD, quarantineFD, err := openOrCreateLegacyBriefQuarantine(targetDir, runID)
+	if err != nil {
+		return fmt.Errorf("open controller brief quarantine: %w", err)
+	}
+	defer func() {
+		if quarantineFD >= 0 {
+			deferBriefFDClose(quarantineFD, "close controller brief quarantine", &err)
+		}
+	}()
+	defer deferBriefFDClose(canonicalFD, "close controller brief directory", &err)
+	if err := removeBriefDirectoryContents(briefFD, quarantineFD, expected); err != nil {
 		return fmt.Errorf("remove legacy brief contents: %w", err)
 	}
-	if err := unix.Unlinkat(runFD, "brief", unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
-		return fmt.Errorf("remove legacy brief directory: %w", err)
+	if err := removeEmptyLegacyBriefDirectory(runFD, quarantineFD, briefFD); err != nil {
+		return fmt.Errorf("remove empty legacy brief directory: %w", err)
+	}
+	if err := closeBriefFD(quarantineFD); err != nil {
+		quarantineFD = -1
+		return fmt.Errorf("close controller brief quarantine: %w", err)
+	}
+	quarantineFD = -1
+	if err := unix.Unlinkat(canonicalFD, legacyBriefQuarantineDirectory, unix.AT_REMOVEDIR); err != nil {
+		return fmt.Errorf("remove empty controller brief quarantine: %w", err)
 	}
 	return nil
 }
@@ -400,7 +420,212 @@ func openBriefDirectoryFD(directoryFD int) (int, error) {
 	return unix.Openat(directoryFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 }
 
-func removeBriefDirectoryContents(directoryFD int, expected map[string][]byte) error {
+func restoreMovedBriefAfterOpenFailure(runFD, briefsFD int, runID string, cause error) error {
+	rollbackErr := renameBriefNoReplace(briefsFD, runID, runFD, "brief")
+	if rollbackErr != nil {
+		rollbackErr = fmt.Errorf("restore moved brief entry to legacy location: %w", rollbackErr)
+	}
+	return errors.Join(fmt.Errorf("verify migrated brief directory: %w", cause), rollbackErr)
+}
+
+func removeEmptyLegacyBriefDirectory(runFD, quarantineFD, pinnedBriefFD int) error {
+	if err := renameBriefNoReplace(runFD, "brief", quarantineFD, legacyBriefDirectoryQuarantineEntry); err != nil {
+		return fmt.Errorf("quarantine legacy brief directory: %w", err)
+	}
+	movedFD, err := openBriefDirectoryAt(quarantineFD, legacyBriefDirectoryQuarantineEntry)
+	if err != nil {
+		return restoreQuarantinedLegacyBriefDirectory(runFD, quarantineFD, err)
+	}
+	var pinned, moved unix.Stat_t
+	pinnedErr := unix.Fstat(pinnedBriefFD, &pinned)
+	movedErr := unix.Fstat(movedFD, &moved)
+	if pinnedErr != nil || movedErr != nil || pinned.Dev != moved.Dev || pinned.Ino != moved.Ino {
+		closeErr := closeBriefFD(movedFD)
+		cause := errors.Join(pinnedErr, movedErr)
+		if cause == nil {
+			cause = errors.New("legacy brief directory changed before cleanup")
+		}
+		return restoreQuarantinedLegacyBriefDirectory(runFD, quarantineFD, errors.Join(cause, closeErr))
+	}
+	empty, emptyErr := briefDirectoryIsEmpty(movedFD)
+	closeErr := closeBriefFD(movedFD)
+	if emptyErr != nil || closeErr != nil || !empty {
+		cause := errors.Join(emptyErr, closeErr)
+		if cause == nil {
+			cause = errors.New("legacy brief directory is not empty after cleanup")
+		}
+		return restoreQuarantinedLegacyBriefDirectory(runFD, quarantineFD, cause)
+	}
+	if err := unix.Unlinkat(quarantineFD, legacyBriefDirectoryQuarantineEntry, unix.AT_REMOVEDIR); err != nil {
+		return fmt.Errorf("remove verified quarantined legacy brief directory: %w", err)
+	}
+	return nil
+}
+
+func restoreQuarantinedLegacyBriefDirectory(runFD, quarantineFD int, cause error) error {
+	rollbackErr := renameBriefNoReplace(quarantineFD, legacyBriefDirectoryQuarantineEntry, runFD, "brief")
+	if rollbackErr != nil {
+		rollbackErr = fmt.Errorf("restore quarantined legacy brief directory: %w", rollbackErr)
+	}
+	return errors.Join(cause, rollbackErr)
+}
+
+func briefDirectoryIsEmpty(directoryFD int) (bool, error) {
+	dupFD, err := openBriefDirectoryFD(directoryFD)
+	if err != nil {
+		return false, err
+	}
+	directory := os.NewFile(uintptr(dupFD), "brief-directory")
+	entries, readErr := directory.ReadDir(1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return false, errors.Join(readErr, closeErr)
+	}
+	if closeErr != nil {
+		return false, closeErr
+	}
+	return len(entries) == 0, nil
+}
+
+func ensureBriefDirectoryAt(parentFD int, name string) (int, error) {
+	if err := unix.Mkdirat(parentFD, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	return openBriefDirectoryAt(parentFD, name)
+}
+
+func openOrCreateLegacyBriefQuarantine(targetDir, runID string) (canonicalFD, quarantineFD int, err error) {
+	canonicalFD, err = openBriefDirectory(targetDir, ".ai-team", "state", "briefs", runID)
+	if err != nil {
+		return -1, -1, err
+	}
+	if quarantineFD, err = ensureBriefDirectoryAt(canonicalFD, legacyBriefQuarantineDirectory); err != nil {
+		return -1, -1, errors.Join(err, closeBriefFD(canonicalFD))
+	}
+	return canonicalFD, quarantineFD, nil
+}
+
+func recoverLegacyBriefQuarantine(targetDir, runID string) (err error) {
+	canonicalFD, err := openBriefDirectory(targetDir, ".ai-team", "state", "briefs", runID)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer deferBriefFDClose(canonicalFD, "close canonical brief directory during recovery", &err)
+	quarantineFD, err := openBriefDirectoryAt(canonicalFD, legacyBriefQuarantineDirectory)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if quarantineFD >= 0 {
+			deferBriefFDClose(quarantineFD, "close legacy brief quarantine during recovery", &err)
+		}
+	}()
+
+	runsFD, err := openBriefDirectory(targetDir, ".ai-team", "runs")
+	if err != nil {
+		return fmt.Errorf("open legacy runs directory for quarantine recovery: %w", err)
+	}
+	defer deferBriefFDClose(runsFD, "close legacy runs directory during recovery", &err)
+	runFD, err := openBriefDirectoryAt(runsFD, runID)
+	if err != nil {
+		return fmt.Errorf("open legacy run directory for quarantine recovery: %w", err)
+	}
+	defer deferBriefFDClose(runFD, "close legacy run directory during recovery", &err)
+	legacyBriefFD, err := openBriefDirectoryAt(runFD, "brief")
+	if errors.Is(err, unix.ENOENT) {
+		legacyBriefFD = -1
+	} else if err != nil {
+		return fmt.Errorf("open legacy brief directory for quarantine recovery: %w", err)
+	}
+	defer func() {
+		if legacyBriefFD >= 0 {
+			deferBriefFDClose(legacyBriefFD, "close legacy brief directory during recovery", &err)
+		}
+	}()
+
+	dupFD, err := openBriefDirectoryFD(quarantineFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(dupFD), "brief-quarantine")
+	entries, err := directory.ReadDir(-1)
+	if closeErr := directory.Close(); err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	for _, entry := range entries {
+		if entry.Name() == legacyBriefDirectoryQuarantineEntry && len(entries) != 1 {
+			return errors.New("interrupted quarantine mixes a legacy brief directory with file entries")
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == legacyBriefDirectoryQuarantineEntry {
+			if legacyBriefFD >= 0 {
+				return errors.New("legacy brief path exists while a quarantined directory awaits recovery")
+			}
+			movedFD, err := openBriefDirectoryAt(quarantineFD, name)
+			if err != nil {
+				return fmt.Errorf("validate quarantined legacy brief directory: %w", err)
+			}
+			empty, emptyErr := briefDirectoryIsEmpty(movedFD)
+			closeErr := closeBriefFD(movedFD)
+			if emptyErr != nil || closeErr != nil || !empty {
+				cause := errors.Join(emptyErr, closeErr)
+				if cause == nil {
+					cause = errors.New("quarantined legacy brief directory is not empty")
+				}
+				return cause
+			}
+			if err := renameBriefNoReplace(quarantineFD, name, runFD, "brief"); err != nil {
+				return fmt.Errorf("restore interrupted legacy brief directory: %w", err)
+			}
+			continue
+		}
+		limit, supported := briefFileLimit(name)
+		if !supported {
+			return fmt.Errorf("unsupported entry %q in interrupted legacy brief quarantine", name)
+		}
+		if _, err := readBriefFileAt(quarantineFD, name, limit); err != nil {
+			return fmt.Errorf("validate quarantined legacy brief %q: %w", name, err)
+		}
+		if legacyBriefFD < 0 {
+			legacyBriefFD, err = ensureBriefDirectoryAt(runFD, "brief")
+			if err != nil {
+				return fmt.Errorf("create legacy brief directory for quarantine recovery: %w", err)
+			}
+		}
+		if err := renameBriefNoReplace(quarantineFD, name, legacyBriefFD, name); err != nil {
+			return fmt.Errorf("restore quarantined legacy brief %q: %w", name, err)
+		}
+	}
+	if err := closeBriefFD(quarantineFD); err != nil {
+		quarantineFD = -1
+		return fmt.Errorf("close recovered legacy brief quarantine: %w", err)
+	}
+	quarantineFD = -1
+	if err := unix.Unlinkat(canonicalFD, legacyBriefQuarantineDirectory, unix.AT_REMOVEDIR); err != nil {
+		return fmt.Errorf("remove recovered legacy brief quarantine: %w", err)
+	}
+	return nil
+}
+
+func briefFileLimit(name string) (int64, bool) {
+	if strings.HasSuffix(name, ".md") {
+		return maxBriefBytes, true
+	}
+	if strings.HasSuffix(name, ".json") {
+		return 1 << 20, true
+	}
+	return 0, false
+}
+
+func removeBriefDirectoryContents(directoryFD, quarantineFD int, expected map[string][]byte) error {
 	dupFD, err := openBriefDirectoryFD(directoryFD)
 	if err != nil {
 		return err
@@ -424,10 +649,28 @@ func removeBriefDirectoryContents(directoryFD int, expected map[string][]byte) e
 		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
 			return fmt.Errorf("legacy brief file %q changed before cleanup", entry.Name())
 		}
-		// unlinkat removes the validated filename relative to the pinned source
-		// directory; it never follows a replaced symlink or an ancestor path.
-		if err := unix.Unlinkat(directoryFD, entry.Name(), 0); err != nil {
-			return err
+		name := entry.Name()
+		if err := renameBriefNoReplace(directoryFD, name, quarantineFD, name); err != nil {
+			return fmt.Errorf("quarantine legacy brief file %q: %w", name, err)
+		}
+		limit, supported := briefFileLimit(name)
+		if !supported {
+			return fmt.Errorf("unsupported legacy brief file %q during cleanup", name)
+		}
+		moved, readErr := readBriefFileAt(quarantineFD, name, limit)
+		if readErr != nil || !bytes.Equal(moved, expected[name]) {
+			restoreErr := renameBriefNoReplace(quarantineFD, name, directoryFD, name)
+			if restoreErr != nil {
+				restoreErr = fmt.Errorf("restore changed legacy brief file %q: %w", name, restoreErr)
+			}
+			changedErr := fmt.Errorf("legacy brief file %q changed before cleanup", name)
+			if readErr != nil {
+				changedErr = errors.Join(changedErr, readErr)
+			}
+			return errors.Join(changedErr, restoreErr)
+		}
+		if err := unix.Unlinkat(quarantineFD, name, 0); err != nil {
+			return fmt.Errorf("remove verified quarantined legacy brief file %q: %w", name, err)
 		}
 	}
 	return nil
@@ -446,6 +689,9 @@ func readBriefTreeAt(directoryFD int, displayRoot string) (map[string][]byte, er
 	tree := make(map[string][]byte, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
+		if name == legacyBriefQuarantineDirectory {
+			return nil, errors.New("controller brief contains an unfinished legacy quarantine; restore it before reading")
+		}
 		var before unix.Stat_t
 		if err := unix.Fstatat(directoryFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, err
@@ -456,10 +702,8 @@ func readBriefTreeAt(directoryFD int, displayRoot string) (map[string][]byte, er
 		if before.Nlink != 1 {
 			return nil, fmt.Errorf("business brief file %q has %d hard links; refusing migration", filepath.Join(displayRoot, name), before.Nlink)
 		}
-		limit := int64(maxBriefBytes)
-		if strings.HasSuffix(name, ".json") {
-			limit = 1 << 20
-		} else if !strings.HasSuffix(name, ".md") {
+		limit, supported := briefFileLimit(name)
+		if !supported {
 			return nil, fmt.Errorf("business brief contains unsupported file %q", name)
 		}
 		if before.Size > limit {

@@ -1111,6 +1111,23 @@ func TestWorkerCandidateEvidenceControllerStoreIsScopedAndImmutable(t *testing.T
 	if _, err := loopback.dispatch("candidate.evidence.write", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json", CandidateEvidence: document}); err == nil {
 		t.Fatal("loopback API accepted controller-owned candidate evidence write")
 	}
+	loopback.candidateEvidenceRoot = filepath.Join(target, ".ai-team", "state", "evidence")
+	seededEvidencePath, err := candidateEvidencePath(loopback.candidateEvidenceRoot, job.RunID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seededEvidence, err := os.ReadFile(seededEvidencePath)
+	if err != nil {
+		t.Fatalf("read the valid controller evidence fixture: %v", err)
+	}
+	result, err := loopback.dispatch("candidate.evidence.read", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json"})
+	if result != nil || err == nil || err.Error() != "controller candidate evidence reads require bubblewrap Unix transport" {
+		t.Fatalf("loopback API did not reject candidate evidence reads before accessing the store: result=%+v err=%v", result, err)
+	}
+	seededEvidenceAfter, err := os.ReadFile(seededEvidencePath)
+	if err != nil || !bytes.Equal(seededEvidence, seededEvidenceAfter) {
+		t.Fatalf("rejected loopback read changed controller evidence: err=%v", err)
+	}
 	cancelJob := job
 	cancelJob.Operation = OperationCancel
 	cancel, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, filepath.Join(socketDir, "cancel.sock"))

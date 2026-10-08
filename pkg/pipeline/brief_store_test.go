@@ -342,6 +342,45 @@ func TestControllerBriefStoreReplacesEmptyCanonicalMountpointAndRemovesIdentical
 	})
 }
 
+func TestControllerBriefStoreCleansLegacySubsetAfterInterruptedCleanup(t *testing.T) {
+	target := t.TempDir()
+	const runID = "partial-legacy-cleanup"
+	controller := NewControllerBriefStore(target)
+	if err := controller.PrepareRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := controller.CreateInitial(runID, "same intention")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.AppendClarification(runID, "approval-one", "question", "answer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := NewFileBriefStore(target).CreateInitial(runID, "same intention")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version.ID != initial.Version.ID {
+		t.Fatalf("fixture legacy version differs from canonical initial version: legacy=%+v canonical=%+v", legacy.Version, initial.Version)
+	}
+
+	reopened := NewControllerBriefStore(target)
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.PrepareRun(runID); err != nil {
+		t.Fatalf("prepare after an interrupted duplicate cleanup: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", runID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy subset remained after cleanup: err=%v", err)
+	}
+	versions, err := reopened.List(runID)
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("canonical brief changed after legacy subset cleanup: versions=%+v err=%v", versions, err)
+	}
+}
+
 func TestControllerBriefStoreCRUDStaysOnPinnedDirectoryAfterAncestorReplacement(t *testing.T) {
 	target := t.TempDir()
 	const runID = "pinned-brief-run"

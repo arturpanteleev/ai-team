@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,25 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
+
+// synchronizedOutput captures a subprocess's combined stdout and stderr while
+// allowing E2E failure diagnostics to read the output before Cmd.Wait returns.
+type synchronizedOutput struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (o *synchronizedOutput) Write(data []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.Write(data)
+}
+
+func (o *synchronizedOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.String()
+}
 
 func buildBinary(t *testing.T) string {
 	t.Helper()
@@ -762,7 +782,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	command := exec.Command(bin, "web", "--port", port, "--dist=")
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
-	var serverOutput strings.Builder
+	var serverOutput synchronizedOutput
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -935,7 +955,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
-	var serverOutput strings.Builder
+	var serverOutput synchronizedOutput
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {
 		t.Fatal(err)

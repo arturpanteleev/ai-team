@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter } from '../router';
+import { MemoryRouter, Routes } from '../router';
 import { decideApproval, getPipelineRun, retryDelivery } from '../api';
 import { PipelineDetail } from './PipelineDetail';
 
@@ -11,6 +11,14 @@ vi.mock('../hooks/useWebSocket', () => ({
 }));
 
 afterEach(() => { cleanup(); session.principal = null; });
+
+function renderDetail() {
+  return render(
+    <MemoryRouter initialEntries={['/pipelines/7']}>
+      <Routes routes={[{ path: '/pipelines/:id', element: <PipelineDetail /> }]} />
+    </MemoryRouter>,
+  );
+}
 
 vi.mock('../api', () => ({
   getActivePrincipal: () => session.principal,
@@ -59,17 +67,29 @@ vi.mock('../api', () => ({
   }),
   decideApproval: vi.fn(),
   resumeRun: vi.fn(),
-  retryDelivery: vi.fn(),
   cancelRun: vi.fn(),
+  retryDelivery: vi.fn(),
 }));
 
 describe('PipelineDetail graph', () => {
+  it('показывает команды задачи только в подходящем состоянии', async () => {
+    vi.mocked(getPipelineRun).mockResolvedValueOnce({
+      run: {
+        id: 7, run_id: 'run-graph', feature: 'graph-feature',
+        status: 'completed', started_at: '2026-07-28T00:00:00Z', completed_at: '2026-07-28T00:01:00Z',
+      },
+      stages: [],
+      approvals: [],
+    });
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'graph-feature' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Продолжить задачу' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Отменить задачу' })).not.toBeInTheDocument();
+  });
+
   it('показывает immutable graph, policy и текущий узел', async () => {
-    render(
-      <MemoryRouter initialEntries={['/pipelines/7']}>
-        <PipelineDetail />
-      </MemoryRouter>,
-    );
+    renderDetail();
 
     expect(await screen.findByText('Маршрут workflow')).toBeInTheDocument();
     expect(screen.getByText('architect · max 2')).toHaveAttribute('data-current', 'true');
@@ -77,7 +97,7 @@ describe('PipelineDetail graph', () => {
   });
 
   it('показывает вопрос analyst как форму и передаёт текст ответа в durable decision API', async () => {
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    renderDetail();
 
     expect(await screen.findByText('Вопрос аналитика')).toBeInTheDocument();
     expect(screen.getAllByText('Кто целевой клиент?').length).toBeGreaterThan(0);
@@ -93,7 +113,7 @@ describe('PipelineDetail graph', () => {
   });
 
   it('показывает историю намерения и документы с явным согласованием до архитектора', async () => {
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    renderDetail();
 
     expect(await screen.findByText('История бизнес-намерения')).toBeInTheDocument();
     expect(screen.getByText('0001-intention.md')).toBeInTheDocument();
@@ -101,20 +121,22 @@ describe('PipelineDetail graph', () => {
     expect(screen.getByRole('link', { name: 'Открыть обоснование' })).toHaveAttribute(
       'href', '/artifacts/run-graph/attempts/attempt-2/artifacts/feat/proposal.md',
     );
-    expect(screen.getByRole('link', { name: 'Открыть product spec' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Открыть спецификацию продукта' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Продолжить задачу' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeInTheDocument();
   });
 
   it('в облачном UI оставляет согласование ТЗ только Product Owner', async () => {
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    renderDetail();
 
     expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Согласовать ТЗ и передать архитектору' })).not.toBeInTheDocument();
   });
 
   it('повторно отправляет закреплённые human revisions вместе с голосом quorum', async () => {
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    renderDetail();
 
     expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
     expect(screen.getByText('Закреплённые версии для всех голосов')).toBeInTheDocument();
@@ -127,7 +149,7 @@ describe('PipelineDetail graph', () => {
     }));
   });
 
-  it('shows controller Git delivery commit and PR separately from run completion', async () => {
+  it('показывает зафиксированные коммит и pull request в состоянии Git-доставки', async () => {
     vi.mocked(getPipelineRun).mockResolvedValue({
       run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },
       stages: [],
@@ -136,20 +158,17 @@ describe('PipelineDetail graph', () => {
         commit_sha: 'b'.repeat(40), pr_url: 'https://example.test/pr/42', performed_at: '2026-07-28T00:01:00Z',
       } },
     });
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    renderDetail();
 
-    expect(await screen.findByText('Git delivery')).toBeInTheDocument();
-    expect(screen.getByText('Status: recorded')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Git-доставка' })).toBeInTheDocument();
+    expect(screen.getByText('Статус: recorded')).toBeInTheDocument();
     expect(screen.getByText('b'.repeat(40))).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'https://example.test/pr/42' })).toHaveAttribute('href', 'https://example.test/pr/42');
-    expect(screen.queryByText(/deployed/i)).not.toBeInTheDocument();
-    // The data loaded above has a durable successful record, so this page does
-    // not offer a second delivery command.
-    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Повторить одобренную Git-доставку' })).not.toBeInTheDocument();
     expect(retryDelivery).not.toHaveBeenCalled();
   });
 
-  it('offers retry for a completed run with pending delivery and hides it from developer role', async () => {
+  it('повторяет доставку, перечитывает durable receipt после сбоя ответа и ограничивает повтор по роли', async () => {
     const pendingRun = {
       run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },
       stages: [], delivery: { status: 'pending' },
@@ -162,21 +181,20 @@ describe('PipelineDetail graph', () => {
     } as Awaited<ReturnType<typeof getPipelineRun>>;
     vi.mocked(getPipelineRun).mockResolvedValueOnce(pendingRun).mockResolvedValueOnce(deliveredRun);
     vi.mocked(retryDelivery).mockRejectedValueOnce(new Error('connection reset after request'));
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
-    expect(await screen.findByRole('button', { name: 'Retry approved Git delivery' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry approved Git delivery' }));
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Повторить одобренную Git-доставку' }));
     expect(retryDelivery).toHaveBeenCalledWith('run-graph');
-    expect(await screen.findByRole('alert')).toHaveTextContent('Delivery retry response was unclear: connection reset after request');
-    expect(screen.getByText('Status: recorded')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Статус доставки обновлён.');
+    expect(screen.getByText('Статус: recorded')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'https://example.test/pr/44' })).toHaveAttribute('href', 'https://example.test/pr/44');
-    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
-    expect(screen.getByText('completed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Повторить одобренную Git-доставку' })).not.toBeInTheDocument();
 
     cleanup();
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
-    vi.mocked(getPipelineRun).mockResolvedValue({ ...pendingRun });
-    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
-    expect(await screen.findByText('Status: pending')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
+    vi.mocked(getPipelineRun).mockResolvedValue(pendingRun);
+    renderDetail();
+    expect(await screen.findByText('Статус: pending')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Повторить одобренную Git-доставку' })).not.toBeInTheDocument();
   });
 });

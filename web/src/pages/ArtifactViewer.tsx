@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, useSearchParams } from '../router';
 import ReactMarkdown from 'react-markdown';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { CopyableHash } from '../components/CopyableHash';
 import { createArtifactRevision, getArtifact, getArtifactRevisions } from '../api';
 import type { ArtifactRevision } from '../types';
 import styles from './ArtifactViewer.module.css';
@@ -22,11 +24,13 @@ export function ArtifactViewer() {
   const view = searchParams.get('view') || 'rendered';
   const isRendered = view === 'rendered';
 
+  usePageTitle(path?.split('/').at(-1) ?? 'Артефакт');
+
   useEffect(() => {
     if (!path) return;
     const [runId, ...artifactParts] = path.split('/');
     if (!runId || artifactParts.length === 0) {
-      setError('Invalid run-aware artifact path');
+      setError('Некорректный путь к артефакту.');
       setLoading(false);
       return;
     }
@@ -41,7 +45,7 @@ export function ArtifactViewer() {
         setContent(latest?.content ?? data);
         setDraft(latest?.content ?? data);
       })
-      .catch(() => setError('Failed to load artifact'))
+      .catch(() => setError('Не удалось загрузить артефакт.'))
       .finally(() => setLoading(false));
   }, [path]);
 
@@ -76,8 +80,8 @@ export function ArtifactViewer() {
     }
   };
 
-  if (loading) return <div className={styles.loading}>Loading...</div>;
-  if (error || !content) return <div className={styles.error}>{error || 'Not found'}</div>;
+  if (loading) return <div className={styles.loading}>Загружаем артефакт…</div>;
+  if (error || !content) return <div className={styles.error}>{error || 'Артефакт не найден.'}</div>;
 
   const toggleView = () => {
     setSearchParams({ view: isRendered ? 'raw' : 'rendered' });
@@ -91,7 +95,7 @@ export function ArtifactViewer() {
         <span className={styles.path}>{path || ''}</span>
         <div className={styles.toolbar}>
           {!editing && <button className={styles.toggle} onClick={startEditing}>Предложить изменение</button>}
-          {!editing && <button className={styles.toggle} onClick={toggleView}>{isRendered ? 'Raw' : 'Rendered'}</button>}
+          {!editing && <button className={styles.toggle} onClick={toggleView}>{isRendered ? 'Исходный текст' : 'Предпросмотр'}</button>}
         </div>
       </div>
 
@@ -99,7 +103,7 @@ export function ArtifactViewer() {
         <h2>История человеческих версий</h2>
         {revisions.map((revision) => <article key={revision.id}>
           <strong>Версия {revision.revision}</strong> · {revision.actor_id} · {new Date(revision.created_at).toLocaleString('ru-RU')}
-          <code>{revision.sha256}</code>
+          <CopyableHash value={revision.sha256} label={`хеш версии ${revision.revision}`} />
           {revision.comment && <p>{revision.comment}</p>}
           <button className={styles.toggle} onClick={() => {
             setDraft(revision.content);

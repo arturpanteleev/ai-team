@@ -23,7 +23,19 @@ export function PipelineCard({ run, onCancel }: PipelineCardProps) {
   });
 
   return (
-    <div className={styles.card} onClick={() => navigate(`/pipelines/${run.id}`)}>
+    <article
+      className={styles.card}
+      onClick={() => navigate(`/pipelines/${run.id}`)}
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          navigate(`/pipelines/${run.id}`);
+        }
+      }}
+      role="link"
+      tabIndex={0}
+      aria-label={`Открыть задачу: ${run.feature}`}
+    >
       <div className={styles.header}>
         <span className={styles.feature}>{run.feature}</span>
         <StatusBadge status={run.status} />
@@ -31,12 +43,12 @@ export function PipelineCard({ run, onCancel }: PipelineCardProps) {
       <div className={styles.footer}>
         <span>{time}</span>
         <span className={styles.duration}>{duration}</span>
-        {run.queue_job_id ? <span>Queue #{run.queue_job_id}</span> : null}
+        {run.queue_job_id ? <span>Очередь №{run.queue_job_id}</span> : null}
         {run.error ? <span role="alert">{run.error}</span> : null}
         {run.status === 'queued' && onCancel ? <button onClick={(event) => {
           event.stopPropagation(); onCancel();
         }}>Отменить</button> : null}
       </div>
-    </div>
+    </article>
   );
 }

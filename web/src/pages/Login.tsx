@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { usePageTitle } from '../hooks/usePageTitle';
 import styles from './Login.module.css';
 
 export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Promise<void>; onActivate: (token: string) => Promise<void> }) {
+  usePageTitle('Вход');
   const [token, setToken] = useState('');
   const [inviteToken, setInviteToken] = useState('');
   const [error, setError] = useState('');
@@ -15,7 +17,7 @@ export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Pro
     try {
       await onLogin(token.trim());
     } catch (value) {
-      setError(value instanceof Error ? value.message : 'Authentication failed');
+      setError(value instanceof Error ? value.message : 'Не удалось войти.');
     } finally {
       setPending(false);
     }
@@ -24,16 +26,16 @@ export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Pro
   const activate = async () => {
     setPending(true); setError('');
     try { await onActivate(inviteToken.trim()); }
-    catch (value) { setError(value instanceof Error ? value.message : 'Invitation activation failed'); }
+    catch (value) { setError(value instanceof Error ? value.message : 'Не удалось активировать приглашение.'); }
     finally { setPending(false); }
   };
 
   return (
     <main className={styles.page}>
       <form className={styles.card} onSubmit={submit}>
-        <h1>ai-team cloud</h1>
-        <p>Сессия истекла или отсутствует. Войдите снова с короткоживущим access token от control plane.</p>
-        <textarea aria-label="Access token" value={token}
+        <h1>Войти в ai-team</h1>
+        <p>Сессия истекла или отсутствует. Введите временный токен доступа.</p>
+        <textarea aria-label="Токен доступа" value={token}
           onChange={(event) => setToken(event.target.value)} autoFocus />
         {error && <div className={styles.error}>{error}</div>}
         <button disabled={pending || token.trim() === ''}>
@@ -42,8 +44,8 @@ export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Pro
       </form>
       <section className={styles.card}>
         <h2>Есть код приглашения?</h2>
-        <p>Активируйте приглашение, чтобы получить access token для этой команды.</p>
-        <textarea aria-label="Invitation code" value={inviteToken} onChange={event => setInviteToken(event.target.value)} />
+        <p>Активируйте приглашение, чтобы получить токен доступа к команде.</p>
+        <textarea aria-label="Код приглашения" value={inviteToken} onChange={event => setInviteToken(event.target.value)} />
         {error && <div className={styles.error}>{error}</div>}
         <button type="button" disabled={pending || inviteToken.trim() === ''} onClick={() => void activate()}>
           {pending ? 'Активация…' : 'Активировать приглашение'}

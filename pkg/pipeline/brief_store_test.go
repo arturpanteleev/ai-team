@@ -280,6 +280,68 @@ func TestEmptyLegacyBriefMountIsRemovedAndLocalStoreKeepsItsLayout(t *testing.T)
 	}
 }
 
+func TestControllerBriefStoreReplacesEmptyCanonicalMountpointAndRemovesIdenticalLegacyTree(t *testing.T) {
+	t.Run("empty canonical mountpoint", func(t *testing.T) {
+		target := t.TempDir()
+		const runID = "empty-canonical-brief"
+		legacy, err := NewFileBriefStore(target).CreateInitial(runID, "legacy intention")
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonicalDir := filepath.Join(target, ".ai-team", "state", "briefs", runID)
+		if err := os.MkdirAll(canonicalDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		store := NewControllerBriefStore(target)
+		t.Cleanup(func() { _ = store.Close() })
+		if err := store.PrepareRun(runID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.Read(runID, legacy.Version.ID)
+		if err != nil || !bytes.Equal(got.Content, legacy.Content) {
+			t.Fatalf("legacy brief was not migrated after removing empty mountpoint: document=%+v err=%v", got, err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", runID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy run root remains after migration: err=%v", err)
+		}
+	})
+
+	t.Run("identical legacy tree", func(t *testing.T) {
+		target := t.TempDir()
+		const runID = "identical-legacy-brief"
+		controller := NewControllerBriefStore(target)
+		if err := controller.PrepareRun(runID); err != nil {
+			t.Fatal(err)
+		}
+		canonical, err := controller.CreateInitial(runID, "same intention")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.Close(); err != nil {
+			t.Fatal(err)
+		}
+		legacy, err := NewFileBriefStore(target).CreateInitial(runID, "same intention")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if legacy.Version.ID != canonical.Version.ID {
+			t.Fatalf("fixture versions differ: canonical=%+v legacy=%+v", canonical.Version, legacy.Version)
+		}
+		store := NewControllerBriefStore(target)
+		t.Cleanup(func() { _ = store.Close() })
+		if err := store.PrepareRun(runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", runID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("identical legacy files were not removed: err=%v", err)
+		}
+		got, err := store.Read(runID, canonical.Version.ID)
+		if err != nil || !bytes.Equal(got.Content, canonical.Content) {
+			t.Fatalf("canonical brief changed while identical legacy data was removed: document=%+v err=%v", got, err)
+		}
+	})
+}
+
 func TestControllerBriefStoreCRUDStaysOnPinnedDirectoryAfterAncestorReplacement(t *testing.T) {
 	target := t.TempDir()
 	const runID = "pinned-brief-run"
@@ -360,6 +422,19 @@ func TestControllerBriefStoreRequiresPrepareRunBeforeCRUD(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, ".ai-team", "runs")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unprepared CRUD created worker-visible run state: err=%v", err)
+	}
+}
+
+func TestControllerBriefStoreCanCloseBeforePrepare(t *testing.T) {
+	store := NewControllerBriefStore(t.TempDir())
+	if err := store.Close(); err != nil {
+		t.Fatalf("closing an unprepared store failed: %v", err)
+	}
+	if err := store.PrepareRun("closed-before-prepare"); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("PrepareRun after Close returned %v, want closed-store error", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after an unprepared close was not idempotent: %v", err)
 	}
 }
 

@@ -3131,6 +3131,20 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	}
 }
 
+func TestTaskBoundBriefStoreCloseHandlesOptionalUnderlyingCloser(t *testing.T) {
+	var nilStore *taskBoundBriefStore
+	if err := nilStore.Close(); err != nil {
+		t.Fatalf("Close on a nil task-bound store failed: %v", err)
+	}
+	if err := (&taskBoundBriefStore{}).Close(); err != nil {
+		t.Fatalf("Close on a store without an underlying BriefStore failed: %v", err)
+	}
+	store := &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(t.TempDir())}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close on a BriefStore without an optional Close method failed: %v", err)
+	}
+}
+
 func TestWorkerControllerBriefAppendRequiresDurableProductOwnerClarification(t *testing.T) {
 	target := t.TempDir()
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-auth-run", TargetDir: target, Task: "Grow B2B revenue", ExecutionID: strings.Repeat("8", ExecutionIDBytes*2)}

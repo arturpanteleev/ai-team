@@ -20,7 +20,20 @@ import (
 
 func closeControllerBriefRoot(rootFD int) error { return unix.Close(rootFD) }
 
-func createInitialBriefAt(rootFD int, runID, intention string) (BriefDocument, error) {
+func closeBriefFD(fd int) error {
+	if err := unix.Close(fd); err != nil {
+		return fmt.Errorf("close controller brief file descriptor: %w", err)
+	}
+	return nil
+}
+
+func deferBriefFDClose(fd int, operation string, destination *error) {
+	if err := closeBriefFD(fd); err != nil {
+		*destination = errors.Join(*destination, fmt.Errorf("%s: %w", operation, err))
+	}
+}
+
+func createInitialBriefAt(rootFD int, runID, intention string) (document BriefDocument, err error) {
 	intention = strings.TrimSpace(intention)
 	if intention == "" || len(intention) > maxBriefBytes {
 		return BriefDocument{}, errors.New("business intention must contain 1..262144 bytes")
@@ -29,13 +42,13 @@ func createInitialBriefAt(rootFD int, runID, intention string) (BriefDocument, e
 	if err != nil {
 		return BriefDocument{}, err
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close run brief directory", &err)
 	content := []byte("# Исходное намерение\n\n" + intention + "\n")
 	version, err := createBriefVersionAt(runFD, "0001-intention.md", content, "intention", "", "")
 	return BriefDocument{Version: version, Content: content}, err
 }
 
-func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer string) (BriefDocument, error) {
+func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer string) (document BriefDocument, err error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" || len(answer) > maxAnswerBytes {
 		return BriefDocument{}, errors.New("answer must contain 1..16384 bytes")
@@ -44,7 +57,7 @@ func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer
 	if err != nil {
 		return BriefDocument{}, errors.Join(errors.New("versioned business brief missing"), err)
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close run brief directory", &err)
 	versions, err := listBriefVersionsAt(runFD)
 	if err != nil || len(versions) == 0 {
 		return BriefDocument{}, errors.Join(errors.New("versioned business brief missing"), err)
@@ -75,21 +88,21 @@ func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer
 	return BriefDocument{Version: version, Content: content}, err
 }
 
-func listBriefStoreVersionsAt(rootFD int, runID string) ([]BriefVersion, error) {
+func listBriefStoreVersionsAt(rootFD int, runID string) (versions []BriefVersion, err error) {
 	runFD, err := openBriefDirectoryAt(rootFD, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close run brief directory", &err)
 	return listBriefVersionsAt(runFD)
 }
 
-func readBriefStoreDocumentAt(rootFD int, runID, versionID string) (BriefDocument, error) {
+func readBriefStoreDocumentAt(rootFD int, runID, versionID string) (document BriefDocument, err error) {
 	runFD, err := openBriefDirectoryAt(rootFD, runID)
 	if err != nil {
 		return BriefDocument{}, err
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close run brief directory", &err)
 	versions, err := listBriefVersionsAt(runFD)
 	if err != nil {
 		return BriefDocument{}, err
@@ -184,8 +197,11 @@ func writeImmutableBriefAt(directoryFD int, name string, data []byte) error {
 	}
 	closeErr := file.Close()
 	if writeErr != nil || closeErr != nil {
-		_ = unix.Unlinkat(directoryFD, name, 0)
-		return errors.Join(writeErr, closeErr)
+		cleanupErr := unix.Unlinkat(directoryFD, name, 0)
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("remove incomplete immutable brief file %q: %w", name, cleanupErr)
+		}
+		return errors.Join(writeErr, closeErr, cleanupErr)
 	}
 	return nil
 }
@@ -207,12 +223,10 @@ func readBriefFileAt(directoryFD int, name string, limit int64) ([]byte, error) 
 	}
 	var after unix.Stat_t
 	if err := unix.Fstat(fileFD, &after); err != nil {
-		_ = unix.Close(fileFD)
-		return nil, err
+		return nil, errors.Join(err, closeBriefFD(fileFD))
 	}
 	if after.Mode&unix.S_IFMT != unix.S_IFREG || after.Dev != before.Dev || after.Ino != before.Ino || after.Nlink != 1 || after.Mode&0o222 != 0 {
-		_ = unix.Close(fileFD)
-		return nil, fmt.Errorf("business brief file %q changed during safe open", name)
+		return nil, errors.Join(fmt.Errorf("business brief file %q changed during safe open", name), closeBriefFD(fileFD))
 	}
 	file := os.NewFile(uintptr(fileFD), name)
 	data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
@@ -229,27 +243,29 @@ func readBriefFileAt(directoryFD int, name string, limit int64) ([]byte, error) 
 // These mutations are anchored to directory descriptors opened one component
 // at a time with O_NOFOLLOW. The workspace is writable by workers, so a path
 // validated earlier must never be resolved again for a move or deletion.
-func secureMigrateLegacyBrief(targetDir, runID string, expected map[string][]byte) error {
+func secureMigrateLegacyBrief(targetDir, runID string, expected map[string][]byte) (err error) {
 	runsFD, err := openBriefDirectory(targetDir, ".ai-team", "runs")
 	if err != nil {
 		return fmt.Errorf("open legacy runs directory: %w", err)
 	}
-	defer unix.Close(runsFD)
+	defer deferBriefFDClose(runsFD, "close legacy runs directory", &err)
 	runFD, err := openBriefDirectoryAt(runsFD, runID)
 	if err != nil {
 		return fmt.Errorf("open legacy run directory: %w", err)
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close legacy run directory", &err)
 	briefFD, err := openBriefDirectoryAt(runFD, "brief")
 	if err != nil {
 		return fmt.Errorf("open legacy brief directory: %w", err)
 	}
-	_ = unix.Close(briefFD)
+	if err := closeBriefFD(briefFD); err != nil {
+		return fmt.Errorf("close legacy brief directory before migration: %w", err)
+	}
 	briefsFD, err := openBriefDirectory(targetDir, ".ai-team", "state", "briefs")
 	if err != nil {
 		return fmt.Errorf("open canonical briefs directory: %w", err)
 	}
-	defer unix.Close(briefsFD)
+	defer deferBriefFDClose(briefsFD, "close canonical briefs directory", &err)
 	if err := renameBriefNoReplace(runFD, "brief", briefsFD, runID); err != nil {
 		return err
 	}
@@ -265,18 +281,21 @@ func secureMigrateLegacyBrief(targetDir, runID string, expected map[string][]byt
 		return fmt.Errorf("verify migrated brief directory: %w", err)
 	}
 	movedTree, readErr := readBriefTreeAt(movedFD, filepath.Join(targetDir, ".ai-team", "state", "briefs", runID))
-	_ = unix.Close(movedFD)
+	closeErr := closeBriefFD(movedFD)
 	if readErr != nil || !equalBriefTrees(expected, movedTree) {
 		rollbackErr := renameBriefNoReplace(briefsFD, runID, runFD, "brief")
 		if readErr != nil {
-			return fmt.Errorf("validate migrated brief contents: %w (rollback: %v)", readErr, rollbackErr)
+			return errors.Join(fmt.Errorf("validate migrated brief contents: %w (rollback: %v)", readErr, rollbackErr), closeErr)
 		}
-		return fmt.Errorf("legacy brief contents changed during migration (rollback: %v)", rollbackErr)
+		return errors.Join(fmt.Errorf("legacy brief contents changed during migration (rollback: %v)", rollbackErr), closeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close migrated brief directory: %w", closeErr)
 	}
 	return nil
 }
 
-func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte) error {
+func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte) (err error) {
 	runsFD, err := openBriefDirectory(targetDir, ".ai-team", "runs")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -284,7 +303,7 @@ func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte
 	if err != nil {
 		return fmt.Errorf("open legacy runs directory: %w", err)
 	}
-	defer unix.Close(runsFD)
+	defer deferBriefFDClose(runsFD, "close legacy runs directory", &err)
 	runFD, err := openBriefDirectoryAt(runsFD, runID)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -292,7 +311,7 @@ func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte
 	if err != nil {
 		return fmt.Errorf("open legacy run directory: %w", err)
 	}
-	defer unix.Close(runFD)
+	defer deferBriefFDClose(runFD, "close legacy run directory", &err)
 	briefFD, err := openBriefDirectoryAt(runFD, "brief")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -300,27 +319,24 @@ func secureRemoveLegacyBrief(targetDir, runID string, expected map[string][]byte
 	if err != nil {
 		return fmt.Errorf("open legacy brief directory: %w", err)
 	}
+	defer deferBriefFDClose(briefFD, "close legacy brief directory", &err)
 	actual, err := readBriefTreeAt(briefFD, filepath.Join(targetDir, ".ai-team", "runs", runID, "brief"))
 	if err != nil {
-		_ = unix.Close(briefFD)
 		return fmt.Errorf("revalidate legacy brief before cleanup: %w", err)
 	}
 	if !equalBriefTrees(expected, actual) {
-		_ = unix.Close(briefFD)
 		return fmt.Errorf("legacy brief contents changed before cleanup")
 	}
 	if err := removeBriefDirectoryContents(briefFD, expected); err != nil {
-		_ = unix.Close(briefFD)
 		return fmt.Errorf("remove legacy brief contents: %w", err)
 	}
-	_ = unix.Close(briefFD)
 	if err := unix.Unlinkat(runFD, "brief", unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("remove legacy brief directory: %w", err)
 	}
 	return nil
 }
 
-func secureRemoveEmptyLegacyRunRoot(targetDir, runID string) error {
+func secureRemoveEmptyLegacyRunRoot(targetDir, runID string) (err error) {
 	runsFD, err := openBriefDirectory(targetDir, ".ai-team", "runs")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -328,7 +344,7 @@ func secureRemoveEmptyLegacyRunRoot(targetDir, runID string) error {
 	if err != nil {
 		return fmt.Errorf("open legacy runs directory: %w", err)
 	}
-	defer unix.Close(runsFD)
+	defer deferBriefFDClose(runsFD, "close legacy runs directory", &err)
 	err = unix.Unlinkat(runsFD, runID, unix.AT_REMOVEDIR)
 	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
 		return nil
@@ -339,12 +355,12 @@ func secureRemoveEmptyLegacyRunRoot(targetDir, runID string) error {
 	return nil
 }
 
-func secureRemoveEmptyCanonicalBrief(targetDir, runID string) error {
+func secureRemoveEmptyCanonicalBrief(targetDir, runID string) (err error) {
 	briefsFD, err := openBriefDirectory(targetDir, ".ai-team", "state", "briefs")
 	if err != nil {
 		return err
 	}
-	defer unix.Close(briefsFD)
+	defer deferBriefFDClose(briefsFD, "close canonical briefs directory", &err)
 	if err := unix.Unlinkat(briefsFD, runID, unix.AT_REMOVEDIR); err != nil {
 		return err
 	}
@@ -362,9 +378,12 @@ func openBriefDirectory(root string, components ...string) (int, error) {
 	}
 	for _, component := range components {
 		nextFD, openErr := openBriefDirectoryAt(fd, component)
-		_ = unix.Close(fd)
+		closeErr := closeBriefFD(fd)
 		if openErr != nil {
-			return -1, openErr
+			return -1, errors.Join(openErr, closeErr)
+		}
+		if closeErr != nil {
+			return -1, errors.Join(closeErr, closeBriefFD(nextFD))
 		}
 		fd = nextFD
 	}
@@ -375,16 +394,21 @@ func openBriefDirectoryAt(parentFD int, name string) (int, error) {
 	return unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 }
 
+func openBriefDirectoryFD(directoryFD int) (int, error) {
+	// Opening "." relative to the pinned directory creates an independent
+	// open file description; Dup would share the directory stream offset.
+	return unix.Openat(directoryFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+}
+
 func removeBriefDirectoryContents(directoryFD int, expected map[string][]byte) error {
-	dupFD, err := unix.Dup(directoryFD)
+	dupFD, err := openBriefDirectoryFD(directoryFD)
 	if err != nil {
 		return err
 	}
 	directory := os.NewFile(uintptr(dupFD), "brief-directory")
 	entries, err := directory.ReadDir(-1)
-	_ = directory.Close()
-	if err != nil {
-		return err
+	if closeErr := directory.Close(); err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
 	}
 	if len(entries) != len(expected) {
 		return fmt.Errorf("legacy brief directory changed before cleanup")
@@ -410,15 +434,14 @@ func removeBriefDirectoryContents(directoryFD int, expected map[string][]byte) e
 }
 
 func readBriefTreeAt(directoryFD int, displayRoot string) (map[string][]byte, error) {
-	dupFD, err := unix.Dup(directoryFD)
+	dupFD, err := openBriefDirectoryFD(directoryFD)
 	if err != nil {
 		return nil, err
 	}
 	directory := os.NewFile(uintptr(dupFD), "brief-directory")
 	entries, err := directory.ReadDir(-1)
-	_ = directory.Close()
-	if err != nil {
-		return nil, err
+	if closeErr := directory.Close(); err != nil || closeErr != nil {
+		return nil, errors.Join(err, closeErr)
 	}
 	tree := make(map[string][]byte, len(entries))
 	for _, entry := range entries {
@@ -449,20 +472,17 @@ func readBriefTreeAt(directoryFD int, displayRoot string) (map[string][]byte, er
 		var after unix.Stat_t
 		statErr := unix.Fstat(fileFD, &after)
 		if statErr != nil || after.Mode&unix.S_IFMT != unix.S_IFREG || after.Dev != before.Dev || after.Ino != before.Ino || after.Nlink != 1 {
-			_ = unix.Close(fileFD)
+			closeErr := closeBriefFD(fileFD)
 			if statErr != nil {
-				return nil, statErr
+				return nil, errors.Join(statErr, closeErr)
 			}
-			return nil, fmt.Errorf("business brief file %q changed during safe open", filepath.Join(displayRoot, name))
+			return nil, errors.Join(fmt.Errorf("business brief file %q changed during safe open", filepath.Join(displayRoot, name)), closeErr)
 		}
 		file := os.NewFile(uintptr(fileFD), name)
 		data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
 		closeErr := file.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if closeErr != nil {
-			return nil, closeErr
+		if readErr != nil || closeErr != nil {
+			return nil, errors.Join(readErr, closeErr)
 		}
 		if int64(len(data)) > limit {
 			return nil, fmt.Errorf("business brief file %q exceeds limit %d", filepath.Join(displayRoot, name), limit)

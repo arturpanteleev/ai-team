@@ -57,21 +57,29 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	}
 }
 
-func TestPlanRejectsCredentialBearingRemoteURLsWithoutEchoingSecrets(t *testing.T) {
+func TestPlanRejectsCredentialBearingOrQueryRemoteURLsWithoutEchoingSecrets(t *testing.T) {
 	for name, remoteURL := range map[string]string{
-		"user password":        "https://user:secret-token@example.test/repo.git",
-		"token as username":    "https://secret-token@example.test/repo.git",
-		"credential parameter": "https://example.test/repo.git?access_token=secret-token",
+		"user password":         "https://user:secret-token@example.test/repo.git",
+		"token as username":     "https://secret-token@example.test/repo.git",
+		"key query parameter":   "https://example.test/repo.git?key=secret-token",
+		"access key parameter":  "https://example.test/repo.git?access_key=secret-token",
+		"other query parameter": "https://example.test/repo.git?anything=secret-token",
+		"fragment":              "https://example.test/repo.git#secret-token",
+		"option-like remote":    "-f",
 	} {
 		t.Run(name, func(t *testing.T) {
 			plan := validTestPlan()
 			plan.RemoteURL = remoteURL
 			err := plan.Validate()
-			if err == nil || !strings.Contains(err.Error(), "credentials") && !strings.Contains(err.Error(), "credential") {
-				t.Fatalf("credential-bearing URL must be rejected clearly: %v", err)
+			if err == nil {
+				t.Fatal("credential-bearing or query/fragment URL must be rejected")
 			}
 			if strings.Contains(err.Error(), "secret-token") {
 				t.Fatalf("validation error exposed credential value: %v", err)
+			}
+			canonical, canonicalErr := plan.CanonicalJSON()
+			if canonicalErr == nil || strings.Contains(string(canonical), "secret-token") || strings.Contains(canonicalErr.Error(), "secret-token") {
+				t.Fatalf("invalid plan unexpectedly exposed a secret: canonical=%q err=%v", canonical, canonicalErr)
 			}
 		})
 	}
@@ -268,6 +276,88 @@ func TestBuildPlanUsesOnlyAttributedFiles(t *testing.T) {
 	}
 }
 
+func TestBuildPlanRejectsMultipleEffectivePushURLs(t *testing.T) {
+	repo, remoteA := setupRepository(t)
+	remoteB := filepath.Join(t.TempDir(), "remote-b.git")
+	git(t, filepath.Dir(remoteB), "init", "--bare", remoteB)
+	git(t, repo, "push", remoteB, "main")
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// multi push URL\n")
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteA)
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteB)
+
+	_, err := BuildPlan(context.Background(), repo, "multiple-urls", "multi push URL", []string{"a.go"}, testVerification(t, repo))
+	if err == nil || !strings.Contains(err.Error(), "ровно один") {
+		t.Fatalf("planner must reject multiple effective push URLs: %v", err)
+	}
+	for _, remote := range []string{remoteA, remoteB} {
+		if output := git(t, repo, "ls-remote", remote, "refs/heads/ai-team/multiple-urls"); strings.TrimSpace(output) != "" {
+			t.Fatalf("planner refusal unexpectedly pushed to %s: %s", remote, output)
+		}
+	}
+}
+
+func TestControllerRejectsMultiplePushURLsBeforeDeliverySideEffects(t *testing.T) {
+	repo, remoteA := setupRepository(t)
+	remoteB := filepath.Join(t.TempDir(), "remote-b.git")
+	git(t, filepath.Dir(remoteB), "init", "--bare", remoteB)
+	git(t, repo, "push", remoteB, "main")
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// multi push URL\n")
+	plan, err := BuildPlan(context.Background(), repo, "multiple-urls-exec", "multi push URL", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteA)
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteB)
+
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "multiple-urls-exec", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "exactly one safe destination") {
+		t.Fatalf("controller must reject multiple effective push URLs: result=%+v err=%v", result, err)
+	}
+	if head := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); head != plan.BaselineHead {
+		t.Fatalf("ambiguous push URL refusal created a commit: head=%s baseline=%s", head, plan.BaselineHead)
+	}
+	if branch := strings.TrimSpace(git(t, repo, "branch", "--list", plan.Branch)); branch != "" {
+		t.Fatalf("ambiguous push URL refusal created local branch %q", branch)
+	}
+	for _, remote := range []string{remoteA, remoteB} {
+		if output := git(t, repo, "ls-remote", remote, "refs/heads/"+plan.Branch); strings.TrimSpace(output) != "" {
+			t.Fatalf("controller refusal unexpectedly pushed to %s: %s", remote, output)
+		}
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), remoteB) {
+		t.Fatal("unapproved additional push destination was persisted in delivery state")
+	}
+}
+
+func TestControllerDoesNotPersistQueryCredentialFromChangedRemote(t *testing.T) {
+	repo, _ := setupRepository(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// query credential\n")
+	plan, err := BuildPlan(context.Background(), repo, "query-credential", "query credential", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "remote", "set-url", "origin", "https://example.test/repo.git?key=secret-token")
+
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "query-credential", Plan: plan})
+	if err == nil || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("unsafe query URL should fail without exposing its value: result=%+v err=%v", result, err)
+	}
+	if strings.Contains(result.StatePath, "secret-token") {
+		t.Fatal("query credential was exposed in state path")
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatal("query credential was persisted in delivery state")
+	}
+}
+
 func TestControllerDoesNotPersistCredentialBearingChangedRemoteURL(t *testing.T) {
 	repo, _ := setupRepository(t)
 	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// changed\n")
@@ -277,7 +367,7 @@ func TestControllerDoesNotPersistCredentialBearingChangedRemoteURL(t *testing.T)
 	}
 	git(t, repo, "remote", "set-url", "origin", "https://user:secret-token@example.test/repo.git")
 	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "credential-remote", Plan: plan})
-	if err == nil || !strings.Contains(err.Error(), "credentials") {
+	if err == nil || !strings.Contains(err.Error(), "exactly one safe destination") {
 		t.Fatalf("changed credential-bearing URL should be rejected safely: result=%+v err=%v", result, err)
 	}
 	data, readErr := os.ReadFile(result.StatePath)
@@ -314,6 +404,15 @@ func TestControllerDisablesGitHooksDuringDelivery(t *testing.T) {
 
 	if _, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "hooks", Plan: plan}); err != nil {
 		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(git(t, repo, "config", "--get", "branch."+plan.Branch+".remote")); got != "origin" {
+		t.Fatalf("delivery branch upstream remote=%q, want origin", got)
+	}
+	if got := strings.TrimSpace(git(t, repo, "config", "--get", "branch."+plan.Branch+".merge")); got != "refs/heads/"+plan.Branch {
+		t.Fatalf("delivery branch upstream merge=%q, want refs/heads/%s", got, plan.Branch)
+	}
+	if got, want := strings.TrimSpace(git(t, repo, "rev-parse", "refs/remotes/origin/"+plan.Branch)), strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); got != want {
+		t.Fatalf("named upstream tracking ref=%s, want delivery HEAD %s", got, want)
 	}
 	for _, marker := range []string{postCheckoutMarker, prePushMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {

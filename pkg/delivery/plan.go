@@ -43,12 +43,6 @@ func gitCommandArgs(args ...string) []string {
 	return append(configured, args...)
 }
 
-// gitRemoteConfigArgs pins both fetch and push URLs to the reviewed plan URL
-// while preserving the named remote's upstream tracking behavior.
-func gitRemoteConfigArgs(remote, remoteURL string) []string {
-	return []string{"-c", "remote." + remote + ".url=" + remoteURL, "-c", "remote." + remote + ".pushurl=" + remoteURL}
-}
-
 // Plan is the complete, reviewable declaration of allowed delivery effects.
 // Commands and shell fragments are deliberately not part of the schema.
 type Plan struct {
@@ -192,10 +186,16 @@ func validateRemoteURL(remoteURL string) error {
 	if remoteURL == "" || strings.TrimSpace(remoteURL) != remoteURL || !utf8.ValidString(remoteURL) {
 		return fmt.Errorf("delivery plan: remote_url обязателен и должен быть корректной строкой")
 	}
+	if strings.HasPrefix(remoteURL, "-") {
+		return fmt.Errorf("delivery plan: remote_url не должен начинаться с option prefix")
+	}
 	for _, r := range remoteURL {
 		if r < 0x20 || r == 0x7f {
 			return fmt.Errorf("delivery plan: remote_url содержит управляющие символы")
 		}
+	}
+	if strings.ContainsAny(remoteURL, "?#") {
+		return fmt.Errorf("delivery plan: remote_url с query или fragment запрещён")
 	}
 	if !strings.Contains(remoteURL, "://") {
 		return nil // SCP-style Git remotes (git@example.org:repo.git) are valid.
@@ -212,15 +212,25 @@ func validateRemoteURL(remoteURL string) error {
 			return fmt.Errorf("delivery plan: remote_url с embedded credentials запрещён; настройте Git credential helper")
 		}
 	}
-	for key := range parsed.Query() {
-		lower := strings.ToLower(key)
-		for _, marker := range []string{"token", "password", "passwd", "secret", "auth", "credential", "signature", "api_key", "apikey"} {
-			if strings.Contains(lower, marker) {
-				return fmt.Errorf("delivery plan: remote_url содержит credential-параметр; настройте Git credential helper")
-			}
-		}
-	}
 	return nil
+}
+
+// singleRemoteURL accepts only the one effective push destination reported by
+// `git remote get-url --push --all`. It deliberately does not return any URL
+// when the configuration is ambiguous, so callers can fail without recording
+// configured destinations in delivery evidence.
+func singleRemoteURL(output string) (string, error) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "", fmt.Errorf("push URL is not configured")
+	}
+	if strings.Contains(output, "\n") {
+		return "", fmt.Errorf("multiple push URLs are configured")
+	}
+	if strings.TrimSpace(output) != output || strings.ContainsRune(output, '\r') {
+		return "", fmt.Errorf("push URL output is malformed")
+	}
+	return output, nil
 }
 
 func (p Plan) CanonicalJSON() ([]byte, error) {

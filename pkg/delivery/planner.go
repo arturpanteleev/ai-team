@@ -44,12 +44,13 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 	if err != nil {
 		return Plan{}, err
 	}
-	remoteURL, err := commandOutput(ctx, targetDir, "git", "remote", "get-url", "--push", "origin")
+	remoteURLs, err := commandOutput(ctx, targetDir, "git", "remote", "get-url", "--push", "--all", "origin")
 	if err != nil {
 		return Plan{}, fmt.Errorf("delivery planner: push URL remote origin не определён: %w", err)
 	}
-	if remoteURL == "" {
-		return Plan{}, fmt.Errorf("delivery planner: push URL remote origin не определён")
+	remoteURL, err := singleRemoteURL(remoteURLs)
+	if err != nil {
+		return Plan{}, fmt.Errorf("delivery planner: remote origin должен иметь ровно один эффективный push URL")
 	}
 	branch := "ai-team/" + feature
 	if current != "" && current != base && current != branch {

@@ -257,13 +257,13 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 				commandResult.Stderr = ""
 				commandResult.Reason = "configured push URL could not be safely verified"
 			} else {
-				remoteURL := strings.TrimSpace(commandResult.Stdout)
-				if urlErr := validateRemoteURL(remoteURL); urlErr != nil {
+				remoteURL, urlErr := singleRemoteURL(commandResult.Stdout)
+				if urlErr != nil || validateRemoteURL(remoteURL) != nil {
 					commandResult.Stdout = ""
 					commandResult.Stderr = ""
 					commandResult.ExitCode = 1
 					commandResult.Status = StepFailed
-					commandResult.Reason = "configured push URL contains embedded credentials or credential parameters"
+					commandResult.Reason = "configured push URLs must resolve to exactly one safe destination"
 				} else {
 					commandResult.Stdout = remoteURL
 				}
@@ -282,7 +282,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		return record(StepResult{Step: step, StartedAt: now, FinishedAt: now, ExitCode: 0, Status: StepSkipped, Reason: reason})
 	}
 
-	remoteURLResult, err := run("verify_remote_url", "git", "remote", "get-url", "--push", request.Plan.Remote)
+	remoteURLResult, err := run("verify_remote_url", "git", "remote", "get-url", "--push", "--all", request.Plan.Remote)
 	if err != nil {
 		return result(), err
 	}
@@ -438,8 +438,8 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 	}
 
 	if !currentState.Pushed {
-		remoteConfig := gitRemoteConfigArgs(request.Plan.Remote, request.Plan.RemoteURL)
-		pushArgs := append(remoteConfig, "push", "-u", request.Plan.Remote, request.Plan.Branch)
+		pushArgs := []string{"push", "--", request.Plan.RemoteURL,
+			"refs/heads/" + request.Plan.Branch + ":refs/heads/" + request.Plan.Branch}
 		if _, err := run("push", "git", pushArgs...); err != nil {
 			return result(), err
 		}
@@ -450,14 +450,21 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 	} else if err := skip("push", "branch already recorded as pushed"); err != nil {
 		return result(), err
 	}
-	remoteConfig := gitRemoteConfigArgs(request.Plan.Remote, request.Plan.RemoteURL)
-	remoteHeadArgs := append(remoteConfig, "ls-remote", request.Plan.Remote, "refs/heads/"+request.Plan.Branch)
+	trackingRef := "refs/remotes/" + request.Plan.Remote + "/" + request.Plan.Branch
+	fetchSpec := "refs/heads/" + request.Plan.Branch + ":" + trackingRef
+	if _, err := run("fetch_remote_branch", "git", "fetch", "--no-tags", "--", request.Plan.RemoteURL, fetchSpec); err != nil {
+		return result(), err
+	}
+	remoteHeadArgs := []string{"ls-remote", "--", request.Plan.RemoteURL, "refs/heads/" + request.Plan.Branch}
 	remoteHead, err := run("verify_remote_head", "git", remoteHeadArgs...)
 	if err != nil {
 		return result(), err
 	}
 	if remoteObjectID(remoteHead.Stdout) != currentState.CommitSHA {
 		return result(), fmt.Errorf("delivery: remote branch не указывает на approved commit %s", currentState.CommitSHA)
+	}
+	if _, err := run("set_upstream", "git", "branch", "--set-upstream-to="+request.Plan.Remote+"/"+request.Plan.Branch, request.Plan.Branch); err != nil {
+		return result(), err
 	}
 
 	if currentState.PRURL == "" {

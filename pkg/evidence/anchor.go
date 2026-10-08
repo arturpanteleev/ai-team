@@ -117,6 +117,26 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 // число событий, корень цепочки и digest attempt manifests. Любое расхождение
 // означает tampering или повреждение evidence.
 func VerifyAnchor(runDir string) error {
+	return VerifyAnchorWithSources(runDir, nil, nil)
+}
+
+func VerifyAnchorWithEventSource(runDir string, eventSource EventLog) error {
+	return VerifyAnchorWithSources(runDir, eventSource, nil)
+}
+
+// VerifyAnchorWithSources verifies a terminal anchor using the explicitly
+// selected event and attempt-manifest authorities. Passing both sources is
+// required when verifying a portable bundle so a path-shaped bundle cannot
+// auto-resolve live controller records from its surrounding workspace.
+func VerifyAnchorWithSources(runDir string, eventSource EventLog, manifestSource AttemptManifestSource) error {
+	return VerifyAnchorWithSourcesAndTarget(runDir, eventSource, manifestSource, "")
+}
+
+// VerifyAnchorWithSourcesAndTarget verifies an anchor with explicit evidence
+// authorities and an optional manifest-recorded target for portable replay.
+// The target is used only for lexical delivery-state identity checks; replay
+// never opens a path named by an event.
+func VerifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manifestSource AttemptManifestSource, deliveryTargetDir string) error {
 	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
 	if err != nil {
 		return fmt.Errorf("anchor verify: %w", err)
@@ -155,11 +175,11 @@ func VerifyAnchor(runDir string) error {
 	if !isTerminalEventType(anchor.TerminalEvent) {
 		return fmt.Errorf("anchor verify: недопустимый terminal_event %q", anchor.TerminalEvent)
 	}
-	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), manifest.RunID)
+	replayed, err := ReplayEventLogWithEventSourcesAndTarget(filepath.Join(runDir, "events.jsonl"), manifest.RunID, eventSource, manifestSource, deliveryTargetDir)
 	if err != nil {
 		return fmt.Errorf("anchor verify: event chain сломан: %w", err)
 	}
-	events, err := VerifyEventLog(filepath.Join(runDir, "events.jsonl"), manifest.RunID)
+	events, err := VerifyEventLogWithSource(filepath.Join(runDir, "events.jsonl"), manifest.RunID, eventSource)
 	if err != nil {
 		return fmt.Errorf("anchor verify: event chain сломан: %w", err)
 	}

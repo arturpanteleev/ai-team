@@ -12,11 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -138,6 +141,9 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if runID == "." || runID == string(filepath.Separator) {
 		return delivery.TerminalRecord{}, errors.New("deliver: недопустимый run dir")
 	}
+	if err := p.validateControllerBackedLegacyDelivery(targetDir, runDir, runID); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: validate controller delivery authority: %w", err)
+	}
 	if _, ok, err := delivery.ReadTerminalRecordForRun(targetDir, runDir, runID); err != nil {
 		return delivery.TerminalRecord{}, err
 	} else if ok {
@@ -152,7 +158,7 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: replayed evidence: %w", err)
 	}
-	terminalStatus, err := terminalStatusOfRun(runDir, runID)
+	terminalStatus, err := terminalStatusOfRun(runDir, runID, p.eventLogSource)
 	if err != nil {
 		return delivery.TerminalRecord{}, err
 	}
@@ -168,7 +174,7 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 		return delivery.TerminalRecord{}, errors.New("deliver: feature не определён")
 	}
 
-	marker, err := firstDeferredMarker(runDir)
+	marker, err := firstDeferredMarker(runDir, p.eventLogSource)
 	if err != nil {
 		return delivery.TerminalRecord{}, err
 	}
@@ -270,6 +276,126 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	return record, nil
 }
 
+// ControllerBackedLegacyDeliveryRequiresApproval identifies pre-canonical
+// cloud runs that still use a worker-visible event journal. Controller
+// candidate-admission proofs (from #212) and usage reservations (from #214)
+// also classify older cloud runs. Lifecycle rows are intentionally excluded
+// because local runs write them too. Markerless runs from before those proofs
+// remain indistinguishable from local runs and are outside this guard's
+// classification.
+func ControllerBackedLegacyDeliveryRequiresApproval(targetDir, runID string) (bool, error) {
+	target, err := filepath.Abs(targetDir)
+	if err != nil {
+		return false, err
+	}
+	if canonical, evalErr := filepath.EvalSymlinks(target); evalErr == nil {
+		target = canonical
+	} else if !errors.Is(evalErr, os.ErrNotExist) {
+		return false, evalErr
+	}
+	target = filepath.Clean(target)
+
+	eventStore := evidence.ControllerEventStore{TargetDir: target}
+	eventReserved, err := eventStore.IsReserved(runID)
+	if err != nil {
+		legacyCandidate, eligibilityErr := eventStore.IsLegacyMigrationCandidate(runID)
+		if eligibilityErr != nil {
+			return false, errors.Join(fmt.Errorf("inspect controller event reservation: %w", err), eligibilityErr)
+		}
+		if !legacyCandidate {
+			return false, fmt.Errorf("inspect controller event reservation: %w", err)
+		}
+	} else if eventReserved {
+		return false, nil
+	}
+	candidateAdmission, err := (candidate.FileMetadataStore{}).HasControllerAdmissionProof(target, runID)
+	if err != nil {
+		return false, fmt.Errorf("inspect controller candidate admission: %w", err)
+	}
+	if candidateAdmission {
+		return true, nil
+	}
+	manifestReserved, err := (evidence.ControllerAttemptManifestStore{TargetDir: target}).IsReserved(runID)
+	if err != nil {
+		return false, fmt.Errorf("inspect controller attempt-manifest reservation: %w", err)
+	}
+	usageReserved, err := metrics.UsageEnvelopeReservation(target, runID)
+	if err != nil {
+		return false, fmt.Errorf("inspect controller usage reservation: %w", err)
+	}
+	return manifestReserved || usageReserved, nil
+}
+
+// validateControllerBackedLegacyDelivery protects the manual retry entry
+// point when a cloud worker's old event journal has not yet been reserved in
+// the controller event store. A reserved event store is already the authority
+// and is checked through the normal source resolver.
+func (p *Pipeline) validateControllerBackedLegacyDelivery(targetDir, runDir, runID string) error {
+	cloudLegacy, err := ControllerBackedLegacyDeliveryRequiresApproval(targetDir, runID)
+	if err != nil {
+		return err
+	}
+	if !cloudLegacy {
+		return nil
+	}
+	if p.approvals == nil {
+		return errors.New("controller approval authority is unavailable for legacy cloud delivery")
+	}
+	legacyPath := filepath.Join(runDir, "events.jsonl")
+	events, err := evidence.VerifyEventLogWithSource(legacyPath, runID, evidence.NewFileEventLog(legacyPath))
+	if err != nil {
+		return fmt.Errorf("read legacy cloud delivery evidence: %w", err)
+	}
+	var approvals []approval.PendingApproval
+	approvalsLoaded := false
+	approved := make(map[string]bool)
+	claimKey := func(attemptID, planHash string) string { return attemptID + "\x00" + planHash }
+	for _, event := range events {
+		switch event.Type {
+		case "delivery_plan_approved":
+			planHash, _ := event.Data["plan_hash"].(string)
+			mode, _ := event.Data["mode"].(string)
+			if event.AttemptID == "" || planHash == "" {
+				return errors.New("legacy delivery approval event lacks attempt or plan identity")
+			}
+			switch mode {
+			case "hash_flag":
+				// The old journal does not preserve a controller-verifiable copy of
+				// the one-shot job flag, so it cannot authorize manual delivery.
+				approved[claimKey(event.AttemptID, planHash)] = false
+			case "resolved_approval":
+				if !approvalsLoaded {
+					approvals, err = p.approvals.List(runID)
+					if err != nil {
+						return fmt.Errorf("list controller delivery approvals: %w", err)
+					}
+					approvalsLoaded = true
+				}
+				matched := false
+				for _, value := range approvals {
+					if value.RunID == runID && value.Trigger == "delivery_plan" && value.SubjectHash == planHash &&
+						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return fmt.Errorf("legacy resolved delivery claim %s has no exact controller approval", planHash)
+				}
+				approved[claimKey(event.AttemptID, planHash)] = true
+			default:
+				return fmt.Errorf("legacy delivery approval mode %q is unsupported", mode)
+			}
+		case "delivery_deferred":
+			planHash, _ := event.Data["plan_hash"].(string)
+			if event.AttemptID == "" || planHash == "" || !approved[claimKey(event.AttemptID, planHash)] {
+				return errors.New("legacy delivery_deferred has no preceding exact controller approval for the same attempt")
+			}
+		}
+	}
+	return nil
+}
+
 // ReconcileTerminalDelivery is used by durable worker recovery after
 // run_finished. A terminal pipeline outcome does not imply deferred delivery
 // finished: only a validated delivery.json closes that obligation.
@@ -282,7 +408,7 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	if err != nil {
 		return fmt.Errorf("recover delivery record: %w", err)
 	}
-	marker, markerErr := firstDeferredMarker(runDir)
+	marker, markerErr := firstDeferredMarker(runDir, p.eventLogSource)
 	if markerErr != nil {
 		if found {
 			return fmt.Errorf("recover delivery: terminal record exists without a verified delivery_deferred marker: %w", markerErr)
@@ -309,7 +435,7 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 		return errors.New("recover delivery: delivery_deferred marker has no plan hash")
 	}
 	if found {
-		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record); err != nil {
+		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record, p.eventLogSource); err != nil {
 			return fmt.Errorf("recover delivery record identity mismatch: %w", err)
 		}
 		return nil
@@ -320,7 +446,7 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	return nil
 }
 
-func validateRecoveredTerminalRecord(runDir, runID, feature string, marker deferredMarkerEvent, record delivery.TerminalRecord) error {
+func validateRecoveredTerminalRecord(runDir, runID, feature string, marker deferredMarkerEvent, record delivery.TerminalRecord, eventSource evidence.EventLog) error {
 	if record.RunID != runID || record.Feature != feature || record.PlanHash != marker.PlanHash {
 		return fmt.Errorf("record run/feature/plan (%q, %q, %q) differs from requested run/marker (%q, %q, %q)",
 			record.RunID, record.Feature, record.PlanHash, runID, feature, marker.PlanHash)
@@ -328,7 +454,7 @@ func validateRecoveredTerminalRecord(runDir, runID, feature string, marker defer
 	if marker.StatePath == "" {
 		return errors.New("delivery_deferred marker has no state_path")
 	}
-	status, err := terminalStatusOfRun(runDir, runID)
+	status, err := terminalStatusOfRun(runDir, runID, eventSource)
 	if err != nil {
 		return err
 	}
@@ -452,8 +578,8 @@ type deferredMarkerEvent struct {
 	StatePath string `json:"state_path"`
 }
 
-func firstDeferredMarker(runDir string) (deferredMarkerEvent, error) {
-	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), filepath.Base(runDir))
+func firstDeferredMarker(runDir string, source evidence.EventLog) (deferredMarkerEvent, error) {
+	events, err := evidence.VerifyEventLogWithSource(filepath.Join(runDir, "events.jsonl"), filepath.Base(runDir), source)
 	if err != nil {
 		return deferredMarkerEvent{}, fmt.Errorf("deliver: event log: %w", err)
 	}
@@ -477,19 +603,27 @@ func firstDeferredMarker(runDir string) (deferredMarkerEvent, error) {
 	return deferredMarkerEvent{}, fmt.Errorf("deliver: %w", errDeferredMarkerNotFound)
 }
 
-func terminalStatusOfRun(runDir, runID string) (string, error) {
-	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+func terminalStatusOfRun(runDir, runID string, source evidence.EventLog) (string, error) {
+	events, err := evidence.VerifyEventLogWithSource(filepath.Join(runDir, "events.jsonl"), runID, source)
 	if err != nil {
 		return "", fmt.Errorf("deliver: event log: %w", err)
 	}
+	status := ""
 	for _, event := range events {
+		if event.Type == "run_canceled" {
+			status = string(workflow.RunCanceled)
+			continue
+		}
 		if event.Type != "run_finished" {
 			continue
 		}
-		status, _ := event.Data["status"].(string)
-		if status != "" {
-			return status, nil
+		finishedStatus, _ := event.Data["status"].(string)
+		if finishedStatus != "" {
+			status = finishedStatus
 		}
+	}
+	if status != "" {
+		return status, nil
 	}
 	return "", errors.New("deliver: run_finished event не найден — run не терминальный")
 }

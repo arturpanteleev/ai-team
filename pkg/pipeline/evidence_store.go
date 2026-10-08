@@ -1,6 +1,10 @@
 package pipeline
 
-import "github.com/arturpanteleev/ai-team/pkg/evidence"
+import (
+	"errors"
+
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+)
 
 // EvidenceStore is a file-shaped persistence seam used by pipeline execution.
 // Consumers still rely on RunDir/LogDir paths and some package-level file
@@ -33,8 +37,17 @@ type attemptManifestResumeFactory interface {
 	ResumeWithAttemptManifestSource(root, runID string, source evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error)
 }
 
+type eventLogStoreFactory interface {
+	StartWithEventLog(root string, manifest evidence.RunManifest, source evidence.EventLog) (EvidenceStore, error)
+	ResumeWithEventLog(root, runID string, eventSource evidence.EventLog, manifestSource evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error)
+}
+
 func (filesystemEvidenceStoreFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
 	return evidence.Start(root, manifest)
+}
+
+func (filesystemEvidenceStoreFactory) StartWithEventLog(root string, manifest evidence.RunManifest, source evidence.EventLog) (EvidenceStore, error) {
+	return evidence.StartWithEventLog(root, manifest, source)
 }
 
 func (filesystemEvidenceStoreFactory) Resume(root, runID string) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
@@ -43,4 +56,33 @@ func (filesystemEvidenceStoreFactory) Resume(root, runID string) (EvidenceStore,
 
 func (filesystemEvidenceStoreFactory) ResumeWithAttemptManifestSource(root, runID string, source evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
 	return evidence.ResumeWithAttemptManifestSource(root, runID, source)
+}
+
+func (filesystemEvidenceStoreFactory) ResumeWithEventLog(root, runID string, eventSource evidence.EventLog, manifestSource evidence.AttemptManifestSource) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
+	return evidence.ResumeWithEventLog(root, runID, eventSource, manifestSource)
+}
+
+func (p *Pipeline) startEvidence(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
+	if p.eventLogSource == nil {
+		return p.evidence.Start(root, manifest)
+	}
+	factory, ok := p.evidence.(eventLogStoreFactory)
+	if !ok {
+		return nil, errors.New("configured evidence factory does not support event log sources")
+	}
+	return factory.StartWithEventLog(root, manifest, p.eventLogSource)
+}
+
+func (p *Pipeline) resumeEvidence(root, runID string) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
+	if p.eventLogSource != nil {
+		factory, ok := p.evidence.(eventLogStoreFactory)
+		if !ok {
+			return nil, evidence.RunManifest{}, evidence.ReplayedRun{}, errors.New("configured evidence factory does not support event log sources")
+		}
+		return factory.ResumeWithEventLog(root, runID, p.eventLogSource, p.attemptManifestSource)
+	}
+	if factory, ok := p.evidence.(attemptManifestResumeFactory); ok {
+		return factory.ResumeWithAttemptManifestSource(root, runID, p.attemptManifestSource)
+	}
+	return p.evidence.Resume(root, runID)
 }

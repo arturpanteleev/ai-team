@@ -2,9 +2,13 @@ package artifactstore
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 )
 
 func TestLocalCASDetectsCorruption(t *testing.T) {
@@ -66,6 +70,78 @@ func TestRunArchiveRestoreExactFiles(t *testing.T) {
 		if err != nil || !bytes.Equal(actual, expected) {
 			t.Fatalf("restore %s: actual=%q expected=%q err=%v", relative, actual, expected, err)
 		}
+	}
+}
+
+func TestRunArchiveFailsWhenReservedCanonicalEventLogIsMissing(t *testing.T) {
+	target := t.TempDir()
+	runID := "reserved-event-log-missing"
+	runRoot := filepath.Join(target, ".ai-team", "runs")
+	if err := os.MkdirAll(filepath.Join(runRoot, runID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	events := evidence.ControllerEventStore{TargetDir: target}
+	if err := events.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	canonicalPath, err := events.Path(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	cas, err := NewLocalCAS(filepath.Join(target, "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := NewRunArchive(runRoot, cas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Archive(runID); err == nil {
+		t.Fatal("archive accepted a reserved run with a missing canonical event log")
+	}
+	if _, err := cas.ReadManifest(runID, maxManifestBytes); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed archive must not publish a success manifest, got %v", err)
+	}
+}
+
+func TestRunArchiveFailsWhenEventRootsDisappearButUsageReservationSurvives(t *testing.T) {
+	target := t.TempDir()
+	runID := "archive-event-roots-missing"
+	runRoot := filepath.Join(target, ".ai-team", "runs")
+	if err := os.MkdirAll(filepath.Join(runRoot, runID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	events := evidence.ControllerEventStore{TargetDir: target}
+	if err := events.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{
+		filepath.Join(target, ".ai-team", "state", "events"),
+		filepath.Join(target, ".ai-team", "state", "runs", "event-log-reservations"),
+	} {
+		if err := os.RemoveAll(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cas, err := NewLocalCAS(filepath.Join(target, "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := NewRunArchive(runRoot, cas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Archive(runID); err == nil {
+		t.Fatal("archive accepted a cloud run after its controller event roots disappeared")
+	}
+	if _, err := cas.ReadManifest(runID, maxManifestBytes); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed archive must not publish a bundle missing canonical events, got %v", err)
 	}
 }
 

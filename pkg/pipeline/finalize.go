@@ -215,6 +215,7 @@ func (rs *runState) writeAttestation(finishedAt time.Time, status string) error 
 		RunDir: rs.evidence.RunDir(), RunID: rs.runID,
 		FinishedAt: finishedAt, Outcome: status,
 		CandidateSubject: subjects, Approvals: approvals,
+		EventLogSource: rs.p.eventLogSource,
 	})
 	if err != nil {
 		return err

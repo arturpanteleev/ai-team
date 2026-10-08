@@ -261,17 +261,25 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 		recorder := e.apiRecorderFactory()
 		tempDir := ""
+		controlSocketDir := ""
 		if e.bubblewrap {
+			homeDir := ""
 			for _, item := range environment {
 				if key, value, ok := strings.Cut(item, "="); ok && key == "TMPDIR" {
 					tempDir = value
-					break
+				} else if ok && key == "HOME" {
+					homeDir = value
 				}
 			}
 			if tempDir == "" {
 				return pipeline.RunResult{}, errors.New("worker private TMPDIR is missing")
 			}
-			socketPath := filepath.Join(tempDir, "controller-api.sock")
+			controlSocketDir, err = createControllerWorkerSocketDir(e.target, homeDir, tempDir)
+			if err != nil {
+				return pipeline.RunResult{}, fmt.Errorf("worker controller socket directory: %w", err)
+			}
+			defer func() { _ = os.RemoveAll(controlSocketDir) }()
+			socketPath := filepath.Join(controlSocketDir, "controller-api.sock")
 			api, err = startWorkerAPIServerUnixForTask(job, recorder, e.apiApprovals, socketPath, expectedTask)
 			if err == nil {
 				command.Env = append(command.Env, workerAPIAddressEnv+"=http://unix", workerAPISocketEnv+"="+socketPath, workerAPITokenEnv+"="+api.token)
@@ -289,7 +297,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		api.candidateAbsenceAllowed = absenceAllowed
 		defer api.close()
 		if e.bubblewrap {
-			openAIEgressSocket = filepath.Join(tempDir, "openai-egress.sock")
+			openAIEgressSocket = filepath.Join(controlSocketDir, "openai-egress.sock")
 			dial := e.openAIEgressDial
 			if dial == nil {
 				dial = dialOpenAIHost

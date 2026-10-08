@@ -60,6 +60,11 @@ func TestExecRunnerRunsCommandsNonInteractively(t *testing.T) {
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
 	t.Setenv("GIT_ASKPASS", "/usr/bin/true")
 	t.Setenv("SSH_ASKPASS", "/usr/bin/true")
+	t.Setenv("AI_TEAM_WORKER_API_ADDRESS", "http://unix")
+	t.Setenv("AI_TEAM_WORKER_API_SOCKET", "/tmp/worker-api.sock")
+	t.Setenv("AI_TEAM_WORKER_API_TOKEN", "worker-api-secret")
+	t.Setenv("AI_TEAM_OPENAI_EGRESS_SOCKET", "/tmp/openai-egress.sock")
+	t.Setenv("AI_TEAM_OPENAI_EGRESS_TOKEN", "openai-egress-secret")
 
 	result := ExecRunner{}.Run(context.Background(), t.TempDir(), "printenv-probe")
 	if result.Status != StepPassed {
@@ -75,6 +80,11 @@ func TestExecRunnerRunsCommandsNonInteractively(t *testing.T) {
 	if strings.Contains(env, "GIT_ASKPASS=") || strings.Contains(env, "SSH_ASKPASS=") {
 		t.Fatalf("askpass-хуки унаследованы — запрос кредов уйдёт в GUI и подвесит доставку:\n%s", env)
 	}
+	for _, capability := range []string{"AI_TEAM_WORKER_API_ADDRESS=", "AI_TEAM_WORKER_API_SOCKET=", "AI_TEAM_WORKER_API_TOKEN=", "AI_TEAM_OPENAI_EGRESS_SOCKET=", "AI_TEAM_OPENAI_EGRESS_TOKEN="} {
+		if strings.Contains(env, capability) {
+			t.Fatalf("delivery child inherited scoped worker capability %q:\n%s", capability, env)
+		}
+	}
 }
 
 func TestNonInteractiveEnv(t *testing.T) {
@@ -83,6 +93,11 @@ func TestNonInteractiveEnv(t *testing.T) {
 		"GIT_TERMINAL_PROMPT=1",
 		"GIT_ASKPASS=/opt/gui-askpass",
 		"SSH_ASKPASS=/opt/gui-askpass",
+		"AI_TEAM_WORKER_API_ADDRESS=http://unix",
+		"AI_TEAM_WORKER_API_SOCKET=/tmp/worker-api.sock",
+		"AI_TEAM_WORKER_API_TOKEN=secret",
+		"AI_TEAM_OPENAI_EGRESS_SOCKET=/tmp/openai-egress.sock",
+		"AI_TEAM_OPENAI_EGRESS_TOKEN=secret",
 	})
 	joined := strings.Join(result, "\n")
 	for _, want := range []string{"PATH=/bin", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"} {

@@ -97,6 +97,35 @@ func (FileMetadataStore) ReadGitAdmission(controlTarget, runID string) error {
 	return readGitAdmission(controlTarget, runID)
 }
 
+// HasControllerAdmissionProof reports whether this run has a valid positive
+// Git-admission or non-Git absence marker. It deliberately reads marker files
+// directly instead of ReadAbsent, whose recovery semantics also reject an
+// existing candidate metadata record.
+func (FileMetadataStore) HasControllerAdmissionProof(controlTarget, runID string) (bool, error) {
+	target, err := canonicalDirectory(controlTarget)
+	if err != nil {
+		return false, err
+	}
+	gitErr := readGitAdmission(target, runID)
+	if gitErr == nil {
+		if _, absenceErr := readAbsenceMarker(target, runID); absenceErr == nil {
+			return false, errors.New("candidate Git-admission and absence markers conflict")
+		} else if !errors.Is(absenceErr, os.ErrNotExist) {
+			return false, fmt.Errorf("candidate absence marker is invalid: %w", absenceErr)
+		}
+		return true, nil
+	}
+	if !errors.Is(gitErr, os.ErrNotExist) {
+		return false, fmt.Errorf("candidate Git-admission marker is invalid: %w", gitErr)
+	}
+	if _, err := readAbsenceMarker(target, runID); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("candidate absence marker is invalid: %w", err)
+	}
+	return false, nil
+}
+
 // DetectGitRepository determines whether target belongs to a Git repository.
 // A failed rev-parse is considered a non-Git target only when no .git marker
 // exists on the target's ancestor chain; a damaged or inaccessible repository

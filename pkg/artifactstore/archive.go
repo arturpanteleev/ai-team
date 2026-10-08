@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -85,6 +86,11 @@ func (a *RunArchive) Archive(runID string) error {
 		if err != nil {
 			return err
 		}
+		if filepath.ToSlash(relative) == "events.jsonl" {
+			// The target-side copy is worker-visible and may be stale or forged.
+			// The canonical source is selected and archived below.
+			return nil
+		}
 		file, err := os.Open(path)
 		if err != nil {
 			return err
@@ -106,12 +112,63 @@ func (a *RunArchive) Archive(runID string) error {
 	if err != nil {
 		return err
 	}
+	if eventBytes, eventErr := evidence.ReadEventLogBytesForRunDir(root, runID); eventErr == nil {
+		blob, putErr := a.store.Put(bytes.NewReader(eventBytes))
+		if putErr != nil {
+			return putErr
+		}
+		manifest.Entries = append(manifest.Entries, ManifestEntry{
+			Path: "events.jsonl", SHA256: blob.SHA256, Size: blob.Size, Mode: 0600,
+		})
+	} else if errors.Is(eventErr, os.ErrNotExist) {
+		if err := reservedEventLogMissingError(a.runRoot, runID, eventErr); err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("archive run event log: %w", eventErr)
+	}
 	sort.Slice(manifest.Entries, func(i, j int) bool { return manifest.Entries[i].Path < manifest.Entries[j].Path })
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	return a.store.WriteManifest(runID, append(data, '\n'))
+}
+
+func reservedEventLogMissingError(runRoot, runID string, eventErr error) error {
+	if filepath.Base(runRoot) != "runs" || filepath.Base(filepath.Dir(runRoot)) != ".ai-team" {
+		return nil
+	}
+	target := filepath.Dir(filepath.Dir(runRoot))
+	store := evidence.ControllerEventStore{TargetDir: target}
+	reserved, authorityErr := store.IsReserved(runID)
+	if reserved {
+		return fmt.Errorf("archive reserved run event log: %w", eventErr)
+	}
+	if authorityErr == nil {
+		return nil
+	}
+	if authorityErr != nil && !errors.Is(authorityErr, os.ErrNotExist) {
+		return fmt.Errorf("archive run event authority: %w", authorityErr)
+	}
+	// IsReserved can return ENOENT both for an absent authority tree and for a
+	// reserved marker whose canonical log is missing. Inspect the run-specific
+	// marker and data directory to distinguish those cases without trusting the
+	// worker-visible mirror.
+	for _, path := range []string{
+		filepath.Join(target, ".ai-team", "state", "runs", "event-log-reservations", runID+".json"),
+		filepath.Join(target, ".ai-team", "state", "events", runID),
+	} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("archive reserved run event log: %w", eventErr)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect archive event authority: %w", err)
+		}
+	}
+	if authorityErr != nil {
+		return fmt.Errorf("archive run event authority: %w", authorityErr)
+	}
+	return nil
 }
 
 func (a *RunArchive) Restore(runID, destination string) error {

@@ -142,7 +142,13 @@ func Build(runDir, outDir string) (*Index, error) {
 			return nil, fmt.Errorf("export: небезопасный путь evidence %q: %w", file.rel, err)
 		}
 		var sum string
-		if file.kind == RecordAttestation {
+		if file.kind == RecordEventLog {
+			data, readErr := evidence.ReadEventLogBytesForRunDir(runDir, manifest.RunID)
+			if readErr != nil {
+				return nil, fmt.Errorf("export: event log: %w", readErr)
+			}
+			sum, err = writeRecordBytes(data, file.rel, outDir, file.kind)
+		} else if file.kind == RecordAttestation {
 			data, sourceErr := runAttestationData(runDir, manifest.RunID)
 			if sourceErr != nil {
 				return nil, sourceErr
@@ -370,7 +376,7 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 	if err := ensureNoExtraneousFiles(bundleDir, &index); err != nil {
 		return err
 	}
-	if err := verifyCore(bundleDir, index.RunID, index.Records); err != nil {
+	if err := verifyCore(bundleDir, index.RunID, index.Records, false); err != nil {
 		return err
 	}
 	digest, err := BundleDigest(&index)
@@ -455,7 +461,7 @@ func VerifyEvidence(runDir string) error {
 	if err != nil {
 		return err
 	}
-	return verifyCore(runDir, manifest.RunID, records)
+	return verifyCore(runDir, manifest.RunID, records, true)
 }
 
 func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record, error) {
@@ -494,7 +500,7 @@ func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record,
 // verifyCore — semantic-свёртка evidence против каталога с run layout:
 // 1) run manifest identity; 2) hash-цепочка + anchor; 3) attempt manifests
 // ↔ events; 4) attestation v1 ↔ run/spec/events/attempts/provenance.
-func verifyCore(root, runID string, records []Record) error {
+func verifyCore(root, runID string, records []Record, liveRun bool) error {
 	manifest, err := readRunManifest(root)
 	if err != nil {
 		return err
@@ -517,10 +523,27 @@ func verifyCore(root, runID string, records []Record) error {
 		return fmt.Errorf("verify: workflow snapshot не совпадает со своим sha256 в run manifest")
 	}
 
-	if err := evidence.VerifyAnchor(root); err != nil {
-		return fmt.Errorf("verify: anchor: %w", err)
+	var anchorErr error
+	if liveRun {
+		anchorErr = evidence.VerifyAnchor(root)
+	} else {
+		anchorErr = evidence.VerifyAnchorWithSourcesAndTarget(root,
+			evidence.NewFileEventLog(filepath.Join(root, "events.jsonl")),
+			evidence.FilesystemAttemptManifestSource(), manifest.TargetDir)
 	}
-	events, err := evidence.VerifyEventLog(filepath.Join(root, "events.jsonl"), runID)
+	if anchorErr != nil {
+		return fmt.Errorf("verify: anchor: %w", anchorErr)
+	}
+	var eventBytes []byte
+	if liveRun {
+		eventBytes, err = evidence.ReadEventLogBytesForRunDir(root, runID)
+	} else {
+		eventBytes, err = safeio.ReadRegularFile(filepath.Join(root, "events.jsonl"), maxEventLogSize)
+	}
+	if err != nil {
+		return fmt.Errorf("verify: event log: %w", err)
+	}
+	events, err := evidence.VerifyEventLogBytes(eventBytes, runID)
 	if err != nil {
 		return fmt.Errorf("verify: event log: %w", err)
 	}
@@ -570,7 +593,12 @@ func verifyCore(root, runID string, records []Record) error {
 		}
 	}
 
-	attestationData, err := safeio.ReadRegularFile(filepath.Join(root, "attestation.json"), maxAttestationSize)
+	var attestationData []byte
+	if liveRun && filepath.Base(filepath.Dir(root)) == "runs" && filepath.Base(filepath.Dir(filepath.Dir(root))) == ".ai-team" {
+		attestationData, err = runAttestationData(root, runID)
+	} else {
+		attestationData, err = safeio.ReadRegularFile(filepath.Join(root, "attestation.json"), maxAttestationSize)
+	}
 	if err != nil {
 		return fmt.Errorf("verify: attestation: %w", err)
 	}
@@ -581,10 +609,6 @@ func verifyCore(root, runID string, records []Record) error {
 	predicate := &statement.Predicate
 	if predicate.RunID != runID || predicate.Run.EvidenceSchemaVersion != evidence.SchemaVersion {
 		return fmt.Errorf("verify: attestation run identity/schema mismatch")
-	}
-	eventBytes, err := safeio.ReadRegularFile(filepath.Join(root, "events.jsonl"), maxEventLogSize)
-	if err != nil {
-		return err
 	}
 	if predicate.Run.EventLogSHA256 != sha256Bytes(eventBytes) {
 		return fmt.Errorf("verify: attestation event_log_sha256 не совпадает с событиями")

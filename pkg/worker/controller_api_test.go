@@ -110,7 +110,7 @@ func TestWorkerAPIAttemptManifestStoreRejectsUnavailableAndMismatchedPorts(t *te
 		t.Fatalf("unsupported port read error = %v, want unavailable", err)
 	}
 
-	port := &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "manifest-run"}}
+	port := &workerAPIPort{address: "http://unix", socketPath: "/tmp/manifest.sock", scope: workerAPIScope{RunID: "manifest-run"}}
 	store := NewWorkerAPIAttemptManifestStore(port)
 	manifest.RunID = "another-run"
 	if err := store.WriteAttemptManifest(manifest); err == nil || !strings.Contains(err.Error(), "run mismatch") {
@@ -184,11 +184,11 @@ func TestWorkerAPIServerFailsClosedWhenAttemptManifestReservationCannotBeCreated
 	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-reserve-failure-%d.sock", os.Getpid()))
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "attempt-api-reserve-failure", TargetDir: target, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
 	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
-	if err == nil || !strings.Contains(err.Error(), "reserve controller attempt manifest store") {
+	if err == nil {
 		if server != nil {
 			server.close()
 		}
-		t.Fatalf("controller API start error = %v, want attempt manifest reservation failure", err)
+		t.Fatal("controller API started despite the unsafe attempt manifest authority path")
 	}
 	if _, statErr := os.Lstat(socket); !os.IsNotExist(statErr) {
 		t.Fatalf("failed controller API start left socket behind: %v", statErr)
@@ -262,6 +262,727 @@ func TestWorkerAPIAttemptManifestTransportBoundsAtStorageLimit(t *testing.T) {
 	}
 }
 
+func TestWorkerAPIEventLogUsesReservedControllerStoreAndScopedChain(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "worker-event-api", TargetDir: target, ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-event-api-%d.sock", os.Getpid()))
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := NewWorkerAPIEventLog(port)
+	store, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: job.RunID, Feature: "event-api", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := evidence.Event{Type: "run_started", Timestamp: time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC)}
+	if err := store.Append(started); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := eventLog.Read(job.RunID)
+	if err != nil || len(stored) != 1 || stored[0].Type != "run_started" {
+		t.Fatalf("API event read events=%+v err=%v", stored, err)
+	}
+	if retry, err := eventLog.Append(job.RunID, started, 0, stored[0].PreviousSHA256); err != nil || !reflect.DeepEqual(retry, stored[0]) {
+		t.Fatalf("API exact retry=%+v err=%v want %+v", retry, err, stored[0])
+	}
+	large := evidence.Event{Type: "run_paused", Timestamp: started.Timestamp.Add(time.Minute), Data: map[string]any{"probe": strings.Repeat("x", 400<<10)}}
+	if err := store.Append(large); err != nil {
+		t.Fatalf("multi-page event append: %v", err)
+	}
+	stored, err = eventLog.Read(job.RunID)
+	largePayload, payloadOK := "", false
+	if len(stored) == 2 {
+		largePayload, payloadOK = stored[1].Data["probe"].(string)
+	}
+	if err != nil || len(stored) != 2 || !payloadOK || len(largePayload) != 400<<10 {
+		t.Fatalf("multi-page API read events=%d err=%v", len(stored), err)
+	}
+	if _, err := server.dispatch("event_log.read", workerAPICall{RunID: "other-event-run"}); err == nil {
+		t.Fatal("event API accepted another run identity")
+	}
+	operation := server.scope.Operation
+	server.scope.Operation = Operation("unsupported")
+	if _, err := server.dispatch("event_log.read", workerAPICall{RunID: job.RunID}); err == nil {
+		t.Fatal("event API accepted an unsupported operation scope")
+	}
+	server.scope.Operation = operation
+	loopback := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: OperationStart}, eventLogs: evidence.ControllerEventStore{TargetDir: target}}
+	if _, err := loopback.dispatch("event_log.read", workerAPICall{RunID: job.RunID}); err == nil {
+		t.Fatal("event API allowed controller event reads without Unix transport")
+	}
+	if _, err := server.dispatch("event_log.append", workerAPICall{RunID: job.RunID, Event: evidence.Event{Type: "foreign", Timestamp: started.Timestamp}, ExpectedSequence: 0, ExpectedPreviousSHA256: stored[0].PreviousSHA256}); err == nil {
+		t.Fatal("event API accepted a conflicting stale append")
+	}
+	canonical, err := (evidence.ControllerEventStore{TargetDir: target}).Read(job.RunID)
+	if err != nil || len(canonical) != 2 || canonical[0].SHA256 != stored[0].SHA256 {
+		t.Fatalf("controller canonical event source mismatch: %+v err=%v", canonical, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".ai-team", "runs", job.RunID, "events.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("external event source created a run-local mirror: %v", err)
+	}
+}
+
+func TestWorkerAPIEventAppendRejectsForgedTerminalApprovalAndDeliveryClaims(t *testing.T) {
+	target := t.TempDir()
+	runID := "event-append-policy"
+	approvalID := "approval-policy"
+	subjectHash := strings.Repeat("a", 64)
+	approvalValue := approval.PendingApproval{
+		RunID: runID, ID: approvalID, AttemptID: "attempt-original", Status: approval.StatusPending,
+		SubjectHash: subjectHash, FromStage: "reviewer", ToStage: "coder", Trigger: "review",
+	}
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: approvalValue}}
+	deliveryPlanHash := strings.Repeat("c", 64)
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("1", ExecutionIDBytes*2), ApprovePlanHash: deliveryPlanHash}
+	socketDir, err := os.MkdirTemp("/tmp", "ai-team-event-policy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := NewWorkerAPIEventLog(port)
+	runStore, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "event-policy", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	requested := evidence.Event{Type: "approval_requested", AttemptID: approvalValue.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"approval_id": approvalID, "subject_hash": subjectHash, "status": "pending",
+	}}
+	if err := runStore.Append(requested); err != nil {
+		t.Fatalf("append matching controller approval request: %v", err)
+	}
+	stored, err := eventLog.Read(runID)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("read initial policy chain: events=%d err=%v", len(stored), err)
+	}
+
+	// Reuse is recorded against the current attempt, while the controller
+	// approval retains the attempt that originally created it.
+	reused := evidence.Event{Type: "approval_reused", AttemptID: "attempt-current", Timestamp: time.Now().UTC(), Data: map[string]any{
+		"approval_id": approvalID, "subject_hash": subjectHash, "prior_status": "pending",
+		"from_stage": approvalValue.FromStage, "to_stage": approvalValue.ToStage, "trigger": approvalValue.Trigger,
+	}}
+	if _, err := eventLog.Append(runID, reused, uint64(len(stored)), stored[len(stored)-1].SHA256); err != nil {
+		t.Fatalf("valid cross-attempt approval reuse rejected: %v", err)
+	}
+	stored, err = eventLog.Read(runID)
+	if err != nil || len(stored) != 3 {
+		t.Fatalf("read chain after approval reuse: events=%d err=%v", len(stored), err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		event evidence.Event
+	}{
+		{
+			name: "empty successful terminal claim",
+			event: evidence.Event{Type: "run_finished", Timestamp: time.Now().UTC(), Data: map[string]any{
+				"status": "completed", "stage_attempts": 0,
+			}},
+		},
+		{
+			name: "decision without resolved controller state",
+			event: evidence.Event{Type: "approval_decided", AttemptID: approvalValue.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
+				"approval_id": approvalID, "subject_hash": subjectHash, "status": "resolved", "resolved_action": "approve",
+			}},
+		},
+		{
+			name: "delivery plan without controller approval",
+			event: evidence.Event{Type: "delivery_plan_approved", AttemptID: "attempt-current", Timestamp: time.Now().UTC(), Data: map[string]any{
+				"plan_hash": strings.Repeat("b", 64), "mode": "hash_flag", "approver": "local-user",
+			}},
+		},
+		{
+			name:  "cancel outside controller cancel operation",
+			event: evidence.Event{Type: "run_canceled", Timestamp: time.Now().UTC(), Data: map[string]any{"reason": "forged"}},
+		},
+		{
+			name:  "unknown event type",
+			event: evidence.Event{Type: "worker_extension", Timestamp: time.Now().UTC()},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := eventLog.Append(runID, tc.event, uint64(len(stored)), stored[len(stored)-1].SHA256); err == nil {
+				t.Fatalf("forged event %q was accepted", tc.event.Type)
+			}
+			current, readErr := eventLog.Read(runID)
+			if readErr != nil || len(current) != len(stored) {
+				t.Fatalf("rejected event became durable: events=%d want=%d err=%v", len(current), len(stored), readErr)
+			}
+		})
+	}
+
+	attemptStarted := evidence.Event{Type: "attempt_started", Stage: "analyst", AttemptID: "attempt-fake", Timestamp: time.Now().UTC(), Data: map[string]any{"stage_index": 1}}
+	if _, err := eventLog.Append(runID, attemptStarted, uint64(len(stored)), stored[len(stored)-1].SHA256); err != nil {
+		t.Fatalf("append baseline attempt start: %v", err)
+	}
+	stored, err = eventLog.Read(runID)
+	if err != nil || len(stored) != 4 {
+		t.Fatalf("read chain after baseline attempt start: events=%d err=%v", len(stored), err)
+	}
+	forgedSuccess := evidence.Event{Type: "attempt_finished", Stage: "analyst", AttemptID: "attempt-fake", Timestamp: time.Now().UTC(), Data: map[string]any{
+		"status": "passed", "execution": "succeeded", "decision": "not_applicable", "outcome": "passed",
+		"error": "worker-supplied error text without a published manifest",
+	}}
+	if _, err := eventLog.Append(runID, forgedSuccess, uint64(len(stored)), stored[len(stored)-1].SHA256); err == nil {
+		t.Fatal("successful attempt_finished without controller-readable manifest was accepted")
+	}
+	current, readErr := eventLog.Read(runID)
+	if readErr != nil || len(current) != len(stored) {
+		t.Fatalf("unmanifested successful attempt became durable: events=%d want=%d err=%v", len(current), len(stored), readErr)
+	}
+
+	// The real pipeline writes delivery_deferred inside runStage, before the
+	// deferred attempt_finished event is published. Keep this API sequence
+	// accepted while requiring the current attempt and its exact approved plan.
+	appendCurrent := func(event evidence.Event) error {
+		events, err := eventLog.Read(runID)
+		if err != nil {
+			return err
+		}
+		if len(events) == 0 {
+			return errors.New("event chain unexpectedly empty")
+		}
+		_, err = eventLog.Append(runID, event, uint64(len(events)), events[len(events)-1].SHA256)
+		return err
+	}
+	activeAttempt := "attempt-delivery-active"
+	if err := appendCurrent(evidence.Event{Type: "attempt_started", Stage: "deployer", AttemptID: activeAttempt, Timestamp: time.Now().UTC(), Data: map[string]any{"stage_index": 1}}); err != nil {
+		t.Fatalf("append delivery attempt start: %v", err)
+	}
+	if err := appendCurrent(evidence.Event{Type: "delivery_plan_approved", AttemptID: activeAttempt, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"plan_hash": deliveryPlanHash, "mode": "hash_flag", "approver": "local-user",
+	}}); err != nil {
+		t.Fatalf("append controller-approved delivery plan: %v", err)
+	}
+	statePath := filepath.Join(target, ".ai-team", "delivery", "feature.json")
+	if err := appendCurrent(evidence.Event{Type: "delivery_deferred", AttemptID: activeAttempt, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"plan_hash": deliveryPlanHash, "state_path": filepath.ToSlash(statePath),
+	}}); err != nil {
+		t.Fatalf("delivery_deferred before attempt_finished was rejected: %v", err)
+	}
+	if err := appendCurrent(evidence.Event{Type: "attempt_finished", Stage: "deployer", AttemptID: activeAttempt, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"status": "failed", "execution": "infra_failed", "decision": "not_applicable", "outcome": "failed", "error": "test ends before manifest publication",
+	}}); err != nil {
+		t.Fatalf("append post-delivery attempt_finished: %v", err)
+	}
+}
+
+func TestWorkerAPIEventAppendAcceptsLargeAttemptDiagnosticsWithinBound(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "large-event-diagnostics", TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "ai-team-event-large-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := NewWorkerAPIEventLog(port)
+	store, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: job.RunID, Feature: "large-event", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	const diagnosticSize = 4 << 20
+	// Control bytes exercise worst-case JSON escaping (~6x). This models the
+	// maximum combined 2 MiB stdout/stderr captured by AgentCLIRuntime.
+	diagnostics := strings.Repeat("\x00", diagnosticSize)
+	startedAt := time.Now().UTC()
+	if err := store.Append(evidence.Event{Type: "attempt_started", Stage: "analyst", AttemptID: "attempt-large-diagnostics", Timestamp: startedAt, Data: map[string]any{"stage_index": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "attempt_finished", Stage: "analyst", AttemptID: "attempt-large-diagnostics", Timestamp: startedAt.Add(time.Second), Data: map[string]any{
+		"status": "failed", "execution": "infra_failed", "decision": "not_applicable", "outcome": "failed", "error": diagnostics,
+	}}); err != nil {
+		t.Fatalf("realistic large attempt diagnostics below bounded event envelope were rejected: %v", err)
+	}
+	stored, err := server.eventLogs.Read(job.RunID)
+	storedDiagnostics := ""
+	if len(stored) == 3 {
+		storedDiagnostics, _ = stored[2].Data["error"].(string)
+	}
+	if err != nil || len(stored) != 3 || len(storedDiagnostics) != diagnosticSize {
+		t.Fatalf("large diagnostic append was not durable: events=%d err=%v", len(stored), err)
+	}
+}
+
+func TestWorkerAPIEventLogMigratesLegacyBeforeResumeAndFailsClosedReservation(t *testing.T) {
+	target := t.TempDir()
+	runID := "worker-event-legacy"
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "event-api", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	// This is a pre-event-store cloud run: independent authority already
+	// exists, while both event roots are absent. Migration must be explicit.
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-event-legacy-%d.sock", os.Getpid()))
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiEvents := NewWorkerAPIEventLog(port)
+	if events, err := apiEvents.Read(runID); err != nil || len(events) != 1 {
+		t.Fatalf("legacy event read events=%+v err=%v", events, err)
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("legacy run was not migrated before resume: reserved=%v err=%v", reserved, err)
+	}
+	canonical, err := (evidence.ControllerEventStore{TargetDir: target}).ReadBytes(runID)
+	legacyBytes, legacyErr := os.ReadFile(filepath.Join(legacy.RunDir(), "events.jsonl"))
+	if err != nil || legacyErr != nil || !bytes.Equal(canonical, legacyBytes) {
+		t.Fatalf("legacy migration did not preserve exact event bytes: canonical=%d legacy=%d err=%v legacyErr=%v", len(canonical), len(legacyBytes), err, legacyErr)
+	}
+
+	// Cancel uses the same pre-spawn migration boundary as Resume: the API
+	// reads the canonical copy only after the exact legacy bytes are reserved.
+	cancelRunID := "worker-event-legacy-cancel"
+	cancelLegacy, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: cancelRunID, Feature: "event-api", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cancelLegacy.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	cancelJob := Job{SchemaVersion: SchemaVersion, Operation: OperationCancel, RunID: cancelRunID, TargetDir: target, ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	cancelSocket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-event-cancel-%d.sock", os.Getpid()))
+	cancelServer, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, cancelSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelServer.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, cancelSocket)
+	t.Setenv(WorkerAPITokenEnv, cancelServer.token)
+	cancelPort, err := NewWorkerAPIPort(cancelJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelEvents := NewWorkerAPIEventLog(cancelPort)
+	if events, err := cancelEvents.Read(cancelRunID); err != nil || len(events) != 1 || events[0].Type != "run_started" {
+		t.Fatalf("cancel API did not select migrated canonical events: events=%+v err=%v", events, err)
+	}
+	cancelCanonical, err := (evidence.ControllerEventStore{TargetDir: target}).ReadBytes(cancelRunID)
+	cancelLegacyBytes, legacyErr := os.ReadFile(filepath.Join(cancelLegacy.RunDir(), "events.jsonl"))
+	if err != nil || legacyErr != nil || !bytes.Equal(cancelCanonical, cancelLegacyBytes) {
+		t.Fatalf("cancel migration did not preserve exact legacy bytes: canonical=%d legacy=%d err=%v legacyErr=%v", len(cancelCanonical), len(cancelLegacyBytes), err, legacyErr)
+	}
+
+	brokenRun := "worker-event-reservation-missing"
+	brokenStore := evidence.ControllerEventStore{TargetDir: target}
+	if err := brokenStore.Reserve(brokenRun); err != nil {
+		t.Fatal(err)
+	}
+	brokenPath, err := brokenStore.Path(brokenRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(brokenPath); err != nil {
+		t.Fatal(err)
+	}
+	brokenJob := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: brokenRun, TargetDir: target, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}
+	brokenSocket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-event-broken-%d.sock", os.Getpid()))
+	if server, err := startWorkerAPIServerUnix(brokenJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, brokenSocket); err == nil {
+		server.close()
+		t.Fatal("resume downgraded a reserved run with missing canonical events to the legacy mirror")
+	}
+}
+
+func TestWorkerAPIStartReservesEventAuthorityBeforeOtherCloudMarkers(t *testing.T) {
+	target := t.TempDir()
+	runID := "worker-event-start-order"
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
+	socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-event-start-order-%d.sock", os.Getpid()))
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatalf("fresh Start failed before event authority reservation: %v", err)
+	}
+	defer server.close()
+	events := evidence.ControllerEventStore{TargetDir: target}
+	if reserved, err := events.IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("fresh Start event authority reserved=%v err=%v", reserved, err)
+	}
+	if reserved, err := (evidence.ControllerAttemptManifestStore{TargetDir: target}).IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("fresh Start attempt authority reserved=%v err=%v", reserved, err)
+	}
+	if reserved, err := metrics.UsageEnvelopeReservation(target, runID); err != nil || !reserved {
+		t.Fatalf("fresh Start usage authority reserved=%v err=%v", reserved, err)
+	}
+	proof := filepath.Join(target, ".ai-team", "state", "runs", "event-log-authority", runID+".json")
+	if _, err := os.Stat(proof); err != nil {
+		t.Fatalf("fresh Start did not persist independent event authority proof: %v", err)
+	}
+}
+
+func TestWorkerAPILegacyDeferredDeliveryMigrationRequiresControllerAuthority(t *testing.T) {
+	target := t.TempDir()
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target = canonicalTarget
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	makeLegacyDeferredRun := func(runID, mode, planHash string) *evidence.Store {
+		t.Helper()
+		legacy, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+			RunID: runID, Feature: "legacy-delivery", TargetDir: target, StartedAt: time.Now().UTC(),
+			ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now().UTC()
+		for _, event := range []evidence.Event{
+			{Type: "run_started", Timestamp: started},
+			{Type: "attempt_started", Stage: "deployer", AttemptID: "attempt-delivery", Timestamp: started.Add(time.Second), Data: map[string]any{"stage_index": 1}},
+			{Type: "delivery_plan_approved", AttemptID: "attempt-delivery", Timestamp: started.Add(2 * time.Second), Data: map[string]any{
+				"plan_hash": planHash, "mode": mode, "approver": "legacy-event",
+			}},
+			{Type: "delivery_deferred", AttemptID: "attempt-delivery", Timestamp: started.Add(3 * time.Second), Data: map[string]any{
+				"plan_hash": planHash, "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "legacy-delivery.json")),
+			}},
+		} {
+			if err := legacy.Append(event); err != nil {
+				t.Fatalf("append legacy event %s: %v", event.Type, err)
+			}
+		}
+		return legacy
+	}
+	newSocket := func(name string) string {
+		t.Helper()
+		return filepath.Join("/tmp", fmt.Sprintf("ai-team-legacy-delivery-%s-%d.sock", name, os.Getpid()))
+	}
+	startJob := func(operation Operation, runID, planHash string, approvals pipeline.ApprovalStore, socket string) (*workerAPIServer, error) {
+		t.Helper()
+		job := Job{SchemaVersion: SchemaVersion, Operation: operation, RunID: runID, TargetDir: target, ApprovePlanHash: planHash,
+			ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+		return startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	}
+
+	const untrustedHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	legacy := makeLegacyDeferredRun("legacy-delivery-without-authority", "hash_flag", untrustedHash)
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, legacy.RunID()); err != nil {
+		t.Fatal(err)
+	}
+	emptyApprovals := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	for _, operation := range []Operation{OperationResume, OperationRecover} {
+		server, err := startJob(operation, legacy.RunID(), "", emptyApprovals, newSocket(string(operation)))
+		if err == nil {
+			server.close()
+			t.Fatalf("%s migrated a worker-supplied hash-flag delivery claim without controller authority", operation)
+		}
+	}
+	// A Cancel can fail after API admission, so it cannot promote unverified
+	// delivery claims before the lifecycle code runs.
+	if cancel, err := startJob(OperationCancel, legacy.RunID(), "", emptyApprovals, newSocket("cancel")); err == nil {
+		cancel.close()
+		t.Fatal("Cancel migrated an untrusted hash-flag delivery claim")
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(legacy.RunID()); err == nil || reserved {
+		t.Fatalf("failed Cancel left an unverified event reservation: reserved=%v err=%v", reserved, err)
+	}
+
+	const resolvedHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	resolvedRun := makeLegacyDeferredRun("legacy-delivery-with-resolved-authority", "resolved_approval", resolvedHash)
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, resolvedRun.RunID()); err != nil {
+		t.Fatal(err)
+	}
+	wrongAttemptStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
+		resolvedRun.RunID() + "/approval-delivery": {RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: "different-attempt",
+			Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"},
+	}}
+	if server, err := startJob(OperationRecover, resolvedRun.RunID(), "", wrongAttemptStore, newSocket("wrong-attempt")); err == nil {
+		server.close()
+		t.Fatal("Recover accepted a resolved delivery approval from another attempt")
+	}
+	correctAttemptStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
+		resolvedRun.RunID() + "/approval-delivery": {RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: "attempt-delivery",
+			Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"},
+	}}
+	server, err := startJob(OperationRecover, resolvedRun.RunID(), "", correctAttemptStore, newSocket("approved"))
+	if err != nil {
+		t.Fatalf("Recover rejected exact controller delivery approval: %v", err)
+	}
+	server.close()
+}
+
+func TestWorkerAPILegacyDeliveryClaimsRequireExactControllerApproval(t *testing.T) {
+	target := t.TempDir()
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target = canonicalTarget
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	makeLegacyRun := func(runID, mode, planHash string) *evidence.Store {
+		t.Helper()
+		legacy, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+			RunID: runID, Feature: "legacy-delivery", TargetDir: target, StartedAt: time.Now().UTC(),
+			ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now().UTC()
+		for _, event := range []evidence.Event{
+			{Type: "run_started", Timestamp: started},
+			{Type: "attempt_started", Stage: "deployer", AttemptID: "attempt-delivery", Timestamp: started.Add(time.Second), Data: map[string]any{"stage_index": 1}},
+			{Type: "delivery_plan_approved", AttemptID: "attempt-delivery", Timestamp: started.Add(2 * time.Second), Data: map[string]any{
+				"plan_hash": planHash, "mode": mode, "approver": "legacy-event",
+			}},
+			{Type: "delivery_deferred", AttemptID: "attempt-delivery", Timestamp: started.Add(3 * time.Second), Data: map[string]any{
+				"plan_hash": planHash, "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "legacy-delivery.json")),
+			}},
+		} {
+			if err := legacy.Append(event); err != nil {
+				t.Fatalf("append legacy event %s: %v", event.Type, err)
+			}
+		}
+		return legacy
+	}
+	startServer := func(operation Operation, runID, planHash string, approvals pipeline.ApprovalStore, label string) (*workerAPIServer, error) {
+		t.Helper()
+		job := Job{SchemaVersion: SchemaVersion, Operation: operation, RunID: runID, TargetDir: target, ApprovePlanHash: planHash,
+			ExecutionID: strings.Repeat("f", ExecutionIDBytes*2)}
+		socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-legacy-delivery-%s-%d.sock", label, os.Getpid()))
+		return startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	}
+	emptyApprovals := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+	const hashFlag = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	legacy := makeLegacyRun("legacy-deferred-unapproved", "hash_flag", hashFlag)
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, legacy.RunID()); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []Operation{OperationResume, OperationRecover} {
+		server, err := startServer(operation, legacy.RunID(), "", emptyApprovals, string(operation))
+		if err == nil {
+			server.close()
+			t.Fatalf("%s migrated worker-supplied hash approval without matching job authority", operation)
+		}
+	}
+	// Cancellation admission must validate claims because RunEngine.Cancel can
+	// fail after this migration boundary.
+	if cancel, err := startServer(OperationCancel, legacy.RunID(), "", emptyApprovals, "cancel"); err == nil {
+		cancel.close()
+		t.Fatal("Cancel migrated an untrusted hash-flag delivery claim")
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(legacy.RunID()); err == nil || reserved {
+		t.Fatalf("failed cancel left an unverified event reservation: reserved=%v err=%v", reserved, err)
+	}
+
+	const resolvedHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	resolvedRun := makeLegacyRun("legacy-deferred-resolved", "resolved_approval", resolvedHash)
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, resolvedRun.RunID()); err != nil {
+		t.Fatal(err)
+	}
+	makeApprovalStore := func(attemptID string) *apiApprovalStore {
+		return &apiApprovalStore{values: map[string]approval.PendingApproval{
+			resolvedRun.RunID() + "/approval-delivery": {RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: attemptID,
+				Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"},
+		}}
+	}
+	if server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("different-attempt"), "wrong-attempt"); err == nil {
+		server.close()
+		t.Fatal("Recover accepted resolved delivery authority from another attempt")
+	}
+	server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("attempt-delivery"), "exact-approval")
+	if err != nil {
+		t.Fatalf("Recover rejected exact controller delivery authority: %v", err)
+	}
+	server.close()
+}
+
+func TestCancelAdmissionFailureLeavesLegacyDeliveryBlockedForManualRetry(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runID := "cancel-failed-legacy-delivery"
+	started := time.Now().UTC()
+	legacy, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "cancel-legacy-feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planHash := strings.Repeat("a", 64)
+	for _, event := range []evidence.Event{
+		{Type: "run_started", Timestamp: started},
+		{Type: "attempt_started", Stage: "deployer", AttemptID: "attempt-delivery", Timestamp: started.Add(time.Second)},
+		{Type: "delivery_plan_approved", AttemptID: "attempt-delivery", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"plan_hash": planHash, "mode": "hash_flag"}},
+		{Type: "delivery_deferred", AttemptID: "attempt-delivery", Timestamp: started.Add(3 * time.Second), Data: map[string]any{
+			"plan_hash": planHash, "feature": "cancel-legacy-feature", "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "cancel-legacy-feature.json")),
+		}},
+		{Type: "run_finished", Timestamp: started.Add(4 * time.Second), Data: map[string]any{"status": "completed", "stage_attempts": 1}},
+	} {
+		if err := legacy.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationCancel, RunID: runID, TargetDir: target,
+		ExecutionID: strings.Repeat("c", ExecutionIDBytes*2)}
+	socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-cancel-failed-delivery-%d.sock", os.Getpid()))
+	if server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket); err == nil {
+		server.close()
+		t.Fatal("Cancel accepted a completed legacy run with an unverified hash-flag delivery claim")
+	}
+
+	spy := &cancelManualDeliverySpy{}
+	manual := pipeline.New(nil, nil, pipeline.WithDeliveryService(spy))
+	if _, err := manual.DeliverDeferred(context.Background(), legacy.RunDir(), "cancel-legacy-feature", target); err == nil {
+		t.Fatal("manual delivery accepted the legacy claim after Cancel admission failed")
+	}
+	if spy.calls != 0 {
+		t.Fatalf("manual delivery invoked downstream service %d times", spy.calls)
+	}
+}
+
+type cancelManualDeliverySpy struct{ calls int }
+
+func (s *cancelManualDeliverySpy) Execute(context.Context, delivery.Request) (delivery.Result, error) {
+	s.calls++
+	return delivery.Result{}, nil
+}
+
+func TestWorkerAPIApprovalRequestedAcceptsDecisionRace(t *testing.T) {
+	target := t.TempDir()
+	runID, approvalID, attemptID := "approval-request-race", "approval-race", "attempt-race"
+	value := approval.PendingApproval{RunID: runID, ID: approvalID, AttemptID: attemptID, Status: approval.StatusResolved,
+		ResolvedAction: "approve", SubjectHash: strings.Repeat("a", 64), FromStage: "reviewer", ToStage: "coder", Trigger: "review"}
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	socket := filepath.Join("/tmp", fmt.Sprintf("ai-team-approval-race-%d.sock", os.Getpid()))
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := NewWorkerAPIEventLog(port)
+	store, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "approval-race", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "approval_requested", AttemptID: attemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"approval_id": approvalID, "subject_hash": value.SubjectHash, "status": "pending",
+	}}); err != nil {
+		t.Fatalf("request event lost a web-decision race after the matching approval resolved: %v", err)
+	}
+	if err := store.Append(evidence.Event{Type: "approval_decided", AttemptID: attemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
+		"approval_id": approvalID, "subject_hash": value.SubjectHash, "status": "resolved", "resolved_action": "approve",
+	}}); err != nil {
+		t.Fatalf("resolved decision event did not follow raced request event: %v", err)
+	}
+}
+
+func TestWorkerAPIRecoverFreshRunReservesEventAuthorityBeforeSpawn(t *testing.T) {
+	target := t.TempDir()
+	runID := "worker-event-fresh-recover"
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationRecover, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("c", ExecutionIDBytes*2)}
+	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-event-recover-%d.sock", os.Getpid()))
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("fresh recover event reservation reserved=%v err=%v", reserved, err)
+	}
+	if server.eventLogs == nil {
+		t.Fatal("fresh recover worker was not attached to the reserved event source")
+	}
+}
+
 func TestWorkerAPIAttemptManifestPortPreservesUnreservedLegacyRuns(t *testing.T) {
 	target := t.TempDir()
 	runID, attemptID := "attempt-api-legacy", "attempt-1"
@@ -273,6 +994,19 @@ func TestWorkerAPIAttemptManifestPortPreservesUnreservedLegacyRuns(t *testing.T)
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	legacyRun, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "legacy-manifest", TargetDir: target, StartedAt: manifest.StartedAt,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyRun.Append(evidence.Event{Type: "run_started", Timestamp: manifest.StartedAt}); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -918,7 +1652,7 @@ func TestWorkerAttestationWriterRejectsUnavailableOrMismatchedScope(t *testing.T
 		{name: "nil writer"},
 		{name: "nil port", writer: &workerAPIAttestationWriter{}},
 		{name: "non Unix API", writer: &workerAPIAttestationWriter{port: &workerAPIPort{address: "http://127.0.0.1:1234", scope: workerAPIScope{RunID: statement.Predicate.RunID}}}},
-		{name: "run mismatch", writer: &workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "different-run"}}}},
+		{name: "run mismatch", writer: &workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", socketPath: "/tmp/worker-api.sock", scope: workerAPIScope{RunID: "different-run"}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -927,7 +1661,7 @@ func TestWorkerAttestationWriterRejectsUnavailableOrMismatchedScope(t *testing.T
 			}
 		})
 	}
-	if err := (&workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: statement.Predicate.RunID}}}).WriteAttestation(nil); err == nil {
+	if err := (&workerAPIAttestationWriter{port: &workerAPIPort{address: "http://unix", socketPath: "/tmp/worker-api.sock", scope: workerAPIScope{RunID: statement.Predicate.RunID}}}).WriteAttestation(nil); err == nil {
 		t.Fatal("WriteAttestation() accepted a nil statement")
 	}
 }
@@ -980,7 +1714,7 @@ func TestWorkerTerminalDeliveryRecordWriterRejectsUnavailableOrMismatchedScope(t
 		{name: "nil writer"},
 		{name: "nil port", writer: &workerAPITerminalRecordWriter{}},
 		{name: "non Unix API", writer: &workerAPITerminalRecordWriter{port: &workerAPIPort{address: "http://127.0.0.1:1234"}}},
-		{name: "run mismatch", writer: &workerAPITerminalRecordWriter{port: &workerAPIPort{address: "http://unix", scope: workerAPIScope{RunID: "different-run"}}}},
+		{name: "run mismatch", writer: &workerAPITerminalRecordWriter{port: &workerAPIPort{address: "http://unix", socketPath: "/tmp/worker-api.sock", scope: workerAPIScope{RunID: "different-run"}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -993,6 +1727,9 @@ func TestWorkerTerminalDeliveryRecordWriterRejectsUnavailableOrMismatchedScope(t
 
 func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T) {
 	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	socketDir, err := os.MkdirTemp("/tmp", "term-api-")
 	if err != nil {
 		t.Fatal(err)
@@ -1000,6 +1737,16 @@ func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T
 	defer func() { _ = os.RemoveAll(socketDir) }()
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "terminal-dispatch-run", TargetDir: target,
 		ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	legacyRun, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: job.RunID, Feature: "terminal-dispatch", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyRun.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	record := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID,
 		Feature: "feat", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Now().UTC()}
 
@@ -1422,6 +2169,20 @@ func TestProcessEngineBubblewrapBuilderFailureStopsBeforeSpawn(t *testing.T) {
 		}
 	}
 	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runID := "bubblewrap-build-failure"
+	legacyRun, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "sandbox", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyRun.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0]}, target, filepath.Join(target, "missing-db-parent", "controller.db"),
 		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
@@ -1432,7 +2193,7 @@ func TestProcessEngineBubblewrapBuilderFailureStopsBeforeSpawn(t *testing.T) {
 	// Execute through the controller API and egress setup, then exercise the
 	// bubblewrap builder's failure path before the worker process can spawn.
 	engine.bubblewrap = true
-	_, err = engine.Cancel(pipeline.CancelConfig{RunID: "bubblewrap-build-failure", TargetDir: target})
+	_, err = engine.Cancel(pipeline.CancelConfig{RunID: runID, TargetDir: target})
 	if runtime.GOOS == "linux" {
 		if err == nil || !strings.Contains(err.Error(), "controller database path") {
 			t.Fatalf("missing controller database parent must fail during bubblewrap construction before spawn, got %v", err)

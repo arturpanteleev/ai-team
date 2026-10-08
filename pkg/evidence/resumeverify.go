@@ -39,7 +39,11 @@ type ResumeEvidenceError struct {
 // только если лог недоступен или повреждён — тогда cause нефиксируемо, но и
 // сам провал уже означает fail-closed отказ resume.
 func AppendBlockedEvent(runDir, runID string, reason ResumeEvidenceReason, detail string) error {
-	store, err := openStoreForAppend(runDir, runID)
+	return AppendBlockedEventWithSources(runDir, runID, reason, detail, nil, nil)
+}
+
+func AppendBlockedEventWithSources(runDir, runID string, reason ResumeEvidenceReason, detail string, eventsSource EventLog, _ AttemptManifestSource) error {
+	store, err := openStoreForAppendWithSources(runDir, runID, eventsSource)
 	if err != nil {
 		return err
 	}
@@ -52,19 +56,34 @@ func AppendBlockedEvent(runDir, runID string, reason ResumeEvidenceReason, detai
 // openStoreForAppend пере-открывает store по валидной event chain, чтобы
 // записать событие без повторного прохода всей snapshot-проверки Resume.
 func openStoreForAppend(runDir, runID string) (*Store, error) {
-	events, err := VerifyEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	return openStoreForAppendWithSources(runDir, runID, nil)
+}
+
+func openStoreForAppendWithSources(runDir, runID string, eventsSource EventLog) (*Store, error) {
+	events, err := VerifyEventLogWithSource(filepath.Join(runDir, "events.jsonl"), runID, eventsSource)
 	if err != nil {
 		return nil, fmt.Errorf("blocked event: event chain: %w", err)
 	}
 	if len(events) == 0 {
 		return nil, fmt.Errorf("blocked event: пустой event log")
 	}
-	return &Store{
+	if eventsSource == nil {
+		if resolved, ok, resolveErr := defaultEventLogSource(filepath.Join(runDir, "events.jsonl"), runID); resolveErr != nil {
+			return nil, resolveErr
+		} else if ok {
+			eventsSource = resolved
+		}
+	}
+	store := &Store{
 		root: filepath.Dir(runDir), runID: runID,
 		eventLog: newFileEventLog(filepath.Join(runDir, "events.jsonl")),
 		nextID:   uint64(len(events)), lastEventHash: events[len(events)-1].SHA256,
 		provenance: make(map[string]ArtifactRecord),
-	}, nil
+	}
+	if eventsSource != nil {
+		store.eventLog = eventsSource
+	}
+	return store, nil
 }
 
 func (e *ResumeEvidenceError) Error() string {
@@ -95,6 +114,12 @@ func VerifyResumeEvidence(runDir string) error {
 // Source-backed reads are limited to MaxAttemptManifestSize; a nil source uses
 // streaming filesystem digests for compatibility with large legacy files.
 func VerifyResumeEvidenceWithAttemptManifestSource(runDir string, source AttemptManifestSource) error {
+	return VerifyResumeEvidenceWithSources(runDir, source, nil)
+}
+
+// VerifyResumeEvidenceWithSources verifies the run using separately scoped
+// event and attempt-manifest authorities.
+func VerifyResumeEvidenceWithSources(runDir string, manifestSource AttemptManifestSource, eventSource EventLog) error {
 	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
 	if err != nil {
 		return resumeErr(ReasonManifestIdentity, "run.json: %v", err)
@@ -118,11 +143,11 @@ func VerifyResumeEvidenceWithAttemptManifestSource(runDir string, source Attempt
 		return resumeErr(ReasonWorkflowSnapshot, "resolved workflow snapshot identity mismatch")
 	}
 
-	replayed, err := ReplayEventLogWithAttemptManifestSource(filepath.Join(runDir, "events.jsonl"), manifest.RunID, source)
+	replayed, err := ReplayEventLogWithEventSources(filepath.Join(runDir, "events.jsonl"), manifest.RunID, eventSource, manifestSource)
 	if err != nil {
 		return resumeErr(ReasonEventChain, "event chain: %v", err)
 	}
-	if err := verifyAttemptManifestsWithSource(runDir, manifest.RunID, replayed.Attempts, source); err != nil {
+	if err := verifyAttemptManifestsWithSource(runDir, manifest.RunID, replayed.Attempts, manifestSource); err != nil {
 		return err
 	}
 	if !replayed.FinishedAt.IsZero() {
@@ -153,7 +178,11 @@ func inferRunID(runDir string) string { return filepath.Base(filepath.Clean(runD
 // VerifyTerminalEvidence verifies the immutable manifest, snapshots, hash
 // chain, attempts, and terminal event for a run that must not be resumed.
 func VerifyTerminalEvidence(runDir, runID, targetDir string) (ReplayedRun, error) {
-	err := VerifyResumeEvidence(runDir)
+	return VerifyTerminalEvidenceWithSources(runDir, runID, targetDir, nil, nil)
+}
+
+func VerifyTerminalEvidenceWithSources(runDir, runID, targetDir string, manifestSource AttemptManifestSource, eventSource EventLog) (ReplayedRun, error) {
+	err := VerifyResumeEvidenceWithSources(runDir, manifestSource, eventSource)
 	if err != nil {
 		var resumeErr *ResumeEvidenceError
 		if !errors.As(err, &resumeErr) || resumeErr.Reason != ReasonAlreadyTerminal {
@@ -173,7 +202,7 @@ func VerifyTerminalEvidence(runDir, runID, targetDir string) (ReplayedRun, error
 	if manifest.SchemaVersion != SchemaVersion || manifest.RunID != runID || manifest.TargetDir != targetDir {
 		return ReplayedRun{}, errors.New("terminal evidence manifest identity mismatch")
 	}
-	replayed, err := ReplayEventLog(filepath.Join(runDir, "events.jsonl"), runID)
+	replayed, err := ReplayEventLogWithEventSources(filepath.Join(runDir, "events.jsonl"), runID, eventSource, manifestSource)
 	if err != nil {
 		return ReplayedRun{}, err
 	}

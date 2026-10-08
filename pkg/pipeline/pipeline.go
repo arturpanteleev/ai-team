@@ -124,6 +124,7 @@ type Pipeline struct {
 	candidateEvidence     CandidateEvidenceStore
 	attemptManifestSource evidence.AttemptManifestSource
 	attemptManifestWriter AttemptManifestWriter
+	eventLogSource        evidence.EventLog
 	reportsDir            string
 }
 
@@ -175,6 +176,12 @@ func WithLifecycleStore(store lifecycle.StorePort) Option {
 // worker from controller-owned state.
 func WithEvidenceStoreFactory(factory EvidenceStoreFactory) Option {
 	return func(p *Pipeline) { p.evidence = factory }
+}
+
+// WithEventLogSource injects the scoped authority used for lifecycle journal
+// reads and appends. Local CLI pipelines keep the run-local file implementation.
+func WithEventLogSource(source evidence.EventLog) Option {
+	return func(p *Pipeline) { p.eventLogSource = source }
 }
 
 // WithBusinessBriefStore routes durable business-brief persistence through a
@@ -558,21 +565,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		// OPS-3: fail-closed проверка применимой evidence chain/snapshots перед
 		// продолжением. Если цепочка/снимки повреждены — отклоняем resume и явно
 		// фиксируем причину в evidence (resume_blocked), пока лог аппендабелен.
-		verifyErr := evidence.VerifyResumeEvidenceWithAttemptManifestSource(runEvidenceDir, p.attemptManifestSource)
+		verifyErr := evidence.VerifyResumeEvidenceWithSources(runEvidenceDir, p.attemptManifestSource, p.eventLogSource)
 		if verifyErr != nil {
 			recErr := &evidence.ResumeEvidenceError{}
 			if errors.As(verifyErr, &recErr) && recErr.Reason != evidence.ReasonEventChain &&
 				recErr.Reason != evidence.ReasonManifestIdentity &&
 				recErr.Reason != evidence.ReasonAlreadyTerminal {
-				_ = evidence.AppendBlockedEvent(runEvidenceDir, runID, recErr.Reason, recErr.Detail)
+				_ = evidence.AppendBlockedEventWithSources(runEvidenceDir, runID, recErr.Reason, recErr.Detail, p.eventLogSource, p.attemptManifestSource)
 			}
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", verifyErr)
 		}
-		if sourceFactory, ok := p.evidence.(attemptManifestResumeFactory); ok {
-			evidenceStore, manifest, replayedRun, err = sourceFactory.ResumeWithAttemptManifestSource(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID, p.attemptManifestSource)
-		} else {
-			evidenceStore, manifest, replayedRun, err = p.evidence.Resume(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
-		}
+		evidenceStore, manifest, replayedRun, err = p.resumeEvidence(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), runID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
 		}
@@ -696,7 +699,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if marshalErr != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("provenance manifest: %w", marshalErr)
 		}
-		evidenceStore, err = p.evidence.Start(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
+		evidenceStore, err = p.startEvidence(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
 			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
 			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot, Provenance: provenanceData,
 		})
@@ -1034,7 +1037,7 @@ func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task strin
 		return err
 	}
 	runRoot := filepath.Join(targetDir, ".ai-team", "runs")
-	evidenceStore, manifest, replayed, err := p.evidence.Resume(runRoot, runID)
+	evidenceStore, manifest, replayed, err := p.resumeEvidence(runRoot, runID)
 	if err != nil {
 		return fmt.Errorf("recover initial lifecycle: verify evidence: %w", err)
 	}
@@ -1042,7 +1045,7 @@ func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task strin
 		len(replayed.Attempts) != 0 || !replayed.FinishedAt.IsZero() {
 		return errors.New("recover initial lifecycle: evidence identity/state mismatch")
 	}
-	events, err := evidence.VerifyEventLog(filepath.Join(runRoot, runID, "events.jsonl"), runID)
+	events, err := evidence.VerifyEventLogWithSource(filepath.Join(runRoot, runID, "events.jsonl"), runID, p.eventLogSource)
 	if err != nil || (len(events) != 0 && (len(events) != 1 || events[0].Type != "run_started")) {
 		return errors.New("recover initial lifecycle: evidence is not the initial run_started checkpoint")
 	}

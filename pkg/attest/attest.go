@@ -139,6 +139,7 @@ type Options struct {
 	Outcome          string
 	CandidateSubject []Subject // пусто — subject не резолвится
 	Approvals        []approval.PendingApproval
+	EventLogSource   evidence.EventLog
 }
 
 // Build читает run evidence из runDir (run.json, workflow/config, events.jsonl,
@@ -159,7 +160,12 @@ func Build(opt Options) (*Statement, error) {
 		return nil, fmt.Errorf("attestation: run manifest identity mismatch")
 	}
 
-	eventLog, err := os.ReadFile(filepath.Join(opt.RunDir, "events.jsonl"))
+	var eventLog []byte
+	if opt.EventLogSource != nil {
+		eventLog, err = opt.EventLogSource.ReadBytes(opt.RunID)
+	} else {
+		eventLog, err = evidence.ReadEventLogBytesForRunDir(opt.RunDir, opt.RunID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("attestation events: %w", err)
 	}

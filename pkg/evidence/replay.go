@@ -307,7 +307,7 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			statePath, pathErr := eventString(event.Data, "state_path", true)
 			validStatePath := ValidDeliveryStatePath(runDir, statePath)
 			if deliveryTargetDir != "" {
-				validStatePath = ValidDeliveryStatePathForTarget(deliveryTargetDir, statePath)
+				validStatePath = ValidDeliveryStatePathForTargetAndRun(deliveryTargetDir, runID, statePath)
 			}
 			if hashErr != nil || pathErr != nil || !validSHA256(planHash) || event.AttemptID == "" || !validStatePath {
 				return ReplayedRun{}, errors.New("delivery_deferred содержит недопустимую identity")

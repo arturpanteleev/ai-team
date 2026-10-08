@@ -2922,7 +2922,7 @@ func TestGitCandidateCannotBeDowngradedByHidingGitMarkerAfterControllerSetup(t *
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	engine := &ProcessEngine{target: target}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
 	allowed, err := engine.prepareCandidateAbsence(context.Background(), Job{Operation: OperationStart, RunID: "git-target-forged-absence"}, nil)
 	if err != nil || allowed {
 		t.Fatalf("Git target absence admission: allowed=%v err=%v", allowed, err)
@@ -2945,6 +2945,29 @@ func TestGitCandidateCannotBeDowngradedByHidingGitMarkerAfterControllerSetup(t *
 	}
 	if _, err := server.dispatch("candidate.absence.create", workerAPICall{A: job.RunID}); err == nil {
 		t.Fatal("worker forged candidate absence through create endpoint")
+	}
+}
+
+func TestUnisolatedGitWorkerDoesNotClaimControllerAdmissionProof(t *testing.T) {
+	target := t.TempDir()
+	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Operation: OperationStart, RunID: "unisolated-git-admission", TargetDir: target}
+	allowed, err := (&ProcessEngine{target: target}).prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || allowed {
+		t.Fatalf("unisolated Git Start: allowed=%v err=%v", allowed, err)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadGitAdmission(target, job.RunID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unisolated worker run must not publish controller admission proof: %v", err)
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(job.RunID); err != nil || reserved {
+		t.Fatalf("unisolated run must retain worker-visible event-log ownership: reserved=%v err=%v", reserved, err)
 	}
 }
 

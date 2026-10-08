@@ -108,19 +108,46 @@ func ValidDeliveryStatePath(runDir, value string) bool {
 		return false
 	}
 	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
-	return ValidDeliveryStatePathForTarget(targetDir, value)
+	runID := filepath.Base(filepath.Clean(runDir))
+	if ValidDeliveryStatePathForTargetAndRun(targetDir, runID, value) {
+		return true
+	}
+	// The local run pipeline canonicalizes its target before it creates a Git
+	// candidate, so on systems such as macOS the event path can use the real
+	// target spelling while runDir came from a symlink spelling. Resolve only
+	// the run's known target root; never follow or open the event-supplied path.
+	canonicalTarget, err := filepath.EvalSymlinks(targetDir)
+	return err == nil && canonicalTarget != targetDir &&
+		ValidDeliveryStatePathForTargetAndRun(canonicalTarget, runID, value)
 }
 
-// ValidDeliveryStatePathForTarget checks a delivery state path against the
-// run manifest's recorded target without opening or resolving that target.
-// This is suitable for portable evidence replay: it proves the path's lexical
-// identity while never reading an external path from the bundle.
+// ValidDeliveryStatePathForTarget checks the ordinary target delivery
+// directory without opening or resolving the path.
 func ValidDeliveryStatePathForTarget(targetDir, value string) bool {
+	return validDeliveryStatePathForTarget(targetDir, "", value)
+}
+
+// ValidDeliveryStatePathForTargetAndRun also accepts the exact candidate
+// worktree delivery directory assigned to runID. It validates path identity
+// lexically and never opens or resolves the event-supplied path.
+func ValidDeliveryStatePathForTargetAndRun(targetDir, runID, value string) bool {
+	if err := ValidateRunID(runID); err != nil {
+		return false
+	}
+	return validDeliveryStatePathForTarget(targetDir, runID, value)
+}
+
+func validDeliveryStatePathForTarget(targetDir, runID, value string) bool {
 	if targetDir == "" || value == "" || !filepath.IsAbs(targetDir) || !filepath.IsAbs(value) ||
 		filepath.Clean(targetDir) != targetDir || filepath.Clean(value) != value {
 		return false
 	}
-	deliveryRoot := filepath.Join(targetDir, ".ai-team", "delivery")
-	relative, err := filepath.Rel(deliveryRoot, filepath.Clean(value))
-	return err == nil && filepath.IsLocal(relative) && relative != "." && filepath.Ext(relative) == ".json"
+	withinDeliveryRoot := func(root string) bool {
+		relative, err := filepath.Rel(root, value)
+		return err == nil && filepath.IsLocal(relative) && relative != "." && filepath.Dir(relative) == "." && filepath.Ext(relative) == ".json"
+	}
+	if withinDeliveryRoot(filepath.Join(targetDir, ".ai-team", "delivery")) {
+		return true
+	}
+	return runID != "" && withinDeliveryRoot(filepath.Join(targetDir, ".ai-team", "worktrees", runID, ".ai-team", "delivery"))
 }

@@ -251,6 +251,25 @@ func TestVerifyBundleReplaysDeliveryDeferredAgainstRecordedTarget(t *testing.T) 
 	}
 }
 
+func TestVerifyBundleReplaysDeliveryDeferredFromSameRunCandidateWorktree(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(target, ".ai-team", "worktrees", testRunID, ".ai-team", "delivery", testFeature+".json")
+	runDir := buildTerminalRunAtForTarget(t, filepath.Join(target, ".ai-team", "runs"), now(), target, statePath)
+	bundleDir := filepath.Join(t.TempDir(), "moved-candidate-bundle")
+	if _, err := Build(runDir, bundleDir); err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	if err := VerifyBundle(bundleDir); err != nil {
+		t.Fatalf("VerifyBundle should validate the same run's candidate-worktree delivery path lexically without opening it: %v", err)
+	}
+	if _, err := os.Lstat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("fixture must leave the event-referenced path absent to prove replay does not open it, err=%v", err)
+	}
+}
+
 func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	target := t.TempDir()
 	attemptID := testRunID + "-001-coder"

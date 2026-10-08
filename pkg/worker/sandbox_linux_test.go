@@ -43,6 +43,11 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal("Linux CI must install bubblewrap before running worker sandbox tests:", err)
 	}
 	target := t.TempDir()
+	// Match cloud Start ordering: reserve controller event authority before
+	// publishing any run-scoped controller markers or spawning the worker.
+	if err := (evidence.ControllerEventStore{TargetDir: target}).Reserve("sandbox-probe"); err != nil {
+		t.Fatal(err)
+	}
 	controlDir := filepath.Join(target, ".ai-team", "controller")
 	if err := os.MkdirAll(controlDir, 0700); err != nil {
 		t.Fatal(err)
@@ -1040,8 +1045,14 @@ func TestBubblewrapRejectsRunOverlappingEnvironmentAndPartialOpenAIEgress(t *tes
 		}
 	})
 	t.Run("OpenAI socket requires capability", func(t *testing.T) {
-		env := append(append([]string(nil), baseEnv...), openAIEgressSocketEnv+"=/tmp/openai-egress.sock")
-		err := build(env)
+		socket := filepath.Join(t.TempDir(), "openai-egress.sock")
+		listener, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatalf("create valid OpenAI proxy socket fixture: %v", err)
+		}
+		defer func() { _ = listener.Close() }()
+		env := append(append([]string(nil), baseEnv...), openAIEgressSocketEnv+"="+socket)
+		err = build(env)
 		if err == nil || !strings.Contains(err.Error(), "socket and capability must be configured together") {
 			t.Fatalf("partial OpenAI egress configuration must fail closed, got %v", err)
 		}
@@ -1379,6 +1390,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		writeAfterProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-brief-ancestor-probe.txt"), []byte("workspace-remains-available"), 0600)
 		workspaceAfterBriefAncestorProbe = visibleErr == nil && string(visibleAfterProbe) == "target-visible" && writeAfterProbeErr == nil
 		var eventsAfterProbe []evidence.Event
+		workspaceAfterEventReplacementProbe := true
 		workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
 		if eventLogAPIReadAppendSucceeded {
 			eventsAfterProbe, _ = eventLog.Read(job.RunID)
@@ -1389,11 +1401,11 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 			workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
 			visibleAfterEventReplacement, visibleReplacementErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 			writeAfterEventReplacementErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-event-replacement.txt"), []byte("workspace-remains-available"), 0600)
-			workspaceAfterEventProbe = visibleReplacementErr == nil && string(visibleAfterEventReplacement) == "target-visible" && writeAfterEventReplacementErr == nil
+			workspaceAfterEventReplacementProbe = visibleReplacementErr == nil && string(visibleAfterEventReplacement) == "target-visible" && writeAfterEventReplacementErr == nil
 		}
 		visibleAfterEventProbe, visibleEventErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 		writeAfterEventProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-event-probe.txt"), []byte("workspace-remains-available"), 0600)
-		workspaceAfterEventProbe = visibleEventErr == nil && string(visibleAfterEventProbe) == "target-visible" && writeAfterEventProbeErr == nil
+		workspaceAfterEventProbe = workspaceAfterEventReplacementProbe && visibleEventErr == nil && string(visibleAfterEventProbe) == "target-visible" && writeAfterEventProbeErr == nil
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)

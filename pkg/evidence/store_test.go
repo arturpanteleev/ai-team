@@ -103,10 +103,28 @@ func TestDeliveryDeferredAdmissionRejectsForeignOrTraversingStatePath(t *testing
 	if !ValidDeliveryStatePath(store.RunDir(), validPath) {
 		t.Fatalf("expected prepared delivery path to match target: %q", validPath)
 	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := filepath.Join(canonicalTarget, ".ai-team", "worktrees", runID, ".ai-team", "delivery", "prepared.json")
+	if !ValidDeliveryStatePath(store.RunDir(), candidatePath) {
+		t.Fatalf("expected same-run candidate delivery path to match target: %q", candidatePath)
+	}
+	alias := filepath.Join(t.TempDir(), "target-alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasedRunDir := filepath.Join(alias, ".ai-team", "runs", runID)
+	if !ValidDeliveryStatePath(aliasedRunDir, candidatePath) {
+		t.Fatalf("expected local validation to tolerate target symlink spelling without resolving the event path: run=%q state=%q", aliasedRunDir, candidatePath)
+	}
 	invalidPaths := []string{
 		filepath.Join(filepath.Dir(target), "foreign", "prepared.json"),
+		filepath.Join(target, ".ai-team", "worktrees", "another-run", ".ai-team", "delivery", "prepared.json"),
 		target + "/.ai-team/delivery/../runs/escaped.json",
 		target + "/.ai-team/delivery/../delivery/prepared.json",
+		target + "/.ai-team/worktrees/" + runID + "/.ai-team/delivery/../events.jsonl",
 	}
 	for _, statePath := range invalidPaths {
 		t.Run(statePath, func(t *testing.T) {

@@ -364,9 +364,9 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	return result, processErr
 }
 
-// prepareCandidateAbsence records non-Git eligibility before an untrusted
-// worker starts. Resume can use only this controller-created proof; a worker
-// cannot create or repair the marker through the API.
+// prepareCandidateAbsence records candidate admission before an isolated
+// worker starts. Resume can use only this controller-created proof; an
+// unisolated compatibility worker must not be classified as controller-owned.
 func (e *ProcessEngine) prepareCandidateAbsence(ctx context.Context, job Job, store lifecycle.StorePort) (bool, error) {
 	metadataStore := candidate.FileMetadataStore{}
 	absenceStore := candidate.AbsenceMarkerStore(metadataStore)
@@ -377,17 +377,25 @@ func (e *ProcessEngine) prepareCandidateAbsence(ctx context.Context, job Job, st
 			return false, err
 		}
 		if hasGit {
-			// Persist positive Git admission before returning. A stale or
-			// pre-seeded absence marker must never authorize a later Recover if
-			// the repository marker disappears after this Start.
-			if err := metadataStore.MarkGitAdmission(e.target, job.RunID); err != nil {
-				return false, err
+			if e.bubblewrap {
+				// Persist positive Git admission before returning. A stale or
+				// pre-seeded absence marker must never authorize a later Recover if
+				// the repository marker disappears after this isolated Start.
+				if err := metadataStore.MarkGitAdmission(e.target, job.RunID); err != nil {
+					return false, err
+				}
 			}
 			_, markerErr := os.Lstat(filepath.Join(e.target, ".ai-team", "state", "candidates", job.RunID+".absent.json"))
 			if markerErr == nil {
 				return false, errors.New("Git Start conflicts with a pre-existing candidate absence marker")
 			} else if !errors.Is(markerErr, os.ErrNotExist) {
 				return false, fmt.Errorf("check candidate absence marker during Git admission: %w", markerErr)
+			}
+			if !e.bubblewrap {
+				// Without namespace isolation a worker can directly rewrite the
+				// target-side proof, so do not classify this local compatibility
+				// run as a controller-admitted cloud run.
+				return false, nil
 			}
 			return false, nil
 		}

@@ -274,10 +274,6 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		if taskErr != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API task: %w", taskErr)
 		}
-		absenceAllowed, absenceErr := e.prepareCandidateAbsence(ctx, job, apiLifecycle)
-		if absenceErr != nil {
-			return pipeline.RunResult{}, fmt.Errorf("worker candidate admission: %w", absenceErr)
-		}
 		recorder := e.apiRecorderFactory()
 		tempDir := ""
 		controlSocketDir := ""
@@ -317,12 +313,20 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			return pipeline.RunResult{}, fmt.Errorf("worker controller API: %w", err)
 		}
 		api.lifecycle = apiLifecycle
-		api.candidateAbsenceAllowed = absenceAllowed
 		defer func() {
 			if api != nil {
 				api.close()
 			}
 		}()
+		// Reserve the controller event authority before writing an independent
+		// candidate-admission proof. The event store uses such proofs to detect
+		// partial cloud-run state and must fail closed if they exist without the
+		// event roots.
+		absenceAllowed, absenceErr := e.prepareCandidateAbsence(ctx, job, apiLifecycle)
+		if absenceErr != nil {
+			return pipeline.RunResult{}, fmt.Errorf("worker candidate admission: %w", absenceErr)
+		}
+		api.candidateAbsenceAllowed = absenceAllowed
 		if e.bubblewrap {
 			openAIEgressSocket = filepath.Join(controlSocketDir, "openai-egress.sock")
 			dial := e.openAIEgressDial

@@ -39,6 +39,108 @@ const (
 	sandboxBriefAncestorProbeAnswer     = "to its pinned directory"
 )
 
+func TestProcessEngineStartReservesEventAuthorityBeforeCandidateAdmission(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("Linux candidate-admission ordering test requires bubblewrap")
+	}
+	for _, tc := range []struct {
+		name string
+		git  bool
+	}{{name: "non-git"}, {name: "git", git: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := makeBubblewrapTarget(t)
+			if tc.git {
+				if output, err := exec.Command("git", "init", target).CombinedOutput(); err != nil {
+					t.Fatalf("initialize Git target: %v\n%s", err, output)
+				}
+			}
+			runID := "candidate-admission-order-" + tc.name
+			engine, err := NewProcessEngine(
+				[]string{os.Args[0]}, target, filepath.Join(target, "missing-db-parent", "controller.db"),
+				WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.bubblewrap = true
+			job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+			if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "controller database path") {
+				t.Fatalf("expected bubblewrap builder to stop before worker spawn after admission setup, got %v", err)
+			}
+			if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || !reserved {
+				t.Fatalf("event authority must be reserved before candidate admission: reserved=%t err=%v", reserved, err)
+			}
+			if tc.git {
+				if err := (candidate.FileMetadataStore{}).ReadGitAdmission(target, runID); err != nil {
+					t.Fatalf("Git candidate admission proof was not written after event reservation: %v", err)
+				}
+			} else if err := (candidate.FileMetadataStore{}).ReadAbsent(target, runID); err != nil {
+				t.Fatalf("non-Git candidate admission proof was not written after event reservation: %v", err)
+			}
+		})
+	}
+}
+
+func TestProcessEngineStartRejectsConflictingCandidateAdmissionAfterReservation(t *testing.T) {
+	target := makeBubblewrapTarget(t)
+	const runID = "candidate-admission-conflict"
+	events := evidence.ControllerEventStore{TargetDir: target}
+	if err := events.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := (candidate.FileMetadataStore{}).MarkAbsent(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0]}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.bubblewrap = true
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+	if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "worker candidate admission: non-Git Start refuses a pre-existing candidate absence marker") {
+		t.Fatalf("conflicting candidate admission must fail after event authority is established: %v", err)
+	}
+	if reserved, err := events.IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("event authority reservation was lost after rejected admission: reserved=%t err=%v", reserved, err)
+	}
+}
+
+func TestProcessEngineAPISocketFailureDoesNotLeaveCandidateAdmissionProof(t *testing.T) {
+	target := makeBubblewrapTarget(t)
+	const runID = "candidate-admission-socket-failure"
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0]}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.bubblewrap = true
+	engine.controlSocketDirCreator = func(target, _, _ string) (string, error) {
+		dir := filepath.Join(target, ".ai-team", "controller", "occupied-socket")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "controller-api.sock"), []byte("occupied"), 0600); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+	if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "worker controller API") || !strings.Contains(err.Error(), "listen on worker controller API socket") {
+		t.Fatalf("expected controller API socket bind failure, got %v", err)
+	}
+	if admitted, err := (candidate.FileMetadataStore{}).HasControllerAdmissionProof(target, runID); err != nil || admitted {
+		t.Fatalf("failed controller setup must not leave candidate admission proof: admitted=%t err=%v", admitted, err)
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || reserved {
+		t.Fatalf("event authority should remain absent when API setup fails: reserved=%t err=%v", reserved, err)
+	}
+}
+
 func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Fatal("Linux CI must install bubblewrap before running worker sandbox tests:", err)

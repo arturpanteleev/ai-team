@@ -85,6 +85,71 @@ func TestPlanRejectsCredentialBearingOrQueryRemoteURLsWithoutEchoingSecrets(t *t
 	}
 }
 
+func TestPlanAcceptsOnlySupportedRemoteURLFormats(t *testing.T) {
+	for name, remoteURL := range map[string]string{
+		"https":             "https://github.com/org/repo.git",
+		"http":              "http://git.example.test/org/repo.git",
+		"ssh with user":     "ssh://git@github.com/org/repo.git",
+		"ssh without user":  "ssh://git.example.test/org/repo.git",
+		"scp":               "git@github.com:org/repo.git",
+		"scp other user":    "ec2-user@host.example.test:org/repo.git",
+		"scp standard user": "user@example.test:org/repo.git",
+		"scp host only":     "host.example.test:org/repo.git",
+		"local bare path":   filepath.Join(t.TempDir(), "remote.git"),
+	} {
+		t.Run("accept_"+name, func(t *testing.T) {
+			if err := validateRemoteURL(remoteURL); err != nil {
+				t.Fatalf("supported remote URL %q rejected: %v", remoteURL, err)
+			}
+		})
+	}
+
+	for name, remoteURL := range map[string]string{
+		"ext helper":             "ext::touch /tmp/marker",
+		"other remote helper":    "hg::https://example.test/repo",
+		"malformed scp helper":   "git@example.test::touch /tmp/marker",
+		"file protocol":          "file:///tmp/repo.git",
+		"unsupported URI scheme": "git+ssh://git@example.test/org/repo.git",
+		"SSH password":           "ssh://git:secret@example.test/org/repo.git",
+	} {
+		t.Run("reject_"+name, func(t *testing.T) {
+			if err := validateRemoteURL(remoteURL); err == nil {
+				t.Fatalf("unsupported remote URL %q must be rejected", remoteURL)
+			}
+		})
+	}
+}
+
+func TestGitCommandArgsBlockExtHelperEvenWhenRepositoryAllowsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell marker helper is Unix-only")
+	}
+	repo := t.TempDir()
+	git(t, repo, "init", "-b", "main")
+	git(t, repo, "config", "protocol.ext.allow", "always")
+
+	helperDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ext-helper-ran")
+	helper := "#!/bin/sh\nprintf invoked > \"$AI_TEAM_EXT_HELPER_MARKER\"\n"
+	writeFile(t, filepath.Join(helperDir, "touch"), helper)
+	if err := os.Chmod(filepath.Join(helperDir, "touch"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AI_TEAM_EXT_HELPER_MARKER", marker)
+
+	result := (ExecRunner{}).Run(context.Background(), repo, "git", gitCommandArgs("ls-remote", "ext::touch")...)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("configured external transport helper ran: marker stat error=%v", err)
+	}
+	if result.Status == StepPassed {
+		t.Fatal("ls-remote using ext transport unexpectedly succeeded")
+	}
+	if !strings.Contains(result.Stderr, "transport 'ext' not allowed") {
+		t.Fatalf("Git should report that ext transport is blocked, got status=%s stderr=%q", result.Status, result.Stderr)
+	}
+}
+
 // Запрет control path — тот инвариант схемы плана, нарушение которого сразу
 // означает исполнение произвольного кода: файл, попавший в ".git/hooks/",
 // запускается у каждого, кто сделает pull, а ".ai-team/" — состояние прогона,

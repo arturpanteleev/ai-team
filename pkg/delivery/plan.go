@@ -25,20 +25,23 @@ const (
 )
 
 var (
-	remotePattern  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	branchPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
-	gitHashPattern = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
-	sha256Pattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	runIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	remotePattern    = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	scpRemotePattern = regexp.MustCompile(`^([A-Za-z0-9._-]+@)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[^:\s]+$`)
+	branchPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	gitHashPattern   = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+	sha256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	runIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
-// gitCommandArgs disables repository-configured hooks, fsmonitor executables
-// and commit signing for every controller-owned Git invocation.
+// gitCommandArgs disables repository-configured hooks, fsmonitor executables,
+// commit signing, and the external-helper transport for every controller-owned
+// Git invocation. The explicit protocol setting overrides repository config.
 func gitCommandArgs(args ...string) []string {
 	configured := []string{
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=",
 		"-c", "commit.gpgsign=false",
+		"-c", "protocol.ext.allow=never",
 	}
 	return append(configured, args...)
 }
@@ -221,19 +224,31 @@ func validateRemoteURL(remoteURL string) error {
 		return fmt.Errorf("delivery plan: remote_url с query или fragment запрещён")
 	}
 	if !strings.Contains(remoteURL, "://") {
-		return nil // SCP-style Git remotes (git@example.org:repo.git) are valid.
+		if filepath.IsAbs(remoteURL) {
+			return nil // Local bare repositories are useful delivery destinations too.
+		}
+		if !scpRemotePattern.MatchString(remoteURL) {
+			return fmt.Errorf("delivery plan: remote_url должен быть локальным путём или поддерживаемым SCP-style адресом [user@]host:path")
+		}
+		return nil
 	}
 	parsed, err := url.Parse(remoteURL)
-	if err != nil {
+	if err != nil || parsed.Host == "" || parsed.Opaque != "" {
 		return fmt.Errorf("delivery plan: remote_url имеет некорректный формат")
 	}
-	if (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) && parsed.User != nil {
-		return fmt.Errorf("delivery plan: HTTP remote_url с embedded credentials запрещён; настройте Git credential helper")
-	}
-	if parsed.User != nil {
-		if _, hasPassword := parsed.User.Password(); hasPassword {
-			return fmt.Errorf("delivery plan: remote_url с embedded credentials запрещён; настройте Git credential helper")
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		if parsed.User != nil {
+			return fmt.Errorf("delivery plan: HTTP remote_url с embedded credentials запрещён; настройте Git credential helper")
 		}
+	case "ssh":
+		if parsed.User != nil {
+			if _, hasPassword := parsed.User.Password(); hasPassword {
+				return fmt.Errorf("delivery plan: SSH remote_url с embedded password запрещён; настройте SSH key или agent")
+			}
+		}
+	default:
+		return fmt.Errorf("delivery plan: remote_url protocol не поддерживается")
 	}
 	return nil
 }

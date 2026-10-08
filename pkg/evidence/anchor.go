@@ -43,6 +43,7 @@ type Anchor struct {
 	ManifestsDigest      string    `json:"manifests_digest"`
 	RunManifestSHA256    string    `json:"run_manifest_sha256"`
 	SupplementalSHA256   string    `json:"supplemental_sha256"`
+	AttestationSHA256    string    `json:"attestation_sha256,omitempty"`
 	DeliveryRecordSHA256 string    `json:"delivery_record_sha256,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
 }
@@ -108,6 +109,10 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 		}
 		deliverySHA256 = sha256Bytes(append(deliveryBytes, '\n'))
 	}
+	attestationSHA256, _, err := terminalAttestationDigest(s.RunDir())
+	if err != nil {
+		return fmt.Errorf("read terminal attestation for anchor: %w", err)
+	}
 	anchor := Anchor{
 		SchemaVersion:        AnchorSchemaVersion,
 		RunID:                s.runID,
@@ -117,6 +122,7 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 		ManifestsDigest:      digest,
 		RunManifestSHA256:    runManifestSHA256,
 		SupplementalSHA256:   supplementalSHA256,
+		AttestationSHA256:    attestationSHA256,
 		DeliveryRecordSHA256: deliverySHA256,
 		CreatedAt:            time.Now().UTC(),
 	}
@@ -175,6 +181,54 @@ func ResealTerminalEvidence(runDir string, eventSource EventLog) error {
 	}
 	store := &Store{root: filepath.Dir(runDir), runID: manifest.RunID, eventLog: eventSource}
 	return store.SealTerminalEvidence()
+}
+
+// terminalAttestationDigest follows the same controller-first authority as
+// export and delivery. The canonical JSON value binds every statement claim,
+// including claims not otherwise derivable from run evidence.
+func terminalAttestationDigest(runDir string) (string, bool, error) {
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
+	controllerPath := filepath.Join(targetDir, ".ai-team", "state", "attestation", filepath.Base(filepath.Clean(runDir))+".json")
+	data, err := safeio.ReadRegularFile(controllerPath, 1<<20)
+	if err == nil {
+		digest, digestErr := AttestationDigest(data)
+		return digest, true, digestErr
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	data, err = safeio.ReadRegularFile(filepath.Join(runDir, "attestation.json"), 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	digest, err := AttestationDigest(data)
+	return digest, true, err
+}
+
+// AttestationDigest hashes the canonical JSON value so equivalent whitespace
+// and key ordering do not change the binding while every claim remains bound.
+func AttestationDigest(data []byte) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return "", err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", errors.New("attestation contains trailing JSON")
+		}
+		return "", err
+	}
+	canonical, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return sha256Bytes(canonical), nil
 }
 
 func VerifyAnchorWithEventSource(runDir string, eventSource EventLog) error {
@@ -375,5 +429,65 @@ func (s *Store) SealTerminalEvidence() error {
 	if len(events) == 0 || !isTerminalEventType(events[len(events)-1].Type) {
 		return errors.New("terminal evidence seal requires a terminal event")
 	}
+	anchorPath := filepath.Join(s.RunDir(), anchorFileName)
+	if _, statErr := os.Lstat(anchorPath); statErr == nil {
+		if err := s.verifyResealTransition(); err != nil {
+			return fmt.Errorf("terminal evidence reseal rejected: %w", err)
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
+		return errors.New("terminal evidence reseal requires the existing terminal anchor")
+	} else {
+		return fmt.Errorf("inspect existing terminal anchor: %w", statErr)
+	}
 	return s.writeAnchor(events[len(events)-1].Type, events)
+}
+
+// verifyResealTransition requires the old anchor to match all evidence that it
+// already bound. The only permitted changes are the first appearance of an
+// attestation and the first addition of a validated delivery record.
+func (s *Store) verifyResealTransition() error {
+	if err := VerifyAnchorWithSources(s.RunDir(), s.eventLog, nil); err != nil {
+		return err
+	}
+	anchorData, err := safeio.ReadRegularFile(filepath.Join(s.RunDir(), anchorFileName), maxAnchorFileSize)
+	if err != nil {
+		return err
+	}
+	var anchor Anchor
+	if err := json.Unmarshal(anchorData, &anchor); err != nil {
+		return fmt.Errorf("decode existing anchor: %w", err)
+	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(s.RunDir(), "run.json"), 1<<20)
+	if err != nil {
+		return err
+	}
+	var manifest RunManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return err
+	}
+	if anchor.AttestationSHA256 != "" {
+		attestationDigest, found, readErr := terminalAttestationDigest(s.RunDir())
+		if readErr != nil {
+			return fmt.Errorf("read existing attestation binding: %w", readErr)
+		}
+		if !found || attestationDigest != anchor.AttestationSHA256 {
+			return errors.New("existing attestation does not match terminal anchor")
+		}
+	}
+	record, found, err := delivery.ReadTerminalRecordForRun(manifest.TargetDir, s.RunDir(), s.runID)
+	if err != nil {
+		return fmt.Errorf("read existing delivery binding: %w", err)
+	}
+	var deliveryDigest string
+	if found {
+		data, marshalErr := json.MarshalIndent(record, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		deliveryDigest = sha256Bytes(append(data, '\n'))
+	}
+	if anchor.DeliveryRecordSHA256 != "" && anchor.DeliveryRecordSHA256 != deliveryDigest {
+		return errors.New("existing delivery record does not match terminal anchor")
+	}
+	return nil
 }

@@ -353,6 +353,17 @@ func safePath(rel string) error {
 	return nil
 }
 
+func canonicalRecordPath(rel string) error {
+	if rel == "" || strings.ContainsAny(rel, "\\\x00") {
+		return fmt.Errorf("path %q is not canonical slash-separated", rel)
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if clean != rel {
+		return fmt.Errorf("path %q is not canonical slash-separated", rel)
+	}
+	return safePath(rel)
+}
+
 // safeArtifactPath validates the portable, attempt-scoped path recorded in an
 // attempt manifest. Requiring canonical slash-separated paths prevents a
 // manifest from naming an artifact outside its input/output namespace or
@@ -522,12 +533,16 @@ func verifyAttemptArtifacts(root, runID string, records []Record, liveRun bool) 
 		}
 	}
 	verifiedArtifacts := make(map[string]bool)
+	manifestSource := evidence.AttemptManifestSource(evidence.FilesystemAttemptManifestSource())
+	if liveRun {
+		manifestSource = nil
+	}
 	for _, record := range records {
 		if record.Type != RecordAttemptManifest {
 			continue
 		}
 		attemptID := filepath.Base(filepath.Dir(filepath.FromSlash(record.Path)))
-		_, manifest, err := evidence.ReadAttemptManifest(nil, root, runID, attemptID)
+		_, manifest, err := evidence.ReadAttemptManifest(manifestSource, root, runID, attemptID)
 		if err != nil {
 			return fmt.Errorf("verify: attempt %s manifest: %w", attemptID, err)
 		}
@@ -733,13 +748,14 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 		if !validRecordType(record.Type) {
 			return fmt.Errorf("verify: record %q имеет не-whitelisted тип %q", record.Path, record.Type)
 		}
-		if err := safePath(filepath.FromSlash(record.Path)); err != nil {
+		if err := canonicalRecordPath(record.Path); err != nil {
 			return fmt.Errorf("verify: record %q небезопасен", record.Path)
 		}
-		if seen[record.Path] {
+		canonical := filepath.ToSlash(filepath.Clean(filepath.FromSlash(record.Path)))
+		if seen[canonical] {
 			return fmt.Errorf("verify: дублирующийся record %q", record.Path)
 		}
-		seen[record.Path] = true
+		seen[canonical] = true
 		path := filepath.Join(bundleDir, filepath.FromSlash(record.Path))
 		var sum string
 		if record.Type == RecordArtifact {
@@ -1048,6 +1064,21 @@ func verifyCore(root, runID string, records []Record, liveRun bool) error {
 	statement, err := attest.Parse(attestationData)
 	if err != nil {
 		return fmt.Errorf("verify: attestation parse: %w", err)
+	}
+	anchorData, err := safeio.ReadRegularFile(filepath.Join(root, "anchor.json"), maxAnchorSize)
+	if err != nil {
+		return fmt.Errorf("verify: attestation anchor: %w", err)
+	}
+	var anchor evidence.Anchor
+	if err := json.Unmarshal(anchorData, &anchor); err != nil {
+		return fmt.Errorf("verify: attestation anchor decode: %w", err)
+	}
+	attestationDigest, err := evidence.AttestationDigest(attestationData)
+	if err != nil {
+		return fmt.Errorf("verify: canonicalize attestation: %w", err)
+	}
+	if anchor.AttestationSHA256 == "" || attestationDigest != anchor.AttestationSHA256 {
+		return errors.New("verify: attestation bytes do not match the terminal anchor")
 	}
 	predicate := &statement.Predicate
 	if predicate.RunID != runID || predicate.Run.EvidenceSchemaVersion != evidence.SchemaVersion {

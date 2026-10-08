@@ -110,29 +110,8 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 	}); err != nil {
 		t.Fatalf("attempt_finished: %v", err)
 	}
-	if err := store.Append(evidence.Event{
-		Type: "run_finished", Timestamp: at(2 * time.Minute),
-		Data: map[string]any{"status": "completed", "stage_attempts": 1},
-	}); err != nil {
-		t.Fatalf("run_finished: %v", err)
-	}
-	statement, err := attest.Build(attest.Options{
-		RunDir: store.RunDir(), RunID: runID, FinishedAt: at(2 * time.Minute),
-		Outcome: "completed",
-		CandidateSubject: []attest.Subject{{
-			Name: "candidate", Digest: map[string]string{"sha256": "aa11bb2200000000000000000000000000000000000000000000000000000000"},
-		}},
-	})
-	if err != nil {
-		t.Fatalf("attestation build: %v", err)
-	}
-	data, err := attest.Serialize(statement)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
-		t.Fatal(err)
-	}
+	// The real finalizer publishes supplemental run files before appending the
+	// terminal event. Keep this fixture's first anchor faithful to that order.
 	if err := os.MkdirAll(filepath.Join(store.RunDir(), "logs"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +135,29 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(store.RunDir(), "containment.json"), receipt, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{
+		Type: "run_finished", Timestamp: at(2 * time.Minute),
+		Data: map[string]any{"status": "completed", "stage_attempts": 1},
+	}); err != nil {
+		t.Fatalf("run_finished: %v", err)
+	}
+	statement, err := attest.Build(attest.Options{
+		RunDir: store.RunDir(), RunID: runID, FinishedAt: at(2 * time.Minute),
+		Outcome: "completed",
+		CandidateSubject: []attest.Subject{{
+			Name: "candidate", Digest: map[string]string{"sha256": "aa11bb2200000000000000000000000000000000000000000000000000000000"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("attestation build: %v", err)
+	}
+	data, err := attest.Serialize(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SealTerminalEvidence(); err != nil {
@@ -435,6 +437,98 @@ func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	}
 }
 
+func TestVerifyBundleAttemptArtifactsStayBundleLocalAtRunShapedPath(t *testing.T) {
+	target := t.TempDir()
+	localRun := buildTerminalRunAt(t, filepath.Join(t.TempDir(), "runs"), now())
+	bundleDir := filepath.Join(target, ".ai-team", "runs", testRunID)
+	if _, err := Build(localRun, bundleDir); err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	attemptID := testRunID + "-001-coder"
+	controllerManifests := evidence.ControllerAttemptManifestStore{TargetDir: target}
+	if err := controllerManifests.Reserve(testRunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerManifests.Write(testRunID, evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: testRunID, AttemptID: attemptID,
+		Stage: "coder", StageIndex: 1, StartedAt: now().Add(time.Second), FinishedAt: now().Add(2 * time.Second),
+		Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed",
+	}); err != nil {
+		t.Fatalf("write reserved empty controller manifest: %v", err)
+	}
+
+	indexPath := filepath.Join(bundleDir, indexFileName)
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index Index
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatal(err)
+	}
+	var removedArtifact string
+	filtered := index.Records[:0]
+	for _, record := range index.Records {
+		if record.Type == RecordArtifact {
+			removedArtifact = record.Path
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	if removedArtifact == "" {
+		t.Fatal("fixture did not contain an attempt artifact")
+	}
+	index.Records = filtered
+	if err := os.RemoveAll(filepath.Join(bundleDir, filepath.FromSlash(removedArtifact))); err != nil {
+		t.Fatal(err)
+	}
+	indexData, err = indexBytes(&index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(indexPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, indexData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted a bundle after its manifest-referenced artifact was removed")
+	}
+}
+
+func TestVerifyBundleRejectsAliasedRecordPaths(t *testing.T) {
+	base := t.TempDir()
+	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+	bundleDir := filepath.Join(base, "bundle")
+	if _, err := Build(runDir, bundleDir); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(bundleDir, indexFileName)
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	index.Records = append(index.Records, Record{Type: RecordRunManifest, Path: "./run.json", SHA256: index.Records[0].SHA256})
+	data, err = indexBytes(&index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(indexPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted a noncanonical alias path for run.json")
+	}
+}
+
 func TestBuildExportsControllerStoredAttestation(t *testing.T) {
 	base := t.TempDir()
 	runsRoot := filepath.Join(base, ".ai-team", "runs")
@@ -625,6 +719,101 @@ func TestVerifyEvidenceAndExportRejectTamperedDeliveryFields(t *testing.T) {
 	}
 }
 
+func TestResealRejectsTamperingSinceTerminalAnchor(t *testing.T) {
+	for _, mutation := range []string{"run.json", "supplemental", "removed-anchor"} {
+		t.Run(mutation, func(t *testing.T) {
+			base := t.TempDir()
+			runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
+			anchorPath := filepath.Join(runDir, "anchor.json")
+			oldAnchor, err := os.ReadFile(anchorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mutation == "run.json" {
+				path := filepath.Join(runDir, "run.json")
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, ' '), 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				path := filepath.Join(runDir, "logs", "attempt.log")
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("changed after terminal seal\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "removed-anchor" {
+					if err := os.Remove(anchorPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := delivery.WriteTerminalRecord(runDir, delivery.TerminalRecord{
+				SchemaVersion: delivery.TerminalRecordSchemaVersion,
+				RunID:         testRunID, Feature: testFeature, PlanHash: strings.Repeat("a", 64),
+				CommitSHA: strings.Repeat("b", 40), PerformedAt: now().Add(3 * time.Minute),
+			}); err != nil {
+				t.Fatalf("write post-terminal delivery record: %v", err)
+			}
+			if err := evidence.ResealTerminalEvidence(runDir, nil); err == nil {
+				t.Fatal("reseal accepted altered evidence")
+			}
+			newAnchor, err := os.ReadFile(anchorPath)
+			if mutation == "removed-anchor" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("failed reseal recreated a removed anchor: err=%v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(oldAnchor, newAnchor) {
+					t.Fatal("failed reseal replaced the previous anchor")
+				}
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("live verification accepted altered evidence with an unsealed delivery")
+			}
+			if _, err := Build(runDir, filepath.Join(base, "bundle")); err == nil {
+				t.Fatal("standalone delivery export accepted altered evidence")
+			}
+		})
+	}
+}
+
+func TestAttestationClaimsAreBoundByTerminalAnchor(t *testing.T) {
+	for _, field := range []string{"outcome", "timestamps", "subject"} {
+		t.Run(field, func(t *testing.T) {
+			liveDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			mutateAttestation(t, filepath.Join(liveDir, "attestation.json"), field)
+			if err := VerifyEvidence(liveDir); err == nil {
+				t.Fatalf("VerifyEvidence accepted mutated attestation %s", field)
+			}
+
+			bundleBase := t.TempDir()
+			bundleRun := buildTerminalRun(t, filepath.Join(bundleBase, "runs"))
+			bundleDir := filepath.Join(bundleBase, "bundle")
+			if _, err := Build(bundleRun, bundleDir); err != nil {
+				t.Fatalf("build bundle: %v", err)
+			}
+			mutateAttestation(t, filepath.Join(bundleDir, "attestation.json"), field)
+			if err := refreshBundleRecordDigest(bundleDir, "attestation.json"); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyBundle(bundleDir); err == nil {
+				t.Fatalf("VerifyBundle accepted mutated attestation %s with refreshed index digest", field)
+			}
+		})
+	}
+}
+
 func TestVerifyBundleRejectsDeliveryTamperingWithRecomputedSelfDigest(t *testing.T) {
 	for _, field := range []string{"commit_sha", "pr_url"} {
 		t.Run(field, func(t *testing.T) {
@@ -772,6 +961,15 @@ func mutateAttestation(t *testing.T, path, field string) {
 	switch field {
 	case "controller_executable_sha256":
 		statement.Predicate.Run.ControllerExecutableSHA = strings.Repeat("d", 64)
+	case "outcome":
+		statement.Predicate.Outcome = "failed"
+	case "timestamps":
+		statement.Predicate.StartedAt = statement.Predicate.StartedAt.Add(time.Second)
+	case "subject":
+		if len(statement.Subject) == 0 {
+			t.Fatal("attestation fixture has no subject")
+		}
+		statement.Subject[0].Name = "other-candidate"
 	case "provenance":
 		if statement.Predicate.Provenance == nil || len(statement.Predicate.Provenance.Items) == 0 {
 			t.Fatal("attestation fixture has no provenance item")

@@ -445,6 +445,9 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record, p.eventLogSource); err != nil {
 			return fmt.Errorf("recover delivery record identity mismatch: %w", err)
 		}
+		if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
+			return fmt.Errorf("recover delivery anchor: %w", err)
+		}
 		return nil
 	}
 	if _, err := p.DeliverDeferred(ctx, runDir, manifest.Feature, targetDir); err != nil {

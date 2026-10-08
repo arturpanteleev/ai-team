@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/export"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 )
 
@@ -225,6 +227,95 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	err = New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir)
 	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
 		t.Fatalf("reconcile must reject valid record with a plan hash from another delivery, got: %v", err)
+	}
+}
+
+func TestReconcileTerminalDeliveryResealsExistingRecordAndRejectsTamperedAnchor(t *testing.T) {
+	dir := env(t)
+	approvedPlanHash := prepareDelivery(t, dir)
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(&gracefulDeliveryService{}))
+	if err := p.Run(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true, ApprovePlanHash: approvedPlanHash,
+	}); err == nil {
+		t.Fatal("failed post-terminal delivery should leave a recoverable obligation")
+	}
+	runDir := onlyRunDir(t, dir)
+	runID := filepath.Base(runDir)
+	anchorPath := filepath.Join(runDir, "anchor.json")
+	anchorData, err := os.ReadFile(anchorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before evidence.Anchor
+	if err := json.Unmarshal(anchorData, &before); err != nil {
+		t.Fatal(err)
+	}
+	if before.DeliveryRecordSHA256 != "" {
+		t.Fatal("fixture delivery record must be written after the initial terminal anchor")
+	}
+
+	attestationDigest, err := attestationDigestOfRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeIdentity, err := runtimeIdentityOfRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: runID, Feature: "feat",
+		PlanHash: approvedPlanHash, CommitSHA: strings.Repeat("b", 40),
+		AttestationSHA256: attestationDigest, RuntimeIdentity: runtimeIdentity,
+		Trailers: []string{
+			delivery.TrailerRunID + ": " + runID,
+			delivery.TrailerRuntime + ": " + runtimeIdentity,
+			delivery.TrailerAttestation + ": " + attestationDigest,
+		},
+		PerformedAt: time.Now().UTC(),
+	}
+	if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
+		t.Fatalf("simulate crash after terminal record write: %v", err)
+	}
+	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
+		t.Fatalf("recovery should reseal validated delivery: %v", err)
+	}
+	if err := export.VerifyEvidence(runDir); err != nil {
+		t.Fatalf("VerifyEvidence after delivery recovery: %v", err)
+	}
+	anchorData, err = os.ReadFile(anchorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after evidence.Anchor
+	if err := json.Unmarshal(anchorData, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.DeliveryRecordSHA256 == "" || after.DeliveryRecordSHA256 == before.DeliveryRecordSHA256 {
+		t.Fatalf("recovery did not bind the delivery record: before=%q after=%q", before.DeliveryRecordSHA256, after.DeliveryRecordSHA256)
+	}
+
+	// A second recovery must not bless new bytes merely because the delivery
+	// record is valid and already present.
+	tamperedSidecar := filepath.Join(runDir, "recovery-tamper.txt")
+	if err := os.WriteFile(tamperedSidecar, []byte("changed after seal\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sealedAnchor, err := os.ReadFile(anchorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err == nil {
+		t.Fatal("recovery accepted a changed supplemental file")
+	}
+	currentAnchor, err := os.ReadFile(anchorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sealedAnchor, currentAnchor) {
+		t.Fatal("failed recovery replaced the old terminal anchor")
 	}
 }
 

@@ -12,7 +12,7 @@
 
 | Что | Зачем | Проверка |
 |---|---|---|
-| Go 1.26.5 или новее | собрать `ai-team` и запускать проверки Go-проекта | `go version` |
+| Go 1.26.9 или новее | собрать `ai-team` и запускать проверки Go-проекта | `go version` |
 | Git | кандидат и delivery в `ai-team` работают через Git | `git --version` |
 | Bash | агенты-заглушки в учебнике — Bash-скрипт | `bash --version` |
 | [`gh`](https://cli.github.com), авторизованный | открывать pull request при настоящей delivery | `gh auth status` |

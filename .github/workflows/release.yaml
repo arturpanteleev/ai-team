@@ -31,6 +31,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: auto
+
 jobs:
   # Gate 1: the pushed tag must be a valid semantic version. Non-semver tags
   # (e.g. experimental v1beta or v-vnext) abort here, before CI or any build.

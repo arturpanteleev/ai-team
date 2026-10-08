@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# setup-go 1.26.6 is the bootstrap while its manifest catches up; go.mod
+# requires 1.26.9, and auto selects that patched toolchain for Go commands.
+env:
+  GOTOOLCHAIN: auto
+
 jobs:
   build:
     runs-on: ubuntu-latest

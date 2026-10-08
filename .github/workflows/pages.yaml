@@ -10,6 +10,9 @@ permissions:
   pages: write
   id-token: write
 
+env:
+  GOTOOLCHAIN: auto
+
 concurrency:
   group: pages
   cancel-in-progress: true

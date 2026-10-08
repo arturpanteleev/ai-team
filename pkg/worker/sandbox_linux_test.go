@@ -4,7 +4,9 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,12 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+)
+
+const (
+	sandboxBriefAncestorProbeApprovalID = "ancestor-redirection-probe"
+	sandboxBriefAncestorProbeQuestions  = "where does the controller write?"
+	sandboxBriefAncestorProbeAnswer     = "to its pinned directory"
 )
 
 func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) {
@@ -115,10 +123,36 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := (containment.ControllerReceiptStore{TargetDir: target}).Write("sandbox-probe", seedContainment); err != nil {
 		t.Fatal(err)
 	}
-	briefStore := pipeline.NewFileBriefStore(target)
+	briefStore := pipeline.NewControllerBriefStore(target)
+	t.Cleanup(func() { _ = briefStore.Close() })
+	if err := briefStore.PrepareRun("sandbox-probe"); err != nil {
+		t.Fatal(err)
+	}
 	brief, err := briefStore.CreateInitial("sandbox-probe", "test worker filesystem boundary")
 	if err != nil {
 		t.Fatal(err)
+	}
+	otherRunBriefStore := pipeline.NewControllerBriefStore(target)
+	t.Cleanup(func() { _ = otherRunBriefStore.Close() })
+	if err := otherRunBriefStore.PrepareRun("sandbox-other-run"); err != nil {
+		t.Fatal(err)
+	}
+	otherRunBrief, err := otherRunBriefStore.CreateInitial("sandbox-other-run", "other run sentinel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRunBriefPath := filepath.Join(target, ".ai-team", "state", "briefs", "sandbox-other-run", filepath.Base(otherRunBrief.Version.Path))
+	otherRunBriefBytes, err := os.ReadFile(otherRunBriefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalBriefRoot := filepath.Join(target, ".ai-team", "state", "briefs")
+	canonicalBriefRootBefore, err := os.Stat(canonicalBriefRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", "sandbox-probe")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh run evidence directory exists before worker start: err=%v", err)
 	}
 	candidateWorktree := filepath.Join(target, ".ai-team", "worktrees", "probe")
 	if err := os.MkdirAll(candidateWorktree, 0700); err != nil {
@@ -154,12 +188,13 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	t.Setenv("AI_TEAM_DB_PASSWORD", "probe-db-control-secret")
 	t.Setenv("AI_TEAM_HOSTING_WRITE_TOKEN", "probe-hosting-control-secret")
 	allowWorkerTestEnvironment(t, "AI_TEAM_BUBBLEWRAP_PROBE")
+	probeApproval := workerQuestionApproval("sandbox-probe", sandboxBriefAncestorProbeApprovalID, sandboxBriefAncestorProbeQuestions, sandboxBriefAncestorProbeAnswer, approval.StatusResolved)
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestBubblewrapWorkerProbeHelper$", "--", "--probe-db", dbPath,
 			"--probe-wal", dbPath + "-wal", "--probe-shm", dbPath + "-shm", "--probe-journal", dbPath + "-journal",
 			"--probe-host-tcp", hostListener.Addr().String(), "--probe-output", probePath},
 		target, dbPath,
-		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{"sandbox-probe/" + sandboxBriefAncestorProbeApprovalID: probeApproval}}),
 		WithAgentRegistryPaths([]string{agentDir}),
 		WithLinuxBubblewrapIsolation(),
 	)
@@ -193,12 +228,30 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.CandidateEvidenceReadable || report.CandidateEvidenceDirectWriteSucceeded || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
-	if report.BriefSourceReadable || !report.BriefSourceWriteSucceeded || !report.BriefAPIListReadSucceeded {
+	if report.BriefSourceReadable || report.BriefSourceWriteSucceeded || report.OtherRunBriefReadable || report.OtherRunBriefWriteSucceeded || !report.BriefAPIListReadSucceeded || !report.BriefAncestorRenameSucceeded || !report.BriefAPIPinnedWriteSucceeded || report.BriefRedirectedWriteSucceeded || !report.WorkerAPIAfterBriefAncestorProbe || !report.WorkspaceAfterBriefAncestorProbe {
 		t.Fatalf("brief source/API boundary failed: %+v", report)
 	}
-	briefAfter, err := os.ReadFile(filepath.Join(target, ".ai-team", "runs", "sandbox-probe", filepath.FromSlash(brief.Version.Path)))
+	canonicalBriefRootAfter, err := os.Stat(canonicalBriefRoot)
+	if err != nil || !os.SameFile(canonicalBriefRootBefore, canonicalBriefRootAfter) {
+		t.Fatalf("worker ancestor probe changed the canonical brief store inode: err=%v", err)
+	}
+	redirectedAppend, err := os.ReadFile(filepath.Join(target, ".ai-team", "state", "briefs", "sandbox-probe", "0002-answer-ancestor-redirection-probe.md"))
+	if err != nil || !strings.Contains(string(redirectedAppend), sandboxBriefAncestorProbeAnswer) {
+		t.Fatalf("controller API did not persist the probe append on the canonical host store: content=%q err=%v", redirectedAppend, err)
+	}
+	if !report.RunDirectoryAbsentBeforeEvidenceStart || !report.EvidenceStartSucceeded {
+		t.Fatalf("fresh evidence publication boundary failed: %+v", report)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".ai-team", "runs", "sandbox-probe", "run.json")); err != nil {
+		t.Fatalf("child evidence.Start did not publish the run on the host: %v", err)
+	}
+	briefAfter, err := os.ReadFile(filepath.Join(target, ".ai-team", "state", "briefs", "sandbox-probe", filepath.Base(brief.Version.Path)))
 	if err != nil || string(briefAfter) != string(brief.Content) {
 		t.Fatalf("worker changed or removed durable controller brief after child exit: content=%q err=%v", briefAfter, err)
+	}
+	otherRunBriefAfter, err := os.ReadFile(otherRunBriefPath)
+	if err != nil || string(otherRunBriefAfter) != string(otherRunBriefBytes) {
+		t.Fatalf("worker changed or removed another run's durable controller brief: content=%q err=%v", otherRunBriefAfter, err)
 	}
 	if !report.UsageAPIWriteSucceeded {
 		t.Fatalf("worker could not publish usage through the controller API: %+v", report)
@@ -375,7 +428,7 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		briefDir := filepath.Join(target, ".ai-team", "runs", "brief-mask-test", "brief")
+		briefDir := filepath.Join(target, ".ai-team", "state", "briefs")
 		foundBriefMask := false
 		for i := 0; i+1 < len(briefCommand.Args); i++ {
 			if briefCommand.Args[i] == "--tmpfs" && briefCommand.Args[i+1] == briefDir {
@@ -384,7 +437,20 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 			}
 		}
 		if !foundBriefMask {
-			t.Fatalf("bubblewrap command must mask only the current run brief source: %v", briefCommand.Args)
+			t.Fatalf("bubblewrap command must mask the complete canonical brief root: %v", briefCommand.Args)
+		}
+		foundReadonlyBriefShadow := false
+		for i := 0; i+2 < len(briefCommand.Args); i++ {
+			if briefCommand.Args[i] == "--chmod" && briefCommand.Args[i+1] == "0555" && briefCommand.Args[i+2] == briefDir {
+				foundReadonlyBriefShadow = true
+				break
+			}
+		}
+		if !foundReadonlyBriefShadow {
+			t.Fatalf("bubblewrap brief shadow must be read-only: %v", briefCommand.Args)
+		}
+		if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", "brief-mask-test")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("bubblewrap brief setup created a fresh run evidence directory: err=%v", err)
 		}
 	})
 
@@ -1077,7 +1143,16 @@ type sandboxProbeReport struct {
 	UsageAPIWriteSucceeded                 bool `json:"usage_api_write_succeeded"`
 	BriefSourceReadable                    bool `json:"brief_source_readable"`
 	BriefSourceWriteSucceeded              bool `json:"brief_source_write_succeeded"`
+	OtherRunBriefReadable                  bool `json:"other_run_brief_readable"`
+	OtherRunBriefWriteSucceeded            bool `json:"other_run_brief_write_succeeded"`
 	BriefAPIListReadSucceeded              bool `json:"brief_api_list_read_succeeded"`
+	BriefAncestorRenameSucceeded           bool `json:"brief_ancestor_rename_succeeded"`
+	BriefAPIPinnedWriteSucceeded           bool `json:"brief_api_pinned_write_succeeded"`
+	BriefRedirectedWriteSucceeded          bool `json:"brief_redirected_write_succeeded"`
+	WorkerAPIAfterBriefAncestorProbe       bool `json:"worker_api_after_brief_ancestor_probe"`
+	WorkspaceAfterBriefAncestorProbe       bool `json:"workspace_after_brief_ancestor_probe"`
+	RunDirectoryAbsentBeforeEvidenceStart  bool `json:"run_directory_absent_before_evidence_start"`
+	EvidenceStartSucceeded                 bool `json:"evidence_start_succeeded"`
 	WorktreeReadable                       bool `json:"worktree_readable"`
 	TargetReadable                         bool `json:"target_readable"`
 	TargetWritable                         bool `json:"target_writable"`
@@ -1138,9 +1213,24 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	containmentPath := filepath.Join(job.TargetDir, ".ai-team", "state", "containment", job.RunID+".json")
 	containmentData, containmentErr := os.ReadFile(containmentPath)
 	containmentDirectWriteErr := os.WriteFile(containmentPath, []byte("worker-overwrite-attempt"), 0600)
-	briefPath := filepath.Join(job.TargetDir, ".ai-team", "runs", job.RunID, "brief", "0001-intention.md")
+	briefPath := filepath.Join(job.TargetDir, ".ai-team", "state", "briefs", job.RunID, "0001-intention.md")
 	_, briefErr := os.ReadFile(briefPath)
 	briefWriteErr := os.WriteFile(briefPath, []byte("worker-overwrite-attempt"), 0600)
+	otherRunBriefPath := filepath.Join(job.TargetDir, ".ai-team", "state", "briefs", "sandbox-other-run", "0001-intention.md")
+	_, otherRunBriefErr := os.ReadFile(otherRunBriefPath)
+	otherRunBriefWriteErr := os.WriteFile(otherRunBriefPath, []byte("worker-overwrite-attempt"), 0600)
+	runEvidenceRoot := filepath.Join(job.TargetDir, ".ai-team", "runs")
+	runEvidenceDir := filepath.Join(runEvidenceRoot, job.RunID)
+	_, runEvidenceStatErr := os.Lstat(runEvidenceDir)
+	runDirectoryAbsentBeforeEvidenceStart := errors.Is(runEvidenceStatErr, os.ErrNotExist)
+	evidenceStartSucceeded := false
+	if runDirectoryAbsentBeforeEvidenceStart {
+		_, startErr := evidence.Start(runEvidenceRoot, evidence.RunManifest{
+			RunID: job.RunID, Feature: "bubblewrap-probe", TargetDir: job.TargetDir, StartedAt: time.Now().UTC(),
+			ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{}`),
+		})
+		evidenceStartSucceeded = startErr == nil
+	}
 	worktreeData, worktreeErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "worktrees", "probe", "visible.txt"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
@@ -1154,9 +1244,14 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	candidateEvidenceAPIWriteReadSucceeded := false
 	attemptManifestAPIWriteReadSucceeded := false
 	briefAPIListReadSucceeded := false
+	briefAncestorRenameSucceeded := false
+	briefAPIPinnedWriteSucceeded := false
+	briefRedirectedWriteSucceeded := false
+	workerAPIAfterBriefAncestorProbe := false
+	workspaceAfterBriefAncestorProbe := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
 		var approvals []approval.PendingApproval
-		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 0
+		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 1 && approvals[0].ID == sandboxBriefAncestorProbeApprovalID
 		adminControlPlaneCallRejected = isExpectedAdminControlPlaneRejection(port.call("admin.control_plane", workerAPICall{RunID: job.RunID}, nil))
 		started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
 		usageEnvelope := metrics.Build(job.RunID, "probe", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
@@ -1191,6 +1286,12 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 			document, readErr := briefs.Read(job.RunID, versions[0].ID)
 			briefAPIListReadSucceeded = createErr == nil && readErr == nil && string(document.Content) == "# Исходное намерение\n\ntest worker filesystem boundary\n"
 		}
+		briefAncestorRenameSucceeded, briefAPIPinnedWriteSucceeded, briefRedirectedWriteSucceeded = runBriefAncestorReplacementProbe(job.TargetDir, job.RunID, job.Task, briefs)
+		var approvalsAfterProbe []approval.PendingApproval
+		workerAPIAfterBriefAncestorProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+		visibleAfterProbe, visibleErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
+		writeAfterProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-brief-ancestor-probe.txt"), []byte("workspace-remains-available"), 0600)
+		workspaceAfterBriefAncestorProbe = visibleErr == nil && string(visibleAfterProbe) == "target-visible" && writeAfterProbeErr == nil
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
@@ -1228,7 +1329,16 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		UsageAPIWriteSucceeded:                 usageAPIWriteSucceeded,
 		BriefSourceReadable:                    briefErr == nil,
 		BriefSourceWriteSucceeded:              briefWriteErr == nil,
+		OtherRunBriefReadable:                  otherRunBriefErr == nil,
+		OtherRunBriefWriteSucceeded:            otherRunBriefWriteErr == nil,
 		BriefAPIListReadSucceeded:              briefAPIListReadSucceeded,
+		BriefAncestorRenameSucceeded:           briefAncestorRenameSucceeded,
+		BriefAPIPinnedWriteSucceeded:           briefAPIPinnedWriteSucceeded,
+		BriefRedirectedWriteSucceeded:          briefRedirectedWriteSucceeded,
+		WorkerAPIAfterBriefAncestorProbe:       workerAPIAfterBriefAncestorProbe,
+		WorkspaceAfterBriefAncestorProbe:       workspaceAfterBriefAncestorProbe,
+		RunDirectoryAbsentBeforeEvidenceStart:  runDirectoryAbsentBeforeEvidenceStart,
+		EvidenceStartSucceeded:                 evidenceStartSucceeded,
 		WorktreeReadable:                       worktreeErr == nil && string(worktreeData) == "worktree-visible",
 		TargetReadable:                         targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:                         writeErr == nil,
@@ -1257,6 +1367,94 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Printf("%s%s\n", ResultPrefix, result)
+}
+
+func runBriefAncestorReplacementProbe(target, runID, task string, briefs pipeline.BriefStore) (ancestorRenamed, pinnedWrite, redirectedWrite bool) {
+	teamRoot := filepath.Join(target, ".ai-team")
+	stateRoot := filepath.Join(teamRoot, "state")
+	canonicalBriefRoot := filepath.Join(stateRoot, "briefs")
+	canonicalBriefInfo, err := os.Stat(canonicalBriefRoot)
+	if err != nil {
+		return false, false, false
+	}
+	for _, ancestor := range []string{stateRoot, teamRoot} {
+		backup := ancestor + "-brief-redirect-probe"
+		if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		ancestorInfo, err := os.Stat(ancestor)
+		if err != nil || !ancestorInfo.IsDir() {
+			continue
+		}
+		if err := os.Rename(ancestor, backup); err != nil {
+			continue
+		}
+		ancestorRenamed = true
+		redirectRunRoot := filepath.Join(target, ".ai-team", "state", "briefs", runID)
+		setupErr := seedRedirectBriefProbeFiles(redirectRunRoot, task)
+		if setupErr != nil {
+			_ = os.RemoveAll(ancestor)
+			_ = os.Rename(backup, ancestor)
+			return ancestorRenamed, false, false
+		}
+		type appendResult struct {
+			document pipeline.BriefDocument
+			err      error
+		}
+		result := make(chan appendResult, 1)
+		go func() {
+			document, err := briefs.AppendClarification(runID, sandboxBriefAncestorProbeApprovalID, sandboxBriefAncestorProbeQuestions, sandboxBriefAncestorProbeAnswer)
+			result <- appendResult{document: document, err: err}
+		}()
+		var appended appendResult
+		select {
+		case appended = <-result:
+		case <-time.After(10 * time.Second):
+			appended.err = errors.New("brief API timed out during ancestor replacement")
+		}
+		redirectedPath := filepath.Join(redirectRunRoot, "0002-answer-ancestor-redirection-probe.md")
+		if _, err := os.Lstat(redirectedPath); err == nil {
+			redirectedWrite = true
+		}
+		removeErr := os.RemoveAll(ancestor)
+		restoreErr := os.Rename(backup, ancestor)
+		if removeErr != nil || restoreErr != nil || appended.err != nil {
+			return ancestorRenamed, false, redirectedWrite
+		}
+		briefInfoAfter, statErr := os.Stat(canonicalBriefRoot)
+		if statErr != nil || !os.SameFile(canonicalBriefInfo, briefInfoAfter) {
+			return ancestorRenamed, false, redirectedWrite
+		}
+		versions, listErr := briefs.List(runID)
+		if listErr != nil || len(versions) != 2 || versions[1].ID != appended.document.Version.ID {
+			return ancestorRenamed, false, redirectedWrite
+		}
+		loaded, readErr := briefs.Read(runID, appended.document.Version.ID)
+		pinnedWrite = readErr == nil && string(loaded.Content) == string(appended.document.Content)
+		return ancestorRenamed, pinnedWrite, redirectedWrite
+	}
+	return false, false, false
+}
+
+func seedRedirectBriefProbeFiles(root, task string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	content := []byte("# Исходное намерение\n\n" + strings.TrimSpace(task) + "\n")
+	if err := os.WriteFile(filepath.Join(root, "0001-intention.md"), content, 0o444); err != nil {
+		return err
+	}
+	digest := sha256.Sum256(content)
+	hash := hex.EncodeToString(digest[:])
+	metadata, err := json.MarshalIndent(struct {
+		ID     string `json:"id"`
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}{ID: "brief-" + hash[:16], Path: "brief/0001-intention.md", SHA256: hash}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(root, "0001-intention.json"), append(metadata, '\n'), 0o444)
 }
 
 func isExpectedAdminControlPlaneRejection(err error) bool {

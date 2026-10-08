@@ -1111,6 +1111,23 @@ func TestWorkerCandidateEvidenceControllerStoreIsScopedAndImmutable(t *testing.T
 	if _, err := loopback.dispatch("candidate.evidence.write", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json", CandidateEvidence: document}); err == nil {
 		t.Fatal("loopback API accepted controller-owned candidate evidence write")
 	}
+	loopback.candidateEvidenceRoot = filepath.Join(target, ".ai-team", "state", "evidence")
+	seededEvidencePath, err := candidateEvidencePath(loopback.candidateEvidenceRoot, job.RunID, "review-candidate.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seededEvidence, err := os.ReadFile(seededEvidencePath)
+	if err != nil {
+		t.Fatalf("read the valid controller evidence fixture: %v", err)
+	}
+	result, err := loopback.dispatch("candidate.evidence.read", workerAPICall{RunID: job.RunID, CandidateEvidenceName: "review-candidate.json"})
+	if result != nil || err == nil || err.Error() != "controller candidate evidence reads require bubblewrap Unix transport" {
+		t.Fatalf("loopback API did not reject candidate evidence reads before accessing the store: result=%+v err=%v", result, err)
+	}
+	seededEvidenceAfter, err := os.ReadFile(seededEvidencePath)
+	if err != nil || !bytes.Equal(seededEvidence, seededEvidenceAfter) {
+		t.Fatalf("rejected loopback read changed controller evidence: err=%v", err)
+	}
 	cancelJob := job
 	cancelJob.Operation = OperationCancel
 	cancel, err := startWorkerAPIServerUnix(cancelJob, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, filepath.Join(socketDir, "cancel.sock"))
@@ -3033,6 +3050,9 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", job.RunID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh controller brief setup created a run evidence directory: err=%v", err)
+	}
 	defer func() { api.close() }()
 	t.Setenv(WorkerAPIAddressEnv, "http://"+api.listener.Addr().String())
 	t.Setenv(WorkerAPITokenEnv, api.token)
@@ -3121,10 +3141,24 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if _, err := briefs.Read(job.RunID, "../outside"); err == nil {
 		t.Fatal("brief API accepted a path instead of a version id")
 	}
-	path := filepath.Join(target, ".ai-team", "runs", job.RunID, filepath.FromSlash(clarified.Version.Path))
+	path := filepath.Join(target, ".ai-team", "state", "briefs", job.RunID, filepath.Base(clarified.Version.Path))
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm()&0o222 != 0 {
 		t.Fatalf("durable brief is not immutable: mode=%v err=%v", info, err)
+	}
+}
+
+func TestTaskBoundBriefStoreCloseHandlesOptionalUnderlyingCloser(t *testing.T) {
+	var nilStore *taskBoundBriefStore
+	if err := nilStore.Close(); err != nil {
+		t.Fatalf("Close on a nil task-bound store failed: %v", err)
+	}
+	if err := (&taskBoundBriefStore{}).Close(); err != nil {
+		t.Fatalf("Close on a store without an underlying BriefStore failed: %v", err)
+	}
+	store := &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(t.TempDir())}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close on a BriefStore without an optional Close method failed: %v", err)
 	}
 }
 

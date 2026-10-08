@@ -192,13 +192,18 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := evidence.ValidateRunID(runID); err != nil {
 		return nil, fmt.Errorf("business brief run id: %w", err)
 	}
-	briefDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "runs", runID, "brief")
+	briefRoot, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "briefs")
 	if err != nil {
-		return nil, fmt.Errorf("prepare business brief mount: %w", err)
+		return nil, fmt.Errorf("prepare controller business brief mount: %w", err)
 	}
-	if err := appendPrivateDirectoryMount(&args, briefDir, true); err != nil {
+	if err := appendPrivateDirectoryMount(&args, briefRoot, true); err != nil {
 		return nil, err
 	}
+	// Keep the namespace-local shadow read-only. The complete root is hidden so
+	// a worker cannot inspect or alter briefs belonging to another run. Brief
+	// versions are accessed through the controller API; workers receive
+	// materialized copies in their workspace for path-based artifact publication.
+	args = append(args, "--chmod", "0555", briefRoot)
 	resolvedDB, err := resolveExistingPath(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("controller database path: %w", err)

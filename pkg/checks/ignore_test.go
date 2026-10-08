@@ -83,3 +83,53 @@ func TestExtraIgnoreDirsMergeAndDigest(t *testing.T) {
 		t.Fatal("reset должен вернуть baseline digest")
 	}
 }
+
+func TestWorkspaceIdentityDigestIncludesBuildDirectories(t *testing.T) {
+	ResetExtraIgnoreDirs()
+	defer ResetExtraIgnoreDirs()
+
+	dir := t.TempDir()
+	for _, rel := range []string{"vendor/flag", "dist/flag", "node_modules/flag", ".venv/flag", "__pycache__/flag"} {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := WorkspaceDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "dist", "flag")
+	if err := os.WriteFile(path, []byte("after"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := WorkspaceDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("workspace identity digest must include dist/flag")
+	}
+
+	guardIgnores := MutationGuardIgnoreDirs()
+	for _, name := range []string{".git", ".ai-team"} {
+		if !guardIgnores[name] {
+			t.Errorf("mutation guard must ignore controller metadata %q", name)
+		}
+	}
+	for _, name := range []string{"vendor", "dist", "node_modules", ".venv", "__pycache__"} {
+		if guardIgnores[name] {
+			t.Errorf("mutation guard must include %q", name)
+		}
+	}
+	fastIgnores := FastTraversalIgnoreDirs()
+	for _, name := range []string{"vendor", "dist", "node_modules", ".venv", "__pycache__"} {
+		if !fastIgnores[name] {
+			t.Errorf("fast traversal ignore set should contain %q", name)
+		}
+	}
+}

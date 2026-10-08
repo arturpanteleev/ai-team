@@ -141,9 +141,13 @@ func DefaultTrustedLocalReceipt() Receipt {
 			AxisEnv:  LevelPARTIAL,
 		},
 		Details: map[Axis]map[string]bool{
-			AxisFS:   {"symlink_reject": true, "worktree_isolation": true, "credential_deny": true},
-			AxisNet:  {"tool_deny": true, "env_isolation": true},
-			AxisProc: {"process_group_kill": true, "cleanup_verified": true},
+			AxisFS:  {"symlink_reject": true, "worktree_isolation": true, "credential_deny": true},
+			AxisNet: {"tool_deny": true, "env_isolation": true},
+			// Process supervision attempts process-group cleanup, while each
+			// invocation reports whether its bounded cleanup wait succeeded.
+			// A run-level receipt cannot truthfully assert cleanup_verified for
+			// every child, so it records only the configured mechanism.
+			AxisProc: {"process_group_kill": true},
 			AxisEnv:  {"allow_list": true, "config_dir_isolation": true, "credential_deny": true},
 		},
 		Profile: "trusted-local",

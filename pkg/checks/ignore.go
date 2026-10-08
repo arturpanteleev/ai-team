@@ -6,9 +6,9 @@ import (
 
 // Процесс-глобальный дополнительный ignore-набор (OPS-2). Один процесс
 // управляет одним проектом (пользовательский CLI/daemon держит target под
-// workspace lock), поэтому глобальная override на процесс безопасна и, главное,
-// гарантирует, что ВСЕ вычисления workspace digest (checks, pipeline candidate,
-// delivery planner/executor) используют идентичный ignore-набор. Канонический
+// workspace lock), поэтому глобальная override на процесс безопасна. Extra
+// применяются к identity digest и быстрым обходам; mutation guard намеренно
+// использует только служебные исключения .git и .ai-team. Канонический
 // baseline никогда не удаляется — extra только добавляет имена каталогов.
 var (
 	extraMu         sync.RWMutex
@@ -16,8 +16,9 @@ var (
 )
 
 // SetExtraIgnoreDirs задаёт project-specific имена каталогов, добавляемые к
-// baseline DefaultIgnoreDirs при workspace tree hashing. Вызывается однократно
-// при загрузке строго валидированного конфига (см. pkg/config.TreeHash).
+// identity и fast-traversal ignore-наборам. Mutation guard эти исключения не
+// применяет. Вызывается при загрузке строго валидированного конфига
+// (см. pkg/config.TreeHash).
 func SetExtraIgnoreDirs(names []string) {
 	extraMu.Lock()
 	defer extraMu.Unlock()

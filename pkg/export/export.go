@@ -2,9 +2,10 @@
 // терминального run (V0-4): whitelisted typed records и digests без raw
 // logs/stdout, перепроверяемые без исходного repo и .ai-team. Bundle хранит
 // зеркало run evidence (run.json, config/workflow snapshots, hash-chained
-// event log, anchor, attestation v1, attempt manifests) плюс index.json с
-// sha256 каждого record. Экспорт публикует verified-запись в state/exports
-// (контракт V0-0), что открывает право гс на prune этой evidence.
+// event log, anchor, attestation v1, attempt manifests и artifacts), а также
+// наличные delivery/containment receipts, плюс index.json с sha256 каждого
+// record. Экспорт публикует verified-запись в state/exports (V0-0), что
+// открывает право gc на prune этой evidence.
 package export
 
 import (
@@ -15,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +25,8 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
@@ -49,6 +53,9 @@ const (
 	RecordAnchor           = "anchor"
 	RecordAttestation      = "attestation"
 	RecordAttemptManifest  = "attempt_manifest"
+	RecordArtifact         = "attempt_artifact"
+	RecordDelivery         = "delivery"
+	RecordContainment      = "containment"
 )
 
 // validRecordType — допускаемый whitelisted тип record bundle'а. Неизвестные
@@ -57,7 +64,8 @@ const (
 func validRecordType(t string) bool {
 	switch t {
 	case RecordRunManifest, RecordConfigSnapshot, RecordWorkflowSnapshot,
-		RecordEventLog, RecordAnchor, RecordAttestation, RecordAttemptManifest:
+		RecordEventLog, RecordAnchor, RecordAttestation, RecordAttemptManifest,
+		RecordArtifact, RecordDelivery, RecordContainment:
 		return true
 	}
 	return false
@@ -128,6 +136,9 @@ func Build(runDir, outDir string) (*Index, error) {
 	if _, err := safeio.ReadRegularFile(filepath.Join(runDir, "anchor.json"), maxAnchorSize); err != nil {
 		return nil, fmt.Errorf("export: run %s не terminal (нет anchor.json): %w", manifest.RunID, err)
 	}
+	if err := VerifyEvidence(runDir); err != nil {
+		return nil, fmt.Errorf("export: run evidence verification: %w", err)
+	}
 	files := []struct{ kind, rel string }{
 		{RecordRunManifest, "run.json"},
 		{RecordConfigSnapshot, fromSlash(manifest.ConfigEvidence)},
@@ -135,6 +146,27 @@ func Build(runDir, outDir string) (*Index, error) {
 		{RecordEventLog, "events.jsonl"},
 		{RecordAnchor, "anchor.json"},
 		{RecordAttestation, "attestation.json"},
+	}
+	if _, err := os.Lstat(filepath.Join(runDir, "containment.json")); err == nil {
+		files = append(files, struct{ kind, rel string }{RecordContainment, "containment.json"})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("export: containment receipt: %w", err)
+	}
+	if _, found, err := readDeliveryRecord(runDir, manifest, true); err != nil {
+		return nil, fmt.Errorf("export: delivery record: %w", err)
+	} else if found {
+		files = append(files, struct{ kind, rel string }{RecordDelivery, "delivery.json"})
+	}
+	if _, found, err := readContainmentReceipt(runDir, manifest, true); err != nil {
+		return nil, fmt.Errorf("export: containment receipt: %w", err)
+	} else if found {
+		alreadyIncluded := false
+		for _, file := range files {
+			alreadyIncluded = alreadyIncluded || file.kind == RecordContainment
+		}
+		if !alreadyIncluded {
+			files = append(files, struct{ kind, rel string }{RecordContainment, "containment.json"})
+		}
 	}
 	records := make([]Record, 0, len(files)+16)
 	for _, file := range files {
@@ -153,6 +185,28 @@ func Build(runDir, outDir string) (*Index, error) {
 			if sourceErr != nil {
 				return nil, sourceErr
 			}
+			sum, err = writeRecordBytes(data, file.rel, outDir, file.kind)
+		} else if file.kind == RecordDelivery {
+			record, _, readErr := readDeliveryRecord(runDir, manifest, true)
+			if readErr != nil {
+				return nil, fmt.Errorf("export: delivery record: %w", readErr)
+			}
+			data, marshalErr := json.MarshalIndent(record, "", "  ")
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			data = append(data, '\n')
+			sum, err = writeRecordBytes(data, file.rel, outDir, file.kind)
+		} else if file.kind == RecordContainment {
+			receipt, _, readErr := readContainmentReceipt(runDir, manifest, true)
+			if readErr != nil {
+				return nil, fmt.Errorf("export: containment receipt: %w", readErr)
+			}
+			data, marshalErr := json.MarshalIndent(receipt, "", "  ")
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			data = append(data, '\n')
 			sum, err = writeRecordBytes(data, file.rel, outDir, file.kind)
 		} else {
 			sum, err = copyRecord(runDir, file.rel, outDir, file.kind)
@@ -184,6 +238,29 @@ func Build(runDir, outDir string) (*Index, error) {
 			return nil, err
 		}
 		records = append(records, Record{Type: RecordAttemptManifest, Path: filepath.ToSlash(rel), SHA256: sum})
+		var attempt evidence.AttemptManifest
+		if err := json.Unmarshal(data, &attempt); err != nil {
+			return nil, fmt.Errorf("export attempt manifest %s decode: %w", id, err)
+		}
+		for _, group := range []struct {
+			area      string
+			artifacts []evidence.ArtifactRecord
+		}{
+			{area: "inputs", artifacts: attempt.Inputs},
+			{area: "artifacts", artifacts: attempt.Outputs},
+		} {
+			for _, artifact := range group.artifacts {
+				artifactPath, pathErr := safeArtifactPath(artifact.EvidencePath, id, group.area)
+				if pathErr != nil {
+					return nil, fmt.Errorf("export: unsafe attempt artifact path %q: %w", artifact.EvidencePath, pathErr)
+				}
+				artifactSum, err := copyArtifactRecord(runDir, artifactPath, outDir)
+				if err != nil {
+					return nil, fmt.Errorf("export attempt artifact %s: %w", artifactPath, err)
+				}
+				records = append(records, Record{Type: RecordArtifact, Path: artifactPath, SHA256: artifactSum})
+			}
+		}
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
 	index := &Index{SchemaVersion: BundleSchema, Type: BundleType, RunID: manifest.RunID, Records: records}
@@ -276,6 +353,27 @@ func safePath(rel string) error {
 	return nil
 }
 
+// safeArtifactPath validates the portable, attempt-scoped path recorded in an
+// attempt manifest. Requiring canonical slash-separated paths prevents a
+// manifest from naming an artifact outside its input/output namespace or
+// aliasing the same file through alternate path spellings.
+func safeArtifactPath(rel, attemptID, area string) (string, error) {
+	if !safeAttemptID(attemptID) || strings.ContainsAny(rel, "\\\x00") {
+		return "", fmt.Errorf("invalid attempt or path")
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	canonical := filepath.ToSlash(clean)
+	if filepath.IsAbs(clean) || canonical != rel || canonical == "." ||
+		canonical == ".." || strings.HasPrefix(canonical, "../") {
+		return "", fmt.Errorf("path is not canonical and relative")
+	}
+	prefix := filepath.ToSlash(filepath.Join("attempts", attemptID, area)) + "/"
+	if !strings.HasPrefix(canonical, prefix) || len(canonical) == len(prefix) {
+		return "", fmt.Errorf("path is outside attempts/%s/%s", attemptID, area)
+	}
+	return canonical, nil
+}
+
 func copyRecord(runDir, rel, outDir, kind string) (string, error) {
 	source := filepath.Join(runDir, rel)
 	maxBytes := sizeLimitFor(kind, rel)
@@ -291,6 +389,261 @@ func copyRecord(runDir, rel, outDir, kind string) (string, error) {
 		return "", err
 	}
 	return sha256Bytes(data), nil
+}
+
+func copyArtifactRecord(runDir, rel, outDir string) (string, error) {
+	if err := safePath(filepath.FromSlash(rel)); err != nil {
+		return "", err
+	}
+	source := filepath.Join(runDir, filepath.FromSlash(rel))
+	artifactType, _, digest, err := evidence.ArtifactDigest(source)
+	if err != nil {
+		return "", err
+	}
+	destination := filepath.Join(outDir, filepath.FromSlash(rel))
+	if artifactType == "file" {
+		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+			return "", err
+		}
+		if err := copyRegularFile(source, destination); err != nil {
+			return "", err
+		}
+		return digest, nil
+	}
+	if artifactType != "directory" {
+		return "", fmt.Errorf("unsupported artifact type %q", artifactType)
+	}
+	if err := os.MkdirAll(destination, 0755); err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == source {
+			return nil
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		outPath := filepath.Join(destination, relative)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symbolic link in evidence artifact %s", path)
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(outPath, 0755)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported evidence artifact entry %s", path)
+		}
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return err
+		}
+		return copyRegularFile(path, outPath)
+	})
+	return digest, err
+}
+
+func copyRegularFile(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("artifact source %s is not a regular file", source)
+	}
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, safeio.ReadOnlyFileMode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	return errors.Join(copyErr, closeErr)
+}
+
+func readDeliveryRecord(runDir string, manifest *evidence.RunManifest, liveRun bool) (*delivery.TerminalRecord, bool, error) {
+	if !liveRun {
+		return delivery.ReadTerminalRecord(runDir)
+	}
+	targetDir := manifest.TargetDir
+	if targetDir == "" {
+		targetDir = filepath.Dir(filepath.Dir(filepath.Dir(filepath.Clean(runDir))))
+	}
+	return delivery.ReadTerminalRecordForRun(targetDir, runDir, manifest.RunID)
+}
+
+func readContainmentReceipt(runDir string, manifest *evidence.RunManifest, liveRun bool) (*containment.Receipt, bool, error) {
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, "containment.json"), maxSnapshotSize)
+	if err == nil {
+		var receipt containment.Receipt
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			return nil, false, fmt.Errorf("containment.json: %w", err)
+		}
+		if err := receipt.Validate(); err != nil {
+			return nil, false, err
+		}
+		return &receipt, true, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, err
+	}
+	if !liveRun || manifest.TargetDir == "" {
+		return nil, false, nil
+	}
+	receipt, err := (containment.ControllerReceiptStore{TargetDir: manifest.TargetDir}).Read(manifest.RunID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &receipt, true, nil
+}
+
+func verifyAttemptArtifacts(root, runID string, records []Record, liveRun bool) error {
+	indexedArtifacts := make(map[string]string)
+	for _, record := range records {
+		if record.Type == RecordArtifact {
+			path := filepath.ToSlash(filepath.Clean(filepath.FromSlash(record.Path)))
+			if _, exists := indexedArtifacts[path]; exists {
+				return fmt.Errorf("verify: duplicate attempt artifact record %s", path)
+			}
+			indexedArtifacts[path] = record.SHA256
+		}
+	}
+	verifiedArtifacts := make(map[string]bool)
+	for _, record := range records {
+		if record.Type != RecordAttemptManifest {
+			continue
+		}
+		attemptID := filepath.Base(filepath.Dir(filepath.FromSlash(record.Path)))
+		_, manifest, err := evidence.ReadAttemptManifest(nil, root, runID, attemptID)
+		if err != nil {
+			return fmt.Errorf("verify: attempt %s manifest: %w", attemptID, err)
+		}
+		if manifest.RunID != runID || manifest.AttemptID != attemptID {
+			return fmt.Errorf("verify: attempt %s identity mismatch", attemptID)
+		}
+		for _, group := range []struct {
+			name    string
+			records []evidence.ArtifactRecord
+		}{
+			{name: "input", records: manifest.Inputs},
+			{name: "output", records: manifest.Outputs},
+		} {
+			for _, artifact := range group.records {
+				area := "inputs"
+				if group.name == "output" {
+					area = "artifacts"
+				}
+				path, pathErr := safeArtifactPath(artifact.EvidencePath, attemptID, area)
+				if pathErr != nil {
+					return fmt.Errorf("verify: attempt %s %s path is unsafe: %q", attemptID, group.name, artifact.EvidencePath)
+				}
+				if verifiedArtifacts[path] {
+					return fmt.Errorf("verify: attempt %s duplicate %s path %s", attemptID, group.name, path)
+				}
+				verifiedArtifacts[path] = true
+				artifactType, size, digest, err := evidence.ArtifactDigest(filepath.Join(root, filepath.FromSlash(path)))
+				if err != nil {
+					return fmt.Errorf("verify: attempt %s %s %s: %w", attemptID, group.name, path, err)
+				}
+				if artifactType != artifact.Type || size != artifact.Size || digest != artifact.SHA256 {
+					return fmt.Errorf("verify: attempt %s %s %s digest/size mismatch", attemptID, group.name, path)
+				}
+				if indexed, ok := indexedArtifacts[path]; !liveRun && (!ok || indexed != digest) {
+					return fmt.Errorf("verify: attempt %s artifact %s is missing from bundle records", attemptID, path)
+				}
+			}
+		}
+	}
+	if !liveRun && len(verifiedArtifacts) != len(indexedArtifacts) {
+		return fmt.Errorf("verify: bundle has unreferenced attempt artifact records")
+	}
+	return nil
+}
+
+func verifyContainment(root string, manifest *evidence.RunManifest, records []Record, liveRun bool) error {
+	receipt, found, err := readContainmentReceipt(root, manifest, liveRun)
+	if err != nil {
+		return fmt.Errorf("verify: containment receipt: %w", err)
+	}
+	var indexed *Record
+	for i := range records {
+		if records[i].Type == RecordContainment {
+			indexed = &records[i]
+			break
+		}
+	}
+	if found != (indexed != nil) {
+		return errors.New("verify: containment receipt record/index mismatch")
+	}
+	if !found {
+		return nil
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	if sha256Bytes(append(data, '\n')) != indexed.SHA256 {
+		return errors.New("verify: containment receipt digest mismatch")
+	}
+	return nil
+}
+
+func verifyDelivery(root string, manifest *evidence.RunManifest, events []evidence.Event, records []Record, liveRun bool) error {
+	record, found, err := readDeliveryRecord(root, manifest, liveRun)
+	if err != nil {
+		return fmt.Errorf("verify: delivery record: %w", err)
+	}
+	var indexed *Record
+	for i := range records {
+		if records[i].Type == RecordDelivery {
+			indexed = &records[i]
+			break
+		}
+	}
+	if found != (indexed != nil) {
+		return errors.New("verify: delivery record/index mismatch")
+	}
+	if !found {
+		return nil
+	}
+	if record.RunID != manifest.RunID || record.Feature != manifest.Feature {
+		return errors.New("verify: delivery record run/feature identity mismatch")
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	if sha256Bytes(append(data, '\n')) != indexed.SHA256 {
+		return errors.New("verify: delivery record digest mismatch")
+	}
+	deferred := false
+	for _, event := range events {
+		if event.Type != "delivery_deferred" {
+			continue
+		}
+		planHash, _ := event.Data["plan_hash"].(string)
+		if planHash == record.PlanHash {
+			deferred = true
+			break
+		}
+	}
+	if !deferred {
+		return errors.New("verify: delivery record has no matching delivery_deferred event")
+	}
+	return nil
 }
 
 func sizeLimitFor(kind, rel string) int64 {
@@ -365,11 +718,21 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 			return fmt.Errorf("verify: дублирующийся record %q", record.Path)
 		}
 		seen[record.Path] = true
-		data, readErr := safeio.ReadRegularFile(filepath.Join(bundleDir, filepath.FromSlash(record.Path)), sizeLimitFor(record.Type, record.Path))
-		if readErr != nil {
-			return fmt.Errorf("verify: record %s %s: %w", record.Type, record.Path, readErr)
+		path := filepath.Join(bundleDir, filepath.FromSlash(record.Path))
+		var sum string
+		if record.Type == RecordArtifact {
+			_, _, sum, err = evidence.ArtifactDigest(path)
+			if err != nil {
+				return fmt.Errorf("verify: record %s %s: %w", record.Type, record.Path, err)
+			}
+		} else {
+			data, readErr := safeio.ReadRegularFile(path, sizeLimitFor(record.Type, record.Path))
+			if readErr != nil {
+				return fmt.Errorf("verify: record %s %s: %w", record.Type, record.Path, readErr)
+			}
+			sum = sha256Bytes(data)
 		}
-		if sum := sha256Bytes(data); sum != record.SHA256 {
+		if sum != record.SHA256 {
 			return fmt.Errorf("verify: record %s %s не совпадает со своим sha256 (evidence подменён)", record.Type, record.Path)
 		}
 	}
@@ -425,8 +788,15 @@ func verifySignature(bundleDir, digest string, keyVerify ...ed25519.PublicKey) e
 // рядом с index.json и не входит в records.
 func ensureNoExtraneousFiles(bundleDir string, index *Index) error {
 	seen := make(map[string]bool, len(index.Records))
+	artifactDirs := make([]string, 0)
 	for _, record := range index.Records {
-		seen[filepath.FromSlash(record.Path)] = true
+		rel := filepath.FromSlash(record.Path)
+		seen[rel] = true
+		if record.Type == RecordArtifact {
+			if info, err := os.Stat(filepath.Join(bundleDir, rel)); err == nil && info.IsDir() {
+				artifactDirs = append(artifactDirs, rel)
+			}
+		}
 	}
 	return filepath.WalkDir(bundleDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -441,6 +811,11 @@ func ensureNoExtraneousFiles(bundleDir string, index *Index) error {
 		}
 		if rel == indexFileName || rel == dsse.EnvelopeFileName || seen[rel] {
 			return nil
+		}
+		for _, artifactDir := range artifactDirs {
+			if strings.HasPrefix(rel, artifactDir+string(filepath.Separator)) {
+				return nil
+			}
 		}
 		return fmt.Errorf("verify: неизвестный файл %q вне index.json (лишние файлы не допускаются)", rel)
 	})
@@ -486,12 +861,49 @@ func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record,
 	sort.Strings(ids)
 	for _, id := range ids {
 		rel := filepath.Join("attempts", id, "manifest.json")
-		data, _, readErr := evidence.ReadAttemptManifest(nil, runDir, manifest.RunID, id)
+		data, attempt, readErr := evidence.ReadAttemptManifest(nil, runDir, manifest.RunID, id)
 		if readErr != nil {
 			return nil, readErr
 		}
 		sum := sha256Bytes(data)
 		records = append(records, Record{Type: RecordAttemptManifest, Path: rel, SHA256: sum})
+		for _, group := range []struct {
+			area      string
+			artifacts []evidence.ArtifactRecord
+		}{
+			{area: "inputs", artifacts: attempt.Inputs},
+			{area: "artifacts", artifacts: attempt.Outputs},
+		} {
+			for _, artifact := range group.artifacts {
+				path, pathErr := safeArtifactPath(artifact.EvidencePath, id, group.area)
+				if pathErr != nil {
+					return nil, fmt.Errorf("verify: unsafe attempt artifact path %q", artifact.EvidencePath)
+				}
+				_, _, artifactSHA, artifactErr := evidence.ArtifactDigest(filepath.Join(runDir, filepath.FromSlash(path)))
+				if artifactErr != nil {
+					return nil, fmt.Errorf("verify: attempt %s artifact %s: %w", id, path, artifactErr)
+				}
+				records = append(records, Record{Type: RecordArtifact, Path: path, SHA256: artifactSHA})
+			}
+		}
+	}
+	if receipt, found, err := readContainmentReceipt(runDir, manifest, true); err != nil {
+		return nil, fmt.Errorf("verify: containment receipt: %w", err)
+	} else if found {
+		data, err := json.MarshalIndent(receipt, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, Record{Type: RecordContainment, Path: "containment.json", SHA256: sha256Bytes(append(data, '\n'))})
+	}
+	if record, found, err := readDeliveryRecord(runDir, manifest, true); err != nil {
+		return nil, fmt.Errorf("verify: delivery record: %w", err)
+	} else if found {
+		data, err := json.MarshalIndent(record, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, Record{Type: RecordDelivery, Path: "delivery.json", SHA256: sha256Bytes(append(data, '\n'))})
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
 	return records, nil
@@ -527,7 +939,7 @@ func verifyCore(root, runID string, records []Record, liveRun bool) error {
 	if liveRun {
 		anchorErr = evidence.VerifyAnchor(root)
 	} else {
-		anchorErr = evidence.VerifyAnchorWithSourcesAndTarget(root,
+		anchorErr = evidence.VerifyBundleAnchor(root,
 			evidence.NewFileEventLog(filepath.Join(root, "events.jsonl")),
 			evidence.FilesystemAttemptManifestSource(), manifest.TargetDir)
 	}
@@ -592,6 +1004,15 @@ func verifyCore(root, runID string, records []Record, liveRun bool) error {
 			return fmt.Errorf("verify: лишняя attempt-директория %q не покрыта event chain", entry.Name())
 		}
 	}
+	if err := verifyAttemptArtifacts(root, runID, records, liveRun); err != nil {
+		return err
+	}
+	if err := verifyContainment(root, manifest, records, liveRun); err != nil {
+		return err
+	}
+	if err := verifyDelivery(root, manifest, events, records, liveRun); err != nil {
+		return err
+	}
 
 	var attestationData []byte
 	if liveRun && filepath.Base(filepath.Dir(root)) == "runs" && filepath.Base(filepath.Dir(filepath.Dir(root))) == ".ai-team" {
@@ -640,7 +1061,7 @@ func fileDigest(path string, maxBytes int64) (string, error) {
 }
 
 func safeAttemptID(value string) bool {
-	return value != "" && value != "." && value != ".." && filepath.Base(value) == value
+	return value != "" && value != "." && value != ".." && filepath.Base(value) == value && !strings.ContainsAny(value, "/\\\x00")
 }
 
 // PublishVerified пишет verified-запись в state/exports/<runID>.json

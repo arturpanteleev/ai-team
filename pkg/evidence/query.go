@@ -58,7 +58,7 @@ func FindDelivered(runsRoot, feature string) (result DeliveredRun, ok bool, err 
 		// отсутствии сканируем старые attempt-манифесты.
 		targetDir := filepath.Dir(filepath.Dir(runsRoot))
 		if record, recOK, recErr := delivery.ReadTerminalRecordForRun(targetDir, runDir, entry.Name()); recErr != nil {
-			continue // corrupted controller or legacy record must not fall back to attempts
+			return DeliveredRun{}, false, recErr // never report a fallback result for corrupted delivery evidence
 		} else if recOK && record.Feature == feature {
 			if !ok || manifest.StartedAt.After(result.StartedAt) {
 				result = DeliveredRun{

@@ -1695,7 +1695,7 @@ func cmdVerify() {
 				"✗ Bundle %s: %v", arg, ui.Colorize(err.Error(), ui.ColorRed))
 			os.Exit(exitFailed)
 		}
-		logging.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt manifests и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
+		logging.Printf("✓ Bundle %s: OK — records, event chain, anchor, attempt artifacts, delivery/containment records и attestation v1 согласованы%s\n", arg, sigNote(keyVerify))
 		logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run_bundle",
 			Message: "Bundle OK", Data: map[string]any{"target": arg}, Exit: exitOK})
 		return
@@ -1721,7 +1721,7 @@ func cmdVerify() {
 			"✗ Run %s: %v", runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)
 	}
-	logging.Printf("✓ Run %s: anchor OK — event chain, manifests digest, attempt manifests и attestation v1 согласованы\n", runID)
+	logging.Printf("✓ Run %s: anchor OK — run manifest, event chain, attempt artifacts, supplemental evidence и attestation v1 согласованы\n", runID)
 	logging.Emit(logging.Record{Level: "ok", Command: "verify", Type: "run",
 		Message: "Run OK", Data: map[string]any{"run_id": runID}, Exit: exitOK})
 }

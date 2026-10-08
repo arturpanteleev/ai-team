@@ -73,10 +73,10 @@
 > дерева до и после команды; разрешено менять лишь `report_file`. Если команда
 > создаёт кеш или артефакты сборки в проекте, проверка провалится с причиной
 > `check изменил workspace; verification commands должны быть read-only`.
-> Каталоги `.git`, `.ai-team`, `node_modules`, `vendor`, `dist`, `.venv` и
-> `__pycache__` в сравнении не участвуют. Для `ai-team run` список можно
-> дополнить в `.ai-team/config.yaml` через `tree_hash.ignore_dirs`; у `gate.yaml`
-> такой настройки нет.
+> В сравнении исключены только `.git` и `.ai-team`, поэтому изменения в
+> `node_modules`, `vendor`, `dist`, `.venv` и `__pycache__` тоже обнаруживаются.
+> `tree_hash.ignore_dirs` может исключить дополнительные каталоги из workspace
+> identity digest, но не ослабляет mutation guard.
 
 ## Go: проверки находятся сами
 

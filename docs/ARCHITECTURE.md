@@ -212,7 +212,9 @@ _type/predicateType/schema_version) — compatibility policy; `Digest` даёт
 export/verify (V0-4): `pkg/export` собирает самодостаточный deterministic
 portable bundle терминального run в `ai-team export <run_id>` (whitelisted
 typed records — run/config/workflow snapshots, hash-chained event log, anchor,
-attestation v1, attempt manifests; без raw logs/stdout). index.json несёт sha256
+attestation v1, attempt manifests и их input/output artifacts; при наличии
+также terminal delivery и containment records; без raw logs/stdout и reports).
+`export` сначала выполняет полную live-проверку, включая sidecars. index.json несёт sha256
 каждого record без тайм-меток — identical evidence даёт байт-в-байт одинаковый
 bundle (BundleDigest). Все файлы собранного bundle (records, index.json и
 dsse.json) пишутся одинаковыми правами только на чтение
@@ -223,7 +225,8 @@ dsse.json) пишутся одинаковыми правами только н�
 records против своих sha256, run identity/schema, config/workflow snapshots
 против run manifest, event chain + anchor (VerifyAnchor), attempt manifests
 против manifest_sha256 в attempt_finished событиях (файлы↔events связка, которой
-VerifyAnchor не даёт), attestation v1 против events/config/workflow/
+VerifyAnchor не даёт), размеры и sha256 всех опубликованных attempt artifacts,
+attestation v1 против events/config/workflow/
 attempt_count/provenance. Только после успешной verify пишется verified-запись
 в state/exports/<runID>.json (контракт V0-0), открывающая право `gc --prune-runs`.
 `ai-team verify <bundle-dir>` проверяет bundle самодостаточно без repo и

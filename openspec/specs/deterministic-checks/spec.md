@@ -21,6 +21,12 @@ The workflow MUST support formatter, lint, build, unit, integration, end-to-end,
 ### Requirement: Reproducible check context
 Each check MUST record workspace baseline and relevant configuration.
 
+Workspace identity digests MAY use explicitly configured tree-hash excludes,
+but mutation attribution and read-only check guards MUST ignore only
+controller-owned `.git` and `.ai-team` directories. They MUST include
+dependency and build directories such as `vendor`, `dist`, `node_modules` and
+`.venv`.
+
 #### Scenario: Dirty workspace
 - **WHEN** a mutation stage starts in an allowed dirty workspace
 - **THEN** the controller MUST distinguish pre-existing changes from changes created by the attempt
@@ -43,3 +49,8 @@ When a stage or check process is canceled or times out, the controller MUST atte
 - **КОГДА** required check завершился успешно
 - **ТОГДА** его before/after hash MUST совпадать с candidate identity
 - **И** evidence MUST NOT описывать live checkout
+
+#### Scenario: Mutation in a build directory
+- **КОГДА** required verifier changes `dist/flag` in a read-only stage
+- **ТОГДА** mutation guard MUST reject the stage and attribute `dist/flag`
+- **И** workspace identity digest MUST change

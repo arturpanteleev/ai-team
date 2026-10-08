@@ -87,6 +87,12 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 			finalizeErr = errors.Join(finalizeErr, fmt.Errorf("failed-status report: %w", err))
 		}
 	}
+	if err := rs.writeUsageEnvelope(endTime, status); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("usage envelope: %w", err))
+	}
+	if err := rs.writeContainmentReceipt(); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("containment receipt: %w", err))
+	}
 	if err := rs.evidence.Append(evidence.Event{
 		Type: "run_finished", Timestamp: endTime.UTC(),
 		Data: map[string]any{"status": status, "stage_attempts": rs.attemptOrdinal},
@@ -95,14 +101,11 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		status = string(workflow.RunFailed)
 		_ = report.GenerateFinalReport(rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime, rs.task.ArtifactRoot, status)
 	}
-	if err := rs.writeUsageEnvelope(endTime, status); err != nil {
-		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("usage envelope: %w", err))
-	}
-	if err := rs.writeContainmentReceipt(); err != nil {
-		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("containment receipt: %w", err))
-	}
 	if err := rs.writeAttestation(endTime, status); err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("attestation: %w", err))
+	}
+	if err := rs.evidence.SealTerminalEvidence(); err != nil {
+		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("seal terminal evidence: %w", err))
 	}
 	rs.ps.Finalize()
 	rs.printSummary()

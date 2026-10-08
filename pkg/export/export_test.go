@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
@@ -64,12 +66,16 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 		t.Fatal(err)
 	}
 	defer func() { _ = os.RemoveAll(artifactRoot) }()
+	outputPath := filepath.Join(artifactRoot, "review.json")
+	if err := os.WriteFile(outputPath, []byte(`{"review":"approved"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	attemptID := store.NewAttemptID("coder", 1)
 	err = store.PublishAttempt(evidence.AttemptManifest{
 		AttemptID: attemptID, Stage: "coder", StageIndex: 1,
 		StartedAt: at(time.Second), FinishedAt: at(90 * time.Second),
 		Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed", Verdict: "APPROVED",
-	}, artifactRoot, nil, nil)
+	}, artifactRoot, nil, []evidence.Artifact{{Name: "review", Path: outputPath}})
 	if err != nil {
 		t.Fatalf("publish attempt: %v", err)
 	}
@@ -127,6 +133,34 @@ func buildTerminalRunAtForTarget(t *testing.T, runsRoot string, baseTime time.Ti
 	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(store.RunDir(), "logs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "logs", "attempt.log"), []byte("runtime output\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(store.RunDir(), "reports", testFeature), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "reports", testFeature, "index.html"), []byte("<p>ok</p>\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "candidate.json"), []byte(`{"candidate":"stable"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "usage.json"), []byte(`{"run_id":"r-export-0001"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := json.Marshal(containment.DefaultTrustedLocalReceipt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RunDir(), "containment.json"), receipt, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SealTerminalEvidence(); err != nil {
+		t.Fatalf("seal terminal evidence: %v", err)
+	}
 	return store.RunDir()
 }
 
@@ -167,6 +201,9 @@ func buildTerminalRunWithoutAttempts(t *testing.T, target string) string {
 	}
 	if err := os.WriteFile(filepath.Join(store.RunDir(), "attestation.json"), data, 0644); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.SealTerminalEvidence(); err != nil {
+		t.Fatalf("seal terminal evidence: %v", err)
 	}
 	return store.RunDir()
 }
@@ -342,8 +379,8 @@ func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	if err := evidence.VerifyAnchorWithEventSource(bundleDir, bundleEventSource); err == nil {
 		t.Fatal("event-only anchor verification unexpectedly selected bundle-local manifests")
 	}
-	if err := evidence.VerifyAnchorWithSources(bundleDir, bundleEventSource, evidence.FilesystemAttemptManifestSource()); err != nil {
-		t.Fatalf("explicit bundle-local event and manifest authorities: %v", err)
+	if err := evidence.VerifyBundleAnchor(bundleDir, bundleEventSource, evidence.FilesystemAttemptManifestSource(), ""); err != nil {
+		t.Fatalf("portable anchor should validate bundle-local authorities: %v", err)
 	}
 	if err := VerifyBundle(bundleDir); err != nil {
 		t.Fatalf("VerifyBundle should use local event and manifest bytes despite live reservations: %v", err)
@@ -390,8 +427,8 @@ func TestVerifyBundleUsesBundleLocalAnchorSourcesAtRunShapedPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundleDir, indexFileName), indexData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := evidence.VerifyAnchor(bundleDir); err != nil {
-		t.Fatalf("fixture anchor should be valid only against live controller sources: %v", err)
+	if err := evidence.VerifyAnchor(bundleDir); err == nil {
+		t.Fatal("live verification must reject a bundle-shaped directory with omitted supplemental evidence")
 	}
 	if err := VerifyBundle(bundleDir); err == nil {
 		t.Fatal("VerifyBundle accepted an anchor from live controller sources instead of bundle-local evidence")
@@ -435,6 +472,149 @@ func TestVerifyEvidenceLiveRun(t *testing.T) {
 	runDir := buildTerminalRun(t, filepath.Join(base, "runs"))
 	if err := VerifyEvidence(runDir); err != nil {
 		t.Fatalf("VerifyEvidence live run: %v", err)
+	}
+}
+
+func TestVerifyEvidenceAndExportRejectTamperedRunContents(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{"attempt artifact content and size", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "attempts", "r-export-0001-001-coder", "artifacts", "review.json"), []byte(`{"review":"changed and longer"}`), 0644)
+		}},
+		{"attempt artifacts removed", func(runDir string) error {
+			return os.RemoveAll(filepath.Join(runDir, "attempts", "r-export-0001-001-coder", "artifacts"))
+		}},
+		{"logs changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "logs", "attempt.log"), []byte("changed\n"), 0644)
+		}},
+		{"candidate changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "candidate.json"), []byte(`{"candidate":"forged"}`), 0644)
+		}},
+		{"usage changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "usage.json"), []byte(`{"run_id":"forged"}`), 0644)
+		}},
+		{"reports changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "reports", testFeature, "index.html"), []byte("<p>forged</p>\n"), 0644)
+		}},
+		{"containment changed", func(runDir string) error {
+			return os.WriteFile(filepath.Join(runDir, "containment.json"), []byte(`{"axes":{},"profile":"strict"}`), 0644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			if err := tc.mutate(runDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("VerifyEvidence accepted modified run evidence")
+			}
+			if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+				t.Fatal("export accepted modified run evidence")
+			}
+		})
+	}
+}
+
+func TestVerifyEvidenceAndExportBindControllerAndProvenanceFields(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(map[string]any) error
+	}{
+		{"controller.executable_sha256", func(run map[string]any) error {
+			controller, ok := run["controller"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing controller identity")
+			}
+			controller["executable_sha256"] = strings.Repeat("0", 64)
+			return nil
+		}},
+		{"provenance.items[0].digest.value", func(run map[string]any) error {
+			provenance, ok := run["provenance"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing provenance")
+			}
+			items, ok := provenance["items"].([]any)
+			if !ok || len(items) == 0 {
+				return fmt.Errorf("missing provenance items")
+			}
+			item, ok := items[0].(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid provenance item")
+			}
+			digest, ok := item["digest"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing provenance digest")
+			}
+			digest["value"] = strings.Repeat("0", 64)
+			return nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+			path := filepath.Join(runDir, "run.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest map[string]any
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.edit(manifest); err != nil {
+				t.Fatal(err)
+			}
+			data, err = json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyEvidence(runDir); err == nil {
+				t.Fatal("verify accepted altered run.json identity")
+			}
+			if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+				t.Fatal("export accepted altered run.json identity")
+			}
+		})
+	}
+}
+
+func TestVerifyEvidenceAndExportRejectTamperedDeliveryFields(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runDir := buildTerminalRunAtForTarget(t, filepath.Join(target, ".ai-team", "runs"), now(), target,
+		filepath.Join(target, ".ai-team", "delivery", "prepared.json"))
+	if err := delivery.WriteTerminalRecord(runDir, delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion,
+		RunID:         testRunID, Feature: testFeature, PlanHash: strings.Repeat("a", 64),
+		CommitSHA: strings.Repeat("b", 40), PerformedAt: now().Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("write delivery record: %v", err)
+	}
+	path := filepath.Join(runDir, "delivery.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), strings.Repeat("b", 40), strings.Repeat("c", 40), 1)
+	if tampered == string(data) {
+		t.Fatal("test setup did not change commit_sha")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEvidence(runDir); err == nil {
+		t.Fatal("verify accepted delivery.json with changed commit_sha")
+	}
+	if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+		t.Fatal("export accepted delivery.json with changed commit_sha")
 	}
 }
 

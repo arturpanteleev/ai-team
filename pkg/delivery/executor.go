@@ -245,9 +245,37 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		currentState.Steps = append(currentState.Steps, step)
 		return writeState(statePath, currentState)
 	}
+	verifyRemoteRewrite := func(step string) error {
+		check := c.Runner.Run(ctx, target, "git", gitCommandArgs("config", "--null", "--list")...)
+		check.Step = step
+		blocked := check.Status != StepPassed || check.Truncated
+		if !blocked {
+			blocked = rejectRemoteURLRewrites(check.Stdout, request.Plan.RemoteURL) != nil
+		}
+		check.Stdout, check.Stderr = "", ""
+		if blocked {
+			check.Status = StepFailed
+			if check.ExitCode == 0 {
+				check.ExitCode = 1
+			}
+			check.Reason = "configured Git URL rewrites could change the approved push URL or could not be safely verified"
+		}
+		if err := record(check); err != nil {
+			return err
+		}
+		if blocked {
+			return fmt.Errorf("delivery %s failed: %s", step, check.Reason)
+		}
+		return nil
+	}
 	run := func(step, name string, args ...string) (StepResult, error) {
 		if name == "git" {
 			args = gitCommandArgs(args...)
+			if isGitNetworkOperation(args) {
+				if err := verifyRemoteRewrite("verify_remote_rewrite_before_" + step); err != nil {
+					return StepResult{Step: step, ExitCode: 1, Status: StepFailed, Reason: "blocked by Git URL rewrite verification"}, err
+				}
+			}
 		}
 		commandResult := c.Runner.Run(ctx, target, name, args...)
 		commandResult.Step = step
@@ -282,6 +310,9 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		return record(StepResult{Step: step, StartedAt: now, FinishedAt: now, ExitCode: 0, Status: StepSkipped, Reason: reason})
 	}
 
+	if err := verifyRemoteRewrite("verify_remote_rewrite"); err != nil {
+		return result(), err
+	}
 	remoteURLResult, err := run("verify_remote_url", "git", "remote", "get-url", "--push", "--all", request.Plan.Remote)
 	if err != nil {
 		return result(), err

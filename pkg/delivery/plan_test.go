@@ -333,6 +333,61 @@ func TestControllerRejectsMultiplePushURLsBeforeDeliverySideEffects(t *testing.T
 	}
 }
 
+func TestControllerRejectsChainedRemoteURLRewriteBeforeDeliverySideEffects(t *testing.T) {
+	repo, sourceRemote := setupRepository(t)
+	approvedRemote := filepath.Join(t.TempDir(), "approved.git")
+	evilRemote := filepath.Join(t.TempDir(), "evil.git")
+	git(t, filepath.Dir(approvedRemote), "init", "--bare", approvedRemote)
+	git(t, filepath.Dir(evilRemote), "init", "--bare", evilRemote)
+	git(t, repo, "push", approvedRemote, "main")
+
+	// The first rule is what the planner resolves into the approved URL. A
+	// later rule would rewrite that approved URL again for direct network calls.
+	git(t, repo, "config", "--add", "url."+approvedRemote+".insteadOf", sourceRemote)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// chained URL rewrite\n")
+	plan, err := BuildPlan(context.Background(), repo, "chained-rewrite", "chained URL rewrite", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatalf("one rewrite to the approved effective URL should be allowed: %v", err)
+	}
+	if plan.RemoteURL != approvedRemote {
+		t.Fatalf("approved URL=%q, want effective first rewrite %q", plan.RemoteURL, approvedRemote)
+	}
+
+	git(t, repo, "config", "--add", "url."+evilRemote+".insteadOf", approvedRemote)
+	if current := strings.TrimSpace(git(t, repo, "remote", "get-url", "--push", "--all", "origin")); current != approvedRemote {
+		t.Fatalf("remote effective URL changed after adding chained rule: got %q want %q", current, approvedRemote)
+	}
+
+	runner := &observingRunner{delegate: ExecRunner{}}
+	controller := &Controller{Runner: runner}
+	_, err = controller.Execute(context.Background(), Request{TargetDir: repo, Feature: "chained-rewrite", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "Git URL rewrites") {
+		t.Fatalf("controller must refuse chained rewrite before delivery: %v", err)
+	}
+	if head := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); head != plan.BaselineHead {
+		t.Fatalf("rewrite refusal created a commit: head=%s baseline=%s", head, plan.BaselineHead)
+	}
+	if branch := strings.TrimSpace(git(t, repo, "branch", "--list", plan.Branch)); branch != "" {
+		t.Fatalf("rewrite refusal created local branch %q", branch)
+	}
+	if commands, ok := runner.commandsForNetworkOperations(); ok {
+		t.Fatalf("rewrite refusal invoked a network operation: %v", commands)
+	}
+	for _, ref := range []string{"refs/heads/" + plan.Branch} {
+		if got := strings.TrimSpace(git(t, t.TempDir(), "ls-remote", evilRemote, ref)); got != "" {
+			t.Fatalf("rewrite refusal unexpectedly pushed to evil remote: %s", got)
+		}
+	}
+}
+
+func TestRejectRemoteURLPushRewritePrefix(t *testing.T) {
+	config := "url.https://evil.example/repo.git.pushinsteadof\nhttps://approved.example/repo.git\x00"
+	err := rejectRemoteURLRewrites(config, "https://approved.example/repo.git")
+	if err == nil || !strings.Contains(err.Error(), "matches a configured Git URL rewrite") {
+		t.Fatalf("matching pushInsteadOf prefix must be rejected, got %v", err)
+	}
+}
+
 func TestControllerDoesNotPersistQueryCredentialFromChangedRemote(t *testing.T) {
 	repo, _ := setupRepository(t)
 	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// query credential\n")
@@ -1034,6 +1089,26 @@ func (runner *failRecordCommitRunner) Run(ctx context.Context, dir, name string,
 		return StepResult{Command: append([]string{name}, args...), StartedAt: now, FinishedAt: now, ExitCode: 1, Status: StepFailed, Reason: "injected post-commit persistence gap"}
 	}
 	return runner.delegate.Run(ctx, dir, name, args...)
+}
+
+type observingRunner struct {
+	delegate ExecRunner
+	commands [][]string
+}
+
+func (runner *observingRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
+	runner.commands = append(runner.commands, append([]string{name}, args...))
+	return runner.delegate.Run(ctx, dir, name, args...)
+}
+
+func (runner *observingRunner) commandsForNetworkOperations() ([][]string, bool) {
+	var found [][]string
+	for _, command := range runner.commands {
+		if len(command) > 1 && command[0] == "git" && isGitNetworkOperation(command[1:]) {
+			found = append(found, append([]string(nil), command...))
+		}
+	}
+	return found, len(found) > 0
 }
 
 func TestControllerRefusesPreStagedFiles(t *testing.T) {

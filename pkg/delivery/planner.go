@@ -52,6 +52,13 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 	if err != nil {
 		return Plan{}, fmt.Errorf("delivery planner: remote origin должен иметь ровно один эффективный push URL")
 	}
+	rewriteConfig, err := commandOutput(ctx, targetDir, "git", "config", "--null", "--list")
+	if err != nil {
+		return Plan{}, fmt.Errorf("delivery planner: не удалось безопасно проверить Git URL rewrite configuration")
+	}
+	if err := rejectRemoteURLRewrites(rewriteConfig, remoteURL); err != nil {
+		return Plan{}, err
+	}
 	branch := "ai-team/" + feature
 	if current != "" && current != base && current != branch {
 		return Plan{}, fmt.Errorf("delivery planner: текущая branch %q должна быть protected base %q или %q", current, base, branch)

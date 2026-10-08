@@ -43,6 +43,29 @@ func gitCommandArgs(args ...string) []string {
 	return append(configured, args...)
 }
 
+func gitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-c" || args[i] == "--config-env" {
+			i++ // These global Git options consume one following argument.
+			continue
+		}
+		if strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		return args[i]
+	}
+	return ""
+}
+
+func isGitNetworkOperation(args []string) bool {
+	switch gitSubcommand(args) {
+	case "push", "fetch", "ls-remote":
+		return true
+	default:
+		return false
+	}
+}
+
 // Plan is the complete, reviewable declaration of allowed delivery effects.
 // Commands and shell fragments are deliberately not part of the schema.
 type Plan struct {
@@ -231,6 +254,40 @@ func singleRemoteURL(output string) (string, error) {
 		return "", fmt.Errorf("push URL output is malformed")
 	}
 	return output, nil
+}
+
+// rejectRemoteURLRewrites fails closed when Git could rewrite an approved
+// effective URL again while push, fetch, or ls-remote receives it directly.
+// `git config --null --list` includes system, global, repository, included,
+// and environment-provided configuration used by the invoking Git process.
+func rejectRemoteURLRewrites(configOutput, remoteURL string) error {
+	if configOutput == "" {
+		return nil
+	}
+	if !strings.HasSuffix(configOutput, "\x00") {
+		return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+	}
+	for _, record := range strings.Split(strings.TrimSuffix(configOutput, "\x00"), "\x00") {
+		key, value, ok := strings.Cut(record, "\n")
+		if !ok {
+			return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+		}
+		lowerKey := strings.ToLower(key)
+		if !strings.HasPrefix(lowerKey, "url.") ||
+			!(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
+			continue
+		}
+		// A newline in a rewrite value cannot be represented as an ordinary URL
+		// prefix and makes the config record ambiguous. Reject it rather than
+		// risk interpreting only part of the configured value.
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+		}
+		if strings.HasPrefix(remoteURL, value) {
+			return fmt.Errorf("delivery: approved push URL matches a configured Git URL rewrite")
+		}
+	}
+	return nil
 }
 
 func (p Plan) CanonicalJSON() ([]byte, error) {

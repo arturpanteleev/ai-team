@@ -101,6 +101,16 @@ type taskBoundBriefStore struct {
 	expectedTask string
 }
 
+func (s *taskBoundBriefStore) Close() error {
+	if s == nil || s.BriefStore == nil {
+		return nil
+	}
+	if closer, ok := s.BriefStore.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 func (s *taskBoundBriefStore) CreateInitial(runID, intention string) (pipeline.BriefDocument, error) {
 	if s == nil || s.BriefStore == nil || s.expectedTask == "" || intention != s.expectedTask {
 		return pipeline.BriefDocument{}, errors.New("initial brief must match the controller's canonical task")
@@ -246,7 +256,15 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, fmt.Errorf("canonicalize worker API attestation target: %w", err)
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: pipeline.NewFileBriefStore(job.TargetDir), expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
+	briefStore := pipeline.NewControllerBriefStore(canonicalTarget)
+	if err := briefStore.PrepareRun(job.RunID); err != nil {
+		_ = listener.Close()
+		if socketPath != "" {
+			_ = os.Remove(socketPath)
+		}
+		return nil, fmt.Errorf("prepare controller business brief store: %w", err)
+	}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
 	api.usageAllowed = socketPath != ""
 	if api.usageAllowed {
 		api.candidateEvidenceRoot = filepath.Join(canonicalTarget, ".ai-team", "state", "evidence")
@@ -265,6 +283,9 @@ func (s *workerAPIServer) close() {
 		_ = s.server.Close()
 		if s.socketPath != "" {
 			_ = os.Remove(s.socketPath)
+		}
+		if closer, ok := s.briefs.(interface{ Close() error }); ok {
+			_ = closer.Close()
 		}
 	}
 }

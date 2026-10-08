@@ -3033,6 +3033,9 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", job.RunID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh controller brief setup created a run evidence directory: err=%v", err)
+	}
 	defer func() { api.close() }()
 	t.Setenv(WorkerAPIAddressEnv, "http://"+api.listener.Addr().String())
 	t.Setenv(WorkerAPITokenEnv, api.token)
@@ -3121,7 +3124,7 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if _, err := briefs.Read(job.RunID, "../outside"); err == nil {
 		t.Fatal("brief API accepted a path instead of a version id")
 	}
-	path := filepath.Join(target, ".ai-team", "runs", job.RunID, filepath.FromSlash(clarified.Version.Path))
+	path := filepath.Join(target, ".ai-team", "state", "briefs", job.RunID, filepath.Base(clarified.Version.Path))
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm()&0o222 != 0 {
 		t.Fatalf("durable brief is not immutable: mode=%v err=%v", info, err)

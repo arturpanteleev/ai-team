@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -75,8 +76,129 @@ type BriefStore interface {
 
 type FileBriefStore struct{ targetDir string }
 
+// ControllerBriefStore keeps durable API briefs outside the worker-visible
+// run evidence tree. The ordinary FileBriefStore deliberately keeps its local
+// layout for local pipelines and path-based artifact publication.
+type ControllerBriefStore struct {
+	targetDir     string
+	mu            sync.Mutex
+	rootFD        int
+	rootPinned    bool
+	preparedRunID string
+	closed        bool
+}
+
 func NewFileBriefStore(targetDir string) *FileBriefStore {
 	return &FileBriefStore{targetDir: targetDir}
+}
+
+// NewControllerBriefStore returns the same file-backed brief protocol used by
+// the worker API, rooted in controller-owned state rather than runs/<id>.
+func NewControllerBriefStore(targetDir string) *ControllerBriefStore {
+	return &ControllerBriefStore{targetDir: targetDir}
+}
+
+func (s *ControllerBriefStore) prepareLocked(runID string) error {
+	if s.closed {
+		return errors.New("controller business brief store is closed")
+	}
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return fmt.Errorf("invalid business brief run id: %w", err)
+	}
+	if s.rootPinned {
+		if s.preparedRunID != runID {
+			return fmt.Errorf("controller business brief store is scoped to run %q", s.preparedRunID)
+		}
+		return nil
+	}
+	if _, err := prepareControllerBriefRoot(s.targetDir, runID); err != nil {
+		return fmt.Errorf("prepare controller business brief directory: %w", err)
+	}
+	rootFD, err := openBriefDirectory(s.targetDir, ".ai-team", "state", "briefs")
+	if err != nil {
+		return fmt.Errorf("pin controller business brief directory: %w", err)
+	}
+	s.rootFD = rootFD
+	s.rootPinned = true
+	s.preparedRunID = runID
+	return nil
+}
+
+func (s *ControllerBriefStore) requirePreparedLocked(runID string) error {
+	if s.closed {
+		return errors.New("controller business brief store is closed")
+	}
+	if !s.rootPinned {
+		return errors.New("controller business brief store must be prepared before CRUD")
+	}
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return fmt.Errorf("invalid business brief run id: %w", err)
+	}
+	if s.preparedRunID != runID {
+		return fmt.Errorf("controller business brief store is scoped to run %q", s.preparedRunID)
+	}
+	return nil
+}
+
+// PrepareRun performs legacy recovery before a worker is spawned. In
+// particular, it must never create .ai-team/runs/<runID> for a fresh run.
+func (s *ControllerBriefStore) PrepareRun(runID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prepareLocked(runID)
+}
+
+// Close releases the controller-owned directory descriptor. It serializes
+// with in-flight store operations so no operation can use a closed descriptor.
+func (s *ControllerBriefStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if !s.rootPinned {
+		return nil
+	}
+	err := closeControllerBriefRoot(s.rootFD)
+	s.rootPinned = false
+	return err
+}
+
+func (s *ControllerBriefStore) CreateInitial(runID, intention string) (BriefDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requirePreparedLocked(runID); err != nil {
+		return BriefDocument{}, err
+	}
+	return createInitialBriefAt(s.rootFD, runID, intention)
+}
+
+func (s *ControllerBriefStore) AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requirePreparedLocked(runID); err != nil {
+		return BriefDocument{}, err
+	}
+	return appendBriefClarificationAt(s.rootFD, runID, approvalID, questions, answer)
+}
+
+func (s *ControllerBriefStore) List(runID string) ([]BriefVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requirePreparedLocked(runID); err != nil {
+		return nil, err
+	}
+	return listBriefStoreVersionsAt(s.rootFD, runID)
+}
+
+func (s *ControllerBriefStore) Read(runID, versionID string) (BriefDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requirePreparedLocked(runID); err != nil {
+		return BriefDocument{}, err
+	}
+	return readBriefStoreDocumentAt(s.rootFD, runID, versionID)
 }
 
 func (s *FileBriefStore) runRoot(runID string) (string, error) {
@@ -91,11 +213,15 @@ func (s *FileBriefStore) runRoot(runID string) (string, error) {
 }
 
 func (s *FileBriefStore) CreateInitial(runID, intention string) (BriefDocument, error) {
+	return createInitialBrief(s.runRoot, runID, intention)
+}
+
+func createInitialBrief(runRoot func(string) (string, error), runID, intention string) (BriefDocument, error) {
 	intention = strings.TrimSpace(intention)
 	if intention == "" || len(intention) > maxBriefBytes {
 		return BriefDocument{}, errors.New("business intention must contain 1..262144 bytes")
 	}
-	root, err := s.runRoot(runID)
+	root, err := runRoot(runID)
 	if err != nil {
 		return BriefDocument{}, err
 	}
@@ -113,11 +239,15 @@ func (s *FileBriefStore) CreateInitial(runID, intention string) (BriefDocument, 
 }
 
 func (s *FileBriefStore) AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error) {
+	return appendBriefClarification(s.runRoot, runID, approvalID, questions, answer)
+}
+
+func appendBriefClarification(runRoot func(string) (string, error), runID, approvalID, questions, answer string) (BriefDocument, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" || len(answer) > maxAnswerBytes {
 		return BriefDocument{}, errors.New("answer must contain 1..16384 bytes")
 	}
-	root, err := s.runRoot(runID)
+	root, err := runRoot(runID)
 	if err != nil {
 		return BriefDocument{}, err
 	}
@@ -160,7 +290,11 @@ func (s *FileBriefStore) AppendClarification(runID, approvalID, questions, answe
 }
 
 func (s *FileBriefStore) List(runID string) ([]BriefVersion, error) {
-	root, err := s.runRoot(runID)
+	return listBriefStoreVersions(s.runRoot, runID)
+}
+
+func listBriefStoreVersions(runRoot func(string) (string, error), runID string) ([]BriefVersion, error) {
+	root, err := runRoot(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +309,11 @@ func (s *FileBriefStore) List(runID string) ([]BriefVersion, error) {
 }
 
 func (s *FileBriefStore) Read(runID, versionID string) (BriefDocument, error) {
-	versions, err := s.List(runID)
+	return readBriefStoreDocument(s.runRoot, runID, versionID)
+}
+
+func readBriefStoreDocument(runRoot func(string) (string, error), runID, versionID string) (BriefDocument, error) {
+	versions, err := listBriefStoreVersions(runRoot, runID)
 	if err != nil {
 		return BriefDocument{}, err
 	}
@@ -183,7 +321,10 @@ func (s *FileBriefStore) Read(runID, versionID string) (BriefDocument, error) {
 		if version.ID != versionID {
 			continue
 		}
-		root, _ := s.runRoot(runID)
+		root, rootErr := runRoot(runID)
+		if rootErr != nil {
+			return BriefDocument{}, rootErr
+		}
 		content, readErr := safeio.ReadRegularFile(filepath.Join(root, filepath.Base(version.Path)), maxBriefBytes)
 		if readErr != nil {
 			return BriefDocument{}, readErr

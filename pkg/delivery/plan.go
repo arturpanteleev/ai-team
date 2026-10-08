@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,18 +19,55 @@ import (
 )
 
 const (
-	SchemaVersion = 3
+	SchemaVersion = 4
 	DeletedDigest = "deleted"
 	DeletedMode   = "deleted"
 )
 
 var (
-	remotePattern  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	branchPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
-	gitHashPattern = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
-	sha256Pattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	runIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	remotePattern    = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	scpRemotePattern = regexp.MustCompile(`^([A-Za-z0-9._-]+@)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[^:\s]+$`)
+	branchPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	gitHashPattern   = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+	sha256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	runIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
+
+// gitCommandArgs disables repository-configured hooks, fsmonitor executables,
+// commit signing, and the external-helper transport for every controller-owned
+// Git invocation. The explicit protocol setting overrides repository config.
+func gitCommandArgs(args ...string) []string {
+	configured := []string{
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=",
+		"-c", "commit.gpgsign=false",
+		"-c", "protocol.ext.allow=never",
+	}
+	return append(configured, args...)
+}
+
+func gitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-c" || args[i] == "--config-env" {
+			i++ // These global Git options consume one following argument.
+			continue
+		}
+		if strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		return args[i]
+	}
+	return ""
+}
+
+func isGitNetworkOperation(args []string) bool {
+	switch gitSubcommand(args) {
+	case "push", "fetch", "ls-remote":
+		return true
+	default:
+		return false
+	}
+}
 
 // Plan is the complete, reviewable declaration of allowed delivery effects.
 // Commands and shell fragments are deliberately not part of the schema.
@@ -38,6 +76,7 @@ type Plan struct {
 	Branch                  string                          `json:"branch"`
 	BaseBranch              string                          `json:"base_branch"`
 	Remote                  string                          `json:"remote"`
+	RemoteURL               string                          `json:"remote_url"`
 	Files                   []string                        `json:"files"`
 	FileDigests             map[string]string               `json:"file_digests"`
 	FileModes               map[string]string               `json:"file_modes"`
@@ -92,6 +131,9 @@ func (p Plan) Validate() error {
 	}
 	if !remotePattern.MatchString(p.Remote) {
 		return fmt.Errorf("delivery plan: невалидный remote %q", p.Remote)
+	}
+	if err := validateRemoteURL(p.RemoteURL); err != nil {
+		return err
 	}
 	if len(p.Files) == 0 {
 		return fmt.Errorf("delivery plan: files не может быть пустым")
@@ -162,6 +204,103 @@ func (p Plan) Validate() error {
 	}
 	if strings.TrimSpace(p.PRBody) == "" || utf8.RuneCountInString(p.PRBody) > 700 {
 		return fmt.Errorf("delivery plan: pr_body обязателен и не должен превышать 700 символов")
+	}
+	return nil
+}
+
+func validateRemoteURL(remoteURL string) error {
+	if remoteURL == "" || strings.TrimSpace(remoteURL) != remoteURL || !utf8.ValidString(remoteURL) {
+		return fmt.Errorf("delivery plan: remote_url обязателен и должен быть корректной строкой")
+	}
+	if strings.HasPrefix(remoteURL, "-") {
+		return fmt.Errorf("delivery plan: remote_url не должен начинаться с option prefix")
+	}
+	for _, r := range remoteURL {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("delivery plan: remote_url содержит управляющие символы")
+		}
+	}
+	if strings.ContainsAny(remoteURL, "?#") {
+		return fmt.Errorf("delivery plan: remote_url с query или fragment запрещён")
+	}
+	if !strings.Contains(remoteURL, "://") {
+		if filepath.IsAbs(remoteURL) {
+			return nil // Local bare repositories are useful delivery destinations too.
+		}
+		if !scpRemotePattern.MatchString(remoteURL) {
+			return fmt.Errorf("delivery plan: remote_url должен быть локальным путём или поддерживаемым SCP-style адресом [user@]host:path")
+		}
+		return nil
+	}
+	parsed, err := url.Parse(remoteURL)
+	if err != nil || parsed.Host == "" || parsed.Opaque != "" {
+		return fmt.Errorf("delivery plan: remote_url имеет некорректный формат")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		if parsed.User != nil {
+			return fmt.Errorf("delivery plan: HTTP remote_url с embedded credentials запрещён; настройте Git credential helper")
+		}
+	case "ssh":
+		if parsed.User != nil {
+			if _, hasPassword := parsed.User.Password(); hasPassword {
+				return fmt.Errorf("delivery plan: SSH remote_url с embedded password запрещён; настройте SSH key или agent")
+			}
+		}
+	default:
+		return fmt.Errorf("delivery plan: remote_url protocol не поддерживается")
+	}
+	return nil
+}
+
+// singleRemoteURL accepts only the one effective push destination reported by
+// `git remote get-url --push --all`. It deliberately does not return any URL
+// when the configuration is ambiguous, so callers can fail without recording
+// configured destinations in delivery evidence.
+func singleRemoteURL(output string) (string, error) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "", fmt.Errorf("push URL is not configured")
+	}
+	if strings.Contains(output, "\n") {
+		return "", fmt.Errorf("multiple push URLs are configured")
+	}
+	if strings.TrimSpace(output) != output || strings.ContainsRune(output, '\r') {
+		return "", fmt.Errorf("push URL output is malformed")
+	}
+	return output, nil
+}
+
+// rejectRemoteURLRewrites fails closed when Git could rewrite an approved
+// effective URL again while push, fetch, or ls-remote receives it directly.
+// `git config --null --list` includes system, global, repository, included,
+// and environment-provided configuration used by the invoking Git process.
+func rejectRemoteURLRewrites(configOutput, remoteURL string) error {
+	if configOutput == "" {
+		return nil
+	}
+	if !strings.HasSuffix(configOutput, "\x00") {
+		return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+	}
+	for _, record := range strings.Split(strings.TrimSuffix(configOutput, "\x00"), "\x00") {
+		key, value, ok := strings.Cut(record, "\n")
+		if !ok {
+			return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+		}
+		lowerKey := strings.ToLower(key)
+		if !strings.HasPrefix(lowerKey, "url.") ||
+			!(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
+			continue
+		}
+		// A newline in a rewrite value cannot be represented as an ordinary URL
+		// prefix and makes the config record ambiguous. Reject it rather than
+		// risk interpreting only part of the configured value.
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("delivery: Git URL rewrite configuration could not be safely parsed")
+		}
+		if strings.HasPrefix(remoteURL, value) {
+			return fmt.Errorf("delivery: approved push URL matches a configured Git URL rewrite")
+		}
 	}
 	return nil
 }

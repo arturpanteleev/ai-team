@@ -44,6 +44,21 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 	if err != nil {
 		return Plan{}, err
 	}
+	remoteURLs, err := commandOutput(ctx, targetDir, "git", "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		return Plan{}, fmt.Errorf("delivery planner: push URL remote origin не определён: %w", err)
+	}
+	remoteURL, err := singleRemoteURL(remoteURLs)
+	if err != nil {
+		return Plan{}, fmt.Errorf("delivery planner: remote origin должен иметь ровно один эффективный push URL")
+	}
+	rewriteConfig, err := commandOutput(ctx, targetDir, "git", "config", "--null", "--list")
+	if err != nil {
+		return Plan{}, fmt.Errorf("delivery planner: не удалось безопасно проверить Git URL rewrite configuration")
+	}
+	if err := rejectRemoteURLRewrites(rewriteConfig, remoteURL); err != nil {
+		return Plan{}, err
+	}
 	branch := "ai-team/" + feature
 	if current != "" && current != base && current != branch {
 		return Plan{}, fmt.Errorf("delivery planner: текущая branch %q должна быть protected base %q или %q", current, base, branch)
@@ -90,7 +105,7 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 	body := fmt.Sprintf("Что изменено: %s.\nЗачем: %s.\nПроверка: обязательные проверки, review, tests и verification пройдены контроллером.", fileSummary, description)
 	plan := Plan{
 		SchemaVersion: SchemaVersion,
-		Branch:        branch, BaseBranch: base, Remote: "origin", Files: files,
+		Branch:        branch, BaseBranch: base, Remote: "origin", RemoteURL: remoteURL, Files: files,
 		FileDigests: fileDigests, FileModes: fileModes, BaselineHead: baselineHead,
 		SourceRunID: verification.SourceRunID, VerifiedWorkspaceDigest: verification.WorkspaceDigest,
 		CheckEvidenceDigest: verification.CheckEvidenceDigest,
@@ -126,7 +141,7 @@ func clonePreconditions(values map[string]PreconditionEvidence) map[string]Preco
 func finalDeltaPaths(ctx context.Context, targetDir, baselineHead string, candidates []string) ([]string, error) {
 	seen := make(map[string]bool)
 	diffArgs := append([]string{"diff", "--name-only", "-z", baselineHead, "--"}, candidates...)
-	diff := exec.CommandContext(ctx, "git", diffArgs...)
+	diff := exec.CommandContext(ctx, "git", gitCommandArgs(diffArgs...)...)
 	diff.Dir = targetDir
 	diffOutput, err := diff.Output()
 	if err != nil {
@@ -138,7 +153,7 @@ func finalDeltaPaths(ctx context.Context, targetDir, baselineHead string, candid
 		}
 	}
 	untrackedArgs := append([]string{"ls-files", "--others", "--exclude-standard", "-z", "--"}, candidates...)
-	untracked := exec.CommandContext(ctx, "git", untrackedArgs...)
+	untracked := exec.CommandContext(ctx, "git", gitCommandArgs(untrackedArgs...)...)
 	untracked.Dir = targetDir
 	untrackedOutput, err := untracked.Output()
 	if err != nil {
@@ -161,7 +176,7 @@ func workspaceFileDigest(ctx context.Context, targetDir, baselineHead, relative 
 	fullPath := filepath.Join(targetDir, filepath.FromSlash(relative))
 	info, err := os.Lstat(fullPath)
 	if os.IsNotExist(err) {
-		probe := exec.CommandContext(ctx, "git", "cat-file", "-e", baselineHead+":"+relative)
+		probe := exec.CommandContext(ctx, "git", gitCommandArgs("cat-file", "-e", baselineHead+":"+relative)...)
 		probe.Dir = targetDir
 		if probe.Run() != nil {
 			return "", fmt.Errorf("delivery planner: attributed file %q отсутствует и не является deletion baseline", relative)
@@ -247,7 +262,7 @@ func detectBaseBranch(ctx context.Context, targetDir, current string) (string, e
 		}
 	}
 	for _, candidate := range []string{"main", "master"} {
-		command := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
+		command := exec.CommandContext(ctx, "git", gitCommandArgs("show-ref", "--verify", "--quiet", "refs/heads/"+candidate)...)
 		command.Dir = targetDir
 		if command.Run() == nil {
 			return candidate, nil
@@ -260,6 +275,9 @@ func detectBaseBranch(ctx context.Context, targetDir, current string) (string, e
 }
 
 func commandOutput(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if name == "git" {
+		args = gitCommandArgs(args...)
+	}
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
 	output, err := command.Output()

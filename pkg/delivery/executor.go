@@ -245,9 +245,58 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		currentState.Steps = append(currentState.Steps, step)
 		return writeState(statePath, currentState)
 	}
+	verifyRemoteRewrite := func(step string) error {
+		check := c.Runner.Run(ctx, target, "git", gitCommandArgs("config", "--null", "--list")...)
+		check.Step = step
+		blocked := check.Status != StepPassed || check.Truncated
+		if !blocked {
+			blocked = rejectRemoteURLRewrites(check.Stdout, request.Plan.RemoteURL) != nil
+		}
+		check.Stdout, check.Stderr = "", ""
+		if blocked {
+			check.Status = StepFailed
+			if check.ExitCode == 0 {
+				check.ExitCode = 1
+			}
+			check.Reason = "configured Git URL rewrites could change the approved push URL or could not be safely verified"
+		}
+		if err := record(check); err != nil {
+			return err
+		}
+		if blocked {
+			return fmt.Errorf("delivery %s failed: %s", step, check.Reason)
+		}
+		return nil
+	}
 	run := func(step, name string, args ...string) (StepResult, error) {
+		if name == "git" {
+			args = gitCommandArgs(args...)
+			if isGitNetworkOperation(args) {
+				if err := verifyRemoteRewrite("verify_remote_rewrite_before_" + step); err != nil {
+					return StepResult{Step: step, ExitCode: 1, Status: StepFailed, Reason: "blocked by Git URL rewrite verification"}, err
+				}
+			}
+		}
 		commandResult := c.Runner.Run(ctx, target, name, args...)
 		commandResult.Step = step
+		if step == "verify_remote_url" {
+			if commandResult.Status != StepPassed {
+				commandResult.Stdout = ""
+				commandResult.Stderr = ""
+				commandResult.Reason = "configured push URL could not be safely verified"
+			} else {
+				remoteURL, urlErr := singleRemoteURL(commandResult.Stdout)
+				if urlErr != nil || validateRemoteURL(remoteURL) != nil {
+					commandResult.Stdout = ""
+					commandResult.Stderr = ""
+					commandResult.ExitCode = 1
+					commandResult.Status = StepFailed
+					commandResult.Reason = "configured push URLs must resolve to exactly one safe destination"
+				} else {
+					commandResult.Stdout = remoteURL
+				}
+			}
+		}
 		if err := record(commandResult); err != nil {
 			return commandResult, err
 		}
@@ -261,6 +310,17 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		return record(StepResult{Step: step, StartedAt: now, FinishedAt: now, ExitCode: 0, Status: StepSkipped, Reason: reason})
 	}
 
+	if err := verifyRemoteRewrite("verify_remote_rewrite"); err != nil {
+		return result(), err
+	}
+	remoteURLResult, err := run("verify_remote_url", "git", "remote", "get-url", "--push", "--all", request.Plan.Remote)
+	if err != nil {
+		return result(), err
+	}
+	if strings.TrimSpace(remoteURLResult.Stdout) != request.Plan.RemoteURL {
+		return result(), fmt.Errorf("delivery: push URL remote %q изменился после approved plan", request.Plan.Remote)
+	}
+
 	currentBranchResult, err := run("inspect_branch", "git", "branch", "--show-current")
 	if err != nil {
 		return result(), err
@@ -270,7 +330,7 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		if currentBranch != "" && currentBranch != request.Plan.BaseBranch && currentBranch != "main" && currentBranch != "master" {
 			return result(), fmt.Errorf("delivery: текущая ветка %q не совпадает с plan branch %q или protected base", currentBranch, request.Plan.Branch)
 		}
-		probe := c.Runner.Run(ctx, target, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+request.Plan.Branch)
+		probe := c.Runner.Run(ctx, target, "git", gitCommandArgs("show-ref", "--verify", "--quiet", "refs/heads/"+request.Plan.Branch)...)
 		probe.Step = "inspect_target_branch"
 		if probe.ExitCode == 1 {
 			probe.Status = StepSkipped
@@ -400,13 +460,18 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 		if strings.TrimSpace(head.Stdout) != currentState.CommitSHA {
 			return result(), fmt.Errorf("delivery resume: HEAD не совпадает с сохранённым commit %s", currentState.CommitSHA)
 		}
+		if err := verifyCommittedChange(ctx, c.Runner, target, request.Plan, currentState.CommitSHA, currentState.Trailers, record); err != nil {
+			return result(), fmt.Errorf("delivery resume: сохранённый commit не совпадает с approved plan: %w", err)
+		}
 		if err := skip("commit", "commit already recorded: "+currentState.CommitSHA); err != nil {
 			return result(), err
 		}
 	}
 
 	if !currentState.Pushed {
-		if _, err := run("push", "git", "push", "-u", request.Plan.Remote, request.Plan.Branch); err != nil {
+		pushArgs := []string{"push", "--", request.Plan.RemoteURL,
+			"refs/heads/" + request.Plan.Branch + ":refs/heads/" + request.Plan.Branch}
+		if _, err := run("push", "git", pushArgs...); err != nil {
 			return result(), err
 		}
 		currentState.Pushed = true
@@ -416,12 +481,21 @@ func (c *Controller) Execute(ctx context.Context, request Request) (Result, erro
 	} else if err := skip("push", "branch already recorded as pushed"); err != nil {
 		return result(), err
 	}
-	remoteHead, err := run("verify_remote_head", "git", "ls-remote", request.Plan.Remote, "refs/heads/"+request.Plan.Branch)
+	trackingRef := "refs/remotes/" + request.Plan.Remote + "/" + request.Plan.Branch
+	fetchSpec := "refs/heads/" + request.Plan.Branch + ":" + trackingRef
+	if _, err := run("fetch_remote_branch", "git", "fetch", "--no-tags", "--", request.Plan.RemoteURL, fetchSpec); err != nil {
+		return result(), err
+	}
+	remoteHeadArgs := []string{"ls-remote", "--", request.Plan.RemoteURL, "refs/heads/" + request.Plan.Branch}
+	remoteHead, err := run("verify_remote_head", "git", remoteHeadArgs...)
 	if err != nil {
 		return result(), err
 	}
 	if remoteObjectID(remoteHead.Stdout) != currentState.CommitSHA {
 		return result(), fmt.Errorf("delivery: remote branch не указывает на approved commit %s", currentState.CommitSHA)
+	}
+	if _, err := run("set_upstream", "git", "branch", "--set-upstream-to="+request.Plan.Remote+"/"+request.Plan.Branch, request.Plan.Branch); err != nil {
+		return result(), err
 	}
 
 	if currentState.PRURL == "" {
@@ -512,7 +586,7 @@ func verifyCommittedChange(
 	record func(StepResult) error,
 ) error {
 	run := func(step string, args ...string) (StepResult, error) {
-		result := runner.Run(ctx, target, "git", args...)
+		result := runner.Run(ctx, target, "git", gitCommandArgs(args...)...)
 		result.Step = step
 		if err := record(result); err != nil {
 			return result, err
@@ -646,7 +720,7 @@ func parseGitEntries(output []byte, index bool) (map[string]gitTreeEntry, error)
 }
 
 func boundedGitOutput(ctx context.Context, target string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", args...)
+	command := exec.CommandContext(ctx, "git", gitCommandArgs(args...)...)
 	command.Dir = target
 	output, err := command.Output()
 	if err != nil {
@@ -659,7 +733,7 @@ func boundedGitOutput(ctx context.Context, target string, args ...string) ([]byt
 }
 
 func hashGitBlob(ctx context.Context, target, object string) (string, error) {
-	command := exec.CommandContext(ctx, "git", "cat-file", "blob", object)
+	command := exec.CommandContext(ctx, "git", gitCommandArgs("cat-file", "blob", object)...)
 	command.Dir = target
 	stdout, err := command.StdoutPipe()
 	if err != nil {

@@ -31,6 +31,15 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	if first != second {
 		t.Fatalf("hash должен быть независим от порядка files: %s != %s", first, second)
 	}
+	changedRemote := plan
+	changedRemote.RemoteURL = "https://example.test/other.git"
+	third, err := changedRemote.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("изменение remote_url должно менять canonical plan hash")
+	}
 
 	for name, data := range map[string]string{
 		"unknown":  `{"schema_version":1,"branch":"ai-team/x","base_branch":"main","remote":"origin","files":["a.go"],"commit_message":"x","pr_title":"x","pr_body":"x","extra":true}`,
@@ -45,6 +54,99 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	plan.Branch = "main"
 	if err := plan.Validate(); err == nil {
 		t.Fatal("protected branch должна быть отклонена")
+	}
+}
+
+func TestPlanRejectsCredentialBearingOrQueryRemoteURLsWithoutEchoingSecrets(t *testing.T) {
+	for name, remoteURL := range map[string]string{
+		"user password":         "https://user:secret-token@example.test/repo.git",
+		"token as username":     "https://secret-token@example.test/repo.git",
+		"key query parameter":   "https://example.test/repo.git?key=secret-token",
+		"access key parameter":  "https://example.test/repo.git?access_key=secret-token",
+		"other query parameter": "https://example.test/repo.git?anything=secret-token",
+		"fragment":              "https://example.test/repo.git#secret-token",
+		"option-like remote":    "-f",
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := validTestPlan()
+			plan.RemoteURL = remoteURL
+			err := plan.Validate()
+			if err == nil {
+				t.Fatal("credential-bearing or query/fragment URL must be rejected")
+			}
+			if strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("validation error exposed credential value: %v", err)
+			}
+			canonical, canonicalErr := plan.CanonicalJSON()
+			if canonicalErr == nil || strings.Contains(string(canonical), "secret-token") || strings.Contains(canonicalErr.Error(), "secret-token") {
+				t.Fatalf("invalid plan unexpectedly exposed a secret: canonical=%q err=%v", canonical, canonicalErr)
+			}
+		})
+	}
+}
+
+func TestPlanAcceptsOnlySupportedRemoteURLFormats(t *testing.T) {
+	for name, remoteURL := range map[string]string{
+		"https":             "https://github.com/org/repo.git",
+		"http":              "http://git.example.test/org/repo.git",
+		"ssh with user":     "ssh://git@github.com/org/repo.git",
+		"ssh without user":  "ssh://git.example.test/org/repo.git",
+		"scp":               "git@github.com:org/repo.git",
+		"scp other user":    "ec2-user@host.example.test:org/repo.git",
+		"scp standard user": "user@example.test:org/repo.git",
+		"scp host only":     "host.example.test:org/repo.git",
+		"local bare path":   filepath.Join(t.TempDir(), "remote.git"),
+	} {
+		t.Run("accept_"+name, func(t *testing.T) {
+			if err := validateRemoteURL(remoteURL); err != nil {
+				t.Fatalf("supported remote URL %q rejected: %v", remoteURL, err)
+			}
+		})
+	}
+
+	for name, remoteURL := range map[string]string{
+		"ext helper":             "ext::touch /tmp/marker",
+		"other remote helper":    "hg::https://example.test/repo",
+		"malformed scp helper":   "git@example.test::touch /tmp/marker",
+		"file protocol":          "file:///tmp/repo.git",
+		"unsupported URI scheme": "git+ssh://git@example.test/org/repo.git",
+		"SSH password":           "ssh://git:secret@example.test/org/repo.git",
+	} {
+		t.Run("reject_"+name, func(t *testing.T) {
+			if err := validateRemoteURL(remoteURL); err == nil {
+				t.Fatalf("unsupported remote URL %q must be rejected", remoteURL)
+			}
+		})
+	}
+}
+
+func TestGitCommandArgsBlockExtHelperEvenWhenRepositoryAllowsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell marker helper is Unix-only")
+	}
+	repo := t.TempDir()
+	git(t, repo, "init", "-b", "main")
+	git(t, repo, "config", "protocol.ext.allow", "always")
+
+	helperDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ext-helper-ran")
+	helper := "#!/bin/sh\nprintf invoked > \"$AI_TEAM_EXT_HELPER_MARKER\"\n"
+	writeFile(t, filepath.Join(helperDir, "touch"), helper)
+	if err := os.Chmod(filepath.Join(helperDir, "touch"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AI_TEAM_EXT_HELPER_MARKER", marker)
+
+	result := (ExecRunner{}).Run(context.Background(), repo, "git", gitCommandArgs("ls-remote", "ext::touch")...)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("configured external transport helper ran: marker stat error=%v", err)
+	}
+	if result.Status == StepPassed {
+		t.Fatal("ls-remote using ext transport unexpectedly succeeded")
+	}
+	if !strings.Contains(result.Stderr, "transport 'ext' not allowed") {
+		t.Fatalf("Git should report that ext transport is blocked, got status=%s stderr=%q", result.Status, result.Stderr)
 	}
 }
 
@@ -228,14 +330,253 @@ func TestConfiguredFilterPathsPreservesGitCheckAttrRecords(t *testing.T) {
 }
 
 func TestBuildPlanUsesOnlyAttributedFiles(t *testing.T) {
-	repo, _ := setupRepository(t)
+	repo, remote := setupRepository(t)
 	writeFile(t, filepath.Join(repo, "z.go"), "package z\n")
 	plan, err := BuildPlan(context.Background(), repo, "feat", "Добавить полезную функцию", []string{"z.go", ".ai-team/state", "a.go", "a.go"}, testVerification(t, repo))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(plan.Files, ",") != "z.go" || plan.Branch != "ai-team/feat" || plan.BaseBranch != "main" {
+	if strings.Join(plan.Files, ",") != "z.go" || plan.Branch != "ai-team/feat" || plan.BaseBranch != "main" || plan.RemoteURL != remote {
 		t.Fatalf("неверный детерминированный plan: %+v", plan)
+	}
+}
+
+func TestBuildPlanRejectsMultipleEffectivePushURLs(t *testing.T) {
+	repo, remoteA := setupRepository(t)
+	remoteB := filepath.Join(t.TempDir(), "remote-b.git")
+	git(t, filepath.Dir(remoteB), "init", "--bare", remoteB)
+	git(t, repo, "push", remoteB, "main")
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// multi push URL\n")
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteA)
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteB)
+
+	_, err := BuildPlan(context.Background(), repo, "multiple-urls", "multi push URL", []string{"a.go"}, testVerification(t, repo))
+	if err == nil || !strings.Contains(err.Error(), "ровно один") {
+		t.Fatalf("planner must reject multiple effective push URLs: %v", err)
+	}
+	for _, remote := range []string{remoteA, remoteB} {
+		if output := git(t, repo, "ls-remote", remote, "refs/heads/ai-team/multiple-urls"); strings.TrimSpace(output) != "" {
+			t.Fatalf("planner refusal unexpectedly pushed to %s: %s", remote, output)
+		}
+	}
+}
+
+func TestControllerRejectsMultiplePushURLsBeforeDeliverySideEffects(t *testing.T) {
+	repo, remoteA := setupRepository(t)
+	remoteB := filepath.Join(t.TempDir(), "remote-b.git")
+	git(t, filepath.Dir(remoteB), "init", "--bare", remoteB)
+	git(t, repo, "push", remoteB, "main")
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// multi push URL\n")
+	plan, err := BuildPlan(context.Background(), repo, "multiple-urls-exec", "multi push URL", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteA)
+	git(t, repo, "config", "--add", "remote.origin.pushurl", remoteB)
+
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "multiple-urls-exec", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "exactly one safe destination") {
+		t.Fatalf("controller must reject multiple effective push URLs: result=%+v err=%v", result, err)
+	}
+	if head := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); head != plan.BaselineHead {
+		t.Fatalf("ambiguous push URL refusal created a commit: head=%s baseline=%s", head, plan.BaselineHead)
+	}
+	if branch := strings.TrimSpace(git(t, repo, "branch", "--list", plan.Branch)); branch != "" {
+		t.Fatalf("ambiguous push URL refusal created local branch %q", branch)
+	}
+	for _, remote := range []string{remoteA, remoteB} {
+		if output := git(t, repo, "ls-remote", remote, "refs/heads/"+plan.Branch); strings.TrimSpace(output) != "" {
+			t.Fatalf("controller refusal unexpectedly pushed to %s: %s", remote, output)
+		}
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), remoteB) {
+		t.Fatal("unapproved additional push destination was persisted in delivery state")
+	}
+}
+
+func TestControllerRejectsChainedRemoteURLRewriteBeforeDeliverySideEffects(t *testing.T) {
+	repo, sourceRemote := setupRepository(t)
+	approvedRemote := filepath.Join(t.TempDir(), "approved.git")
+	evilRemote := filepath.Join(t.TempDir(), "evil.git")
+	git(t, filepath.Dir(approvedRemote), "init", "--bare", approvedRemote)
+	git(t, filepath.Dir(evilRemote), "init", "--bare", evilRemote)
+	git(t, repo, "push", approvedRemote, "main")
+
+	// The first rule is what the planner resolves into the approved URL. A
+	// later rule would rewrite that approved URL again for direct network calls.
+	git(t, repo, "config", "--add", "url."+approvedRemote+".insteadOf", sourceRemote)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// chained URL rewrite\n")
+	plan, err := BuildPlan(context.Background(), repo, "chained-rewrite", "chained URL rewrite", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatalf("one rewrite to the approved effective URL should be allowed: %v", err)
+	}
+	if plan.RemoteURL != approvedRemote {
+		t.Fatalf("approved URL=%q, want effective first rewrite %q", plan.RemoteURL, approvedRemote)
+	}
+
+	git(t, repo, "config", "--add", "url."+evilRemote+".insteadOf", approvedRemote)
+	if current := strings.TrimSpace(git(t, repo, "remote", "get-url", "--push", "--all", "origin")); current != approvedRemote {
+		t.Fatalf("remote effective URL changed after adding chained rule: got %q want %q", current, approvedRemote)
+	}
+
+	runner := &observingRunner{delegate: ExecRunner{}}
+	controller := &Controller{Runner: runner}
+	_, err = controller.Execute(context.Background(), Request{TargetDir: repo, Feature: "chained-rewrite", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "Git URL rewrites") {
+		t.Fatalf("controller must refuse chained rewrite before delivery: %v", err)
+	}
+	if head := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); head != plan.BaselineHead {
+		t.Fatalf("rewrite refusal created a commit: head=%s baseline=%s", head, plan.BaselineHead)
+	}
+	if branch := strings.TrimSpace(git(t, repo, "branch", "--list", plan.Branch)); branch != "" {
+		t.Fatalf("rewrite refusal created local branch %q", branch)
+	}
+	if commands, ok := runner.commandsForNetworkOperations(); ok {
+		t.Fatalf("rewrite refusal invoked a network operation: %v", commands)
+	}
+	for _, ref := range []string{"refs/heads/" + plan.Branch} {
+		if got := strings.TrimSpace(git(t, t.TempDir(), "ls-remote", evilRemote, ref)); got != "" {
+			t.Fatalf("rewrite refusal unexpectedly pushed to evil remote: %s", got)
+		}
+	}
+}
+
+func TestRejectRemoteURLPushRewritePrefix(t *testing.T) {
+	config := "url.https://evil.example/repo.git.pushinsteadof\nhttps://approved.example/repo.git\x00"
+	err := rejectRemoteURLRewrites(config, "https://approved.example/repo.git")
+	if err == nil || !strings.Contains(err.Error(), "matches a configured Git URL rewrite") {
+		t.Fatalf("matching pushInsteadOf prefix must be rejected, got %v", err)
+	}
+}
+
+func TestControllerDoesNotPersistQueryCredentialFromChangedRemote(t *testing.T) {
+	repo, _ := setupRepository(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// query credential\n")
+	plan, err := BuildPlan(context.Background(), repo, "query-credential", "query credential", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "remote", "set-url", "origin", "https://example.test/repo.git?key=secret-token")
+
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "query-credential", Plan: plan})
+	if err == nil || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("unsafe query URL should fail without exposing its value: result=%+v err=%v", result, err)
+	}
+	if strings.Contains(result.StatePath, "secret-token") {
+		t.Fatal("query credential was exposed in state path")
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatal("query credential was persisted in delivery state")
+	}
+}
+
+func TestControllerDoesNotPersistCredentialBearingChangedRemoteURL(t *testing.T) {
+	repo, _ := setupRepository(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// changed\n")
+	plan, err := BuildPlan(context.Background(), repo, "credential-remote", "change", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "remote", "set-url", "origin", "https://user:secret-token@example.test/repo.git")
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "credential-remote", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "exactly one safe destination") {
+		t.Fatalf("changed credential-bearing URL should be rejected safely: result=%+v err=%v", result, err)
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatal("credential value was persisted in delivery state")
+	}
+}
+
+func TestControllerDisablesGitHooksDuringDelivery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook fixture is Unix-only")
+	}
+	repo, _ := setupRepository(t)
+	installFakeGH(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// hook check\n")
+	plan, err := BuildPlan(context.Background(), repo, "hooks", "disable hooks", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookDir := t.TempDir()
+	postCheckoutMarker := filepath.Join(t.TempDir(), "post-checkout-ran")
+	prePushMarker := filepath.Join(t.TempDir(), "pre-push-ran")
+	for name, marker := range map[string]string{"post-checkout": postCheckoutMarker, "pre-push": prePushMarker} {
+		path := filepath.Join(hookDir, name)
+		writeFile(t, path, "#!/bin/sh\ntouch \""+marker+"\"\n")
+		if err := os.Chmod(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, repo, "config", "core.hooksPath", hookDir)
+
+	if _, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "hooks", Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(git(t, repo, "config", "--get", "branch."+plan.Branch+".remote")); got != "origin" {
+		t.Fatalf("delivery branch upstream remote=%q, want origin", got)
+	}
+	if got := strings.TrimSpace(git(t, repo, "config", "--get", "branch."+plan.Branch+".merge")); got != "refs/heads/"+plan.Branch {
+		t.Fatalf("delivery branch upstream merge=%q, want refs/heads/%s", got, plan.Branch)
+	}
+	if got, want := strings.TrimSpace(git(t, repo, "rev-parse", "refs/remotes/origin/"+plan.Branch)), strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")); got != want {
+		t.Fatalf("named upstream tracking ref=%s, want delivery HEAD %s", got, want)
+	}
+	for _, marker := range []string{postCheckoutMarker, prePushMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("delivery unexpectedly executed hook marker %q (stat err %v)", marker, err)
+		}
+	}
+}
+
+func TestControllerRechecksCommitAgainstPlanWhenSavedStateIsTampered(t *testing.T) {
+	repo, _ := setupRepository(t)
+	const approved = "package a\n// approved\n"
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+	plan, err := BuildPlan(context.Background(), repo, "tampered-state", "approved change", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "switch", "-c", plan.Branch)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// foreign commit\n")
+	git(t, repo, "add", "--", "a.go")
+	git(t, repo, "commit", "-m", plan.CommitMessage)
+	foreignCommit := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+
+	statePath, err := Prepare(repo, "tampered-state", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forged state
+	if err := json.Unmarshal(data, &forged); err != nil {
+		t.Fatal(err)
+	}
+	forged.CommitSHA = foreignCommit
+	forged.CommitVerified = true
+	if err := writeState(statePath, &forged); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "tampered-state", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "committed bytes") {
+		t.Fatalf("подменённый state с чужим commit должен быть отклонён по blob hash: %v", err)
 	}
 }
 
@@ -807,12 +1148,32 @@ type failRecordCommitRunner struct {
 }
 
 func (runner *failRecordCommitRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
-	if !runner.failed && name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+	if !runner.failed && name == "git" && len(args) >= 2 && args[len(args)-2] == "rev-parse" && args[len(args)-1] == "HEAD" {
 		runner.failed = true
 		now := time.Now().UTC()
 		return StepResult{Command: append([]string{name}, args...), StartedAt: now, FinishedAt: now, ExitCode: 1, Status: StepFailed, Reason: "injected post-commit persistence gap"}
 	}
 	return runner.delegate.Run(ctx, dir, name, args...)
+}
+
+type observingRunner struct {
+	delegate ExecRunner
+	commands [][]string
+}
+
+func (runner *observingRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
+	runner.commands = append(runner.commands, append([]string{name}, args...))
+	return runner.delegate.Run(ctx, dir, name, args...)
+}
+
+func (runner *observingRunner) commandsForNetworkOperations() ([][]string, bool) {
+	var found [][]string
+	for _, command := range runner.commands {
+		if len(command) > 1 && command[0] == "git" && isGitNetworkOperation(command[1:]) {
+			found = append(found, append([]string(nil), command...))
+		}
+	}
+	return found, len(found) > 0
 }
 
 func TestControllerRefusesPreStagedFiles(t *testing.T) {
@@ -833,7 +1194,7 @@ func TestControllerRefusesPreStagedFiles(t *testing.T) {
 
 func validTestPlan() Plan {
 	return Plan{
-		SchemaVersion: SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin",
+		SchemaVersion: SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin", RemoteURL: "https://example.test/repo.git",
 		Files: []string{"a.go"}, FileDigests: map[string]string{"a.go": strings.Repeat("a", 64)}, FileModes: map[string]string{"a.go": "100644"},
 		BaselineHead: strings.Repeat("b", 40), SourceRunID: "run-1",
 		VerifiedWorkspaceDigest: strings.Repeat("c", 64), CheckEvidenceDigest: strings.Repeat("d", 64),

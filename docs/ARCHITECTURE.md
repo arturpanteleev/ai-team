@@ -376,8 +376,8 @@ polling. Это узкий поток изменяемого текста: lifec
 ## Deployer и canonical delivery plan
 
 `deployer` — не исполнитель произвольных команд от LLM. Контроллер строит
-строгий JSON plan только из workspace-relative файлов, изменение которых
-атрибутировано актуальным попыткам текущего run. Затем он проверяет:
+строгий JSON plan с push URL remote и только с workspace-relative файлами,
+изменение которых атрибутировано актуальным попыткам текущего run. Затем он проверяет:
 
 1. review verdict — `APPROVED`;
 2. test-report result — `PASS`;
@@ -394,8 +394,10 @@ file modes; после commit — parent, tree, blobs и modes. Состояни
 сохраняется в attempt evidence. Если процесс оборвался сразу после `git
 commit` (например, процесс убит между commit и push), controller при retry
 принимает уже существующий commit только после повторной сверки message,
-parent, paths, modes и blob hashes — так что штатный retry не создаёт
-дублирующий commit или PR.
+parent, paths, modes и blob hashes с canonical plan — так что штатный retry не
+создаёт дублирующий commit или PR. Перед side effects controller повторно
+сверяет push URL remote с одобренным планом; каждый Git вызов отключает hooks,
+fsmonitor и commit signing.
 
 ### Отложенная (deferred) delivery и Git trailers — V0-9
 

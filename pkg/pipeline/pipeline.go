@@ -297,6 +297,7 @@ type runState struct {
 	ps                        *ui.PipelineStatus
 	startTime                 time.Time
 	approvedPlanHash          string
+	approvePlanExplicit       bool
 	runID                     string
 	evidence                  EvidenceStore
 	attemptOrdinal            int
@@ -342,6 +343,7 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 }
 
 func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResult, error) {
+	approvePlanExplicit := strings.TrimSpace(runCfg.ApprovePlanHash) != ""
 	if err := p.cfg.Validate(p.reg); err != nil {
 		return RunResult{}, err
 	}
@@ -838,23 +840,24 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return copy
 		}(),
-		results:          replayedStageResults(replayedRun),
-		startTime:        runStartedAt,
-		approvedPlanHash: runCfg.ApprovePlanHash,
-		runID:            runID,
-		evidence:         evidenceStore,
-		attemptOrdinal:   attemptOrdinal,
-		lifecycleStore:   lifecycleStore,
-		lifecycleState:   resumedState,
-		approvalStore:    approvalStore,
-		resumedApproval:  resumedApproval,
-		resumed:          runCfg.ResumeRunID != "",
-		brief:            currentBrief,
-		graph:            compiledGraph,
-		visits:           make(map[string]int),
-		candidate:        candidateManager,
-		sourceTarget:     sourceTarget,
-		budgetConfig:     p.cfg.Budget,
+		results:             replayedStageResults(replayedRun),
+		startTime:           runStartedAt,
+		approvedPlanHash:    runCfg.ApprovePlanHash,
+		approvePlanExplicit: approvePlanExplicit,
+		runID:               runID,
+		evidence:            evidenceStore,
+		attemptOrdinal:      attemptOrdinal,
+		lifecycleStore:      lifecycleStore,
+		lifecycleState:      resumedState,
+		approvalStore:       approvalStore,
+		resumedApproval:     resumedApproval,
+		resumed:             runCfg.ResumeRunID != "",
+		brief:               currentBrief,
+		graph:               compiledGraph,
+		visits:              make(map[string]int),
+		candidate:           candidateManager,
+		sourceTarget:        sourceTarget,
+		budgetConfig:        p.cfg.Budget,
 	}
 	if len(resumeInvalidated) > 0 {
 		rs.loopbackCycles = 1

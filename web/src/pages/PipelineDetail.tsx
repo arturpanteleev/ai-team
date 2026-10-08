@@ -1,12 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useParams, Link } from '../router';
-import type { PipelineRun, Stage, Artifact, Approval, CloudRole, WorkflowGraph, WorkflowSnapshot } from '../types';
-import { getPipelineRun, getPipelineArtifacts, getRunWorkflow, decideApproval, resumeRun, cancelRun, getActivePrincipal } from '../api';
+import type { PipelineRun, Stage, Artifact, Approval, CloudRole, DeliveryProjection, WorkflowGraph, WorkflowSnapshot } from '../types';
+import { getPipelineRun, getPipelineArtifacts, getRunWorkflow, decideApproval, resumeRun, retryDelivery, cancelRun, getActivePrincipal } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { StatusBadge } from '../components/StatusBadge';
 import { StageRow } from '../components/StageRow';
 import styles from './PipelineDetail.module.css';
+
+function safePullRequestURL(value?: string): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 export function PipelineDetail() {
   const principal = getActivePrincipal();
@@ -15,6 +25,9 @@ export function PipelineDetail() {
   const [stages, setStages] = useState<Stage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [delivery, setDelivery] = useState<DeliveryProjection>({ status: 'not_requested' });
+  const [deliveryRetryError, setDeliveryRetryError] = useState('');
+  const [deliveryRetrying, setDeliveryRetrying] = useState(false);
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [nextStage, setNextStage] = useState('');
   const [actor, setActor] = useState(principal?.actor_id ?? 'local-user');
@@ -36,6 +49,7 @@ export function PipelineDetail() {
       setStages(pipelineData.stages);
       setArtifacts(artifactsData);
       setApprovals(pipelineData.approvals ?? []);
+      setDelivery(pipelineData.delivery ?? { status: 'not_requested' });
       setGraph(workflowData.graph ?? null);
       setNextStage(pipelineData.next_stage ?? '');
     } catch {
@@ -104,6 +118,30 @@ export function PipelineDetail() {
     }
   };
 
+  const sendDeliveryRetry = async () => {
+    setDeliveryRetryError('');
+    setDeliveryRetrying(true);
+    try {
+      await retryDelivery(run.run_id);
+      await fetchData();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Git delivery retry failed';
+      // The controller may have completed the POST before the connection was
+      // lost. Re-read its durable receipt/event projection before reporting the
+      // outcome so the UI does not offer a duplicate delivery blindly.
+      await fetchData();
+      setDeliveryRetryError(`${message}. Delivery status was refreshed from the controller.`);
+    } finally {
+      setDeliveryRetrying(false);
+    }
+  };
+
+  const canRetryDelivery = (!principal || principal.roles.includes('product_owner') || principal.roles.includes('release_manager')) &&
+    (run.status === 'completed' || run.status === 'completed_with_warnings') &&
+    (delivery.status === 'pending' || delivery.status === 'failed');
+  const deliveryStatus = delivery.status;
+  const prURL = safePullRequestURL(delivery.record?.pr_url);
+
   return (
     <div className={styles.container}>
       <Link to="/" className={styles.back}>← Назад</Link>
@@ -117,6 +155,28 @@ export function PipelineDetail() {
           <StatusBadge status={run.status} />
         </div>
       </div>
+
+      {deliveryStatus !== 'not_requested' && (
+        <section className={styles.workflow} aria-labelledby="git-delivery-heading">
+          <h2 id="git-delivery-heading">Git delivery</h2>
+          <p aria-live="polite">Status: {deliveryStatus}</p>
+          {delivery.record && (
+            <div>
+              {delivery.record.commit_sha && <p>Commit: <code>{delivery.record.commit_sha}</code></p>}
+              {delivery.record.pr_url && <p>Pull request: {prURL
+                ? <a href={prURL} target="_blank" rel="noreferrer">{delivery.record.pr_url}</a>
+                : <code>{delivery.record.pr_url}</code>}</p>}
+            </div>
+          )}
+          {delivery.error && <p role="status">Delivery failed: {delivery.error}</p>}
+          {deliveryRetryError && <p role="alert">Delivery retry response was unclear: {deliveryRetryError}</p>}
+          {canRetryDelivery && (
+            <button onClick={sendDeliveryRetry} disabled={deliveryRetrying}>
+              {deliveryRetrying ? 'Retrying delivery…' : 'Retry approved Git delivery'}
+            </button>
+          )}
+        </section>
+      )}
 
       {artifacts.some((artifact) => artifact.run_id === run.run_id && artifact.path.startsWith('brief/')) && (
         <section className={styles.workflow}>

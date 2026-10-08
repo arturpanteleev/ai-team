@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -314,6 +315,48 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
+}
+
+func (s *Server) handleRetryDelivery(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorize(r, cloudidentity.PermissionDeliver, ""); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if err := requireEmptyCommand(w, r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	runID := chi.URLParam(r, "runID")
+	run, err := s.store.GetPipelineRunByRunID(runID)
+	if err != nil || run == nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	actorID := "local-user"
+	if session, ok := s.requestSession(r); ok && session.Principal.ActorID != "" {
+		actorID = session.Principal.ActorID
+	}
+	requestedAt := time.Now().UTC()
+	// Persist intent before the controller can run Git/hosting commands. Later
+	// outcome events are projections; a missing one cannot erase this audit row.
+	if err := s.appendRunEventRequired(runID, "delivery_retry_requested", requestedAt, map[string]any{"actor_id": actorID}); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ delivery retry intent audit for run %s: %v\n", runID, err)
+		http.Error(w, "delivery retry could not be recorded", http.StatusServiceUnavailable)
+		return
+	}
+	record, err := s.controller.DeliverDeferred(r.Context(), runID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ delivery retry failed for run %s: %v\n", runID, err)
+		s.appendRunEvent(runID, "delivery_retry_failed", time.Now().UTC(), map[string]any{
+			"actor_id": actorID, "error": "delivery retry failed; see controller diagnostics",
+		})
+		http.Error(w, "delivery retry failed", http.StatusConflict)
+		return
+	}
+	s.appendRunEvent(runID, "delivery_retry_succeeded", time.Now().UTC(), map[string]any{
+		"actor_id": actorID, "plan_hash": record.PlanHash, "commit_sha": record.CommitSHA, "pr_url": record.PRURL,
+	})
+	writeJSONResponse(w, http.StatusOK, map[string]any{"run_id": runID, "delivery": record})
 }
 
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {

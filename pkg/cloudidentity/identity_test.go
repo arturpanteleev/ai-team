@@ -43,11 +43,21 @@ func TestPrincipalRolesAndRBAC(t *testing.T) {
 	if err := Authorize(principal, PermissionCancel, ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := Authorize(principal, PermissionDeliver, ""); err != nil {
+		t.Fatalf("release manager should retry an approved delivery: %v", err)
+	}
 	if err := Authorize(principal, PermissionStart, ""); err == nil {
 		t.Fatal("release manager не должен создавать run")
 	}
 	if err := Authorize(principal, PermissionDecision, RoleQA); err == nil {
 		t.Fatal("нельзя принимать решение от чужой роли")
+	}
+	reviewer, err := NewPrincipal("reviewer-1", []Role{RoleReviewer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Authorize(reviewer, PermissionDeliver, ""); err == nil {
+		t.Fatal("reviewer must not execute Git delivery")
 	}
 	if _, err := NewPrincipal("x", []Role{"admin"}); err == nil {
 		t.Fatal("неизвестная роль должна быть отклонена")

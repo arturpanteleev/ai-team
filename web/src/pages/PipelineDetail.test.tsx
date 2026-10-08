@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from '../router';
-import { decideApproval } from '../api';
+import { decideApproval, getPipelineRun, retryDelivery } from '../api';
 import { PipelineDetail } from './PipelineDetail';
 
 const session = vi.hoisted(() => ({ principal: null as null | { actor_id: string; roles: ('product_owner' | 'developer')[] } }));
@@ -59,6 +59,7 @@ vi.mock('../api', () => ({
   }),
   decideApproval: vi.fn(),
   resumeRun: vi.fn(),
+  retryDelivery: vi.fn(),
   cancelRun: vi.fn(),
 }));
 
@@ -124,5 +125,58 @@ describe('PipelineDetail graph', () => {
     }), expect.objectContaining({
       action: 'approve_spec', artifact_revisions: { 'attempts/attempt-2/artifacts/feat/spec.md': 'rev-000001-A' },
     }));
+  });
+
+  it('shows controller Git delivery commit and PR separately from run completion', async () => {
+    vi.mocked(getPipelineRun).mockResolvedValue({
+      run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },
+      stages: [],
+      delivery: { status: 'recorded', record: {
+        schema_version: 1, run_id: 'run-graph', feature: 'graph-feature', plan_hash: 'a'.repeat(64),
+        commit_sha: 'b'.repeat(40), pr_url: 'https://example.test/pr/42', performed_at: '2026-07-28T00:01:00Z',
+      } },
+    });
+    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+
+    expect(await screen.findByText('Git delivery')).toBeInTheDocument();
+    expect(screen.getByText('Status: recorded')).toBeInTheDocument();
+    expect(screen.getByText('b'.repeat(40))).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://example.test/pr/42' })).toHaveAttribute('href', 'https://example.test/pr/42');
+    expect(screen.queryByText(/deployed/i)).not.toBeInTheDocument();
+    // The data loaded above has a durable successful record, so this page does
+    // not offer a second delivery command.
+    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
+    expect(retryDelivery).not.toHaveBeenCalled();
+  });
+
+  it('offers retry for a completed run with pending delivery and hides it from developer role', async () => {
+    const pendingRun = {
+      run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },
+      stages: [], delivery: { status: 'pending' },
+    } as Awaited<ReturnType<typeof getPipelineRun>>;
+    const deliveredRun = {
+      run: pendingRun.run, stages: [], delivery: { status: 'recorded', record: {
+        schema_version: 1, run_id: 'run-graph', feature: 'graph-feature', plan_hash: 'a'.repeat(64),
+        commit_sha: 'b'.repeat(40), pr_url: 'https://example.test/pr/44', performed_at: '2026-07-28T00:01:00Z',
+      } },
+    } as Awaited<ReturnType<typeof getPipelineRun>>;
+    vi.mocked(getPipelineRun).mockResolvedValueOnce(pendingRun).mockResolvedValueOnce(deliveredRun);
+    vi.mocked(retryDelivery).mockRejectedValueOnce(new Error('connection reset after request'));
+    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    expect(await screen.findByRole('button', { name: 'Retry approved Git delivery' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry approved Git delivery' }));
+    expect(retryDelivery).toHaveBeenCalledWith('run-graph');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Delivery retry response was unclear: connection reset after request');
+    expect(screen.getByText('Status: recorded')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://example.test/pr/44' })).toHaveAttribute('href', 'https://example.test/pr/44');
+    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
+    expect(screen.getByText('completed')).toBeInTheDocument();
+
+    cleanup();
+    session.principal = { actor_id: 'dev-1', roles: ['developer'] };
+    vi.mocked(getPipelineRun).mockResolvedValue({ ...pendingRun });
+    render(<MemoryRouter initialEntries={['/pipelines/7']}><PipelineDetail /></MemoryRouter>);
+    expect(await screen.findByText('Status: pending')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry approved Git delivery' })).not.toBeInTheDocument();
   });
 });

@@ -170,6 +170,17 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if err := appendPrivateDirectoryMount(&args, deliveryDir, true); err != nil {
 		return nil, err
 	}
+	// Delivery receipts prove that trusted controller code observed a successful
+	// Execute. The worker API can submit terminal-record mirrors, but this
+	// separate authority store has no worker writer and is hidden from children.
+	deliveryReceiptDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "delivery-receipts")
+	if err != nil {
+		return nil, fmt.Errorf("prepare controller delivery receipt mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, deliveryReceiptDir, true); err != nil {
+		return nil, err
+	}
+	args = append(args, "--chmod", "0555", deliveryReceiptDir, "--remount-ro", deliveryReceiptDir)
 	attestationDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "attestation")
 	if err != nil {
 		return nil, fmt.Errorf("prepare controller attestation mount: %w", err)

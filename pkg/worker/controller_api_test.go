@@ -3777,6 +3777,14 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	}
 }
 
+func TestProcessEngineRejectsTrustedTerminalReconcilerWithoutBubblewrap(t *testing.T) {
+	_, err := NewProcessEngine([]string{"worker"}, t.TempDir(), filepath.Join(t.TempDir(), "db"),
+		WithTerminalDeliveryReconciler(func(context.Context, string, string) error { return nil }))
+	if err == nil || !strings.Contains(err.Error(), "requires AI_TEAM_WORKER_SANDBOX=bubblewrap") {
+		t.Fatalf("unsandboxed worker was allowed trusted receipt reconciliation: %v", err)
+	}
+}
+
 func TestProcessEngineFailsWhenWorkerRecorderAPIRejectsCall(t *testing.T) {
 	target := t.TempDir()
 	t.Setenv("AI_TEAM_WORKER_TEST_MODE", "api-failure")

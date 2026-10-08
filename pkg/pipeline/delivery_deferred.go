@@ -105,6 +105,14 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	var writeErr error
 	if rs.p.terminalRecordWriter != nil {
 		writeErr = rs.p.terminalRecordWriter.WriteTerminalRecord(record)
+	} else {
+		// A direct pipeline invocation has observed Execute in this controller
+		// process, so it can issue the retry proof. Sandboxed workers only submit
+		// a TerminalRecord through their scoped API and do not get this authority.
+		if receiptErr := delivery.WriteControllerDeliveryReceipt(rs.runCfg.TargetDir, record); receiptErr != nil {
+			return fmt.Errorf("deferred delivery: controller receipt: %w", receiptErr)
+		}
+		writeErr = delivery.WriteTerminalRecord(rs.evidence.RunDir(), record)
 	}
 	if writeErr != nil {
 		return fmt.Errorf("deferred delivery: запись terminal record: %w", writeErr)
@@ -182,25 +190,16 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	if err != nil {
 		return delivery.TerminalRecord{}, err
 	}
-	if marker.PlanHash == "" || (marker.Feature != "" && marker.Feature != feature) {
-		return delivery.TerminalRecord{}, errors.New("deliver: delivery_deferred маркер не согласован с run")
-	}
-	// AUD-05: prepared plan и delivery выполняются в workspace, записанном в
-	// state_path (для Git-run — candidate worktree), а не в указанном CLI
-	// control target. Без state_path retry fail-closed: невозможно выбрать
-	// верный workspace.
-	workspace, err := deliveryWorkspaceFromStatePath(marker.StatePath, feature)
+	marker, err = deferredMarkerWithAttemptStage(p.attemptManifestSource, runDir, runID, marker)
 	if err != nil {
 		return delivery.TerminalRecord{}, err
 	}
-	// workspace должен лежать внутри control target (или совпадать с ним),
-	// иначе cmdDeliver был вызван для чуждого репозитория. Пути канонизируем:
-	// state_path может быть записан уже через символическую ссылку
-	// (на macOS /var → /private/var), а CLI target — нет.
-	workspaceCanon, targetCanon := canonicalPath(workspace), canonicalPath(targetDir)
-	rel, relErr := filepath.Rel(targetCanon, workspaceCanon)
-	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace %s вне control target %s", workspace, targetDir)
+	if marker.PlanHash == "" || (marker.Feature != "" && marker.Feature != feature) {
+		return delivery.TerminalRecord{}, errors.New("deliver: delivery_deferred маркер не согласован с run")
+	}
+	workspace, plan, _, planHash, err := preparedDeferredPlan(targetDir, feature, marker)
+	if err != nil {
+		return delivery.TerminalRecord{}, err
 	}
 
 	lock, err := evidence.AcquireWorkspaceLock(workspace)
@@ -212,15 +211,16 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	// AUD-05: retry обязан исполнять доставку в тот же candidate, который был
 	// attestated в terminal finalize; проверив digest workspace — fail-closed
 	// при реконфигурации ворктри между finalize и повторной доставкой.
-	if candidateDigest, found, digestErr := candidateWorkspaceDigestOfRun(runDir); digestErr != nil {
+	candidateSHA, candidateFound, digestErr := candidateWorkspaceDigestOfRun(runDir)
+	if digestErr != nil {
 		return delivery.TerminalRecord{}, digestErr
-	} else if found {
+	} else if candidateFound {
 		currentDigest, wsErr := checks.WorkspaceDigest(workspace)
 		if wsErr != nil {
 			return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace digest: %w", wsErr)
 		}
-		if currentDigest != candidateDigest {
-			return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace %s не совпадает с attested candidate %s", currentDigest, candidateDigest)
+		if currentDigest != candidateSHA {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: workspace %s не совпадает с attested candidate %s", currentDigest, candidateSHA)
 		}
 	}
 
@@ -233,19 +233,32 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 		return delivery.TerminalRecord{}, err
 	}
 
-	plan, found, err := delivery.LoadPreparedPlan(workspace, feature)
+	canonical, err := plan.CanonicalJSON()
 	if err != nil {
-		return delivery.TerminalRecord{}, fmt.Errorf("deliver: prepared plan: %w", err)
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: canonical prepared plan: %w", err)
 	}
-	if !found {
-		return delivery.TerminalRecord{}, errors.New("deliver: prepared plan отсутствует — delivery state не найден")
+	approvalStore := p.approvals
+	if approvalStore == nil {
+		approvalStore, err = approval.NewStore(targetDir)
+		if err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: controller approval store: %w", err)
+		}
 	}
-	planHash, err := plan.Hash()
-	if err != nil {
-		return delivery.TerminalRecord{}, err
+	approvalAttempts := evidence.ReservedAttemptManifestSource{TargetDir: targetDir}
+	if err := requireResolvedDeliveryOperationApproval(approvalStore, approvalAttempts, runDir,
+		runID, marker.Stage, planHash, canonical, candidateSHA); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: %w", err)
 	}
-	if planHash != marker.PlanHash {
-		return delivery.TerminalRecord{}, fmt.Errorf("deliver: plan hash mismatch: marker=%s prepared=%s", marker.PlanHash, planHash)
+	// A successful retry is idempotent. Do this after the exact current plan,
+	// candidate, terminal run, and workspace lock have been validated, so a
+	// changed plan cannot borrow the previous run's approval or PR record.
+	if existing, found, readErr := delivery.ReadControllerDeliveryReceipt(targetDir, runID); readErr != nil {
+		return delivery.TerminalRecord{}, readErr
+	} else if found {
+		if err := validateRecoveredTerminalRecord(runDir, runID, feature, marker, *existing); err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: existing controller receipt mismatch: %w", err)
+		}
+		return *existing, nil
 	}
 
 	trailers := []string{
@@ -274,8 +287,28 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 		RuntimeIdentity:   runtimeIdentity,
 		PerformedAt:       time.Now().UTC(),
 	}
-	if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
+	// Persist the controller-only receipt first. Worker-submitted terminal
+	// records use a separate API and cannot satisfy the idempotent shortcut.
+	if err := delivery.WriteControllerDeliveryReceipt(targetDir, record); err != nil {
 		return delivery.TerminalRecord{}, err
+	}
+	stored, found, err := delivery.ReadControllerDeliveryReceipt(targetDir, runID)
+	if err != nil {
+		return delivery.TerminalRecord{}, err
+	}
+	if !found {
+		return delivery.TerminalRecord{}, errors.New("deliver: controller delivery receipt disappeared after write")
+	}
+	record = *stored
+	// Keep the worker-API compatibility record and historical run-local copy for
+	// existing readers. Neither mirror is accepted as proof for retry
+	// idempotency; a conflicting worker-submitted record cannot replace the
+	// controller receipt or undo the successful delivery.
+	if err := delivery.WriteControllerTerminalRecord(targetDir, runID, record); err != nil {
+		logging.Printf("⚠ delivery compatibility controller record for run %s: %v", runID, err)
+	}
+	if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
+		logging.Printf("⚠ delivery compatibility mirror for run %s: %v", runID, err)
 	}
 	if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: reseal terminal evidence: %w", err)
@@ -411,9 +444,9 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	if filepath.Base(runID) != runID || runID == "." || runID == ".." {
 		return fmt.Errorf("recover delivery: invalid run id %q", runID)
 	}
-	record, found, err := delivery.ReadTerminalRecordForRun(targetDir, runDir, runID)
+	record, found, err := delivery.ReadControllerDeliveryReceipt(targetDir, runID)
 	if err != nil {
-		return fmt.Errorf("recover delivery record: %w", err)
+		return fmt.Errorf("recover controller delivery receipt: %w", err)
 	}
 	marker, markerErr := firstDeferredMarker(runDir, p.eventLogSource)
 	if markerErr != nil {
@@ -440,6 +473,37 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 	}
 	if marker.PlanHash == "" {
 		return errors.New("recover delivery: delivery_deferred marker has no plan hash")
+	}
+	if p.approvals == nil {
+		return errors.New("recover delivery: controller approval store is required for trusted recovery")
+	}
+	attemptStore := evidence.ControllerAttemptManifestStore{TargetDir: targetDir}
+	reserved, err := attemptStore.IsReserved(runID)
+	if err != nil {
+		return fmt.Errorf("recover controller attempt manifest reservation: %w", err)
+	}
+	if !reserved {
+		return errors.New("recover delivery: trusted recovery requires a controller-reserved attempt manifest")
+	}
+	_, attempt, err := evidence.ReadAttemptManifest(attemptStore, runDir, runID, marker.AttemptID)
+	if err != nil {
+		return fmt.Errorf("recover controller delivery attempt: %w", err)
+	}
+	if marker.Stage != "" && attempt.Stage != marker.Stage {
+		return fmt.Errorf("recover delivery: marker stage %q differs from controller attempt stage %q", marker.Stage, attempt.Stage)
+	}
+	marker.Stage = attempt.Stage
+	_, _, canonical, planHash, err := preparedDeferredPlan(targetDir, manifest.Feature, marker)
+	if err != nil {
+		return fmt.Errorf("recover delivery prepared plan: %w", err)
+	}
+	candidateSHA, _, err := candidateWorkspaceDigestOfRun(runDir)
+	if err != nil {
+		return fmt.Errorf("recover delivery candidate identity: %w", err)
+	}
+	if err := requireResolvedDeliveryOperationApproval(p.approvals, attemptStore, runDir,
+		runID, marker.Stage, planHash, canonical, candidateSHA); err != nil {
+		return fmt.Errorf("recover delivery: %w", err)
 	}
 	if found {
 		if err := validateRecoveredTerminalRecord(runDir, runID, manifest.Feature, marker, *record, p.eventLogSource); err != nil {
@@ -586,6 +650,8 @@ type deferredMarkerEvent struct {
 	PlanHash  string `json:"plan_hash"`
 	Feature   string `json:"feature"`
 	StatePath string `json:"state_path"`
+	Stage     string `json:"-"`
+	AttemptID string `json:"-"`
 }
 
 func firstDeferredMarker(runDir string, source evidence.EventLog) (deferredMarkerEvent, error) {
@@ -605,12 +671,66 @@ func firstDeferredMarker(runDir string, source evidence.EventLog) (deferredMarke
 		if err := json.Unmarshal(data, &marker); err != nil {
 			return deferredMarkerEvent{}, fmt.Errorf("deliver: decode delivery_deferred marker: %w", err)
 		}
-		if marker.PlanHash == "" || marker.StatePath == "" {
-			return deferredMarkerEvent{}, errors.New("deliver: некорректный delivery_deferred marker: отсутствует plan_hash или state_path")
+		marker.Stage, marker.AttemptID = event.Stage, event.AttemptID
+		if marker.PlanHash == "" || marker.StatePath == "" || marker.AttemptID == "" {
+			return deferredMarkerEvent{}, errors.New("deliver: некорректный delivery_deferred marker: отсутствует plan_hash, state_path или attempt_id")
 		}
 		return marker, nil
 	}
 	return deferredMarkerEvent{}, fmt.Errorf("deliver: %w", errDeferredMarkerNotFound)
+}
+
+// Older delivery_deferred events carry AttemptID but not Stage. Recover that
+// value from the selected attempt-manifest source; cloud recovery supplies the
+// reserved controller source, while trusted CLI replay can use legacy evidence.
+func deferredMarkerWithAttemptStage(source evidence.AttemptManifestSource, runDir, runID string, marker deferredMarkerEvent) (deferredMarkerEvent, error) {
+	if marker.Stage != "" {
+		return marker, nil
+	}
+	_, attempt, err := evidence.ReadAttemptManifest(source, runDir, runID, marker.AttemptID)
+	if err != nil {
+		return deferredMarkerEvent{}, fmt.Errorf("deliver: resolve marker stage from attempt manifest: %w", err)
+	}
+	marker.Stage = attempt.Stage
+	if marker.Stage == "" {
+		return deferredMarkerEvent{}, errors.New("deliver: attempt manifest has no stage for delivery approval")
+	}
+	return marker, nil
+}
+
+// preparedDeferredPlan resolves the plan only from the marker's prepared
+// state path and confirms that the workspace belongs to the controller target.
+// The returned canonical bytes are the exact payload that the release-manager
+// approval must have resolved.
+func preparedDeferredPlan(targetDir, feature string, marker deferredMarkerEvent) (string, delivery.Plan, []byte, string, error) {
+	workspace, err := deliveryWorkspaceFromStatePath(marker.StatePath, feature)
+	if err != nil {
+		return "", delivery.Plan{}, nil, "", err
+	}
+	workspaceCanon, targetCanon := canonicalPath(workspace), canonicalPath(targetDir)
+	rel, relErr := filepath.Rel(targetCanon, workspaceCanon)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", delivery.Plan{}, nil, "", fmt.Errorf("deliver: workspace %s вне control target %s", workspace, targetDir)
+	}
+	plan, found, err := delivery.LoadPreparedPlan(workspace, feature)
+	if err != nil {
+		return "", delivery.Plan{}, nil, "", fmt.Errorf("deliver: prepared plan: %w", err)
+	}
+	if !found {
+		return "", delivery.Plan{}, nil, "", errors.New("deliver: prepared plan отсутствует — delivery state не найден")
+	}
+	planHash, err := plan.Hash()
+	if err != nil {
+		return "", delivery.Plan{}, nil, "", err
+	}
+	if planHash != marker.PlanHash {
+		return "", delivery.Plan{}, nil, "", fmt.Errorf("deliver: plan hash mismatch: marker=%s prepared=%s", marker.PlanHash, planHash)
+	}
+	canonical, err := plan.CanonicalJSON()
+	if err != nil {
+		return "", delivery.Plan{}, nil, "", fmt.Errorf("deliver: canonical prepared plan: %w", err)
+	}
+	return workspace, plan, canonical, planHash, nil
 }
 
 func terminalStatusOfRun(runDir, runID string, source evidence.EventLog) (string, error) {

@@ -81,6 +81,7 @@ const (
 	PermissionStart        Permission = "run:start"
 	PermissionResume       Permission = "run:resume"
 	PermissionCancel       Permission = "run:cancel"
+	PermissionDeliver      Permission = "run:deliver"
 	PermissionDecision     Permission = "approval:decide"
 	PermissionArtifactEdit Permission = "artifact:edit"
 	PermissionTeamManage   Permission = "team:manage"
@@ -95,6 +96,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect) ||
 			principal.Has(RoleDeveloper) || principal.Has(RoleQA)
 	case PermissionCancel:
+		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleReleaseManager)
+	case PermissionDeliver:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleReleaseManager)
 	case PermissionDecision:
 		allowed = knownRoles[selectedRole] && principal.Has(selectedRole)

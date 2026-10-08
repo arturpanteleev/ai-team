@@ -383,7 +383,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		}
 		rs.deferredDelivery = &deferredDelivery{StatePath: statePath, PlanHash: planHash}
 		if err := rs.evidence.Append(evidence.Event{
-			Type: "delivery_deferred", AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
+			Type: "delivery_deferred", Stage: name, AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
 			Data: map[string]any{"plan_hash": planHash, "state_path": filepath.ToSlash(statePath)},
 		}); err != nil {
 			r.ValidationFailed = true

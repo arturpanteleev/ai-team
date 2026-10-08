@@ -209,22 +209,42 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	if err := os.Remove(filepath.Join(runDir, "delivery.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
+	marker, err := firstDeferredMarker(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptStore := evidence.ControllerAttemptManifestStore{TargetDir: dir}
+	_, attempt, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), runDir, runID, marker.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attemptStore.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := attemptStore.Write(runID, attempt); err != nil {
+		t.Fatal(err)
+	}
+	approvalStore, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore))
+	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("reconcile should accept a valid controller-owned record: %v", err)
 	}
-	if err := os.Remove(filepath.Join(dir, ".ai-team", "state", "delivery", runID+".json")); err != nil {
+	if err := os.Remove(filepath.Join(dir, ".ai-team", "state", "delivery-receipts", runID+".json")); err != nil {
 		t.Fatal(err)
 	}
 	record.PlanHash = strings.Repeat("c", 64)
 	record.RecordSHA256 = ""
-	if err := delivery.WriteControllerTerminalRecord(dir, runID, *record); err != nil {
-		t.Fatalf("write valid mismatched terminal record: %v", err)
+	if err := delivery.WriteControllerDeliveryReceipt(dir, *record); err != nil {
+		t.Fatalf("write valid mismatched controller receipt: %v", err)
 	}
-	if _, found, err := delivery.ReadControllerTerminalRecord(dir, runID); err != nil || !found {
-		t.Fatalf("fixture must remain a valid delivery record: found=%v err=%v", found, err)
+	if _, found, err := delivery.ReadControllerDeliveryReceipt(dir, runID); err != nil || !found {
+		t.Fatalf("fixture must remain a valid delivery receipt: found=%v err=%v", found, err)
 	}
 
-	err = New(nil, nil).ReconcileTerminalDelivery(context.Background(), runID, dir)
+	err = controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir)
 	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
 		t.Fatalf("reconcile must reject valid record with a plan hash from another delivery, got: %v", err)
 	}

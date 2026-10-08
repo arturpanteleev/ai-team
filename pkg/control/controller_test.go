@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -57,6 +58,19 @@ func (f *fakeEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, e
 func TestNewRequiresEngine(t *testing.T) {
 	if _, err := New(nil, t.TempDir()); err == nil {
 		t.Fatal("controller без engine принят")
+	}
+}
+
+func TestDeliverDeferredUsesEvidenceRunIDValidationBeforePaths(t *testing.T) {
+	controller := &Controller{target: t.TempDir()}
+	invalid := []string{"", ".", "..", "a/b", `a\b`, "bad\x00id", "bad\nname", strings.Repeat("x", 256)}
+	for _, runID := range invalid {
+		if err := evidence.ValidateRunID(runID); err == nil {
+			t.Fatalf("test fixture unexpectedly passes the shared validator: %q", runID)
+		}
+		if _, err := controller.DeliverDeferred(context.Background(), runID); err == nil || !strings.Contains(err.Error(), "invalid run id") {
+			t.Errorf("DeliverDeferred(%q) = %v, want shared run ID rejection", runID, err)
+		}
 	}
 }
 

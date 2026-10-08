@@ -60,14 +60,15 @@ var workerEnvironmentReserved = map[string]bool{
 type ProcessOption func(*ProcessEngine) error
 
 type ProcessEngine struct {
-	argv               []string
-	target             string
-	dbPath             string
-	agentPaths         []string
-	bubblewrap         bool
-	apiRecorderFactory func() pipeline.Recorder
-	apiApprovals       workerApprovalPort
-	openAIEgressDial   func(context.Context) (net.Conn, error)
+	argv                       []string
+	target                     string
+	dbPath                     string
+	agentPaths                 []string
+	bubblewrap                 bool
+	apiRecorderFactory         func() pipeline.Recorder
+	apiApprovals               workerApprovalPort
+	openAIEgressDial           func(context.Context) (net.Conn, error)
+	terminalDeliveryReconciler func(context.Context, string, string) error
 }
 
 type ProcessError struct {
@@ -107,6 +108,9 @@ func NewProcessEngine(argv []string, target, dbPath string, options ...ProcessOp
 			return nil, err
 		}
 	}
+	if engine.terminalDeliveryReconciler != nil && !engine.bubblewrap {
+		return nil, errors.New("trusted terminal delivery reconciliation requires AI_TEAM_WORKER_SANDBOX=bubblewrap")
+	}
 	return engine, nil
 }
 
@@ -139,6 +143,20 @@ func WithControllerAPI(recorderFactory func() pipeline.Recorder, approvals pipel
 			return errors.New("controller API requires recorder and approval stores")
 		}
 		engine.apiRecorderFactory, engine.apiApprovals = recorderFactory, approvals
+		return nil
+	}
+}
+
+// WithTerminalDeliveryReconciler installs the trusted parent-process recovery
+// path for terminal worker results. It is valid only with Linux bubblewrap
+// isolation: otherwise an untrusted child can forge a receipt directly in the
+// target filesystem, regardless of the controller API capabilities.
+func WithTerminalDeliveryReconciler(reconcile func(context.Context, string, string) error) ProcessOption {
+	return func(engine *ProcessEngine) error {
+		if reconcile == nil {
+			return errors.New("terminal delivery reconciler is required")
+		}
+		engine.terminalDeliveryReconciler = reconcile
 		return nil
 	}
 }
@@ -295,7 +313,11 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 		api.lifecycle = apiLifecycle
 		api.candidateAbsenceAllowed = absenceAllowed
-		defer api.close()
+		defer func() {
+			if api != nil {
+				api.close()
+			}
+		}()
 		if e.bubblewrap {
 			openAIEgressSocket = filepath.Join(controlSocketDir, "openai-egress.sock")
 			dial := e.openAIEgressDial
@@ -330,6 +352,10 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	command.Stdout = output
 	command.Stderr = output
 	err = command.Run()
+	if api != nil {
+		api.close()
+		api = nil
+	}
 	result := pipeline.RunResult{RunID: job.RunID}
 	if apiFailure := workerAPIRecorderFailure(output.String()); apiFailure != "" {
 		return result, &ProcessError{ExitCode: processExitCode(err), Diagnostics: output.String(), Err: fmt.Errorf("worker controller API recorder failed: %s", apiFailure)}
@@ -345,6 +371,14 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			return result, &ProcessError{ExitCode: 0, Diagnostics: output.String(), Err: err}
 		}
 		result.Outcome = workflow.RunOutcome(parsed.Outcome)
+		if (result.Outcome == workflow.RunOutcome(workflow.RunCompleted) ||
+			result.Outcome == workflow.RunOutcome(workflow.RunCompletedWithWarnings)) &&
+			e.terminalDeliveryReconciler != nil &&
+			(job.Operation == OperationStart || job.Operation == OperationResume || job.Operation == OperationRecover) {
+			if err := e.terminalDeliveryReconciler(ctx, job.RunID, e.target); err != nil {
+				return result, &ProcessError{ExitCode: 0, Diagnostics: output.String(), Err: fmt.Errorf("trusted terminal delivery reconciliation: %w", err)}
+			}
+		}
 		return result, nil
 	}
 	if ctx.Err() != nil {

@@ -1,8 +1,10 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -765,6 +767,82 @@ func TestControllerTerminalRecordIsScopedIdempotentAndConflictSafe(t *testing.T)
 	}
 }
 
+func TestControllerDeliveryReceiptIsDistinctFromWorkerTerminalRecords(t *testing.T) {
+	target := t.TempDir()
+	runID := "trusted-delivery-run"
+	record := TerminalRecord{
+		SchemaVersion: TerminalRecordSchemaVersion, RunID: runID, Feature: "feat",
+		PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40),
+		PerformedAt: time.Now().UTC(),
+	}
+	if err := WriteControllerTerminalRecord(target, runID, record); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, err := ReadControllerDeliveryReceipt(target, runID); err != nil || found || got != nil {
+		t.Fatalf("worker API terminal record must not produce a controller receipt: record=%+v found=%v err=%v", got, found, err)
+	}
+	if err := WriteControllerDeliveryReceipt(target, record); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := ReadControllerDeliveryReceipt(target, runID)
+	if err != nil || !found || got == nil || got.CommitSHA != record.CommitSHA || got.RecordSHA256 == "" {
+		t.Fatalf("trusted receipt roundtrip: record=%+v found=%v err=%v", got, found, err)
+	}
+	if err := WriteControllerDeliveryReceipt(target, record); err != nil {
+		t.Fatalf("exact receipt retry: %v", err)
+	}
+	conflict := record
+	conflict.CommitSHA = strings.Repeat("b", 40)
+	if err := WriteControllerDeliveryReceipt(target, conflict); err == nil {
+		t.Fatal("conflicting trusted receipt overwrite was accepted")
+	}
+	wrongRun := runID + "-other"
+	if _, found, err := ReadControllerDeliveryReceipt(target, wrongRun); err != nil || found {
+		t.Fatalf("other run unexpectedly has a receipt: found=%v err=%v", found, err)
+	}
+	path := filepath.Join(target, ".ai-team", "state", "delivery-receipts", runID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(record.CommitSHA), []byte(strings.Repeat("d", 40)), 1)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadControllerDeliveryReceipt(target, runID); err == nil {
+		t.Fatal("tampered controller receipt did not fail closed")
+	}
+}
+
+func TestControllerDeliveryReceiptPropagatesDirectorySyncFailureAndRetriesSync(t *testing.T) {
+	target := t.TempDir()
+	record := TerminalRecord{
+		SchemaVersion: TerminalRecordSchemaVersion, RunID: "receipt-sync-run", Feature: "feat",
+		PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40),
+		PerformedAt: time.Now().UTC(),
+	}
+	syncFailure := errors.New("directory fsync failed")
+	var syncedPath string
+	err := writeControllerDeliveryReceipt(target, record, func(path string) error {
+		syncedPath = path
+		return syncFailure
+	})
+	if !errors.Is(err, syncFailure) || syncedPath == "" {
+		t.Fatalf("directory sync error must be returned: path=%q err=%v", syncedPath, err)
+	}
+	if err := writeControllerDeliveryReceipt(target, record, func(path string) error {
+		if path != syncedPath {
+			t.Fatalf("retry synced another directory: got=%q want=%q", path, syncedPath)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("exact receipt retry should re-sync an already published receipt: %v", err)
+	}
+	if _, found, err := ReadControllerDeliveryReceipt(target, record.RunID); err != nil || !found {
+		t.Fatalf("receipt after failed then successful directory sync: found=%v err=%v", found, err)
+	}
+}
+
 func TestTerminalRecordForRunPrefersControllerStoreAndFallsBackToLegacy(t *testing.T) {
 	target := t.TempDir()
 	runID := "delivery-read-run"
@@ -788,12 +866,22 @@ func TestTerminalRecordForRunPrefersControllerStoreAndFallsBackToLegacy(t *testi
 	if _, _, err = ReadTerminalRecordForRun(target, runDir, runID); err == nil || !strings.Contains(err.Error(), "conflict") {
 		t.Fatalf("conflicting controller/run-local records must be rejected, got err=%v", err)
 	}
+	trusted := controller
+	trusted.Feature = "receipt"
+	if err := WriteControllerDeliveryReceipt(target, trusted); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = ReadTerminalRecordForRun(target, runDir, runID)
+	if err != nil || !ok || got.Feature != "receipt" {
+		t.Fatalf("controller receipt must outrank worker/API mirrors: record=%+v ok=%v err=%v", got, ok, err)
+	}
 	storePath := filepath.Join(target, ".ai-team", "state", "delivery", runID+".json")
 	if err := os.WriteFile(storePath, []byte("broken"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ReadTerminalRecordForRun(target, runDir, runID); err == nil {
-		t.Fatal("corrupt controller record must not fall back to legacy")
+	got, ok, err = ReadTerminalRecordForRun(target, runDir, runID)
+	if err != nil || !ok || got.Feature != "receipt" {
+		t.Fatalf("corrupt compatibility controller record must not override trusted receipt: record=%+v ok=%v err=%v", got, ok, err)
 	}
 }
 

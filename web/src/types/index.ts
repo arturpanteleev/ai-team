@@ -24,6 +24,20 @@ export interface PipelineRun {
   error?: string;
 }
 
+export interface DeliveryProjection {
+  status: 'not_requested' | 'pending' | 'failed' | 'recorded' | 'unavailable';
+  record?: {
+    schema_version: number;
+    run_id: string;
+    feature: string;
+    plan_hash: string;
+    commit_sha?: string;
+    pr_url?: string;
+    performed_at: string;
+  };
+  error?: string;
+}
+
 export interface Stage {
   id: number;
   pipeline_run_id: number;

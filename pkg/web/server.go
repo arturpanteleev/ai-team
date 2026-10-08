@@ -22,6 +22,7 @@ import (
 	agentdata "github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -40,6 +41,7 @@ type RunController interface {
 	Cancel(runID string) error
 	Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error)
 	Approvals(runID string) ([]approval.PendingApproval, error)
+	DeliverDeferred(ctx context.Context, runID string) (delivery.TerminalRecord, error)
 	Preflight(context.Context) preflight.Report
 }
 
@@ -47,6 +49,13 @@ type ServerOption func(*Server)
 
 func WithRunController(controller RunController) ServerOption {
 	return func(server *Server) { server.controller = controller }
+}
+
+// WithTargetDir supplies the canonical project target independently of the
+// configured artifact store path. Cloud callers should always set it because
+// artifact storage may be relocated with --artifacts.
+func WithTargetDir(target string) ServerOption {
+	return func(server *Server) { server.targetDir = target }
 }
 
 type IdentityVerifier interface {
@@ -71,6 +80,7 @@ type Server struct {
 	router         *chi.Mux
 	frontend       http.Handler
 	artifactRoot   string // абсолютный корень артефактов; всё вне него не отдаётся
+	targetDir      string // canonical project/control root; independent of artifactRoot
 	runRoot        string // immutable .ai-team/runs root
 	httpServer     *http.Server
 	cancelEvents   context.CancelFunc
@@ -109,16 +119,39 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		hub:          hub,
 		streamID:     streamID[:16],
 		artifactRoot: absRoot,
-		runRoot:      filepath.Join(filepath.Dir(absRoot), "runs"),
 		sessions:     make(map[string]browserSession),
-	}
-	srv.humanArtifacts, err = humanartifact.New(filepath.Dir(filepath.Dir(absRoot)))
-	if err != nil {
-		_ = s.Close()
-		return nil, fmt.Errorf("human artifact store: %w", err)
 	}
 	for _, option := range options {
 		option(srv)
+	}
+	target := srv.targetDir
+	if target == "" {
+		// Backward-compatible default for callers using the conventional
+		// <target>/.ai-team/artifacts layout. Custom artifact roots must provide
+		// WithTargetDir and are never used as a source of target identity.
+		target = filepath.Dir(filepath.Dir(absRoot))
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("project target path: %w", err)
+	}
+	target, err = filepath.EvalSymlinks(filepath.Clean(target))
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("project target path: %w", err)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil || !targetInfo.IsDir() {
+		_ = s.Close()
+		return nil, errors.New("project target must be an existing directory")
+	}
+	srv.targetDir = filepath.Clean(target)
+	srv.runRoot = filepath.Join(srv.targetDir, ".ai-team", "runs")
+	srv.humanArtifacts, err = humanartifact.New(srv.targetDir)
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("human artifact store: %w", err)
 	}
 	hub.SetReplay(srv.replayEvents)
 	go hub.Run()
@@ -173,6 +206,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Use(srv.writeSecurity)
 		router.Post("/api/runs", srv.handleStartRun)
 		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)
+		router.Post("/api/runs/{runID}/delivery/retry", srv.handleRetryDelivery)
 		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
 		router.Post("/api/runs/{runID}/artifact-revisions", srv.handleCreateArtifactRevision)
@@ -280,13 +314,17 @@ func (s *Server) RecordQueueStatus(queueJobID int64, status, cause string) {
 }
 
 func (s *Server) appendRunEvent(runID, eventType string, at time.Time, data any) {
-	encoded, err := json.Marshal(data)
-	if err != nil {
-		return
-	}
-	if err := s.store.AppendEventNext(&store.Event{RunID: runID, Type: eventType, Timestamp: at, DataJSON: string(encoded)}); err != nil {
+	if err := s.appendRunEventRequired(runID, eventType, at, data); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ run event projection: %v\n", err)
 	}
+}
+
+func (s *Server) appendRunEventRequired(runID, eventType string, at time.Time, data any) error {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return s.store.AppendEventNext(&store.Event{RunID: runID, Type: eventType, Timestamp: at, DataJSON: string(encoded)})
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -416,8 +454,10 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 		"stages": stages,
 	}
 	if run.RunID != "" {
-		target := filepath.Dir(filepath.Dir(s.artifactRoot))
-		if stateStore, stateErr := lifecycle.NewStore(target); stateErr == nil {
+		response["delivery"] = s.deliveryProjection(run, stages, s.targetDir)
+	}
+	if run.RunID != "" {
+		if stateStore, stateErr := lifecycle.NewStore(s.targetDir); stateErr == nil {
 			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
 				response["next_stage"] = state.NextStage
 			}
@@ -435,6 +475,53 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// заголовки и статус уже отправлены: ошибку кодирования клиенту не передать, она означает оборванное соединение.
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+type webDeliveryProjection struct {
+	Status string                   `json:"status"`
+	Record *delivery.TerminalRecord `json:"record,omitempty"`
+	Error  string                   `json:"error,omitempty"`
+}
+
+func (s *Server) deliveryProjection(run *store.PipelineRun, stages []store.Stage, target string) webDeliveryProjection {
+	projection := webDeliveryProjection{Status: "not_requested"}
+	for _, stage := range stages {
+		if stage.DeliveryJSON == "" {
+			continue
+		}
+		var marker struct {
+			PlanHash string `json:"plan_hash"`
+		}
+		if json.Unmarshal([]byte(stage.DeliveryJSON), &marker) == nil && marker.PlanHash != "" {
+			projection.Status = "pending"
+			break
+		}
+	}
+	record, found, err := delivery.ReadControllerDeliveryReceipt(target, run.RunID)
+	if err != nil {
+		projection.Status = "unavailable"
+		return projection
+	}
+	if found {
+		projection.Status = "recorded"
+		projection.Record = record
+		return projection
+	}
+	event, eventErr := s.store.LatestRunEvent(run.RunID, "delivery_retry_failed")
+	if eventErr != nil {
+		projection.Status = "unavailable"
+		return projection
+	}
+	if event != nil {
+		var data struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(event.DataJSON), &data) == nil && data.Error != "" {
+			projection.Status = "failed"
+			projection.Error = data.Error
+		}
+	}
+	return projection
 }
 
 type artifactInfo struct {

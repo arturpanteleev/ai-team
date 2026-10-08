@@ -25,9 +25,55 @@ import (
 // — канонический источник результата доставки для FindDelivered/export.
 
 const (
-	TerminalRecordSchemaVersion = 1
-	deliveryRecordMaxSize       = 1 << 20
+	TerminalRecordSchemaVersion            = 1
+	deliveryRecordMaxSize                  = 1 << 20
+	controllerDeliveryReceiptSchemaVersion = 1
 )
+
+// controllerDeliveryReceipt is a durable proof that this controller process
+// observed the result of DeliveryService.Execute. It lives in a separate
+// sandbox-hidden store because the worker API can submit TerminalRecord
+// values, but cannot submit receipts.
+type controllerDeliveryReceipt struct {
+	SchemaVersion int            `json:"schema_version"`
+	RunID         string         `json:"run_id"`
+	Record        TerminalRecord `json:"record"`
+	ReceiptSHA256 string         `json:"receipt_sha256,omitempty"`
+}
+
+func (r controllerDeliveryReceipt) selfDigest() (string, error) {
+	r.ReceiptSHA256 = ""
+	data, err := json.Marshal(r)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (r controllerDeliveryReceipt) validate() error {
+	if r.SchemaVersion != controllerDeliveryReceiptSchemaVersion || r.RunID == "" || r.Record.RunID != r.RunID {
+		return errors.New("controller delivery receipt identity/schema mismatch")
+	}
+	if err := r.Record.Validate(); err != nil {
+		return fmt.Errorf("controller delivery receipt record: %w", err)
+	}
+	recordDigest, err := r.Record.selfDigest()
+	if err != nil {
+		return err
+	}
+	if r.Record.RecordSHA256 != recordDigest {
+		return errors.New("controller delivery receipt record digest mismatch")
+	}
+	got, err := r.selfDigest()
+	if err != nil {
+		return err
+	}
+	if r.ReceiptSHA256 == "" || r.ReceiptSHA256 != got {
+		return errors.New("controller delivery receipt digest mismatch")
+	}
+	return nil
+}
 
 // TerminalRecord — каноническая запись отложенной доставки run.
 type TerminalRecord struct {
@@ -325,11 +371,175 @@ func ReadControllerTerminalRecord(targetDir, runID string) (*TerminalRecord, boo
 	return record, true, nil
 }
 
-// ReadTerminalRecordForRun prefers controller-owned state, falling back to
-// the historical evidence-local delivery.json only when the new file is absent.
-func ReadTerminalRecordForRun(targetDir, runDir, runID string) (*TerminalRecord, bool, error) {
-	record, ok, err := ReadControllerTerminalRecord(targetDir, runID)
+// WriteControllerDeliveryReceipt records the exact TerminalRecord produced
+// after a successful trusted DeliveryService.Execute. The separate receipt
+// store has no worker API writer and is hidden by the Linux worker sandbox.
+func WriteControllerDeliveryReceipt(targetDir string, record TerminalRecord) error {
+	return writeControllerDeliveryReceipt(targetDir, record, syncControllerDeliveryReceiptDirectory)
+}
+
+func writeControllerDeliveryReceipt(targetDir string, record TerminalRecord, syncDirectory func(string) error) error {
+	if syncDirectory == nil {
+		return errors.New("controller delivery receipt directory sync is required")
+	}
+	if err := validateTerminalRunID(record.RunID); err != nil {
+		return fmt.Errorf("controller delivery receipt run id: %w", err)
+	}
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	recordDigest, err := record.selfDigest()
 	if err != nil {
+		return err
+	}
+	record.RecordSHA256 = recordDigest
+	receipt := controllerDeliveryReceipt{
+		SchemaVersion: controllerDeliveryReceiptSchemaVersion,
+		RunID:         record.RunID,
+		Record:        record,
+	}
+	receipt.ReceiptSHA256, err = receipt.selfDigest()
+	if err != nil {
+		return err
+	}
+	if err := receipt.validate(); err != nil {
+		return err
+	}
+	dir, err := safeio.EnsureDir(targetDir, ".ai-team", "state", "delivery-receipts")
+	if err != nil {
+		return err
+	}
+	finalPath := filepath.Join(dir, record.RunID+".json")
+	if existing, found, readErr := readControllerDeliveryReceiptAtPath(finalPath); readErr != nil {
+		return readErr
+	} else if found {
+		if sameControllerDeliveryReceipt(*existing, receipt) {
+			return syncDirectory(dir)
+		}
+		return fmt.Errorf("controller delivery receipt already exists for run %s; conflicting overwrite rejected", record.RunID)
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(dir, ".tmp-delivery-receipt-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmpPath, 0600); err != nil {
+		return err
+	}
+	if err = os.Link(tmpPath, finalPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			existing, found, readErr := readControllerDeliveryReceiptAtPath(finalPath)
+			if readErr != nil {
+				return readErr
+			}
+			if found && sameControllerDeliveryReceipt(*existing, receipt) {
+				return syncDirectory(dir)
+			}
+			return fmt.Errorf("controller delivery receipt already exists for run %s; conflicting overwrite rejected", record.RunID)
+		}
+		return err
+	}
+	return syncDirectory(dir)
+}
+
+func syncControllerDeliveryReceiptDirectory(dir string) error {
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open controller delivery receipt directory for sync: %w", err)
+	}
+	syncErr := dirFile.Sync()
+	closeErr := dirFile.Close()
+	if syncErr != nil || closeErr != nil {
+		return errors.Join(
+			wrapOptionalError("sync controller delivery receipt directory", syncErr),
+			wrapOptionalError("close controller delivery receipt directory", closeErr),
+		)
+	}
+	return nil
+}
+
+func wrapOptionalError(context string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
+// ReadControllerDeliveryReceipt reads only the controller-origin retry proof.
+// Legacy run-local records and worker-submitted controller records are not
+// accepted as evidence that Execute completed.
+func ReadControllerDeliveryReceipt(targetDir, runID string) (*TerminalRecord, bool, error) {
+	if err := validateTerminalRunID(runID); err != nil {
+		return nil, false, fmt.Errorf("controller delivery receipt run id: %w", err)
+	}
+	path := filepath.Join(targetDir, ".ai-team", "state", "delivery-receipts", runID+".json")
+	receipt, found, err := readControllerDeliveryReceiptAtPath(path)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	if receipt.RunID != runID {
+		return nil, false, fmt.Errorf("controller delivery receipt identity mismatch: requested=%q stored=%q", runID, receipt.RunID)
+	}
+	return &receipt.Record, true, nil
+}
+
+func readControllerDeliveryReceiptAtPath(path string) (*controllerDeliveryReceipt, bool, error) {
+	data, err := safeio.ReadRegularFile(path, 2*deliveryRecordMaxSize)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var receipt controllerDeliveryReceipt
+	if err := decoder.Decode(&receipt); err != nil {
+		return nil, false, fmt.Errorf("controller delivery receipt decode: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return nil, false, errors.New("controller delivery receipt: trailing JSON value")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, false, fmt.Errorf("controller delivery receipt: trailing data: %w", err)
+	}
+	if err := receipt.validate(); err != nil {
+		return nil, false, err
+	}
+	return &receipt, true, nil
+}
+
+func sameControllerDeliveryReceipt(a, b controllerDeliveryReceipt) bool {
+	return a.RunID == b.RunID && a.ReceiptSHA256 != "" && a.ReceiptSHA256 == b.ReceiptSHA256
+}
+
+// ReadTerminalRecordForRun prefers the controller-origin receipt. If no receipt
+// exists, it preserves compatibility with worker API records and the historical
+// evidence-local delivery.json for older consumers.
+func ReadTerminalRecordForRun(targetDir, runDir, runID string) (*TerminalRecord, bool, error) {
+	record, ok, err := ReadControllerDeliveryReceipt(targetDir, runID)
+	if err != nil || ok {
+		return record, ok, err
+	}
+	record, ok, err = ReadControllerTerminalRecord(targetDir, runID)
+	if err != nil || ok {
 		return record, ok, err
 	}
 	localRecord, localOK, localErr := ReadTerminalRecord(runDir)

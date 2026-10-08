@@ -17,6 +17,62 @@ func TestClaudeSubscriptionTokenIsDetectedAndPassed(t *testing.T) {
 	}
 }
 
+func TestClaudeOAuthTokenStaysClaudeOnlyWithGeneralAllowList(t *testing.T) {
+	const otherAllowedKey = "AI_TEAM_TEST_EXPLICITLY_ALLOWED"
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-oauth-token")
+	t.Setenv(otherAllowedKey, "allowed-value")
+	t.Setenv(HarnessEnvAllowVar, "CLAUDE_CODE_OAUTH_TOKEN,"+otherAllowedKey)
+	t.Setenv(HarnessEnvAllowLegacyVar, "")
+
+	t.Run("codex", func(t *testing.T) {
+		target := t.TempDir()
+		env, cleanup, err := (&CodexAdapter{}).Environment(&Agent{Name: "coder"}, &Task{TargetDir: target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if containsEnvironmentKey(env, "CLAUDE_CODE_OAUTH_TOKEN") {
+			t.Fatal("Claude subscription token must not reach Codex even when named in the general allow-list")
+		}
+		if got := environmentValue(env, otherAllowedKey); got != "allowed-value" {
+			t.Fatalf("other explicitly allowed key = %q, want %q", got, "allowed-value")
+		}
+	})
+
+	t.Run("opencode", func(t *testing.T) {
+		target := t.TempDir()
+		env, cleanup, err := (&OpenCodeAdapter{}).Environment(&Agent{Name: "analyst", Mutation: "none"}, &Task{
+			TargetDir: target, ArtifactRoot: filepath.Join(target, ".ai-team", "artifacts"), Feature: "feature",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if containsEnvironmentKey(env, "CLAUDE_CODE_OAUTH_TOKEN") {
+			t.Fatal("Claude subscription token must not reach OpenCode even when named in the general allow-list")
+		}
+		if got := environmentValue(env, otherAllowedKey); got != "allowed-value" {
+			t.Fatalf("other explicitly allowed key = %q, want %q", got, "allowed-value")
+		}
+	})
+
+	t.Run("claude", func(t *testing.T) {
+		env, cleanup, err := (&ClaudeAdapter{}).Environment(&Agent{Name: "coder"}, &Task{TargetDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if got := environmentValue(env, "CLAUDE_CODE_OAUTH_TOKEN"); got != "synthetic-oauth-token" {
+			t.Fatalf("Claude subscription token = %q, want it passed to Claude", got)
+		}
+		if got := environmentValue(env, otherAllowedKey); got != "allowed-value" {
+			t.Fatalf("other explicitly allowed key = %q, want %q", got, "allowed-value")
+		}
+	})
+}
+
 func TestClaudeAPIKeyRequiresExplicitAllowList(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("ANTHROPIC_API_KEY", "synthetic-api-key")

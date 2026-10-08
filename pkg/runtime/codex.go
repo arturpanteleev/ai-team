@@ -143,7 +143,7 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 		}
 	}
 
-	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())
+	env := withAllowedEnvironmentKeys(os.Environ(), allowedNonClaudeEnvironmentKeys())
 	env = append(env, "CODEX_HOME="+codexHome)
 	sort.Strings(env)
 	return env, cleanup, nil

@@ -11,6 +11,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
 
 func TestCredentialReportDoesNotExposeValue(t *testing.T) {
@@ -27,6 +28,115 @@ func TestCredentialReportDoesNotExposeValue(t *testing.T) {
 	}
 	if !strings.Contains(encoded, "SECRET_TOKEN") || !strings.Contains(encoded, "MISSING_TOKEN") {
 		t.Fatalf("credential names отсутствуют: %s", encoded)
+	}
+}
+
+func TestPreflightReportsClaudeAndCodexAuthenticationMethod(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		cli    string
+		method string
+		status Status
+		setup  func(*testing.T)
+	}{
+		{
+			name:   "claude subscription",
+			cli:    "claude",
+			method: "способ входа: подписка",
+			status: StatusPassed,
+			setup: func(t *testing.T) {
+				t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-subscription-token")
+			},
+		},
+		{
+			name:   "claude API key",
+			cli:    "claude",
+			method: "способ входа: API-ключ",
+			status: StatusPassed,
+			setup: func(t *testing.T) {
+				t.Setenv("ANTHROPIC_API_KEY", "synthetic-api-key")
+				t.Setenv(runtime.HarnessEnvAllowVar, "ANTHROPIC_API_KEY")
+			},
+		},
+		{
+			name:   "claude key must be allowed",
+			cli:    "claude",
+			method: "способ входа: не найден",
+			status: StatusWarning,
+			setup: func(t *testing.T) {
+				t.Setenv("ANTHROPIC_API_KEY", "synthetic-api-key")
+			},
+		},
+		{
+			name:   "codex subscription",
+			cli:    "codex",
+			method: "способ входа: подписка",
+			status: StatusPassed,
+			setup: func(t *testing.T) {
+				home := os.Getenv("HOME")
+				path := filepath.Join(home, ".codex")
+				if err := os.MkdirAll(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "auth.json"), []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"synthetic-access"}}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "codex API key",
+			cli:    "codex",
+			method: "способ входа: API-ключ",
+			status: StatusPassed,
+			setup: func(t *testing.T) {
+				t.Setenv("OPENAI_API_KEY", "synthetic-api-key")
+				t.Setenv(runtime.HarnessEnvAllowVar, "OPENAI_API_KEY")
+			},
+		},
+		{
+			name:   "codex no auth",
+			cli:    "codex",
+			method: "способ входа: не найден",
+			status: StatusWarning,
+			setup:  func(*testing.T) {},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+			t.Setenv("ANTHROPIC_API_KEY", "")
+			t.Setenv("CODEX_API_KEY", "")
+			t.Setenv("OPENAI_API_KEY", "")
+			t.Setenv(runtime.HarnessEnvAllowVar, "")
+			t.Setenv(runtime.HarnessEnvAllowLegacyVar, "")
+			test.setup(t)
+
+			checker := testChecker(t, false)
+			checker.config.CLI = test.cli
+			checker.run = func(_ context.Context, name string, args ...string) (string, error) {
+				if filepath.Base(name) == "git" {
+					if strings.Contains(strings.Join(args, " "), "branch --show-current") {
+						return "main", nil
+					}
+					return checker.target, nil
+				}
+				return test.cli + " version", nil
+			}
+			report := checker.Check(context.Background())
+			for _, check := range report.Checks {
+				if check.ID != "credentials" {
+					continue
+				}
+				if check.Status != test.status || check.Message != test.method {
+					t.Fatalf("credentials = %s %q, want %s %q", check.Status, check.Message, test.status, test.method)
+				}
+				if strings.Contains(check.Message, "synthetic-") {
+					t.Fatal("preflight exposed credential contents")
+				}
+				return
+			}
+			t.Fatal("credentials check missing from preflight")
+		})
 	}
 }
 

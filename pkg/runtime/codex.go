@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 // CodexAdapter — реализация RuntimeAdapter для OpenAI Codex CLI.
@@ -117,6 +119,28 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		cleanup()
 		return nil, func() {}, err
+	}
+
+	// The user's login lives outside CODEX_HOME. When no explicitly allowed
+	// API-key environment variable will reach Codex, copy only auth.json into
+	// the private temporary home so subscription credentials remain usable.
+	if !hasAllowedNonEmptyEnvironment("CODEX_API_KEY", "OPENAI_API_KEY") {
+		auth, err := loadCodexAuthFile()
+		if err != nil && !os.IsNotExist(err) {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("codex: не удалось безопасно прочитать пользовательскую авторизацию")
+		}
+		if err == nil {
+			authPath := filepath.Join(codexHome, "auth.json")
+			if err := safeio.WriteRegularFileNoFollow(authPath, auth.contents, 0600); err != nil {
+				cleanup()
+				return nil, func() {}, fmt.Errorf("codex: не удалось скопировать авторизацию во временный CODEX_HOME")
+			}
+			if err := os.Chmod(authPath, 0600); err != nil {
+				cleanup()
+				return nil, func() {}, fmt.Errorf("codex: не удалось защитить временный auth.json")
+			}
+		}
 	}
 
 	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())

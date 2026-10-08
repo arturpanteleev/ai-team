@@ -214,6 +214,29 @@ func TestClaudeEnvironmentIsolatesConfigAndCreds(t *testing.T) {
 	}
 }
 
+func TestClaudeEnvironmentAllowsSubscriptionTokenWithoutOptIn(t *testing.T) {
+	a := &ClaudeAdapter{}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-oauth-token")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv(HarnessEnvAllowVar, "")
+	t.Setenv(HarnessEnvAllowLegacyVar, "")
+
+	target := t.TempDir()
+	env, cleanup, err := a.Environment(&Agent{Name: "coder"}, &Task{TargetDir: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if !containsEnvironmentKey(env, "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatal("Claude Code subscription token must reach the Claude subprocess")
+	}
+	if containsEnvironmentKey(env, "ANTHROPIC_API_KEY") {
+		t.Fatal("an API key must remain opt-in even when subscription auth is available")
+	}
+}
+
 func TestClaudeEnvironmentRejectsProjectSettingsSurface(t *testing.T) {
 	a := &ClaudeAdapter{}
 	target := t.TempDir()

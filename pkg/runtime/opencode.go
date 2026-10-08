@@ -220,6 +220,15 @@ func allowedEnvironmentKeys() map[string]bool {
 	return allowed
 }
 
+// allowedClaudeEnvironmentKeys adds Claude Code's documented subscription
+// token to the general runtime allow-list. Keep it Claude-only so an OAuth
+// token is not passed to unrelated CLIs.
+func allowedClaudeEnvironmentKeys() map[string]bool {
+	allowed := allowedEnvironmentKeys()
+	allowed["CLAUDE_CODE_OAUTH_TOKEN"] = true
+	return allowed
+}
+
 // withAllowedEnvironmentKeys builds a subprocess environment containing only
 // the explicitly allowed variable names from the parent environment.
 func withAllowedEnvironmentKeys(environment []string, allowed map[string]bool) []string {

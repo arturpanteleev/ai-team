@@ -305,8 +305,8 @@ ai-team init --profile regulated
 | Рантайм | `cli:` | Выбор модели | Что проверяет preflight |
 |---|---|---|---|
 | OpenCode | `opencode` (по умолчанию) | `-m <model>` или `auto` | `opencode --version`, ключи провайдера и их разрешение, Git-репозиторий |
-| Codex | `codex` | `-m <model>` или `auto` | `codex --version`; авторизация Codex (токен или `CODEX_API_KEY`), sandbox `workspace-write` |
-| Claude Code | `claude` | `--model <model>` или `auto` | `claude --version`; `ANTHROPIC_API_KEY` или подписка, `--permission-mode acceptEdits` |
+| Codex | `codex` | `-m <model>` или `auto` | `codex --version`; способ входа (API-ключ / подписка / не найден), sandbox `workspace-write` |
+| Claude Code | `claude` | `--model <model>` или `auto` | `claude --version`; способ входа (API-ключ / подписка / не найден), `--permission-mode acceptEdits` |
 
 Каждый рантайм ставится и настраивается отдельно от ai-team. Пошагово —
 в учебнике [Подключить настоящую модель](../tutorial/real-model.md).
@@ -334,6 +334,19 @@ AI_TEAM_HARNESS_ENV_ALLOW=ANTHROPIC_API_KEY ai-team run --feature add-jwt-auth -
 Разрешённая переменная передаётся в процесс рантайма вместе со значением.
 ai-team не пишет значение в логи, отчёты и доказательства. Старое имя
 `AI_TEAM_OPENCODE_ENV_ALLOW` работает так же.
+
+Для Claude Code вместо API-ключа можно использовать подписку Claude: получите
+`CLAUDE_CODE_OAUTH_TOKEN` командой `claude setup-token`. Claude-адаптер
+передаёт эту переменную только в процесс Claude Code; добавлять её в
+`AI_TEAM_HARNESS_ENV_ALLOW` не нужно. Обычный `ANTHROPIC_API_KEY` по-прежнему
+передаётся только после явного разрешения имени переменной.
+
+Для Codex можно войти через подписку ChatGPT командой `codex login`. Если
+`CODEX_API_KEY` или `OPENAI_API_KEY` не разрешён и не передаётся рантайму,
+адаптер копирует `~/.codex/auth.json` во временный `CODEX_HOME` с правами
+`0600`; временный каталог имеет права `0700` и удаляется после этапа. Файл
+авторизации не выводится в логи. Preflight показывает только способ входа,
+не значение токена, и не проверяет действительность учётных данных у сервиса.
 
 ## Другие переменные окружения
 

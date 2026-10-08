@@ -357,7 +357,7 @@ func prepareDelivery(t *testing.T, dir string) string {
 	fileDigest := sha256.Sum256(change)
 	reviewDigest := sha256.Sum256([]byte("**Verdict:** APPROVED\n"))
 	plan := delivery.Plan{
-		SchemaVersion: delivery.SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin",
+		SchemaVersion: delivery.SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin", RemoteURL: "https://example.test/repo.git",
 		Files: []string{"change.go"}, FileDigests: map[string]string{"change.go": fmt.Sprintf("%x", fileDigest)}, FileModes: map[string]string{"change.go": "100644"},
 		BaselineHead: strings.Repeat("b", 40), SourceRunID: "prepared-run",
 		VerifiedWorkspaceDigest: check.WorkspaceDigestAfter, CheckEvidenceDigest: check.EvidenceDigest,
@@ -1839,6 +1839,16 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	for _, args := range [][]string{{"init", "--bare", remote}, {"remote", "add", "origin", remote}} {
+		cmd := exec.Command("git", args...)
+		if args[0] == "remote" {
+			cmd.Dir = dir
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}

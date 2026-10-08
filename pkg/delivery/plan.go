@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,7 +19,7 @@ import (
 )
 
 const (
-	SchemaVersion = 3
+	SchemaVersion = 4
 	DeletedDigest = "deleted"
 	DeletedMode   = "deleted"
 )
@@ -31,6 +32,23 @@ var (
 	runIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
+// gitCommandArgs disables repository-configured hooks, fsmonitor executables
+// and commit signing for every controller-owned Git invocation.
+func gitCommandArgs(args ...string) []string {
+	configured := []string{
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=",
+		"-c", "commit.gpgsign=false",
+	}
+	return append(configured, args...)
+}
+
+// gitRemoteConfigArgs pins both fetch and push URLs to the reviewed plan URL
+// while preserving the named remote's upstream tracking behavior.
+func gitRemoteConfigArgs(remote, remoteURL string) []string {
+	return []string{"-c", "remote." + remote + ".url=" + remoteURL, "-c", "remote." + remote + ".pushurl=" + remoteURL}
+}
+
 // Plan is the complete, reviewable declaration of allowed delivery effects.
 // Commands and shell fragments are deliberately not part of the schema.
 type Plan struct {
@@ -38,6 +56,7 @@ type Plan struct {
 	Branch                  string                          `json:"branch"`
 	BaseBranch              string                          `json:"base_branch"`
 	Remote                  string                          `json:"remote"`
+	RemoteURL               string                          `json:"remote_url"`
 	Files                   []string                        `json:"files"`
 	FileDigests             map[string]string               `json:"file_digests"`
 	FileModes               map[string]string               `json:"file_modes"`
@@ -92,6 +111,9 @@ func (p Plan) Validate() error {
 	}
 	if !remotePattern.MatchString(p.Remote) {
 		return fmt.Errorf("delivery plan: невалидный remote %q", p.Remote)
+	}
+	if err := validateRemoteURL(p.RemoteURL); err != nil {
+		return err
 	}
 	if len(p.Files) == 0 {
 		return fmt.Errorf("delivery plan: files не может быть пустым")
@@ -162,6 +184,41 @@ func (p Plan) Validate() error {
 	}
 	if strings.TrimSpace(p.PRBody) == "" || utf8.RuneCountInString(p.PRBody) > 700 {
 		return fmt.Errorf("delivery plan: pr_body обязателен и не должен превышать 700 символов")
+	}
+	return nil
+}
+
+func validateRemoteURL(remoteURL string) error {
+	if remoteURL == "" || strings.TrimSpace(remoteURL) != remoteURL || !utf8.ValidString(remoteURL) {
+		return fmt.Errorf("delivery plan: remote_url обязателен и должен быть корректной строкой")
+	}
+	for _, r := range remoteURL {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("delivery plan: remote_url содержит управляющие символы")
+		}
+	}
+	if !strings.Contains(remoteURL, "://") {
+		return nil // SCP-style Git remotes (git@example.org:repo.git) are valid.
+	}
+	parsed, err := url.Parse(remoteURL)
+	if err != nil {
+		return fmt.Errorf("delivery plan: remote_url имеет некорректный формат")
+	}
+	if (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) && parsed.User != nil {
+		return fmt.Errorf("delivery plan: HTTP remote_url с embedded credentials запрещён; настройте Git credential helper")
+	}
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			return fmt.Errorf("delivery plan: remote_url с embedded credentials запрещён; настройте Git credential helper")
+		}
+	}
+	for key := range parsed.Query() {
+		lower := strings.ToLower(key)
+		for _, marker := range []string{"token", "password", "passwd", "secret", "auth", "credential", "signature", "api_key", "apikey"} {
+			if strings.Contains(lower, marker) {
+				return fmt.Errorf("delivery plan: remote_url содержит credential-параметр; настройте Git credential helper")
+			}
+		}
 	}
 	return nil
 }

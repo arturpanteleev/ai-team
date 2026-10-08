@@ -31,6 +31,15 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	if first != second {
 		t.Fatalf("hash должен быть независим от порядка files: %s != %s", first, second)
 	}
+	changedRemote := plan
+	changedRemote.RemoteURL = "https://example.test/other.git"
+	third, err := changedRemote.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("изменение remote_url должно менять canonical plan hash")
+	}
 
 	for name, data := range map[string]string{
 		"unknown":  `{"schema_version":1,"branch":"ai-team/x","base_branch":"main","remote":"origin","files":["a.go"],"commit_message":"x","pr_title":"x","pr_body":"x","extra":true}`,
@@ -45,6 +54,26 @@ func TestPlanStrictValidationAndStableHash(t *testing.T) {
 	plan.Branch = "main"
 	if err := plan.Validate(); err == nil {
 		t.Fatal("protected branch должна быть отклонена")
+	}
+}
+
+func TestPlanRejectsCredentialBearingRemoteURLsWithoutEchoingSecrets(t *testing.T) {
+	for name, remoteURL := range map[string]string{
+		"user password":        "https://user:secret-token@example.test/repo.git",
+		"token as username":    "https://secret-token@example.test/repo.git",
+		"credential parameter": "https://example.test/repo.git?access_token=secret-token",
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := validTestPlan()
+			plan.RemoteURL = remoteURL
+			err := plan.Validate()
+			if err == nil || !strings.Contains(err.Error(), "credentials") && !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("credential-bearing URL must be rejected clearly: %v", err)
+			}
+			if strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("validation error exposed credential value: %v", err)
+			}
+		})
 	}
 }
 
@@ -228,14 +257,107 @@ func TestConfiguredFilterPathsPreservesGitCheckAttrRecords(t *testing.T) {
 }
 
 func TestBuildPlanUsesOnlyAttributedFiles(t *testing.T) {
-	repo, _ := setupRepository(t)
+	repo, remote := setupRepository(t)
 	writeFile(t, filepath.Join(repo, "z.go"), "package z\n")
 	plan, err := BuildPlan(context.Background(), repo, "feat", "Добавить полезную функцию", []string{"z.go", ".ai-team/state", "a.go", "a.go"}, testVerification(t, repo))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(plan.Files, ",") != "z.go" || plan.Branch != "ai-team/feat" || plan.BaseBranch != "main" {
+	if strings.Join(plan.Files, ",") != "z.go" || plan.Branch != "ai-team/feat" || plan.BaseBranch != "main" || plan.RemoteURL != remote {
 		t.Fatalf("неверный детерминированный plan: %+v", plan)
+	}
+}
+
+func TestControllerDoesNotPersistCredentialBearingChangedRemoteURL(t *testing.T) {
+	repo, _ := setupRepository(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// changed\n")
+	plan, err := BuildPlan(context.Background(), repo, "credential-remote", "change", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "remote", "set-url", "origin", "https://user:secret-token@example.test/repo.git")
+	result, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "credential-remote", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("changed credential-bearing URL should be rejected safely: result=%+v err=%v", result, err)
+	}
+	data, readErr := os.ReadFile(result.StatePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatal("credential value was persisted in delivery state")
+	}
+}
+
+func TestControllerDisablesGitHooksDuringDelivery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook fixture is Unix-only")
+	}
+	repo, _ := setupRepository(t)
+	installFakeGH(t)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// hook check\n")
+	plan, err := BuildPlan(context.Background(), repo, "hooks", "disable hooks", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookDir := t.TempDir()
+	postCheckoutMarker := filepath.Join(t.TempDir(), "post-checkout-ran")
+	prePushMarker := filepath.Join(t.TempDir(), "pre-push-ran")
+	for name, marker := range map[string]string{"post-checkout": postCheckoutMarker, "pre-push": prePushMarker} {
+		path := filepath.Join(hookDir, name)
+		writeFile(t, path, "#!/bin/sh\ntouch \""+marker+"\"\n")
+		if err := os.Chmod(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, repo, "config", "core.hooksPath", hookDir)
+
+	if _, err := NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "hooks", Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{postCheckoutMarker, prePushMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("delivery unexpectedly executed hook marker %q (stat err %v)", marker, err)
+		}
+	}
+}
+
+func TestControllerRechecksCommitAgainstPlanWhenSavedStateIsTampered(t *testing.T) {
+	repo, _ := setupRepository(t)
+	const approved = "package a\n// approved\n"
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+	plan, err := BuildPlan(context.Background(), repo, "tampered-state", "approved change", []string{"a.go"}, testVerification(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "switch", "-c", plan.Branch)
+	writeFile(t, filepath.Join(repo, "a.go"), "package a\n// foreign commit\n")
+	git(t, repo, "add", "--", "a.go")
+	git(t, repo, "commit", "-m", plan.CommitMessage)
+	foreignCommit := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	writeFile(t, filepath.Join(repo, "a.go"), approved)
+
+	statePath, err := Prepare(repo, "tampered-state", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forged state
+	if err := json.Unmarshal(data, &forged); err != nil {
+		t.Fatal(err)
+	}
+	forged.CommitSHA = foreignCommit
+	forged.CommitVerified = true
+	if err := writeState(statePath, &forged); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewController().Execute(context.Background(), Request{TargetDir: repo, Feature: "tampered-state", Plan: plan})
+	if err == nil || !strings.Contains(err.Error(), "committed bytes") {
+		t.Fatalf("подменённый state с чужим commit должен быть отклонён по blob hash: %v", err)
 	}
 }
 
@@ -807,7 +929,7 @@ type failRecordCommitRunner struct {
 }
 
 func (runner *failRecordCommitRunner) Run(ctx context.Context, dir, name string, args ...string) StepResult {
-	if !runner.failed && name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+	if !runner.failed && name == "git" && len(args) >= 2 && args[len(args)-2] == "rev-parse" && args[len(args)-1] == "HEAD" {
 		runner.failed = true
 		now := time.Now().UTC()
 		return StepResult{Command: append([]string{name}, args...), StartedAt: now, FinishedAt: now, ExitCode: 1, Status: StepFailed, Reason: "injected post-commit persistence gap"}
@@ -833,7 +955,7 @@ func TestControllerRefusesPreStagedFiles(t *testing.T) {
 
 func validTestPlan() Plan {
 	return Plan{
-		SchemaVersion: SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin",
+		SchemaVersion: SchemaVersion, Branch: "ai-team/feat", BaseBranch: "main", Remote: "origin", RemoteURL: "https://example.test/repo.git",
 		Files: []string{"a.go"}, FileDigests: map[string]string{"a.go": strings.Repeat("a", 64)}, FileModes: map[string]string{"a.go": "100644"},
 		BaselineHead: strings.Repeat("b", 40), SourceRunID: "run-1",
 		VerifiedWorkspaceDigest: strings.Repeat("c", 64), CheckEvidenceDigest: strings.Repeat("d", 64),

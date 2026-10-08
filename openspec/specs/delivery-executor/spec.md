@@ -4,9 +4,12 @@
 Controller-owned delivery: canonical plan, подтверждение exact SHA-256, семь предусловий, exact-file commit/push/PR и post-commit recovery.
 ## Requirements
 ### Requirement: Validated delivery plan
-Delivery MUST consume a structured plan containing branch, base commit, exact
-file set, file SHA-256/modes, verification evidence, preconditions, commit
-message and PR metadata.
+Delivery MUST consume a structured plan containing branch, base commit, remote
+name and push URL, exact file set, file SHA-256/modes, verification evidence,
+preconditions, commit message and PR metadata. The push URL MUST be included in
+the canonical plan hash and MUST still match the configured remote when
+delivery begins. Embedded credentials and credential-bearing URL parameters
+MUST be rejected so plans and delivery evidence never persist secrets.
 
 #### Scenario: Unrelated dirty file
 - **WHEN** a dirty file is not listed in the validated delivery plan
@@ -15,6 +18,18 @@ message and PR metadata.
 #### Scenario: Git transforms staged bytes
 - **WHEN** attributes, filters or line-ending normalization make staged blobs differ from approved bytes
 - **THEN** the executor MUST reject delivery before commit
+
+#### Scenario: Remote URL changes after approval
+- **WHEN** the configured push URL differs from the URL in the approved plan
+- **THEN** the executor MUST reject delivery before git side effects
+
+#### Scenario: Remote URL contains credentials
+- **WHEN** the configured remote URL contains embedded credentials or credential-bearing query parameters
+- **THEN** the planner or executor MUST reject it without writing the credential value to plan or delivery evidence
+
+#### Scenario: Repository hooks or fsmonitor are configured
+- **WHEN** the executor runs any Git command
+- **THEN** it MUST disable repository hooks, fsmonitor and commit signing for that invocation
 
 ### Requirement: Protected branch safety
 The delivery executor MUST determine and reject the repository default or protected branch before push.
@@ -34,6 +49,10 @@ Delivery MUST persist step results and safely resume after partial failure.
 - **WHEN** branch HEAD advanced after the exact approved commit but commit identity was not persisted
 - **THEN** the executor MUST re-verify commit message, parent, paths, modes and blob hashes before recovery
 - **AND** it MUST NOT create a duplicate commit
+
+#### Scenario: Commit identity in saved state is tampered
+- **WHEN** a resumed delivery has a saved commit SHA, regardless of `commit_verified`
+- **THEN** the executor MUST re-verify commit message, parent, paths, modes and blob hashes against the approved plan before push
 
 ### Requirement: Delivery только из candidate
 

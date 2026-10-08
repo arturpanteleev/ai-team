@@ -173,7 +173,7 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 		return nil, func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(configHome) }
-	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())
+	env := withAllowedEnvironmentKeys(os.Environ(), allowedNonClaudeEnvironmentKeys())
 	env = withControlledOpenAIEgressProxy(env)
 	env = append(env,
 		"OPENCODE_PERMISSION="+string(permissionJSON),
@@ -217,6 +217,23 @@ func allowedEnvironmentKeys() map[string]bool {
 			}
 		}
 	}
+	return allowed
+}
+
+// allowedNonClaudeEnvironmentKeys keeps Claude's subscription credential
+// scoped to Claude even when a general harness allow-list names it.
+func allowedNonClaudeEnvironmentKeys() map[string]bool {
+	allowed := allowedEnvironmentKeys()
+	delete(allowed, "CLAUDE_CODE_OAUTH_TOKEN")
+	return allowed
+}
+
+// allowedClaudeEnvironmentKeys adds Claude Code's documented subscription
+// token to the general runtime allow-list. Keep it Claude-only so an OAuth
+// token is not passed to unrelated CLIs.
+func allowedClaudeEnvironmentKeys() map[string]bool {
+	allowed := allowedEnvironmentKeys()
+	allowed["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	return allowed
 }
 

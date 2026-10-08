@@ -140,7 +140,7 @@ func (a *ClaudeAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact
 		return nil, func() {}, err
 	}
 
-	env := withAllowedEnvironmentKeys(os.Environ(), allowedEnvironmentKeys())
+	env := withAllowedEnvironmentKeys(os.Environ(), allowedClaudeEnvironmentKeys())
 	env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
 	sort.Strings(env)
 	return env, cleanup, nil

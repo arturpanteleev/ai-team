@@ -168,25 +168,38 @@ func (c *Checker) Check(ctx context.Context) Report {
 		add(Check{ID: "model", Status: StatusPassed, Message: model})
 	}
 
-	allowed := allowedCredentialNames()
-	if len(allowed) == 0 {
-		add(Check{ID: "credentials", Status: StatusWarning, Message: "явные credential environment variables не разрешены"})
+	if cliName := filepath.Base(cli); cliName == "claude" || cliName == "codex" {
+		method := runtime.DetectAuthentication(cliName)
+		message := "способ входа: не найден"
+		status := StatusWarning
+		switch method {
+		case runtime.AuthenticationAPIKey:
+			message, status = "способ входа: API-ключ", StatusPassed
+		case runtime.AuthenticationSubscription:
+			message, status = "способ входа: подписка", StatusPassed
+		}
+		add(Check{ID: "credentials", Status: status, Message: message})
 	} else {
-		var present, missing []string
-		for _, name := range allowed {
-			if _, ok := os.LookupEnv(name); ok {
-				present = append(present, name)
-			} else {
-				missing = append(missing, name)
+		allowed := allowedCredentialNames()
+		if len(allowed) == 0 {
+			add(Check{ID: "credentials", Status: StatusWarning, Message: "явные credential environment variables не разрешены"})
+		} else {
+			var present, missing []string
+			for _, name := range allowed {
+				if _, ok := os.LookupEnv(name); ok {
+					present = append(present, name)
+				} else {
+					missing = append(missing, name)
+				}
 			}
+			message := "заданы: " + strings.Join(present, ", ")
+			status := StatusPassed
+			if len(missing) > 0 {
+				status = StatusWarning
+				message += "; отсутствуют: " + strings.Join(missing, ", ")
+			}
+			add(Check{ID: "credentials", Status: status, Message: strings.TrimSpace(message)})
 		}
-		message := "заданы: " + strings.Join(present, ", ")
-		status := StatusPassed
-		if len(missing) > 0 {
-			status = StatusWarning
-			message += "; отсутствуют: " + strings.Join(missing, ", ")
-		}
-		add(Check{ID: "credentials", Status: status, Message: strings.TrimSpace(message)})
 	}
 
 	if output, err := c.git(ctx, "rev-parse", "--show-toplevel"); err != nil {

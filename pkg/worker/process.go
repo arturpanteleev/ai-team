@@ -69,6 +69,7 @@ type ProcessEngine struct {
 	apiApprovals               workerApprovalPort
 	openAIEgressDial           func(context.Context) (net.Conn, error)
 	terminalDeliveryReconciler func(context.Context, string, string) error
+	controlSocketDirCreator    func(target, home, temp string) (string, error)
 }
 
 type ProcessError struct {
@@ -292,7 +293,11 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 			if tempDir == "" {
 				return pipeline.RunResult{}, errors.New("worker private TMPDIR is missing")
 			}
-			controlSocketDir, err = createControllerWorkerSocketDir(e.target, homeDir, tempDir)
+			createSocketDir := e.controlSocketDirCreator
+			if createSocketDir == nil {
+				createSocketDir = createControllerWorkerSocketDir
+			}
+			controlSocketDir, err = createSocketDir(e.target, homeDir, tempDir)
 			if err != nil {
 				return pipeline.RunResult{}, fmt.Errorf("worker controller socket directory: %w", err)
 			}

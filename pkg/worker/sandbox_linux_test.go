@@ -561,24 +561,50 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 
 	t.Run("Unix socket setup failure does not fall back to TCP or unsandboxed worker", func(t *testing.T) {
 		target := makeBubblewrapTarget(t)
-		longTempRoot := filepath.Join(t.TempDir(), strings.Repeat("x", 100))
-		if err := os.Mkdir(longTempRoot, 0700); err != nil {
+		workerPath := filepath.Join(t.TempDir(), "worker")
+		if err := os.WriteFile(workerPath, []byte("#!/bin/sh\n: > \"$0.spawned\"\nexit 0\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("TMPDIR", longTempRoot)
-		engine, err := NewProcessEngine([]string{"/bin/true"}, target, filepath.Join(target, "controller.db"),
+		engine, err := NewProcessEngine([]string{workerPath}, target, filepath.Join(target, "controller.db"),
 			WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}))
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Exercise the bubblewrap execution path without requiring the host to
-		// permit namespace creation: Unix socket setup fails before bwrap lookup.
+		// Inject failure at the exact controller-owned socket-directory boundary;
+		// TMPDIR is private and the placement helper deliberately uses /tmp or
+		// /var/tmp, so manipulating TMPDIR cannot reliably cause this failure.
+		socketSetupErr := errors.New("injected socket-directory setup failure")
+		socketDirectoryAttempts := 0
+		engine.controlSocketDirCreator = func(gotTarget, home, temp string) (string, error) {
+			socketDirectoryAttempts++
+			if gotTarget != engine.target || home == "" || temp == "" {
+				t.Fatalf("socket directory creator received target=%q home=%q temp=%q", gotTarget, home, temp)
+			}
+			return "", socketSetupErr
+		}
+		egressDialAttempts := 0
+		engine.openAIEgressDial = func(context.Context) (net.Conn, error) {
+			egressDialAttempts++
+			return nil, errors.New("unexpected OpenAI egress dial")
+		}
+		// Exercise the bubblewrap execution path without requiring namespace
+		// creation. Any attempted child execution writes a sentinel next to the
+		// executable, regardless of whether a sandbox wrapper is present.
 		engine.bubblewrap = true
 		_, err = engine.Start(context.Background(), pipeline.RunConfig{
 			RunID: "socket-setup-failure", Feature: "probe", TaskDesc: "test fail-closed socket setup", TargetDir: target,
 		})
-		if err == nil || !strings.Contains(err.Error(), "worker controller API") {
-			t.Fatalf("controller API Unix socket failure must stop the worker invocation before egress setup, got %v", err)
+		if !errors.Is(err, socketSetupErr) || !strings.Contains(err.Error(), "worker controller socket directory") {
+			t.Fatalf("controller API Unix socket setup failure must stop the worker invocation, got %v", err)
+		}
+		if socketDirectoryAttempts != 1 {
+			t.Fatalf("controller socket directory setup attempts=%d, want exactly one fail-closed attempt", socketDirectoryAttempts)
+		}
+		if egressDialAttempts != 0 {
+			t.Fatalf("OpenAI egress dial attempts=%d after socket setup failed", egressDialAttempts)
+		}
+		if _, err := os.Lstat(workerPath + ".spawned"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("worker executable ran after controller socket setup failed: err=%v", err)
 		}
 	})
 }

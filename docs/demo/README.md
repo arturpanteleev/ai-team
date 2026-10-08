@@ -4,7 +4,7 @@
 Python-репозитории. Пошаговое руководство с разбором сценариев и подключением
 к GitHub Actions — [Проверки в CI без модели](../guides/ci-gate.md).
 
-Быстрый запуск из корня ai-team (нужны `bash`, `git` и Go 1.26.5+):
+Быстрый запуск из корня ai-team (нужны `bash`, `git` и Go 1.26.9+):
 
 ```bash
 bash docs/demo/run-demo.sh

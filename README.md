@@ -55,7 +55,7 @@ ai-team ведёт задачу по цепочке агентов: аналит
 
 ## Установка
 
-Нужны Go 1.26.5+ (для `go install`), один из CLI-рантаймов в `PATH`
+Нужны Go 1.26.9+ (для `go install`), один из CLI-рантаймов в `PATH`
 ([OpenCode](https://opencode.ai), [Codex](https://github.com/openai/codex) или
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)) и, для delivery,
 авторизованный [`gh`](https://cli.github.com).
@@ -120,7 +120,7 @@ ai-team run --resume <run_id> --approve-plan <sha256>
 
 ## Разработка
 
-Нужны Go 1.26.5+ и Node 22+ (фронтенд дашборда); точная версия Go для
+Нужны Go 1.26.9+ и Node 22+ (фронтенд дашборда); точная версия Go для
 локальной сборки закреплена в [`.tool-versions`](.tool-versions).
 
 ```bash

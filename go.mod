@@ -1,6 +1,6 @@
 module github.com/arturpanteleev/ai-team
 
-go 1.26.5
+go 1.26.9
 
 require (
 	github.com/go-chi/chi/v5 v5.3.1

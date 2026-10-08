@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -254,7 +253,7 @@ func Build(runDir, outDir string) (*Index, error) {
 				if pathErr != nil {
 					return nil, fmt.Errorf("export: unsafe attempt artifact path %q: %w", artifact.EvidencePath, pathErr)
 				}
-				artifactSum, err := copyArtifactRecord(runDir, artifactPath, outDir)
+				artifactSum, err := copyArtifactRecord(runDir, artifactPath, outDir, artifact.SHA256)
 				if err != nil {
 					return nil, fmt.Errorf("export attempt artifact %s: %w", artifactPath, err)
 				}
@@ -402,84 +401,19 @@ func copyRecord(runDir, rel, outDir, kind string) (string, error) {
 	return sha256Bytes(data), nil
 }
 
-func copyArtifactRecord(runDir, rel, outDir string) (string, error) {
+func copyArtifactRecord(runDir, rel, outDir, expectedDigest string) (string, error) {
 	if err := safePath(filepath.FromSlash(rel)); err != nil {
 		return "", err
 	}
-	source := filepath.Join(runDir, filepath.FromSlash(rel))
-	artifactType, _, digest, err := evidence.ArtifactDigest(source)
-	if err != nil {
-		return "", err
-	}
 	destination := filepath.Join(outDir, filepath.FromSlash(rel))
-	if artifactType == "file" {
-		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
-			return "", err
-		}
-		if err := copyRegularFile(source, destination); err != nil {
-			return "", err
-		}
-		return digest, nil
-	}
-	if artifactType != "directory" {
-		return "", fmt.Errorf("unsupported artifact type %q", artifactType)
-	}
-	if err := os.MkdirAll(destination, 0755); err != nil {
+	_, _, digest, err := evidence.CopyArtifactAt(runDir, filepath.FromSlash(rel), destination)
+	if err != nil {
 		return "", err
 	}
-	err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == source {
-			return nil
-		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		outPath := filepath.Join(destination, relative)
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symbolic link in evidence artifact %s", path)
-		}
-		if entry.IsDir() {
-			return os.MkdirAll(outPath, 0755)
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("unsupported evidence artifact entry %s", path)
-		}
-		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-			return err
-		}
-		return copyRegularFile(path, outPath)
-	})
-	return digest, err
-}
-
-func copyRegularFile(source, destination string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
+	if digest != expectedDigest {
+		return "", fmt.Errorf("artifact %s changed during export", rel)
 	}
-	defer func() { _ = in.Close() }()
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("artifact source %s is not a regular file", source)
-	}
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, safeio.ReadOnlyFileMode)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	return errors.Join(copyErr, closeErr)
+	return digest, nil
 }
 
 func readDeliveryRecord(runDir string, manifest *evidence.RunManifest, liveRun bool) (*delivery.TerminalRecord, bool, error) {
@@ -569,7 +503,7 @@ func verifyAttemptArtifacts(root, runID string, records []Record, liveRun bool) 
 					return fmt.Errorf("verify: attempt %s duplicate %s path %s", attemptID, group.name, path)
 				}
 				verifiedArtifacts[path] = true
-				artifactType, size, digest, err := evidence.ArtifactDigest(filepath.Join(root, filepath.FromSlash(path)))
+				artifactType, size, digest, err := evidence.ArtifactDigestAt(root, path)
 				if err != nil {
 					return fmt.Errorf("verify: attempt %s %s %s: %w", attemptID, group.name, path, err)
 				}
@@ -759,7 +693,7 @@ func VerifyBundle(bundleDir string, keyVerify ...ed25519.PublicKey) error {
 		path := filepath.Join(bundleDir, filepath.FromSlash(record.Path))
 		var sum string
 		if record.Type == RecordArtifact {
-			_, _, sum, err = evidence.ArtifactDigest(path)
+			_, _, sum, err = evidence.ArtifactDigestAt(bundleDir, record.Path)
 			if err != nil {
 				return fmt.Errorf("verify: record %s %s: %w", record.Type, record.Path, err)
 			}
@@ -917,7 +851,7 @@ func collectRunRecords(runDir string, manifest *evidence.RunManifest) ([]Record,
 				if pathErr != nil {
 					return nil, fmt.Errorf("verify: unsafe attempt artifact path %q", artifact.EvidencePath)
 				}
-				_, _, artifactSHA, artifactErr := evidence.ArtifactDigest(filepath.Join(runDir, filepath.FromSlash(path)))
+				_, _, artifactSHA, artifactErr := evidence.ArtifactDigestAt(runDir, path)
 				if artifactErr != nil {
 					return nil, fmt.Errorf("verify: attempt %s artifact %s: %w", id, path, artifactErr)
 				}

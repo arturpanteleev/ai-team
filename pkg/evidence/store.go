@@ -624,21 +624,21 @@ func (s *Store) NewAttemptID(stage string, ordinal int) string {
 
 // SnapshotInputs copies the exact bytes that will be supplied to the runtime
 // into the controller-owned run directory before execution.
-func (s *Store) SnapshotInputs(attemptID string, inputs []Artifact) ([]Artifact, func(), error) {
+func (s *Store) SnapshotInputs(attemptID string, inputs []Artifact) ([]Artifact, func() error, error) {
 	if attemptID == "" || filepath.Base(attemptID) != attemptID {
-		return nil, func() {}, fmt.Errorf("invalid attempt id %q", attemptID)
+		return nil, func() error { return nil }, fmt.Errorf("invalid attempt id %q", attemptID)
 	}
 	root := filepath.Join(s.RunDir(), "inflight-inputs", attemptID)
 	if err := os.Mkdir(root, 0700); err != nil {
-		return nil, func() {}, err
+		return nil, func() error { return nil }, err
 	}
-	cleanup := func() { _ = os.RemoveAll(root) }
+	cleanup := func() error { return os.RemoveAll(root) }
 	result := make([]Artifact, 0, len(inputs))
 	for index, input := range inputs {
 		destination := filepath.Join(root, fmt.Sprintf("%03d-%s", index+1, sanitize(input.Name)), filepath.Base(input.Path))
 		if err := copyArtifact(input.Path, destination); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("snapshot input %s: %w", input.Name, err)
+			cleanupErr := cleanup()
+			return nil, func() error { return nil }, errors.Join(fmt.Errorf("snapshot input %s: %w", input.Name, err), cleanupErr)
 		}
 		sourcePath := input.SourcePath
 		if sourcePath == "" {

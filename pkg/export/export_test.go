@@ -569,6 +569,49 @@ func TestVerifyEvidenceLiveRun(t *testing.T) {
 	}
 }
 
+func TestArtifactParentSymlinkRejectedByLiveVerifyAndBuild(t *testing.T) {
+	runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+	attemptArtifacts := filepath.Join(runDir, "attempts", testRunID+"-001-coder", "artifacts")
+	outside := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "review.json"), []byte(`{"review":"approved"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEvidence(runDir); err == nil {
+		t.Fatal("VerifyEvidence accepted an attempt artifact below a symlink parent")
+	}
+	if _, err := Build(runDir, filepath.Join(t.TempDir(), "bundle")); err == nil {
+		t.Fatal("Build accepted an attempt artifact below a symlink parent")
+	}
+}
+
+func TestVerifyBundleRejectsArtifactSymlinkParent(t *testing.T) {
+	runDir := buildTerminalRun(t, filepath.Join(t.TempDir(), "runs"))
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if _, err := Build(runDir, bundleDir); err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	attemptArtifacts := filepath.Join(bundleDir, "attempts", testRunID+"-001-coder", "artifacts")
+	outside := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Rename(attemptArtifacts, outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, attemptArtifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBundle(bundleDir); err == nil {
+		t.Fatal("VerifyBundle accepted an artifact below a symlink parent")
+	}
+}
+
 func TestVerifyEvidenceAndExportRejectTamperedRunContents(t *testing.T) {
 	cases := []struct {
 		name   string

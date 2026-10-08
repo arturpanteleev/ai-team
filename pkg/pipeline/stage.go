@@ -64,7 +64,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		StartedAt:   stageStart.UTC(),
 	}
 	var evidenceInputs []evidence.Artifact
-	cleanupEvidenceInputs := func() {}
+	cleanupEvidenceInputs := func() error { return nil }
 	fail := func(err error) notifier.StageResult {
 		r.Err = err
 		r.Status = notifier.StatusFailed
@@ -113,7 +113,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 				}
 			}
 		}
-		cleanupEvidenceInputs()
+		if cleanupErr := cleanupEvidenceInputs(); cleanupErr != nil {
+			logging.Printf("warning: cleanup inflight input snapshot for attempt %s failed: %v; remaining files are included in terminal evidence", attemptID, cleanupErr)
+		}
 		data := map[string]any{
 			"status": r.Status, "execution": r.State.Execution, "decision": r.State.Decision,
 			"outcome": r.State.Outcome, "verdict": r.Verdict,

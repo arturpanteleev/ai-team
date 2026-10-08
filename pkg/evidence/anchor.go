@@ -343,10 +343,11 @@ func verifyAnchorWithSourcesAndTarget(runDir string, eventSource EventLog, manif
 // supplementalDigest binds all ordinary files in a run directory outside the
 // event, manifest, attempt and delivery authorities. In particular, logs,
 // reports, candidate.json, usage.json and containment.json are included.
-// Attempt files are verified against their manifests separately; attestation
-// is validated separately and delivery.json is post-terminal with its own
-// validated record digest. Controller-owned usage and containment receipts
-// are included under stable synthetic names.
+// Attempt files are verified against their manifests separately; leftover
+// inflight-inputs are supplemental evidence so a failed scratch cleanup remains
+// integrity-bound. Attestation is validated separately and delivery.json is
+// post-terminal with its own validated record digest. Controller-owned usage
+// and containment receipts are included under stable synthetic names.
 func supplementalDigest(runDir, targetDir, runID string) (string, error) {
 	files := make(map[string]string)
 	err := filepath.WalkDir(runDir, func(current string, entry os.DirEntry, walkErr error) error {
@@ -362,7 +363,7 @@ func supplementalDigest(runDir, targetDir, runID string) (string, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		first, _, _ := strings.Cut(rel, "/")
-		if first == "attempts" || first == "inflight-inputs" || rel == "events.jsonl" || rel == "run.json" || rel == "anchor.json" || rel == "delivery.json" || rel == "attestation.json" {
+		if first == "attempts" || rel == "events.jsonl" || rel == "run.json" || rel == "anchor.json" || rel == "delivery.json" || rel == "attestation.json" {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
@@ -378,7 +379,7 @@ func supplementalDigest(runDir, targetDir, runID string) (string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("supplemental evidence %s has unsupported type", rel)
 		}
-		_, size, digest, err := ArtifactDigest(current)
+		_, size, digest, err := ArtifactDigestAt(runDir, rel)
 		if err != nil {
 			return fmt.Errorf("digest supplemental evidence %s: %w", rel, err)
 		}

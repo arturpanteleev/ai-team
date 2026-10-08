@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -34,15 +35,16 @@ func isTerminalEventType(eventType string) bool {
 // hash-chained event log, корень цепочки и digest всех attempt manifests на
 // момент завершения run.
 type Anchor struct {
-	SchemaVersion      int       `json:"schema_version"`
-	RunID              string    `json:"run_id"`
-	TerminalEvent      string    `json:"terminal_event"`
-	EventCount         uint64    `json:"event_count"`
-	ChainRootSHA256    string    `json:"chain_root_sha256"`
-	ManifestsDigest    string    `json:"manifests_digest"`
-	RunManifestSHA256  string    `json:"run_manifest_sha256"`
-	SupplementalSHA256 string    `json:"supplemental_sha256"`
-	CreatedAt          time.Time `json:"created_at"`
+	SchemaVersion        int       `json:"schema_version"`
+	RunID                string    `json:"run_id"`
+	TerminalEvent        string    `json:"terminal_event"`
+	EventCount           uint64    `json:"event_count"`
+	ChainRootSHA256      string    `json:"chain_root_sha256"`
+	ManifestsDigest      string    `json:"manifests_digest"`
+	RunManifestSHA256    string    `json:"run_manifest_sha256"`
+	SupplementalSHA256   string    `json:"supplemental_sha256"`
+	DeliveryRecordSHA256 string    `json:"delivery_record_sha256,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // manifestsDigest вычисляет sha256 отсортированного списка
@@ -96,16 +98,27 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 	if err != nil {
 		return err
 	}
+	var deliverySHA256 string
+	if record, found, readErr := delivery.ReadTerminalRecordForRun(manifest.TargetDir, s.RunDir(), s.runID); readErr != nil {
+		return fmt.Errorf("read terminal delivery record for anchor: %w", readErr)
+	} else if found {
+		deliveryBytes, marshalErr := json.MarshalIndent(record, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		deliverySHA256 = sha256Bytes(append(deliveryBytes, '\n'))
+	}
 	anchor := Anchor{
-		SchemaVersion:      AnchorSchemaVersion,
-		RunID:              s.runID,
-		TerminalEvent:      terminalEvent,
-		EventCount:         events[len(events)-1].Sequence,
-		ChainRootSHA256:    events[len(events)-1].SHA256,
-		ManifestsDigest:    digest,
-		RunManifestSHA256:  runManifestSHA256,
-		SupplementalSHA256: supplementalSHA256,
-		CreatedAt:          time.Now().UTC(),
+		SchemaVersion:        AnchorSchemaVersion,
+		RunID:                s.runID,
+		TerminalEvent:        terminalEvent,
+		EventCount:           events[len(events)-1].Sequence,
+		ChainRootSHA256:      events[len(events)-1].SHA256,
+		ManifestsDigest:      digest,
+		RunManifestSHA256:    runManifestSHA256,
+		SupplementalSHA256:   supplementalSHA256,
+		DeliveryRecordSHA256: deliverySHA256,
+		CreatedAt:            time.Now().UTC(),
 	}
 	data, err := json.MarshalIndent(anchor, "", "  ")
 	if err != nil {
@@ -140,6 +153,28 @@ func (s *Store) writeAnchor(terminalEvent string, events []Event) error {
 // означает tampering или повреждение evidence.
 func VerifyAnchor(runDir string) error {
 	return VerifyAnchorWithSources(runDir, nil, nil)
+}
+
+// ResealTerminalEvidence refreshes the terminal anchor after a post-terminal
+// delivery record is persisted. The event chain remains unchanged; the anchor
+// gains a digest of the immutable delivery record for live and bundle verify.
+func ResealTerminalEvidence(runDir string, eventSource EventLog) error {
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return fmt.Errorf("read run manifest for terminal reseal: %w", err)
+	}
+	var manifest RunManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("decode run manifest for terminal reseal: %w", err)
+	}
+	if manifest.RunID == "" {
+		return errors.New("terminal reseal: run manifest has no run_id")
+	}
+	if eventSource == nil {
+		eventSource = NewFileEventLog(filepath.Join(runDir, "events.jsonl"))
+	}
+	store := &Store{root: filepath.Dir(runDir), runID: manifest.RunID, eventLog: eventSource}
+	return store.SealTerminalEvidence()
 }
 
 func VerifyAnchorWithEventSource(runDir string, eventSource EventLog) error {

@@ -617,6 +617,17 @@ func verifyDelivery(root string, manifest *evidence.RunManifest, events []eviden
 		return errors.New("verify: delivery record/index mismatch")
 	}
 	if !found {
+		anchorData, readErr := safeio.ReadRegularFile(filepath.Join(root, "anchor.json"), maxAnchorSize)
+		if readErr != nil {
+			return fmt.Errorf("verify: delivery anchor: %w", readErr)
+		}
+		var anchor evidence.Anchor
+		if err := json.Unmarshal(anchorData, &anchor); err != nil {
+			return fmt.Errorf("verify: delivery anchor decode: %w", err)
+		}
+		if anchor.DeliveryRecordSHA256 != "" {
+			return errors.New("verify: anchor contains a delivery digest but no delivery record is present")
+		}
 		return nil
 	}
 	if record.RunID != manifest.RunID || record.Feature != manifest.Feature {
@@ -628,6 +639,17 @@ func verifyDelivery(root string, manifest *evidence.RunManifest, events []eviden
 	}
 	if sha256Bytes(append(data, '\n')) != indexed.SHA256 {
 		return errors.New("verify: delivery record digest mismatch")
+	}
+	anchorData, err := safeio.ReadRegularFile(filepath.Join(root, "anchor.json"), maxAnchorSize)
+	if err != nil {
+		return fmt.Errorf("verify: delivery anchor: %w", err)
+	}
+	var anchor evidence.Anchor
+	if err := json.Unmarshal(anchorData, &anchor); err != nil {
+		return fmt.Errorf("verify: delivery anchor decode: %w", err)
+	}
+	if anchor.DeliveryRecordSHA256 == "" || sha256Bytes(append(data, '\n')) != anchor.DeliveryRecordSHA256 {
+		return errors.New("verify: delivery record does not match the terminal anchor")
 	}
 	deferred := false
 	for _, event := range events {
@@ -1043,11 +1065,31 @@ func verifyCore(root, runID string, records []Record, liveRun bool) error {
 	if predicate.Run.AttemptCount != attemptCount {
 		return fmt.Errorf("verify: attestation attempt_count %d != %d", predicate.Run.AttemptCount, attemptCount)
 	}
+	if predicate.Run.ControllerExecutableSHA != manifest.Controller.ExecutableSHA256 {
+		return errors.New("verify: attestation controller_executable_sha256 does not match run manifest")
+	}
 	if predicate.Provenance == nil || predicate.Provenance.SchemaVersion != provenance.SchemaVersion {
 		return fmt.Errorf("verify: attestation должна нести provenance manifest v1 (V0-2)")
 	}
 	if predicate.Provenance.RunID != runID {
 		return fmt.Errorf("verify: attestation provenance run_id не совпадает")
+	}
+	var manifestProvenance provenance.Manifest
+	provenanceDecoder := json.NewDecoder(bytes.NewReader(manifest.Provenance))
+	provenanceDecoder.DisallowUnknownFields()
+	if err := provenanceDecoder.Decode(&manifestProvenance); err != nil {
+		return fmt.Errorf("verify: run manifest provenance: %w", err)
+	}
+	attestedProvenanceBytes, err := json.Marshal(predicate.Provenance)
+	if err != nil {
+		return fmt.Errorf("verify: marshal attestation provenance: %w", err)
+	}
+	manifestProvenanceBytes, err := json.Marshal(manifestProvenance)
+	if err != nil {
+		return fmt.Errorf("verify: marshal run manifest provenance: %w", err)
+	}
+	if !bytes.Equal(attestedProvenanceBytes, manifestProvenanceBytes) {
+		return errors.New("verify: attestation provenance does not match run manifest")
 	}
 	return nil
 }

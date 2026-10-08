@@ -785,9 +785,8 @@ func TestTerminalRecordForRunPrefersControllerStoreAndFallsBackToLegacy(t *testi
 	if err := WriteControllerTerminalRecord(target, runID, controller); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, err = ReadTerminalRecordForRun(target, runDir, runID)
-	if err != nil || !ok || got.Feature != "controller" {
-		t.Fatalf("controller priority: record=%+v ok=%v err=%v", got, ok, err)
+	if _, _, err = ReadTerminalRecordForRun(target, runDir, runID); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("conflicting controller/run-local records must be rejected, got err=%v", err)
 	}
 	storePath := filepath.Join(target, ".ai-team", "state", "delivery", runID+".json")
 	if err := os.WriteFile(storePath, []byte("broken"), 0600); err != nil {

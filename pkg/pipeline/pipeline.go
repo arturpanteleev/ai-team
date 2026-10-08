@@ -128,6 +128,7 @@ type Pipeline struct {
 	attemptManifestWriter AttemptManifestWriter
 	eventLogSource        evidence.EventLog
 	deliveryApprovalHash  string
+	questionAnswerInputs  QuestionAnswerInputProvider
 	reportsDir            string
 }
 
@@ -224,6 +225,13 @@ func WithContainmentReceiptWriter(writer ContainmentReceiptWriter) Option {
 
 func WithCandidateEvidenceStore(store CandidateEvidenceStore) Option {
 	return func(p *Pipeline) { p.candidateEvidence = store }
+}
+
+// WithQuestionAnswerInputProvider routes resolved clarification answers
+// through a typed controller API. Local CLI pipelines retain the filesystem
+// materialization path.
+func WithQuestionAnswerInputProvider(provider QuestionAnswerInputProvider) Option {
+	return func(p *Pipeline) { p.questionAnswerInputs = provider }
 }
 
 // WithAttemptManifestStore routes canonical manifest reads and writes through
@@ -521,13 +529,6 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 	}
-	if runCfg.ResumeRunID != "" && resumedState.Phase == lifecycle.PhaseRunning {
-		recoveredClarification, err = recoveredQuestionApproval(approvalStore, resumedState.RunID, resumedState.NextStage)
-		if err != nil {
-			return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
-		}
-	}
-
 	// task.md is a workflow input and therefore must be created/read while the
 	// workspace lock is held. Otherwise a rejected concurrent run could overwrite
 	// the task consumed by the active run before failing to acquire the lock.
@@ -619,10 +620,39 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
-		if resumedState.Phase == lifecycle.PhaseRunning {
+		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
 				return RunResult{}, fmt.Errorf("resume graph handoff input: %w", err)
+			}
+			if recoveredGraphApproval == nil {
+				// A resolved graph return into the current stage is newer than an
+				// older clarification targeting that same stage. Only reconcile a
+				// stale checkpoint after checking for that exact handoff first.
+				var reconciledTo string
+				var reconciled bool
+				reconciledTo, reconciled, err = ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume graph checkpoint: %w", err)
+				}
+				if reconciled {
+					runCfg.retryFrom = reconciledTo
+				}
+				recoveredClarification, err = RecoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
+				}
+				if recoveredClarification == nil && runCfg.retryFrom != "analyst" {
+					recoveredClarification, err = recoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom)
+					if err != nil {
+						return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
+					}
+				}
+			}
+		}
+		if resumedApproval != nil && resumedApproval.ResolvedAction == "answer_questions" {
+			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
+				return RunResult{}, fmt.Errorf("resume clarification approval: %w", err)
 			}
 		}
 		configDigest := sha256.Sum256(configSnapshot)
@@ -979,7 +1009,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					filtered = append(filtered, input)
 				}
 			}
-			answer, answerErr := writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
+			var answer runtime.Artifact
+			var answerErr error
+			if p.questionAnswerInputs != nil {
+				answer, answerErr = p.questionAnswerInputs.MaterializeQuestionAnswer(runID, inputApproval.ID)
+			} else {
+				answer, answerErr = writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
+			}
 			if answerErr != nil {
 				outcome, finalErr := rs.finalize(answerErr)
 				return RunResult{RunID: runID, Outcome: outcome}, finalErr

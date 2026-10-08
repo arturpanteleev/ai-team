@@ -42,6 +42,7 @@ type apiApprovalStore struct {
 	values      map[string]approval.PendingApproval
 	createErr   error
 	loadErr     error
+	listErr     error
 	createCalls int
 }
 
@@ -1300,6 +1301,9 @@ func (s *apiApprovalStore) Load(run, id string) (approval.PendingApproval, error
 	return v, nil
 }
 func (s *apiApprovalStore) List(run string) ([]approval.PendingApproval, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	var out []approval.PendingApproval
 	for _, v := range s.values {
 		if v.RunID == run {
@@ -1327,7 +1331,7 @@ func workerQuestionApproval(runID, approvalID, questions, answer string, status 
 		RequiredRoles: []string{"qa"}, Quorum: approval.QuorumAny,
 		Actions: []string{"answer_questions", "stop"},
 		Targets: map[string]string{"answer_questions": "questioner", "stop": "$stop"},
-		Status:  status, Payload: payload,
+		Status:  status, Payload: payload, CreatedAt: time.Now().UTC().Add(-time.Minute),
 	}
 	if status == approval.StatusResolved {
 		now := time.Now().UTC()
@@ -1338,6 +1342,15 @@ func workerQuestionApproval(runID, approvalID, questions, answer string, status 
 			Action: "answer_questions", Comment: answer, SubjectHash: value.SubjectHash, DecidedAt: now,
 		}}
 	}
+	return value
+}
+
+func workerAnalystQuestionApproval(runID, approvalID, questions, answer string, status approval.Status) approval.PendingApproval {
+	value := workerQuestionApproval(runID, approvalID, questions, answer, status)
+	value.AttemptID = "attempt-analyst"
+	value.FromStage = "analyst"
+	value.ToStage = "analyst"
+	value.Targets["answer_questions"] = "analyst"
 	return value
 }
 

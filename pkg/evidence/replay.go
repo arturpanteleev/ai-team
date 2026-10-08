@@ -15,12 +15,54 @@ import (
 // verified event chain. Artifact contents remain in attempt manifests; the
 // event carries and verifies each manifest identity.
 type ReplayedRun struct {
-	RunID           string              `json:"run_id"`
-	StartedAt       time.Time           `json:"started_at"`
-	FinishedAt      time.Time           `json:"finished_at,omitempty"`
-	Status          workflow.RunOutcome `json:"status,omitempty"`
-	Attempts        []ReplayedAttempt   `json:"attempts"`
-	LastEventSHA256 string              `json:"last_event_sha256"`
+	RunID             string                     `json:"run_id"`
+	StartedAt         time.Time                  `json:"started_at"`
+	FinishedAt        time.Time                  `json:"finished_at,omitempty"`
+	Status            workflow.RunOutcome        `json:"status,omitempty"`
+	Attempts          []ReplayedAttempt          `json:"attempts"`
+	Transitions       []ReplayedTransition       `json:"transitions,omitempty"`
+	ApprovalDecisions []ReplayedApprovalDecision `json:"approval_decisions,omitempty"`
+	ApprovalReuses    []ReplayedApprovalReuse    `json:"approval_reuses,omitempty"`
+	LastEventSHA256   string                     `json:"last_event_sha256"`
+}
+
+// ReplayedTransition retains the identity-bearing fields from verified
+// transition_selected events for recovery decisions that must reconcile a
+// lifecycle checkpoint with its event journal.
+type ReplayedTransition struct {
+	Sequence   uint64 `json:"sequence"`
+	AttemptID  string `json:"attempt_id"`
+	From       string `json:"from"`
+	Outcome    string `json:"outcome"`
+	EdgeTarget string `json:"edge_target"`
+	Action     string `json:"action,omitempty"`
+	Target     string `json:"target"`
+}
+
+// ReplayedApprovalDecision retains the event identity needed to bind a
+// recovered approval-store record to its verified approval_decided event.
+type ReplayedApprovalDecision struct {
+	Sequence    uint64 `json:"sequence"`
+	AttemptID   string `json:"attempt_id"`
+	ID          string `json:"approval_id"`
+	SubjectHash string `json:"subject_hash"`
+	FromStage   string `json:"from_stage"`
+	ToStage     string `json:"to_stage"`
+	Trigger     string `json:"trigger"`
+	Action      string `json:"action"`
+}
+
+// ReplayedApprovalReuse retains the exact controller event that applied a
+// previously resolved decision to a later attempt of the same graph edge.
+type ReplayedApprovalReuse struct {
+	Sequence    uint64 `json:"sequence"`
+	AttemptID   string `json:"attempt_id"`
+	ID          string `json:"approval_id"`
+	SubjectHash string `json:"subject_hash"`
+	PriorStatus string `json:"prior_status"`
+	FromStage   string `json:"from_stage"`
+	ToStage     string `json:"to_stage"`
+	Trigger     string `json:"trigger"`
 }
 
 type ReplayedAttempt struct {
@@ -235,6 +277,17 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				return ReplayedRun{}, fmt.Errorf("approval_decided %s не соответствует запросу", approvalID)
 			}
 			decidedApprovals[approvalID] = true
+			fromStage, fromErr := eventString(event.Data, "from_stage", false)
+			toStage, toErr := eventString(event.Data, "to_stage", false)
+			trigger, triggerErr := eventString(event.Data, "trigger", false)
+			if fromErr != nil || toErr != nil || triggerErr != nil {
+				return ReplayedRun{}, fmt.Errorf("approval_decided %s has invalid source identity", approvalID)
+			}
+			result.ApprovalDecisions = append(result.ApprovalDecisions, ReplayedApprovalDecision{
+				Sequence: event.Sequence, AttemptID: event.AttemptID, ID: approvalID,
+				SubjectHash: subjectHash, FromStage: fromStage, ToStage: toStage,
+				Trigger: trigger, Action: action,
+			})
 		case "transition_selected":
 			index, exists := byID[event.AttemptID]
 			from, fromErr := eventString(event.Data, "from", true)
@@ -247,7 +300,15 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				strings.ContainsAny(edgeTarget, "/\\") || strings.ContainsAny(target, "/\\") {
 				return ReplayedRun{}, fmt.Errorf("transition_selected %s не соответствует attempt", event.AttemptID)
 			}
+			action, actionErr := eventString(event.Data, "action", false)
+			if actionErr != nil {
+				return ReplayedRun{}, fmt.Errorf("transition_selected %s has invalid action", event.AttemptID)
+			}
 			selectedTransitions[event.AttemptID] = true
+			result.Transitions = append(result.Transitions, ReplayedTransition{
+				Sequence: event.Sequence, AttemptID: event.AttemptID, From: from,
+				Outcome: outcome, EdgeTarget: edgeTarget, Action: action, Target: target,
+			})
 		case "run_finished":
 			if result.StartedAt.IsZero() {
 				return ReplayedRun{}, fmt.Errorf("run_finished appears before run_started")
@@ -297,11 +358,20 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			approvalID, idErr := eventString(event.Data, "approval_id", true)
 			subjectHash, hashErr := eventString(event.Data, "subject_hash", true)
 			priorStatus, statusErr := eventString(event.Data, "prior_status", true)
+			fromStage, fromErr := eventString(event.Data, "from_stage", false)
+			toStage, toErr := eventString(event.Data, "to_stage", false)
+			trigger, triggerErr := eventString(event.Data, "trigger", false)
 			if idErr != nil || hashErr != nil || statusErr != nil || !safeEventIdentifier(approvalID) ||
 				!validSHA256(subjectHash) || approvalSubjects[approvalID] != subjectHash ||
-				(priorStatus != "pending" && priorStatus != "resolved") || event.AttemptID == "" {
+				(priorStatus != "pending" && priorStatus != "resolved") || event.AttemptID == "" ||
+				fromErr != nil || toErr != nil || triggerErr != nil {
 				return ReplayedRun{}, fmt.Errorf("approval_reused содержит недопустимую identity")
 			}
+			result.ApprovalReuses = append(result.ApprovalReuses, ReplayedApprovalReuse{
+				Sequence: event.Sequence, AttemptID: event.AttemptID, ID: approvalID,
+				SubjectHash: subjectHash, PriorStatus: priorStatus,
+				FromStage: fromStage, ToStage: toStage, Trigger: trigger,
+			})
 		case "delivery_deferred":
 			planHash, hashErr := eventString(event.Data, "plan_hash", true)
 			statePath, pathErr := eventString(event.Data, "state_path", true)

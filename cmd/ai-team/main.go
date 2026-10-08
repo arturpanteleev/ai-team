@@ -327,6 +327,7 @@ func cmdWorker() {
 	var attemptManifestSource evidence.AttemptManifestSource
 	var attemptManifestWriter pipeline.AttemptManifestWriter
 	var eventLogSource evidence.EventLog
+	var questionAnswerInputProvider pipeline.QuestionAnswerInputProvider
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -339,6 +340,7 @@ func cmdWorker() {
 		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
 		candidateMetadataStore = worker.NewWorkerAPICandidates(apiPort)
 		if apiPort.SupportsControllerUsageStore() {
+			questionAnswerInputProvider = worker.NewWorkerAPIQuestionAnswerInputs(apiPort)
 			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
 			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
@@ -431,6 +433,9 @@ func cmdWorker() {
 	}
 	if eventLogSource != nil {
 		engineOptions = append(engineOptions, pipeline.WithEventLogSource(eventLogSource))
+	}
+	if questionAnswerInputProvider != nil {
+		engineOptions = append(engineOptions, pipeline.WithQuestionAnswerInputProvider(questionAnswerInputProvider))
 	}
 	if attestationWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttestationWriter(attestationWriter))

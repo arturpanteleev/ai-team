@@ -172,8 +172,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		agentCfg = &config.AgentConfig{Name: name}
 	}
 
-	// Первый результат collectInputs здесь не нужен: runtime-артефакты берутся
-	// не из него, а из immutable-снимка ниже (inputs = toRuntimeArtifacts(...)).
+	// The runtime normally receives its immutable evidence snapshot. A controller
+	// handoff answer is the exception: its worker-visible path is a read-only
+	// bind mount and must remain the actual runtime input, not a writable copy.
 	_, inputArtifacts, err := rs.collectInputs(a, name)
 	r.Inputs = inputArtifacts
 	if err != nil {
@@ -184,6 +185,19 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return fail(fmt.Errorf("агент %s: immutable input snapshot: %w", name, err))
 	}
 	inputs := toRuntimeArtifacts(evidenceInputs)
+	if rs.p.questionAnswerInputs != nil {
+		for _, materialized := range inputArtifacts {
+			if materialized.Name != "clarification-answer" {
+				continue
+			}
+			for index := range inputs {
+				if inputs[index].Name == materialized.Name {
+					inputs[index] = materialized
+					break
+				}
+			}
+		}
+	}
 	preconditions, err := validateSnapshotPreconditions(name, a, inputs)
 	if err != nil {
 		return fail(err)

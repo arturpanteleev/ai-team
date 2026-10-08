@@ -24,6 +24,10 @@ func checkBubblewrapAvailable() error {
 }
 
 func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPath, runID string, agentPaths, environment []string) (*exec.Cmd, error) {
+	return bubblewrapWorkerCommandWithInputs(ctx, worker, target, dbPath, runID, agentPaths, environment, nil)
+}
+
+func bubblewrapWorkerCommandWithInputs(ctx context.Context, worker *exec.Cmd, target, dbPath, runID string, agentPaths, environment []string, readOnlyInputs []workerReadOnlyInputMount) (*exec.Cmd, error) {
 	if err := evidence.ValidateRunID(runID); err != nil {
 		return nil, fmt.Errorf("bubblewrap run id: %w", err)
 	}
@@ -62,6 +66,7 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		// initial capability environment after the worker marks itself
 		// non-dumpable.
 		"--cap-drop", "CAP_SYS_PTRACE",
+		"--cap-drop", "CAP_SYS_ADMIN",
 		"--ro-bind", "/", "/",
 		// Hide standard host service sockets (for example docker.sock and
 		// system D-Bus sockets) while keeping a writable namespace-local /run.
@@ -70,6 +75,12 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		"--bind", canonicalTarget, canonicalTarget,
 		"--bind", home, home,
 		"--bind", temp, temp,
+	}
+	for _, mount := range readOnlyInputs {
+		if err := validateQuestionAnswerMount(canonicalTarget, runID, mount); err != nil {
+			return nil, fmt.Errorf("validate worker clarification input mount: %w", err)
+		}
+		args = append(args, "--ro-bind", mount.SourcePath, mount.TargetPath)
 	}
 	if env[openAIEgressSocketEnv] != "" || env[openAIEgressTokenEnv] != "" {
 		if env[openAIEgressSocketEnv] == "" || env[openAIEgressTokenEnv] == "" {
@@ -139,6 +150,14 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 		return nil, err
 	}
 	args = append(args, "--chmod", "0555", eventAuthorityDir)
+	handoffInputDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "handoff-inputs")
+	if err != nil {
+		return nil, fmt.Errorf("prepare controller clarification input authority mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, handoffInputDir, true); err != nil {
+		return nil, err
+	}
+	args = append(args, "--chmod", "0555", handoffInputDir)
 	candidateEvidenceRunDir := filepath.Join(candidateEvidenceDir, runID)
 	candidateEvidenceRunDirAdded := false
 	for _, name := range []string{"review-candidate.json", "verification-candidate.json"} {

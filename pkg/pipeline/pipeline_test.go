@@ -1037,6 +1037,9 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 				gotQuestion = true
 			case "clarification-answer":
 				gotAnswer = true
+				if !strings.Contains(input.Path, filepath.Join(".ai-team", "runs")) || strings.Contains(input.Path, "inflight-inputs") {
+					t.Errorf("recovery did not pass the read-only run-scoped materialization to the runtime: %q", input.Path)
+				}
 				answer, readErr := os.ReadFile(input.Path)
 				if readErr != nil || !strings.Contains(string(answer), "B2B-клиенты") {
 					t.Errorf("после recovery потерян durable answer: %q err=%v", answer, readErr)
@@ -1057,7 +1060,13 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 			},
 		})
 	}, config.AgentConfig{Name: "analyst"})
-	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	canonicalTarget, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerStore := ControllerQuestionAnswerStore{TargetDir: canonicalTarget}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}),
+		WithQuestionAnswerInputProvider(canonicalQuestionAnswerTestProvider{store: answerStore}))
 	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
 	var required *ApprovalRequiredError
 	if !errors.As(err, &required) {
@@ -1078,6 +1087,9 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := answerStore.Prepare(decided); err != nil {
+		t.Fatalf("prepare controller-owned canonical answer: %v", err)
+	}
 	// Match the durable events written by the first resume attempt before its
 	// lifecycle state advances to running. The process then crashes at that
 	// boundary, so the next process sees a running lifecycle and invalidated
@@ -1087,6 +1099,12 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 		t.Fatal(err)
 	}
 	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: decided.AttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "transition_selected", AttemptID: decided.AttemptID, Stage: decided.FromStage, Data: map[string]any{
+		"from": decided.FromStage, "outcome": "blocked", "edge_target": decided.ToStage,
+		"action": decided.ResolvedAction, "target": decided.Targets[decided.ResolvedAction],
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := evidenceStore.Append(evidence.Event{Type: "attempts_invalidated", Data: map[string]any{
@@ -1122,6 +1140,452 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	}
 	if second.RunID != first.RunID || second.Outcome != "completed" || rt.calls["analyst"] != 2 {
 		t.Fatalf("неверный resumed result: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+}
+
+func TestRun_AnalystClarificationFailsClosedAfterCompletedTargetBeforeTransition(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		if name != "analyst" || rt.calls[name] != 1 {
+			return
+		}
+		path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("Кто целевой клиент?\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"product_owner"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "analyst"})
+	targetDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerStore := ControllerQuestionAnswerStore{TargetDir: targetDir}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}),
+		WithQuestionAnswerInputProvider(canonicalQuestionAnswerTestProvider{store: answerStore}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "уточнить целевую аудиторию", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("ожидалось ожидание ответа: result=%+v err=%v", first, err)
+	}
+	approvals, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := approvals.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "answer_questions",
+		Comment: "B2B-клиенты среднего бизнеса", SubjectHash: pending.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := answerStore.Prepare(decided); err != nil {
+		t.Fatalf("prepare controller-owned canonical answer: %v", err)
+	}
+
+	runRoot := filepath.Join(dir, ".ai-team", "runs")
+	evidenceStore, _, replayed, err := evidence.Resume(runRoot, first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceAttempt := replayed.Attempts[0]
+	if err := evidenceStore.Append(evidence.Event{
+		Type: "approval_decided", AttemptID: decided.AttemptID, Timestamp: time.Now().UTC(),
+		Data: approvalEventData(decided),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{
+		Type: "transition_selected", AttemptID: decided.AttemptID, Stage: "analyst", Timestamp: time.Now().UTC(),
+		Data: map[string]any{
+			"from": "analyst", "outcome": "blocked", "edge_target": "analyst",
+			"action": "answer_questions", "target": "analyst",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "attempts_invalidated", Timestamp: time.Now().UTC(), Data: map[string]any{
+		"attempt_ids": []string{sourceAttempt.AttemptID}, "reason": "approved_loopback",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetAttemptID := evidenceStore.NewAttemptID("analyst", 2)
+	attemptStarted := time.Now().UTC()
+	attemptFinished := attemptStarted.Add(time.Second)
+	if err := evidenceStore.Append(evidence.Event{
+		Type: "attempt_started", Stage: "analyst", AttemptID: targetAttemptID, Timestamp: attemptStarted,
+		Data: map[string]any{"stage_index": graph.Index("analyst") + 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.PublishAttempt(evidence.AttemptManifest{
+		AttemptID: targetAttemptID, Stage: "analyst", StageIndex: graph.Index("analyst") + 1,
+		StartedAt: attemptStarted, FinishedAt: attemptFinished,
+		Status: "passed", Execution: string(workflow.ExecutionSucceeded),
+		Decision: string(workflow.DecisionNotApplicable), Outcome: string(workflow.OutcomePassed),
+	}, filepath.Join(dir, ".ai-team", "artifacts"), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest, _, err := evidence.AttemptManifestDigest(nil, evidenceStore.RunDir(), first.RunID, targetAttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{
+		Type: "attempt_finished", Stage: "analyst", AttemptID: targetAttemptID, Timestamp: attemptFinished,
+		Data: map[string]any{
+			"status": "passed", "execution": workflow.ExecutionSucceeded,
+			"decision": workflow.DecisionNotApplicable, "outcome": workflow.OutcomePassed,
+			"manifest_sha256": manifestDigest,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lifecycles, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := lifecycles.Load(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := waiting
+	running.Phase, running.NextStage, running.PendingApprovalID = lifecycle.PhaseRunning, "analyst", ""
+	if err := lifecycles.Save(waiting, running); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir}); !errors.Is(err, ErrStaleQuestionApproval) {
+		t.Fatalf("resume should fail closed after successful attempt_finished without transition_selected: %v", err)
+	}
+	if rt.calls["analyst"] != 1 {
+		t.Fatalf("resume must not retry analyst without the clarification answer; calls=%d", rt.calls["analyst"])
+	}
+}
+
+type clarificationRecoveryFixture struct {
+	dir       string
+	pipeline  *Pipeline
+	runtime   *scriptedRuntime
+	first     RunResult
+	approvals *approval.Store
+	evidence  EvidenceStore
+	graph     workflow.Graph
+	observed  struct {
+		returnFeedback string
+		hasAnswer      bool
+	}
+}
+
+func newClarificationRecoveryFixture(t *testing.T) *clarificationRecoveryFixture {
+	t.Helper()
+	dir := env(t)
+	if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package recovery\nconst Revision = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rt := newScripted()
+	rt.blocked["analyst"] = "need buyer context"
+	fixture := &clarificationRecoveryFixture{dir: dir, runtime: rt}
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name == "coder" {
+			if err := os.WriteFile(filepath.Join(dir, "coder.go"), []byte("package recovery\nconst Revision = 1\n"), 0644); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		if name != "analyst" {
+			return
+		}
+		if rt.calls[name] == 1 {
+			path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("Who is the buyer?\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		delete(rt.blocked, "analyst")
+		for _, input := range inputs {
+			switch input.Name {
+			case "clarification-answer":
+				fixture.observed.hasAnswer = true
+			case "human-return-feedback":
+				data, err := os.ReadFile(input.Path)
+				if err != nil {
+					t.Errorf("read recovered graph return feedback: %v", err)
+					return
+				}
+				fixture.observed.returnFeedback = string(data)
+			}
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.MaxVisits["coder"] = 4
+		wf.Edges = append(wf.Edges,
+			config.WorkflowEdgeConfig{
+				From: "analyst", Outcome: "blocked", To: "analyst",
+				Approval: &config.WorkflowApprovalConfig{
+					Roles: []string{"product_owner"}, Quorum: "any",
+					Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+				},
+			},
+			config.WorkflowEdgeConfig{
+				From: "coder", Outcome: "rejected", To: "analyst",
+				Approval: &config.WorkflowApprovalConfig{
+					Roles: []string{"product_owner"}, Quorum: "any",
+					Actions: map[string]string{"return_to_analyst": "analyst", "stop": "$stop"},
+				},
+			},
+		)
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "coder"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "clarify and continue", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("expected clarification approval, result=%+v err=%v", first, err)
+	}
+	approvals, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := approvals.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "owner@example.com", ActorRole: "product_owner", Action: "answer_questions",
+		Comment: "B2B buyers", SubjectHash: pending.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerStore := ControllerQuestionAnswerStore{TargetDir: targetDir}
+	if _, err := answerStore.Prepare(decided); err != nil {
+		t.Fatal(err)
+	}
+	evidenceStore, _, replayed, err := evidence.Resume(filepath.Join(dir, ".ai-team", "runs"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: decided.AttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "transition_selected", AttemptID: decided.AttemptID, Stage: "analyst", Data: map[string]any{
+		"from": "analyst", "outcome": "blocked", "edge_target": "analyst",
+		"action": "answer_questions", "target": "analyst",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "attempts_invalidated", Data: map[string]any{
+		"attempt_ids": []string{replayed.Attempts[0].AttemptID}, "reason": "approved_loopback",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalPath := filepath.Join(dir, ".ai-team", "artifacts", "feat", "proposal.md")
+	if err := os.MkdirAll(filepath.Dir(proposalPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proposalPath, []byte("approved analyst output\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	analystAttemptID := evidenceStore.NewAttemptID("analyst", 2)
+	proposal := evidence.Artifact{Name: "proposal", Path: proposalPath}
+	appendSyntheticFinishedAttempt(t, evidenceStore, filepath.Join(dir, ".ai-team", "artifacts"), analystAttemptID,
+		"analyst", graph.Index("analyst")+1,
+		workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Decision: workflow.DecisionNotApplicable, Outcome: workflow.OutcomePassed},
+		[]evidence.Artifact{proposal})
+	handoffSubject := sha256.Sum256([]byte("analyst passed to coder"))
+	handoff, err := approvals.Create(approval.PendingApproval{
+		RunID: first.RunID, AttemptID: analystAttemptID, FromStage: "analyst", ToStage: "coder",
+		Trigger: "graph_outcome:passed", SubjectHash: fmt.Sprintf("%x", handoffSubject[:]),
+		RequiredRoles: []string{"operator"}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "reject"}, Targets: map[string]string{"approve": "coder", "reject": "$stop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_requested", AttemptID: analystAttemptID, Data: approvalEventData(handoff)}); err != nil {
+		t.Fatal(err)
+	}
+	handoff, err = approvals.Decide(first.RunID, handoff.ID, approval.Decision{
+		ActorID: "operator@example.com", ActorRole: "operator", Action: "approve", SubjectHash: handoff.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: analystAttemptID, Data: approvalEventData(handoff)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "transition_selected", AttemptID: analystAttemptID, Stage: "analyst", Data: map[string]any{
+		"from": "analyst", "outcome": "passed", "edge_target": "coder", "action": "approve", "target": "coder",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.pipeline, fixture.first, fixture.approvals = p, first, approvals
+	fixture.evidence, fixture.graph = evidenceStore, graph
+	return fixture
+}
+
+func appendSyntheticFinishedAttempt(t *testing.T, store EvidenceStore, artifactRoot, attemptID, stage string, stageIndex int,
+	state workflow.AttemptState, outputs []evidence.Artifact) {
+	t.Helper()
+	started := time.Now().UTC()
+	finished := started
+	if err := store.Append(evidence.Event{
+		Type: "attempt_started", Stage: stage, AttemptID: attemptID, Timestamp: started,
+		Data: map[string]any{"stage_index": stageIndex},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: store.RunID(), AttemptID: attemptID,
+		Stage: stage, StageIndex: stageIndex, StartedAt: started, FinishedAt: finished,
+		Status: state.LegacyStatus(), Execution: string(state.Execution),
+		Decision: string(state.Decision), Outcome: string(state.Outcome),
+	}
+	if err := store.PublishAttempt(manifest, artifactRoot, nil, outputs); err != nil {
+		t.Fatal(err)
+	}
+	digest, _, err := evidence.AttemptManifestDigest(nil, store.RunDir(), store.RunID(), attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{
+		Type: "attempt_finished", Stage: stage, AttemptID: attemptID, Timestamp: finished,
+		Data: map[string]any{
+			"status": state.LegacyStatus(), "execution": state.Execution,
+			"decision": state.Decision, "outcome": state.Outcome, "manifest_sha256": digest,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setLifecycleRunningAtAnalyst(t *testing.T, dir, runID string) {
+	t.Helper()
+	store, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := store.Load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := waiting
+	running.Phase, running.NextStage, running.PendingApprovalID = lifecycle.PhaseRunning, "analyst", ""
+	if err := store.Save(waiting, running); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRun_ClarificationRecoveryReconcilesCompletedTargetTransition(t *testing.T) {
+	fixture := newClarificationRecoveryFixture(t)
+	setLifecycleRunningAtAnalyst(t, fixture.dir, fixture.first.RunID)
+	result, err := fixture.pipeline.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: fixture.first.RunID, TargetDir: fixture.dir, ApproveGates: true,
+	})
+	if err != nil || result.Outcome != workflow.RunCompleted {
+		t.Fatalf("resume should reconcile the recorded analyst transition and run coder: result=%+v err=%v", result, err)
+	}
+	if fixture.runtime.calls["analyst"] != 1 || fixture.runtime.calls["coder"] != 1 {
+		t.Fatalf("resume reran an already completed analyst target: calls=%+v", fixture.runtime.calls)
+	}
+}
+
+func TestRun_LaterGraphReturnInputSupersedesOlderClarificationRecovery(t *testing.T) {
+	fixture := newClarificationRecoveryFixture(t)
+	coderAttemptID := fixture.evidence.NewAttemptID("coder", 3)
+	appendSyntheticFinishedAttempt(t, fixture.evidence, filepath.Join(fixture.dir, ".ai-team", "artifacts"), coderAttemptID,
+		"coder", fixture.graph.Index("coder")+1,
+		workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Decision: workflow.DecisionRejected, Outcome: workflow.OutcomeRejected}, nil)
+	subject := sha256.Sum256([]byte("later graph return to analyst"))
+	pending, err := fixture.approvals.Create(approval.PendingApproval{
+		RunID: fixture.first.RunID, AttemptID: coderAttemptID, FromStage: "coder", ToStage: "analyst",
+		Trigger: "graph_outcome:rejected", SubjectHash: fmt.Sprintf("%x", subject[:]),
+		RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+		Actions: []string{"return_to_analyst", "stop"},
+		Targets: map[string]string{"return_to_analyst": "analyst", "stop": "$stop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.evidence.Append(evidence.Event{Type: "approval_requested", AttemptID: coderAttemptID, Data: approvalEventData(pending)}); err != nil {
+		t.Fatal(err)
+	}
+	decided, err := fixture.approvals.Decide(fixture.first.RunID, pending.ID, approval.Decision{
+		ActorID: "owner@example.com", ActorRole: "product_owner", Action: "return_to_analyst",
+		Comment: "Use the latest graph return input.", SubjectHash: pending.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.evidence.Append(evidence.Event{Type: "approval_decided", AttemptID: coderAttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.evidence.Append(evidence.Event{Type: "transition_selected", AttemptID: coderAttemptID, Stage: "coder", Data: map[string]any{
+		"from": "coder", "outcome": "rejected", "edge_target": "analyst",
+		"action": "return_to_analyst", "target": "analyst",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.evidence.Append(evidence.Event{Type: "run_resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	setLifecycleRunningAtAnalyst(t, fixture.dir, fixture.first.RunID)
+
+	result, err := fixture.pipeline.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: fixture.first.RunID, TargetDir: fixture.dir, ApproveGates: true,
+	})
+	if err != nil || (result.Outcome != workflow.RunCompleted && result.Outcome != workflow.RunCompletedWithWarnings) {
+		t.Fatalf("resume should use the later graph handoff: result=%+v err=%v", result, err)
+	}
+	if fixture.runtime.calls["analyst"] != 2 || !strings.Contains(fixture.observed.returnFeedback, "Use the latest graph return input.") {
+		t.Fatalf("later graph return input was not delivered: calls=%+v feedback=%q", fixture.runtime.calls, fixture.observed.returnFeedback)
+	}
+	if fixture.observed.hasAnswer {
+		t.Fatal("older clarification answer preempted the later graph return input")
 	}
 }
 
@@ -1312,7 +1776,21 @@ outputs: {}
 		t.Fatalf("pinned handoff input lost after recovery: review=%q feedback=%q", selectedReview, returnFeedback)
 	}
 	stale, err := recoveredGraphInputApproval(approvals, first.RunID, "coder", compiledGraph, evidence.ReplayedRun{
-		Attempts: []evidence.ReplayedAttempt{{AttemptID: pending.AttemptID, Stage: "reviewer"}, {AttemptID: "later-coder-attempt", Stage: "coder", FinishedAt: time.Now().UTC(), Status: "passed"}},
+		Attempts: []evidence.ReplayedAttempt{{
+			AttemptID: pending.AttemptID, Stage: "reviewer", StageIndex: 2,
+			StartedAt: time.Now().Add(-2 * time.Minute), FinishedAt: time.Now().Add(-time.Minute),
+			Status: "rejected", State: workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Decision: workflow.DecisionRejected, Outcome: workflow.OutcomeRejected},
+		}, {AttemptID: "later-coder-attempt", Stage: "coder", FinishedAt: time.Now().UTC(), Status: "passed"}},
+		ApprovalDecisions: []evidence.ReplayedApprovalDecision{{
+			Sequence: 10,
+			ID:       decided.ID, SubjectHash: decided.SubjectHash, AttemptID: decided.AttemptID,
+			FromStage: decided.FromStage, ToStage: decided.ToStage, Trigger: decided.Trigger, Action: decided.ResolvedAction,
+		}},
+		Transitions: []evidence.ReplayedTransition{{
+			Sequence:  11,
+			AttemptID: decided.AttemptID, From: decided.FromStage, Outcome: "rejected",
+			EdgeTarget: decided.ToStage, Action: decided.ResolvedAction, Target: decided.Targets[decided.ResolvedAction],
+		}},
 	})
 	if err != nil || stale != nil {
 		t.Fatalf("must not reuse a return approval after its target stage has started: approval=%+v err=%v", stale, err)

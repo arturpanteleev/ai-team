@@ -333,6 +333,14 @@
     padding: 11px;
   }
 
+  .approval details > summary {
+    min-width: 44px;
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 10px 6px;
+    cursor: pointer;
+  }
+
   .question {
     padding: 10px;
     overflow-wrap: anywhere;

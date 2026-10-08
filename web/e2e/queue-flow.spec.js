@@ -493,7 +493,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
       await page.setViewportSize({ width, height: 800 })
       await expectFingerTargets(page, [
         '[class*="back"]', '[class*="controlHeader"] button', '[class*="actions"] button',
-        '[class*="questionText"] a', '[class*="edges"] a',
+        '[class*="questionText"] a', '[class*="edges"] a', 'summary',
       ])
     }
     detail = await readDetail()

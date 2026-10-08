@@ -149,6 +149,10 @@ func TestReservedCanonicalAttemptManifestSupportsReplayAndResumeWithoutLocalMani
 	if err := canonical.Write(runID, manifest); err != nil {
 		t.Fatal(err)
 	}
+	controllerEvents := ControllerEventStore{TargetDir: target}
+	if err := controllerEvents.MigrateLegacy(runID, store.RunDir()); err != nil {
+		t.Fatalf("migrate legacy events into controller authority: %v", err)
+	}
 	if err := os.Remove(filepath.Join(store.RunDir(), "attempts", attemptID, "manifest.json")); err != nil {
 		t.Fatal(err)
 	}

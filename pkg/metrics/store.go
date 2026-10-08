@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/runid"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
@@ -280,7 +280,7 @@ func ValidateUsageEnvelope(runID string, envelope UsageEnvelope) error {
 }
 
 func validateUsageRunID(runID string) error {
-	return evidence.ValidateRunID(runID)
+	return runid.Validate(runID)
 }
 
 func canonicalUsageTarget(target string) (string, error) {

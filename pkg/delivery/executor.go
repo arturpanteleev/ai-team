@@ -758,7 +758,13 @@ var promptSuppressingEnv = [][2]string{
 // promptSuppressingUnset — переменные, которые доставка удаляет из окружения
 // ребёнка: они уводят запрос креденшелов в сторону (GUI-askpass, ssh-askpass),
 // где GIT_TERMINAL_PROMPT=0 уже не действует и ожидание снова бесконечно.
-var promptSuppressingUnset = []string{"GIT_ASKPASS", "SSH_ASKPASS"}
+var promptSuppressingUnset = []string{
+	"GIT_ASKPASS", "SSH_ASKPASS",
+	// Worker API and OpenAI egress capabilities are process-scoped secrets.
+	// The delivery child is nested under the worker and must not inherit them.
+	"AI_TEAM_WORKER_API_ADDRESS", "AI_TEAM_WORKER_API_SOCKET", "AI_TEAM_WORKER_API_TOKEN",
+	"AI_TEAM_OPENAI_EGRESS_SOCKET", "AI_TEAM_OPENAI_EGRESS_TOKEN",
+}
 
 // NonInteractiveEnv возвращает окружение внешних команд доставки: base с
 // вычищенными askpass-хуками и принудительно неинтерактивными git/gh.

@@ -11,9 +11,37 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 )
+
+func TestWorkerAPIEventAppendRequestEnvelopeBoundary(t *testing.T) {
+	if workerAPIMaxEventAppendEnvelope >= evidence.MaxEventLogSize || workerAPIMaxEventAppendPayload >= workerAPIMaxEventAppendEnvelope {
+		t.Fatalf("event request bounds must leave room below the journal limit: envelope=%d payload=%d journal=%d",
+			workerAPIMaxEventAppendEnvelope, workerAPIMaxEventAppendPayload, evidence.MaxEventLogSize)
+	}
+	if workerAPIMaxEventAppendPayload < 24<<20 {
+		t.Fatalf("event payload limit too small for worst-case JSON escaping of runtime diagnostics: %d", workerAPIMaxEventAppendPayload)
+	}
+	for _, tc := range []struct {
+		name   string
+		method string
+		size   int
+		want   bool
+	}{
+		{name: "event at envelope cap", method: "event_log.append", size: workerAPIMaxEventAppendEnvelope, want: true},
+		{name: "event above envelope cap", method: "event_log.append", size: workerAPIMaxEventAppendEnvelope + 1},
+		{name: "normal API above normal cap", method: "approval.list", size: workerAPIMaxBody + 1},
+		{name: "manifest at envelope cap", method: "attempt_manifest.write", size: workerAPIMaxAttemptManifestEnvelope, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workerAPIRequestWithinLimit(tc.method, tc.size); got != tc.want {
+				t.Fatalf("workerAPIRequestWithinLimit(%q, %d)=%v, want %v", tc.method, tc.size, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.T) {
 	const runID = "clarification-validation-run"

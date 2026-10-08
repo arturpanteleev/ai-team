@@ -40,6 +40,16 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	if home == "" || temp == "" || !filepath.IsAbs(home) || !filepath.IsAbs(temp) {
 		return nil, errors.New("worker HOME and TMPDIR must be absolute for bubblewrap")
 	}
+	for _, capabilitySocket := range []struct{ key, role string }{
+		{workerAPISocketEnv, "worker API capability socket"},
+		{openAIEgressSocketEnv, "OpenAI egress capability socket"},
+	} {
+		if socketPath := env[capabilitySocket.key]; socketPath != "" {
+			if err := validateWorkerSocketPath(socketPath, capabilitySocket.role, canonicalTarget, home, temp); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, bind := range []struct{ role, path string }{{"worker HOME", home}, {"worker TMPDIR", temp}} {
 		if err := rejectRunBindPath(bind.path, bind.role); err != nil {
 			return nil, err
@@ -48,6 +58,10 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	args := []string{
 		"--die-with-parent", "--new-session",
 		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+		// A nested runtime must not regain permission to inspect the worker's
+		// initial capability environment after the worker marks itself
+		// non-dumpable.
+		"--cap-drop", "CAP_SYS_PTRACE",
 		"--ro-bind", "/", "/",
 		// Hide standard host service sockets (for example docker.sock and
 		// system D-Bus sockets) while keeping a writable namespace-local /run.
@@ -117,6 +131,14 @@ func bubblewrapWorkerCommand(ctx context.Context, worker *exec.Cmd, target, dbPa
 	// create a counterfeit file at the controller authority path and confuse
 	// tools running in the same sandbox, even though host storage stayed safe.
 	args = append(args, "--chmod", "0555", attemptManifestDir)
+	eventAuthorityDir, err := safeio.EnsureDir(canonicalTarget, ".ai-team", "state", "events")
+	if err != nil {
+		return nil, fmt.Errorf("prepare controller event authority mount: %w", err)
+	}
+	if err := appendPrivateDirectoryMount(&args, eventAuthorityDir, true); err != nil {
+		return nil, err
+	}
+	args = append(args, "--chmod", "0555", eventAuthorityDir)
 	candidateEvidenceRunDir := filepath.Join(candidateEvidenceDir, runID)
 	candidateEvidenceRunDirAdded := false
 	for _, name := range []string{"review-candidate.json", "verification-candidate.json"} {

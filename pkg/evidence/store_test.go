@@ -25,7 +25,11 @@ func (l *countingEventLog) Read(runID string) ([]Event, error) {
 	return l.delegate.Read(runID)
 }
 
-func (l *countingEventLog) Append(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) ([]Event, error) {
+func (l *countingEventLog) ReadBytes(runID string) ([]byte, error) {
+	return l.delegate.ReadBytes(runID)
+}
+
+func (l *countingEventLog) Append(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error) {
 	l.appends++
 	return l.delegate.Append(runID, event, expectedSequence, expectedPreviousSHA256)
 }
@@ -72,6 +76,69 @@ func TestStoreUsesInternalEventLogSeamForAppendAndResume(t *testing.T) {
 	replayed, err = ReplayEventLog(journalPath, manifest.RunID)
 	if err != nil || replayed.StartedAt != startedAt || replayed.RunID != manifest.RunID {
 		t.Fatalf("filesystem replay=%+v err=%v", replayed, err)
+	}
+}
+
+func TestDeliveryDeferredAdmissionRejectsForeignOrTraversingStatePath(t *testing.T) {
+	target := t.TempDir()
+	runID := "run-delivery-state-admission"
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := testRunManifest(runID)
+	manifest.TargetDir = target
+	store, err := Start(filepath.Join(target, ".ai-team", "runs"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := store.Append(Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "attempt-delivery-path"
+	if err := store.Append(Event{Type: "attempt_started", Stage: "deployer", AttemptID: attemptID, Timestamp: started.Add(time.Second), Data: map[string]any{"stage_index": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	validPath := filepath.Join(target, ".ai-team", "delivery", "prepared.json")
+	if !ValidDeliveryStatePath(store.RunDir(), validPath) {
+		t.Fatalf("expected prepared delivery path to match target: %q", validPath)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := filepath.Join(canonicalTarget, ".ai-team", "worktrees", runID, ".ai-team", "delivery", "prepared.json")
+	if !ValidDeliveryStatePath(store.RunDir(), candidatePath) {
+		t.Fatalf("expected same-run candidate delivery path to match target: %q", candidatePath)
+	}
+	alias := filepath.Join(t.TempDir(), "target-alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasedRunDir := filepath.Join(alias, ".ai-team", "runs", runID)
+	if !ValidDeliveryStatePath(aliasedRunDir, candidatePath) {
+		t.Fatalf("expected local validation to tolerate target symlink spelling without resolving the event path: run=%q state=%q", aliasedRunDir, candidatePath)
+	}
+	invalidPaths := []string{
+		filepath.Join(filepath.Dir(target), "foreign", "prepared.json"),
+		filepath.Join(target, ".ai-team", "worktrees", "another-run", ".ai-team", "delivery", "prepared.json"),
+		target + "/.ai-team/delivery/../runs/escaped.json",
+		target + "/.ai-team/delivery/../delivery/prepared.json",
+		target + "/.ai-team/worktrees/" + runID + "/.ai-team/delivery/../events.jsonl",
+	}
+	for _, statePath := range invalidPaths {
+		t.Run(statePath, func(t *testing.T) {
+			events, readErr := store.eventLog.Read(runID)
+			if readErr != nil || len(events) != 2 {
+				t.Fatalf("baseline events=%d err=%v", len(events), readErr)
+			}
+			_, _, err := ValidateEventAppend(events, runID, store.RunDir(), Event{Type: "delivery_deferred", AttemptID: attemptID, Timestamp: started.Add(2 * time.Second), Data: map[string]any{
+				"plan_hash": strings.Repeat("a", 64), "state_path": filepath.ToSlash(statePath),
+			}}, uint64(len(events)), events[len(events)-1].SHA256, nil)
+			if err == nil {
+				t.Fatalf("foreign delivery state path was accepted: %q", statePath)
+			}
+		})
 	}
 }
 

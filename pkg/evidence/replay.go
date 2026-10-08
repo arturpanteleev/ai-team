@@ -49,11 +49,25 @@ func ReplayEventLog(path, runID string) (ReplayedRun, error) {
 // filesystem-backed streaming digest used by ReplayEventLog; supplied sources
 // are rejected when they return manifests larger than MaxAttemptManifestSize.
 func ReplayEventLogWithAttemptManifestSource(path, runID string, source AttemptManifestSource) (ReplayedRun, error) {
-	events, err := VerifyEventLog(path, runID)
+	return ReplayEventLogWithEventSources(path, runID, nil, source)
+}
+
+// ReplayEventLogWithEventSources replays a journal from the supplied event
+// authority and attempt-manifest source. Nil sources retain local behavior.
+func ReplayEventLogWithEventSources(path, runID string, eventsSource EventLog, manifestsSource AttemptManifestSource) (ReplayedRun, error) {
+	return ReplayEventLogWithEventSourcesAndTarget(path, runID, eventsSource, manifestsSource, "")
+}
+
+// ReplayEventLogWithEventSourcesAndTarget replays a journal using explicitly
+// selected authorities and, when provided, the run target recorded in its
+// manifest. Bundle verification supplies that target so absolute historical
+// delivery paths remain verifiable after the bundle is moved.
+func ReplayEventLogWithEventSourcesAndTarget(path, runID string, eventsSource EventLog, manifestsSource AttemptManifestSource, deliveryTargetDir string) (ReplayedRun, error) {
+	events, err := VerifyEventLogWithSource(path, runID, eventsSource)
 	if err != nil {
 		return ReplayedRun{}, err
 	}
-	return replayEventsWithAttemptManifestSource(events, runID, filepath.Dir(path), source)
+	return replayEventsWithAttemptManifestSourceAndTarget(events, runID, filepath.Dir(path), manifestsSource, deliveryTargetDir)
 }
 
 // replayEvents rebuilds lifecycle state from an already verified event chain.
@@ -64,6 +78,10 @@ func replayEvents(events []Event, runID, runDir string) (ReplayedRun, error) {
 }
 
 func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string, source AttemptManifestSource) (ReplayedRun, error) {
+	return replayEventsWithAttemptManifestSourceAndTarget(events, runID, runDir, source, "")
+}
+
+func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDir string, source AttemptManifestSource, deliveryTargetDir string) (ReplayedRun, error) {
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	var err error
 	byID := make(map[string]int)
@@ -146,8 +164,18 @@ func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string,
 				if digestErr != nil || digest != attempt.ManifestSHA256 {
 					return ReplayedRun{}, fmt.Errorf("attempt_finished %q manifest identity mismatch", event.AttemptID)
 				}
-			} else if attempt.Error == "" {
-				return ReplayedRun{}, fmt.Errorf("attempt_finished %q has neither manifest evidence nor publication error", event.AttemptID)
+				if source != nil {
+					_, manifest, readErr := ReadAttemptManifest(source, runDir, runID, event.AttemptID)
+					if readErr != nil || validateControllerAttemptManifest(manifest) != nil ||
+						manifest.Stage != event.Stage || !manifest.StartedAt.Equal(attempt.StartedAt) || !manifest.FinishedAt.Equal(event.Timestamp) ||
+						manifest.Status != attempt.Status || manifest.Execution != string(attempt.State.Execution) ||
+						manifest.Decision != string(attempt.State.Decision) || manifest.Outcome != string(attempt.State.Outcome) ||
+						manifest.Verdict != attempt.Verdict || manifest.Blocker != attempt.Blocker || manifest.Error != attempt.Error {
+						return ReplayedRun{}, fmt.Errorf("attempt_finished %q disagrees with its controller-readable manifest", event.AttemptID)
+					}
+				}
+			} else if attempt.Error == "" || attempt.Status != string(workflow.OutcomeFailed) {
+				return ReplayedRun{}, fmt.Errorf("attempt_finished %q without manifest must be an errored failed attempt", event.AttemptID)
 			}
 			finishedCount++
 		case "attempt_abandoned":
@@ -265,6 +293,54 @@ func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string,
 				return ReplayedRun{}, errors.New("run_canceled имеет недопустимую позицию")
 			}
 			canceled = true
+		case "approval_reused":
+			approvalID, idErr := eventString(event.Data, "approval_id", true)
+			subjectHash, hashErr := eventString(event.Data, "subject_hash", true)
+			priorStatus, statusErr := eventString(event.Data, "prior_status", true)
+			if idErr != nil || hashErr != nil || statusErr != nil || !safeEventIdentifier(approvalID) ||
+				!validSHA256(subjectHash) || approvalSubjects[approvalID] != subjectHash ||
+				(priorStatus != "pending" && priorStatus != "resolved") || event.AttemptID == "" {
+				return ReplayedRun{}, fmt.Errorf("approval_reused содержит недопустимую identity")
+			}
+		case "delivery_deferred":
+			planHash, hashErr := eventString(event.Data, "plan_hash", true)
+			statePath, pathErr := eventString(event.Data, "state_path", true)
+			validStatePath := ValidDeliveryStatePath(runDir, statePath)
+			if deliveryTargetDir != "" {
+				validStatePath = ValidDeliveryStatePathForTargetAndRun(deliveryTargetDir, runID, statePath)
+			}
+			if hashErr != nil || pathErr != nil || !validSHA256(planHash) || event.AttemptID == "" || !validStatePath {
+				return ReplayedRun{}, errors.New("delivery_deferred содержит недопустимую identity")
+			}
+		case "delivery_plan_approved":
+			planHash, hashErr := eventString(event.Data, "plan_hash", true)
+			mode, modeErr := eventString(event.Data, "mode", true)
+			approver, approverErr := eventString(event.Data, "approver", true)
+			if hashErr != nil || modeErr != nil || approverErr != nil || !validSHA256(planHash) ||
+				strings.TrimSpace(approver) == "" || (mode != "hash_flag" && mode != "resolved_approval") || event.AttemptID == "" {
+				return ReplayedRun{}, errors.New("delivery_plan_approved содержит недопустимую identity")
+			}
+		case "deferred_gates_ratified":
+			action, actionErr := eventString(event.Data, "action", true)
+			approver, approverErr := eventString(event.Data, "approver", true)
+			if actionErr != nil || approverErr != nil || strings.TrimSpace(approver) == "" || (action != "approve" && action != "reject") || validateRatifiedGateEvents(event.Data["gates"]) != nil {
+				return ReplayedRun{}, errors.New("deferred_gates_ratified содержит недопустимую identity")
+			}
+		case "test_mutations":
+			policy, policyErr := eventString(event.Data, "policy", true)
+			index, exists := byID[event.AttemptID]
+			if policyErr != nil || (policy != "off" && policy != "required" && policy != "warn") || !exists || result.Attempts[index].Stage != event.Stage {
+				return ReplayedRun{}, errors.New("test_mutations не соответствует attempt")
+			}
+		case "resume_blocked":
+			reason, reasonErr := eventString(event.Data, "reason", true)
+			if reasonErr != nil || strings.TrimSpace(reason) == "" {
+				return ReplayedRun{}, errors.New("resume_blocked содержит недопустимую причину")
+			}
+		default:
+			// Preserve historical replay compatibility for old extension events.
+			// The worker API boundary has a separate strict allowlist, so new
+			// untrusted event types can never enter controller-owned logs.
 		}
 	}
 	if len(events) > 0 {
@@ -279,6 +355,28 @@ func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string,
 		}
 	}
 	return result, nil
+}
+
+func validateRatifiedGateEvents(raw any) error {
+	gates, ok := raw.([]any)
+	if !ok || len(gates) == 0 {
+		return errors.New("gates must be a non-empty array")
+	}
+	seen := make(map[string]bool, len(gates))
+	for _, rawGate := range gates {
+		gate, ok := rawGate.(map[string]any)
+		if !ok {
+			return errors.New("gate must be an object")
+		}
+		id, idOK := gate["approval_id"].(string)
+		subject, subjectOK := gate["subject_hash"].(string)
+		action, actionOK := gate["action"].(string)
+		if !idOK || !safeEventIdentifier(id) || seen[id] || !subjectOK || !validSHA256(subject) || !actionOK || action == "" {
+			return errors.New("gate identity is invalid")
+		}
+		seen[id] = true
+	}
+	return nil
 }
 
 func eventString(data map[string]any, name string, required bool) (string, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 )
@@ -39,12 +41,35 @@ func cmdDeliver() {
 	requireControlRoot(absolute)
 	runDir := filepath.Join(absolute, ".ai-team", "runs", *runID)
 
+	var pipelineOptions []pipeline.Option
+	legacyCloud, classifyErr := pipeline.ControllerBackedLegacyDeliveryRequiresApproval(absolute, *runID)
+	if classifyErr != nil {
+		fatal("Не удалось проверить controller delivery authority: %v", classifyErr)
+	}
+	var controllerApprovals *approval.SQLiteStore
+	if legacyCloud {
+		dbPath := filepath.Join(absolute, ".ai-team", "web.db")
+		if info, statErr := os.Lstat(dbPath); statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				fatal("Небезопасный controller approval DB: %s", dbPath)
+			}
+			controllerApprovals, err = approval.NewSQLiteStore(dbPath)
+			if err != nil {
+				fatal("Controller approval store: %v", err)
+			}
+			defer func() { _ = controllerApprovals.Close() }()
+			pipelineOptions = append(pipelineOptions, pipeline.WithApprovalStore(controllerApprovals))
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			fatal("Не удалось проверить controller approval DB: %v", statErr)
+		}
+	}
+
 	// QS-06: доставка ходит в сеть (push, gh) — Ctrl-C обязан её прерывать,
 	// а не оставлять зависший git/gh держать команду бесконечно.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	record, err := pipeline.New(nil, nil).DeliverDeferred(ctx, runDir, *feature, absolute)
+	record, err := pipeline.New(nil, nil, pipelineOptions...).DeliverDeferred(ctx, runDir, *feature, absolute)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Deliver run %s: %v\n", *runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)

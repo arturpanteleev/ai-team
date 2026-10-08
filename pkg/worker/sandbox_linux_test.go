@@ -3,6 +3,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -42,6 +43,11 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal("Linux CI must install bubblewrap before running worker sandbox tests:", err)
 	}
 	target := t.TempDir()
+	// Match cloud Start ordering: reserve controller event authority before
+	// publishing any run-scoped controller markers or spawning the worker.
+	if err := (evidence.ControllerEventStore{TargetDir: target}).Reserve("sandbox-probe"); err != nil {
+		t.Fatal(err)
+	}
 	controlDir := filepath.Join(target, ".ai-team", "controller")
 	if err := os.MkdirAll(controlDir, 0700); err != nil {
 		t.Fatal(err)
@@ -68,6 +74,13 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(lifecycleDir, "controller-state.json"), []byte("lifecycle-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	eventAuthorityDir := filepath.Join(lifecycleDir, "event-log-authority")
+	if err := os.MkdirAll(eventAuthorityDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(eventAuthorityDir, "controller-sentinel.json"), []byte("event-authority-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	approvalDir := filepath.Join(target, ".ai-team", "state", "approvals")
@@ -225,7 +238,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid probe report %q: %v", data, err)
 	}
-	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.CandidateEvidenceReadable || report.CandidateEvidenceDirectWriteSucceeded || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
+	if report.DatabaseReadable || report.WALReadable || report.SHMReadable || report.JournalReadable || report.LifecycleReadable || report.EventAuthorityProofReadable || report.LegacyApprovalReadable || report.CandidateMetadataReadable || report.CandidateEvidenceReadable || report.CandidateEvidenceDirectWriteSucceeded || report.UsageStateReadable || report.DeliveryStateReadable || report.DeliveryDirectWriteSucceeded || report.ContainmentStateReadable || report.ContainmentDirectWriteSucceeded {
 		t.Fatalf("controller-owned state visible inside worker: %+v", report)
 	}
 	if report.BriefSourceReadable || report.BriefSourceWriteSucceeded || report.OtherRunBriefReadable || report.OtherRunBriefWriteSucceeded || !report.BriefAPIListReadSucceeded || !report.BriefAncestorRenameSucceeded || !report.BriefAPIPinnedWriteSucceeded || report.BriefRedirectedWriteSucceeded || !report.WorkerAPIAfterBriefAncestorProbe || !report.WorkspaceAfterBriefAncestorProbe {
@@ -242,8 +255,24 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if !report.RunDirectoryAbsentBeforeEvidenceStart || !report.EvidenceStartSucceeded {
 		t.Fatalf("fresh evidence publication boundary failed: %+v", report)
 	}
+	if report.EventLogDirectReadable || report.EventLogDirectWriteSucceeded || !report.EventLogAPIReadAppendSucceeded ||
+		!report.EventLogStateReplacementAPIPinned || !report.EventLogTeamReplacementAPIPinned ||
+		!report.WorkerAPIAfterEventProbe || !report.WorkspaceAfterEventProbe {
+		t.Fatalf("controller event authority/API boundary failed: %+v", report)
+	}
+	if report.CapabilityParentEnvironmentReadable || report.APISocketReplacementSucceeded || report.EgressSocketReplacementSucceeded ||
+		!report.APISocketStillUsable || !report.EgressSocketStillUsable {
+		t.Fatalf("worker capability process/socket boundary failed: %+v", report)
+	}
 	if _, err := os.Stat(filepath.Join(target, ".ai-team", "runs", "sandbox-probe", "run.json")); err != nil {
 		t.Fatalf("child evidence.Start did not publish the run on the host: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", "sandbox-probe", "events.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cloud run must not publish a worker-visible event mirror: %v", err)
+	}
+	canonicalEvents, err := (evidence.ControllerEventStore{TargetDir: target}).Read("sandbox-probe")
+	if err != nil || len(canonicalEvents) != 4 {
+		t.Fatalf("controller canonical event source lost probe events: len=%d err=%v", len(canonicalEvents), err)
 	}
 	briefAfter, err := os.ReadFile(filepath.Join(target, ".ai-team", "state", "briefs", "sandbox-probe", filepath.Base(brief.Version.Path)))
 	if err != nil || string(briefAfter) != string(brief.Content) {
@@ -448,6 +477,19 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 		}
 		if !foundReadonlyBriefShadow {
 			t.Fatalf("bubblewrap brief shadow must be read-only: %v", briefCommand.Args)
+		}
+		eventRoot := filepath.Join(target, ".ai-team", "state", "events")
+		foundEventMask, foundReadonlyEventShadow := false, false
+		for i := 0; i+1 < len(briefCommand.Args); i++ {
+			if briefCommand.Args[i] == "--tmpfs" && briefCommand.Args[i+1] == eventRoot {
+				foundEventMask = true
+			}
+			if i+2 < len(briefCommand.Args) && briefCommand.Args[i] == "--chmod" && briefCommand.Args[i+1] == "0555" && briefCommand.Args[i+2] == eventRoot {
+				foundReadonlyEventShadow = true
+			}
+		}
+		if !foundEventMask || !foundReadonlyEventShadow {
+			t.Fatalf("bubblewrap event authority root must be masked with a read-only shadow: %v", briefCommand.Args)
 		}
 		if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", "brief-mask-test")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("bubblewrap brief setup created a fresh run evidence directory: err=%v", err)
@@ -1003,8 +1045,14 @@ func TestBubblewrapRejectsRunOverlappingEnvironmentAndPartialOpenAIEgress(t *tes
 		}
 	})
 	t.Run("OpenAI socket requires capability", func(t *testing.T) {
-		env := append(append([]string(nil), baseEnv...), openAIEgressSocketEnv+"=/tmp/openai-egress.sock")
-		err := build(env)
+		socket := filepath.Join(t.TempDir(), "openai-egress.sock")
+		listener, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatalf("create valid OpenAI proxy socket fixture: %v", err)
+		}
+		defer func() { _ = listener.Close() }()
+		env := append(append([]string(nil), baseEnv...), openAIEgressSocketEnv+"="+socket)
+		err = build(env)
 		if err == nil || !strings.Contains(err.Error(), "socket and capability must be configured together") {
 			t.Fatalf("partial OpenAI egress configuration must fail closed, got %v", err)
 		}
@@ -1122,6 +1170,7 @@ type sandboxProbeReport struct {
 	SHMReadable                            bool `json:"shm_readable"`
 	JournalReadable                        bool `json:"journal_readable"`
 	LifecycleReadable                      bool `json:"lifecycle_readable"`
+	EventAuthorityProofReadable            bool `json:"event_authority_proof_readable"`
 	LegacyApprovalReadable                 bool `json:"legacy_approval_readable"`
 	CandidateMetadataReadable              bool `json:"candidate_metadata_readable"`
 	CandidateEvidenceReadable              bool `json:"candidate_evidence_readable"`
@@ -1153,6 +1202,18 @@ type sandboxProbeReport struct {
 	WorkspaceAfterBriefAncestorProbe       bool `json:"workspace_after_brief_ancestor_probe"`
 	RunDirectoryAbsentBeforeEvidenceStart  bool `json:"run_directory_absent_before_evidence_start"`
 	EvidenceStartSucceeded                 bool `json:"evidence_start_succeeded"`
+	EventLogDirectReadable                 bool `json:"event_log_direct_readable"`
+	EventLogDirectWriteSucceeded           bool `json:"event_log_direct_write_succeeded"`
+	EventLogAPIReadAppendSucceeded         bool `json:"event_log_api_read_append_succeeded"`
+	EventLogStateReplacementAPIPinned      bool `json:"event_log_state_replacement_api_pinned"`
+	EventLogTeamReplacementAPIPinned       bool `json:"event_log_team_replacement_api_pinned"`
+	CapabilityParentEnvironmentReadable    bool `json:"capability_parent_environment_readable"`
+	APISocketReplacementSucceeded          bool `json:"api_socket_replacement_succeeded"`
+	EgressSocketReplacementSucceeded       bool `json:"egress_socket_replacement_succeeded"`
+	APISocketStillUsable                   bool `json:"api_socket_still_usable"`
+	EgressSocketStillUsable                bool `json:"egress_socket_still_usable"`
+	WorkerAPIAfterEventProbe               bool `json:"worker_api_after_event_probe"`
+	WorkspaceAfterEventProbe               bool `json:"workspace_after_event_probe"`
 	WorktreeReadable                       bool `json:"worktree_readable"`
 	TargetReadable                         bool `json:"target_readable"`
 	TargetWritable                         bool `json:"target_writable"`
@@ -1190,11 +1251,18 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode probe job: %v", err)
 	}
+	if err := ProtectWorkerProcess(); err != nil {
+		t.Fatalf("protect probe worker process: %v", err)
+	}
+	capabilityParentEnvironmentReadable := probeChildCanReadParentCapabilities(t)
+	apiSocketReplacementSucceeded := probeSocketReplacement(os.Getenv(workerAPISocketEnv))
+	egressSocketReplacementSucceeded := probeSocketReplacement(os.Getenv(openAIEgressSocketEnv))
 	dbData, dbErr := os.ReadFile(value("--probe-db"))
 	walData, walErr := os.ReadFile(value("--probe-wal"))
 	shmData, shmErr := os.ReadFile(value("--probe-shm"))
 	journalData, journalErr := os.ReadFile(value("--probe-journal"))
 	lifecycleData, lifecycleErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "runs", "controller-state.json"))
+	eventAuthorityProof, eventAuthorityProofErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "runs", "event-log-authority", "controller-sentinel.json"))
 	approvalData, approvalErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "approvals", "pending.json"))
 	candidateData, candidateErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "state", "candidates", "controller-sentinel.json"))
 	candidateEvidencePath := filepath.Join(job.TargetDir, ".ai-team", "state", "evidence", job.RunID, "review-candidate.json")
@@ -1224,13 +1292,6 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	_, runEvidenceStatErr := os.Lstat(runEvidenceDir)
 	runDirectoryAbsentBeforeEvidenceStart := errors.Is(runEvidenceStatErr, os.ErrNotExist)
 	evidenceStartSucceeded := false
-	if runDirectoryAbsentBeforeEvidenceStart {
-		_, startErr := evidence.Start(runEvidenceRoot, evidence.RunManifest{
-			RunID: job.RunID, Feature: "bubblewrap-probe", TargetDir: job.TargetDir, StartedAt: time.Now().UTC(),
-			ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{}`),
-		})
-		evidenceStartSucceeded = startErr == nil
-	}
 	worktreeData, worktreeErr := os.ReadFile(filepath.Join(job.TargetDir, ".ai-team", "worktrees", "probe", "visible.txt"))
 	targetData, targetErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	writeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("worker-write"), 0600)
@@ -1249,7 +1310,43 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	briefRedirectedWriteSucceeded := false
 	workerAPIAfterBriefAncestorProbe := false
 	workspaceAfterBriefAncestorProbe := false
+	eventLogDirectReadable := false
+	eventLogDirectWriteSucceeded := false
+	eventLogAPIReadAppendSucceeded := false
+	eventLogStateReplacementAPIPinned := false
+	eventLogTeamReplacementAPIPinned := false
+	workerAPIAfterEventProbe := false
+	workspaceAfterEventProbe := false
+	apiSocketStillUsable := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
+		apiSocketStillUsable = port.call("approval.list", workerAPICall{RunID: job.RunID}, new([]approval.PendingApproval)) == nil
+		eventLog := NewWorkerAPIEventLog(port)
+		var evidenceStore *evidence.Store
+		if runDirectoryAbsentBeforeEvidenceStart {
+			var startErr error
+			evidenceStore, startErr = evidence.StartWithEventLog(runEvidenceRoot, evidence.RunManifest{
+				RunID: job.RunID, Feature: "bubblewrap-probe", TargetDir: job.TargetDir, StartedAt: time.Now().UTC(),
+				ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+			}, eventLog)
+			evidenceStartSucceeded = startErr == nil
+			if startErr == nil {
+				startErr = evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()})
+			}
+			if startErr == nil {
+				before, readErr := eventLog.Read(job.RunID)
+				if readErr == nil && len(before) == 1 {
+					startErr = evidenceStore.Append(evidence.Event{Type: "run_paused", Timestamp: time.Now().UTC(), Data: map[string]any{"status": "probe"}})
+					if startErr == nil {
+						after, afterErr := eventLog.Read(job.RunID)
+						eventLogAPIReadAppendSucceeded = afterErr == nil && len(after) == 2
+					}
+				}
+			}
+		}
+		eventPath := filepath.Join(job.TargetDir, ".ai-team", "state", "events", job.RunID, "events.jsonl")
+		_, directReadErr := os.ReadFile(eventPath)
+		eventLogDirectReadable = directReadErr == nil
+		eventLogDirectWriteSucceeded = os.WriteFile(eventPath, []byte("worker-event-forgery"), 0600) == nil
 		var approvals []approval.PendingApproval
 		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 1 && approvals[0].ID == sandboxBriefAncestorProbeApprovalID
 		adminControlPlaneCallRejected = isExpectedAdminControlPlaneRejection(port.call("admin.control_plane", workerAPICall{RunID: job.RunID}, nil))
@@ -1292,6 +1389,23 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		visibleAfterProbe, visibleErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 		writeAfterProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-brief-ancestor-probe.txt"), []byte("workspace-remains-available"), 0600)
 		workspaceAfterBriefAncestorProbe = visibleErr == nil && string(visibleAfterProbe) == "target-visible" && writeAfterProbeErr == nil
+		var eventsAfterProbe []evidence.Event
+		workspaceAfterEventReplacementProbe := true
+		workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+		if eventLogAPIReadAppendSucceeded {
+			eventsAfterProbe, _ = eventLog.Read(job.RunID)
+			eventLogStateReplacementAPIPinned, eventLogTeamReplacementAPIPinned = runEventAncestorReplacementProbe(job.TargetDir, job.RunID, eventLog)
+			verifiedAfterReplacement, verifyErr := eventLog.Read(job.RunID)
+			eventLogAPIReadAppendSucceeded = verifyErr == nil && len(verifiedAfterReplacement) == 4 && len(eventsAfterProbe) == 2 &&
+				verifiedAfterReplacement[0].SHA256 == eventsAfterProbe[0].SHA256 && verifiedAfterReplacement[1].SHA256 == eventsAfterProbe[1].SHA256
+			workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+			visibleAfterEventReplacement, visibleReplacementErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
+			writeAfterEventReplacementErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-event-replacement.txt"), []byte("workspace-remains-available"), 0600)
+			workspaceAfterEventReplacementProbe = visibleReplacementErr == nil && string(visibleAfterEventReplacement) == "target-visible" && writeAfterEventReplacementErr == nil
+		}
+		visibleAfterEventProbe, visibleEventErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
+		writeAfterEventProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-event-probe.txt"), []byte("workspace-remains-available"), 0600)
+		workspaceAfterEventProbe = workspaceAfterEventReplacementProbe && visibleEventErr == nil && string(visibleAfterEventProbe) == "target-visible" && writeAfterEventProbeErr == nil
 	}
 	canDial := func(address string) bool {
 		conn, dialErr := net.DialTimeout("tcp", address, 500*time.Millisecond)
@@ -1302,12 +1416,14 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		return true
 	}
 	openAIProxyReachable, deniedOtherHost, deniedOtherPort := runOpenAIEgressProbe(t)
+	egressSocketStillUsable := openAIProxyReachable
 	report := sandboxProbeReport{
 		DatabaseReadable:                       dbErr == nil && strings.Contains(string(dbData), "controller-db-secret"),
 		WALReadable:                            walErr == nil && strings.Contains(string(walData), "controller-wal-secret"),
 		SHMReadable:                            shmErr == nil && strings.Contains(string(shmData), "controller-shm-secret"),
 		JournalReadable:                        journalErr == nil && strings.Contains(string(journalData), "controller-journal-secret"),
 		LifecycleReadable:                      lifecycleErr == nil && strings.Contains(string(lifecycleData), "lifecycle-secret"),
+		EventAuthorityProofReadable:            eventAuthorityProofErr == nil && strings.Contains(string(eventAuthorityProof), "event-authority-secret"),
 		LegacyApprovalReadable:                 approvalErr == nil && strings.Contains(string(approvalData), "legacy-approval-secret"),
 		CandidateMetadataReadable:              candidateErr == nil && strings.Contains(string(candidateData), "candidate-metadata-secret"),
 		CandidateEvidenceReadable:              candidateEvidenceErr == nil && len(candidateEvidenceData) > 0,
@@ -1339,6 +1455,18 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		WorkspaceAfterBriefAncestorProbe:       workspaceAfterBriefAncestorProbe,
 		RunDirectoryAbsentBeforeEvidenceStart:  runDirectoryAbsentBeforeEvidenceStart,
 		EvidenceStartSucceeded:                 evidenceStartSucceeded,
+		EventLogDirectReadable:                 eventLogDirectReadable,
+		EventLogDirectWriteSucceeded:           eventLogDirectWriteSucceeded,
+		EventLogAPIReadAppendSucceeded:         eventLogAPIReadAppendSucceeded,
+		EventLogStateReplacementAPIPinned:      eventLogStateReplacementAPIPinned,
+		EventLogTeamReplacementAPIPinned:       eventLogTeamReplacementAPIPinned,
+		CapabilityParentEnvironmentReadable:    capabilityParentEnvironmentReadable,
+		APISocketReplacementSucceeded:          apiSocketReplacementSucceeded,
+		EgressSocketReplacementSucceeded:       egressSocketReplacementSucceeded,
+		APISocketStillUsable:                   apiSocketStillUsable,
+		EgressSocketStillUsable:                egressSocketStillUsable,
+		WorkerAPIAfterEventProbe:               workerAPIAfterEventProbe,
+		WorkspaceAfterEventProbe:               workspaceAfterEventProbe,
 		WorktreeReadable:                       worktreeErr == nil && string(worktreeData) == "worktree-visible",
 		TargetReadable:                         targetErr == nil && string(targetData) == "target-visible",
 		TargetWritable:                         writeErr == nil,
@@ -1367,6 +1495,54 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Printf("%s%s\n", ResultPrefix, result)
+}
+
+func probeChildCanReadParentCapabilities(t *testing.T) bool {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestBubblewrapParentEnvironmentReaderHelper$")
+	command.Env = []string{"AI_TEAM_PARENT_ENV_PROBE=1"}
+	err := command.Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 17 {
+		t.Fatalf("parent procfs reader probe did not report the expected denied read: %v", err)
+	}
+	return false
+}
+
+func TestBubblewrapParentEnvironmentReaderHelper(t *testing.T) {
+	if os.Getenv("AI_TEAM_PARENT_ENV_PROBE") != "1" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(os.Getppid()), "environ"))
+	if err != nil {
+		os.Exit(17)
+	}
+	if bytes.Contains(data, []byte(WorkerAPITokenEnv+"=")) || bytes.Contains(data, []byte(OpenAIEgressTokenEnv+"=")) {
+		os.Exit(0)
+	}
+	// A readable parent with no capability still means the probe was not
+	// exercising PR_SET_DUMPABLE against the worker's inherited environment.
+	os.Exit(18)
+}
+
+func probeSocketReplacement(path string) bool {
+	if path == "" {
+		return true
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return true
+	}
+	removed := os.Remove(path) == nil
+	listener, err := net.Listen("unix", path)
+	if err == nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return true
+	}
+	return removed
 }
 
 func runBriefAncestorReplacementProbe(target, runID, task string, briefs pipeline.BriefStore) (ancestorRenamed, pinnedWrite, redirectedWrite bool) {
@@ -1434,6 +1610,65 @@ func runBriefAncestorReplacementProbe(target, runID, task string, briefs pipelin
 		return ancestorRenamed, pinnedWrite, redirectedWrite
 	}
 	return false, false, false
+}
+
+// runEventAncestorReplacementProbe changes both pathname ancestors from inside
+// the Linux child namespace, then reads/appends through the controller API
+// while a decoy events.jsonl is visible at the replacement path. The API must
+// stay attached to the pre-spawn event/reservation descriptors.
+func runEventAncestorReplacementProbe(target, runID string, eventLog evidence.EventLog) (statePinned, teamPinned bool) {
+	teamRoot := filepath.Join(target, ".ai-team")
+	stateRoot := filepath.Join(teamRoot, "state")
+	for _, probe := range []struct {
+		ancestor string
+		backup   string
+		decoy    string
+		result   *bool
+	}{
+		{ancestor: stateRoot, backup: stateRoot + "-event-redirect-probe", decoy: stateRoot, result: &statePinned},
+		{ancestor: teamRoot, backup: teamRoot + "-event-redirect-probe", decoy: teamRoot, result: &teamPinned},
+	} {
+		if _, err := os.Lstat(probe.backup); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := os.Rename(probe.ancestor, probe.backup); err != nil {
+			continue
+		}
+		decoyRunDir := filepath.Join(probe.decoy, "state", "events", runID)
+		if err := os.MkdirAll(decoyRunDir, 0700); err != nil {
+			_ = os.RemoveAll(probe.decoy)
+			_ = os.Rename(probe.backup, probe.ancestor)
+			continue
+		}
+		decoyBytes := []byte("decoy-event-journal-must-remain-unchanged")
+		decoyPath := filepath.Join(decoyRunDir, "events.jsonl")
+		if err := os.WriteFile(decoyPath, decoyBytes, 0600); err != nil {
+			_ = os.RemoveAll(probe.decoy)
+			_ = os.Rename(probe.backup, probe.ancestor)
+			continue
+		}
+		before, readErr := eventLog.Read(runID)
+		appendOK := false
+		if readErr == nil && len(before) > 0 {
+			appended, appendErr := eventLog.Append(runID, evidence.Event{Type: "run_paused", Timestamp: time.Now().UTC(), Data: map[string]any{
+				"ancestor_replacement_probe": filepath.Base(probe.ancestor),
+			}}, uint64(len(before)), before[len(before)-1].SHA256)
+			if appendErr == nil {
+				after, afterErr := eventLog.Read(runID)
+				appendOK = afterErr == nil && len(after) == len(before)+1 && after[len(after)-1].SHA256 == appended.SHA256 &&
+					after[0].SHA256 == before[0].SHA256
+			}
+		}
+		currentDecoy, decoyErr := os.ReadFile(decoyPath)
+		decoyUntouched := decoyErr == nil && bytes.Equal(currentDecoy, decoyBytes)
+		cleanupErr := os.RemoveAll(probe.decoy)
+		restoreErr := os.Rename(probe.backup, probe.ancestor)
+		if cleanupErr == nil && restoreErr == nil {
+			afterRestore, restoreReadErr := eventLog.Read(runID)
+			*probe.result = appendOK && decoyUntouched && restoreReadErr == nil && len(afterRestore) == len(before)+1
+		}
+	}
+	return statePinned, teamPinned
 }
 
 func seedRedirectBriefProbeFiles(root, task string) error {

@@ -2,17 +2,82 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 )
+
+func TestControllerEventSourceFeedsDeliveryAnchorAndAttestation(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runID := "controller-events-delivery"
+	controllerEvents := evidence.ControllerEventStore{TargetDir: target}
+	if err := controllerEvents.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 10, 8, 15, 0, 0, 0, time.UTC)
+	store, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "event-authority", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, controllerEvents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "delivery_deferred", AttemptID: "delivery-attempt", Timestamp: started.Add(time.Minute), Data: map[string]any{
+		"plan_hash": strings.Repeat("a", 64), "feature": "event-authority", "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "event-authority.json")),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "run_finished", Timestamp: started.Add(2 * time.Minute), Data: map[string]any{"status": "completed", "stage_attempts": 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.RunDir(), "events.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("cloud evidence unexpectedly published a local event log: %v", err)
+	}
+	marker, err := firstDeferredMarker(store.RunDir(), controllerEvents)
+	if err != nil || marker.PlanHash != strings.Repeat("a", 64) {
+		t.Fatalf("delivery marker=%+v err=%v", marker, err)
+	}
+	status, err := terminalStatusOfRun(store.RunDir(), runID, controllerEvents)
+	if err != nil || status != "completed" {
+		t.Fatalf("delivery terminal status=%q err=%v", status, err)
+	}
+	if err := evidence.VerifyAnchorWithEventSource(store.RunDir(), controllerEvents); err != nil {
+		t.Fatalf("controller event anchor verification: %v", err)
+	}
+	statement, err := attest.Build(attest.Options{RunDir: store.RunDir(), RunID: runID, FinishedAt: started.Add(2 * time.Minute), Outcome: "completed", EventLogSource: controllerEvents})
+	if err != nil {
+		t.Fatalf("controller event attestation build: %v", err)
+	}
+	bytes, err := controllerEvents.ReadBytes(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(bytes)
+	if statement.Predicate.Run.EventLogSHA256 != fmt.Sprintf("%x", want[:]) {
+		t.Fatalf("attestation digest=%s, canonical events=%x", statement.Predicate.Run.EventLogSHA256, want)
+	}
+}
 
 // Regression A5-1 (AUD-05): delivery state после утверждённой delivery-стадии
 // лежит в РЕАЛЬНОМ подготовленном расположении <target>/.ai-team/delivery/
@@ -204,4 +269,190 @@ func TestDeferredDeliveryRunsUnderWorkspaceLock(t *testing.T) {
 	if _, ok, err := delivery.ReadTerminalRecord(runDir); err != nil || !ok {
 		t.Fatalf("terminal record после доставки: ok=%v err=%v", ok, err)
 	}
+}
+
+func TestManualDeliveryRejectsUnverifiedLegacyCloudClaims(t *testing.T) {
+	target := t.TempDir()
+	runID := "legacy-cloud-delivery-forged"
+	runDir := writeLegacyControllerDeliveryEvidence(t, target, runID, "hash_flag", "attempt-delivery", strings.Repeat("a", 64))
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeDeliveryService{}
+	p := New(nil, nil, WithDeliveryService(service))
+	if _, err := p.DeliverDeferred(context.Background(), runDir, "cloud-feature", target); err == nil {
+		t.Fatal("manual delivery accepted worker-supplied hash_flag approval without controller authority")
+	}
+	if service.calls != 0 {
+		t.Fatalf("forged legacy chain initiated delivery %d times", service.calls)
+	}
+}
+
+func TestLegacyDeliveryClassificationUsesControllerCandidateAdmission(t *testing.T) {
+	target := t.TempDir()
+	runID := "legacy-cloud-candidate-admission"
+	runDir := writeLegacyControllerDeliveryEvidence(t, target, runID, "hash_flag", "attempt-delivery", strings.Repeat("e", 64))
+	if err := (candidate.FileMetadataStore{}).MarkGitAdmission(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeDeliveryService{}
+	p := New(nil, nil, WithDeliveryService(service))
+	if _, err := p.DeliverDeferred(context.Background(), runDir, "cloud-feature", target); err == nil {
+		t.Fatal("manual delivery accepted a hash_flag claim despite controller Git-admission proof")
+	}
+	if service.calls != 0 {
+		t.Fatalf("forged legacy chain initiated delivery %d times", service.calls)
+	}
+}
+
+func TestManualDeliveryUsesFinalCancellationStatus(t *testing.T) {
+	target := t.TempDir()
+	runID := "delivery-canceled-after-finish"
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	store, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "cancelled-feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []evidence.Event{
+		{Type: "run_started", Timestamp: started},
+		{Type: "run_finished", Timestamp: started.Add(time.Second), Data: map[string]any{"status": "completed"}},
+		{Type: "run_canceled", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"status": "canceled"}},
+		{Type: "run_finished", Timestamp: started.Add(3 * time.Second), Data: map[string]any{"status": "canceled"}},
+	} {
+		if err := store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := terminalStatusOfRun(store.RunDir(), runID, nil)
+	if err != nil || status != "canceled" {
+		t.Fatalf("manual delivery terminal status=%q err=%v; cancellation must override earlier completion", status, err)
+	}
+}
+
+func TestLegacyCloudDeliveryRequiresExactControllerApproval(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		approvalID string
+		attemptID  string
+		wantError  bool
+	}{
+		{name: "different attempt", approvalID: "approval-wrong-attempt", attemptID: "other-attempt", wantError: true},
+		{name: "exact approval", approvalID: "approval-exact-attempt", attemptID: "attempt-delivery"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := t.TempDir()
+			runID := "legacy-cloud-" + strings.ReplaceAll(test.name, " ", "-")
+			planHash := strings.Repeat("b", 64)
+			runDir := writeLegacyControllerDeliveryEvidence(t, target, runID, "resolved_approval", "attempt-delivery", planHash)
+			if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+				t.Fatal(err)
+			}
+			approvals, err := approval.NewStore(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := approvals.Create(approval.PendingApproval{
+				RunID: runID, ID: test.approvalID, AttemptID: test.attemptID, FromStage: "deployer", ToStage: "deployer",
+				Trigger: "delivery_plan", SubjectHash: planHash, RequiredRoles: []string{"release_manager"},
+				Actions: []string{"approve", "reject"}, Targets: map[string]string{"approve": "deployer", "reject": "deployer"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := approvals.Decide(runID, value.ID, approval.Decision{
+				ActorID: "release-manager", ActorRole: "release_manager", Action: "approve", SubjectHash: planHash,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			p := New(nil, nil, WithApprovalStore(approvals))
+			err = p.validateControllerBackedLegacyDelivery(target, runDir, runID)
+			if (err != nil) != test.wantError {
+				t.Fatalf("legacy delivery authority error=%v, wantError=%v", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestReservedAndLocalDeliverySourcesKeepTheirExistingAuthority(t *testing.T) {
+	t.Run("reserved controller event log", func(t *testing.T) {
+		target := t.TempDir()
+		runID := "reserved-delivery-authority"
+		if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		manifest := evidence.RunManifest{RunID: runID, Feature: "cloud-feature", TargetDir: target, StartedAt: time.Now().UTC(),
+			ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`)}
+		eventStore := evidence.ControllerEventStore{TargetDir: target}
+		if err := eventStore.Reserve(runID); err != nil {
+			t.Fatal(err)
+		}
+		run, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), manifest, eventStore)
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now().UTC()
+		for _, event := range []evidence.Event{
+			{Type: "run_started", Timestamp: started},
+			{Type: "attempt_started", Stage: "deployer", AttemptID: "attempt-delivery", Timestamp: started.Add(time.Second)},
+			{Type: "delivery_plan_approved", AttemptID: "attempt-delivery", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"plan_hash": strings.Repeat("c", 64), "mode": "hash_flag"}},
+			{Type: "delivery_deferred", AttemptID: "attempt-delivery", Timestamp: started.Add(3 * time.Second), Data: map[string]any{
+				"plan_hash": strings.Repeat("c", 64), "feature": "cloud-feature", "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "cloud-feature.json")),
+			}},
+		} {
+			if err := run.Append(event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p := New(nil, nil)
+		if err := p.validateControllerBackedLegacyDelivery(target, run.RunDir(), runID); err != nil {
+			t.Fatalf("reserved canonical event log incorrectly used legacy fallback: %v", err)
+		}
+		if marker, err := firstDeferredMarker(run.RunDir(), nil); err != nil || marker.PlanHash != strings.Repeat("c", 64) {
+			t.Fatalf("reserved canonical event marker=%+v err=%v", marker, err)
+		}
+	})
+
+	t.Run("local CLI file journal", func(t *testing.T) {
+		target := t.TempDir()
+		runID := "local-delivery-authority"
+		runDir := writeLegacyControllerDeliveryEvidence(t, target, runID, "hash_flag", "attempt-delivery", strings.Repeat("d", 64))
+		if err := (New(nil, nil)).validateControllerBackedLegacyDelivery(target, runDir, runID); err != nil {
+			t.Fatalf("local file-backed delivery was treated as controller-backed: %v", err)
+		}
+	})
+}
+
+func writeLegacyControllerDeliveryEvidence(t *testing.T, target, runID, mode, attemptID, planHash string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	store, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "cloud-feature", TargetDir: target, StartedAt: started,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []evidence.Event{
+		{Type: "run_started", Timestamp: started},
+		{Type: "attempt_started", Stage: "deployer", AttemptID: attemptID, Timestamp: started.Add(time.Second)},
+		{Type: "delivery_plan_approved", AttemptID: attemptID, Timestamp: started.Add(2 * time.Second), Data: map[string]any{"plan_hash": planHash, "mode": mode}},
+		{Type: "delivery_deferred", AttemptID: attemptID, Timestamp: started.Add(3 * time.Second), Data: map[string]any{
+			"plan_hash": planHash, "feature": "cloud-feature", "state_path": filepath.ToSlash(filepath.Join(target, ".ai-team", "delivery", "cloud-feature.json")),
+		}},
+		{Type: "run_finished", Timestamp: started.Add(4 * time.Second), Data: map[string]any{"status": "completed"}},
+	} {
+		if err := store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store.RunDir()
 }

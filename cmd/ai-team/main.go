@@ -297,6 +297,9 @@ func cmdWorker() {
 	if err != nil {
 		fatal("Невалидный worker job: %v", err)
 	}
+	if err := worker.ProtectWorkerProcess(); err != nil {
+		fatal("Worker process protection: %v", err)
+	}
 	_, apiAddressSet := os.LookupEnv(worker.WorkerAPIAddressEnv)
 	_, apiSocketSet := os.LookupEnv(worker.WorkerAPISocketEnv)
 	_, apiTokenSet := os.LookupEnv(worker.WorkerAPITokenEnv)
@@ -323,6 +326,7 @@ func cmdWorker() {
 	var candidateEvidenceStore pipeline.CandidateEvidenceStore
 	var attemptManifestSource evidence.AttemptManifestSource
 	var attemptManifestWriter pipeline.AttemptManifestWriter
+	var eventLogSource evidence.EventLog
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -343,6 +347,7 @@ func cmdWorker() {
 			manifestStore := worker.NewWorkerAPIAttemptManifestStore(apiPort)
 			attemptManifestSource = manifestStore
 			attemptManifestWriter = manifestStore
+			eventLogSource = worker.NewWorkerAPIEventLog(apiPort)
 		}
 		lifecycleStore = worker.NewWorkerAPILifecycle(apiPort)
 	} else {
@@ -366,6 +371,9 @@ func cmdWorker() {
 		defer func() { _ = localApprovalStore.Close() }()
 		approvalStore = approval.NewWorkerStore(localApprovalStore)
 		recorder = web.NewStoreRecorder(recorderStore)
+	}
+	if err := worker.ClearWorkerProcessCapabilities(); err != nil {
+		fatal("Worker capability environment: %v", err)
 	}
 	registryPaths, hasRegistrySnapshot, registryErr := worker.AgentRegistryPathsFromEnvironment()
 	if registryErr != nil {
@@ -421,6 +429,9 @@ func cmdWorker() {
 	if attemptManifestSource != nil || attemptManifestWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttemptManifestStore(attemptManifestSource, attemptManifestWriter))
 	}
+	if eventLogSource != nil {
+		engineOptions = append(engineOptions, pipeline.WithEventLogSource(eventLogSource))
+	}
 	if attestationWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttestationWriter(attestationWriter))
 	}
@@ -453,7 +464,7 @@ func cmdWorker() {
 			ApprovePlanHash: job.ApprovePlanHash,
 		})
 	case worker.OperationRecover:
-		result, err = executeRecoveredJob(ctx, engine, target, job)
+		result, err = executeRecoveredJobWithSources(ctx, engine, target, job, eventLogSource, attemptManifestSource)
 	case worker.OperationCancel:
 		result, err = engine.Cancel(pipeline.CancelConfig{RunID: job.RunID, TargetDir: target})
 	}
@@ -488,6 +499,10 @@ type recoveryEngine interface {
 }
 
 func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target string, job worker.Job) (pipeline.RunResult, error) {
+	return executeRecoveredJobWithSources(ctx, engine, target, job, nil, nil)
+}
+
+func executeRecoveredJobWithSources(ctx context.Context, engine recoveryEngine, target string, job worker.Job, eventSource evidence.EventLog, manifestSource evidence.AttemptManifestSource) (pipeline.RunResult, error) {
 	state, err := engine.LoadLifecycle(target, job.RunID)
 	if errors.Is(err, fs.ErrNotExist) {
 		runDir := filepath.Join(target, ".ai-team", "runs", job.RunID)
@@ -504,7 +519,7 @@ func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target stri
 	if err != nil {
 		return pipeline.RunResult{}, err
 	}
-	if outcome, attemptCount, terminalErr := recoveredTerminalOutcome(target, job.RunID, state); terminalErr == nil {
+	if outcome, attemptCount, terminalErr := recoveredTerminalOutcomeWithSources(target, job.RunID, state, eventSource, manifestSource); terminalErr == nil {
 		if state.Phase != lifecycle.PhaseTerminal {
 			terminal := state
 			terminal.Phase = lifecycle.PhaseTerminal
@@ -533,11 +548,15 @@ func executeRecoveredJob(ctx context.Context, engine recoveryEngine, target stri
 }
 
 func recoveredTerminalOutcome(target, runID string, state lifecycle.State) (string, int, error) {
+	return recoveredTerminalOutcomeWithSources(target, runID, state, nil, nil)
+}
+
+func recoveredTerminalOutcomeWithSources(target, runID string, state lifecycle.State, eventSource evidence.EventLog, manifestSource evidence.AttemptManifestSource) (string, int, error) {
 	if state.RunID != runID || state.TargetDir != target {
 		return "", 0, errors.New("terminal lifecycle identity mismatch")
 	}
 	runDir := filepath.Join(target, ".ai-team", "runs", runID)
-	replayed, err := evidence.VerifyTerminalEvidence(runDir, runID, target)
+	replayed, err := evidence.VerifyTerminalEvidenceWithSources(runDir, runID, target, manifestSource, eventSource)
 	if err != nil {
 		return "", 0, fmt.Errorf("terminal run evidence: %w", err)
 	}

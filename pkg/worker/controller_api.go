@@ -30,6 +30,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const (
@@ -38,11 +39,18 @@ const (
 	workerAPITokenEnv                 = "AI_TEAM_WORKER_API_TOKEN"
 	workerAPIMaxBody                  = 1 << 20
 	workerAPIMaxCandidateEvidenceBody = 9 << 20
+	// AgentCLIRuntime bounds captured stdout/stderr diagnostics to 2 MiB each.
+	// A 4 MiB event error can expand to 24 MiB when JSON escapes control bytes;
+	// this 32 MiB envelope leaves room for the typed request and stays well
+	// below the 64 MiB event-log limit.
+	workerAPIMaxEventAppendEnvelope = 32 << 20
+	workerAPIMaxEventAppendPayload  = 30 << 20
 	// Attempt manifest bytes are base64 encoded once in the request Payload and
 	// again in the read response. Leave room for both JSON envelopes while
 	// keeping this allowance scoped to the typed manifest methods.
 	workerAPIMaxAttemptManifestEnvelope = 12 << 20
 	workerAPIMaxAttemptManifestPayload  = evidence.MaxAttemptManifestSize + workerAPIMaxBody
+	workerAPIEventReadPage              = 512 << 10
 	workerAPIErrorMarker                = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
 	workerAPIRequestTTL                 = 30 * time.Second
 	workerAPIFutureSkew                 = 5 * time.Second
@@ -67,29 +75,53 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID                 string                     `json:"run_id,omitempty"`
-	A                     string                     `json:"a,omitempty"`
-	B                     string                     `json:"b,omitempty"`
-	C                     string                     `json:"c,omitempty"`
-	Index                 int                        `json:"index,omitempty"`
-	At                    time.Time                  `json:"at,omitempty"`
-	Data                  map[string]any             `json:"data,omitempty"`
-	IDs                   []string                   `json:"ids,omitempty"`
-	Stage                 notifier.StageResult       `json:"stage,omitempty"`
-	Error                 string                     `json:"error,omitempty"`
-	Approval              approval.PendingApproval   `json:"approval,omitempty"`
-	Lifecycle             lifecycle.State            `json:"lifecycle,omitempty"`
-	Previous              lifecycle.State            `json:"previous_lifecycle,omitempty"`
-	BriefVersion          pipeline.BriefVersion      `json:"brief_version,omitempty"`
-	BriefContent          []byte                     `json:"brief_content,omitempty"`
-	CandidateMetadata     candidate.Metadata         `json:"candidate_metadata,omitempty"`
-	Usage                 metrics.UsageEnvelope      `json:"usage_envelope,omitempty"`
-	TerminalRecord        delivery.TerminalRecord    `json:"terminal_record,omitempty"`
-	Attestation           attest.Statement           `json:"attestation,omitempty"`
-	ContainmentReceipt    *containment.Receipt       `json:"containment_receipt,omitempty"`
-	CandidateEvidenceName string                     `json:"candidate_evidence_name,omitempty"`
-	CandidateEvidence     pipeline.CandidateEvidence `json:"candidate_evidence,omitempty"`
-	AttemptManifest       evidence.AttemptManifest   `json:"attempt_manifest,omitempty"`
+	RunID                  string                     `json:"run_id,omitempty"`
+	A                      string                     `json:"a,omitempty"`
+	B                      string                     `json:"b,omitempty"`
+	C                      string                     `json:"c,omitempty"`
+	Index                  int                        `json:"index,omitempty"`
+	At                     time.Time                  `json:"at,omitempty"`
+	Data                   map[string]any             `json:"data,omitempty"`
+	IDs                    []string                   `json:"ids,omitempty"`
+	Stage                  notifier.StageResult       `json:"stage,omitempty"`
+	Error                  string                     `json:"error,omitempty"`
+	Approval               approval.PendingApproval   `json:"approval,omitempty"`
+	Lifecycle              lifecycle.State            `json:"lifecycle,omitempty"`
+	Previous               lifecycle.State            `json:"previous_lifecycle,omitempty"`
+	BriefVersion           pipeline.BriefVersion      `json:"brief_version,omitempty"`
+	BriefContent           []byte                     `json:"brief_content,omitempty"`
+	CandidateMetadata      candidate.Metadata         `json:"candidate_metadata,omitempty"`
+	Usage                  metrics.UsageEnvelope      `json:"usage_envelope,omitempty"`
+	TerminalRecord         delivery.TerminalRecord    `json:"terminal_record,omitempty"`
+	Attestation            attest.Statement           `json:"attestation,omitempty"`
+	ContainmentReceipt     *containment.Receipt       `json:"containment_receipt,omitempty"`
+	CandidateEvidenceName  string                     `json:"candidate_evidence_name,omitempty"`
+	CandidateEvidence      pipeline.CandidateEvidence `json:"candidate_evidence,omitempty"`
+	AttemptManifest        evidence.AttemptManifest   `json:"attempt_manifest,omitempty"`
+	Event                  evidence.Event             `json:"event,omitempty"`
+	ExpectedSequence       uint64                     `json:"expected_sequence,omitempty"`
+	ExpectedPreviousSHA256 string                     `json:"expected_previous_sha256,omitempty"`
+	Offset                 int64                      `json:"offset,omitempty"`
+	Snapshot               string                     `json:"snapshot,omitempty"`
+}
+
+type workerAPIEventPage struct {
+	Snapshot string `json:"snapshot"`
+	Offset   int64  `json:"offset"`
+	Total    int64  `json:"total"`
+	Data     []byte `json:"data"`
+}
+
+type workerAPIEventAppendResult struct {
+	SchemaVersion  int       `json:"schema_version"`
+	Sequence       uint64    `json:"sequence"`
+	RunID          string    `json:"run_id"`
+	Type           string    `json:"type"`
+	Stage          string    `json:"stage,omitempty"`
+	AttemptID      string    `json:"attempt_id,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	PreviousSHA256 string    `json:"previous_sha256"`
+	SHA256         string    `json:"sha256"`
 }
 type workerQuestionPayload struct {
 	Kind     string `json:"kind"`
@@ -140,11 +172,16 @@ type workerAPIServer struct {
 	containmentReceipts     containment.ControllerReceiptStore
 	candidateEvidenceRoot   string
 	attemptManifests        evidence.ControllerAttemptManifestStore
+	eventLogs               evidence.EventLog
+	eventSnapshot           []byte
+	eventSnapshotToken      string
 	usageAllowed            bool
 	usageEnvelopeWritten    bool
 	candidateAbsenceAllowed bool
 	briefTask               string
+	approvedPlanHash        string
 	dispatchMu              sync.Mutex
+	requestSlots            chan struct{}
 	nonceMu                 sync.Mutex
 	nonces                  map[string]time.Time
 }
@@ -217,28 +254,6 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, fmt.Errorf("worker controller API run id: %w", err)
 	}
-	if socketPath != "" {
-		canonicalTarget, targetErr := candidate.CanonicalTargetDir(job.TargetDir)
-		if targetErr != nil {
-			_ = listener.Close()
-			_ = os.Remove(socketPath)
-			return nil, fmt.Errorf("canonicalize controller usage target: %w", targetErr)
-		}
-		if err := (metrics.FileUsageEnvelopeStore{}).Reserve(canonicalTarget, job.RunID); err != nil {
-			_ = listener.Close()
-			if socketPath != "" {
-				_ = os.Remove(socketPath)
-			}
-			return nil, fmt.Errorf("prepare controller usage store: %w", err)
-		}
-		if job.Operation == OperationStart {
-			if err := (evidence.ControllerAttemptManifestStore{TargetDir: canonicalTarget}).Reserve(job.RunID); err != nil {
-				_ = listener.Close()
-				_ = os.Remove(socketPath)
-				return nil, fmt.Errorf("reserve controller attempt manifest store: %w", err)
-			}
-		}
-	}
 	var nonce [32]byte
 	if _, err := io.ReadFull(random, nonce[:]); err != nil {
 		_ = listener.Close()
@@ -264,8 +279,119 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, fmt.Errorf("prepare controller business brief store: %w", err)
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, requestSlots: make(chan struct{}, 1), nonces: make(map[string]time.Time)}
+	api.approvedPlanHash = strings.ToLower(strings.TrimSpace(job.ApprovePlanHash))
 	api.usageAllowed = socketPath != ""
+	if api.usageAllowed {
+		store := evidence.ControllerEventStore{TargetDir: canonicalTarget}
+		runDir := filepath.Join(canonicalTarget, ".ai-team", "runs", job.RunID)
+		reserved, sourceErr := store.IsReserved(job.RunID)
+		if sourceErr != nil {
+			// Pre-event-store cloud runs are recognizable from independent
+			// controller markers, but ordinary readers must not fall back to the
+			// worker-visible journal. Resume/Recover/Cancel are the only explicit
+			// migration admissions, and migration itself rejects any event-era
+			// authority proof.
+			legacyCandidate, candidateErr := store.IsLegacyMigrationCandidate(job.RunID)
+			if candidateErr != nil {
+				sourceErr = errors.Join(sourceErr, candidateErr)
+			} else if legacyCandidate {
+				switch job.Operation {
+				case OperationResume, OperationRecover, OperationCancel:
+					if _, statErr := os.Lstat(runDir); statErr != nil {
+						sourceErr = fmt.Errorf("inspect legacy event run directory: %w", statErr)
+					} else {
+						sourceErr = store.MigrateLegacyWithValidator(job.RunID, runDir, func(events []evidence.Event) error {
+							return validateControllerDeliveryClaims(job, events, approvals)
+						})
+						if sourceErr == nil {
+							reserved = true
+						}
+					}
+				default:
+					// Do not migrate an old worker-visible journal for read-only API scopes.
+				}
+			}
+			if sourceErr != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("inspect controller event reservation: %w", sourceErr)
+			}
+		}
+		if !reserved {
+			switch job.Operation {
+			case OperationStart:
+				sourceErr = store.Reserve(job.RunID)
+			case OperationRecover:
+				if _, statErr := os.Lstat(runDir); errors.Is(statErr, os.ErrNotExist) {
+					// A recover dispatch with no prior worker evidence may proceed as
+					// a fresh admitted run; its authority must exist before spawn too.
+					sourceErr = store.Reserve(job.RunID)
+				} else if statErr != nil {
+					sourceErr = fmt.Errorf("inspect recovery run directory: %w", statErr)
+				} else {
+					sourceErr = store.MigrateLegacyWithValidator(job.RunID, runDir, func(events []evidence.Event) error {
+						return validateControllerDeliveryClaims(job, events, approvals)
+					})
+				}
+			case OperationResume, OperationCancel:
+				sourceErr = store.MigrateLegacyWithValidator(job.RunID, runDir, func(events []evidence.Event) error {
+					return validateControllerDeliveryClaims(job, events, approvals)
+				})
+			default:
+				// Event appends are unavailable for operations that do not own a
+				// run lifecycle. Keep their controller API surface read-only.
+			}
+			if sourceErr != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("prepare controller event log: %w", sourceErr)
+			}
+			reserved, sourceErr = store.IsReserved(job.RunID)
+			if sourceErr != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("verify controller event reservation: %w", sourceErr)
+			}
+		}
+		if reserved {
+			if job.Operation == OperationResume || job.Operation == OperationRecover {
+				events, readErr := store.Read(job.RunID)
+				if readErr == nil {
+					readErr = validateControllerDeliveryClaims(job, events, approvals)
+				}
+				if readErr != nil {
+					_ = listener.Close()
+					_ = os.Remove(socketPath)
+					return nil, fmt.Errorf("validate controller delivery authority: %w", readErr)
+				}
+			}
+			pinned, pinErr := store.OpenReserved(job.RunID)
+			if pinErr != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("pin controller event log: %w", pinErr)
+			}
+			api.eventLogs = pinned
+		}
+	}
+	if api.usageAllowed {
+		// Establish per-run event authority before independent cloud markers.
+		// Otherwise IsReserved would mistake a brand-new Start for a legacy
+		// cloud run while the event roots are still empty.
+		if err := (metrics.FileUsageEnvelopeStore{}).Reserve(canonicalTarget, job.RunID); err != nil {
+			_ = listener.Close()
+			_ = os.Remove(socketPath)
+			return nil, fmt.Errorf("prepare controller usage store: %w", err)
+		}
+		if job.Operation == OperationStart {
+			if err := (evidence.ControllerAttemptManifestStore{TargetDir: canonicalTarget}).Reserve(job.RunID); err != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
+				return nil, fmt.Errorf("reserve controller attempt manifest store: %w", err)
+			}
+		}
+	}
 	if api.usageAllowed {
 		api.candidateEvidenceRoot = filepath.Join(canonicalTarget, ".ai-team", "state", "evidence")
 	}
@@ -287,6 +413,9 @@ func (s *workerAPIServer) close() {
 		if closer, ok := s.briefs.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
+		if closer, ok := s.eventLogs.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 	}
 }
 func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -298,26 +427,39 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	const maxWorkerAPIRequestBody = workerAPIMaxAttemptManifestEnvelope
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxWorkerAPIRequestBody+1))
-	if err != nil || len(data) > maxWorkerAPIRequestBody {
+	if s.requestSlots != nil {
+		select {
+		case s.requestSlots <- struct{}{}:
+			defer func() { <-s.requestSlots }()
+		case <-r.Context().Done():
+			return
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, workerAPIMaxEventAppendEnvelope+1))
+	if err != nil || len(data) > workerAPIMaxEventAppendEnvelope {
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	requestLimit := workerAPIRequestBodyLimit("", len(data))
+	requestMethod := ""
 	if len(data) > workerAPIMaxBody {
 		var largeRequest workerAPIRequest
-		if json.Unmarshal(data, &largeRequest) != nil ||
-			(largeRequest.Method != "candidate.evidence.write" && largeRequest.Method != "candidate.evidence.read" && largeRequest.Method != "attempt_manifest.write" && largeRequest.Method != "attempt_manifest.read") ||
-			(len(data) > workerAPIMaxCandidateEvidenceBody && largeRequest.Method != "attempt_manifest.write" && largeRequest.Method != "attempt_manifest.read") {
+		if json.Unmarshal(data, &largeRequest) != nil {
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		requestMethod = largeRequest.Method
+		requestLimit = workerAPIRequestBodyLimit(largeRequest.Method, len(data))
+		if requestLimit == 0 {
 			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 	}
-	var request workerAPIRequest
-	requestLimit := workerAPIMaxCandidateEvidenceBody
-	if len(data) > workerAPIMaxCandidateEvidenceBody {
-		requestLimit = workerAPIMaxAttemptManifestEnvelope
+	if requestLimit == 0 || len(data) > requestLimit || !workerAPIRequestWithinLimit(requestMethod, len(data)) {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return
 	}
+	var request workerAPIRequest
 	if strictjson.Unmarshal(data, int64(requestLimit), &request) != nil || request.workerAPIScope != s.scope {
 		http.Error(w, "invalid invocation scope", http.StatusForbidden)
 		return
@@ -329,6 +471,9 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Method == "attempt_manifest.write" {
 		payloadLimit = workerAPIMaxAttemptManifestPayload
+	}
+	if request.Method == "event_log.append" {
+		payloadLimit = workerAPIMaxEventAppendPayload
 	}
 	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, int64(payloadLimit), &call) != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
@@ -352,6 +497,27 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		result = struct{}{}
 	}
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func workerAPIRequestBodyLimit(method string, size int) int {
+	switch method {
+	case "candidate.evidence.write", "candidate.evidence.read":
+		return workerAPIMaxCandidateEvidenceBody
+	case "attempt_manifest.write", "attempt_manifest.read":
+		return workerAPIMaxAttemptManifestEnvelope
+	case "event_log.append":
+		return workerAPIMaxEventAppendEnvelope
+	default:
+		if size <= workerAPIMaxBody {
+			return workerAPIMaxBody
+		}
+		return 0
+	}
+}
+
+func workerAPIRequestWithinLimit(method string, size int) bool {
+	limit := workerAPIRequestBodyLimit(method, size)
+	return limit > 0 && size >= 0 && size <= limit
 }
 
 type workerAPIResponseError struct {
@@ -557,6 +723,103 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, fmt.Errorf("worker API candidate evidence read is not allowed for operation %q", s.scope.Operation)
 		}
 		return readControllerCandidateEvidence(s.candidateEvidenceRoot, s.scope.RunID, c.CandidateEvidenceName)
+	case "event_log.read":
+		if !s.usageAllowed || s.eventLogs == nil {
+			return nil, errors.New("controller event log reads require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID || c.Offset < 0 {
+			return nil, errors.New("event log read run or offset mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover, OperationCancel:
+		default:
+			return nil, fmt.Errorf("worker API event log read is not allowed for operation %q", s.scope.Operation)
+		}
+		if c.Snapshot == "" {
+			if c.Offset != 0 {
+				return nil, errors.New("event log read must start at offset zero")
+			}
+			data, err := s.eventLogs.ReadBytes(s.scope.RunID)
+			if err != nil {
+				return nil, err
+			}
+			var token [16]byte
+			if _, err := rand.Read(token[:]); err != nil {
+				return nil, err
+			}
+			s.eventSnapshot = data
+			s.eventSnapshotToken = hex.EncodeToString(token[:])
+			c.Snapshot = s.eventSnapshotToken
+		} else if c.Snapshot != s.eventSnapshotToken || s.eventSnapshot == nil {
+			return nil, errors.New("event log read snapshot is unavailable")
+		}
+		if c.Offset > int64(len(s.eventSnapshot)) {
+			return nil, errors.New("event log read offset exceeds snapshot")
+		}
+		end := c.Offset + workerAPIEventReadPage
+		if end > int64(len(s.eventSnapshot)) {
+			end = int64(len(s.eventSnapshot))
+		}
+		page := workerAPIEventPage{
+			Snapshot: s.eventSnapshotToken, Offset: c.Offset, Total: int64(len(s.eventSnapshot)),
+			Data: append([]byte(nil), s.eventSnapshot[c.Offset:end]...),
+		}
+		if end == int64(len(s.eventSnapshot)) {
+			s.eventSnapshot = nil
+			s.eventSnapshotToken = ""
+		}
+		return page, nil
+	case "event_log.append":
+		if !s.usageAllowed || s.eventLogs == nil {
+			return nil, errors.New("controller event log appends require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("event log append run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover, OperationCancel:
+		default:
+			return nil, fmt.Errorf("worker API event log append is not allowed for operation %q", s.scope.Operation)
+		}
+		if c.Event.Type == "" {
+			return nil, errors.New("event log append requires event type")
+		}
+		events, err := s.eventLogs.Read(s.scope.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("read event chain before append: %w", err)
+		}
+		runDir := filepath.Join(s.scope.TargetDir, ".ai-team", "runs", s.scope.RunID)
+		validated, exactRetry, err := evidence.ValidateEventAppend(events, s.scope.RunID, runDir, c.Event,
+			c.ExpectedSequence, c.ExpectedPreviousSHA256,
+			evidence.ReservedAttemptManifestSource{TargetDir: s.scope.TargetDir})
+		if err != nil {
+			return nil, err
+		}
+		if !exactRetry {
+			if err := s.validateWorkerApprovalEvent(c.Event); err != nil {
+				return nil, err
+			}
+			if err := s.validateWorkerDeliveryEvent(c.Event, events, runDir); err != nil {
+				return nil, err
+			}
+			if err := s.validateWorkerTerminalEvent(c.Event); err != nil {
+				return nil, err
+			}
+		}
+		if !exactRetry {
+			c.Event = validated
+		}
+		appended, err := s.eventLogs.Append(s.scope.RunID, c.Event, c.ExpectedSequence, c.ExpectedPreviousSHA256)
+		if err != nil {
+			return nil, err
+		}
+		s.eventSnapshot = nil
+		s.eventSnapshotToken = ""
+		return workerAPIEventAppendResult{
+			SchemaVersion: appended.SchemaVersion, Sequence: appended.Sequence, RunID: appended.RunID,
+			Type: appended.Type, Stage: appended.Stage, AttemptID: appended.AttemptID, Timestamp: appended.Timestamp,
+			PreviousSHA256: appended.PreviousSHA256, SHA256: appended.SHA256,
+		}, nil
 	case "attempt_manifest.write":
 		if !s.usageAllowed {
 			return nil, errors.New("controller attempt manifest writes require bubblewrap Unix transport")
@@ -763,6 +1026,239 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 	return nil, nil
 }
 
+func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prior []evidence.Event, runDir string) error {
+	switch event.Type {
+	case "delivery_plan_approved":
+		planHash, _ := event.Data["plan_hash"].(string)
+		mode, _ := event.Data["mode"].(string)
+		if mode == "hash_flag" {
+			if s.approvedPlanHash == "" || planHash != s.approvedPlanHash {
+				return errors.New("delivery plan approval does not match the controller-approved plan hash")
+			}
+			return nil
+		}
+		if mode != "resolved_approval" {
+			return errors.New("delivery plan approval mode is not supported")
+		}
+		values, err := s.approvals.List(s.scope.RunID)
+		if err != nil {
+			return fmt.Errorf("list delivery approval authority: %w", err)
+		}
+		for _, value := range values {
+			if value.Trigger == "delivery_plan" && value.SubjectHash == planHash && value.Status == approval.StatusResolved &&
+				value.ResolvedAction == "approve" && value.AttemptID == event.AttemptID {
+				return nil
+			}
+		}
+		return errors.New("delivery plan approval has no matching resolved controller approval")
+	case "delivery_deferred":
+		planHash, _ := event.Data["plan_hash"].(string)
+		statePath, _ := event.Data["state_path"].(string)
+		if !evidence.ValidDeliveryStatePath(runDir, statePath) {
+			return errors.New("deferred delivery state path is outside the prepared delivery directory")
+		}
+		started := false
+		finished := false
+		approvedEvent := false
+		for _, value := range prior {
+			if value.AttemptID != event.AttemptID {
+				continue
+			}
+			switch value.Type {
+			case "attempt_started":
+				started = true
+			case "attempt_finished", "attempt_abandoned":
+				finished = true
+			case "delivery_plan_approved":
+				approvedHash, _ := value.Data["plan_hash"].(string)
+				if approvedHash == planHash {
+					approvedEvent = true
+				}
+			}
+		}
+		if !started || finished {
+			return errors.New("deferred delivery event must belong to the current unfinished controller attempt")
+		}
+		if !approvedEvent {
+			return fmt.Errorf("deferred delivery plan %s has no matching approval event", planHash)
+		}
+		if s.approvedPlanHash == planHash {
+			return nil
+		}
+		values, err := s.approvals.List(s.scope.RunID)
+		if err != nil {
+			return fmt.Errorf("list deferred delivery approval authority: %w", err)
+		}
+		for _, value := range values {
+			if value.Trigger == "delivery_plan" && value.SubjectHash == planHash && value.Status == approval.StatusResolved &&
+				value.ResolvedAction == "approve" && value.AttemptID == event.AttemptID {
+				return nil
+			}
+		}
+		return fmt.Errorf("deferred delivery plan %s has no matching controller approval authority", planHash)
+	case "deferred_gates_ratified":
+		raw, ok := event.Data["gates"].([]any)
+		if !ok || len(raw) == 0 {
+			return errors.New("deferred gate ratification requires controller approvals")
+		}
+		values, err := s.approvals.List(s.scope.RunID)
+		if err != nil {
+			return fmt.Errorf("list deferred approval authority: %w", err)
+		}
+		for _, rawGate := range raw {
+			gate, ok := rawGate.(map[string]any)
+			if !ok {
+				return errors.New("deferred gate ratification contains invalid gate")
+			}
+			id, _ := gate["approval_id"].(string)
+			subjectHash, _ := gate["subject_hash"].(string)
+			action, _ := gate["action"].(string)
+			matched := false
+			for _, value := range values {
+				if value.ID == id && value.SubjectHash == subjectHash && value.Status == approval.StatusResolved && value.ResolvedAction == action {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("deferred gate %s does not match controller approval state", id)
+			}
+		}
+	}
+	return nil
+}
+
+// validateControllerDeliveryClaims keeps event journals from gaining delivery
+// authority merely by migration into controller storage. Resume, Recover, and
+// Cancel correlate each historical approval marker with current controller
+// state before the canonical copy is prepared. Cancel admission can still fail
+// later (for example, because lifecycle state is already terminal), so it
+// cannot bless an unverified delivery claim as canonical.
+func validateControllerDeliveryClaims(job Job, events []evidence.Event, approvals interface {
+	List(string) ([]approval.PendingApproval, error)
+}) error {
+	approvedPlanHash := strings.ToLower(strings.TrimSpace(job.ApprovePlanHash))
+	approved := make(map[string]map[string]bool)
+	var values []approval.PendingApproval
+	valuesLoaded := false
+	for _, event := range events {
+		switch event.Type {
+		case "delivery_plan_approved":
+			planHash, _ := event.Data["plan_hash"].(string)
+			mode, _ := event.Data["mode"].(string)
+			if event.AttemptID == "" || planHash == "" {
+				return errors.New("delivery plan approval event lacks attempt or plan identity")
+			}
+			switch mode {
+			case "hash_flag":
+				if approvedPlanHash == "" || approvedPlanHash != planHash {
+					return fmt.Errorf("legacy hash-flag delivery claim %s has no matching controller job approval", planHash)
+				}
+			case "resolved_approval":
+				if !valuesLoaded {
+					if approvals == nil {
+						return errors.New("controller approval authority is unavailable for legacy delivery claim")
+					}
+					var listErr error
+					values, listErr = approvals.List(job.RunID)
+					if listErr != nil {
+						return fmt.Errorf("list legacy delivery approval authority: %w", listErr)
+					}
+					valuesLoaded = true
+				}
+				matched := false
+				for _, value := range values {
+					if value.RunID == job.RunID && value.Trigger == "delivery_plan" && value.SubjectHash == planHash &&
+						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return fmt.Errorf("legacy resolved delivery claim %s has no exact controller approval", planHash)
+				}
+			default:
+				return fmt.Errorf("legacy delivery approval mode %q is unsupported", mode)
+			}
+			if approved[event.AttemptID] == nil {
+				approved[event.AttemptID] = make(map[string]bool)
+			}
+			approved[event.AttemptID][planHash] = true
+		case "delivery_deferred":
+			planHash, _ := event.Data["plan_hash"].(string)
+			if event.AttemptID == "" || planHash == "" || !approved[event.AttemptID][planHash] {
+				return errors.New("legacy delivery_deferred has no preceding controller-authorized plan for the same attempt")
+			}
+		}
+	}
+	return nil
+}
+
+func (s *workerAPIServer) validateWorkerApprovalEvent(event evidence.Event) error {
+	if event.Type != "approval_requested" && event.Type != "approval_decided" && event.Type != "approval_reused" {
+		return nil
+	}
+	approvalID, ok := event.Data["approval_id"].(string)
+	if !ok || approvalID == "" {
+		return errors.New("approval event requires approval_id")
+	}
+	value, err := s.approvals.Load(s.scope.RunID, approvalID)
+	if err != nil {
+		return fmt.Errorf("load approval event authority: %w", err)
+	}
+	subjectHash, _ := event.Data["subject_hash"].(string)
+	if value.RunID != s.scope.RunID || value.ID != approvalID || value.SubjectHash != subjectHash {
+		return errors.New("approval event identity does not match controller approval state")
+	}
+	switch event.Type {
+	case "approval_requested":
+		status, _ := event.Data["status"].(string)
+		// The pipeline persists the pending record before appending this event.
+		// A web decision can race in that small interval, so the controller may
+		// already hold the matching resolved record when the request event arrives.
+		if value.AttemptID != event.AttemptID || status != string(approval.StatusPending) ||
+			(value.Status != approval.StatusPending && value.Status != approval.StatusResolved) {
+			return errors.New("approval_requested does not match a pending or just-resolved controller approval")
+		}
+	case "approval_decided":
+		status, _ := event.Data["status"].(string)
+		action, _ := event.Data["resolved_action"].(string)
+		if value.AttemptID != event.AttemptID || value.Status != approval.StatusResolved || status != string(value.Status) || action == "" || action != value.ResolvedAction {
+			return errors.New("approval_decided does not match a resolved controller approval")
+		}
+	case "approval_reused":
+		priorStatus, _ := event.Data["prior_status"].(string)
+		fromStage, _ := event.Data["from_stage"].(string)
+		toStage, _ := event.Data["to_stage"].(string)
+		trigger, _ := event.Data["trigger"].(string)
+		if priorStatus != string(value.Status) || fromStage != value.FromStage || toStage != value.ToStage || trigger != value.Trigger {
+			return errors.New("approval_reused does not match the prior controller approval")
+		}
+		if event.AttemptID == "" {
+			return errors.New("approval_reused requires the current attempt identity")
+		}
+	}
+	return nil
+}
+
+func (s *workerAPIServer) validateWorkerTerminalEvent(event evidence.Event) error {
+	switch event.Type {
+	case "run_canceled":
+		if s.scope.Operation != OperationCancel {
+			return errors.New("run_canceled is only allowed in a controller cancel operation")
+		}
+	case "run_finished":
+		status, _ := event.Data["status"].(string)
+		if status == string(workflow.RunCanceled) && s.scope.Operation != OperationCancel {
+			return errors.New("canceled run_finished is only allowed in a controller cancel operation")
+		}
+		if s.scope.Operation == OperationCancel && status != string(workflow.RunCanceled) {
+			return errors.New("controller cancel operation must finish as canceled")
+		}
+	}
+	return nil
+}
+
 func candidateEvidencePath(root, runID, name string) (string, error) {
 	if err := evidence.ValidateRunID(runID); err != nil {
 		return "", fmt.Errorf("candidate evidence run id: %w", err)
@@ -854,6 +1350,7 @@ func sameLifecycleState(a, b lifecycle.State) bool {
 
 type workerAPIPort struct {
 	address, token string
+	socketPath     string
 	scope          workerAPIScope
 	client         *http.Client
 }
@@ -870,7 +1367,10 @@ func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 	if !okA || !okT || token == "" {
 		return nil, errors.New("worker controller API environment is missing or invalid")
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Large event append envelopes can contain several MiB of escaped runtime
+	// diagnostics; keep the transport bounded by the same TTL as the signed
+	// request instead of timing out before the server can validate the payload.
+	client := &http.Client{Timeout: workerAPIRequestTTL}
 	switch {
 	case strings.HasPrefix(address, "http://127.0.0.1:") && !hasSocket:
 		// Compatibility transport for non-bubblewrap worker launches.
@@ -881,7 +1381,7 @@ func newWorkerAPIPort(job Job) (*workerAPIPort, error) {
 	default:
 		return nil, errors.New("worker controller API environment is missing or invalid")
 	}
-	return &workerAPIPort{address: address, token: token, scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, client: client}, nil
+	return &workerAPIPort{address: address, token: token, socketPath: socketPath, scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, client: client}, nil
 }
 
 func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort(job) }
@@ -889,7 +1389,7 @@ func NewWorkerAPIPort(job Job) (*WorkerAPIPort, error) { return newWorkerAPIPort
 // SupportsControllerUsageStore reports whether this worker API uses the Unix
 // transport that is reachable only from the bubblewrap worker namespace.
 func (p *workerAPIPort) SupportsControllerUsageStore() bool {
-	return p != nil && p.address == "http://unix" && os.Getenv(workerAPISocketEnv) != ""
+	return p != nil && p.address == "http://unix" && p.socketPath != ""
 }
 
 func (p *workerAPIPort) SupportsControllerAttestationStore() bool {
@@ -1002,6 +1502,99 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 
 type workerAPIAttemptManifestStore struct{ port *workerAPIPort }
 type WorkerAPIAttemptManifestStore = workerAPIAttemptManifestStore
+
+type workerAPIEventLog struct {
+	port *workerAPIPort
+	mu   sync.Mutex
+}
+
+type WorkerAPIEventLog = workerAPIEventLog
+
+func NewWorkerAPIEventLog(port *WorkerAPIPort) evidence.EventLog {
+	return &workerAPIEventLog{port: port}
+}
+
+func (*workerAPIEventLog) ExternalEventAuthority() {}
+
+func (s *workerAPIEventLog) Read(runID string) ([]evidence.Event, error) {
+	data, err := s.ReadBytes(runID)
+	if err != nil {
+		return nil, err
+	}
+	return evidence.VerifyEventLogBytes(data, runID)
+}
+
+func (s *workerAPIEventLog) ReadBytes(runID string) ([]byte, error) {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return nil, errors.New("worker event log API unavailable")
+	}
+	if runID != s.port.scope.RunID {
+		return nil, errors.New("worker event log API run mismatch")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []byte
+	var snapshot string
+	var offset int64
+	var total int64 = -1
+	for {
+		var page workerAPIEventPage
+		if err := s.port.call("event_log.read", workerAPICall{
+			RunID: runID, Offset: offset, Snapshot: snapshot,
+		}, &page); err != nil {
+			return nil, err
+		}
+		if page.Offset != offset || page.Total < 0 || page.Total > evidence.MaxEventLogSize || int64(len(page.Data)) > page.Total-offset || len(page.Data) > workerAPIEventReadPage || page.Snapshot == "" || (snapshot != "" && page.Snapshot != snapshot) {
+			return nil, errors.New("worker event log API returned an invalid page identity")
+		}
+		if total < 0 {
+			total = page.Total
+			result = make([]byte, 0, total)
+		} else if total != page.Total {
+			return nil, errors.New("worker event log API changed snapshot size")
+		}
+		if len(page.Data) == 0 && offset < total {
+			return nil, errors.New("worker event log API returned an empty page before end")
+		}
+		result = append(result, page.Data...)
+		offset += int64(len(page.Data))
+		snapshot = page.Snapshot
+		if offset == total {
+			break
+		}
+	}
+	if _, err := evidence.VerifyEventLogBytes(result, runID); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *workerAPIEventLog) Append(runID string, event evidence.Event, expectedSequence uint64, expectedPreviousSHA256 string) (evidence.Event, error) {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return evidence.Event{}, errors.New("worker event log API unavailable")
+	}
+	if runID != s.port.scope.RunID {
+		return evidence.Event{}, errors.New("worker event log API run mismatch")
+	}
+	var result workerAPIEventAppendResult
+	err := s.port.call("event_log.append", workerAPICall{
+		RunID: runID, Event: event, ExpectedSequence: expectedSequence,
+		ExpectedPreviousSHA256: expectedPreviousSHA256,
+	}, &result)
+	if err != nil {
+		return evidence.Event{}, err
+	}
+	event.SchemaVersion = result.SchemaVersion
+	event.Sequence = result.Sequence
+	event.RunID = result.RunID
+	event.Type = result.Type
+	event.Stage = result.Stage
+	event.AttemptID = result.AttemptID
+	event.Timestamp = result.Timestamp
+	event.PreviousSHA256 = result.PreviousSHA256
+	event.SHA256 = result.SHA256
+	return event, nil
+}
 
 // NewWorkerAPIAttemptManifestStore exposes the scoped controller-owned
 // attempt-manifest read/write port to pipeline workers.

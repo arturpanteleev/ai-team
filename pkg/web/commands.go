@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,8 +175,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func isSameOriginSessionRequest(r *http.Request) bool {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
-		u, err := url.Parse(origin)
-		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme(r)
+		return originMatchesRequest(r, origin)
 	}
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin")
 }

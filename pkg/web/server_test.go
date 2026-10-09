@@ -1033,6 +1033,7 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 	}
 
 	bootstrap := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	bootstrap.Host = "127.0.0.1:443"
 	bootstrap.AddCookie(cookie)
 	bootstrap.Header.Set("Origin", "https://127.0.0.1")
 	bootstrap.Header.Set("X-Forwarded-Proto", "https")
@@ -1108,6 +1109,38 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 	srv.router.ServeHTTP(expiredWriter, expired)
 	if expiredWriter.Code != http.StatusUnauthorized || !strings.Contains(expiredWriter.Body.String(), "сессия истекла") {
 		t.Fatalf("expired session: %d %s", expiredWriter.Code, expiredWriter.Body.String())
+	}
+}
+
+func TestSameOriginSessionRequestNormalizesDefaultPorts(t *testing.T) {
+	tests := []struct {
+		name           string
+		host           string
+		origin         string
+		forwardedProto string
+		want           bool
+	}{
+		{name: "HTTPS Origin omits Host default port", host: "app.example:443", origin: "https://app.example", forwardedProto: "https", want: true},
+		{name: "HTTPS Origin spells Host default port", host: "app.example", origin: "https://app.example:443", forwardedProto: "https", want: true},
+		{name: "matching non-default HTTPS port", host: "app.example:8443", origin: "https://app.example:8443", forwardedProto: "https", want: true},
+		{name: "different HTTPS port", host: "app.example:443", origin: "https://app.example:8443", forwardedProto: "https", want: false},
+		{name: "different hostname", host: "app.example:443", origin: "https://attacker.example", forwardedProto: "https", want: false},
+		{name: "different scheme", host: "app.example:443", origin: "http://app.example:443", forwardedProto: "https", want: false},
+		{name: "path is not an Origin", host: "app.example:443", origin: "https://app.example/path", forwardedProto: "https", want: false},
+		{name: "ordinary HTTP default port", host: "app.example:80", origin: "http://app.example", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://app.example/api/session", nil)
+			req.Host = tt.host
+			if tt.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
+			}
+			req.Header.Set("Origin", tt.origin)
+			if got := isSameOriginSessionRequest(req); got != tt.want {
+				t.Fatalf("isSameOriginSessionRequest() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

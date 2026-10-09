@@ -11,4 +11,4 @@
 - [x] Add regression coverage for approval/store concurrency, worker event
   boundaries, pipeline attempt evidence, Web API, and CLI.
 - [x] Run `openspec validate --all --strict --no-interactive`.
-- [ ] Run `make verify`.
+- [x] Run `make verify`.

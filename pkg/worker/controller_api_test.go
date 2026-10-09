@@ -748,11 +748,13 @@ func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T)
 		name            string
 		withOutput      bool
 		withTypedFields bool
+		forgedSuccess   bool
 		wantWriteError  bool
 	}{
 		{name: "resolved reject finishes without submission output"},
 		{name: "reject with output is rejected", withOutput: true, wantWriteError: true},
 		{name: "reject with typed submission metadata is rejected", withTypedFields: true, wantWriteError: true},
+		{name: "reject with forged successful state is rejected", forgedSuccess: true, wantWriteError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -803,8 +805,12 @@ func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T)
 
 			manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "writer",
 				Executor: "human", ActorID: "writer-1", ActorRole: "writer", HumanInputApprovalID: approvalID,
-				StageIndex: 1, StartedAt: startedAt.Add(time.Second), FinishedAt: finishedAt, Status: "rejected", Execution: "succeeded",
+				StageIndex: 1, StartedAt: startedAt.Add(time.Second), FinishedAt: finishedAt, Status: "rejected", Verdict: "REJECTED", Execution: "succeeded",
 				Decision: "rejected", Outcome: "rejected"}
+			if test.forgedSuccess {
+				manifest.Status, manifest.Verdict = "passed", "APPROVED"
+				manifest.Decision, manifest.Outcome = "approved", "passed"
+			}
 			if test.withOutput {
 				artifactRel := "attempts/" + attemptID + "/artifacts/feature/result.md"
 				artifactPath := filepath.Join(target, ".ai-team", "runs", runID, filepath.FromSlash(artifactRel))
@@ -838,7 +844,8 @@ func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T)
 				t.Fatalf("read stored reject manifest digest: %v", digestErr)
 			}
 			finishedEvent := evidence.Event{Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt, Data: map[string]any{
-				"status": "rejected", "execution": "succeeded", "decision": "rejected", "outcome": "rejected", "manifest_sha256": manifestDigest,
+				"status": manifest.Status, "execution": manifest.Execution, "decision": manifest.Decision, "outcome": manifest.Outcome,
+				"verdict": manifest.Verdict, "manifest_sha256": manifestDigest,
 				"executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID,
 			}}
 			_, finishErr := server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: finishedEvent,

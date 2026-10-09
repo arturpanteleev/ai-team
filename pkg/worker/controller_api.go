@@ -33,6 +33,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -1402,6 +1403,11 @@ func (s *workerAPIServer) validateReservedHumanSubmissionManifest(manifest evide
 			manifest.HumanSubmissionSHA256 != "" || manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" ||
 			manifest.HumanSubmissionDescription != "" || len(manifest.Outputs) != 0 {
 			return errors.New("rejected human input manifest cannot contain submission metadata or outputs")
+		}
+		if manifest.Status != string(workflow.OutcomeRejected) || manifest.Execution != string(workflow.ExecutionSucceeded) ||
+			manifest.Decision != string(workflow.DecisionRejected) || manifest.Outcome != string(workflow.OutcomeRejected) ||
+			manifest.Verdict != string(verdict.Rejected) || manifest.Error != "" || manifest.Blocker != "" {
+			return errors.New("rejected human input manifest does not match the resolved rejection state")
 		}
 		return nil
 	}

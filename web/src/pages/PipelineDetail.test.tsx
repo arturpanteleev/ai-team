@@ -149,6 +149,23 @@ describe('PipelineDetail graph', () => {
     }));
   });
 
+  it('сохраняет решение по ТЗ и продолжает тот же run', async () => {
+    vi.mocked(getPipelineRun).mockClear();
+    vi.mocked(decideApproval).mockClear();
+    vi.mocked(resumeRun).mockClear();
+    renderDetail();
+
+    expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }));
+    await waitFor(() => expect(vi.mocked(decideApproval)).toHaveBeenCalledWith('run-graph', expect.objectContaining({
+      id: 'approval-spec',
+    }), expect.objectContaining({ action: 'approve_spec', actor_role: 'product_owner' })));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить задачу' }));
+    await waitFor(() => expect(vi.mocked(resumeRun)).toHaveBeenCalledWith('run-graph'));
+    await waitFor(() => expect(vi.mocked(getPipelineRun).mock.calls.length).toBeGreaterThanOrEqual(3));
+  });
+
   it('показывает зафиксированные коммит и pull request в состоянии Git-доставки', async () => {
     vi.mocked(getPipelineRun).mockResolvedValue({
       run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },
@@ -198,17 +215,4 @@ describe('PipelineDetail graph', () => {
     expect(screen.queryByRole('button', { name: 'Повторить одобренную Git-доставку' })).not.toBeInTheDocument();
   });
 
-  it('сохраняет решение по ТЗ и продолжает тот же run', async () => {
-    renderDetail();
-
-    expect(await screen.findByText('Product Owner согласует требования перед архитектором')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }));
-    await waitFor(() => expect(vi.mocked(decideApproval)).toHaveBeenCalledWith('run-graph', expect.objectContaining({
-      id: 'approval-spec',
-    }), expect.objectContaining({ action: 'approve_spec', actor_role: 'product_owner' })));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Продолжить задачу' }));
-    await waitFor(() => expect(vi.mocked(resumeRun)).toHaveBeenCalledWith('run-graph'));
-    await waitFor(() => expect(vi.mocked(getPipelineRun).mock.calls.length).toBeGreaterThanOrEqual(3));
-  });
 });

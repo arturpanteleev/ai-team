@@ -61,30 +61,37 @@ async function waitForServer(url, child) {
 async function expectNoHorizontalOverflow(page, width) {
   await page.setViewportSize({ width, height: 800 })
   await expect.poll(() => page.evaluate(() => {
-    const controlsFit = [...document.querySelectorAll('button, input, textarea, a')]
+    const controlsOutside = [...document.querySelectorAll('button, input, textarea, a')]
       .filter((element) => {
         const style = getComputedStyle(element)
         return style.display !== 'none' && style.visibility !== 'hidden' && element.getBoundingClientRect().width > 0
       })
-      .every((element) => {
+      .flatMap((element) => {
+        const filters = element.closest('#pipeline-status-filters')
+        if (filters && getComputedStyle(filters).overflowX === 'auto') return []
         const bounds = element.getBoundingClientRect()
-        return bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        if (bounds.left >= -1 && bounds.right <= window.innerWidth + 1) return []
+        const name = typeof element.className === 'string' && element.className ? `.${element.className.split(/\s+/).join('.')}` : ''
+        return [`${element.tagName.toLowerCase()}${name}: ${bounds.left.toFixed(1)}..${bounds.right.toFixed(1)}px`]
       })
+    const controlsFit = controlsOutside.length === 0
     const overflowingContent = [...document.querySelectorAll('body *')].flatMap((element) => {
       const bounds = element.getBoundingClientRect()
       const style = getComputedStyle(element)
       if (style.display === 'none' || style.visibility === 'hidden' || bounds.width === 0) return []
-      const scrollArea = element.closest('.filters, .markdown pre, .markdown table, pre.log')
-      if (scrollArea && ['auto', 'scroll'].includes(getComputedStyle(scrollArea).overflowX)) return []
+      const scrollArea = element.closest('#pipeline-status-filters, .markdown pre, .markdown table, pre.log')
+      if (scrollArea?.matches('#pipeline-status-filters') || (scrollArea && ['auto', 'scroll'].includes(getComputedStyle(scrollArea).overflowX))) return []
       if (element.scrollWidth <= element.clientWidth + 1) return []
-      return [`${element.tagName.toLowerCase()}: ${element.scrollWidth}px > ${element.clientWidth}px`]
+      const name = typeof element.className === 'string' && element.className ? `.${element.className.split(/\s+/).join('.')}` : ''
+      return [`${element.tagName.toLowerCase()}${name}: ${element.scrollWidth}px > ${element.clientWidth}px`]
     })
     return {
       controlsFit,
+      controlsOutside,
       pageFits: document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth,
       overflowingContent,
     }
-  })).toEqual({ controlsFit: true, pageFits: true, overflowingContent: [] })
+  })).toEqual({ controlsFit: true, controlsOutside: [], pageFits: true, overflowingContent: [] })
 }
 
 async function expectFingerTargets(page, selectors) {

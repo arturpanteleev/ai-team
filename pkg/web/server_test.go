@@ -1128,8 +1128,8 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 		controller.decision.ActorRole != "product_owner" {
 		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
-	if controller.decision.ControllerAuthenticated {
-		t.Fatal("unauthenticated local server must not mark a decision as controller-authenticated")
+	if !controller.decision.ControllerAuthenticated {
+		t.Fatal("authenticated local token decision must retain controller authorization provenance")
 	}
 }
 

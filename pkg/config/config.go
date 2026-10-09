@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -60,17 +61,48 @@ type Config struct {
 	Containment     *ContainmentConfig `yaml:"containment,omitempty"`
 	TreeHash        *TreeHashConfig    `yaml:"tree_hash,omitempty"`
 	Budget          *BudgetConfig      `yaml:"budget,omitempty"`
+	Usage           *UsageConfig       `yaml:"usage,omitempty"`
 	Redaction       *RedactionConfig   `yaml:"redaction,omitempty"`
 	Retention       *RetentionConfig   `yaml:"retention,omitempty"`
 }
 
-// BudgetConfig — глобальные жёсткие лимиты run (P1-7): total wall-time и
-// суммарное число попыток. Лимиты применяются ВСЕГДА (даже без секции —
-// канонические дефолты), это контракт: run не может превысить wall-time или
-// attempts бюджета.
+// BudgetConfig — лимит времени одного исполнения и суммарное число попыток
+// задачи. Время задачи может включать паузы между исполнениями, время ожидания
+// человека не расходует max_execution_time.
 type BudgetConfig struct {
+	MaxExecutionTime string `yaml:"max_execution_time,omitempty"`
+	// MaxWallTime is a backwards-compatible alias for MaxExecutionTime.
 	MaxWallTime string `yaml:"max_wall_time,omitempty"`
 	MaxAttempts int    `yaml:"max_attempts,omitempty"`
+}
+
+// UsageConfig enables an explicitly approximate allocation of a monthly
+// subscription across recorded runs. It is never an API price estimate.
+type UsageConfig struct {
+	MonthlySubscriptionAmount   float64 `yaml:"monthly_subscription_amount,omitempty"`
+	MonthlySubscriptionCurrency string  `yaml:"monthly_subscription_currency,omitempty"`
+}
+
+func (uc *UsageConfig) Validate() error {
+	if uc == nil {
+		return nil
+	}
+	amount := uc.MonthlySubscriptionAmount
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return fmt.Errorf("usage.monthly_subscription_amount должен быть конечным неотрицательным числом")
+	}
+	currency := uc.MonthlySubscriptionCurrency
+	if currency != "" {
+		if len(currency) != 3 {
+			return fmt.Errorf("usage.monthly_subscription_currency должен быть ISO-кодом из трёх заглавных букв")
+		}
+		for _, char := range currency {
+			if char < 'A' || char > 'Z' {
+				return fmt.Errorf("usage.monthly_subscription_currency должен быть ISO-кодом из трёх заглавных букв")
+			}
+		}
+	}
+	return nil
 }
 
 // Канонические дефолты бюджета (применяются при отсутствии явного budget).
@@ -79,17 +111,9 @@ const (
 	DefaultBudgetMaxAttempts = 100
 )
 
-// DefaultBudgetMaxWallTimeDuration — тот же дефолт в виде длительности.
-// Отдельная константа, а не ParseDuration в рантайме: строка нужна для
-// диагностики ("превышен max_wall_time 24h"), длительность — для таймера, и
-// расхождение между ними сторожит TestDefaultBudgetWallTimeConstantsAgree.
-//
-// Почему 24 часа. Внутри бюджета ждут не только агенты, но и человек: run
-// целиком (включая approval-гейты) исполняется под этим ctx, поэтому лимит
-// обязан переживать ночь между «запустил вечером» и «подтвердил утром».
-// Более тесный дефолт убивал бы живые run'ы, ожидающие оператора; 24 часа
-// ограничивают именно зависший run, который иначе бесконечно держит workspace
-// lock и candidate-worktree.
+// DefaultBudgetMaxWallTimeDuration is the default budget for one execution
+// invocation. A paused task gets a fresh execution budget when it resumes;
+// its overall elapsed time remains measured from original creation.
 const DefaultBudgetMaxWallTimeDuration = 24 * time.Hour
 
 // DefaultStageTimeout — бюджет одной стадии по умолчанию. То же значение,
@@ -142,25 +166,34 @@ func (c *Config) EffectiveDeliveryTimeout() time.Duration {
 	return duration
 }
 
-// EffectiveMaxWallTime возвращает wall-time лимит и его человекочитаемую
-// метку: явные или канонический дефолт. Нулевая длительность не возвращается
-// никогда — вызывающий вооружает таймер безусловно, иначе конфиг без секции
-// `budget` давал бы run без верхней границы времени вообще.
+// EffectiveMaxWallTime возвращает бюджет одного исполнения и его метку.
+// EffectiveMaxExecutionTime is the preferred name; this wrapper remains for
+// source compatibility with existing callers.
+func (bc *BudgetConfig) EffectiveMaxWallTime() (time.Duration, string) {
+	return bc.EffectiveMaxExecutionTime()
+}
+
+// EffectiveMaxExecutionTime returns the budget for one execution invocation.
+// Nona-positive durations never escape this helper: the caller always arms a
+// deadline, including when no budget section was configured.
 //
 // Непарсящееся или неположительное значение тоже даёт дефолт, а не ноль:
 // Validate отвергает такие конфиги до запуска, так что сюда они попадают
 // только программно, и падать в «без лимита» здесь опаснее, чем подставить
-// канонический. Метка при этом возвращается дефолтная — сообщать «превышен
-// max_wall_time <мусор>» при работающем 24-часовом таймере было бы ложью.
-func (bc *BudgetConfig) EffectiveMaxWallTime() (time.Duration, string) {
-	if bc == nil || strings.TrimSpace(bc.MaxWallTime) == "" {
+// канонический. Метка при этом возвращается дефолтная.
+func (bc *BudgetConfig) EffectiveMaxExecutionTime() (time.Duration, string) {
+	if bc == nil || (strings.TrimSpace(bc.MaxExecutionTime) == "" && strings.TrimSpace(bc.MaxWallTime) == "") {
 		return DefaultBudgetMaxWallTimeDuration, DefaultBudgetMaxWallTime
 	}
-	d, err := time.ParseDuration(bc.MaxWallTime)
+	value := bc.MaxExecutionTime
+	if strings.TrimSpace(value) == "" {
+		value = bc.MaxWallTime
+	}
+	d, err := time.ParseDuration(value)
 	if err != nil || d <= 0 {
 		return DefaultBudgetMaxWallTimeDuration, DefaultBudgetMaxWallTime
 	}
-	return d, bc.MaxWallTime
+	return d, value
 }
 
 // EffectiveMaxAttempts возвращает лимит попыток: явный или дефолт.
@@ -175,10 +208,16 @@ func (bc *BudgetConfig) Validate() error {
 	if bc == nil {
 		return nil
 	}
-	if bc.MaxWallTime != "" {
-		d, err := time.ParseDuration(bc.MaxWallTime)
+	if bc.MaxExecutionTime != "" && bc.MaxWallTime != "" {
+		return fmt.Errorf("budget.max_execution_time и устаревший max_wall_time нельзя задавать вместе")
+	}
+	for name, value := range map[string]string{"max_execution_time": bc.MaxExecutionTime, "max_wall_time": bc.MaxWallTime} {
+		if value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(value)
 		if err != nil || d <= 0 {
-			return fmt.Errorf("budget.max_wall_time %q не парсится (пример: 2h)", bc.MaxWallTime)
+			return fmt.Errorf("budget.%s %q не парсится (пример: 2h)", name, value)
 		}
 	}
 	if bc.MaxAttempts < 0 {
@@ -372,8 +411,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"stall_after": true, "stages": true, "returns": true,
 		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
-		"delivery_timeout": true, "containment": true, "tree_hash": true,
-		"budget": true, "redaction": true, "retention": true,
+		"delivery_timeout": true, "containment": true, "usage": true,
+		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -393,6 +432,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		PreflightTimeout string              `yaml:"preflight_timeout"`
 		DeliveryTimeout  string              `yaml:"delivery_timeout"`
 		Containment      *ContainmentConfig  `yaml:"containment"`
+		Usage            *UsageConfig        `yaml:"usage"`
 		TreeHash         *TreeHashConfig     `yaml:"tree_hash"`
 		Budget           *BudgetConfig       `yaml:"budget"`
 		Redaction        *RedactionConfig    `yaml:"redaction"`
@@ -420,6 +460,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Containment = raw.Containment
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
+	c.Usage = raw.Usage
 	c.Redaction = raw.Redaction
 	c.Retention = raw.Retention
 
@@ -771,6 +812,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if c.Budget != nil {
 		if err := c.Budget.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.Usage != nil {
+		if err := c.Usage.Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

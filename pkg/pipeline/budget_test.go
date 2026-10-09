@@ -1,14 +1,18 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
@@ -47,7 +51,7 @@ func TestRun_BudgetWallTime(t *testing.T) {
 	if err == nil {
 		t.Fatal("ожидалась бюджет-ошибка по wall-time")
 	}
-	if !strings.Contains(err.Error(), "run budget: превышен max_wall_time 200ms") {
+	if !strings.Contains(err.Error(), "run budget: превышен max_execution_time 200ms") {
 		t.Fatalf("ошибка бюджета не распознана: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
@@ -140,7 +144,7 @@ func TestRun_AttestedUsagePersisted(t *testing.T) {
 	if !envelope.UsageReported || envelope.TokensUnknown {
 		t.Fatalf("ожидали attested usage: %+v", envelope)
 	}
-	if envelope.TokensInput != 121 || envelope.TokensOutput != 27 || envelope.CostUSD != 1.35 {
+	if envelope.TokensInput != 121 || envelope.TokensOutput != 27 || envelope.CostUSD != 0 {
 		t.Fatalf("usage-значения: %+v", envelope)
 	}
 }
@@ -169,5 +173,147 @@ func TestRun_UnattestedUsageStaysUnknown(t *testing.T) {
 	}
 	if !envelope.TokensUnknown || envelope.UsageReported {
 		t.Fatalf("unattested usage не должен маркироваться reported: %+v", envelope)
+	}
+}
+
+func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"analyst":  {Attested: true, TokensInput: 5, TokensOutput: 2},
+		"reviewer": {Attested: true, TokensInput: 7, TokensOutput: 3},
+		"deployer": {Attested: true, TokensInput: 11, TokensOutput: 4},
+	}
+	cfg := cfgForGraph(nil,
+		config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}, config.AgentConfig{Name: "deployer"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "durable usage", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("first run should pause after analyst: result=%+v err=%v", first, err)
+	}
+	approve := func(approvalID string) time.Time {
+		t.Helper()
+		store, err := approval.NewStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending, err := store.Load(first.RunID, approvalID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decidedAt := time.Now().UTC()
+		decided, err := store.Decide(first.RunID, approvalID, approval.Decision{
+			ActorID: "operator-1", ActorRole: "operator", Action: "approve",
+			SubjectHash: pending.SubjectHash, DecidedAt: decidedAt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decided.ResolvedAt.IsZero() || !decided.ResolvedAt.Equal(decidedAt) {
+			t.Fatalf("approval did not preserve Decision.DecidedAt: %+v", decided)
+		}
+		time.Sleep(20 * time.Millisecond)
+		return decidedAt
+	}
+	firstDecisionAt := approve(required.ApprovalID)
+	reportsDir := filepath.Join(dir, ".ai-team", "reports", "feat")
+	if err := os.RemoveAll(reportsDir); err != nil {
+		t.Fatalf("remove derived report projection before first resume: %v", err)
+	}
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if !errors.As(err, &required) {
+		t.Fatalf("second execution should pause after reviewer: result=%+v err=%v", second, err)
+	}
+	secondDecisionAt := approve(required.ApprovalID)
+	if err := os.RemoveAll(reportsDir); err != nil {
+		t.Fatalf("remove derived report projection before second resume: %v", err)
+	}
+	third, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil || third.Outcome != "completed" {
+		t.Fatalf("third execution should finish: result=%+v err=%v", third, err)
+	}
+
+	runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+	raw, err := os.ReadFile(filepath.Join(runDir, "usage.json"))
+	if err != nil {
+		t.Fatalf("usage.json: %v", err)
+	}
+	var envelope metrics.UsageEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.TokensUnknown || !envelope.UsageReported || envelope.TokensInput != 23 || envelope.TokensOutput != 9 {
+		t.Fatalf("two-pause totals were lost or double-counted: %+v", envelope)
+	}
+	var manifestStartedAt time.Time
+	manifestRaw, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest evidence.RunManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifestStartedAt = manifest.StartedAt
+	if !envelope.StartedAt.Equal(manifestStartedAt) || envelope.TotalDurationMS < 30 {
+		t.Fatalf("task duration must start at original creation and include pauses: envelope=%+v manifest=%s", envelope, manifestStartedAt)
+	}
+	attemptEntries, err := os.ReadDir(filepath.Join(runDir, "attempts"))
+	if err != nil || len(attemptEntries) != 3 {
+		t.Fatalf("expected three durable attempts: entries=%d err=%v", len(attemptEntries), err)
+	}
+	var inputTotal, outputTotal int64
+	for _, entry := range attemptEntries {
+		data, err := os.ReadFile(filepath.Join(runDir, "attempts", entry.Name(), "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var attempt evidence.AttemptManifest
+		if err := json.Unmarshal(data, &attempt); err != nil {
+			t.Fatal(err)
+		}
+		if attempt.Usage == nil || !attempt.Usage.Attested {
+			t.Fatalf("attempt %s did not persist attested usage: %+v", entry.Name(), attempt.Usage)
+		}
+		stageHTML, err := os.ReadFile(filepath.Join(reportsDir, "attempts", entry.Name(), "index.html"))
+		if err != nil {
+			t.Fatalf("restored stage report for %s: %v", entry.Name(), err)
+		}
+		for _, artifact := range map[string][]string{
+			"analyst":  {"task.md", "proposal.md"},
+			"reviewer": {"proposal.md", "review.md"},
+			"deployer": {"review.md"},
+		}[attempt.Stage] {
+			if !strings.Contains(string(stageHTML), artifact) {
+				t.Fatalf("restored report for %s is missing manifest artifact %s", attempt.Stage, artifact)
+			}
+		}
+		finalHTML, err := os.ReadFile(filepath.Join(reportsDir, "index.html"))
+		if err != nil {
+			t.Fatalf("final report: %v", err)
+		}
+		if !strings.Contains(string(finalHTML), entry.Name()) {
+			t.Fatalf("final report does not link restored attempt %s", entry.Name())
+		}
+		inputTotal += attempt.Usage.TokensInput
+		outputTotal += attempt.Usage.TokensOutput
+	}
+	if inputTotal != envelope.TokensInput || outputTotal != envelope.TokensOutput {
+		t.Fatalf("manifest sum does not equal run envelope: attempts=%d/%d envelope=%d/%d", inputTotal, outputTotal, envelope.TokensInput, envelope.TokensOutput)
+	}
+	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisionEvents []time.Time
+	for _, event := range events {
+		if event.Type == "approval_decided" {
+			decisionEvents = append(decisionEvents, event.Timestamp)
+		}
+	}
+	if len(decisionEvents) != 2 || !decisionEvents[0].Equal(firstDecisionAt) || !decisionEvents[1].Equal(secondDecisionAt) {
+		t.Fatalf("approval event times must match human decisions, got %v want %v, %v", decisionEvents, firstDecisionAt, secondDecisionAt)
 	}
 }

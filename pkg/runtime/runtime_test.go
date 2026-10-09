@@ -26,6 +26,17 @@ func TestCheckCLI_OpenCodeNotFound(t *testing.T) {
 	}
 }
 
+func TestAgentCLIExecutionClearsPreviousUsageOnFailedOpenCode(t *testing.T) {
+	r := &AgentCLIRuntime{lastUsage: &Usage{Attested: true, TokensInput: 123}}
+	missingOpenCode := filepath.Join(t.TempDir(), "opencode")
+	if err := r.Execute(context.Background(), &Agent{CLI: missingOpenCode}, &Task{}, nil); err == nil {
+		t.Fatal("expected missing OpenCode executable error")
+	}
+	if usage := r.Usage(); usage != nil {
+		t.Fatalf("missing OpenCode usage must not inherit stale tokens: %+v", usage)
+	}
+}
+
 func TestNewRuntime(t *testing.T) {
 	r, err := NewRuntime("agentcli")
 	if err != nil {

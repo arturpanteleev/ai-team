@@ -23,9 +23,11 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
+	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
@@ -325,6 +327,7 @@ type runState struct {
 	deferredDelivery          *deferredDelivery
 	budgetConfig              *config.BudgetConfig
 	usageTotal                runtime.Usage
+	usageUnknown              bool
 	attestationDigest         string
 }
 
@@ -537,6 +540,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 
 	runStartedAt := time.Now().UTC()
+	taskCreatedAt := runStartedAt
 	runID := runCfg.RunID
 	if runID == "" {
 		runID, err = evidence.NewRunID(runStartedAt)
@@ -611,6 +615,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
 		}
+		taskCreatedAt = manifest.StartedAt
+		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
+			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
+		}
 		if resumedState.Phase == lifecycle.PhaseRunning {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
@@ -664,7 +672,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if resumedApproval != nil {
 			if err := evidenceStore.Append(evidence.Event{
 				Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
-				Timestamp: runStartedAt, Data: approvalEventData(*resumedApproval),
+				Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
 			}); err != nil {
 				return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
 			}
@@ -832,10 +840,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("report path %s должен быть каталогом без symlink", featureReports)
 			}
-			// Live reports are a replaceable projection; previous versions remain
-			// available in their immutable run directories.
-			if err := os.RemoveAll(featureReports); err != nil {
-				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("clear live report projection: %w", err)
+			// New runs replace this projection. Resumes keep it because earlier
+			// attempt pages are still linked from the final report.
+			if runCfg.ResumeRunID == "" {
+				if err := os.RemoveAll(featureReports); err != nil {
+					return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("clear live report projection: %w", err)
+				}
 			}
 		} else if !os.IsNotExist(statErr) {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, statErr
@@ -870,8 +880,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return copy
 		}(),
-		results:             replayedStageResults(replayedRun),
-		startTime:           runStartedAt,
+		startTime:           taskCreatedAt,
 		approvedPlanHash:    runCfg.ApprovePlanHash,
 		approvePlanExplicit: approvePlanExplicit,
 		runID:               runID,
@@ -889,6 +898,24 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		sourceTarget:        sourceTarget,
 		budgetConfig:        p.cfg.Budget,
 	}
+	if runCfg.ResumeRunID != "" {
+		var usage runtime.Usage
+		rs.results, usage, rs.usageUnknown, err = replayedStageResults(replayedRun, evidenceStore.RunDir(), p.attemptManifestSource, p.reg)
+		if err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume attempt manifests: %w", err)
+		}
+		rs.usageTotal = usage
+		// Preserve historical attempt pages across pauses and rebuild them from
+		// the immutable manifest, so report links remain populated after resume.
+		for _, previous := range rs.results {
+			if previous.FinishedAt.IsZero() {
+				continue
+			}
+			if reportErr := report.GenerateStageReport(rs.reportsDir, runCfg.Feature, previous.AttemptID, previous, rs.task.ArtifactRoot); reportErr != nil {
+				logging.Printf("warning: restore report for attempt %s: %v", previous.AttemptID, reportErr)
+			}
+		}
+	}
 	if len(resumeInvalidated) > 0 {
 		rs.loopbackCycles = 1
 	}
@@ -899,18 +926,18 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	rs.task.ConsoleOut = rs.ps.StatusWriter()
 	if p.recorder != nil {
 		snapshot, _ := yaml.Marshal(p.cfg)
-		p.recorder.ReconcileInterrupted(rs.startTime)
+		p.recorder.ReconcileInterrupted(runStartedAt)
 		if rs.resumed {
-			p.recorder.RunResumed(runID, rs.startTime)
+			p.recorder.RunResumed(runID, runStartedAt)
 			if resumedApproval != nil {
 				p.recorder.ApprovalDecided(runID, resumedApproval.ID, resumedApproval.AttemptID,
-					rs.startTime, approvalEventData(*resumedApproval))
+					approvalDecisionTimestamp(*resumedApproval), approvalEventData(*resumedApproval))
 				if resumedTransitionData != nil {
-					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, rs.startTime, resumedTransitionData)
+					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, runStartedAt, resumedTransitionData)
 				}
 			}
 			if len(resumeInvalidated) > 0 {
-				p.recorder.AttemptsInvalidated(runID, resumeInvalidated, rs.startTime)
+				p.recorder.AttemptsInvalidated(runID, resumeInvalidated, runStartedAt)
 			}
 		} else {
 			p.recorder.RunStarted(runID, runCfg.Feature, string(snapshot), rs.startTime)
@@ -1005,12 +1032,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 	}
 
-	// P1-7: жёсткий wall-time бюджет run'а (всегда, default 24h) поверх
-	// per-stage timeout-ов. Превышение → остановка run с явной причиной.
-	// Ветки «без бюджета» здесь нет намеренно: EffectiveMaxWallTime всегда
-	// возвращает положительную длительность, и отсутствие секции `budget`
-	// в конфиге не должно давать run без верхней границы времени (QS-09).
-	budgetDur, budgetStr := rs.budgetConfig.EffectiveMaxWallTime()
+	// Wall-time бюджет применяется к этому вызову RunWithResult. Пауза
+	// завершает вызов; последующий resume получает отдельный полный бюджет.
+	// Длительность задачи независимо считается от taskCreatedAt.
+	budgetDur, budgetStr := rs.budgetConfig.EffectiveMaxExecutionTime()
 	budgetCtx, cancel := context.WithTimeout(ctx, budgetDur)
 	defer cancel()
 	runErr := rs.execute(budgetCtx)
@@ -1018,9 +1043,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	// возвращают ErrStageTimeout (не wrapping context.DeadlineExceeded) и
 	// до этой ветки не доходят — остаются resumable, а не терминал-бюджет.
 	// ctx.Err() == nil отделяет наш дедлайн от дедлайна вызывающего: чужой
-	// таймаут не должен рапортоваться как превышение max_wall_time.
+	// таймаут не должен рапортоваться как превышение max_execution_time.
 	if errors.Is(runErr, context.DeadlineExceeded) && ctx.Err() == nil {
-		runErr = fmt.Errorf("run budget: превышен max_wall_time %s", budgetStr)
+		runErr = fmt.Errorf("run budget: превышен max_execution_time %s", budgetStr)
 	}
 	outcome, finalErr := rs.finalize(runErr)
 	if finalErr != nil {

@@ -5,6 +5,7 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"math"
 	"text/tabwriter"
 	"time"
 
@@ -25,6 +26,7 @@ type StageMetrics struct {
 // Attested=true фиксирует этот источник аттестации.
 type Usage struct {
 	Attested     bool    `json:"attested"`
+	Unknown      bool    `json:"unknown,omitempty"`
 	TokensInput  int64   `json:"tokens_input,omitempty"`
 	TokensOutput int64   `json:"tokens_output,omitempty"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`
@@ -75,6 +77,12 @@ func Build(runID, feature string, startedAt, finishedAt time.Time, results []wor
 	if !startedAt.IsZero() && !finishedAt.IsZero() && !finishedAt.Before(startedAt) {
 		total = finishedAt.Sub(startedAt).Milliseconds()
 	}
+	tokensInput, tokensOutput, costUSD := usage.TokensInput, usage.TokensOutput, usage.CostUSD
+	if !usage.Attested || usage.Unknown {
+		// An incomplete aggregate is not a zero-token total. Omit its counters
+		// so downstream readers cannot mistake a partial sum for the full run.
+		tokensInput, tokensOutput, costUSD = 0, 0, 0
+	}
 	envelope := UsageEnvelope{
 		SchemaVersion:   SchemaVersion,
 		RunID:           runID,
@@ -84,11 +92,11 @@ func Build(runID, feature string, startedAt, finishedAt time.Time, results []wor
 		TotalDurationMS: total,
 		Stages:          stages,
 		LoopbackCycles:  loopbackCycles,
-		TokensUnknown:   !usage.Attested,
+		TokensUnknown:   !usage.Attested || usage.Unknown,
 		UsageReported:   usage.Attested,
-		TokensInput:     usage.TokensInput,
-		TokensOutput:    usage.TokensOutput,
-		CostUSD:         usage.CostUSD,
+		TokensInput:     tokensInput,
+		TokensOutput:    tokensOutput,
+		CostUSD:         costUSD,
 		Outcome:         outcome,
 	}
 	return envelope
@@ -101,6 +109,45 @@ func (e UsageEnvelope) TotalAttempts() int {
 		total += stage.Attempts
 	}
 	return total
+}
+
+// EstimateSubscriptionShare distributes an explicitly configured monthly
+// subscription amount across recorded runs in the same UTC month, in
+// proportion to their attested input+output tokens. It returns unavailable
+// when any required usage input is unknown or the recorded token denominator
+// is empty. The result is an estimate, never an API price.
+func EstimateSubscriptionShare(monthlyAmount float64, run UsageEnvelope, recorded []UsageEnvelope) (float64, bool) {
+	if monthlyAmount <= 0 || math.IsNaN(monthlyAmount) || math.IsInf(monthlyAmount, 0) || run.TokensUnknown || !run.UsageReported {
+		return 0, false
+	}
+	month := run.FinishedAt.UTC().Format("2006-01")
+	var totalTokens int64
+	var selectedTokens int64
+	foundRun := false
+	for _, envelope := range recorded {
+		if envelope.FinishedAt.IsZero() || envelope.FinishedAt.UTC().Format("2006-01") != month {
+			continue
+		}
+		if envelope.TokensUnknown || !envelope.UsageReported {
+			return 0, false
+		}
+		if envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {
+			return 0, false
+		}
+		tokens := envelope.TokensInput + envelope.TokensOutput
+		if tokens < 0 || totalTokens > math.MaxInt64-tokens {
+			return 0, false
+		}
+		totalTokens += tokens
+		if envelope.RunID == run.RunID {
+			selectedTokens = tokens
+			foundRun = true
+		}
+	}
+	if !foundRun || totalTokens == 0 {
+		return 0, false
+	}
+	return monthlyAmount * float64(selectedTokens) / float64(totalTokens), true
 }
 
 // Format печатает envelope как читаемую таблицу (этап, попытки, время).

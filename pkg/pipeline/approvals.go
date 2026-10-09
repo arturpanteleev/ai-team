@@ -262,6 +262,22 @@ func approvalEventData(value approval.PendingApproval) map[string]any {
 	return normalized
 }
 
+// approvalDecisionTimestamp returns the time of the decision that completed
+// the quorum. It deliberately does not use the later resume time: those are
+// distinct moments when an operator decides before a worker resumes.
+func approvalDecisionTimestamp(value approval.PendingApproval) time.Time {
+	var latest time.Time
+	for _, decision := range value.Decisions {
+		if decision.DecidedAt.After(latest) {
+			latest = decision.DecidedAt
+		}
+	}
+	if !latest.IsZero() {
+		return latest.UTC()
+	}
+	return value.ResolvedAt.UTC()
+}
+
 func isApprovedSpecPayload(payload json.RawMessage) bool {
 	var value struct {
 		Kind string `json:"kind"`

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/ciimport"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
-	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
@@ -128,7 +128,7 @@ func printUsage() {
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list [--target <path>]   Список доступных агентов
   ai-team ci-import                Импортировать объяснимый набор checks из project CI
-  ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
+  ai-team usage <run_id>           Токены и приблизительная доля подписки завершённого run
   ai-team redact verify|scan|redact   P1-6 redaction-контракт: сеcrets-скан evidence,
                                    verify (fail-closed для экспорта) или detached-копия
                                    с заменой секретов на [REDACTED:...]
@@ -1567,39 +1567,97 @@ func cmdUsage() {
 	} else if err != nil {
 		fatal("Не удалось прочитать usage: %v", err)
 	}
-	logging.Printf("Run:      %s\n", envelope.RunID)
-	logging.Printf("Feature:  %s\n", envelope.Feature)
-	logging.Printf("Outcome:  %s\n", envelope.Outcome)
-	logging.Printf("Период:   %s → %s\n",
-		envelope.StartedAt.Format(time.RFC3339), envelope.FinishedAt.Format(time.RFC3339))
-	logging.Printf("Loopback: %d\n", envelope.LoopbackCycles)
-	tokens := "unknown"
-	if !envelope.TokensUnknown {
-		tokens = "known"
+	lines := make([]string, 0, 4)
+	if envelope.TokensUnknown {
+		lines = append(lines, "Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных")
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("Входные токены: %d", envelope.TokensInput),
+			fmt.Sprintf("Выходные токены: %d", envelope.TokensOutput),
+			fmt.Sprintf("Всего токенов: %d", envelope.TokensInput+envelope.TokensOutput),
+		)
 	}
-	logging.Printf("Токены:   %s\n\n", tokens)
-	// Containment receipt (V0-P1-4) — если присутствует.
-	receipt, receiptErr := containment.ControllerReceiptStore{TargetDir: absolute}.Read(runID)
-	if errors.Is(receiptErr, os.ErrNotExist) {
-		cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20)
-		if cerr == nil {
-			receiptErr = json.Unmarshal(cdata, &receipt)
-		} else {
-			receiptErr = cerr
-		}
-	}
-	if receiptErr == nil {
-		logging.Printf("Containment (%s):\n", receipt.Profile)
-		for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
-			logging.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
-		}
-		fmt.Println()
-	} else if !errors.Is(receiptErr, os.ErrNotExist) {
-		fatal("Повреждённый containment receipt: %v", receiptErr)
-	}
-	if err := envelope.Format(os.Stdout); err != nil {
+	lines = append(lines, fmt.Sprintf("Доля подписки (приблизительно): %s", approximateSubscriptionShare(absolute, envelope)))
+	if _, err := io.WriteString(os.Stdout, strings.Join(lines, "\n")+"\n"); err != nil {
 		fatal("Ошибка вывода usage: %v", err)
 	}
+}
+
+func approximateSubscriptionShare(target string, run metrics.UsageEnvelope) string {
+	cfg, err := config.Load(filepath.Join(target, ".ai-team", "config.yaml"))
+	if err != nil || cfg.Usage == nil || cfg.Usage.Validate() != nil || cfg.Usage.MonthlySubscriptionAmount <= 0 {
+		return "оценка недоступна"
+	}
+	recorded, complete := recordedUsageEnvelopes(target)
+	if !complete {
+		return "оценка недоступна"
+	}
+	share, ok := metrics.EstimateSubscriptionShare(cfg.Usage.MonthlySubscriptionAmount, run, recorded)
+	if !ok {
+		return "оценка недоступна"
+	}
+	currency := cfg.Usage.MonthlySubscriptionCurrency
+	if currency == "" {
+		currency = "USD"
+	}
+	return fmt.Sprintf("≈ %.2f %s", share, currency)
+}
+
+func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
+	runsDir := filepath.Join(target, ".ai-team", "runs")
+	entries, err := os.ReadDir(runsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, true
+	}
+	if err != nil {
+		return nil, false
+	}
+	var envelopes []metrics.UsageEnvelope
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "." || entry.Name() == ".." {
+			continue
+		}
+		runID := entry.Name()
+		reserved, reserveErr := metrics.UsageEnvelopeReservation(target, runID)
+		if reserveErr != nil {
+			return nil, false
+		}
+		var envelope metrics.UsageEnvelope
+		if reserved {
+			envelope, err = metrics.ReadUsageEnvelope(target, runID)
+		} else {
+			envelope, err = readLocalUsageEnvelope(target, runID)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			// Without an envelope we cannot know whether this run belongs in
+			// the current monthly denominator, so never publish a partial-share
+			// estimate from the remaining recorded runs.
+			return nil, false
+		}
+		if err != nil {
+			return nil, false
+		}
+		envelopes = append(envelopes, envelope)
+	}
+	return envelopes, true
+}
+
+func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error) {
+	path := filepath.Join(target, ".ai-team", "runs", runID, "usage.json")
+	data, err := safeio.ReadRegularFile(path, 8<<20)
+	if err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var envelope metrics.UsageEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	if err := metrics.ValidateUsageEnvelope(runID, envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	return envelope, nil
 }
 
 func cmdList() {

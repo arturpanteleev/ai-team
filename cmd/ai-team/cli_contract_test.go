@@ -486,10 +486,68 @@ func TestUsageCommandContract(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("ожидался exit 0, получен %d; stderr: %s", code, stderr)
 		}
-		for _, expected := range []string{"fixture-feature", "completed", "coder", "Loopback: 1"} {
+		for _, expected := range []string{
+			"Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных",
+			"Доля подписки (приблизительно): оценка недоступна",
+		} {
 			if !strings.Contains(stdout, expected) {
 				t.Fatalf("usage-сводка должна содержать %q:\n%s", expected, stdout)
 			}
+		}
+		for _, noisy := range []string{"Loopback", "Containment", "Попытки", "unknown"} {
+			if strings.Contains(stdout, noisy) {
+				t.Fatalf("usage output contains unrelated counter %q:\n%s", noisy, stdout)
+			}
+		}
+	})
+
+	t.Run("known token totals and approximate subscription allocation", func(t *testing.T) {
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		writeEnvelope := func(runID string, input, output int64) {
+			runDir := filepath.Join(estimateRoot, ".ai-team", "runs", runID)
+			if err := os.MkdirAll(runDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.UsageEnvelope{
+				SchemaVersion: metrics.SchemaVersion, RunID: runID, Feature: "fixture-feature",
+				StartedAt: started, FinishedAt: started.Add(time.Minute), TokensInput: input,
+				TokensOutput: output, UsageReported: true, Outcome: "completed",
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeEnvelope("known", 40, 60)
+		writeEnvelope("peer", 200, 300)
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 4\npipeline: []\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, "known")
+		if code != 0 {
+			t.Fatalf("known usage failed: code=%d stderr=%s", code, stderr)
+		}
+		for _, expected := range []string{
+			"Входные токены: 40", "Выходные токены: 60", "Всего токенов: 100",
+			"Доля подписки (приблизительно): ≈ 8.33 USD",
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("usage output missing %q:\n%s", expected, stdout)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(estimateRoot, ".ai-team", "runs", "missing-usage"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr = runCLI(t, "usage", "--target", estimateRoot, "known")
+		if code != 0 {
+			t.Fatalf("known usage with incomplete monthly inputs failed: code=%d stderr=%s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("incomplete monthly usage inputs must disable the estimate:\n%s", stdout)
 		}
 	})
 

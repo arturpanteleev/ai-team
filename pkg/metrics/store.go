@@ -268,8 +268,14 @@ func ValidateUsageEnvelope(runID string, envelope UsageEnvelope) error {
 	if envelope.TotalDurationMS < 0 || envelope.LoopbackCycles < 0 || envelope.TokensInput < 0 || envelope.TokensOutput < 0 || math.IsNaN(envelope.CostUSD) || math.IsInf(envelope.CostUSD, 0) || envelope.CostUSD < 0 {
 		return errors.New("usage envelope contains invalid aggregate values")
 	}
-	if envelope.TokensUnknown && envelope.UsageReported {
-		return errors.New("usage envelope token attestation flags conflict")
+	if envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {
+		return errors.New("usage envelope token total overflows")
+	}
+	if !envelope.TokensUnknown && !envelope.UsageReported {
+		return errors.New("usage envelope cannot claim known tokens without an attested report")
+	}
+	if envelope.TokensUnknown && (envelope.TokensInput != 0 || envelope.TokensOutput != 0) {
+		return errors.New("usage envelope cannot publish partial token sums as a total")
 	}
 	for _, stage := range envelope.Stages {
 		if strings.TrimSpace(stage.Stage) == "" || stage.Attempts < 0 || stage.DurationMS < 0 {

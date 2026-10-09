@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -243,22 +245,73 @@ func graphTerminalError(target, stage string, cause error) error {
 	}
 }
 
-func replayedStageResults(run evidence.ReplayedRun) []notifier.StageResult {
+func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry) ([]notifier.StageResult, runtime.Usage, bool, error) {
 	results := make([]notifier.StageResult, 0, len(run.Attempts))
+	var usage runtime.Usage
+	usageUnknown := false
 	for _, attempt := range run.Attempts {
 		var attemptErr error
 		if attempt.Error != "" {
 			attemptErr = errors.New(attempt.Error)
 		}
-		results = append(results, notifier.StageResult{
+		result := notifier.StageResult{
 			RunID: run.RunID, AttemptID: attempt.AttemptID, Name: attempt.Stage,
 			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
 			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
 			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
 			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded,
-		})
+		}
+		usageRecordPresent := false
+		if attempt.ManifestSHA256 != "" {
+			_, manifest, err := evidence.ReadAttemptManifest(source, runDir, run.RunID, attempt.AttemptID)
+			if err != nil {
+				return nil, runtime.Usage{}, false, fmt.Errorf("read attempt %s manifest: %w", attempt.AttemptID, err)
+			}
+			result.Checks = append(result.Checks, manifest.Checks...)
+			result.Usage = manifest.Usage
+			usageRecordPresent = manifest.Usage != nil
+			for _, input := range manifest.Inputs {
+				result.Inputs = append(result.Inputs, workflow.Artifact{Name: input.Name, Path: input.SourcePath, Size: input.Size})
+			}
+			for _, output := range manifest.Outputs {
+				result.Outputs = append(result.Outputs, workflow.Artifact{Name: output.Name, Path: output.SourcePath, Size: output.Size})
+			}
+			// Count model work even when a later loopback invalidated the attempt.
+			if manifest.Usage != nil && manifest.Usage.Attested {
+				usage.Attested = true
+				if usage.TokensInput > math.MaxInt64-manifest.Usage.TokensInput || usage.TokensOutput > math.MaxInt64-manifest.Usage.TokensOutput {
+					usageUnknown = true
+				} else {
+					usage.TokensInput += manifest.Usage.TokensInput
+					usage.TokensOutput += manifest.Usage.TokensOutput
+				}
+			} else if manifest.Usage != nil {
+				usageUnknown = true
+			}
+		}
+		if !usageRecordPresent && attempt.State.Execution != workflow.ExecutionPending && attempt.State.Execution != workflow.ExecutionRunning {
+			// Pre-B-51 manifests have no usage field. A completed model attempt
+			// from that format cannot be treated as a zero-token invocation.
+			definition, err := registry.Load(attempt.Stage)
+			if err != nil {
+				return nil, runtime.Usage{}, false, fmt.Errorf("load historical stage %s: %w", attempt.Stage, err)
+			}
+			if definition.Kind != "delivery" {
+				usageUnknown = true
+			}
+		}
+		if attempt.FinishedAt.IsZero() {
+			definition, err := registry.Load(attempt.Stage)
+			if err != nil {
+				return nil, runtime.Usage{}, false, fmt.Errorf("load interrupted stage %s: %w", attempt.Stage, err)
+			}
+			if definition.Kind != "delivery" {
+				usageUnknown = true
+			}
+		}
+		results = append(results, result)
 	}
-	return results
+	return results, usage, usageUnknown, nil
 }
 
 func indexOf(values []string, expected string) int {

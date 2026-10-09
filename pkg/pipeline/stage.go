@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +65,8 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		StartedAt:   stageStart.UTC(),
 	}
 	var evidenceInputs []evidence.Artifact
+	modelAttempt := false
+	executionInvoked := false
 	cleanupEvidenceInputs := func() error { return nil }
 	fail := func(err error) notifier.StageResult {
 		r.Err = err
@@ -82,6 +85,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		r.Duration = r.FinishedAt.Sub(r.StartedAt)
 		r.Summary = report.ReadStageSummary(rs.task.ArtifactRoot, rs.runCfg.Feature, name)
 		rs.deriveStageState(&r)
+		if modelAttempt && !executionInvoked {
+			// This attempt failed before the runtime was invoked, so its known
+			// token usage is zero rather than missing.
+			r.Usage = &workflow.AttemptUsage{Attested: true}
+			rs.usageTotal.Attested = true
+		}
 		manifest := evidence.AttemptManifest{
 			AttemptID: attemptID, Stage: name, StageIndex: i + 1,
 			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
@@ -91,6 +100,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			Mutations:       append([]string(nil), r.Mutations...),
 			MutationChanges: append([]workflow.MutationChange(nil), r.MutationChanges...),
 			Delivery:        r.Delivery,
+			Usage:           r.Usage,
 		}
 		if r.Err != nil {
 			manifest.Error = r.Err.Error()
@@ -156,6 +166,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(fmt.Errorf("ошибка загрузки агента %s: %w", name, err))
 	}
+	modelAttempt = a.Kind != "delivery"
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
 		agentCfg = &config.AgentConfig{Name: name}
@@ -263,10 +274,34 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}()
 
 	var execErr error
+	executionInvoked = true
 	if a.Kind == "delivery" {
 		execErr = rs.writeDeliveryPlan(stageCtx, a, preconditions)
 	} else {
 		execErr = stageRuntime.Execute(stageCtx, runtimeAgent, rs.task, inputs)
+	}
+	// Persist reported usage before interpreting the execution result so that
+	// interrupted or failed model invocations still contribute their attested
+	// tokens to the durable per-attempt record.
+	if stageRuntime != nil {
+		r.Usage = &workflow.AttemptUsage{}
+		reported := false
+		if reporter, ok := stageRuntime.(runtime.UsageReporter); ok {
+			if u := reporter.Usage(); u != nil && u.Attested && u.TokensInput >= 0 && u.TokensOutput >= 0 {
+				r.Usage = &workflow.AttemptUsage{Attested: true, TokensInput: u.TokensInput, TokensOutput: u.TokensOutput}
+				reported = true
+				rs.usageTotal.Attested = true
+				if rs.usageTotal.TokensInput > math.MaxInt64-u.TokensInput || rs.usageTotal.TokensOutput > math.MaxInt64-u.TokensOutput {
+					rs.usageUnknown = true
+				} else {
+					rs.usageTotal.TokensInput += u.TokensInput
+					rs.usageTotal.TokensOutput += u.TokensOutput
+				}
+			}
+		}
+		if !reported {
+			rs.usageUnknown = true
+		}
 	}
 	// BLOCKED имеет приоритет над ошибкой выполнения и проверкой выходов:
 	// заблокированный агент по контракту не создаёт обычных артефактов.
@@ -317,17 +352,6 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(fmt.Errorf("этап %s превысил таймаут %s: %w", name, timeout, context.DeadlineExceeded))
 		}
 		return fail(execErr)
-	}
-
-	// P1-7: usage принимается ТОЛЬКО от attested adapter (runtime.UsageReporter);
-	// бакетускается в общий usage envelope run'а.
-	if reporter, ok := stageRuntime.(runtime.UsageReporter); ok {
-		if u := reporter.Usage(); u != nil && u.Attested {
-			rs.usageTotal.Attested = true
-			rs.usageTotal.TokensInput += u.TokensInput
-			rs.usageTotal.TokensOutput += u.TokensOutput
-			rs.usageTotal.CostUSD += u.CostUSD
-		}
 	}
 
 	outputs, err := rs.collectOutputs(a, name)

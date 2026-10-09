@@ -44,12 +44,17 @@ action и quorum validation, что CLI decision. В cloud mode actor identity �
 - **ТОГДА** это значение MUST NOT попасть в audit decision
 
 ### Requirement: Local write protection
-Каждый web write request MUST пройти session и CSRF validation поверх
-loopback Host/Origin policy.
+Каждый web write request MUST пройти bearer authentication, session и CSRF
+validation поверх loopback Host/Origin policy. Сервер с отключённым
+authenticator MUST отклонять write request с `401`.
 
 #### Scenario: Нет session
 - **КОГДА** write request не содержит выданную server-ом session-cookie
 - **ТОГДА** API MUST вернуть 401
+
+#### Scenario: Локальный токен отсутствует или неверен
+- **КОГДА** local write request не содержит действующий Bearer token
+- **ТОГДА** API MUST вернуть 401 без изменения состояния
 
 #### Scenario: Нет CSRF
 - **КОГДА** session валидна, но CSRF header отсутствует или неверен

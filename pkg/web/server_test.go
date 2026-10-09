@@ -801,7 +801,17 @@ func newTestServer(t *testing.T) (*Server, string) {
 
 func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *http.Request {
 	t.Helper()
+	const testLocalToken = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	if srv.authenticator == nil {
+		verifier, err := NewLocalAuthenticator(testLocalToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.authenticator = verifier
+		srv.localAuth = true
+	}
 	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	sessionRequest.Header.Set("Authorization", "Bearer "+testLocalToken)
 	sessionWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(sessionWriter, sessionRequest)
 	if sessionWriter.Code != http.StatusOK {
@@ -870,12 +880,61 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
 	sessionWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	if sessionWriter.Code != http.StatusUnauthorized {
+		t.Fatalf("session bootstrap without authenticator: %d %s", sessionWriter.Code, sessionWriter.Body.String())
+	}
 	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
-	noCSRF.AddCookie(sessionWriter.Result().Cookies()[0])
+	noCSRF.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "forged-session"})
+	noCSRF.Header.Set("X-CSRF-Token", "forged-csrf")
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, noCSRF)
-	if writer.Code != http.StatusForbidden {
-		t.Fatalf("без CSRF: %d", writer.Code)
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("без authenticator и bearer token: %d", writer.Code)
+	}
+}
+
+func TestLocalWebTokenIsRequiredAndApprovalRoleComesFromServer(t *testing.T) {
+	const token = "local-web-token-for-tests-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-local", RunID: "run-local", AttemptID: "attempt-local",
+		Status: approval.StatusPending, RequiredRoles: []string{"reviewer"},
+		Actions: []string{"approve"}, SubjectHash: testSubjectHash,
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	withoutToken := newLoopbackRequest(http.MethodPost, "/api/runs/run-local/approvals/approval-local/decisions", strings.NewReader(`{"action":"approve"}`))
+	unauthenticated := httptest.NewRecorder()
+	srv.router.ServeHTTP(unauthenticated, withoutToken)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("write without token must be rejected: %d %s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+
+	invalidLogin := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	invalidLogin.Header.Set("Authorization", "Bearer invalid-local-token")
+	invalidResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(invalidResponse, invalidLogin)
+	if invalidResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid local token must be rejected: %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+
+	request := authenticatedRequest(t, srv, token, http.MethodPost,
+		"/api/runs/run-local/approvals/approval-local/decisions",
+		`{"actor_id":"spoofed","actor_role":"release_manager","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("local decision: %d %s", response.Code, response.Body.String())
+	}
+	if controller.decision.ActorID != "local-user" || controller.decision.ActorRole != "reviewer" {
+		t.Fatalf("local identity and role must come from server: %+v", controller.decision)
 	}
 }
 
@@ -1032,7 +1091,8 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, decision)
 	if writer.Code != http.StatusOK || controller.runID != "run-1" ||
-		controller.approvalID != "approval-1" || controller.decision.ActorID != "user-1" {
+		controller.approvalID != "approval-1" || controller.decision.ActorID != "local-user" ||
+		controller.decision.ActorRole != "product_owner" {
 		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
 	if controller.decision.ControllerAuthenticated {
@@ -1161,18 +1221,18 @@ func TestSpecificationApprovalRequiresProductOwnerRoleAndPayload(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 	endpoint := "/api/runs/run-1/approvals/approval-spec/decisions"
-	nonProductOwner := authorizedRequest(t, srv, "POST", endpoint,
+	spoofedRole := authorizedRequest(t, srv, "POST", endpoint,
 		`{"actor_id":"user-1","actor_role":"qa","action":"approve_spec","subject_hash":"`+testSubjectHash+`"}`)
 	writer := httptest.NewRecorder()
-	srv.router.ServeHTTP(writer, nonProductOwner)
-	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
-		t.Fatalf("approve_spec должен быть запрещён другой роли: code=%d controller=%+v", writer.Code, controller)
+	srv.router.ServeHTTP(writer, spoofedRole)
+	if writer.Code != http.StatusOK || controller.decision.ActorRole != "product_owner" || controller.decision.ActorID != "local-user" {
+		t.Fatalf("local server must ignore spoofed actor and assign Product Owner: code=%d controller=%+v", writer.Code, controller)
 	}
 	legacyAction := authorizedRequest(t, srv, "POST", endpoint,
 		`{"actor_id":"user-1","actor_role":"qa","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, legacyAction)
-	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
+	if writer.Code != http.StatusForbidden {
 		t.Fatalf("Product Owner role check нельзя обойти общим approve action: code=%d controller=%+v", writer.Code, controller)
 	}
 	productOwner := authorizedRequest(t, srv, "POST", endpoint,
@@ -1584,7 +1644,7 @@ func TestRetryDeliveryFailureIsProjectedSeparatelyFromCompletedRun(t *testing.T)
 		t.Fatalf("retry failure status=%d body=%s", retry.Code, retry.Body.String())
 	}
 	details := httptest.NewRecorder()
-	srv.router.ServeHTTP(details, newLoopbackRequest(http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), nil))
+	srv.router.ServeHTTP(details, authorizedRequest(t, srv, http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), ""))
 	var response struct {
 		Run      store.PipelineRun     `json:"run"`
 		Delivery webDeliveryProjection `json:"delivery"`

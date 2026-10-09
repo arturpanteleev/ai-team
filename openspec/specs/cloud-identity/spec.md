@@ -29,11 +29,16 @@ Cloud browser session MUST быть уникальной, ограниченно
 - **ТОГДА** API reads, commands и WebSocket MUST требовать валидную session
 - **И** write command MUST дополнительно требовать session-bound CSRF token
 
-### Requirement: Совместимый local mode
+### Requirement: Локальная аутентификация
 
-Loopback local mode MUST оставаться доступным без cloud credential.
+Loopback local mode MUST выдавать случайный bearer token, если cloud
+authentication не настроена. Token MUST быть сохранён в regular file без
+symlink с правами `0600`; сервер MUST проверять его до создания browser session.
+Пишущие запросы MUST требовать аутентифицированную session и CSRF token.
 
-#### Scenario: Локальный запуск
+#### Scenario: Локальный запуск без cloud credential
 
 - **КОГДА** authentication явно не настроена и server bind-ится на loopback
-- **ТОГДА** browser MUST получить local session без Bearer token
+- **ТОГДА** CLI MUST напечатать локальный Bearer token и сохранить его в `.ai-team/web.token` с правами `0600`
+- **И** `/api/session` MUST вернуть `401` без токена и создать session с trusted local principal с валидным токеном
+- **И** пишущий запрос без токена MUST завершиться `401`

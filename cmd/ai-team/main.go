@@ -1861,18 +1861,35 @@ func cmdWeb() {
 		fatal("Ошибка run controller: %v", err)
 	}
 	serverOptions := []web.ServerOption{web.WithRunController(runController), web.WithTargetDir(target)}
-	authEnabled := false
+	cloudAuthEnabled := false
+	var localWebToken, localWebTokenPath string
 	if secret := os.Getenv(*authSecretEnv); secret != "" {
 		tokenManager, managerErr := cloudidentity.NewTokenManager([]byte(secret))
 		if managerErr != nil {
 			fatal("Ошибка cloud authentication: %v", managerErr)
 		}
 		serverOptions = append(serverOptions, web.WithAuthenticator(tokenManager))
-		authEnabled = true
+		cloudAuthEnabled = true
+	} else {
+		token, tokenPath, tokenErr := loadOrCreateLocalWebToken(target)
+		if tokenErr != nil {
+			fatal("Ошибка локального web token: %v", tokenErr)
+		}
+		localAuthenticator, authErr := web.NewLocalAuthenticator(token)
+		if authErr != nil {
+			fatal("Ошибка локальной web authentication: %v", authErr)
+		}
+		serverOptions = append(serverOptions, web.WithLocalAuthenticator(localAuthenticator))
+		localWebToken, localWebTokenPath = token, tokenPath
 	}
 	srv, err := web.NewServer(*dbPath, *distDir, *artifacts, serverOptions...)
 	if err != nil {
 		fatal("Ошибка запуска web сервера: %v", err)
+	}
+	if localWebToken != "" {
+		if printErr := printLocalWebToken(os.Stderr, localWebToken, localWebTokenPath); printErr != nil {
+			fatal("Не удалось вывести локальный web token: %v", printErr)
+		}
 	}
 	defer func() { _ = srv.Close() }() // закрытие на выходе из процесса: обработать ошибку уже негде.
 	// Фоновые ошибки run не должны исчезать после 202: фиксируем их в
@@ -1903,8 +1920,8 @@ func cmdWeb() {
 	}()
 
 	addr := net.JoinHostPort(*host, *port)
-	if !authEnabled && *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
-		fatal("web UI не имеет authentication и может bind только loopback host")
+	if !cloudAuthEnabled && *host != "127.0.0.1" && *host != "localhost" && *host != "::1" {
+		fatal("web UI без cloud authentication может bind только loopback host")
 	}
 	logging.Printf("Web UI available at http://%s\n", addr)
 	if err := srv.ListenAndServe(addr); err != nil {

@@ -34,7 +34,7 @@ func (s *Server) teamReadSecurity(next http.Handler) http.Handler {
 }
 
 func (s *Server) teamWriteSecurity(next http.Handler) http.Handler {
-	return s.teamReadSecurity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	protected := s.teamReadSecurity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, ok := s.requestSession(r)
 		if !ok {
 			http.Error(w, "требуется активная web session", http.StatusUnauthorized)
@@ -46,6 +46,13 @@ func (s *Server) teamWriteSecurity(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	}))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authenticator == nil {
+			http.Error(w, "требуется локальный или cloud bearer token", http.StatusUnauthorized)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleTeamMembers(w http.ResponseWriter, _ *http.Request) {
@@ -116,6 +123,10 @@ type activateTeamCommand struct {
 }
 
 func (s *Server) handleTeamActivation(w http.ResponseWriter, r *http.Request) {
+	if s.authenticator == nil {
+		http.Error(w, "требуется cloud authentication", http.StatusUnauthorized)
+		return
+	}
 	var command activateTeamCommand
 	if err := decodeCommand(w, r, &command); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

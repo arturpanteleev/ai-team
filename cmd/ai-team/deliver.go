@@ -18,7 +18,11 @@ import (
 )
 
 func deliverDeferredCLI(ctx context.Context, runID, feature, targetDir string, options ...pipeline.Option) (delivery.TerminalRecord, error) {
-	engine := pipeline.NewRunEngine(pipeline.New(nil, nil, options...))
+	registry, err := newAgentRegistry(targetDir)
+	if err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("load delivery agent registry: %w", err)
+	}
+	engine := pipeline.NewRunEngine(pipeline.New(nil, registry, options...))
 	return engine.DeliverDeferredForFeature(ctx, runID, feature, targetDir)
 }
 

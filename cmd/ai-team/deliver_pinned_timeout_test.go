@@ -72,10 +72,64 @@ func cliDeliveryTemplate(timeout string) *config.Config {
 		Template:        "cli-pinned-delivery-timeout",
 		Title:           "CLI pinned delivery timeout",
 		DeliveryTimeout: timeout,
+		Checks: []checks.Definition{{
+			Name: "project-vet", Class: "lint", Command: []string{"go", "version"}, Policy: checks.PolicyRequired,
+		}},
 		Stages: []config.TemplateStage{
 			{ID: "approver", Title: "Approve", Function: "operator", Result: "approve", Executor: "agent", Agent: "approver", Confirm: "auto"},
+			{ID: "implementation", Title: "Implement", Function: "developer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "implementation", Confirm: "auto",
+				Delivery: &config.TemplateDelivery{RequireChecks: []string{"project-vet"}, RequireVerdicts: []string{"approver"}}},
 			{ID: "deployer", Title: "Deliver", Function: "deployer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "deployer", Confirm: "auto"},
 		},
+	}
+}
+
+func writeProjectApproverAgent(t *testing.T, target string) {
+	t.Helper()
+	agentDir := filepath.Join(target, ".ai-team", "agents", "approver")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	definition := []byte(`name: approver
+description: Test project approver
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED]
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  review: '{feature}/review.md'
+`)
+	if err := os.WriteFile(filepath.Join(agentDir, "def.yaml"), definition, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("test prompt"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeProjectImplementationAgent(t *testing.T, target string) {
+	t.Helper()
+	agentDir := filepath.Join(target, ".ai-team", "agents", "implementation")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	definition := []byte(`name: implementation
+description: Test project implementation stage
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs: {}
+`)
+	if err := os.WriteFile(filepath.Join(agentDir, "def.yaml"), definition, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("test prompt"), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -95,6 +149,13 @@ outputs:
   review: '{feature}/review.md'
 `)},
 		"approver/prompt.md": &fstest.MapFile{Data: []byte("test prompt")},
+		"implementation/def.yaml": &fstest.MapFile{Data: []byte(`name: implementation
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs: {}
+`)},
+		"implementation/prompt.md": &fstest.MapFile{Data: []byte("test prompt")},
 		"deployer/def.yaml": &fstest.MapFile{Data: []byte(`name: deployer
 runtime: delivery
 kind: delivery
@@ -153,9 +214,10 @@ func prepareCLIDelivery(t *testing.T, target string) string {
 		FileModes:   map[string]string{"change.go": "100644"}, BaselineHead: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		SourceRunID: "prepared-run", VerifiedWorkspaceDigest: check.WorkspaceDigestAfter,
 		CheckEvidenceDigest: check.EvidenceDigest,
-		Preconditions: map[string]delivery.PreconditionEvidence{"review": {
-			Type: "file", Size: 22, SHA256: fmt.Sprintf("%x", reviewDigest), Verdict: "APPROVED",
-		}},
+		Preconditions: map[string]delivery.PreconditionEvidence{
+			"review":                  {Type: "file", Size: 22, SHA256: fmt.Sprintf("%x", reviewDigest), Verdict: "APPROVED"},
+			"verdict:approver:review": {Type: "file", Size: 22, SHA256: fmt.Sprintf("%x", reviewDigest), Verdict: "APPROVED"},
+		},
 		CommitMessage: "feat change", PRTitle: "feat change", PRBody: "test delivery plan",
 	}
 	if _, err := delivery.Prepare(target, "feat", plan); err != nil {
@@ -170,6 +232,8 @@ func prepareCLIDelivery(t *testing.T, target string) string {
 
 func TestDeliverCommandUsesPinnedDeliveryTimeoutAfterPublish(t *testing.T) {
 	target := t.TempDir()
+	writeProjectApproverAgent(t, target)
+	writeProjectImplementationAgent(t, target)
 	artifacts := filepath.Join(target, ".ai-team", "artifacts")
 	if err := os.MkdirAll(filepath.Join(artifacts, "tasks", "feat"), 0755); err != nil {
 		t.Fatal(err)

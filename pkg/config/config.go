@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,17 +28,20 @@ type AgentConfig struct {
 	CLI     string              `yaml:"cli,omitempty"`
 	Timeout string              `yaml:"timeout,omitempty"`
 	Checks  []checks.Definition `yaml:"checks,omitempty"`
+	// MCPServers contains only the named servers selected by this stage.
+	MCPServers []runtime.MCPServerConfig `yaml:"-"`
 }
 
 type Config struct {
-	SchemaVersion int                 `yaml:"schema_version"`
-	Template      string              `yaml:"template"`
-	Title         string              `yaml:"title"`
-	StallAfter    string              `yaml:"stall_after,omitempty"`
-	Stages        []TemplateStage     `yaml:"stages"`
-	Returns       []TemplateReturn    `yaml:"returns,omitempty"`
-	MaxVisits     map[string]int      `yaml:"max_visits,omitempty"`
-	Checks        []checks.Definition `yaml:"checks,omitempty"`
+	SchemaVersion int                                `yaml:"schema_version"`
+	Template      string                             `yaml:"template"`
+	Title         string                             `yaml:"title"`
+	StallAfter    string                             `yaml:"stall_after,omitempty"`
+	Stages        []TemplateStage                    `yaml:"stages"`
+	Returns       []TemplateReturn                   `yaml:"returns,omitempty"`
+	MaxVisits     map[string]int                     `yaml:"max_visits,omitempty"`
+	Checks        []checks.Definition                `yaml:"checks,omitempty"`
+	MCPServers    map[string]runtime.MCPServerConfig `yaml:"mcp_servers,omitempty"`
 
 	// PipelineAgents and Workflow are runtime compatibility projections. They
 	// are never serialized; schema v5 stores stage IDs, agent references and
@@ -414,30 +418,32 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
 		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
+		"mcp_servers": true,
 	}, "config"); err != nil {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion    int                 `yaml:"schema_version"`
-		Template         string              `yaml:"template"`
-		Title            string              `yaml:"title"`
-		StallAfter       string              `yaml:"stall_after"`
-		Stages           []TemplateStage     `yaml:"stages"`
-		Returns          []TemplateReturn    `yaml:"returns"`
-		MaxVisits        map[string]int      `yaml:"max_visits"`
-		Checks           []checks.Definition `yaml:"checks"`
-		CLI              string              `yaml:"cli"`
-		Model            string              `yaml:"model"`
-		Effort           string              `yaml:"effort"`
-		StageTimeout     string              `yaml:"stage_timeout"`
-		PreflightTimeout string              `yaml:"preflight_timeout"`
-		DeliveryTimeout  string              `yaml:"delivery_timeout"`
-		Containment      *ContainmentConfig  `yaml:"containment"`
-		Usage            *UsageConfig        `yaml:"usage"`
-		TreeHash         *TreeHashConfig     `yaml:"tree_hash"`
-		Budget           *BudgetConfig       `yaml:"budget"`
-		Redaction        *RedactionConfig    `yaml:"redaction"`
-		Retention        *RetentionConfig    `yaml:"retention"`
+		SchemaVersion    int                                `yaml:"schema_version"`
+		Template         string                             `yaml:"template"`
+		Title            string                             `yaml:"title"`
+		StallAfter       string                             `yaml:"stall_after"`
+		Stages           []TemplateStage                    `yaml:"stages"`
+		Returns          []TemplateReturn                   `yaml:"returns"`
+		MaxVisits        map[string]int                     `yaml:"max_visits"`
+		Checks           []checks.Definition                `yaml:"checks"`
+		MCPServers       map[string]runtime.MCPServerConfig `yaml:"mcp_servers"`
+		CLI              string                             `yaml:"cli"`
+		Model            string                             `yaml:"model"`
+		Effort           string                             `yaml:"effort"`
+		StageTimeout     string                             `yaml:"stage_timeout"`
+		PreflightTimeout string                             `yaml:"preflight_timeout"`
+		DeliveryTimeout  string                             `yaml:"delivery_timeout"`
+		Containment      *ContainmentConfig                 `yaml:"containment"`
+		Usage            *UsageConfig                       `yaml:"usage"`
+		TreeHash         *TreeHashConfig                    `yaml:"tree_hash"`
+		Budget           *BudgetConfig                      `yaml:"budget"`
+		Redaction        *RedactionConfig                   `yaml:"redaction"`
+		Retention        *RetentionConfig                   `yaml:"retention"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -452,6 +458,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Returns = raw.Returns
 	c.MaxVisits = raw.MaxVisits
 	c.Checks = raw.Checks
+	c.MCPServers = raw.MCPServers
 	c.CLI = raw.CLI
 	c.Model = raw.Model
 	c.Effort = raw.Effort
@@ -674,18 +681,29 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 	}
 	if c.Template != "" {
 		for _, stage := range c.Stages {
-			if stage.Delivery == nil || (stage.ID != name && stage.Agent != name) {
+			if stage.Delivery != nil && (stage.ID == name || stage.Agent == name) {
+				if resolved == nil {
+					resolved = &AgentConfig{Name: name}
+				}
+				for _, requiredName := range stage.Delivery.RequireChecks {
+					for _, definition := range c.Checks {
+						if definition.Name == requiredName {
+							resolved.Checks = append(resolved.Checks, definition)
+							break
+						}
+					}
+				}
+			}
+			if stage.ID != name {
 				continue
 			}
-			if resolved == nil {
-				resolved = &AgentConfig{Name: name}
-			}
-			for _, requiredName := range stage.Delivery.RequireChecks {
-				for _, definition := range c.Checks {
-					if definition.Name == requiredName {
-						resolved.Checks = append(resolved.Checks, definition)
-						break
+			for _, serverID := range stage.MCPServers {
+				if server, ok := c.MCPServers[serverID]; ok {
+					if resolved == nil {
+						resolved = &AgentConfig{Name: name}
 					}
+					server.Name = serverID
+					resolved.MCPServers = append(resolved.MCPServers, server)
 				}
 			}
 		}
@@ -781,6 +799,16 @@ func (c *Config) Validate(reg AgentLookup) error {
 		"effort %q недопустим (low|medium|high)", c.Effort)
 	validate(c.CLI == "" || runtime.AdapterExists(c.CLI),
 		"cli %q не поддерживается (неизвестный runtime adapter; доступны: %s)", c.CLI, runtime.AdapterNames())
+	mcpIDs := make([]string, 0, len(c.MCPServers))
+	for id := range c.MCPServers {
+		mcpIDs = append(mcpIDs, id)
+	}
+	sort.Strings(mcpIDs)
+	for _, id := range mcpIDs {
+		if err := c.MCPServers[id].Validate(id); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
 
 	seenNames := make(map[string]bool, len(c.PipelineAgents))
 	for _, a := range c.PipelineAgents {

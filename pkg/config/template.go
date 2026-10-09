@@ -9,6 +9,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -29,6 +30,7 @@ type TemplateStage struct {
 	Confirm          string            `yaml:"confirm,omitempty"`
 	Skippable        bool              `yaml:"skippable,omitempty"`
 	Delivery         *TemplateDelivery `yaml:"delivery,omitempty"`
+	MCPServers       []string          `yaml:"mcp_servers,omitempty"`
 }
 
 // TemplateCheck keeps the result check declarative. Execution is introduced by
@@ -61,7 +63,7 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		"id": true, "title": true, "function": true, "result": true,
 		"executor": true, "agent": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
-		"skippable": true, "delivery": true,
+		"skippable": true, "delivery": true, "mcp_servers": true,
 	}, "config: stage"); err != nil {
 		return err
 	}
@@ -180,6 +182,27 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 			agentNames[stage.Agent] = true
 			if reg != nil && !reg.Exists(stage.Agent) {
 				add("%s: агент %q не найден в registry", prefix, stage.Agent)
+			}
+		}
+		if len(stage.MCPServers) > 0 {
+			if stage.Agent == "" {
+				add("%s: mcp_servers допустимы только для stage с agent", prefix)
+			}
+			if c.CLI != "codex" {
+				add("%s: mcp_servers поддерживаются только при cli: codex", prefix)
+			}
+			if len(stage.MCPServers) > runtime.MaxMCPServersPerStage {
+				add("%s: допускается не более %d mcp_servers", prefix, runtime.MaxMCPServersPerStage)
+			}
+			seenServers := map[string]bool{}
+			for _, serverID := range stage.MCPServers {
+				if strings.TrimSpace(serverID) == "" || seenServers[serverID] {
+					add("%s: mcp_servers содержит пустой или повторяющийся id", prefix)
+				}
+				seenServers[serverID] = true
+				if _, exists := c.MCPServers[serverID]; !exists {
+					add("%s: mcp_servers ссылается на неизвестный сервер %q", prefix, serverID)
+				}
 			}
 		}
 		if stage.Result == "link" {

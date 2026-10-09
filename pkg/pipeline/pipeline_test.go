@@ -182,17 +182,18 @@ type scriptedRuntime struct {
 	// content[agent][output] — содержимое выхода; по умолчанию "ok"
 	content map[string]map[string]string
 	// contentFn — динамическое содержимое (по номеру запуска агента)
-	contentFn map[string]func(callN int) map[string]string
-	execErr   map[string]error
-	blocked   map[string]string // agent -> blocker reason
-	skipWrite map[string]bool   // agent -> не создавать выходы
-	waitCtx   map[string]bool   // agent -> блокироваться до отмены ctx
-	onExec    func(agentName string, inputs []runtime.Artifact)
-	onExecute func(agentName string, task *runtime.Task, inputs []runtime.Artifact)
-	calls     map[string]int
-	targetDir string
-	usage     *runtime.Usage
-	usagePer  map[string]*runtime.Usage
+	contentFn         map[string]func(callN int) map[string]string
+	execErr           map[string]error
+	blocked           map[string]string // agent -> blocker reason
+	skipWrite         map[string]bool   // agent -> не создавать выходы
+	waitCtx           map[string]bool   // agent -> блокироваться до отмены ctx
+	onExec            func(agentName string, inputs []runtime.Artifact)
+	onExecute         func(agentName string, task *runtime.Task, inputs []runtime.Artifact)
+	calls             map[string]int
+	targetDir         string
+	usage             *runtime.Usage
+	usagePer          map[string]*runtime.Usage
+	mcpServersByAgent map[string][]runtime.MCPServerConfig
 	// deadline первого Execute: стадия видит min(stage timeout, run budget),
 	// поэтому по нему проверяется, что бюджет run'а реально вооружён.
 	firstDeadline    time.Time
@@ -237,6 +238,10 @@ func (r *scriptedRuntime) Usage() *runtime.Usage { return r.usage }
 
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
+	if r.mcpServersByAgent == nil {
+		r.mcpServersByAgent = map[string][]runtime.MCPServerConfig{}
+	}
+	r.mcpServersByAgent[a.Name] = append([]runtime.MCPServerConfig(nil), a.MCPServers...)
 	r.calls[a.Name]++
 	r.targetDir = task.TargetDir
 	if !r.deadlineSeen {
@@ -565,6 +570,38 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 	if n.calls[0].RunID == "" || n.calls[0].AttemptID == "" || n.calls[0].RunID != n.calls[1].RunID {
 		t.Fatalf("run/attempt identity не передана в StageResult: %+v", n.calls)
+	}
+}
+
+func TestRun_StageMCPAllowlistReachesOnlySelectedAgent(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	server := runtime.MCPServerConfig{Name: "knowledge", Command: "/usr/bin/true"}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "stage-mcp-wiring-test",
+		Title:         "Stage MCP wiring test",
+		CLI:           "codex",
+		PipelineAgents: []config.AgentConfig{
+			{Name: "product_spec", CLI: "codex"},
+			{Name: "review", CLI: "codex"},
+		},
+		Stages: []config.TemplateStage{
+			{ID: "product_spec", Title: "Product spec", Function: "analyst", Result: "md", Executor: "agent", Agent: "analyst", Confirm: "auto", MCPServers: []string{"knowledge"}},
+			{ID: "review", Title: "Review", Function: "reviewer", Result: "md", Executor: "agent", Agent: "reviewer", Confirm: "auto"},
+		},
+		MCPServers: map[string]runtime.MCPServerConfig{"knowledge": server},
+	}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	if err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "test stage MCP forwarding", TargetDir: dir, ApproveGates: true}); err != nil {
+		t.Fatalf("pipeline run failed: %v", err)
+	}
+	if got := rt.mcpServersByAgent["analyst"]; len(got) != 1 || got[0].Name != "knowledge" || got[0].Command != server.Command {
+		t.Fatalf("selected stage MCP server was not forwarded: %+v", got)
+	}
+	if got := rt.mcpServersByAgent["reviewer"]; len(got) != 0 {
+		t.Fatalf("unselected stage received MCP servers: %+v", got)
 	}
 }
 

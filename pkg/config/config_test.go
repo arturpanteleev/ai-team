@@ -516,6 +516,98 @@ func TestAgentConfigFallbackAndLegacyRuntimeDefault(t *testing.T) {
 	}
 }
 
+func TestConfigMCPServersAreSelectedPerAgentStage(t *testing.T) {
+	data := []byte(`schema_version: 5
+template: idea-to-prod
+title: Process
+cli: codex
+mcp_servers:
+  knowledge:
+    command: /opt/ai-team/bin/knowledge-mcp
+    args: [--readonly, /srv/knowledge]
+  monitoring:
+    command: /opt/ai-team/bin/monitoring-mcp
+    args: [--readonly]
+stages:
+  - id: product_spec
+    title: Product spec
+    function: operator
+    result: md
+    executor: agent
+    agent: analyst
+    confirm: auto
+    mcp_servers: [knowledge]
+  - id: observation
+    title: Observation
+    function: operator
+    result: md
+    executor: human
+    agent: observer
+    confirm: auto
+    mcp_servers: [monitoring]
+`)
+	cfg, err := ParseYAML(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("valid per-stage MCP allowlist rejected: %v", err)
+	}
+	product := cfg.AgentConfig("product_spec")
+	observation := cfg.AgentConfig("observation")
+	if product == nil || len(product.MCPServers) != 1 || product.MCPServers[0].Name != "knowledge" {
+		t.Fatalf("product-spec runtime must receive only knowledge MCP: %+v", product)
+	}
+	if observation == nil || len(observation.MCPServers) != 1 || observation.MCPServers[0].Name != "monitoring" {
+		t.Fatalf("observation runtime must receive only monitoring MCP: %+v", observation)
+	}
+	if leaked := cfg.AgentConfig("analyst"); leaked != nil && len(leaked.MCPServers) > 0 {
+		t.Fatalf("registry agent lookup must not broaden a stage-specific allowlist: %+v", leaked.MCPServers)
+	}
+}
+
+func TestConfigRejectsMCPOutsideCodexOrWithoutStageAllowlist(t *testing.T) {
+	base := `schema_version: 5
+template: idea-to-prod
+title: Process
+CLI_PLACEHOLDER
+mcp_servers:
+  knowledge:
+    command: /opt/ai-team/bin/knowledge-mcp
+stages:
+  - id: product_spec
+    title: Product spec
+    function: operator
+    result: md
+    executor: agent
+    agent: analyst
+    confirm: auto
+    mcp_servers: [knowledge]
+`
+	for _, test := range []struct {
+		name string
+		cli  string
+		want string
+	}{
+		{name: "non Codex", cli: "cli: opencode", want: "только при cli: codex"},
+		{name: "unknown selected server", cli: "cli: codex", want: "неизвестный сервер"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			text := strings.Replace(base, "CLI_PLACEHOLDER", test.cli, 1)
+			if test.name == "unknown selected server" {
+				text = strings.Replace(text, "mcp_servers: [knowledge]", "mcp_servers: [missing]", 1)
+			}
+			cfg, err := ParseYAML([]byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid MCP config should fail with %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestLegacyRuntimeConfigValidationRemainsAvailableInMemory(t *testing.T) {
 	base := &Config{
 		SchemaVersion:  CurrentSchemaVersion,

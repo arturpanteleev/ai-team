@@ -8,9 +8,23 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
 func Run(ctx context.Context, command *exec.Cmd) error {
+	return run(ctx, command, 0)
+}
+
+// RunGraceful gives a supervised command a bounded opportunity to stop owned
+// descendants before the process-tree force kill.
+func RunGraceful(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
+	if grace < 0 {
+		grace = 0
+	}
+	return run(ctx, command, grace)
+}
+
+func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -20,9 +34,26 @@ func Run(ctx context.Context, command *exec.Cmd) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		var signalErr error
+		if grace > 0 {
+			signalErr = command.Process.Signal(os.Interrupt)
+			timer := time.NewTimer(grace)
+			defer timer.Stop()
+			var waitErr error
+			select {
+			case waitErr = <-done:
+				// Keep the supervisor active through the grace window in case
+				// the command exits before a child process does.
+				<-timer.C
+			case <-timer.C:
+				waitErr = <-done
+			}
+			killErr := killTree(command.Process.Pid)
+			return errors.Join(ctx.Err(), signalErr, killErr, waitErr)
+		}
 		killErr := killTree(command.Process.Pid)
 		waitErr := <-done
-		return errors.Join(ctx.Err(), killErr, waitErr)
+		return errors.Join(ctx.Err(), signalErr, killErr, waitErr)
 	}
 }
 

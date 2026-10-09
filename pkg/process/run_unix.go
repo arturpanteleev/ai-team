@@ -12,6 +12,20 @@ import (
 )
 
 func Run(ctx context.Context, command *exec.Cmd) error {
+	return run(ctx, command, 0)
+}
+
+// RunGraceful requests shutdown of the supervised process group before force
+// killing it. Codex owns MCP child lifecycles and needs a chance to close its
+// server processes when an agent stage reaches its deadline.
+func RunGraceful(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
+	if grace < 0 {
+		grace = 0
+	}
+	return run(ctx, command, grace)
+}
+
+func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	if command.SysProcAttr == nil {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -25,6 +39,28 @@ func Run(ctx context.Context, command *exec.Cmd) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		if grace > 0 {
+			termErr := syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+			if errors.Is(termErr, syscall.ESRCH) {
+				termErr = nil
+			}
+			timer := time.NewTimer(grace)
+			defer timer.Stop()
+			var waitErr error
+			select {
+			case waitErr = <-done:
+				// Codex may exit before an MCP child does. Keep the group under
+				// supervision for the full grace window, then kill any survivor.
+				<-timer.C
+			case <-timer.C:
+				waitErr = <-done
+			}
+			killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			if errors.Is(killErr, syscall.ESRCH) {
+				killErr = nil
+			}
+			return errors.Join(ctx.Err(), termErr, killErr, waitErr)
+		}
 		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		if errors.Is(killErr, syscall.ESRCH) {
 			killErr = nil

@@ -89,7 +89,7 @@ func TestCodexProtectedStageUsesExactReadDenyProfileAndPromptInput(t *testing.T)
 	if strings.Contains(strings.Join(args, " "), "--sandbox") {
 		t.Fatalf("custom permission profile must not be shadowed by legacy --sandbox: %v", args)
 	}
-	config, err := codexSessionConfig(launch.DeniedReadPaths)
+	config, err := codexSessionConfig(launch.DeniedReadPaths, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +304,117 @@ func TestCodexEnvironmentIsolatesConfigAndCreds(t *testing.T) {
 	}
 	if !strings.Contains(string(config), `approval_policy = "never"`) || !strings.Contains(string(config), `sandbox_mode = "workspace-write"`) {
 		t.Errorf("config.toml должен фиксировать zero-approval + workspace-write: %s", config)
+	}
+}
+
+func TestCodexEnvironmentLoadsOnlyStageSelectedMCPWithoutRuntimeSecrets(t *testing.T) {
+	serverDir := t.TempDir()
+	serverCommand := filepath.Join(serverDir, "knowledge-mcp")
+	if err := os.WriteFile(serverCommand, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	globalConfig := `[mcp_servers.user_global]
+command = "/tmp/user-server"
+`
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(globalConfig), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("OPENAI_API_KEY", "model-provider-secret")
+	t.Setenv("MCP_WORKSPACE", "workspace-7")
+	t.Setenv(HarnessEnvAllowVar, "OPENAI_API_KEY,MCP_WORKSPACE")
+	server := MCPServerConfig{
+		Name:              "knowledge",
+		Command:           serverCommand,
+		Args:              []string{"--readonly", "--workspace", "workspace-7"},
+		Env:               map[string]string{"LOG_LEVEL": "warn"},
+		EnvVars:           []string{"MCP_WORKSPACE"},
+		StartupTimeoutSec: 15,
+		ToolTimeoutSec:    90,
+	}
+	target := t.TempDir()
+	env, cleanup, err := (&CodexAdapter{}).Environment(&Agent{
+		Name: "analyst", MCPServers: []MCPServerConfig{server},
+	}, &Task{TargetDir: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexHome := environmentValue(env, "CODEX_HOME")
+	config, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		cleanup()
+		t.Fatal(err)
+	}
+	text := string(config)
+	for _, required := range []string{
+		"[mcp_servers.knowledge]",
+		`command = ` + strconv.Quote(serverCommand),
+		`args = ["--readonly", "--workspace", "workspace-7"]`,
+		"startup_timeout_sec = 15",
+		"tool_timeout_sec = 90",
+		`env_vars = ["MCP_WORKSPACE"]`,
+		`LOG_LEVEL = "warn"`,
+		`HOME = `,
+	} {
+		if !strings.Contains(text, required) {
+			cleanup()
+			t.Fatalf("generated Codex session config is missing %q: %s", required, text)
+		}
+	}
+	for _, forbidden := range []string{"user_global", "monitoring", "OPENAI_API_KEY", "model-provider-secret", "CODEX_HOME"} {
+		if strings.Contains(text, forbidden) {
+			cleanup()
+			t.Fatalf("generated MCP config must not load unselected servers or runtime credentials (%q): %s", forbidden, text)
+		}
+	}
+	if strings.Count(text, "[mcp_servers.") != 2 { // selected server table and its env table
+		cleanup()
+		t.Fatalf("only the selected server may reach this stage context: %s", text)
+	}
+	var mcpHome string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "HOME = ") {
+			mcpHome = strings.Trim(strings.TrimPrefix(line, "HOME = "), `"`)
+		}
+	}
+	if mcpHome == "" || mcpHome == codexHome {
+		cleanup()
+		t.Fatalf("MCP process must receive a separate private HOME: mcp=%q codex=%q", mcpHome, codexHome)
+	}
+	if info, err := os.Stat(mcpHome); err != nil || info.Mode().Perm() != 0700 {
+		cleanup()
+		t.Fatalf("MCP HOME must be private and exist for invocation: %v %v", info, err)
+	}
+	cleanup()
+	if _, err := os.Stat(codexHome); !os.IsNotExist(err) {
+		t.Fatalf("temporary Codex home must be removed after invocation, stat error=%v", err)
+	}
+	if _, err := os.Stat(mcpHome); !os.IsNotExist(err) {
+		t.Fatalf("temporary MCP home must be removed after invocation, stat error=%v", err)
+	}
+}
+
+func TestCodexEnvironmentRequiresMCPEnvToBeExplicitlyAllowed(t *testing.T) {
+	serverDir := t.TempDir()
+	serverCommand := filepath.Join(serverDir, "monitoring-mcp")
+	if err := os.WriteFile(serverCommand, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MCP_WORKSPACE", "workspace-7")
+	t.Setenv(HarnessEnvAllowVar, "")
+	target := t.TempDir()
+	_, _, err := (&CodexAdapter{}).Environment(&Agent{
+		Name: "observer", MCPServers: []MCPServerConfig{{
+			Name: "monitoring", Command: serverCommand, EnvVars: []string{"MCP_WORKSPACE"},
+		}},
+	}, &Task{TargetDir: target})
+	if err == nil || !strings.Contains(err.Error(), HarnessEnvAllowVar) {
+		t.Fatalf("MCP env must require explicit harness env allowlist, got %v", err)
 	}
 }
 

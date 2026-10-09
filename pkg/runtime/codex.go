@@ -110,6 +110,27 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 		return nil, func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(codexHome) }
+	var mcpHome string
+	if agent != nil && len(agent.MCPServers) > 0 {
+		if err := validateRuntimeMCPServers(agent.MCPServers); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		mcpHome, err = os.MkdirTemp("", "ai-team-codex-mcp-home-*")
+		if err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		if err := os.Chmod(mcpHome, 0700); err != nil {
+			_ = os.RemoveAll(mcpHome)
+			cleanup()
+			return nil, func() {}, err
+		}
+		cleanup = func() {
+			_ = os.RemoveAll(mcpHome)
+			_ = os.RemoveAll(codexHome)
+		}
+	}
 
 	deniedReadPaths, err := exactDeniedReadPaths(task)
 	if err != nil {
@@ -126,7 +147,11 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 			return nil, func() {}, err
 		}
 	}
-	configContent, err := codexSessionConfig(deniedReadPaths)
+	var mcpServers []MCPServerConfig
+	if agent != nil {
+		mcpServers = agent.MCPServers
+	}
+	configContent, err := codexSessionConfig(deniedReadPaths, mcpServers, mcpHome)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -186,24 +211,121 @@ func requireCodexPermissionProfiles(cli string) error {
 	return nil
 }
 
-func codexSessionConfig(deniedReadPaths []string) ([]byte, error) {
+func validateRuntimeMCPServers(servers []MCPServerConfig) error {
+	if len(servers) > MaxMCPServersPerStage {
+		return fmt.Errorf("codex: допускается не более %d MCP серверов на этап", MaxMCPServersPerStage)
+	}
+	seen := make(map[string]bool, len(servers))
+	allowedEnv := allowedNonClaudeEnvironmentKeys()
+	for _, server := range servers {
+		if err := server.Validate(server.Name); err != nil {
+			return err
+		}
+		if seen[server.Name] {
+			return fmt.Errorf("codex: повторный MCP сервер %q", server.Name)
+		}
+		seen[server.Name] = true
+		if _, err := exec.LookPath(server.Command); err != nil {
+			return fmt.Errorf("codex: MCP сервер %q command недоступна", server.Name)
+		}
+		for _, name := range server.EnvVars {
+			if !allowedEnv[name] {
+				return fmt.Errorf("codex: MCP сервер %q env_vars %q должен быть явно добавлен в %s", server.Name, name, HarnessEnvAllowVar)
+			}
+			if value, present := os.LookupEnv(name); !present || value == "" {
+				return fmt.Errorf("codex: MCP сервер %q требует незаданную переменную окружения %q", server.Name, name)
+			}
+		}
+	}
+	return nil
+}
+
+func codexSessionConfig(deniedReadPaths []string, mcpServers []MCPServerConfig, mcpHome string) ([]byte, error) {
 	paths, err := validateExactDeniedReadPaths(deniedReadPaths)
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
-		return []byte("approval_policy = \"never\"\nsandbox_mode = \"workspace-write\"\n"), nil
-	}
 	var config strings.Builder
 	config.WriteString("approval_policy = \"never\"\n")
-	config.WriteString("default_permissions = \"ai_team_workspace\"\n\n")
-	config.WriteString("[permissions.ai_team_workspace]\nextends = \":workspace\"\n\n")
-	config.WriteString("[permissions.ai_team_workspace.filesystem]\n")
-	for _, path := range paths {
-		config.WriteString(strconv.Quote(path))
-		config.WriteString(" = \"deny\"\n")
+	if len(paths) == 0 {
+		config.WriteString("sandbox_mode = \"workspace-write\"\n")
+	} else {
+		config.WriteString("default_permissions = \"ai_team_workspace\"\n\n")
+		config.WriteString("[permissions.ai_team_workspace]\nextends = \":workspace\"\n\n")
+		config.WriteString("[permissions.ai_team_workspace.filesystem]\n")
+		for _, path := range paths {
+			config.WriteString(strconv.Quote(path))
+			config.WriteString(" = \"deny\"\n")
+		}
+		config.WriteString("\n[permissions.ai_team_workspace.network]\nenabled = false\n")
 	}
-	config.WriteString("\n[permissions.ai_team_workspace.network]\nenabled = false\n")
+	if len(mcpServers) == 0 {
+		return []byte(config.String()), nil
+	}
+	if mcpHome == "" {
+		return nil, fmt.Errorf("codex: internal error: MCP home is required when MCP servers are enabled")
+	}
+	if len(mcpServers) > MaxMCPServersPerStage {
+		return nil, fmt.Errorf("codex: допускается не более %d MCP серверов на этап", MaxMCPServersPerStage)
+	}
+	servers := append([]MCPServerConfig(nil), mcpServers...)
+	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
+	seen := map[string]bool{}
+	for _, server := range servers {
+		if err := server.Validate(server.Name); err != nil {
+			return nil, err
+		}
+		if seen[server.Name] {
+			return nil, fmt.Errorf("codex: повторный MCP сервер %q", server.Name)
+		}
+		seen[server.Name] = true
+		config.WriteString("\n[mcp_servers.")
+		config.WriteString(server.Name)
+		config.WriteString("]\ncommand = ")
+		config.WriteString(strconv.Quote(server.Command))
+		config.WriteString("\nenabled = true\nstartup_timeout_sec = ")
+		config.WriteString(strconv.Itoa(effectiveMCPStartupTimeout(server)))
+		config.WriteString("\ntool_timeout_sec = ")
+		config.WriteString(strconv.Itoa(effectiveMCPToolTimeout(server)))
+		if len(server.Args) > 0 {
+			config.WriteString("\nargs = [")
+			for index, arg := range server.Args {
+				if index > 0 {
+					config.WriteString(", ")
+				}
+				config.WriteString(strconv.Quote(arg))
+			}
+			config.WriteString("]")
+		}
+		if len(server.EnvVars) > 0 {
+			envVars := append([]string(nil), server.EnvVars...)
+			sort.Strings(envVars)
+			config.WriteString("\nenv_vars = [")
+			for index, name := range envVars {
+				if index > 0 {
+					config.WriteString(", ")
+				}
+				config.WriteString(strconv.Quote(name))
+			}
+			config.WriteString("]")
+		}
+		config.WriteString("\n\n[mcp_servers.")
+		config.WriteString(server.Name)
+		config.WriteString(".env]\nHOME = ")
+		config.WriteString(strconv.Quote(mcpHome))
+		envNames := make([]string, 0, len(server.Env))
+		for name := range server.Env {
+			envNames = append(envNames, name)
+		}
+		sort.Strings(envNames)
+		for _, name := range envNames {
+			config.WriteString("\n")
+			config.WriteString(name)
+			config.WriteString(" = ")
+			config.WriteString(strconv.Quote(server.Env[name]))
+		}
+		config.WriteString("\n")
+	}
 	return []byte(config.String()), nil
 }
 

@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -29,6 +31,41 @@ func TestRunKillsCommandProcessGroupOnTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= time.Second {
 		t.Fatalf("Run waited %s; descendant likely survived cancellation", elapsed)
+	}
+}
+
+func TestRunGracefulSignalsProcessGroupBeforeForceKill(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "mcp-cleaned")
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	command := exec.Command("sh", "-c", `trap 'printf stopped > "$MCP_CLEANUP_MARKER"; exit 0' TERM; while :; do sleep 30; done`)
+	command.Env = append(os.Environ(), "MCP_CLEANUP_MARKER="+marker)
+	err := RunGraceful(ctx, command, time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if contents, readErr := os.ReadFile(marker); readErr != nil || string(contents) != "stopped" {
+		t.Fatalf("Codex-style owner must receive shutdown signal before force kill: contents=%q err=%v", contents, readErr)
+	}
+}
+
+func TestRunGracefulKeepsSupervisingAfterCodexExits(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "orphan-mcp-survived")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	command := exec.Command("sh", "-c", `(trap '' TERM; sleep 1; printf leaked > "$MCP_ORPHAN_MARKER") & trap 'exit 0' TERM; while :; do sleep 30; done`)
+	command.Env = append(os.Environ(), "MCP_ORPHAN_MARKER="+marker)
+	started := time.Now()
+	err := RunGraceful(ctx, command, 300*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 350*time.Millisecond {
+		t.Fatalf("supervisor returned before the child cleanup grace elapsed: %s", elapsed)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if contents, readErr := os.ReadFile(marker); !os.IsNotExist(readErr) {
+		t.Fatalf("MCP child outlived Codex cancellation cleanup: contents=%q err=%v", contents, readErr)
 	}
 }
 

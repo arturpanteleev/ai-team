@@ -92,10 +92,21 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	subjectHash := hex.EncodeToString(subjectDigest[:])
 
 	var resolved *approval.PendingApproval
-	if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
-		rs.resumedApproval.Trigger == humanInputTrigger && rs.resumedApproval.FromStage == stageID {
-		value := *rs.resumedApproval
-		rs.resumedApproval = nil // consume this exact human input once per invocation.
+	inputApproval := rs.resumedApproval
+	recoveredInput := false
+	if inputApproval == nil || inputApproval.Kind != approval.KindInput ||
+		inputApproval.Trigger != humanInputTrigger || inputApproval.FromStage != stageID {
+		inputApproval = rs.recoveredHumanApproval
+		recoveredInput = true
+	}
+	if inputApproval != nil && inputApproval.Kind == approval.KindInput &&
+		inputApproval.Trigger == humanInputTrigger && inputApproval.FromStage == stageID {
+		value := *inputApproval
+		if recoveredInput {
+			rs.recoveredHumanApproval = nil
+		} else {
+			rs.resumedApproval = nil // consume this exact human input once per invocation.
+		}
 		if value.SubjectHash != subjectHash || value.ToStage != stageID || value.Status != approval.StatusResolved {
 			return notifier.StageResult{}, errors.New("resumed human input does not match the current stage subject")
 		}

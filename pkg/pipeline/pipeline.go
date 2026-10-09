@@ -340,6 +340,7 @@ type runState struct {
 	lifecycleState            lifecycle.State
 	approvalStore             ApprovalStore
 	resumedApproval           *approval.PendingApproval
+	recoveredHumanApproval    *approval.PendingApproval
 	selectedArtifactRevisions map[string]string
 	resumed                   bool
 	brief                     briefVersion
@@ -575,6 +576,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	var resumedApproval *approval.PendingApproval
 	var recoveredClarification *approval.PendingApproval
 	var recoveredGraphApproval *approval.PendingApproval
+	var recoveredHumanApproval *approval.PendingApproval
 	var resumedTransitionData map[string]any
 	if runCfg.ResumeRunID != "" {
 		resumedState, err = lifecycleStore.Load(runCfg.ResumeRunID)
@@ -816,8 +818,19 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				if err != nil {
 					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
 				}
-				if recoveredClarification == nil {
-					resumedApproval, err = recoveredHumanInputApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+			}
+			// A forward graph handoff can target a human stage whose resolved
+			// input belongs to an interrupted attempt. Recover that input even
+			// when the graph approval was also recovered above; the two approvals
+			// carry independent state (pinned graph revisions vs. typed result).
+			// Clarification recovery keeps its existing precedence because its
+			// answer is the stage input that must be materialized on resume.
+			resumedHumanInput := resumedApproval != nil && resumedApproval.Kind == approval.KindInput &&
+				resumedApproval.Trigger == humanInputTrigger && resumedApproval.FromStage == runCfg.retryFrom
+			if recoveredClarification == nil && !resumedHumanInput &&
+				(resumedApproval == nil || resumedApproval.Kind != approval.KindQuestions) {
+				if stage, ok := p.templateStage(runCfg.retryFrom); ok && stage.Executor == "human" {
+					recoveredHumanApproval, err = recoveredHumanInputApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
 					if err != nil {
 						return RunResult{}, fmt.Errorf("resume human input: %w", err)
 					}
@@ -1117,9 +1130,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		names:       pipelineStageNames(p.cfg),
 		extraInputs: make(map[string][]runtime.Artifact),
 		selectedArtifactRevisions: func() map[string]string {
-			selectedApproval := resumedApproval
+			// A recovered graph handoff is the authority for pinned artifact
+			// revisions even when its target's human input was recovered too.
+			selectedApproval := recoveredGraphApproval
 			if selectedApproval == nil {
-				selectedApproval = recoveredGraphApproval
+				selectedApproval = resumedApproval
 			}
 			if selectedApproval == nil || len(selectedApproval.ArtifactRevisions) == 0 {
 				return nil
@@ -1130,23 +1145,24 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return copy
 		}(),
-		startTime:           taskCreatedAt,
-		approvedPlanHash:    runCfg.ApprovePlanHash,
-		approvePlanExplicit: approvePlanExplicit,
-		runID:               runID,
-		evidence:            evidenceStore,
-		attemptOrdinal:      attemptOrdinal,
-		lifecycleStore:      lifecycleStore,
-		lifecycleState:      resumedState,
-		approvalStore:       approvalStore,
-		resumedApproval:     resumedApproval,
-		resumed:             runCfg.ResumeRunID != "",
-		brief:               currentBrief,
-		graph:               compiledGraph,
-		visits:              make(map[string]int),
-		candidate:           candidateManager,
-		sourceTarget:        sourceTarget,
-		budgetConfig:        p.cfg.Budget,
+		startTime:              taskCreatedAt,
+		approvedPlanHash:       runCfg.ApprovePlanHash,
+		approvePlanExplicit:    approvePlanExplicit,
+		runID:                  runID,
+		evidence:               evidenceStore,
+		attemptOrdinal:         attemptOrdinal,
+		lifecycleStore:         lifecycleStore,
+		lifecycleState:         resumedState,
+		approvalStore:          approvalStore,
+		resumedApproval:        resumedApproval,
+		recoveredHumanApproval: recoveredHumanApproval,
+		resumed:                runCfg.ResumeRunID != "",
+		brief:                  currentBrief,
+		graph:                  compiledGraph,
+		visits:                 make(map[string]int),
+		candidate:              candidateManager,
+		sourceTarget:           sourceTarget,
+		budgetConfig:           p.cfg.Budget,
 	}
 	if runCfg.ResumeRunID != "" {
 		var usage runtime.Usage
@@ -1207,7 +1223,8 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		delete(rs.userOwnedPaths, filepath.ToSlash(mutation))
 	}
 	inputApproval := resumedApproval
-	if inputApproval == nil {
+	if recoveredGraphApproval != nil && (inputApproval == nil ||
+		(inputApproval.Kind == approval.KindInput && inputApproval.Trigger == humanInputTrigger && inputApproval.FromStage == runCfg.retryFrom)) {
 		inputApproval = recoveredGraphApproval
 	}
 	if inputApproval == nil {

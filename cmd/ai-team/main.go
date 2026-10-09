@@ -1368,21 +1368,32 @@ func cmdRun() {
 		os.Exit(code)
 	}
 
+	reportRunSuccess(runResult, *feature)
+}
+
+func reportRunSuccess(runResult pipeline.RunResult, feature string) {
+	var humanMessage string
 	if string(runResult.Outcome) == "completed_with_warnings" {
-		logging.Printf("\n%s Пайплайн выполнен с предупреждениями\n", ui.Colorize("!", ui.ColorYellow))
+		humanMessage = fmt.Sprintf("\n%s Пайплайн выполнен с предупреждениями\n", ui.Colorize("!", ui.ColorYellow))
 	} else {
-		logging.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
+		humanMessage = fmt.Sprintf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
 	}
-	logging.Emit(logging.Record{
+	record := logging.Record{
 		Level: "ok", Command: "run", Type: "run",
 		Message: "Пайплайн выполнен: " + runResult.RunID,
 		Data: map[string]any{
 			"outcome": string(runResult.Outcome),
 			"run_id":  runResult.RunID,
-			"feature": *feature,
+			"feature": feature,
 		},
 		Exit: exitOK,
-	})
+	}
+	if logging.GetMode() == logging.ModeDefault {
+		logging.Printf("%s", humanMessage)
+		return
+	}
+	logging.Printf("%s", humanMessage)
+	logging.Emit(record)
 }
 
 // runPreflight выполняет read-only preflight ДО старта run (AUD-09): тот же

@@ -251,9 +251,12 @@ func TestTaskCommandsJSONAndCancelReason(t *testing.T) {
 		t.Fatalf("show must include a ready resume command: %#v", records[0].Data)
 	}
 
-	_, code, stderr = runCLI(t, "cancel", runID, "--target", target, "--reason", "operator")
+	cancelStdout, code, stderr := runCLI(t, "cancel", runID, "--target", target, "--reason", "operator")
 	if code != 0 {
 		t.Fatalf("cancel command: code=%d stderr=%s", code, stderr)
+	}
+	if got := strings.Count(cancelStdout, "Run отменён: "+runID); got != 1 || stderr != "" {
+		t.Fatalf("human cancel should print one success line, got stdout=%q stderr=%q", cancelStdout, stderr)
 	}
 	stateStore, err := lifecycle.NewStore(target)
 	if err != nil {
@@ -273,6 +276,37 @@ func TestTaskCommandsJSONAndCancelReason(t *testing.T) {
 		}
 	}
 	t.Fatal("run_canceled event did not preserve the CLI reason")
+}
+
+func TestTaskCancelOutputModes(t *testing.T) {
+	for _, mode := range []string{"json", "quiet"} {
+		t.Run(mode, func(t *testing.T) {
+			target := newControlRoot(t)
+			runID := "run-cancel-" + mode
+			createTaskRunFixture(t, target, runID, lifecycle.PhaseResumable, "analyst", "")
+			args := []string{"cancel", runID, "--target", target, "--reason", "operator"}
+			if mode == "json" {
+				args = append(args, "--json")
+			} else {
+				args = append(args, "--quiet")
+			}
+			stdout, code, stderr := runCLI(t, args...)
+			if code != 0 {
+				t.Fatalf("cancel command: code=%d stderr=%s", code, stderr)
+			}
+			if mode == "json" {
+				records := parseJSONL(t, stdout)
+				if len(records) != 1 || records[0].Command != "cancel" || records[0].Message != "Run отменён: "+runID {
+					t.Fatalf("JSON cancel should emit one structured record, got %+v", records)
+				}
+				if stderr != "" {
+					t.Fatalf("JSON cancel should not add human output to stderr, got %q", stderr)
+				}
+			} else if stdout != "" || stderr != "" {
+				t.Fatalf("quiet cancel should suppress success output, got stdout=%q stderr=%q", stdout, stderr)
+			}
+		})
+	}
 }
 
 func createTaskRunFixture(t *testing.T, target, runID string, phase lifecycle.Phase, nextStage, approvalID string) {

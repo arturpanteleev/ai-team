@@ -486,10 +486,12 @@ func cmdTaskCancel() {
 		os.Exit(code)
 	}
 	message := "Run отменён: " + result.RunID
-	if logging.GetMode() != logging.ModeJSON {
+	record := logging.Record{Level: "ok", Command: "cancel", Type: "run", Message: message, Data: map[string]any{"run_id": result.RunID, "outcome": string(result.Outcome), "reason": strings.TrimSpace(*reason)}, Exit: exitOK}
+	if logging.GetMode() == logging.ModeDefault {
 		logging.Printf("%s\n", message)
+		return
 	}
-	logging.Emit(logging.Record{Level: "ok", Command: "cancel", Type: "run", Message: message, Data: map[string]any{"run_id": result.RunID, "outcome": string(result.Outcome), "reason": strings.TrimSpace(*reason)}, Exit: exitOK})
+	logging.Emit(record)
 }
 
 func interspersedTaskArgs(args []string, valueFlags map[string]bool) []string {

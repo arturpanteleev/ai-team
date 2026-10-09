@@ -16,8 +16,58 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
+	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
+
+func TestRunSuccessOutputHelper(t *testing.T) {
+	if os.Getenv("AI_TEAM_RUN_SUCCESS_HELPER") != "1" {
+		return
+	}
+	switch os.Getenv("AI_TEAM_RUN_SUCCESS_MODE") {
+	case "json":
+		logging.SetMode(logging.ModeJSON)
+	case "quiet":
+		logging.SetMode(logging.ModeQuiet)
+	default:
+		logging.SetMode(logging.ModeDefault)
+	}
+	reportRunSuccess(pipeline.RunResult{RunID: "run-output-test", Outcome: "completed"}, "feature-output-test")
+}
+
+func TestRunSuccessOutputModes(t *testing.T) {
+	for _, mode := range []string{"default", "json", "quiet"} {
+		t.Run(mode, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestRunSuccessOutputHelper$")
+			command.Env = append(os.Environ(), "AI_TEAM_RUN_SUCCESS_HELPER=1", "AI_TEAM_RUN_SUCCESS_MODE="+mode)
+			var stdout, stderr bytes.Buffer
+			command.Stdout = &stdout
+			command.Stderr = &stderr
+			if err := command.Run(); err != nil {
+				t.Fatalf("run success output helper: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			output := strings.TrimSuffix(stdout.String(), "PASS\n")
+			switch mode {
+			case "default":
+				if got := strings.Count(output, "✓ Пайплайн выполнен"); got != 1 || stderr.Len() != 0 {
+					t.Fatalf("default mode should print one human success line, got stdout=%q stderr=%q", output, stderr.String())
+				}
+			case "json":
+				records := parseJSONL(t, output)
+				if len(records) != 1 || records[0].Command != "run" || records[0].Data["run_id"] != "run-output-test" {
+					t.Fatalf("JSON mode should keep one structured run record, got %+v", records)
+				}
+				if got := strings.Count(stderr.String(), "✓ Пайплайн выполнен"); got != 1 {
+					t.Fatalf("JSON mode should retain one human progress line on stderr, got %q", stderr.String())
+				}
+			case "quiet":
+				if output != "" || stderr.Len() != 0 {
+					t.Fatalf("quiet mode should suppress successful output, got stdout=%q stderr=%q", output, stderr.String())
+				}
+			}
+		})
+	}
+}
 
 func TestStageSubmitCommandHelper(t *testing.T) {
 	if os.Getenv("AI_TEAM_STAGE_SUBMIT_HELPER") != "1" {

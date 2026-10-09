@@ -98,4 +98,24 @@ describe('useWebSocket', () => {
     );
     unmount();
   });
+
+  it('переподключается с сохранённым cursor после возврата соединения', () => {
+    vi.useFakeTimers();
+    window.sessionStorage.setItem(
+      'ai-team:event-cursor',
+      JSON.stringify({ stream: 's1', cursor: 8 }),
+    );
+    const { unmount } = renderHook(() => useWebSocket({ onEvent: vi.fn() }));
+    expect(MockWebSocket.instances[0].url).toContain('/ws?cursor=8');
+
+    act(() => {
+      MockWebSocket.instances[0].close();
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.instances[1].url).toContain('/ws?cursor=8');
+    unmount();
+    vi.useRealTimers();
+  });
 });

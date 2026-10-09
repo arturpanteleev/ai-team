@@ -88,11 +88,27 @@
   .nav {
     grid-column: 1 / -1;
     flex-direction: row;
-    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .navLink {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 12px;
+    text-align: center;
   }
 
   .sidebar > small {
     grid-column: 1 / -1;
     overflow-wrap: anywhere;
+    max-width: 100%;
+  }
+
+  .themeToggle {
+    min-height: 44px;
   }
 }

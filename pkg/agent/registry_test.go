@@ -136,6 +136,17 @@ func TestRegistry_DefaultPipeline(t *testing.T) {
 	}
 }
 
+func TestRegistry_InputsOnlyReadScopeKeepsObserverValid(t *testing.T) {
+	r := NewFS(os.DirFS("../../agents"))
+	a, err := r.Load("observer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ReadScope != "inputs-only" || a.Mutation != "none" {
+		t.Fatalf("observer read/mutation scope = %q/%q, want inputs-only/none", a.ReadScope, a.Mutation)
+	}
+}
+
 func TestRegistry_RejectsUnsafeOrInconsistentDefinitions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -151,6 +162,9 @@ func TestRegistry_RejectsUnsafeOrInconsistentDefinitions(t *testing.T) {
 		{"delivery without external", "name: sample\nruntime: agentcli\nkind: delivery\nmutation: none\n", "требует mutation external"},
 		{"delivery without preconditions", "name: sample\nruntime: agentcli\nkind: delivery\nmutation: external\n", "требует declarative preconditions"},
 		{"external non-delivery", "name: sample\nruntime: agentcli\nmutation: external\n", "только для kind delivery"},
+		{"inputs-only source mutation", "name: sample\nruntime: agentcli\nread_scope: inputs-only\nmutation: source\nallowed_paths: ['**']\n", "несовместим с mutation \"source\""},
+		{"inputs-only tests mutation", "name: sample\nruntime: agentcli\nread_scope: inputs-only\nmutation: tests\nallowed_paths: ['**/*_test.go']\n", "несовместим с mutation \"tests\""},
+		{"inputs-only delivery kind", "name: sample\nruntime: agentcli\nread_scope: inputs-only\nkind: delivery\nmutation: external\n", "kind delivery не поддерживает read_scope"},
 		{"reserved ai-team scope", "name: sample\nruntime: agentcli\nmutation: source\nallowed_paths: ['.ai-team/config.yaml']\n", "reserved controller"},
 		{"reserved git scope", "name: sample\nruntime: agentcli\nmutation: source\nallowed_paths: ['.git/config']\n", "reserved controller"},
 		{"diff without mutation", "name: sample\nruntime: agentcli\nmutation: none\nrequire_diff: true\n", "require_diff требует"},

@@ -129,6 +129,12 @@ func validateDefinition(dirName string, a *Agent) error {
 	default:
 		return fmt.Errorf("агент %s: неизвестный mutation %q", dirName, a.Mutation)
 	}
+	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Kind == "delivery" {
+		return fmt.Errorf("агент %s: kind delivery не поддерживает read_scope %q", dirName, runtime.ReadScopeInputsOnly)
+	}
+	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Mutation != "none" {
+		return fmt.Errorf("агент %s: read_scope %q несовместим с mutation %q", dirName, runtime.ReadScopeInputsOnly, a.Mutation)
+	}
 	if a.Kind == "delivery" && a.Mutation != "external" {
 		return fmt.Errorf("агент %s: kind delivery требует mutation external", dirName)
 	}

@@ -136,6 +136,24 @@ func TestWorkerAPIQuestionAnswerRejectsCompletedTargetAndWrongOperation(t *testi
 	}
 }
 
+func TestWorkerAPIQuestionAnswerDispatchRequiresPreparedAdmission(t *testing.T) {
+	if _, err := (&workerAPIServer{scope: workerAPIScope{RunID: "run-question-unprepared"}}).dispatch("handoff.question_answer.path", workerAPICall{}); err == nil ||
+		!strings.Contains(err.Error(), "no prepared clarification answer") {
+		t.Fatalf("unprepared controller API must not expose a clarification path: %v", err)
+	}
+
+	server := &workerAPIServer{
+		scope:        workerAPIScope{RunID: "run-question-unprepared", Operation: OperationResume},
+		usageAllowed: true, questionAnswerID: "approval-question-unprepared",
+		questionAnswerPath: "/tmp/answer.md",
+	}
+	if _, err := server.dispatch("handoff.question_answer.path", workerAPICall{
+		RunID: server.scope.RunID, A: server.questionAnswerID,
+	}); err == nil || !strings.Contains(err.Error(), "mount identity is unavailable") {
+		t.Fatalf("controller API must require an admitted mount identity: %v", err)
+	}
+}
+
 func TestPrepareQuestionAnswerMountpointRecoversOnlyExactSingleLinkProjection(t *testing.T) {
 	expected := []byte("# Ответ Product Owner\n\nDurable answer\n")
 	path := filepath.Join(t.TempDir(), ".ai-team", "runs", "run-recovery", "inputs", "approval-recovery-answer.md")

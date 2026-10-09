@@ -214,6 +214,9 @@ func TestValidateQuestionAnswerCandidateUsesCurrentWorkspaceIdentity(t *testing.
 	if err := validateQuestionAnswerCandidate(context.TODO(), target, value); err != nil {
 		t.Fatalf("matching controller candidate identity should be admitted: %v", err)
 	}
+	if err := validateQuestionAnswerCandidate(nil, target, value); err != nil {
+		t.Fatalf("nil context should use a safe background context: %v", err)
+	}
 	if err := validateQuestionAnswerCandidate(context.Background(), target, approval.PendingApproval{RunID: runID}); err != nil {
 		t.Fatalf("approval without a candidate binding should not require a worktree: %v", err)
 	}

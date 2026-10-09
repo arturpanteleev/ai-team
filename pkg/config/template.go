@@ -72,13 +72,18 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		s.Executor = "human"
 	}
 	if s.Confirm == "" {
-		if s.Result == "approve" {
-			s.Confirm = "auto"
-		} else {
-			s.Confirm = "required"
-		}
+		s.Confirm = defaultConfirmForResult(s.Result)
 	}
 	return nil
+}
+
+// defaultConfirmForResult keeps YAML-loaded and programmatically constructed
+// templates consistent when a caller omits the optional confirmation mode.
+func defaultConfirmForResult(result string) string {
+	if result == "approve" {
+		return "auto"
+	}
+	return "required"
 }
 
 func (c *TemplateCheck) UnmarshalYAML(node *yaml.Node) error {
@@ -339,7 +344,11 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			next = c.Stages[i+1].ID
 		}
 		edge := workflow.Edge{From: stage.ID, Outcome: workflow.OutcomePassed, To: next}
-		if next != workflow.TerminalComplete && stage.Confirm == "required" {
+		confirm := stage.Confirm
+		if confirm == "" {
+			confirm = defaultConfirmForResult(stage.Result)
+		}
+		if next != workflow.TerminalComplete && confirm == "required" {
 			edge.Approval = generatedApproval(stage.Function, next, nil)
 		}
 		graph.Edges = append(graph.Edges, edge)

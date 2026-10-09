@@ -208,6 +208,31 @@ func TestTemplateGraphRespectsStageConfirmation(t *testing.T) {
 	}
 }
 
+func TestTemplateGraphDefaultsConfirmationForProgrammaticStages(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Stages) < 2 {
+		t.Fatalf("standard profile has %d stages, need at least two", len(cfg.Stages))
+	}
+	// Direct Go callers can construct or edit Config without YAML unmarshalling.
+	// An omitted mode must preserve the documented result-based defaults.
+	cfg.Stages[0].Confirm = ""
+	cfg.Stages[1].Confirm = ""
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, wantApproval := range []bool{false, true} {
+		stage := cfg.Stages[i]
+		edge, ok := graph.Edge(stage.ID, "passed")
+		if !ok || (edge.Approval != nil) != wantApproval {
+			t.Fatalf("omitted confirm for stage %q result=%q: approval=%v, want %v", stage.ID, stage.Result, edge.Approval != nil, wantApproval)
+		}
+	}
+}
+
 func TestProfilePresetsAreDistinctTemplates(t *testing.T) {
 	standard, err := DefaultProfile(ProfileStandard)
 	if err != nil {

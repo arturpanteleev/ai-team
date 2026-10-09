@@ -85,3 +85,18 @@ func TestParseRolesRequiresAtLeastOneRole(t *testing.T) {
 		t.Fatalf("ParseRoles valid role: roles=%v err=%v", roles, err)
 	}
 }
+
+func TestFunctionRoleResolvesLegacyFunctionAliasesForAuthorization(t *testing.T) {
+	for function, want := range map[string]Role{
+		"bo": RoleProductOwner, "po": RoleProductOwner, "deployer": RoleReleaseManager,
+		"product_owner": RoleProductOwner, "release_manager": RoleReleaseManager,
+	} {
+		got, ok := FunctionRole(function)
+		if !ok || got != want {
+			t.Errorf("FunctionRole(%q) = (%q, %v), want (%q, true)", function, got, ok, want)
+		}
+	}
+	if _, ok := FunctionRole("unknown"); ok {
+		t.Fatal("unknown stage function unexpectedly resolved to a cloud role")
+	}
+}

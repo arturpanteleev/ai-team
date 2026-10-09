@@ -191,6 +191,35 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 	if manifest.Executor != "human" && (manifest.ActorID != "" || manifest.ActorRole != "" || manifest.HumanInputApprovalID != "") {
 		return errors.New("non-human attempt manifest cannot contain a human actor")
 	}
+	hasHumanSubmission := manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
+		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
+	if hasHumanSubmission && manifest.Executor != "human" {
+		return errors.New("non-human attempt manifest cannot contain a human submission")
+	}
+	if manifest.HumanSubmissionVersion < 0 || (manifest.HumanSubmissionVersion == 0 && manifest.HumanSubmissionSHA256 != "") {
+		return errors.New("human submission version/hash metadata is invalid")
+	}
+	if manifest.HumanSubmissionVersion > 0 {
+		if !validSHA256(manifest.HumanSubmissionSHA256) || len(manifest.HumanSubmissionDescription) > 16<<10 ||
+			(manifest.HumanSubmissionResult != "md" && manifest.HumanSubmissionResult != "link" && manifest.HumanSubmissionResult != "approve") {
+			return errors.New("human submission result metadata is invalid")
+		}
+		if manifest.HumanSubmissionResult == "link" {
+			if manifest.HumanSubmissionLinkKind != "pr" && manifest.HumanSubmissionLinkKind != "build" && manifest.HumanSubmissionLinkKind != "other" {
+				return errors.New("human submission link kind is invalid")
+			}
+		} else if manifest.HumanSubmissionLinkKind != "" {
+			return errors.New("human submission link kind is only valid for links")
+		}
+		if len(manifest.Outputs) != 1 || manifest.Outputs[0].SHA256 == "" {
+			return errors.New("typed human submission must bind one attempt output")
+		}
+		if manifest.HumanSubmissionResult == "md" || manifest.HumanSubmissionResult == "link" {
+			if manifest.Outputs[0].SHA256 != manifest.HumanSubmissionSHA256 {
+				return errors.New("typed human result hash disagrees with attempt output")
+			}
+		}
+	}
 	if manifest.Usage != nil && (manifest.Usage.TokensInput < 0 || manifest.Usage.TokensOutput < 0 ||
 		math.IsNaN(manifest.Usage.CostUSD) || math.IsInf(manifest.Usage.CostUSD, 0) || manifest.Usage.CostUSD < 0 ||
 		(!manifest.Usage.Attested && (manifest.Usage.TokensInput != 0 || manifest.Usage.TokensOutput != 0 || manifest.Usage.CostUSD != 0))) {

@@ -66,6 +66,25 @@ func ParseRoles(values []string) ([]Role, error) {
 	return roles, nil
 }
 
+// FunctionRole maps process-template function aliases to the canonical cloud
+// identity role used for authorization. Approval records continue to retain
+// the configured function string so workflow requirements remain stable.
+func FunctionRole(function string) (Role, bool) {
+	value := strings.TrimSpace(strings.ToLower(function))
+	switch value {
+	case "bo", "po", "business_owner":
+		return RoleProductOwner, true
+	case "deployer":
+		return RoleReleaseManager, true
+	default:
+		roles, err := ParseRoles([]string{value})
+		if err != nil {
+			return "", false
+		}
+		return roles[0], true
+	}
+}
+
 func (p Principal) Has(role Role) bool {
 	for _, current := range p.Roles {
 		if current == role {

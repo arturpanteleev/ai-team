@@ -154,6 +154,143 @@ func TestDecisionPinsLatestImmutableArtifactRevision(t *testing.T) {
 	}
 }
 
+func TestSubmitHumanStageEndpointPersistsVersionAndExposesHistory(t *testing.T) {
+	target := t.TempDir()
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		Kind: approval.KindInput, ID: "approval-stage-submit", RunID: "run-stage-submit", AttemptID: "request-attempt",
+		FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny, Actions: []string{"submit"},
+		Status: approval.StatusPending, Payload: payload,
+	}}}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), WithTargetDir(target), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	content := " \n# Result\n\nFinished the implementation.  \n"
+	request := authorizedRequest(t, srv, "POST", "/api/runs/run-stage-submit/stages/writer/submit",
+		`{"result":"md","content":`+mustJSONString(t, content)+`,"actor_id":"writer-1","actor_role":"developer"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("stage submit: %d %s", response.Code, response.Body.String())
+	}
+	var receipt struct {
+		Submission struct {
+			Version      int    `json:"version"`
+			SHA256       string `json:"sha256"`
+			ID           string `json:"id"`
+			ArtifactPath string `json:"artifact_path"`
+		} `json:"submission"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	wantSHA := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	if receipt.Submission.Version != 1 || receipt.Submission.SHA256 != wantSHA || receipt.Submission.ID == "" ||
+		receipt.Submission.ArtifactPath != "stages/writer/result.md" ||
+		controller.decision.Comment != content || controller.decision.SubmissionVersion != 1 || controller.decision.ContentSHA256 != wantSHA ||
+		!controller.decision.ControllerAuthenticated {
+		t.Fatalf("stage submit receipt/approval metadata mismatch: receipt=%+v decision=%+v", receipt.Submission, controller.decision)
+	}
+	history, err := srv.humanArtifacts.List("run-stage-submit", "stages/writer/result.md")
+	if err != nil || len(history) != 1 || history[0].Content != content || history[0].SHA256 != wantSHA {
+		t.Fatalf("durable typed stage revision: history=%+v err=%v", history, err)
+	}
+	get := authorizedRequest(t, srv, http.MethodGet, "/api/runs/run-stage-submit/artifact-revisions?path=stages%2Fwriter%2Fresult.md", "")
+	listed := httptest.NewRecorder()
+	srv.router.ServeHTTP(listed, get)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), receipt.Submission.ID) {
+		t.Fatalf("stage revision history endpoint: %d %s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestDefaultHumanStageFunctionAliasesAuthorizeAndKeepConfiguredActorRole(t *testing.T) {
+	for _, stage := range []struct {
+		id, function, result, content string
+	}{
+		{id: "intent", function: "bo", result: "approve"},
+		{id: "product_spec", function: "po", result: "md", content: "# Product requirements\n\nКритерии приёмки\n"},
+	} {
+		for _, mode := range []string{"local", "team"} {
+			t.Run(stage.id+"/"+mode, func(t *testing.T) {
+				target := t.TempDir()
+				payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: stage.id,
+					Result: stage.result, OutputName: "result", OutputPath: "feature/result.md"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				controller := &fakeRunController{approvals: []approval.PendingApproval{{
+					Kind: approval.KindInput, ID: "approval-" + stage.id, RunID: "run-" + stage.id, AttemptID: "request-" + stage.id,
+					FromStage: stage.id, ToStage: stage.id, Trigger: "human_input", SubjectHash: testSubjectHash,
+					RequiredRoles: []string{stage.function}, Quorum: approval.QuorumAny, Actions: []string{map[string]string{"approve": "approve", "md": "submit"}[stage.result]},
+					Status: approval.StatusPending, Payload: payload,
+				}}}
+				options := []ServerOption{WithTargetDir(target), WithRunController(controller)}
+				var manager *cloudidentity.TokenManager
+				if mode == "local" {
+					verifier, err := NewLocalAuthenticator("local-human-stage-token-0123456789abcdef")
+					if err != nil {
+						t.Fatal(err)
+					}
+					options = append(options, WithLocalAuthenticator(verifier))
+				} else {
+					manager, err = cloudidentity.NewTokenManager([]byte(strings.Repeat("m", 32)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					options = append(options, WithAuthenticator(manager))
+				}
+				srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), options...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = srv.Close() }()
+				var response *httptest.ResponseRecorder
+				body := `{"result":` + mustJSONString(t, stage.result) + `,"actor_role":"product_owner"`
+				if stage.result == "md" {
+					body += `,"content":` + mustJSONString(t, stage.content)
+				}
+				body += `}`
+				endpoint := "/api/runs/run-" + stage.id + "/stages/" + stage.id + "/submit"
+				if mode == "local" {
+					request := authenticatedRequest(t, srv, "local-human-stage-token-0123456789abcdef", http.MethodPost, endpoint, body)
+					response = httptest.NewRecorder()
+					srv.router.ServeHTTP(response, request)
+				} else {
+					if err := srv.store.BootstrapTeamAdmin("owner@example.com", time.Now().UTC()); err != nil {
+						t.Fatal(err)
+					}
+					cookie, csrf := cloudSessionForTest(t, srv, manager, "owner@example.com", cloudidentity.RoleProductOwner)
+					response = teamRequest(srv, cookie, csrf, http.MethodPost, endpoint, body)
+				}
+				if response.Code != http.StatusCreated {
+					t.Fatalf("stage submit: %d %s", response.Code, response.Body.String())
+				}
+				if controller.decision.ActorID == "" || controller.decision.ActorRole != stage.function {
+					t.Fatalf("controller decision must retain raw configured function role %q: %+v", stage.function, controller.decision)
+				}
+				if controller.decision.Action != map[string]string{"approve": "approve", "md": "submit"}[stage.result] {
+					t.Fatalf("unexpected decision action: %+v", controller.decision)
+				}
+			})
+		}
+	}
+}
+
+func mustJSONString(t *testing.T, value string) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func TestQuorumVotesReuseFirstPinnedArtifactRevisionAfterNewerEdit(t *testing.T) {
 	target := t.TempDir()
 	approvalValue := approval.PendingApproval{

@@ -12,8 +12,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +26,14 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -50,11 +54,16 @@ const (
 	// keeping this allowance scoped to the typed manifest methods.
 	workerAPIMaxAttemptManifestEnvelope = 12 << 20
 	workerAPIMaxAttemptManifestPayload  = evidence.MaxAttemptManifestSize + workerAPIMaxBody
-	workerAPIEventReadPage              = 512 << 10
-	workerAPIErrorMarker                = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
-	workerAPIRequestTTL                 = 30 * time.Second
-	workerAPIFutureSkew                 = 5 * time.Second
-	workerAPIMaxNonces                  = 4096
+	// Approval reads may contain a large submitted markdown comment. Keep this
+	// scoped to the typed approval read methods; the generic RPC cap stays 1 MiB.
+	workerAPIMaxApprovalReadResponse = approval.MaxApprovalRecordBytes + (64 << 10)
+	workerAPIApprovalListPageBytes   = 768 << 10
+	workerAPIApprovalListPageItems   = 32
+	workerAPIEventReadPage           = 512 << 10
+	workerAPIErrorMarker             = "AI_TEAM_WORKER_API_RECORDER_ERROR:"
+	workerAPIRequestTTL              = 30 * time.Second
+	workerAPIFutureSkew              = 5 * time.Second
+	workerAPIMaxNonces               = 4096
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -110,6 +119,12 @@ type workerAPIEventPage struct {
 	Offset   int64  `json:"offset"`
 	Total    int64  `json:"total"`
 	Data     []byte `json:"data"`
+}
+
+type workerAPIApprovalListPage struct {
+	Values     []approval.PendingApproval `json:"values"`
+	NextOffset int                        `json:"next_offset"`
+	HasMore    bool                       `json:"has_more"`
 }
 
 type workerAPIEventAppendResult struct {
@@ -658,7 +673,7 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 	if request.Method == "attempt_manifest.write" {
 		payloadLimit = workerAPIMaxAttemptManifestPayload
 	}
-	if request.Method == "event_log.append" {
+	if request.Method == "event_log.append" || request.Method == "event_log.description_missing" {
 		payloadLimit = workerAPIMaxEventAppendPayload
 	}
 	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, int64(payloadLimit), &call) != nil {
@@ -691,7 +706,7 @@ func workerAPIRequestBodyLimit(method string, size int) int {
 		return workerAPIMaxCandidateEvidenceBody
 	case "attempt_manifest.write", "attempt_manifest.read":
 		return workerAPIMaxAttemptManifestEnvelope
-	case "event_log.append":
+	case "event_log.append", "event_log.description_missing":
 		return workerAPIMaxEventAppendEnvelope
 	default:
 		if size <= workerAPIMaxBody {
@@ -962,7 +977,7 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			s.eventSnapshotToken = ""
 		}
 		return page, nil
-	case "event_log.append":
+	case "event_log.append", "event_log.description_missing":
 		if !s.usageAllowed || s.eventLogs == nil {
 			return nil, errors.New("controller event log appends require bubblewrap Unix transport")
 		}
@@ -982,13 +997,25 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, fmt.Errorf("read event chain before append: %w", err)
 		}
 		runDir := filepath.Join(s.scope.TargetDir, ".ai-team", "runs", s.scope.RunID)
-		validated, exactRetry, err := evidence.ValidateEventAppend(events, s.scope.RunID, runDir, c.Event,
-			c.ExpectedSequence, c.ExpectedPreviousSHA256,
-			evidence.ReservedAttemptManifestSource{TargetDir: s.scope.TargetDir})
+		controllerOnly := method == "event_log.description_missing"
+		validateAppend := evidence.ValidateEventAppend
+		if controllerOnly {
+			validateAppend = evidence.ValidateControllerEventAppend
+			if s.scope.Operation != OperationStart && s.scope.Operation != OperationResume && s.scope.Operation != OperationRecover {
+				return nil, fmt.Errorf("controller description event is not allowed for operation %q", s.scope.Operation)
+			}
+		}
+		validated, exactRetry, err := validateAppend(events, s.scope.RunID, runDir, c.Event,
+			c.ExpectedSequence, c.ExpectedPreviousSHA256, evidence.ReservedAttemptManifestSource{TargetDir: s.scope.TargetDir})
 		if err != nil {
 			return nil, err
 		}
-		if !exactRetry {
+		if controllerOnly {
+			if err := s.validateControllerDescriptionMissing(c.Event, events); err != nil {
+				return nil, err
+			}
+		}
+		if !controllerOnly && !exactRetry {
 			if err := s.validateWorkerApprovalEvent(c.Event); err != nil {
 				return nil, err
 			}
@@ -1031,6 +1058,11 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			// New bubblewrap starts reserve before spawn, so this path can only be
 			// used for legacy recovery/resume.
 			return nil, nil
+		}
+		if isHumanAttemptManifest(c.AttemptManifest) {
+			if err := s.validateReservedHumanSubmissionManifest(c.AttemptManifest); err != nil {
+				return nil, err
+			}
 		}
 		return nil, s.attemptManifests.Write(s.scope.RunID, c.AttemptManifest)
 	case "attempt_manifest.read":
@@ -1140,9 +1172,39 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		c.Approval.RunID = s.scope.RunID
 		return s.approvals.Create(c.Approval)
 	case "approval.load":
-		return s.approvals.Load(s.scope.RunID, c.A)
+		value, err := s.approvals.Load(s.scope.RunID, c.A)
+		if err != nil {
+			return nil, err
+		}
+		if encoded, err := json.Marshal(value); err != nil || len(encoded) > approval.MaxApprovalRecordBytes {
+			return nil, errors.New("approval record exceeds maximum size")
+		}
+		return value, nil
 	case "approval.list":
-		return s.approvals.List(s.scope.RunID)
+		values, err := s.approvals.List(s.scope.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if c.Index < 0 || c.Index > len(values) {
+			return nil, errors.New("approval list offset is invalid")
+		}
+		sort.Slice(values, func(i, j int) bool { return values[i].ID < values[j].ID })
+		page := workerAPIApprovalListPage{Values: make([]approval.PendingApproval, 0, workerAPIApprovalListPageItems)}
+		pageBytes := 2 // JSON array delimiters
+		for index := c.Index; index < len(values) && len(page.Values) < workerAPIApprovalListPageItems; index++ {
+			encoded, err := json.Marshal(values[index])
+			if err != nil || len(encoded) > approval.MaxApprovalRecordBytes {
+				return nil, errors.New("approval list record exceeds maximum size")
+			}
+			if len(page.Values) > 0 && pageBytes+len(encoded)+1 > workerAPIApprovalListPageBytes {
+				break
+			}
+			page.Values = append(page.Values, values[index])
+			pageBytes += len(encoded) + 1
+			page.NextOffset = index + 1
+		}
+		page.HasMore = page.NextOffset < len(values)
+		return page, nil
 	case "approval.decide", "approval.resolve_deferred":
 		return nil, errors.New("worker API cannot make human approval decisions")
 	case "handoff.question_answer.path":
@@ -1253,6 +1315,176 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return nil, fmt.Errorf("worker API method %q is not allowed", method)
 	}
 	return nil, nil
+}
+
+func (s *workerAPIServer) validateControllerDescriptionMissing(event evidence.Event, events []evidence.Event) error {
+	if event.Type != "description_missing" || s.approvals == nil {
+		return errors.New("controller description event requires an approval-backed event")
+	}
+	approvalID, _ := event.Data["approval_id"].(string)
+	value, err := s.approvals.Load(s.scope.RunID, approvalID)
+	if err != nil {
+		return fmt.Errorf("load human input event authority: %w", err)
+	}
+	if value.RunID != s.scope.RunID || value.ID != approvalID || value.Kind != approval.KindInput ||
+		value.Trigger != "human_input" || value.FromStage != event.Stage || value.ToStage != event.Stage ||
+		value.Status != approval.StatusResolved || value.ResolvedAction == "" || value.ResolvedAction == "reject" ||
+		len(value.Decisions) == 0 {
+		return errors.New("description_missing does not match a resolved human input approval")
+	}
+	var payload approval.InputPayload
+	if json.Unmarshal(value.Payload, &payload) != nil || payload.StageID != event.Stage ||
+		(payload.Result != "md" && payload.Result != "link" && payload.Result != "approve") {
+		return errors.New("description_missing approval payload does not match a human result")
+	}
+	var started *evidence.Event
+	for index := range events {
+		candidate := &events[index]
+		if candidate.Type == "attempt_started" && candidate.AttemptID == event.AttemptID && candidate.Stage == event.Stage {
+			started = candidate
+		}
+	}
+	if started == nil || started.Data["executor"] != "human" || started.Data["human_input_approval_id"] != approvalID {
+		return errors.New("description_missing does not match a started human attempt")
+	}
+	actorID, _ := started.Data["actor_id"].(string)
+	actorRole, _ := started.Data["actor_role"].(string)
+	decision := value.Decisions[len(value.Decisions)-1]
+	if actorID == "" || actorRole == "" || decision.ActorID != actorID || decision.ActorRole != actorRole ||
+		decision.Action != value.ResolvedAction || strings.TrimSpace(decision.Description) != "" {
+		return errors.New("description_missing does not match the resolved human input decision")
+	}
+	return nil
+}
+
+func isHumanAttemptManifest(manifest evidence.AttemptManifest) bool {
+	return manifest.Executor == "human" || manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
+		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
+}
+
+func (s *workerAPIServer) loadHumanSubmissionApproval(manifest evidence.AttemptManifest) (approval.PendingApproval, approval.InputPayload, approval.Decision, error) {
+	if s.approvals == nil || manifest.Executor != "human" || manifest.HumanInputApprovalID == "" {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest requires its controller approval")
+	}
+	value, err := s.approvals.Load(s.scope.RunID, manifest.HumanInputApprovalID)
+	if err != nil {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, fmt.Errorf("load human submission manifest approval: %w", err)
+	}
+	if value.RunID != s.scope.RunID || value.ID != manifest.HumanInputApprovalID || value.Kind != approval.KindInput ||
+		value.Trigger != "human_input" || value.FromStage != manifest.Stage || value.ToStage != manifest.Stage ||
+		value.Status != approval.StatusResolved || len(value.Decisions) == 0 {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest does not match a resolved stage input")
+	}
+	var payload approval.InputPayload
+	if json.Unmarshal(value.Payload, &payload) != nil || payload.StageID != manifest.Stage ||
+		(payload.Result != "md" && payload.Result != "link" && payload.Result != "approve") {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest result does not match the configured input")
+	}
+	decision := value.Decisions[len(value.Decisions)-1]
+	if decision.ActorID != manifest.ActorID || decision.ActorRole != manifest.ActorRole {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest actor does not match its resolved decision")
+	}
+	if value.ResolvedAction != decision.Action || !containsWorkerString(value.Actions, decision.Action) {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest decision is not the resolved allowed action")
+	}
+	if decision.Action != "reject" && (payload.Result == "approve" && decision.Action != "approve" || payload.Result != "approve" && decision.Action != "submit") {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest action does not match its configured result")
+	}
+	return value, payload, decision, nil
+}
+
+func (s *workerAPIServer) validateReservedHumanSubmissionManifest(manifest evidence.AttemptManifest) error {
+	_, _, decision, err := s.loadHumanSubmissionApproval(manifest)
+	if err != nil {
+		return err
+	}
+	if decision.Action == "reject" {
+		if decision.SubmissionVersion != 0 || decision.ContentSHA256 != "" || manifest.HumanSubmissionVersion != 0 ||
+			manifest.HumanSubmissionSHA256 != "" || manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" ||
+			manifest.HumanSubmissionDescription != "" || len(manifest.Outputs) != 0 {
+			return errors.New("rejected human input manifest cannot contain submission metadata or outputs")
+		}
+		if manifest.Status != string(workflow.OutcomeRejected) || manifest.Execution != string(workflow.ExecutionSucceeded) ||
+			manifest.Decision != string(workflow.DecisionRejected) || manifest.Outcome != string(workflow.OutcomeRejected) ||
+			manifest.Verdict != string(verdict.Rejected) || manifest.Error != "" || manifest.Blocker != "" {
+			return errors.New("rejected human input manifest does not match the resolved rejection state")
+		}
+		return nil
+	}
+	decisionIsVersioned := decision.SubmissionVersion != 0 || decision.ContentSHA256 != ""
+	manifestHasTypedSubmission := manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
+		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
+	if decisionIsVersioned {
+		if manifest.HumanSubmissionVersion < 1 || !manifestHasTypedSubmission {
+			return errors.New("versioned human input decision requires a typed attempt manifest binding")
+		}
+		return s.validateHumanSubmissionManifest(manifest)
+	}
+	if manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" || manifest.HumanSubmissionResult != "" ||
+		manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != "" {
+		return errors.New("legacy human input decision cannot carry typed submission metadata")
+	}
+	return nil
+}
+
+func (s *workerAPIServer) validateHumanSubmissionManifest(manifest evidence.AttemptManifest) error {
+	if manifest.HumanSubmissionVersion < 1 {
+		return errors.New("human submission manifest requires its controller approval")
+	}
+	_, payload, decision, err := s.loadHumanSubmissionApproval(manifest)
+	if err != nil {
+		return err
+	}
+	if payload.Result != manifest.HumanSubmissionResult || payload.LinkKind != manifest.HumanSubmissionLinkKind ||
+		decision.SubmissionVersion != manifest.HumanSubmissionVersion || decision.ContentSHA256 != manifest.HumanSubmissionSHA256 ||
+		decision.Description != manifest.HumanSubmissionDescription {
+		return errors.New("human submission manifest version/hash does not match its approval decision")
+	}
+	if decision.Action != "submit" && decision.Action != "approve" {
+		return errors.New("human submission manifest has an unsupported resolved action")
+	}
+	if len(manifest.Outputs) != 1 {
+		return errors.New("human submission manifest must bind exactly one output")
+	}
+	output := manifest.Outputs[0]
+	if output.Type != "file" || output.Name != payload.OutputName || output.EvidencePath == "" {
+		return errors.New("human submission manifest output does not match the configured contract")
+	}
+	outputPrefix := path.Join("attempts", manifest.AttemptID, "artifacts") + "/"
+	if !strings.HasPrefix(output.EvidencePath, outputPrefix) || path.Clean(output.EvidencePath) != output.EvidencePath {
+		return errors.New("human submission manifest output is outside its immutable attempt artifacts")
+	}
+	var expected []byte
+	switch manifest.HumanSubmissionResult {
+	case "md", "link":
+		if decision.Action != "submit" {
+			return errors.New("human submission manifest result requires submit action")
+		}
+		expected = []byte(decision.Comment)
+	case "approve":
+		if decision.Action != "approve" {
+			return errors.New("human approval manifest result requires approve action")
+		}
+		expected, err = humanartifact.ApprovalResultContent(manifest.Stage, decision)
+		if err != nil {
+			return fmt.Errorf("encode human approval result: %w", err)
+		}
+	default:
+		return errors.New("human submission manifest result is unsupported")
+	}
+	expectedSHA256 := humanartifact.Digest(expected)
+	if output.Size != int64(len(expected)) || output.SHA256 != expectedSHA256 {
+		return errors.New("human submission manifest output does not match its resolved decision bytes")
+	}
+	if strings.TrimSpace(s.scope.TargetDir) == "" {
+		return errors.New("human submission manifest artifact root is unavailable")
+	}
+	runDir := filepath.Join(s.scope.TargetDir, ".ai-team", "runs", s.scope.RunID)
+	artifactType, artifactSize, artifactSHA256, err := evidence.ArtifactDigestAt(runDir, output.EvidencePath)
+	if err != nil || artifactType != "file" || artifactSize != int64(len(expected)) || artifactSHA256 != expectedSHA256 {
+		return errors.New("human submission manifest attempt artifact does not match its resolved decision bytes")
+	}
+	return nil
 }
 
 func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prior []evidence.Event, runDir string) error {
@@ -1721,6 +1953,9 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 	if method == "attempt_manifest.read" {
 		responseLimit = workerAPIMaxAttemptManifestEnvelope
 	}
+	if method == "approval.load" || method == "approval.list" {
+		responseLimit = workerAPIMaxApprovalReadResponse
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 	if err != nil {
 		return err
@@ -1830,6 +2065,26 @@ func (s *workerAPIEventLog) Append(runID string, event evidence.Event, expectedS
 	event.Timestamp = result.Timestamp
 	event.PreviousSHA256 = result.PreviousSHA256
 	event.SHA256 = result.SHA256
+	return event, nil
+}
+
+func (s *workerAPIEventLog) AppendControllerEvent(runID string, event evidence.Event, expectedSequence uint64, expectedPreviousSHA256 string) (evidence.Event, error) {
+	if s == nil || s.port == nil || !s.port.SupportsControllerUsageStore() {
+		return evidence.Event{}, errors.New("worker event log API unavailable")
+	}
+	if runID != s.port.scope.RunID || event.Type != "description_missing" {
+		return evidence.Event{}, errors.New("worker controller event log API identity or type mismatch")
+	}
+	var result workerAPIEventAppendResult
+	if err := s.port.call("event_log.description_missing", workerAPICall{
+		RunID: runID, Event: event, ExpectedSequence: expectedSequence,
+		ExpectedPreviousSHA256: expectedPreviousSHA256,
+	}, &result); err != nil {
+		return evidence.Event{}, err
+	}
+	event.SchemaVersion, event.Sequence, event.RunID = result.SchemaVersion, result.Sequence, result.RunID
+	event.Type, event.Stage, event.AttemptID = result.Type, result.Stage, result.AttemptID
+	event.Timestamp, event.PreviousSHA256, event.SHA256 = result.Timestamp, result.PreviousSHA256, result.SHA256
 	return event, nil
 }
 
@@ -1963,8 +2218,22 @@ func (a *workerAPIApprovals) Load(_, id string) (approval.PendingApproval, error
 }
 func (a *workerAPIApprovals) List(_ string) ([]approval.PendingApproval, error) {
 	var out []approval.PendingApproval
-	err := a.port.call("approval.list", workerAPICall{}, &out)
-	return out, err
+	offset := 0
+	for {
+		var page workerAPIApprovalListPage
+		if err := a.port.call("approval.list", workerAPICall{Index: offset}, &page); err != nil {
+			return nil, err
+		}
+		if page.NextOffset != offset+len(page.Values) ||
+			(page.HasMore && page.NextOffset <= offset) || (!page.HasMore && page.NextOffset != offset+len(page.Values)) {
+			return nil, errors.New("worker API approval list returned an invalid page")
+		}
+		out = append(out, page.Values...)
+		offset = page.NextOffset
+		if !page.HasMore {
+			return out, nil
+		}
+	}
 }
 func (a *workerAPIApprovals) HasAuthenticatedControllerDecision(value approval.PendingApproval) bool {
 	return a != nil && a.port != nil && controllerDecisionMarkedAuthenticated(value)

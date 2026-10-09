@@ -311,7 +311,7 @@ func TestBubblewrapQuestionAnswerProbeHelper(t *testing.T) {
 	visible, visibleErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 	workspaceWriteErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-write.txt"), []byte("workspace-write"), 0600)
 	if apiErr == nil {
-		apiErr = port.call("approval.list", workerAPICall{RunID: job.RunID}, new([]approval.PendingApproval))
+		apiErr = workerAPIApprovalListCall(port, job.RunID, nil)
 	}
 	report := questionAnswerProbeReport{
 		CanonicalHidden:       errors.Is(canonicalErr, os.ErrNotExist),

@@ -449,18 +449,10 @@ func generatedApproval(function, primary string, actions map[string]string) *wor
 }
 
 func cloudRoleForFunction(function string) string {
-	switch strings.TrimSpace(strings.ToLower(function)) {
-	case "bo", "po":
-		return string(cloudidentity.RoleProductOwner)
-	case "deployer":
-		return string(cloudidentity.RoleReleaseManager)
-	default:
-		roles, err := cloudidentity.ParseRoles([]string{function})
-		if err != nil {
-			return function
-		}
-		return string(roles[0])
+	if role, ok := cloudidentity.FunctionRole(function); ok {
+		return string(role)
 	}
+	return function
 }
 
 func stageFunction(stages []TemplateStage, id string) string {

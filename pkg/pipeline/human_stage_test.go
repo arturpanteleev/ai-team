@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestHumanResultContentValidatesTypedResults(t *testing.T) {
 		{
 			name: "PR URL", stage: config.TemplateStage{ID: "implementation", Result: "link", LinkKind: "pr"},
 			input: approval.Decision{Action: "submit", Comment: "https://example.test/org/repo/pull/7"},
-			want:  "https://example.test/org/repo/pull/7\n",
+			want:  "https://example.test/org/repo/pull/7",
 		},
 		{
 			name: "invalid PR URL", stage: config.TemplateStage{ID: "implementation", Result: "link", LinkKind: "pr"},
@@ -135,6 +136,10 @@ func TestHumanExecutorPipelineWaitsForTypedInputsAndRequiredGraphGate(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	humanArtifacts, err := humanartifact.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	registry := agent.NewFS(fstest.MapFS{
 		"analyst/def.yaml": def(`name: analyst
 runtime: agentcli
@@ -189,8 +194,26 @@ outputs:
 		}
 		return result, pending
 	}
+	submissionController := humanStageSubmissionController{store: store}
 	decide := func(value approval.PendingApproval, actor, role, action, comment string) {
 		t.Helper()
+		if value.Kind == approval.KindInput {
+			var payload approval.InputPayload
+			if err := json.Unmarshal(value.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			command := humanartifact.SubmissionCommand{StageID: payload.StageID, Result: payload.Result, LinkKind: payload.LinkKind,
+				ActorID: actor, ActorRole: role}
+			if payload.Result == "approve" {
+				command.Note = comment
+			} else {
+				command.Content = comment
+			}
+			if _, submitErr := humanArtifacts.Submit(submissionController, value.RunID, command); submitErr != nil {
+				t.Fatal(submitErr)
+			}
+			return
+		}
 		if _, decideErr := store.Decide(value.RunID, value.ID, approval.Decision{
 			ActorID: actor, ActorRole: role, Action: action, Comment: comment, SubjectHash: value.SubjectHash,
 		}); decideErr != nil {
@@ -231,6 +254,20 @@ outputs:
 	if runErr != nil || result.Outcome != workflow.RunCompleted {
 		t.Fatalf("typed human flow did not complete: result=%+v err=%v", result, runErr)
 	}
+	events, err := evidence.VerifyEventLog(filepath.Join(dir, ".ai-team", "runs", first.RunID, "events.jsonl"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingDescriptions := map[string]string{}
+	for _, event := range events {
+		if event.Type == "description_missing" {
+			approvalID, _ := event.Data["approval_id"].(string)
+			missingDescriptions[event.Stage] = approvalID
+		}
+	}
+	if len(missingDescriptions) != 3 {
+		t.Fatalf("empty human submission descriptions must produce one controller warning per stage, got %v", missingDescriptions)
+	}
 	for _, stageID := range []string{"intent", "product_spec", "implementation"} {
 		var inputApproval approval.PendingApproval
 		approvals, listErr := store.List(first.RunID)
@@ -246,12 +283,57 @@ outputs:
 		if inputApproval.ID == "" {
 			t.Fatalf("missing input approval for %s", stageID)
 		}
+		if missingDescriptions[stageID] != inputApproval.ID {
+			t.Fatalf("description warning for %s is not bound to its human input approval: %v", stageID, missingDescriptions)
+		}
 		_, manifest, readErr := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(), filepath.Join(dir, ".ai-team", "runs", first.RunID), first.RunID, inputApproval.AttemptID)
 		if readErr != nil {
 			t.Fatalf("read %s human attempt manifest: %v", stageID, readErr)
 		}
 		if manifest.Stage != stageID || manifest.Executor != "human" || manifest.ActorID == "" || manifest.HumanInputApprovalID != inputApproval.ID {
 			t.Fatalf("%s manifest lost human identity: %+v", stageID, manifest)
+		}
+		if len(inputApproval.Decisions) == 0 || len(manifest.Outputs) != 1 {
+			t.Fatalf("%s typed submission lacks a decision or attempt output: approval=%+v manifest=%+v", stageID, inputApproval, manifest)
+		}
+		decision := inputApproval.Decisions[len(inputApproval.Decisions)-1]
+		resultPath := "stages/" + stageID + "/result."
+		switch stageID {
+		case "intent":
+			resultPath += "txt"
+		case "product_spec":
+			resultPath += "md"
+		case "implementation":
+			resultPath += "link"
+		}
+		history, historyErr := humanArtifacts.List(first.RunID, resultPath)
+		if historyErr != nil || len(history) != 1 || history[0].Revision != decision.SubmissionVersion ||
+			history[0].SHA256 != decision.ContentSHA256 || history[0].Content != decision.Comment || history[0].Description != decision.Description ||
+			manifest.HumanSubmissionVersion != decision.SubmissionVersion || manifest.HumanSubmissionSHA256 != decision.ContentSHA256 ||
+			manifest.HumanSubmissionResult != history[0].Result || manifest.HumanSubmissionDescription != decision.Description {
+			t.Fatalf("%s version/hash metadata diverges across approval, revision, and manifest: history=%+v decision=%+v manifest=%+v err=%v", stageID, history, decision, manifest, historyErr)
+		}
+		if !strings.HasPrefix(manifest.Outputs[0].EvidencePath, "attempts/"+manifest.AttemptID+"/artifacts/") {
+			t.Fatalf("%s output did not land in its immutable attempt directory: %+v", stageID, manifest.Outputs[0])
+		}
+		outputPath := filepath.Join(filepath.Join(dir, ".ai-team", "runs", first.RunID), filepath.FromSlash(manifest.Outputs[0].EvidencePath))
+		outputBytes, readErr := os.ReadFile(outputPath)
+		artifactType, _, outputSHA, digestErr := evidence.ArtifactDigest(outputPath)
+		if readErr != nil || digestErr != nil || artifactType != "file" || outputSHA != manifest.Outputs[0].SHA256 {
+			t.Fatalf("%s attempt output digest does not match manifest: type=%s sha=%s record=%s read=%v digest=%v", stageID, artifactType, outputSHA, manifest.Outputs[0].SHA256, readErr, digestErr)
+		}
+		if stageID == "product_spec" || stageID == "implementation" {
+			if string(outputBytes) != decision.Comment || outputSHA != decision.ContentSHA256 {
+				t.Fatalf("%s attempt output does not preserve exact submitted bytes: got=%q want=%q output_sha=%s submission_sha=%s", stageID, outputBytes, decision.Comment, outputSHA, decision.ContentSHA256)
+			}
+		} else {
+			var result struct {
+				Comment     string `json:"comment"`
+				Description string `json:"description"`
+			}
+			if json.Unmarshal(outputBytes, &result) != nil || result.Comment != decision.Comment || result.Description != decision.Description {
+				t.Fatalf("approve attempt output lost submitted text/description: %s", outputBytes)
+			}
 		}
 		if stageID == "implementation" {
 			foundSpec := false
@@ -265,6 +347,16 @@ outputs:
 			}
 		}
 	}
+}
+
+type humanStageSubmissionController struct{ store *approval.Store }
+
+func (c humanStageSubmissionController) Approvals(runID string) ([]approval.PendingApproval, error) {
+	return c.store.List(runID)
+}
+
+func (c humanStageSubmissionController) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	return c.store.Decide(runID, approvalID, decision)
 }
 
 type humanCrashEvidenceFactory struct {

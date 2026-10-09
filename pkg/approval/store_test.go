@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -87,6 +89,47 @@ func TestInputApprovalBindsSubmissionContentAndActor(t *testing.T) {
 	base.Comment = "# Different content"
 	if _, err := store.Decide(value.RunID, value.ID, base); err == nil || !strings.Contains(err.Error(), "конфликтующее") {
 		t.Fatalf("same actor must not replace a submitted result: %v", err)
+	}
+}
+
+func TestInputApprovalPersistsBoundaryWhitespaceAndSubmissionMetadata(t *testing.T) {
+	target := t.TempDir()
+	store, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(InputPayload{Kind: string(KindInput), StageID: "spec", Result: "md", OutputName: "spec", OutputPath: "feature/spec.md"})
+	value, err := store.Create(PendingApproval{
+		Kind: KindInput, RunID: "run-exact-input", AttemptID: "attempt-exact-input", FromStage: "spec", ToStage: "spec",
+		Trigger: "human_input", SubjectHash: testSubject, RequiredRoles: []string{"architect"}, Quorum: QuorumAny,
+		Actions: []string{"submit", "reject"}, Targets: map[string]string{"submit": "spec", "reject": "spec"}, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := " \n\n# Exact bytes  \n\n "
+	digest := sha256.Sum256([]byte(content))
+	decision := Decision{ActorID: "architect-1", ActorRole: "architect", Action: "submit", Comment: content,
+		Description: "  complete  \n", SubmissionVersion: 1, ContentSHA256: hex.EncodeToString(digest[:]), SubjectHash: testSubject}
+	resolved, err := store.Decide(value.RunID, value.ID, decision)
+	if err != nil || resolved.Decisions[0].Comment != content {
+		t.Fatalf("input boundary whitespace was changed: decision=%+v err=%v", resolved.Decisions, err)
+	}
+	reloadedStore, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := reloadedStore.Load(value.RunID, value.ID)
+	if err != nil || reloaded.Decisions[0].Comment != content || reloaded.Decisions[0].Description != decision.Description ||
+		reloaded.Decisions[0].ContentSHA256 != decision.ContentSHA256 || reloaded.Decisions[0].SubmissionVersion != 1 {
+		t.Fatalf("durable submission changed after reload: decision=%+v err=%v", reloaded.Decisions, err)
+	}
+	if retried, err := reloadedStore.Decide(value.RunID, value.ID, decision); err != nil || retried.Decisions[0].Comment != content {
+		t.Fatalf("exact boundary-whitespace retry was not idempotent: decision=%+v err=%v", retried.Decisions, err)
+	}
+	decision.Comment = "# changed"
+	if _, err := reloadedStore.Decide(value.RunID, value.ID, decision); err == nil {
+		t.Fatal("changed bytes must not replace the boundary-whitespace submission")
 	}
 }
 

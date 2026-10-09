@@ -39,7 +39,11 @@ const (
 	KindInput      Kind   = "input"
 )
 
-const MaxInputCommentBytes = 128 << 10
+// MaxInputCommentBytes is also the maximum markdown payload accepted by a
+// human stage. Approval records hold the JSON-escaped payload, so their
+// bounded serialized limit is larger than the raw content limit.
+const MaxInputCommentBytes = 10 << 20
+const MaxApprovalRecordBytes = 64 << 20
 
 // InputPayload is the immutable contract for a human-executed stage. The
 // controller derives OutputPath from the configured stage/registry contract;
@@ -59,6 +63,9 @@ type Decision struct {
 	ActorRole               string            `json:"actor_role"`
 	Action                  string            `json:"action"`
 	Comment                 string            `json:"comment,omitempty"`
+	Description             string            `json:"description,omitempty"`
+	SubmissionVersion       int               `json:"submission_version,omitempty"`
+	ContentSHA256           string            `json:"content_sha256,omitempty"`
 	SubjectHash             string            `json:"subject_hash"`
 	ArtifactRevisions       map[string]string `json:"artifact_revisions,omitempty"`
 	DecidedAt               time.Time         `json:"decided_at"`
@@ -181,12 +188,12 @@ func (s *Store) Load(runID, approvalID string) (PendingApproval, error) {
 	if err != nil {
 		return PendingApproval{}, err
 	}
-	data, err := safeio.ReadRegularFile(path, 1<<20)
+	data, err := safeio.ReadRegularFile(path, MaxApprovalRecordBytes)
 	if err != nil {
 		return PendingApproval{}, err
 	}
 	var value PendingApproval
-	if err := strictjson.Unmarshal(data, 1<<20, &value); err != nil {
+	if err := strictjson.Unmarshal(data, MaxApprovalRecordBytes, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", approvalID, err)
 	}
 	normalize(&value)
@@ -312,6 +319,18 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 		if len(decision.Comment) > MaxInputCommentBytes {
 			return PendingApproval{}, fmt.Errorf("human input exceeds maximum size of %d bytes", MaxInputCommentBytes)
 		}
+		if len(decision.Description) > 16<<10 {
+			return PendingApproval{}, errors.New("human input description exceeds maximum size of 16384 bytes")
+		}
+		if decision.SubmissionVersion < 0 || decision.SubmissionVersion > 0 && !validSHA256(decision.ContentSHA256) {
+			return PendingApproval{}, errors.New("human input submission version or content hash is invalid")
+		}
+		if decision.ContentSHA256 != "" {
+			digest := sha256.Sum256([]byte(decision.Comment))
+			if !strings.EqualFold(decision.ContentSHA256, hex.EncodeToString(digest[:])) {
+				return PendingApproval{}, errors.New("human input content hash does not match submitted bytes")
+			}
+		}
 		if decision.Action == "submit" && strings.TrimSpace(decision.Comment) == "" {
 			return PendingApproval{}, errors.New("human input submit requires a non-empty comment")
 		}
@@ -330,7 +349,7 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	for _, previous := range value.Decisions {
 		if previous.ActorID == decision.ActorID && previous.ActorRole == decision.ActorRole {
 			if previous.Action == decision.Action && previous.SubjectHash == decision.SubjectHash &&
-				(value.Kind != KindInput || previous.Comment == decision.Comment) {
+				(value.Kind != KindInput || sameHumanInputDecision(previous, decision)) {
 				return value, nil
 			}
 			return PendingApproval{}, errors.New("actor уже записал конфликтующее решение")
@@ -392,6 +411,8 @@ func normalizeDecision(approvalID string, decision Decision) Decision {
 	decision.ActorRole = strings.TrimSpace(decision.ActorRole)
 	decision.Action = strings.TrimSpace(decision.Action)
 	decision.SubjectHash = strings.ToLower(strings.TrimSpace(decision.SubjectHash))
+	// applyDecision restores the original input comment after this generic
+	// normalizer so markdown boundary whitespace remains part of the payload.
 	decision.Comment = strings.TrimSpace(decision.Comment)
 	if decision.DecidedAt.IsZero() {
 		decision.DecidedAt = time.Now().UTC()
@@ -399,6 +420,11 @@ func normalizeDecision(approvalID string, decision Decision) Decision {
 		decision.DecidedAt = decision.DecidedAt.UTC()
 	}
 	return decision
+}
+
+func sameHumanInputDecision(left, right Decision) bool {
+	return left.Comment == right.Comment && left.Description == right.Description &&
+		left.SubmissionVersion == right.SubmissionVersion && left.ContentSHA256 == right.ContentSHA256
 }
 
 func normalize(value *PendingApproval) {
@@ -497,6 +523,18 @@ func validate(value PendingApproval) error {
 			!contains(value.Actions, decision.Action) ||
 			decision.SubjectHash != value.SubjectHash || decision.DecidedAt.IsZero() {
 			return errors.New("approval содержит недопустимое решение")
+		}
+		if value.Kind == KindInput {
+			if len(decision.Description) > 16<<10 || decision.SubmissionVersion < 0 ||
+				(decision.SubmissionVersion == 0) != (decision.ContentSHA256 == "") {
+				return errors.New("approval contains invalid human submission metadata")
+			}
+			if decision.ContentSHA256 != "" {
+				digest := sha256.Sum256([]byte(decision.Comment))
+				if !validSHA256(decision.ContentSHA256) || decision.ContentSHA256 != hex.EncodeToString(digest[:]) {
+					return errors.New("approval human submission hash does not match its comment")
+				}
+			}
 		}
 	}
 	switch value.Status {
@@ -653,6 +691,9 @@ func (s *Store) write(path string, value PendingApproval) error {
 		return err
 	}
 	data = append(data, '\n')
+	if len(data) > MaxApprovalRecordBytes {
+		return fmt.Errorf("approval record exceeds maximum size of %d bytes", MaxApprovalRecordBytes)
+	}
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".approval-*.tmp")
 	if err != nil {

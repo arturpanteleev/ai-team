@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -46,16 +46,6 @@ type humanInputArtifactDigest struct {
 	Type   string `json:"type"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
-}
-
-type humanApprovalResult struct {
-	Kind      string    `json:"kind"`
-	StageID   string    `json:"stage_id"`
-	Action    string    `json:"action"`
-	ActorID   string    `json:"actor_id"`
-	ActorRole string    `json:"actor_role"`
-	Comment   string    `json:"comment,omitempty"`
-	At        time.Time `json:"at"`
 }
 
 func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string) (notifier.StageResult, error) {
@@ -174,6 +164,11 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		stage.Result != "approve" && decision.Action != "submit" && decision.Action != "reject" {
 		return notifier.StageResult{}, errors.New("human input action does not match stage result type")
 	}
+	if decision.SubmissionVersion > 0 || decision.ContentSHA256 != "" {
+		if decision.SubmissionVersion < 1 || humanartifact.Digest([]byte(decision.Comment)) != decision.ContentSHA256 {
+			return notifier.StageResult{}, errors.New("human input submission version/hash does not match submitted bytes")
+		}
+	}
 
 	// If a crash happened after this attempt was durably finished but before
 	// graph advancement, the immutable attempt is replayed and reused below.
@@ -206,6 +201,12 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_started", Stage: stageID, AttemptID: attemptID,
 		Timestamp: started, Data: map[string]any{"stage_index": index + 1, "executor": "human", "actor_id": decision.ActorID, "actor_role": decision.ActorRole, "human_input_approval_id": resolved.ID}}); err != nil {
 		result.Err = fmt.Errorf("record human attempt start: %w", err)
+	}
+	if result.Err == nil && decision.Action != "reject" && strings.TrimSpace(decision.Description) == "" {
+		if err := rs.evidence.AppendControllerEvent(evidence.Event{Type: "description_missing", Stage: stageID, AttemptID: attemptID,
+			Timestamp: time.Now().UTC(), Data: map[string]any{"field": "description", "approval_id": resolved.ID}}); err != nil {
+			result.Err = fmt.Errorf("record missing human submission description: %w", err)
+		}
 	}
 
 	var evidenceInputs []evidence.Artifact
@@ -256,6 +257,13 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		Status: result.Status, Verdict: string(result.Verdict), Error: errorString(result.Err),
 		Execution: string(result.State.Execution), Decision: string(result.State.Decision), Outcome: string(result.State.Outcome),
 		Usage: result.Usage,
+	}
+	if decision.Action != "reject" && decision.SubmissionVersion > 0 {
+		manifest.HumanSubmissionVersion = decision.SubmissionVersion
+		manifest.HumanSubmissionSHA256 = decision.ContentSHA256
+		manifest.HumanSubmissionResult = stage.Result
+		manifest.HumanSubmissionLinkKind = stage.LinkKind
+		manifest.HumanSubmissionDescription = decision.Description
 	}
 	rs.deriveStageState(&result)
 	manifest.Status, manifest.Error = result.Status, errorString(result.Err)
@@ -518,8 +526,8 @@ func (rs *runState) humanInputSubject(stage config.TemplateStage, name, outputPa
 }
 
 func humanResultContent(stage config.TemplateStage, decision approval.Decision, outputName, outputPath string) ([]byte, error) {
-	if stage.Result != "approve" && strings.TrimSpace(decision.Comment) == "" {
-		return nil, errors.New("human stage result is empty")
+	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, decision.Comment); err != nil {
+		return nil, err
 	}
 	switch stage.Result {
 	case "md":
@@ -530,26 +538,12 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 		}
 		return []byte(decision.Comment), nil
 	case "link":
-		link := strings.TrimSpace(decision.Comment)
-		if stage.LinkKind == "pr" {
-			parsed, err := url.ParseRequestURI(link)
-			if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-				return nil, errors.New("PR result must be an HTTP(S) URL")
-			}
-		}
-		return []byte(link + "\n"), nil
+		return []byte(decision.Comment), nil
 	case "approve":
 		if decision.Action != "approve" {
 			return nil, errors.New("approve stage requires approve action")
 		}
-		data, err := json.Marshal(humanApprovalResult{
-			Kind: "human_stage_result", StageID: stage.ID, Action: decision.Action,
-			ActorID: decision.ActorID, ActorRole: decision.ActorRole, Comment: decision.Comment, At: decision.DecidedAt,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return append(data, '\n'), nil
+		return humanartifact.ApprovalResultContent(stage.ID, decision)
 	default:
 		return nil, fmt.Errorf("unsupported human result type %q", stage.Result)
 	}

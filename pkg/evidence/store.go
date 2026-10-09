@@ -99,32 +99,37 @@ type RunManifest struct {
 }
 
 type AttemptManifest struct {
-	SchemaVersion        int                       `json:"schema_version"`
-	RunID                string                    `json:"run_id"`
-	AttemptID            string                    `json:"attempt_id"`
-	Stage                string                    `json:"stage"`
-	Executor             string                    `json:"executor,omitempty"`
-	ActorID              string                    `json:"actor_id,omitempty"`
-	ActorRole            string                    `json:"actor_role,omitempty"`
-	HumanInputApprovalID string                    `json:"human_input_approval_id,omitempty"`
-	StageIndex           int                       `json:"stage_index"`
-	TotalStages          int                       `json:"total_stages,omitempty"`
-	StartedAt            time.Time                 `json:"started_at"`
-	FinishedAt           time.Time                 `json:"finished_at"`
-	Status               string                    `json:"status"`
-	Execution            string                    `json:"execution"`
-	Decision             string                    `json:"decision"`
-	Outcome              string                    `json:"outcome"`
-	Verdict              string                    `json:"verdict,omitempty"`
-	Blocker              string                    `json:"blocker,omitempty"`
-	Error                string                    `json:"error,omitempty"`
-	Inputs               []ArtifactRecord          `json:"inputs,omitempty"`
-	Outputs              []ArtifactRecord          `json:"outputs,omitempty"`
-	Checks               []checks.Result           `json:"checks,omitempty"`
-	Mutations            []string                  `json:"mutations,omitempty"`
-	MutationChanges      []workflow.MutationChange `json:"mutation_changes,omitempty"`
-	Delivery             *delivery.Result          `json:"delivery,omitempty"`
-	Usage                *workflow.AttemptUsage    `json:"usage,omitempty"`
+	SchemaVersion              int                       `json:"schema_version"`
+	RunID                      string                    `json:"run_id"`
+	AttemptID                  string                    `json:"attempt_id"`
+	Stage                      string                    `json:"stage"`
+	Executor                   string                    `json:"executor,omitempty"`
+	ActorID                    string                    `json:"actor_id,omitempty"`
+	ActorRole                  string                    `json:"actor_role,omitempty"`
+	HumanInputApprovalID       string                    `json:"human_input_approval_id,omitempty"`
+	HumanSubmissionVersion     int                       `json:"human_submission_version,omitempty"`
+	HumanSubmissionSHA256      string                    `json:"human_submission_sha256,omitempty"`
+	HumanSubmissionResult      string                    `json:"human_submission_result,omitempty"`
+	HumanSubmissionLinkKind    string                    `json:"human_submission_link_kind,omitempty"`
+	HumanSubmissionDescription string                    `json:"human_submission_description,omitempty"`
+	StageIndex                 int                       `json:"stage_index"`
+	TotalStages                int                       `json:"total_stages,omitempty"`
+	StartedAt                  time.Time                 `json:"started_at"`
+	FinishedAt                 time.Time                 `json:"finished_at"`
+	Status                     string                    `json:"status"`
+	Execution                  string                    `json:"execution"`
+	Decision                   string                    `json:"decision"`
+	Outcome                    string                    `json:"outcome"`
+	Verdict                    string                    `json:"verdict,omitempty"`
+	Blocker                    string                    `json:"blocker,omitempty"`
+	Error                      string                    `json:"error,omitempty"`
+	Inputs                     []ArtifactRecord          `json:"inputs,omitempty"`
+	Outputs                    []ArtifactRecord          `json:"outputs,omitempty"`
+	Checks                     []checks.Result           `json:"checks,omitempty"`
+	Mutations                  []string                  `json:"mutations,omitempty"`
+	MutationChanges            []workflow.MutationChange `json:"mutation_changes,omitempty"`
+	Delivery                   *delivery.Result          `json:"delivery,omitempty"`
+	Usage                      *workflow.AttemptUsage    `json:"usage,omitempty"`
 }
 
 // ArtifactDigest exposes the same bounded evidence identity used by attempt
@@ -191,6 +196,10 @@ type EventLog interface {
 type eventLog = EventLog
 
 type externalEventAuthority interface{ ExternalEventAuthority() }
+
+type controllerOnlyEventAppender interface {
+	AppendControllerEvent(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error)
+}
 
 // fileEventLog persists a run journal at one filesystem path.
 type fileEventLog struct {
@@ -303,6 +312,25 @@ func (l *fileEventLog) Append(runID string, event Event, expectedSequence uint64
 		return Event{}, err
 	}
 	return event, nil
+}
+
+func (l *fileEventLog) AppendControllerEvent(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error) {
+	if l == nil || l.path == "" {
+		return Event{}, errors.New("event log path is required")
+	}
+	events, err := l.Read(runID)
+	if err != nil {
+		return Event{}, err
+	}
+	validated, exactRetry, err := ValidateControllerEventAppend(events, runID, filepath.Dir(l.path), event,
+		expectedSequence, expectedPreviousSHA256, FilesystemAttemptManifestSource())
+	if err != nil {
+		return Event{}, err
+	}
+	if exactRetry {
+		return validated, nil
+	}
+	return l.Append(runID, validated, expectedSequence, expectedPreviousSHA256)
 }
 
 func sameRetryEvent(stored, requested Event, runID string, sequence uint64, previous string) bool {
@@ -836,12 +864,39 @@ func cleanArtifactKey(path string) string {
 }
 
 func (s *Store) Append(event Event) error {
+	return s.append(event, false)
+}
+
+// AppendControllerEvent records the one event that is derived from a trusted
+// resolved human submission. Remote workers use a separate, validated
+// controller API capability; they cannot submit this event through Append.
+func (s *Store) AppendControllerEvent(event Event) error {
+	if event.Type != "description_missing" {
+		return fmt.Errorf("unsupported controller-only event type %q", event.Type)
+	}
+	return s.append(event, true)
+}
+
+func (s *Store) append(event Event, controllerOnly bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.eventLog == nil {
 		return errors.New("event log is unavailable")
 	}
-	appended, err := s.eventLog.Append(s.runID, event, s.nextID, s.lastEventHash)
+	if !controllerOnly && event.Type == "description_missing" {
+		return errors.New("description_missing can only be appended through AppendControllerEvent")
+	}
+	var appended Event
+	var err error
+	if controllerOnly {
+		controllerAppender, ok := s.eventLog.(controllerOnlyEventAppender)
+		if !ok {
+			return errors.New("event log does not support controller-only event appends")
+		}
+		appended, err = controllerAppender.AppendControllerEvent(s.runID, event, s.nextID, s.lastEventHash)
+	} else {
+		appended, err = s.eventLog.Append(s.runID, event, s.nextID, s.lastEventHash)
+	}
 	if err != nil {
 		return err
 	}

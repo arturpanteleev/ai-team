@@ -15,6 +15,7 @@
 | `ai-team init` | готовит проект: создаёт `.ai-team/config.yaml` и рабочие каталоги |
 | `ai-team run` | проводит задачу по конвейеру агентов или продолжает остановленный прогон |
 | `ai-team decision` | записывает решение человека по ожидающему подтверждению |
+| `ai-team stage` | сдаёт результат этапа человека: Markdown, ссылку или approve |
 | `ai-team deliver` | повторяет отложенную delivery (коммит, push, PR) завершённого прогона |
 | `ai-team list` | показывает доступных агентов и откуда каждый загружен |
 | `ai-team gate` | проверяет diff без модели: политика изменений, проверки, подписываемый bundle |
@@ -178,6 +179,34 @@ ai-team run --resume <run_id>
 Локальные файловые подтверждения лежат в
 `.ai-team/state/approvals/<run_id>/<approval_id>.json`. В web и scheduler-worker
 режимах approvals хранятся в SQLite `.ai-team/web.db`.
+
+### ai-team stage
+
+Сдаёт результат ожидающего human stage и разрешает его input approval. Для
+Markdown можно передать файл или текст, для ссылки обязательны URL и вид
+`pr`, `build` либо `other`, а `approve` принимает необязательный текст через
+`--note`. `--description` записывает поле «Что сделано»; если оно пустое,
+после продолжения этапа в журнале появится предупреждение `description_missing`.
+Команда выводит номер версии и SHA-256 сохранённого результата.
+
+```text
+ai-team stage submit <run_id> --stage <id> (--md <файл> | --text <текст> | --link <url> --kind <вид> | --approve) [--note <текст>] [--description <текст>] [--target <путь>] [--db <путь-в-.ai-team>]
+```
+
+`--md` и `--text` сдают Markdown; размер ограничен 10 MiB. Ссылки принимают
+только URL со схемой HTTP(S). Для SQLite approvals, используемых web и
+scheduler-worker, команда автоматически выбирает `.ai-team/web.db`; trusted-local
+администратор может явно передать базу через `--db`. Без базы используется
+локальное файловое хранилище approvals.
+
+```bash
+ai-team stage submit <run_id> --stage product_spec --md ./spec.md \
+  --description "Зафиксированы требования и критерии приёмки"
+ai-team stage submit <run_id> --stage implementation \
+  --link https://github.com/acme/app/pull/42 --kind pr \
+  --description "Создан pull request"
+ai-team stage submit <run_id> --stage intent --approve --note "Идея принята"
+```
 
 ### ai-team deliver
 

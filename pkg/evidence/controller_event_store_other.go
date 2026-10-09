@@ -83,6 +83,9 @@ func (s ControllerEventStore) ReadBytes(string) ([]byte, error) {
 func (s ControllerEventStore) Append(string, Event, uint64, string) (Event, error) {
 	return Event{}, errControllerEventStoreUnsupported
 }
+func (s ControllerEventStore) AppendControllerEvent(string, Event, uint64, string) (Event, error) {
+	return Event{}, errControllerEventStoreUnsupported
+}
 func (s ControllerEventStore) Path(string) (string, error) {
 	return "", errControllerEventStoreUnsupported
 }
@@ -211,5 +214,8 @@ func (*PinnedControllerEventLog) ReadBytes(string) ([]byte, error) {
 	return nil, errControllerEventStoreUnsupported
 }
 func (*PinnedControllerEventLog) Append(string, Event, uint64, string) (Event, error) {
+	return Event{}, errControllerEventStoreUnsupported
+}
+func (*PinnedControllerEventLog) AppendControllerEvent(string, Event, uint64, string) (Event, error) {
 	return Event{}, errControllerEventStoreUnsupported
 }

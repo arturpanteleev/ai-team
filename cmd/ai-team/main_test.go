@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,8 +10,80 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
+
+func TestStageSubmitCommandHelper(t *testing.T) {
+	if os.Getenv("AI_TEAM_STAGE_SUBMIT_HELPER") != "1" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv("AI_TEAM_STAGE_SUBMIT_ARGS")), &args); err != nil {
+		t.Fatal(err)
+	}
+	os.Args = append([]string{"ai-team", "stage", "submit"}, args...)
+	logging.SetMode(logging.ModeJSON)
+	cmdStage()
+}
+
+func TestStageSubmitCLIStoresTypedMarkdownVersion(t *testing.T) {
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	approvals, err := approval.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "spec", Result: "md", OutputName: "result", OutputPath: "feature/spec.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := approvals.Create(approval.PendingApproval{
+		Kind: approval.KindInput, RunID: "run-cli-submit", AttemptID: "request-cli", FromStage: "spec", ToStage: "spec",
+		Trigger: "human_input", SubjectHash: strings.Repeat("c", 64), RequiredRoles: []string{"developer"},
+		Quorum: approval.QuorumAny, Actions: []string{"submit", "reject"}, Targets: map[string]string{"submit": "spec", "reject": "spec"}, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := filepath.Join(target, "submission.md")
+	content := "\n# Spec\n\nExact bytes from file.  \n"
+	if err := os.WriteFile(markdown, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"run-cli-submit", "--target", target, "--stage", "spec", "--md", markdown,
+		"--description", "documented", "--actor", "developer-1", "--role", "developer"}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestStageSubmitCommandHelper$")
+	command.Env = append(os.Environ(), "AI_TEAM_STAGE_SUBMIT_HELPER=1", "AI_TEAM_STAGE_SUBMIT_ARGS="+string(encoded))
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage submit CLI failed: %v\n%s", err, output)
+	}
+	if !bytes.Contains(output, []byte(`"type":"human_submission"`)) || !bytes.Contains(output, []byte(`"version":1`)) {
+		t.Fatalf("stage submit CLI receipt missing version data: %s", output)
+	}
+	resolved, err := approvals.Load(value.RunID, value.ID)
+	if err != nil || resolved.Status != approval.StatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Comment != content ||
+		resolved.Decisions[0].SubmissionVersion != 1 || resolved.Decisions[0].ContentSHA256 != humanartifact.Digest([]byte(content)) {
+		t.Fatalf("CLI approval did not preserve exact markdown and revision metadata: %+v err=%v", resolved, err)
+	}
+	artifacts, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := artifacts.List(value.RunID, "stages/spec/result.md")
+	if err != nil || len(history) != 1 || history[0].Content != content || history[0].Description != "documented" || history[0].SHA256 != humanartifact.Digest([]byte(content)) {
+		t.Fatalf("CLI durable submission history mismatch: %+v err=%v", history, err)
+	}
+}
 
 func TestCheckControlRootDistinguishesUninitializedFromUnsafe(t *testing.T) {
 	t.Run("не инициализирован", func(t *testing.T) {

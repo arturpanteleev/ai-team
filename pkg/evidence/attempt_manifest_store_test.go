@@ -160,6 +160,33 @@ func TestControllerAttemptManifestStoreEnforcesIdentityRetryConflictAndSize(t *t
 	}
 }
 
+func TestControllerAttemptManifestBindsTypedHumanSubmissionToOutputHash(t *testing.T) {
+	target := t.TempDir()
+	store := ControllerAttemptManifestStore{TargetDir: target}
+	const runID, attemptID = "typed-human-manifest", "typed-human-manifest-001-writer"
+	if err := store.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	submittedSHA := strings.Repeat("a", 64)
+	manifest := testAttemptManifest(runID, attemptID)
+	manifest.Stage, manifest.Executor = "writer", "human"
+	manifest.ActorID, manifest.ActorRole, manifest.HumanInputApprovalID = "writer-1", "developer", "approval-writer"
+	manifest.HumanSubmissionVersion, manifest.HumanSubmissionSHA256 = 1, submittedSHA
+	manifest.HumanSubmissionResult, manifest.HumanSubmissionDescription = "md", "finished"
+	manifest.Outputs = []ArtifactRecord{{Name: "result", Type: "file", SourcePath: "/workspace/result.md",
+		EvidencePath: filepath.ToSlash(filepath.Join("attempts", attemptID, "artifacts", "result.md")),
+		Size:         17, SHA256: submittedSHA}}
+	if err := store.Write(runID, manifest); err != nil {
+		t.Fatalf("valid typed human attempt manifest: %v", err)
+	}
+	conflict := manifest
+	conflict.Outputs = append([]ArtifactRecord(nil), manifest.Outputs...)
+	conflict.Outputs[0].SHA256 = strings.Repeat("b", 64)
+	if err := store.Write(runID, conflict); err == nil || !strings.Contains(err.Error(), "disagrees") {
+		t.Fatalf("attempt output hash diverging from submission metadata was accepted: %v", err)
+	}
+}
+
 func TestControllerAttemptManifestStoreRejectsSymlinkedRunDirectory(t *testing.T) {
 	target := t.TempDir()
 	store := ControllerAttemptManifestStore{TargetDir: target}

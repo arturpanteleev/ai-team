@@ -476,8 +476,11 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     // and its WebSocket while preserving same-tab sessionStorage. This is a
     // browser recovery check, not an iOS/Android background lifecycle check.
     await expect.poll(() => websocketUrls.length).toBeGreaterThan(0)
-    const cursorBeforeReturn = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-team:event-cursor') ?? '{"cursor":0}').cursor)
-    expect(cursorBeforeReturn).toBeGreaterThan(0)
+    let cursorBeforeReturn = 0
+    await expect.poll(async () => {
+      cursorBeforeReturn = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-team:event-cursor') ?? '{"cursor":0}').cursor)
+      return cursorBeforeReturn
+    }).toBeGreaterThan(0)
     const readsBeforeReturn = pipelineListReads
     const socketsBeforeReturn = websocketUrls.length
     await page.goto('about:blank')

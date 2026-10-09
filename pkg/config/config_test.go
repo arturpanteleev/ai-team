@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -158,6 +159,77 @@ func TestTemplateGraphUsesOrderAndBackwardReturns(t *testing.T) {
 	}
 	if node, ok := graph.Node("product_spec"); !ok || node.MaxVisits != 4 {
 		t.Fatalf("explicit max_visits not compiled: node=%+v exists=%v", node, ok)
+	}
+}
+
+func TestTemplateGraphRespectsStageConfirmation(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cfg.Stages {
+		cfg.Stages[i].Confirm = "auto"
+	}
+
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatalf("all-auto template should compile without forward approvals: %v", err)
+	}
+	for i, stage := range cfg.Stages {
+		edge, ok := graph.Edge(stage.ID, "passed")
+		if !ok || edge.Approval != nil {
+			t.Fatalf("confirm:auto stage %q should have an unguarded forward edge: %+v", stage.ID, edge)
+		}
+		want := workflow.TerminalComplete
+		if i+1 < len(cfg.Stages) {
+			want = cfg.Stages[i+1].ID
+		}
+		if edge.To != want {
+			t.Fatalf("stage %q proceeds to %q, want %q", stage.ID, edge.To, want)
+		}
+	}
+	for _, route := range cfg.Returns {
+		edge, ok := graph.Edge(route.From, "rejected")
+		if !ok || edge.Approval == nil {
+			t.Fatalf("return %s → %s must retain its approval: %+v", route.From, route.To, edge)
+		}
+	}
+
+	cfg.Stages[0].Confirm = "required"
+	graph, err = cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edge, ok := graph.Edge(cfg.Stages[0].ID, "passed"); !ok || edge.Approval == nil {
+		t.Fatalf("confirm:required stage %q must compile an approval: %+v", cfg.Stages[0].ID, edge)
+	}
+	if edge, ok := graph.Edge(cfg.Stages[1].ID, "passed"); !ok || edge.Approval != nil {
+		t.Fatalf("confirm:auto stage %q must not compile an approval: %+v", cfg.Stages[1].ID, edge)
+	}
+}
+
+func TestTemplateGraphDefaultsConfirmationForProgrammaticStages(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Stages) < 2 {
+		t.Fatalf("standard profile has %d stages, need at least two", len(cfg.Stages))
+	}
+	// Direct Go callers can construct or edit Config without YAML unmarshalling.
+	// An omitted mode must preserve the documented result-based defaults.
+	cfg.Stages[0].Confirm = ""
+	cfg.Stages[1].Confirm = ""
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, wantApproval := range []bool{false, true} {
+		stage := cfg.Stages[i]
+		edge, ok := graph.Edge(stage.ID, "passed")
+		if !ok || (edge.Approval != nil) != wantApproval {
+			t.Fatalf("omitted confirm for stage %q result=%q: approval=%v, want %v", stage.ID, stage.Result, edge.Approval != nil, wantApproval)
+		}
 	}
 }
 

@@ -58,7 +58,11 @@ The compiled graph MUST contain one node per stage in the same order. Each
 stage MUST have a `passed` edge to the following stage, with the final stage
 leading to `$complete`. Each declared return MUST compile into a rejected
 transition to its exact backward target, and its target MUST carry the
-effective `max_visits` limit.
+effective `max_visits` limit. A forward edge MUST require approval only when
+its source stage has `confirm: required`; `confirm: auto` MUST permit the
+transition without an edge approval. Backward return edges MUST continue to
+require approval. This rule applies to schema v5 templates; legacy workflow
+graphs retain their existing approval validation.
 
 #### Scenario: Ordered forward transitions
 
@@ -66,6 +70,15 @@ effective `max_visits` limit.
 - **ТОГДА** every non-terminal stage's `passed` edge MUST target the next
   stage ID in declaration order
 - **И** the terminal stage's `passed` edge MUST target `$complete`
+
+#### Scenario: Stage confirmation controls forward approval
+
+- **КОГДА** a non-terminal stage has `confirm: auto`
+- **ТОГДА** its `passed` edge MUST be valid without an approval policy
+- **КОГДА** a non-terminal stage has `confirm: required`
+- **ТОГДА** its `passed` edge MUST carry an approval policy
+- **И** backward return edges MUST carry approval policies regardless of
+  `confirm`
 
 #### Scenario: Return route compilation
 

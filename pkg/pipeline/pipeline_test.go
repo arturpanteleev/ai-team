@@ -1588,12 +1588,25 @@ func TestRun_OptionalUnavailableCheckProducesWarningAndContinues(t *testing.T) {
 	}
 }
 
-func TestRun_DeliveryRequiresExplicitApprovalNonInteractive(t *testing.T) {
+func TestRun_AllAutoV5TemplateStillRequiresExplicitDeliveryApproval(t *testing.T) {
 	dir := env(t)
 	_ = prepareDelivery(t, dir)
 	rt := newScripted()
 	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+	allAutoConfig := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "all-auto-delivery-test",
+		Title:         "All auto delivery test",
+		CLI:           "opencode",
+		PipelineAgents: []config.AgentConfig{
+			{Name: "approver"}, {Name: "deployer"},
+		},
+		Stages: []config.TemplateStage{
+			{ID: "approver", Title: "Approve", Function: "operator", Result: "approve", Executor: "agent", Agent: "approver", Confirm: "auto"},
+			{ID: "deployer", Title: "Deliver", Function: "deployer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "deployer", Confirm: "auto"},
+		},
+	}
+	p := New(allAutoConfig, deliveryRegistry(),
 		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
 	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
 	var approvalErr *ApprovalRequiredError

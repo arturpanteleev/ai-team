@@ -162,6 +162,7 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 	selectedTransitions := make(map[string]bool)
 	agentStartedEvents := make(map[string]bool)
 	agentFinishedEvents := make(map[string]bool)
+	attemptFinishedEvents := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
 	canceled := false
@@ -303,6 +304,7 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				return ReplayedRun{}, fmt.Errorf("attempt_finished %q without manifest must be an errored failed attempt", event.AttemptID)
 			}
 			finishedCount++
+			attemptFinishedEvents[event.AttemptID] = true
 		case "attempt_abandoned":
 			index, exists := byID[event.AttemptID]
 			if !exists || !result.Attempts[index].FinishedAt.IsZero() {
@@ -564,6 +566,9 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 	for _, attempt := range result.Attempts {
 		if attempt.FinishedAt.IsZero() && terminal {
 			return ReplayedRun{}, fmt.Errorf("terminal run contains active attempt %q", attempt.AttemptID)
+		}
+		if attemptFinishedEvents[attempt.AttemptID] && agentStartedEvents[attempt.AttemptID] && !agentFinishedEvents[attempt.AttemptID] {
+			return ReplayedRun{}, fmt.Errorf("finished agent attempt %q is missing agent_finished", attempt.AttemptID)
 		}
 	}
 	return result, nil

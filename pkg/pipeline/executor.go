@@ -138,32 +138,134 @@ func (rs *runState) latestAgentStageResult(stageID, outputPath string) (string, 
 		if previous.Name != stageID || previous.Executor != "agent" || previous.Superseded || previous.FinishedAt.IsZero() {
 			continue
 		}
+		hasContractOutput := false
 		for _, output := range previous.Outputs {
 			path, absErr := filepath.Abs(output.Path)
 			if absErr != nil {
 				return "", "", "", fmt.Errorf("prior agent result for %s: %w", stageID, absErr)
 			}
-			if path != expectedPath {
+			if path == expectedPath {
+				hasContractOutput = true
+				break
+			}
+		}
+		if !hasContractOutput {
+			continue
+		}
+		_, manifest, manifestErr := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, previous.AttemptID)
+		if manifestErr != nil {
+			return "", "", "", fmt.Errorf("read prior agent attempt %s manifest: %w", previous.AttemptID, manifestErr)
+		}
+		if manifest.RunID != rs.runID || manifest.AttemptID != previous.AttemptID || manifest.Stage != stageID || manifest.Executor != "agent" ||
+			!manifest.FinishedAt.Equal(previous.FinishedAt) {
+			return "", "", "", fmt.Errorf("prior agent attempt %s manifest identity mismatch", previous.AttemptID)
+		}
+		for _, output := range manifest.Outputs {
+			sourcePath, absErr := filepath.Abs(output.SourcePath)
+			if absErr != nil {
+				return "", "", "", fmt.Errorf("prior agent result for %s: %w", stageID, absErr)
+			}
+			if sourcePath != expectedPath {
 				continue
 			}
-			if err := validateExistingArtifactPath(rs.task.ArtifactRoot, path); err != nil {
+			if err := validateExistingArtifactPath(rs.task.ArtifactRoot, sourcePath); err != nil {
 				return "", "", "", fmt.Errorf("prior agent result for %s is unsafe: %w", stageID, err)
 			}
-			info, err := os.Stat(path)
-			if err != nil || !info.Mode().IsRegular() {
-				if err == nil {
-					err = errors.New("result is not a regular file")
+			evidencePath, pathErr := confinedArtifactPath(rs.evidence.RunDir(), output.EvidencePath)
+			if pathErr != nil {
+				return "", "", "", fmt.Errorf("prior agent result evidence path for %s is unsafe: %w", stageID, pathErr)
+			}
+			if err := validateExistingArtifactPath(rs.evidence.RunDir(), evidencePath); err != nil {
+				return "", "", "", fmt.Errorf("prior agent result evidence for %s is unsafe: %w", stageID, err)
+			}
+			artifactType, size, digest, digestErr := evidence.ArtifactDigest(evidencePath)
+			if digestErr != nil || artifactType != "file" || size != output.Size || digest != output.SHA256 {
+				return "", "", "", fmt.Errorf("prior agent result evidence for %s does not match its attempt manifest", stageID)
+			}
+			liveType, liveSize, liveDigest, liveErr := evidence.ArtifactDigest(sourcePath)
+			if liveErr != nil || liveType != output.Type || liveSize != output.Size || liveDigest != output.SHA256 {
+				return "", "", "", fmt.Errorf("prior agent result for %s changed after its attempt was recorded", stageID)
+			}
+			manifestDigest, _, digestErr := evidence.AttemptManifestDigest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, previous.AttemptID)
+			if digestErr != nil {
+				return "", "", "", fmt.Errorf("digest prior agent attempt %s manifest: %w", previous.AttemptID, digestErr)
+			}
+			events, found, eventsErr := rs.readEvidenceEvents()
+			if eventsErr != nil {
+				return "", "", "", fmt.Errorf("read prior agent attempt %s events: %w", previous.AttemptID, eventsErr)
+			}
+			manifestBound := false
+			if found {
+				for _, event := range events {
+					if event.Type == "attempt_finished" && event.AttemptID == previous.AttemptID && event.Stage == stageID &&
+						event.Data["manifest_sha256"] == manifestDigest {
+						manifestBound = true
+						break
+					}
 				}
-				return "", "", "", fmt.Errorf("prior agent result for %s: %w", stageID, err)
 			}
-			data, err := safeio.ReadRegularFile(path, approval.MaxInputCommentBytes)
+			if !manifestBound {
+				return "", "", "", fmt.Errorf("prior agent attempt %s manifest is not bound by finished evidence", previous.AttemptID)
+			}
+			data, err := safeio.ReadRegularFile(evidencePath, approval.MaxInputCommentBytes)
 			if err != nil {
-				return "", "", "", fmt.Errorf("read prior agent result for %s: %w", stageID, err)
+				return "", "", "", fmt.Errorf("read prior agent result evidence for %s: %w", stageID, err)
 			}
-			return string(data), previous.AttemptID, path, nil
+			return string(data), previous.AttemptID, evidencePath, nil
 		}
+		return "", "", "", fmt.Errorf("prior agent attempt %s manifest does not record contract output %s", previous.AttemptID, outputPath)
 	}
 	return "", "", "", nil
+}
+
+func (rs *runState) appendAgentFinished(event evidence.Event) error {
+	appendErr := rs.evidence.Append(event)
+	if appendErr == nil {
+		return nil
+	}
+	confirmed, found, readErr := rs.agentFinishedEventRecorded(event)
+	if readErr != nil {
+		return errors.Join(appendErr, fmt.Errorf("check agent_finished after append error: %w", readErr))
+	}
+	if !found {
+		return appendErr
+	}
+	if confirmed {
+		return nil
+	}
+
+	// Retry only after the event log proves the first append did not take.
+	retryErr := rs.evidence.Append(event)
+	if retryErr == nil {
+		return nil
+	}
+	confirmed, _, readErr = rs.agentFinishedEventRecorded(event)
+	if readErr == nil && confirmed {
+		return nil
+	}
+	return errors.Join(appendErr, retryErr, readErr)
+}
+
+func (rs *runState) agentFinishedEventRecorded(expected evidence.Event) (bool, bool, error) {
+	events, found, err := rs.readEvidenceEvents()
+	if err != nil || !found {
+		return false, found, err
+	}
+	for _, event := range events {
+		if event.Type != expected.Type || event.AttemptID != expected.AttemptID {
+			continue
+		}
+		if event.Stage != expected.Stage || !event.Timestamp.Equal(expected.Timestamp) || len(event.Data) != len(expected.Data) {
+			return false, true, nil
+		}
+		for key, value := range expected.Data {
+			if event.Data[key] != value {
+				return false, true, nil
+			}
+		}
+		return true, true, nil
+	}
+	return false, true, nil
 }
 
 // addRefinementInput binds the decision's current result text to the agent's

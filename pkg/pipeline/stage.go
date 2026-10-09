@@ -183,8 +183,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			if r.Err != nil {
 				agentData["error"] = r.Err.Error()
 			}
-			if err := rs.evidence.Append(evidence.Event{Type: "agent_finished", Stage: name, AttemptID: attemptID, Timestamp: r.FinishedAt, Data: agentData}); err != nil {
-				logging.Printf("warning: запись agent_finished %s: %v", attemptID, err)
+			if err := rs.appendAgentFinished(evidence.Event{Type: "agent_finished", Stage: name, AttemptID: attemptID, Timestamp: r.FinishedAt, Data: agentData}); err != nil {
+				r.Err = errors.Join(r.Err, fmt.Errorf("запись agent_finished %s: %w", attemptID, err))
+				logging.Printf("error: запись agent_finished %s не подтверждена: %v", attemptID, err)
 			}
 		}
 	}()

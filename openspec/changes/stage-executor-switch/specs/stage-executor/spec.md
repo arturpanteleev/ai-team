@@ -72,3 +72,30 @@ stage with the source agent attempt ID in its evidence manifest and emit
   the regular-file path
 - **AND** the prior result is read from the exact output path in the human
   stage's configured output contract, even when the agent emitted multiple files
+
+#### Scenario: Prior agent output bytes match their immutable evidence
+
+- **WHEN** the pipeline prepares a human edit of an agent result
+- **THEN** it reads the output artifact recorded by that attempt manifest and
+  verifies the live contract output still matches the recorded type, size, and
+  digest
+- **AND** it rejects the human edit if the live output changed or the immutable
+  evidence copy does not match the manifest
+
+### Requirement: Finished agent attempts have complete lifecycle events
+
+The pipeline MUST retry an ambiguous `agent_finished` append only after
+checking the event log for the exact event. Replay MUST reject a finished agent
+attempt that has `agent_started` but no matching `agent_finished` event.
+
+#### Scenario: Agent completion append fails transiently
+
+- **WHEN** the first `agent_finished` append fails and the event log confirms it
+  was not recorded
+- **THEN** the pipeline retries the append and keeps exactly one matching event
+
+#### Scenario: Replay encounters a missing agent completion event
+
+- **WHEN** an agent attempt has both `agent_started` and `attempt_finished` but
+  no matching `agent_finished`
+- **THEN** replay fails closed instead of accepting the attempt as complete

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -100,6 +101,13 @@ func TestExecutorOverrideSurvivesRunningCheckpoint(t *testing.T) {
 
 func TestLatestAgentStageResultUsesHumanContractOutputPath(t *testing.T) {
 	artifactRoot := t.TempDir()
+	store, err := evidence.Start(filepath.Join(t.TempDir(), "runs"), evidence.RunManifest{
+		RunID: "agent-output-provenance-test", ConfigSnapshot: json.RawMessage(`{"schema_version":1}`),
+		WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	contractPath := filepath.Join(artifactRoot, "features", "feat", "spec.md")
 	otherPath := filepath.Join(artifactRoot, "features", "feat", "debug.log")
 	for path, content := range map[string]string{
@@ -113,10 +121,45 @@ func TestLatestAgentStageResultUsesHumanContractOutputPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	started := time.Now().UTC()
+	finished := started.Add(time.Second)
+	attemptID := store.NewAttemptID("product_spec", 1)
+	if err := store.Append(evidence.Event{Type: "run_started", Timestamp: started.Add(-time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "attempt_started", Stage: "product_spec", AttemptID: attemptID, Timestamp: started,
+		Data: map[string]any{"stage_index": 1, "executor": "agent"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "agent_started", Stage: "product_spec", AttemptID: attemptID, Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishAttempt(evidence.AttemptManifest{
+		AttemptID: attemptID, Stage: "product_spec", Executor: "agent", StageIndex: 1,
+		StartedAt: started, FinishedAt: finished, Status: "passed", Execution: "succeeded", Decision: "approved", Outcome: "passed",
+	}, artifactRoot, nil, []evidence.Artifact{{Name: "spec", Path: contractPath}, {Name: "debug", Path: otherPath}}); err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest, _, err := evidence.AttemptManifestDigest(nil, store.RunDir(), store.RunID(), attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(evidence.Event{Type: "attempt_finished", Stage: "product_spec", AttemptID: attemptID, Timestamp: finished,
+		Data: map[string]any{"status": "passed", "execution": "succeeded", "decision": "approved", "outcome": "passed", "manifest_sha256": manifestDigest}}); err != nil {
+		t.Fatal(err)
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(nil, store.RunDir(), store.RunID(), attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractEvidencePath := filepath.Join(store.RunDir(), filepath.FromSlash(manifest.Outputs[0].EvidencePath))
 	rs := &runState{
-		task: &runtime.Task{ArtifactRoot: artifactRoot},
+		p:        &Pipeline{},
+		runID:    store.RunID(),
+		evidence: store,
+		task:     &runtime.Task{ArtifactRoot: artifactRoot},
 		results: []notifier.StageResult{{
-			Name: "product_spec", Executor: "agent", AttemptID: "attempt-agent-1", FinishedAt: time.Now().UTC(),
+			Name: "product_spec", Executor: "agent", AttemptID: attemptID, FinishedAt: finished,
 			Outputs: []runtime.Artifact{
 				{Name: "spec", Path: contractPath},
 				{Name: "debug", Path: otherPath},
@@ -128,14 +171,22 @@ func TestLatestAgentStageResultUsesHumanContractOutputPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result != "current specification" || attemptID != "attempt-agent-1" || path != contractPath {
-		t.Fatalf("selected result=%q attempt=%q path=%q; want the contract output %q", result, attemptID, path, contractPath)
+	if result != "current specification" || attemptID != rs.results[0].AttemptID || path != contractEvidencePath {
+		t.Fatalf("selected result=%q attempt=%q path=%q; want immutable contract output %q", result, attemptID, path, contractEvidencePath)
+	}
+	if err := os.WriteFile(contractPath, []byte("tampered after agent attempt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := rs.latestAgentStageResult("product_spec", "features/feat/spec.md"); err == nil {
+		t.Fatal("mutated live output was accepted as the prior agent result")
 	}
 }
 
 type executorCrashEvidenceFactory struct {
 	delegate              EvidenceStoreFactory
 	panicOnExecutorChange bool
+	failAgentFinishedOnce bool
+	failedAgentFinished   int
 }
 
 func (f *executorCrashEvidenceFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
@@ -164,7 +215,22 @@ func (s *executorCrashEvidenceStore) Append(event evidence.Event) error {
 		s.factory.panicOnExecutorChange = false
 		panic("simulated process crash after running checkpoint")
 	}
+	if event.Type == "agent_finished" && s.factory.failAgentFinishedOnce {
+		s.factory.failAgentFinishedOnce = false
+		s.factory.failedAgentFinished++
+		return errors.New("simulated transient agent_finished append error")
+	}
 	return s.EvidenceStore.Append(event)
+}
+
+func (s *executorCrashEvidenceStore) ReadEvents() ([]evidence.Event, error) {
+	reader, ok := s.EvidenceStore.(interface {
+		ReadEvents() ([]evidence.Event, error)
+	})
+	if !ok {
+		return nil, errors.New("underlying evidence store does not expose events")
+	}
+	return reader.ReadEvents()
 }
 
 func TestResolvedAgentActionSurvivesCrashAfterRunningCheckpoint(t *testing.T) {
@@ -292,12 +358,13 @@ outputs:
 
 func TestHumanReadyStageCanRunOrRefineWithAgent(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		action    string
-		comment   string
-		wantInput string
+		name                  string
+		action                string
+		comment               string
+		wantInput             string
+		failAgentFinishedOnce bool
 	}{
-		{name: "Сделай", action: "run_agent"},
+		{name: "Сделай", action: "run_agent", failAgentFinishedOnce: true},
 		{name: "Доработай агентом", action: "refine_agent", comment: "## Current result\nHuman draft to refine.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -329,6 +396,9 @@ outputs:
 			}
 			rt := newScripted()
 			rt.content["analyst"] = map[string]string{"spec": "# Agent result\n"}
+			evidenceFactory := &executorCrashEvidenceFactory{
+				delegate: filesystemEvidenceStoreFactory{}, failAgentFinishedOnce: test.failAgentFinishedOnce,
+			}
 			var refinementInput string
 			rt.onExec = func(_ string, inputs []runtime.Artifact) {
 				for _, input := range inputs {
@@ -343,7 +413,7 @@ outputs:
 				}
 			}
 			p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithApprovalStore(approvals),
-				WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+				WithEvidenceStoreFactory(evidenceFactory), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
 			first, runErr := p.RunWithResult(context.Background(), RunConfig{
 				Feature: "feat", TaskDesc: "Write a product specification", TargetDir: dir,
 			})
@@ -389,6 +459,9 @@ outputs:
 				if !seen[eventType] {
 					t.Fatalf("missing %s event: %v", eventType, seen)
 				}
+			}
+			if test.failAgentFinishedOnce && evidenceFactory.failedAgentFinished != 1 {
+				t.Fatalf("agent_finished append was not retried after transient error: failures=%d", evidenceFactory.failedAgentFinished)
 			}
 		})
 	}

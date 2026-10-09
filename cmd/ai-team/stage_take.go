@@ -207,7 +207,7 @@ func takeStageOverWeb(ctx context.Context, client *http.Client, baseURL, origin,
 }
 
 func decodeStageResponse(response *http.Response, target any) error {
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }() // ошибка Close не меняет уже прочитанный ответ
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
 		return fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))

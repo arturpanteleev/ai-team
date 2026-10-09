@@ -31,6 +31,13 @@ path, even if the attempt emitted other files. The writer permits atomic replace
 binds a prior agent attempt. The human attempt event and manifest record that
 attempt ID. Normal human submissions remain immutable/idempotent.
 
+After a process crash between `attempt_finished` and `agent_finished`, resume
+preflight reconstructs the missing completion event from the hash-chained
+start/completion events and verifies the referenced attempt manifest before
+appending it. Strict replay still rejects an unreconciled gap. If the completion
+event remains unavailable after retry, the run is stopped as resumable at the
+same stage; the graph does not select or start a downstream stage.
+
 The API route is `POST /api/runs/{runID}/executor` with
 `{"stage_id":"…","executor":"human|agent"}`. It uses the user's stage
 function role and returns the selected visit ID. The CLI stage-action command

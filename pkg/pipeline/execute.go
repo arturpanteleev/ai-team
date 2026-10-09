@@ -143,6 +143,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				rs.p.recorder.StageFinished(result)
 			}
 		}
+		if errors.Is(result.Err, ErrAgentFinishedEvidence) {
+			return result.Err
+		}
 		if result.Status == notifier.StatusBlocked {
 			logging.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
 			logging.Printf("  Для исправления уточните задачу и запустите заново: ai-team run --feature %s --task \"<описание>\"\n",

@@ -183,10 +183,11 @@ func TestLatestAgentStageResultUsesHumanContractOutputPath(t *testing.T) {
 }
 
 type executorCrashEvidenceFactory struct {
-	delegate              EvidenceStoreFactory
-	panicOnExecutorChange bool
-	failAgentFinishedOnce bool
-	failedAgentFinished   int
+	delegate               EvidenceStoreFactory
+	panicOnExecutorChange  bool
+	panicOnAgentFinished   bool
+	failAgentFinishedCount int
+	failedAgentFinished    int
 }
 
 func (f *executorCrashEvidenceFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
@@ -215,8 +216,12 @@ func (s *executorCrashEvidenceStore) Append(event evidence.Event) error {
 		s.factory.panicOnExecutorChange = false
 		panic("simulated process crash after running checkpoint")
 	}
-	if event.Type == "agent_finished" && s.factory.failAgentFinishedOnce {
-		s.factory.failAgentFinishedOnce = false
+	if event.Type == "agent_finished" && s.factory.panicOnAgentFinished {
+		s.factory.panicOnAgentFinished = false
+		panic("simulated process crash after attempt_finished")
+	}
+	if event.Type == "agent_finished" && s.factory.failAgentFinishedCount > 0 {
+		s.factory.failAgentFinishedCount--
 		s.factory.failedAgentFinished++
 		return errors.New("simulated transient agent_finished append error")
 	}
@@ -358,14 +363,18 @@ outputs:
 
 func TestHumanReadyStageCanRunOrRefineWithAgent(t *testing.T) {
 	for _, test := range []struct {
-		name                  string
-		action                string
-		comment               string
-		wantInput             string
-		failAgentFinishedOnce bool
+		name                   string
+		action                 string
+		comment                string
+		wantInput              string
+		failAgentFinishedCount int
+		panicOnAgentFinished   bool
+		secondStage            bool
 	}{
-		{name: "Сделай", action: "run_agent", failAgentFinishedOnce: true},
+		{name: "Сделай", action: "run_agent", failAgentFinishedCount: 1},
 		{name: "Доработай агентом", action: "refine_agent", comment: "## Current result\nHuman draft to refine.\n"},
+		{name: "Восстановление после потери agent_finished", action: "run_agent", panicOnAgentFinished: true},
+		{name: "Постоянная ошибка agent_finished останавливает граф", action: "run_agent", failAgentFinishedCount: 2, secondStage: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := env(t)
@@ -385,19 +394,52 @@ outputs:
 `),
 				"analyst/prompt.md": def("test agent"),
 			})
+			if test.secondStage {
+				registry = agent.NewFS(fstest.MapFS{
+					"analyst/def.yaml": def(`name: analyst
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  spec: '{feature}/specs/product/spec.md'
+`),
+					"analyst/prompt.md": def("test agent"),
+					"reviewer/def.yaml": def(`name: reviewer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  review: '{feature}/review.md'
+`),
+					"reviewer/prompt.md": def("test reviewer"),
+				})
+			}
+			stages := []config.TemplateStage{{
+				ID: "product_spec", Title: "Product specification", Function: "product_owner",
+				Result: "md", Executor: "human", Agent: "analyst", Confirm: "auto",
+			}}
+			if test.secondStage {
+				stages = append(stages, config.TemplateStage{
+					ID: "code_review", Title: "Code review", Function: "reviewer",
+					Result: "md", Executor: "agent", Agent: "reviewer", Confirm: "auto",
+				})
+			}
 			cfg := &config.Config{
 				SchemaVersion: config.CurrentSchemaVersion,
 				Template:      "executor-switch-test",
 				Title:         "Executor switch test",
-				Stages: []config.TemplateStage{{
-					ID: "product_spec", Title: "Product specification", Function: "product_owner",
-					Result: "md", Executor: "human", Agent: "analyst", Confirm: "auto",
-				}},
+				Stages:        stages,
 			}
 			rt := newScripted()
 			rt.content["analyst"] = map[string]string{"spec": "# Agent result\n"}
+			rt.content["reviewer"] = map[string]string{"review": "# Review result\n"}
 			evidenceFactory := &executorCrashEvidenceFactory{
-				delegate: filesystemEvidenceStoreFactory{}, failAgentFinishedOnce: test.failAgentFinishedOnce,
+				delegate: filesystemEvidenceStoreFactory{}, failAgentFinishedCount: test.failAgentFinishedCount,
+				panicOnAgentFinished: test.panicOnAgentFinished,
 			}
 			var refinementInput string
 			rt.onExec = func(_ string, inputs []runtime.Artifact) {
@@ -437,11 +479,74 @@ outputs:
 			}); err != nil {
 				t.Fatal(err)
 			}
+			if test.panicOnAgentFinished {
+				crashed := false
+				func() {
+					defer func() {
+						if recovered := recover(); recovered != nil {
+							crashed = strings.Contains(fmt.Sprint(recovered), "simulated process crash")
+						}
+					}()
+					_, _ = p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+				}()
+				if !crashed {
+					t.Fatal("expected simulated crash after attempt_finished and before agent_finished")
+				}
+				preRecovery, err := evidence.VerifyEventLog(filepath.Join(dir, ".ai-team", "runs", first.RunID, "events.jsonl"), first.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var sawAttemptFinished, sawAgentFinished bool
+				for _, event := range preRecovery {
+					if event.Stage == "product_spec" && event.AttemptID != "" {
+						sawAttemptFinished = sawAttemptFinished || event.Type == "attempt_finished"
+						sawAgentFinished = sawAgentFinished || event.Type == "agent_finished"
+					}
+				}
+				if !sawAttemptFinished || sawAgentFinished {
+					t.Fatalf("crash fixture did not stop in attempt_finished/agent_finished gap: %+v", preRecovery)
+				}
+				runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+				if err := evidence.VerifyResumeEvidence(runDir); err != nil {
+					t.Fatalf("resume preflight should backfill the missing agent_finished event: %v", err)
+				}
+			}
+
 			result, resumeErr := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
-			if resumeErr != nil || result.Outcome != workflow.RunCompleted {
+			if test.failAgentFinishedCount > 1 {
+				if !errors.Is(resumeErr, ErrAgentFinishedEvidence) || result.Outcome != workflow.RunStopped {
+					t.Fatalf("persistent agent_finished append failure should stop resumably: result=%+v err=%v", result, resumeErr)
+				}
+				if len(rt.executed) != 1 || rt.executed[0] != "analyst" {
+					t.Fatalf("downstream stage started after unrecorded agent completion: %v", rt.executed)
+				}
+				stateStore, err := lifecycle.NewStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				state, err := stateStore.Load(first.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state.Phase != lifecycle.PhaseResumable || state.NextStage != "product_spec" {
+					t.Fatalf("persistent evidence failure should retain a resumable current stage: %+v", state)
+				}
+				events, err := evidence.VerifyEventLog(filepath.Join(dir, ".ai-team", "runs", first.RunID, "events.jsonl"), first.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					if event.Type == "attempt_started" && event.Stage == "code_review" {
+						t.Fatalf("downstream attempt_started was recorded after persistent agent_finished failure: %+v", event)
+					}
+				}
+				if err := evidence.VerifyResumeEvidence(filepath.Join(dir, ".ai-team", "runs", first.RunID)); err != nil {
+					t.Fatalf("resumable attempt should reconcile once event persistence returns: %v", err)
+				}
+			} else if resumeErr != nil || result.Outcome != workflow.RunCompleted {
 				t.Fatalf("agent action should complete the stage: result=%+v err=%v", result, resumeErr)
 			}
-			if len(rt.executed) != 1 || rt.executed[0] != "analyst" {
+			if test.failAgentFinishedCount <= 1 && (len(rt.executed) < 1 || rt.executed[0] != "analyst") {
 				t.Fatalf("agent was not invoked once: %v", rt.executed)
 			}
 			if test.action == "refine_agent" && refinementInput != test.comment {
@@ -460,7 +565,7 @@ outputs:
 					t.Fatalf("missing %s event: %v", eventType, seen)
 				}
 			}
-			if test.failAgentFinishedOnce && evidenceFactory.failedAgentFinished != 1 {
+			if test.failAgentFinishedCount == 1 && evidenceFactory.failedAgentFinished != 1 {
 				t.Fatalf("agent_finished append was not retried after transient error: failures=%d", evidenceFactory.failedAgentFinished)
 			}
 		})

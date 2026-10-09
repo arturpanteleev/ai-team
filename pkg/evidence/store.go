@@ -530,6 +530,10 @@ func resumeWithEventLogAndAttemptManifestSource(root, runID string, eventLog eve
 	if err != nil {
 		return nil, RunManifest{}, ReplayedRun{}, err
 	}
+	events, err = reconcileMissingAgentFinishedEvent(runDir, runID, eventLog, source, events)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("recover agent completion event: %w", err)
+	}
 	var replayed ReplayedRun
 	if len(events) == 0 {
 		// Atomic evidence creation can complete before the first run_started

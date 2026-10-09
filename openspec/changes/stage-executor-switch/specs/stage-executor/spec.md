@@ -85,8 +85,12 @@ stage with the source agent attempt ID in its evidence manifest and emit
 ### Requirement: Finished agent attempts have complete lifecycle events
 
 The pipeline MUST retry an ambiguous `agent_finished` append only after
-checking the event log for the exact event. Replay MUST reject a finished agent
-attempt that has `agent_started` but no matching `agent_finished` event.
+checking the event log for the exact event. Strict replay MUST reject a finished
+agent attempt that has `agent_started` but no matching `agent_finished` event.
+Resume preflight MUST reconcile the single durable crash window where
+`attempt_finished` was appended before the process stopped, by reconstructing
+and appending the matching `agent_finished` from the verified attempt and
+start events before strict replay.
 
 #### Scenario: Agent completion append fails transiently
 
@@ -99,3 +103,18 @@ attempt that has `agent_started` but no matching `agent_finished` event.
 - **WHEN** an agent attempt has both `agent_started` and `attempt_finished` but
   no matching `agent_finished`
 - **THEN** replay fails closed instead of accepting the attempt as complete
+
+#### Scenario: Resume recovers a crash between attempt and agent completion
+
+- **WHEN** a nonterminal event log has matching `agent_started` and
+  `attempt_finished` events but no `agent_finished`
+- **THEN** resume preflight appends exactly one hash-chained `agent_finished`
+  carrying the attempt status and original action/approval identity
+- **AND** strict replay proceeds only after validating the recovered event
+
+#### Scenario: Persistent completion-event failure stops the graph
+
+- **WHEN** the pipeline cannot append or confirm `agent_finished` after its
+  retry
+- **THEN** the run stops in a resumable checkpoint at the current stage
+- **AND** no downstream stage attempt starts until resume reconciles the event

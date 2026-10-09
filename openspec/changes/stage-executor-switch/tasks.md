@@ -11,6 +11,9 @@
       select prior agent results by the human contract output path.
 - [x] Add executor/agent events to evidence and worker API allowlist; retry
       uncertain completion writes and reject incomplete agent lifecycle replay.
+- [x] Reconcile a crash after `attempt_finished` but before `agent_finished`
+      before strict resume replay; keep a run resumable at the current stage if
+      the completion event remains unavailable, without starting downstream work.
 - [x] Add pipeline, lifecycle, and web tests for visit identity and agent
       execution/refinement.
 - [ ] Wire the CLI action `ai-team task stage <stage-id> run-agent` through

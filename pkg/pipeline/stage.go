@@ -77,6 +77,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		RunID:       rs.runID,
 		AttemptID:   attemptID,
 		Name:        name,
+		Executor:    "agent",
 		StageIndex:  i + 1,
 		TotalStages: len(rs.names),
 		StartedAt:   stageStart.UTC(),
@@ -93,7 +94,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 	if err := rs.evidence.Append(evidence.Event{
 		Type: "attempt_started", Stage: name, AttemptID: attemptID, Timestamp: stageStart.UTC(),
-		Data: map[string]any{"stage_index": i + 1},
+		Data: map[string]any{"stage_index": i + 1, "executor": "agent"},
 	}); err != nil {
 		return fail(fmt.Errorf("агент %s: запись attempt_started: %w", name, err))
 	}
@@ -109,7 +110,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			rs.usageTotal.Attested = true
 		}
 		manifest := evidence.AttemptManifest{
-			AttemptID: attemptID, Stage: name, StageIndex: i + 1, TotalStages: len(rs.names),
+			AttemptID: attemptID, Stage: name, Executor: "agent", StageIndex: i + 1, TotalStages: len(rs.names),
 			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
 			Status: r.Status, Verdict: string(r.Verdict), Blocker: r.Blocker,
 			Execution: string(r.State.Execution), Decision: string(r.State.Decision), Outcome: string(r.State.Outcome),
@@ -145,7 +146,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		}
 		data := map[string]any{
 			"status": r.Status, "execution": r.State.Execution, "decision": r.State.Decision,
-			"outcome": r.State.Outcome, "verdict": r.Verdict,
+			"outcome": r.State.Outcome, "verdict": r.Verdict, "executor": "agent",
 		}
 		if manifestPublished {
 			digest, _, digestErr := evidence.AttemptManifestDigest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, attemptID)
@@ -179,9 +180,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		ui.Colorize("▶", ui.ColorCyan),
 		ui.Colorize(name, ui.ColorBold+ui.ColorYellow))
 
-	a, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(name))
+	a, err := rs.p.loadStageDefinition(name)
 	if err != nil {
 		return fail(fmt.Errorf("ошибка загрузки агента %s: %w", name, err))
+	}
+	if a == nil {
+		return fail(fmt.Errorf("human stage %s must execute through the typed input path", name))
 	}
 	modelAttempt = a.Kind != "delivery"
 	agentCfg := rs.p.cfg.AgentConfig(name)
@@ -696,7 +700,7 @@ func sortedStringMapKeys(values map[string]string) []string {
 
 // authorizeStage validates controller-owned prerequisites before planning.
 func (rs *runState) authorizeStage(name string) error {
-	_, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(name))
+	_, err := rs.p.loadStageDefinition(name)
 	if err != nil {
 		return fmt.Errorf("ошибка загрузки агента %s: %w", name, err)
 	}

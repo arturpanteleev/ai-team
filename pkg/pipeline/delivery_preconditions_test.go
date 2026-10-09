@@ -132,6 +132,10 @@ func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
 		strings.Join(implementation.Delivery.RequireChecks, ",") != "go-test,go-vet" {
 		t.Fatalf("built-in Go checks were not attached to stage implementation/coder: %+v", implementation)
 	}
+	// This case exercises an agent-executed implementation stage and its stable
+	// stage-ID-to-registry-agent mapping. The standard template's production
+	// implementation is human-executed, covered by the human input flow tests.
+	implementation.Executor = "agent"
 	cfg.Stages = []config.TemplateStage{implementation}
 	cfg.PipelineAgents = []config.AgentConfig{{Name: implementation.ID}}
 	cfg.Returns = nil

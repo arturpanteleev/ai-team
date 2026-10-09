@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,7 +36,22 @@ const (
 	QuorumAll             = "all"
 	KindApprove    Kind   = "approve"
 	KindQuestions  Kind   = "questions"
+	KindInput      Kind   = "input"
 )
+
+const MaxInputCommentBytes = 128 << 10
+
+// InputPayload is the immutable contract for a human-executed stage. The
+// controller derives OutputPath from the configured stage/registry contract;
+// the decision comment supplies the bytes written there on resume.
+type InputPayload struct {
+	Kind       string `json:"kind"`
+	StageID    string `json:"stage_id"`
+	Result     string `json:"result"`
+	LinkKind   string `json:"link_kind,omitempty"`
+	OutputName string `json:"output_name"`
+	OutputPath string `json:"output_path"`
+}
 
 type Decision struct {
 	ApprovalID              string            `json:"approval_id"`
@@ -277,7 +293,12 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if value.Deferred {
 		return PendingApproval{}, errors.New("deferred approval разрешается consolidated delivery-решением (ResolveDeferred)")
 	}
+	inputComment := decision.Comment
 	decision = normalizeDecision(approvalID, decision)
+	if value.Kind == KindInput {
+		// Input bytes are the human stage result, so preserve whitespace exactly.
+		decision.Comment = inputComment
+	}
 	if decision.SubjectHash != value.SubjectHash {
 		return PendingApproval{}, errors.New("subject hash решения не совпадает с ожидаемым")
 	}
@@ -286,6 +307,14 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	}
 	if contains(value.FeedbackActions, decision.Action) && decision.Comment == "" {
 		return PendingApproval{}, errors.New("для возврата требуется причина или feedback")
+	}
+	if value.Kind == KindInput {
+		if len(decision.Comment) > MaxInputCommentBytes {
+			return PendingApproval{}, fmt.Errorf("human input exceeds maximum size of %d bytes", MaxInputCommentBytes)
+		}
+		if decision.Action == "submit" && strings.TrimSpace(decision.Comment) == "" {
+			return PendingApproval{}, errors.New("human input submit requires a non-empty comment")
+		}
 	}
 	if decision.ActorID == "" || !contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) {
 		return PendingApproval{}, errors.New("решение содержит недопустимого actor, role или action")
@@ -300,7 +329,8 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	}
 	for _, previous := range value.Decisions {
 		if previous.ActorID == decision.ActorID && previous.ActorRole == decision.ActorRole {
-			if previous.Action == decision.Action && previous.SubjectHash == decision.SubjectHash {
+			if previous.Action == decision.Action && previous.SubjectHash == decision.SubjectHash &&
+				(value.Kind != KindInput || previous.Comment == decision.Comment) {
 				return value, nil
 			}
 			return PendingApproval{}, errors.New("actor уже записал конфликтующее решение")
@@ -403,7 +433,7 @@ func validate(value PendingApproval) error {
 		!validSHA256(value.SubjectHash) || value.CreatedAt.IsZero() {
 		return errors.New("approval содержит недопустимые обязательные поля")
 	}
-	if value.Kind != KindApprove && value.Kind != KindQuestions {
+	if value.Kind != KindApprove && value.Kind != KindQuestions && value.Kind != KindInput {
 		return fmt.Errorf("неподдерживаемый approval kind %q", value.Kind)
 	}
 	if value.Kind == KindQuestions {
@@ -415,6 +445,24 @@ func validate(value PendingApproval) error {
 			strings.TrimSpace(payload.Markdown) == "" || !contains(value.Actions, "answer_questions") ||
 			value.Targets["answer_questions"] != value.FromStage {
 			return errors.New("questions approval должен содержать вопросы и маршрут answer_questions на исходный этап")
+		}
+	}
+	if value.Kind == KindInput {
+		var payload InputPayload
+		if json.Unmarshal(value.Payload, &payload) != nil || payload.Kind != string(KindInput) ||
+			payload.StageID == "" || payload.StageID != value.FromStage || value.ToStage != value.FromStage ||
+			value.Trigger != "human_input" ||
+			(payload.Result != "md" && payload.Result != "link" && payload.Result != "approve") ||
+			payload.OutputName == "" || !validInputOutputPath(payload.OutputPath) || value.Quorum != QuorumAny ||
+			!contains(value.Actions, "reject") || value.Targets["reject"] != value.FromStage {
+			return errors.New("input approval must bind a human stage, result, output, and same-stage reject action")
+		}
+		if payload.Result == "approve" {
+			if !contains(value.Actions, "approve") || value.Targets["approve"] != value.FromStage || contains(value.Actions, "submit") {
+				return errors.New("approve input must offer approve/reject on the human stage")
+			}
+		} else if !contains(value.Actions, "submit") || value.Targets["submit"] != value.FromStage || contains(value.Actions, "approve") {
+			return errors.New("md/link input must offer submit/reject on the human stage")
 		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {
@@ -471,6 +519,14 @@ func validate(value PendingApproval) error {
 		return fmt.Errorf("неизвестный approval status %q", value.Status)
 	}
 	return nil
+}
+
+func validInputOutputPath(value string) bool {
+	if value == "" || strings.Contains(value, "\\") || strings.HasPrefix(value, "/") {
+		return false
+	}
+	cleaned := path.Clean(value)
+	return cleaned == value && cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
 }
 
 func sameRequest(left, right PendingApproval) bool {

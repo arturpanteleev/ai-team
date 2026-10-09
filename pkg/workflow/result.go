@@ -55,28 +55,32 @@ type AttemptUsage struct {
 
 // StageResult is the domain record of one immutable stage attempt.
 type StageResult struct {
-	RunID            string
-	AttemptID        string
-	Name             string
-	Status           string
-	Err              error
-	Blocker          string
-	Verdict          verdict.Verdict
-	Duration         time.Duration
-	StartedAt        time.Time
-	FinishedAt       time.Time
-	Superseded       bool
-	ValidationFailed bool
-	ControlStopped   bool
-	State            AttemptState
-	Checks           []checks.Result
-	Mutations        []string
-	MutationChanges  []MutationChange
-	Delivery         *delivery.Result
-	Usage            *AttemptUsage
-	StageIndex       int
-	TotalStages      int
-	Inputs           []Artifact
-	Outputs          []Artifact
-	Summary          string
+	RunID                string
+	AttemptID            string
+	Name                 string
+	Executor             string
+	ActorID              string
+	ActorRole            string
+	HumanInputApprovalID string
+	Status               string
+	Err                  error
+	Blocker              string
+	Verdict              verdict.Verdict
+	Duration             time.Duration
+	StartedAt            time.Time
+	FinishedAt           time.Time
+	Superseded           bool
+	ValidationFailed     bool
+	ControlStopped       bool
+	State                AttemptState
+	Checks               []checks.Result
+	Mutations            []string
+	MutationChanges      []MutationChange
+	Delivery             *delivery.Result
+	Usage                *AttemptUsage
+	StageIndex           int
+	TotalStages          int
+	Inputs               []Artifact
+	Outputs              []Artifact
+	Summary              string
 }

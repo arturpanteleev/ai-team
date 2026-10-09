@@ -771,6 +771,29 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if err := evidence.CleanupInflightInputSnapshots(runCfg.TargetDir, runID); err != nil {
 			return RunResult{}, fmt.Errorf("cleanup orphaned inflight inputs: %w", err)
 		}
+		if resumedApproval != nil && resumedApproval.Kind == approval.KindInput && approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
+			if err := validateRecordedHumanInputDecision(replayedRun, *resumedApproval); err != nil {
+				return RunResult{}, fmt.Errorf("resume human input approval: %w", err)
+			}
+		}
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil && resumedApproval.Kind == approval.KindInput {
+			// A crash can happen after a completed human attempt and its graph
+			// transition are durable but before lifecycle advances. Reconcile the
+			// exact transition and resume at its target without replaying the input.
+			reconciledTo, reconciled, reconcileErr := ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
+			if reconcileErr != nil {
+				return RunResult{}, fmt.Errorf("resume human stage transition: %w", reconcileErr)
+			}
+			if reconciled {
+				runCfg.retryFrom = reconciledTo
+				resumedApproval = nil
+				runCfg.resumeDecisionAction = ""
+				recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, reconciledTo, compiledGraph, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume human graph handoff: %w", err)
+				}
+			}
+		}
 		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
@@ -885,13 +908,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 		if resumedApproval != nil {
-			if err := evidenceStore.Append(evidence.Event{
-				Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
-				Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
-			}); err != nil {
-				return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+			if !approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
+				if err := evidenceStore.Append(evidence.Event{
+					Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
+					Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
+				}); err != nil {
+					return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+				}
 			}
-			if resumedTransitionData != nil {
+			if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
 				if err := evidenceStore.Append(evidence.Event{
 					Type: "transition_selected", AttemptID: resumedApproval.AttemptID,
 					Stage: resumedApproval.FromStage, Timestamp: runStartedAt, Data: resumedTransitionData,
@@ -1083,7 +1108,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			Interactive:  p.prompter.Interactive(),
 		},
 		reportsDir:  reportsDir,
-		names:       p.cfg.AgentNames(),
+		names:       pipelineStageNames(p.cfg),
 		extraInputs: make(map[string][]runtime.Artifact),
 		selectedArtifactRevisions: func() map[string]string {
 			selectedApproval := resumedApproval
@@ -1147,7 +1172,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		snapshot, _ := yaml.Marshal(p.cfg)
 		p.recorder.ReconcileInterrupted(runStartedAt)
 		if rs.resumed {
-			if resumedApproval != nil {
+			if resumedApproval != nil && !approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
 				// Attach first so the recorder can append the decision at its
 				// actual timestamp, then append the later resume event. Event
 				// sequence and timestamps must describe the same chronology.
@@ -1157,7 +1182,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			p.recorder.RunResumed(runID, runStartedAt)
 			if resumedApproval != nil {
-				if resumedTransitionData != nil {
+				if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
 					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, runStartedAt, resumedTransitionData)
 				}
 			}
@@ -1306,6 +1331,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 	}
 	return RunResult{RunID: runID, Outcome: outcome}, finalErr
+}
+
+func pipelineStageNames(cfg *config.Config) []string {
+	if cfg != nil && cfg.Template != "" {
+		names := make([]string, 0, len(cfg.Stages))
+		for _, stage := range cfg.Stages {
+			names = append(names, stage.ID)
+		}
+		return names
+	}
+	return cfg.AgentNames()
 }
 
 func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task string) error {

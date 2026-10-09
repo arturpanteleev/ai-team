@@ -99,28 +99,32 @@ type RunManifest struct {
 }
 
 type AttemptManifest struct {
-	SchemaVersion   int                       `json:"schema_version"`
-	RunID           string                    `json:"run_id"`
-	AttemptID       string                    `json:"attempt_id"`
-	Stage           string                    `json:"stage"`
-	StageIndex      int                       `json:"stage_index"`
-	TotalStages     int                       `json:"total_stages,omitempty"`
-	StartedAt       time.Time                 `json:"started_at"`
-	FinishedAt      time.Time                 `json:"finished_at"`
-	Status          string                    `json:"status"`
-	Execution       string                    `json:"execution"`
-	Decision        string                    `json:"decision"`
-	Outcome         string                    `json:"outcome"`
-	Verdict         string                    `json:"verdict,omitempty"`
-	Blocker         string                    `json:"blocker,omitempty"`
-	Error           string                    `json:"error,omitempty"`
-	Inputs          []ArtifactRecord          `json:"inputs,omitempty"`
-	Outputs         []ArtifactRecord          `json:"outputs,omitempty"`
-	Checks          []checks.Result           `json:"checks,omitempty"`
-	Mutations       []string                  `json:"mutations,omitempty"`
-	MutationChanges []workflow.MutationChange `json:"mutation_changes,omitempty"`
-	Delivery        *delivery.Result          `json:"delivery,omitempty"`
-	Usage           *workflow.AttemptUsage    `json:"usage,omitempty"`
+	SchemaVersion        int                       `json:"schema_version"`
+	RunID                string                    `json:"run_id"`
+	AttemptID            string                    `json:"attempt_id"`
+	Stage                string                    `json:"stage"`
+	Executor             string                    `json:"executor,omitempty"`
+	ActorID              string                    `json:"actor_id,omitempty"`
+	ActorRole            string                    `json:"actor_role,omitempty"`
+	HumanInputApprovalID string                    `json:"human_input_approval_id,omitempty"`
+	StageIndex           int                       `json:"stage_index"`
+	TotalStages          int                       `json:"total_stages,omitempty"`
+	StartedAt            time.Time                 `json:"started_at"`
+	FinishedAt           time.Time                 `json:"finished_at"`
+	Status               string                    `json:"status"`
+	Execution            string                    `json:"execution"`
+	Decision             string                    `json:"decision"`
+	Outcome              string                    `json:"outcome"`
+	Verdict              string                    `json:"verdict,omitempty"`
+	Blocker              string                    `json:"blocker,omitempty"`
+	Error                string                    `json:"error,omitempty"`
+	Inputs               []ArtifactRecord          `json:"inputs,omitempty"`
+	Outputs              []ArtifactRecord          `json:"outputs,omitempty"`
+	Checks               []checks.Result           `json:"checks,omitempty"`
+	Mutations            []string                  `json:"mutations,omitempty"`
+	MutationChanges      []workflow.MutationChange `json:"mutation_changes,omitempty"`
+	Delivery             *delivery.Result          `json:"delivery,omitempty"`
+	Usage                *workflow.AttemptUsage    `json:"usage,omitempty"`
 }
 
 // ArtifactDigest exposes the same bounded evidence identity used by attempt

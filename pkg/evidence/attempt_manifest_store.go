@@ -182,6 +182,15 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 	if manifest.SchemaVersion != SchemaVersion || strings.TrimSpace(manifest.Stage) == "" || manifest.StageIndex < 1 || manifest.StartedAt.IsZero() || manifest.FinishedAt.IsZero() {
 		return errors.New("attempt manifest required schema or identity fields are invalid")
 	}
+	if manifest.Executor != "" && manifest.Executor != "agent" && manifest.Executor != "human" {
+		return errors.New("attempt manifest executor is invalid")
+	}
+	if manifest.Executor == "human" && (strings.TrimSpace(manifest.ActorID) == "" || strings.TrimSpace(manifest.ActorRole) == "" || strings.TrimSpace(manifest.HumanInputApprovalID) == "") {
+		return errors.New("human attempt manifest requires actor and input approval identity")
+	}
+	if manifest.Executor != "human" && (manifest.ActorID != "" || manifest.ActorRole != "" || manifest.HumanInputApprovalID != "") {
+		return errors.New("non-human attempt manifest cannot contain a human actor")
+	}
 	if manifest.Usage != nil && (manifest.Usage.TokensInput < 0 || manifest.Usage.TokensOutput < 0 ||
 		math.IsNaN(manifest.Usage.CostUSD) || math.IsInf(manifest.Usage.CostUSD, 0) || manifest.Usage.CostUSD < 0 ||
 		(!manifest.Usage.Attested && (manifest.Usage.TokensInput != 0 || manifest.Usage.TokensOutput != 0 || manifest.Usage.CostUSD != 0))) {

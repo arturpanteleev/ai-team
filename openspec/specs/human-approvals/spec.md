@@ -51,6 +51,37 @@ cloud mode actor identity и доступные роли MUST поступать
 - **И** MUST завершить текущую process session с управляемым stopped status
 - **И** тот же run MUST продолжиться после внешнего decision
 
+### Requirement: Typed human stage input
+
+Approval storage MUST support `kind: input` as a typed human-stage submission,
+separate from transition approvals and question-answer loops. The immutable
+payload MUST bind stage ID, result type, output name/path, and exact subject
+hash. A markdown or link submission MUST preserve the submitted comment bytes;
+retries from the same actor with identical action and bytes MUST be idempotent,
+while changed bytes MUST be rejected. Human input MUST resolve only through
+an authorized actor and MUST target the same stage so resume cannot skip a
+graph node.
+
+#### Scenario: Exact typed submission
+
+- **КОГДА** an authorized actor submits a non-empty result for a pending input
+  approval with the exact subject
+- **ТОГДА** the controller MUST retain the exact content and actor, resolve the
+  approval, and permit resume of the bound stage
+
+#### Scenario: Conflicting retry
+
+- **КОГДА** the same actor resubmits different bytes or an action not permitted
+  by the declared result type
+- **ТОГДА** the store MUST reject the update and preserve the original
+  decision
+
+#### Scenario: Input cannot be bypassed
+
+- **КОГДА** a run uses `--approve-gates` while waiting for a human input
+- **ТОГДА** the missing typed result MUST remain unresolved and the stage MUST
+  remain waiting
+
 ### Requirement: Approval subject привязан к candidate
 
 Subject transition approval, относящегося к source workflow, MUST включать

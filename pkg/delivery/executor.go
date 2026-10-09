@@ -799,20 +799,16 @@ func remoteObjectID(output string) string {
 }
 
 func verifyPullRequest(output string, plan Plan, commitSHA string) (string, error) {
-	var response struct {
-		URL         string `json:"url"`
-		State       string `json:"state"`
-		BaseRefName string `json:"baseRefName"`
-		HeadRefName string `json:"headRefName"`
-		HeadRefOID  string `json:"headRefOid"`
+	response, err := decodePullRequestView(output)
+	if err != nil {
+		return "", fmt.Errorf("delivery: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(output))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
-		return "", fmt.Errorf("delivery: invalid gh pr view JSON: %w", err)
+	for _, rule := range pullRequestRuleReport(response, plan.BaseBranch).Rules {
+		if rule.Status == "failed" {
+			return "", fmt.Errorf("delivery: %s: %s", rule.Rule, rule.Reason)
+		}
 	}
-	if response.URL == "" || response.State != "OPEN" || response.BaseRefName != plan.BaseBranch ||
-		response.HeadRefName != plan.Branch || response.HeadRefOID != commitSHA {
+	if response.HeadRefName != plan.Branch || response.HeadRefOID != commitSHA {
 		return "", fmt.Errorf("delivery: PR не совпадает с approved state: url=%q state=%q base=%q head=%q oid=%q", response.URL, response.State, response.BaseRefName, response.HeadRefName, response.HeadRefOID)
 	}
 	return response.URL, nil

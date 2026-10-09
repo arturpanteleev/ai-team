@@ -31,7 +31,7 @@ import (
 // execute.go — исполнение графа workflow и lifecycle-переходы.
 
 func (rs *runState) execute(ctx context.Context) error {
-	if rs.runCfg.resumeDecisionAction == "reject" {
+	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) {
 		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
 	}
 	return rs.executeGraph(ctx)
@@ -76,24 +76,46 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if err := rs.authorizeStage(current); err != nil {
 			return err
 		}
-		result := rs.runStage(ctx, index, current)
-		rs.results = append(rs.results, result)
-		rs.visits[current]++
+		var result notifier.StageResult
+		replayedHumanAttempt := false
+		if rs.p.stageExecutor(current) == "human" {
+			var humanErr error
+			result, humanErr = rs.runHumanStage(ctx, index, current)
+			if humanErr != nil {
+				return humanErr
+			}
+		} else {
+			result = rs.runStage(ctx, index, current)
+		}
+		for _, previous := range rs.results {
+			if previous.AttemptID == result.AttemptID && result.AttemptID != "" {
+				replayedHumanAttempt = true
+				break
+			}
+		}
+		if !replayedHumanAttempt {
+			rs.results = append(rs.results, result)
+			rs.visits[current]++
+		}
 		if err := rs.enforceTestMutationPolicy(current, result); err != nil {
 			return err
 		}
-		if err := rs.afterAttempt(ctx); err != nil {
-			return err
+		if !replayedHumanAttempt {
+			if err := rs.afterAttempt(ctx); err != nil {
+				return err
+			}
 		}
 
-		if err := rs.p.notifier.Notify(ctx, result); err != nil {
-			fmt.Fprintf(os.Stderr, "  %s notifier error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
-		}
-		if err := report.GenerateStageReport(rs.reportsDir, rs.runCfg.Feature, result.AttemptID, result, rs.task.ArtifactRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "  %s report error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
-		}
-		if rs.p.recorder != nil {
-			rs.p.recorder.StageFinished(result)
+		if !replayedHumanAttempt {
+			if err := rs.p.notifier.Notify(ctx, result); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s notifier error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+			}
+			if err := report.GenerateStageReport(rs.reportsDir, rs.runCfg.Feature, result.AttemptID, result, rs.task.ArtifactRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s report error: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+			}
+			if rs.p.recorder != nil {
+				rs.p.recorder.StageFinished(result)
+			}
 		}
 		if result.Status == notifier.StatusBlocked {
 			logging.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
@@ -111,11 +133,11 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		var transitionPayload json.RawMessage
 		requestKind := approval.KindApprove
 		if result.Status == notifier.StatusBlocked {
-			stage, stageErr := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(current))
+			stage, stageErr := rs.p.loadStageDefinition(current)
 			if stageErr != nil {
 				return fmt.Errorf("load stage %s: %w", current, stageErr)
 			}
-			if stage.AskQuestions {
+			if stage != nil && stage.AskQuestions {
 				var hasQuestions bool
 				var questionErr error
 				transitionPayload, hasQuestions, questionErr = questionsPayload(result.Outputs)
@@ -257,7 +279,9 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		}
 		result := notifier.StageResult{
 			RunID: run.RunID, AttemptID: attempt.AttemptID, Name: attempt.Stage,
-			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
+			Executor: attempt.Executor, ActorID: attempt.ActorID, ActorRole: attempt.ActorRole,
+			HumanInputApprovalID: attempt.HumanInputApprovalID,
+			StageIndex:           attempt.StageIndex, StartedAt: attempt.StartedAt,
 			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
 			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
 			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded, TotalStages: totalStages,
@@ -303,6 +327,10 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		if !usageRecordPresent && attempt.State.Execution != workflow.ExecutionPending && attempt.State.Execution != workflow.ExecutionRunning {
 			// Pre-B-51 manifests have no usage field. A completed model attempt
 			// from that format cannot be treated as a zero-token invocation.
+			if attempt.Executor == "human" {
+				results = append(results, result)
+				continue
+			}
 			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load historical stage %s: %w", attempt.Stage, err)
@@ -312,6 +340,10 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			}
 		}
 		if attempt.FinishedAt.IsZero() {
+			if attempt.Executor == "human" {
+				results = append(results, result)
+				continue
+			}
 			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load interrupted stage %s: %w", attempt.Stage, err)

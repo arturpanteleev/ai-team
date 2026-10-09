@@ -49,6 +49,118 @@ func TestStoreAnyQuorumAndIdempotentDecision(t *testing.T) {
 	}
 }
 
+func TestInputApprovalBindsSubmissionContentAndActor(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(InputPayload{
+		Kind: string(KindInput), StageID: "product_spec", Result: "md",
+		OutputName: "spec", OutputPath: "feature/specs/product/spec.md",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		Kind: KindInput, RunID: "run-human", AttemptID: "run-human-001-product_spec",
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: "human_input",
+		SubjectHash: testSubject, RequiredRoles: []string{"product_owner"}, Quorum: QuorumAny,
+		Actions: []string{"submit", "reject"},
+		Targets: map[string]string{"submit": "product_spec", "reject": "product_spec"},
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Decision{ActorID: "alice", ActorRole: "product_owner", Action: "submit", SubjectHash: testSubject}
+	if _, err := store.Decide(value.RunID, value.ID, base); err == nil || !strings.Contains(err.Error(), "non-empty") {
+		t.Fatalf("empty input submission must be rejected: %v", err)
+	}
+	base.Comment = "\n# Product spec\n\n- exact whitespace  \n"
+	resolved, err := store.Decide(value.RunID, value.ID, base)
+	if err != nil || resolved.Status != StatusResolved || resolved.Decisions[0].ActorID != "alice" || resolved.Decisions[0].Comment != base.Comment {
+		t.Fatalf("human submission did not resolve with actor identity: value=%+v err=%v", resolved, err)
+	}
+	if _, err := store.Decide(value.RunID, value.ID, base); err != nil {
+		t.Fatalf("exact same content must be idempotent: %v", err)
+	}
+	base.Comment = "# Different content"
+	if _, err := store.Decide(value.RunID, value.ID, base); err == nil || !strings.Contains(err.Error(), "конфликтующее") {
+		t.Fatalf("same actor must not replace a submitted result: %v", err)
+	}
+}
+
+func TestInputApprovalRequiresHumanInputTrigger(t *testing.T) {
+	payload, err := json.Marshal(InputPayload{
+		Kind: string(KindInput), StageID: "product_spec", Result: "md",
+		OutputName: "spec", OutputPath: "feature/specs/product/spec.md",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := PendingApproval{
+		SchemaVersion: SchemaVersion, Kind: KindInput, ID: "approval-input-trigger", RunID: "run-input-trigger",
+		AttemptID: "attempt-1", FromStage: "product_spec", ToStage: "product_spec", Trigger: "graph_outcome:passed",
+		SubjectHash: testSubject, RequiredRoles: []string{"product_owner"}, Quorum: QuorumAny,
+		Actions: []string{"submit", "reject"},
+		Targets: map[string]string{"submit": "product_spec", "reject": "product_spec"},
+		Payload: payload, CreatedAt: time.Now().UTC(), Status: StatusPending,
+	}
+	if err := validate(value); err == nil {
+		t.Fatal("input approval with a graph transition trigger should be rejected")
+	}
+}
+
+func TestConcurrentIdenticalInputSubmissionIsIdempotent(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(InputPayload{
+		Kind: string(KindInput), StageID: "product_spec", Result: "md",
+		OutputName: "spec", OutputPath: "feature/spec.md",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		Kind: KindInput, RunID: "run-input-concurrent", AttemptID: "attempt-1",
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: "human_input",
+		SubjectHash: testSubject, RequiredRoles: []string{"product_owner"}, Quorum: QuorumAny,
+		Actions: []string{"submit", "reject"},
+		Targets: map[string]string{"submit": "product_spec", "reject": "product_spec"}, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := Decision{ActorID: "owner", ActorRole: "product_owner", Action: "submit", SubjectHash: testSubject, Comment: "# Exact bytes\n"}
+	const writers = 8
+	start := make(chan struct{})
+	results := make(chan error, writers)
+	var wait sync.WaitGroup
+	for range writers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, decideErr := store.Decide(value.RunID, value.ID, decision)
+			results <- decideErr
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for resultErr := range results {
+		if resultErr != nil {
+			t.Fatalf("identical concurrent submission must be idempotent: %v", resultErr)
+		}
+	}
+	reloaded, err := store.Load(value.RunID, value.ID)
+	if err != nil || reloaded.Status != StatusResolved || len(reloaded.Decisions) != 1 || reloaded.Decisions[0].Comment != decision.Comment {
+		t.Fatalf("concurrent submit changed the immutable result: value=%+v err=%v", reloaded, err)
+	}
+}
+
 func TestStoreRejectsStaleSubjectAndWrongRole(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

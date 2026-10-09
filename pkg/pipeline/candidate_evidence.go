@@ -455,9 +455,12 @@ func writeControllerJSON(path string, value any) error {
 }
 
 func (rs *runState) prepareControllerStageEvidence(ctx context.Context, stage string) error {
-	definition, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(stage))
+	definition, err := rs.p.loadStageDefinition(stage)
 	if err != nil {
 		return err
+	}
+	if definition == nil {
+		return nil
 	}
 	for inputName, declaredPath := range definition.Inputs {
 		resolved := filepath.ToSlash(runtime.ReplaceVars(declaredPath, rs.runCfg.Feature))

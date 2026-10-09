@@ -41,6 +41,42 @@ for other results. Optional stage fields MUST be strictly decoded.
   non-markdown result
 - **ТОГДА** config MUST be rejected
 
+### Requirement: Human executor stages collect typed results
+
+A stage with `executor: human` MUST stop for a typed `input` approval bound to
+the stage ID, result type, output name/path, declared input digests, and current
+candidate identity when present. `result: approve` MUST collect an explicit
+`approve` or `reject` action; `result: md` and `result: link` MUST collect a
+`submit` or `reject` action. `--approve-gates` MUST NOT synthesize a human
+result. The request MUST leave the stage without a started attempt; after a
+valid submission, the controller MUST resume that same stage and publish the
+human result as its attempt output before applying the ordinary graph edge and
+its independent confirmation policy.
+
+#### Scenario: Human stage pauses and resumes with markdown
+
+- **КОГДА** run reaches a `human` stage with `result: md`
+- **ТОГДА** it MUST persist `kind: input`, set lifecycle to `waiting`, and
+  create no unfinished attempt
+- **КОГДА** an authorized actor submits markdown for the exact subject
+- **ТОГДА** the same stage MUST resume with the submitted bytes as its output,
+  record the actor and `executor: human`, and then follow its configured graph
+  edge and confirmation gate
+
+#### Scenario: Human link result
+
+- **КОГДА** run reaches a human `result: link` stage
+- **ТОГДА** submission MUST be validated against `link_kind` and published as
+  the stage's output artifact, so the attempt can be consumed or verified like
+  other stage outputs
+
+#### Scenario: Invalid or stale human input
+
+- **КОГДА** input is empty, malformed for its declared result, or bound to a
+  changed stage/input/candidate subject
+- **ТОГДА** it MUST NOT advance the stage or replace previously submitted
+  content
+
 ### Requirement: Backward returns and visit limits
 
 Each `returns` entry MUST reference existing stages and point from a later

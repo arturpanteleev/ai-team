@@ -7,10 +7,25 @@ Immutable run/attempt manifests и hash-chained event log как источни�
 Run evidence MUST сохранять identity attempts, transitions и всех человеческих
 approval requests/decisions в одной verified chain.
 
+Every attempt manifest MUST include its executor identity. A human attempt MUST
+also include the exact actor ID and role from the resolved input approval; the
+hash-chained `attempt_started` and `attempt_finished` events MUST bind the same
+  executor, actor, and input approval ID fields. Human inputs and outputs MUST
+  be copied into the attempt's immutable evidence artifacts and covered by the
+  manifest digest.
+
 #### Scenario: Approval evidence
 - **КОГДА** approval создаётся или получает решение
 - **ТОГДА** event MUST содержать approval_id, subject hash, actor/action при
   решении и связанные from/to stages
+
+#### Scenario: Human attempt evidence
+
+- **КОГДА** a human input is submitted and its stage resumes
+- **ТОГДА** the published attempt manifest MUST say `executor: human`, identify
+  the decision actor and role, and bind the exact submitted output bytes
+- **И** every declared input consumed by that human stage MUST be snapshotted
+  with its digest so a later stage can prove which human output it consumed
 
 ### Requirement: Event log run binding
 Hash-chain событий MUST начинаться с корня, выведенного из `run_id` своего прогона, так что event log одного прогона MUST NOT проходить проверку целостности в каталоге другого — в том числе после перештамповки `run_id` в событиях и полного пересчёта дайджестов.

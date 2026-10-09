@@ -326,6 +326,7 @@ type runState struct {
 	names                     []string
 	results                   []notifier.StageResult
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
+	selectedInputOverrides    map[string]map[string]runtime.Artifact
 	questionAnswerTargetStage string
 	questionAnswerDeniedPaths []string
 	ps                        *ui.PipelineStatus
@@ -340,6 +341,7 @@ type runState struct {
 	lifecycleState            lifecycle.State
 	approvalStore             ApprovalStore
 	resumedApproval           *approval.PendingApproval
+	recoveredHumanApproval    *approval.PendingApproval
 	selectedArtifactRevisions map[string]string
 	resumed                   bool
 	brief                     briefVersion
@@ -575,6 +577,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	var resumedApproval *approval.PendingApproval
 	var recoveredClarification *approval.PendingApproval
 	var recoveredGraphApproval *approval.PendingApproval
+	var recoveredHumanApproval *approval.PendingApproval
 	var resumedTransitionData map[string]any
 	if runCfg.ResumeRunID != "" {
 		resumedState, err = lifecycleStore.Load(runCfg.ResumeRunID)
@@ -771,6 +774,42 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if err := evidence.CleanupInflightInputSnapshots(runCfg.TargetDir, runID); err != nil {
 			return RunResult{}, fmt.Errorf("cleanup orphaned inflight inputs: %w", err)
 		}
+		if resumedApproval != nil && resumedApproval.Kind == approval.KindInput && approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
+			if err := validateRecordedHumanInputDecision(replayedRun, *resumedApproval); err != nil {
+				return RunResult{}, fmt.Errorf("resume human input approval: %w", err)
+			}
+		}
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil && resumedApproval.Kind == approval.KindInput {
+			// A crash can happen after a completed human attempt and its graph
+			// transition are durable but before lifecycle advances. Reconcile the
+			// exact transition and resume at its target without replaying the input.
+			reconciledTo, reconciled, reconcileErr := ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
+			if reconcileErr != nil {
+				return RunResult{}, fmt.Errorf("resume human stage transition: %w", reconcileErr)
+			}
+			if reconciled {
+				runCfg.retryFrom = reconciledTo
+				resumedApproval = nil
+				runCfg.resumeDecisionAction = ""
+				recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, reconciledTo, compiledGraph, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume human graph handoff: %w", err)
+				}
+			}
+		}
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			resumedApproval.Kind == approval.KindInput && resumedApproval.Trigger == humanInputTrigger &&
+			resumedApproval.FromStage == runCfg.retryFrom {
+			// A resolved human submission is the authority for the result written
+			// by this stage. The graph approval that handed off into the stage is a
+			// separate authority for pinned revisions and extra inputs, and remains
+			// live until the target attempt completes. Recover both slots even when
+			// lifecycle is still Waiting on the human input.
+			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("resume human graph handoff: %w", err)
+			}
+		}
 		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
@@ -792,6 +831,23 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				recoveredClarification, err = RecoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
 				if err != nil {
 					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
+				}
+			}
+			// A forward graph handoff can target a human stage whose resolved
+			// input belongs to an interrupted attempt. Recover that input even
+			// when the graph approval was also recovered above; the two approvals
+			// carry independent state (pinned graph revisions vs. typed result).
+			// Clarification recovery keeps its existing precedence because its
+			// answer is the stage input that must be materialized on resume.
+			resumedHumanInput := resumedApproval != nil && resumedApproval.Kind == approval.KindInput &&
+				resumedApproval.Trigger == humanInputTrigger && resumedApproval.FromStage == runCfg.retryFrom
+			if recoveredClarification == nil && !resumedHumanInput &&
+				(resumedApproval == nil || resumedApproval.Kind != approval.KindQuestions) {
+				if stage, ok := p.templateStage(runCfg.retryFrom); ok && stage.Executor == "human" {
+					recoveredHumanApproval, err = recoveredHumanInputApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+					if err != nil {
+						return RunResult{}, fmt.Errorf("resume human input: %w", err)
+					}
 				}
 			}
 		}
@@ -885,13 +941,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 		if resumedApproval != nil {
-			if err := evidenceStore.Append(evidence.Event{
-				Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
-				Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
-			}); err != nil {
-				return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+			if !approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
+				if err := evidenceStore.Append(evidence.Event{
+					Type: "approval_decided", AttemptID: resumedApproval.AttemptID,
+					Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
+				}); err != nil {
+					return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+				}
 			}
-			if resumedTransitionData != nil {
+			if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
 				if err := evidenceStore.Append(evidence.Event{
 					Type: "transition_selected", AttemptID: resumedApproval.AttemptID,
 					Stage: resumedApproval.FromStage, Timestamp: runStartedAt, Data: resumedTransitionData,
@@ -1082,13 +1140,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			LogDir:       evidenceStore.LogDir(),
 			Interactive:  p.prompter.Interactive(),
 		},
-		reportsDir:  reportsDir,
-		names:       p.cfg.AgentNames(),
-		extraInputs: make(map[string][]runtime.Artifact),
+		reportsDir:             reportsDir,
+		names:                  pipelineStageNames(p.cfg),
+		extraInputs:            make(map[string][]runtime.Artifact),
+		selectedInputOverrides: make(map[string]map[string]runtime.Artifact),
 		selectedArtifactRevisions: func() map[string]string {
-			selectedApproval := resumedApproval
+			// A recovered graph handoff is the authority for pinned artifact
+			// revisions even when its target's human input was recovered too.
+			selectedApproval := recoveredGraphApproval
 			if selectedApproval == nil {
-				selectedApproval = recoveredGraphApproval
+				selectedApproval = resumedApproval
 			}
 			if selectedApproval == nil || len(selectedApproval.ArtifactRevisions) == 0 {
 				return nil
@@ -1099,23 +1160,24 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			return copy
 		}(),
-		startTime:           taskCreatedAt,
-		approvedPlanHash:    runCfg.ApprovePlanHash,
-		approvePlanExplicit: approvePlanExplicit,
-		runID:               runID,
-		evidence:            evidenceStore,
-		attemptOrdinal:      attemptOrdinal,
-		lifecycleStore:      lifecycleStore,
-		lifecycleState:      resumedState,
-		approvalStore:       approvalStore,
-		resumedApproval:     resumedApproval,
-		resumed:             runCfg.ResumeRunID != "",
-		brief:               currentBrief,
-		graph:               compiledGraph,
-		visits:              make(map[string]int),
-		candidate:           candidateManager,
-		sourceTarget:        sourceTarget,
-		budgetConfig:        p.cfg.Budget,
+		startTime:              taskCreatedAt,
+		approvedPlanHash:       runCfg.ApprovePlanHash,
+		approvePlanExplicit:    approvePlanExplicit,
+		runID:                  runID,
+		evidence:               evidenceStore,
+		attemptOrdinal:         attemptOrdinal,
+		lifecycleStore:         lifecycleStore,
+		lifecycleState:         resumedState,
+		approvalStore:          approvalStore,
+		resumedApproval:        resumedApproval,
+		recoveredHumanApproval: recoveredHumanApproval,
+		resumed:                runCfg.ResumeRunID != "",
+		brief:                  currentBrief,
+		graph:                  compiledGraph,
+		visits:                 make(map[string]int),
+		candidate:              candidateManager,
+		sourceTarget:           sourceTarget,
+		budgetConfig:           p.cfg.Budget,
 	}
 	if runCfg.ResumeRunID != "" {
 		var usage runtime.Usage
@@ -1147,7 +1209,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		snapshot, _ := yaml.Marshal(p.cfg)
 		p.recorder.ReconcileInterrupted(runStartedAt)
 		if rs.resumed {
-			if resumedApproval != nil {
+			if resumedApproval != nil && !approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
 				// Attach first so the recorder can append the decision at its
 				// actual timestamp, then append the later resume event. Event
 				// sequence and timestamps must describe the same chronology.
@@ -1157,7 +1219,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 			p.recorder.RunResumed(runID, runStartedAt)
 			if resumedApproval != nil {
-				if resumedTransitionData != nil {
+				if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
 					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, runStartedAt, resumedTransitionData)
 				}
 			}
@@ -1176,7 +1238,8 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		delete(rs.userOwnedPaths, filepath.ToSlash(mutation))
 	}
 	inputApproval := resumedApproval
-	if inputApproval == nil {
+	if recoveredGraphApproval != nil && (inputApproval == nil ||
+		(inputApproval.Kind == approval.KindInput && inputApproval.Trigger == humanInputTrigger && inputApproval.FromStage == runCfg.retryFrom)) {
 		inputApproval = recoveredGraphApproval
 	}
 	if inputApproval == nil {
@@ -1269,6 +1332,55 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 	}
+	graphInputApproval := recoveredGraphApproval
+	if graphInputApproval == nil && resumedApproval != nil && strings.HasPrefix(resumedApproval.Trigger, "graph_outcome:") {
+		graphInputApproval = resumedApproval
+	}
+	if graphInputApproval != nil && len(graphInputApproval.ArtifactRevisions) > 0 &&
+		graphInputApproval.Targets[graphInputApproval.ResolvedAction] == runCfg.retryFrom &&
+		!isBackwardTransition(rs.graph, graphInputApproval) {
+		// A forward graph handoff normally leaves source artifacts at their
+		// configured workspace paths. Explicitly selected immutable revisions
+		// must also be exposed to the target stage, especially when the target is
+		// human and its result approval is resumed separately from this graph
+		// authority. Keep only selected artifacts here; backward handoffs already
+		// materialize their complete source attempt above.
+		outputs, inputErr := rs.stageOutputs(graphInputApproval.FromStage, graphInputApproval.AttemptID)
+		if inputErr != nil {
+			outcome, finalErr := rs.finalize(inputErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		targetDefinition, inputErr := p.loadStageDefinition(runCfg.retryFrom)
+		if inputErr != nil {
+			outcome, finalErr := rs.finalize(inputErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		for _, output := range outputs {
+			selected, selectErr := selectedHumanRevision(runCfg.TargetDir, runID, output, graphInputApproval.ArtifactRevisions)
+			if selectErr != nil {
+				outcome, finalErr := rs.finalize(selectErr)
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+			if selected.Path != output.Path {
+				matchesConfiguredInput := false
+				if targetDefinition != nil {
+					_, matchesConfiguredInput = targetDefinition.Inputs[output.Name]
+				}
+				if matchesConfiguredInput {
+					if rs.selectedInputOverrides[runCfg.retryFrom] == nil {
+						rs.selectedInputOverrides[runCfg.retryFrom] = make(map[string]runtime.Artifact)
+					}
+					rs.selectedInputOverrides[runCfg.retryFrom][output.Name] = selected
+				} else {
+					// Preserve an explicitly selected artifact that has no matching
+					// configured input under a distinct name, so it cannot shadow or
+					// duplicate another logical input for the target stage.
+					selected.Name = "graph-selected-" + output.Name
+					rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], selected)
+				}
+			}
+		}
+	}
 
 	// Wall-time бюджет применяется к этому вызову RunWithResult. Пауза
 	// завершает вызов; последующий resume получает отдельный полный бюджет.
@@ -1306,6 +1418,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		}
 	}
 	return RunResult{RunID: runID, Outcome: outcome}, finalErr
+}
+
+func pipelineStageNames(cfg *config.Config) []string {
+	if cfg != nil && cfg.Template != "" {
+		names := make([]string, 0, len(cfg.Stages))
+		for _, stage := range cfg.Stages {
+			names = append(names, stage.ID)
+		}
+		return names
+	}
+	return cfg.AgentNames()
 }
 
 func (p *Pipeline) recoverInitialLifecycle(runID, targetDir, feature, task string) error {

@@ -1,6 +1,9 @@
 package evidence
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -42,14 +45,36 @@ type ReplayedTransition struct {
 // ReplayedApprovalDecision retains the event identity needed to bind a
 // recovered approval-store record to its verified approval_decided event.
 type ReplayedApprovalDecision struct {
-	Sequence    uint64 `json:"sequence"`
-	AttemptID   string `json:"attempt_id"`
-	ID          string `json:"approval_id"`
-	SubjectHash string `json:"subject_hash"`
-	FromStage   string `json:"from_stage"`
-	ToStage     string `json:"to_stage"`
-	Trigger     string `json:"trigger"`
-	Action      string `json:"action"`
+	Sequence          uint64 `json:"sequence"`
+	AttemptID         string `json:"attempt_id"`
+	ID                string `json:"approval_id"`
+	Kind              string `json:"kind,omitempty"`
+	SubjectHash       string `json:"subject_hash"`
+	FromStage         string `json:"from_stage"`
+	ToStage           string `json:"to_stage"`
+	Trigger           string `json:"trigger"`
+	Action            string `json:"action"`
+	DecisionSetSHA256 string `json:"decision_set_sha256,omitempty"`
+}
+
+// DecisionSetDigest returns a stable digest for the full decisions array in
+// an approval record or event. It binds submitted bytes and actor metadata in
+// addition to the action and subject hash.
+func DecisionSetDigest(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	var canonical any
+	if err := json.Unmarshal(data, &canonical); err != nil {
+		return "", err
+	}
+	data, err = json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // ReplayedApprovalReuse retains the exact controller event that applied a
@@ -66,18 +91,22 @@ type ReplayedApprovalReuse struct {
 }
 
 type ReplayedAttempt struct {
-	AttemptID      string                `json:"attempt_id"`
-	Stage          string                `json:"stage"`
-	StageIndex     int                   `json:"stage_index"`
-	StartedAt      time.Time             `json:"started_at"`
-	FinishedAt     time.Time             `json:"finished_at,omitempty"`
-	Status         string                `json:"status,omitempty"`
-	State          workflow.AttemptState `json:"state"`
-	Verdict        string                `json:"verdict,omitempty"`
-	Blocker        string                `json:"blocker,omitempty"`
-	Error          string                `json:"error,omitempty"`
-	ManifestSHA256 string                `json:"manifest_sha256,omitempty"`
-	Superseded     bool                  `json:"superseded,omitempty"`
+	AttemptID            string                `json:"attempt_id"`
+	Stage                string                `json:"stage"`
+	Executor             string                `json:"executor,omitempty"`
+	ActorID              string                `json:"actor_id,omitempty"`
+	ActorRole            string                `json:"actor_role,omitempty"`
+	HumanInputApprovalID string                `json:"human_input_approval_id,omitempty"`
+	StageIndex           int                   `json:"stage_index"`
+	StartedAt            time.Time             `json:"started_at"`
+	FinishedAt           time.Time             `json:"finished_at,omitempty"`
+	Status               string                `json:"status,omitempty"`
+	State                workflow.AttemptState `json:"state"`
+	Verdict              string                `json:"verdict,omitempty"`
+	Blocker              string                `json:"blocker,omitempty"`
+	Error                string                `json:"error,omitempty"`
+	ManifestSHA256       string                `json:"manifest_sha256,omitempty"`
+	Superseded           bool                  `json:"superseded,omitempty"`
 }
 
 // ReplayEventLog verifies the hash chain and rebuilds the run lifecycle. It
@@ -158,8 +187,25 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				return ReplayedRun{}, fmt.Errorf("attempt_started %q stage_index must be positive", event.AttemptID)
 			}
 			byID[event.AttemptID] = len(result.Attempts)
+			executor, executorErr := eventString(event.Data, "executor", false)
+			if executorErr != nil || (executor != "" && executor != "agent" && executor != "human") {
+				return ReplayedRun{}, fmt.Errorf("attempt_started %q executor is invalid", event.AttemptID)
+			}
+			if executor == "" {
+				executor = "agent" // legacy attempt events predate executor metadata.
+			}
+			actorID, actorIDErr := eventString(event.Data, "actor_id", false)
+			actorRole, actorRoleErr := eventString(event.Data, "actor_role", false)
+			humanInputApprovalID, approvalIDErr := eventString(event.Data, "human_input_approval_id", false)
+			if actorIDErr != nil || actorRoleErr != nil || approvalIDErr != nil {
+				return ReplayedRun{}, fmt.Errorf("attempt_started %q has invalid human actor identity", event.AttemptID)
+			}
+			if executor == "human" && (actorID == "" || actorRole == "" || !safeEventIdentifier(humanInputApprovalID)) {
+				return ReplayedRun{}, fmt.Errorf("human attempt_started %q has no actor or input approval identity", event.AttemptID)
+			}
 			result.Attempts = append(result.Attempts, ReplayedAttempt{
 				AttemptID: event.AttemptID, Stage: event.Stage, StageIndex: stageIndex,
+				Executor: executor, ActorID: actorID, ActorRole: actorRole, HumanInputApprovalID: humanInputApprovalID,
 				StartedAt: event.Timestamp, State: workflow.AttemptState{Execution: workflow.ExecutionRunning, Outcome: workflow.OutcomePending},
 			})
 		case "attempt_finished":
@@ -172,6 +218,27 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				return ReplayedRun{}, fmt.Errorf("attempt_finished %q predates attempt_started", event.AttemptID)
 			}
 			attempt.FinishedAt = event.Timestamp
+			actorID, actorErr := eventString(event.Data, "actor_id", false)
+			if actorErr != nil {
+				return ReplayedRun{}, actorErr
+			}
+			actorRole, roleErr := eventString(event.Data, "actor_role", false)
+			if roleErr != nil {
+				return ReplayedRun{}, roleErr
+			}
+			humanInputApprovalID, approvalIDErr := eventString(event.Data, "human_input_approval_id", false)
+			if approvalIDErr != nil {
+				return ReplayedRun{}, approvalIDErr
+			}
+			if executor, executorErr := eventString(event.Data, "executor", false); executorErr != nil || (executor != "" && executor != attempt.Executor) {
+				return ReplayedRun{}, fmt.Errorf("attempt_finished %q executor mismatch", event.AttemptID)
+			}
+			if attempt.Executor == "human" && (attempt.ActorID == "" || attempt.ActorRole == "" ||
+				humanInputApprovalID == "" || actorID != attempt.ActorID ||
+				actorRole != attempt.ActorRole || humanInputApprovalID != attempt.HumanInputApprovalID) {
+				return ReplayedRun{}, fmt.Errorf("human attempt_finished %q changes its actor or input approval identity", event.AttemptID)
+			}
+			attempt.ActorID, attempt.ActorRole, attempt.HumanInputApprovalID = actorID, actorRole, humanInputApprovalID
 			attempt.Status, err = eventString(event.Data, "status", true)
 			if err != nil {
 				return ReplayedRun{}, err
@@ -212,7 +279,9 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 						manifest.Stage != event.Stage || !manifest.StartedAt.Equal(attempt.StartedAt) || !manifest.FinishedAt.Equal(event.Timestamp) ||
 						manifest.Status != attempt.Status || manifest.Execution != string(attempt.State.Execution) ||
 						manifest.Decision != string(attempt.State.Decision) || manifest.Outcome != string(attempt.State.Outcome) ||
-						manifest.Verdict != attempt.Verdict || manifest.Blocker != attempt.Blocker || manifest.Error != attempt.Error {
+						manifest.Verdict != attempt.Verdict || manifest.Blocker != attempt.Blocker || manifest.Error != attempt.Error ||
+						(manifest.Executor != "" && manifest.Executor != attempt.Executor) || manifest.ActorID != attempt.ActorID ||
+						manifest.ActorRole != attempt.ActorRole || manifest.HumanInputApprovalID != attempt.HumanInputApprovalID {
 						return ReplayedRun{}, fmt.Errorf("attempt_finished %q disagrees with its controller-readable manifest", event.AttemptID)
 					}
 				}
@@ -280,13 +349,21 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			fromStage, fromErr := eventString(event.Data, "from_stage", false)
 			toStage, toErr := eventString(event.Data, "to_stage", false)
 			trigger, triggerErr := eventString(event.Data, "trigger", false)
-			if fromErr != nil || toErr != nil || triggerErr != nil {
+			kind, kindErr := eventString(event.Data, "kind", false)
+			if fromErr != nil || toErr != nil || triggerErr != nil || kindErr != nil {
 				return ReplayedRun{}, fmt.Errorf("approval_decided %s has invalid source identity", approvalID)
 			}
+			decisionSetDigest := ""
+			if rawDecisions, present := event.Data["decisions"]; present {
+				decisionSetDigest, err = DecisionSetDigest(rawDecisions)
+				if err != nil {
+					return ReplayedRun{}, fmt.Errorf("approval_decided %s has invalid decisions", approvalID)
+				}
+			}
 			result.ApprovalDecisions = append(result.ApprovalDecisions, ReplayedApprovalDecision{
-				Sequence: event.Sequence, AttemptID: event.AttemptID, ID: approvalID,
+				Sequence: event.Sequence, AttemptID: event.AttemptID, ID: approvalID, Kind: kind,
 				SubjectHash: subjectHash, FromStage: fromStage, ToStage: toStage,
-				Trigger: trigger, Action: action,
+				Trigger: trigger, Action: action, DecisionSetSHA256: decisionSetDigest,
 			})
 		case "transition_selected":
 			index, exists := byID[event.AttemptID]

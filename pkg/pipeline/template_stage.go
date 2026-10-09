@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 )
 
@@ -21,6 +22,29 @@ func (p *Pipeline) stageExecutor(stageID string) string {
 		return stage.Executor
 	}
 	return "agent"
+}
+
+// stageExecutorForRun applies only an override bound to the approval visit
+// that made this stage ready. A new approval/loop visit cannot inherit a
+// previous executor choice for the same stage ID.
+func (rs *runState) stageExecutorForRun(stageID string) string {
+	if rs.resumedApproval != nil && rs.resumedApproval.Status == approval.StatusResolved &&
+		rs.resumedApproval.Kind == approval.KindInput && rs.resumedApproval.FromStage == stageID &&
+		(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
+		return "agent"
+	}
+	override, ok := rs.lifecycleState.ExecutorOverrides[stageID]
+	if !ok {
+		return rs.p.stageExecutor(stageID)
+	}
+	approvalID := rs.lifecycleState.PendingApprovalID
+	if approvalID == "" && rs.resumedApproval != nil {
+		approvalID = rs.resumedApproval.ID
+	}
+	if approvalID == "" || override.ApprovalID != approvalID {
+		return rs.p.stageExecutor(stageID)
+	}
+	return override.Executor
 }
 
 func (p *Pipeline) registryAgentName(stageID string) string {

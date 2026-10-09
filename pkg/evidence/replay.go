@@ -91,22 +91,23 @@ type ReplayedApprovalReuse struct {
 }
 
 type ReplayedAttempt struct {
-	AttemptID            string                `json:"attempt_id"`
-	Stage                string                `json:"stage"`
-	Executor             string                `json:"executor,omitempty"`
-	ActorID              string                `json:"actor_id,omitempty"`
-	ActorRole            string                `json:"actor_role,omitempty"`
-	HumanInputApprovalID string                `json:"human_input_approval_id,omitempty"`
-	StageIndex           int                   `json:"stage_index"`
-	StartedAt            time.Time             `json:"started_at"`
-	FinishedAt           time.Time             `json:"finished_at,omitempty"`
-	Status               string                `json:"status,omitempty"`
-	State                workflow.AttemptState `json:"state"`
-	Verdict              string                `json:"verdict,omitempty"`
-	Blocker              string                `json:"blocker,omitempty"`
-	Error                string                `json:"error,omitempty"`
-	ManifestSHA256       string                `json:"manifest_sha256,omitempty"`
-	Superseded           bool                  `json:"superseded,omitempty"`
+	AttemptID                 string                `json:"attempt_id"`
+	Stage                     string                `json:"stage"`
+	Executor                  string                `json:"executor,omitempty"`
+	ActorID                   string                `json:"actor_id,omitempty"`
+	ActorRole                 string                `json:"actor_role,omitempty"`
+	HumanInputApprovalID      string                `json:"human_input_approval_id,omitempty"`
+	HumanEditOfAgentAttemptID string                `json:"human_edit_of_agent_attempt_id,omitempty"`
+	StageIndex                int                   `json:"stage_index"`
+	StartedAt                 time.Time             `json:"started_at"`
+	FinishedAt                time.Time             `json:"finished_at,omitempty"`
+	Status                    string                `json:"status,omitempty"`
+	State                     workflow.AttemptState `json:"state"`
+	Verdict                   string                `json:"verdict,omitempty"`
+	Blocker                   string                `json:"blocker,omitempty"`
+	Error                     string                `json:"error,omitempty"`
+	ManifestSHA256            string                `json:"manifest_sha256,omitempty"`
+	Superseded                bool                  `json:"superseded,omitempty"`
 }
 
 // ReplayEventLog verifies the hash chain and rebuilds the run lifecycle. It
@@ -159,6 +160,8 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 	approvalSubjects := make(map[string]string)
 	decidedApprovals := make(map[string]bool)
 	selectedTransitions := make(map[string]bool)
+	agentStartedEvents := make(map[string]bool)
+	agentFinishedEvents := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
 	canceled := false
@@ -197,16 +200,19 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			actorID, actorIDErr := eventString(event.Data, "actor_id", false)
 			actorRole, actorRoleErr := eventString(event.Data, "actor_role", false)
 			humanInputApprovalID, approvalIDErr := eventString(event.Data, "human_input_approval_id", false)
-			if actorIDErr != nil || actorRoleErr != nil || approvalIDErr != nil {
+			humanEditOfAgentAttemptID, humanEditErr := eventString(event.Data, "human_edit_of_agent_attempt_id", false)
+			if actorIDErr != nil || actorRoleErr != nil || approvalIDErr != nil || humanEditErr != nil {
 				return ReplayedRun{}, fmt.Errorf("attempt_started %q has invalid human actor identity", event.AttemptID)
 			}
-			if executor == "human" && (actorID == "" || actorRole == "" || !safeEventIdentifier(humanInputApprovalID)) {
+			if executor == "human" && (actorID == "" || actorRole == "" || !safeEventIdentifier(humanInputApprovalID) ||
+				(humanEditOfAgentAttemptID != "" && !safeEventIdentifier(humanEditOfAgentAttemptID))) {
 				return ReplayedRun{}, fmt.Errorf("human attempt_started %q has no actor or input approval identity", event.AttemptID)
 			}
 			result.Attempts = append(result.Attempts, ReplayedAttempt{
 				AttemptID: event.AttemptID, Stage: event.Stage, StageIndex: stageIndex,
 				Executor: executor, ActorID: actorID, ActorRole: actorRole, HumanInputApprovalID: humanInputApprovalID,
-				StartedAt: event.Timestamp, State: workflow.AttemptState{Execution: workflow.ExecutionRunning, Outcome: workflow.OutcomePending},
+				HumanEditOfAgentAttemptID: humanEditOfAgentAttemptID,
+				StartedAt:                 event.Timestamp, State: workflow.AttemptState{Execution: workflow.ExecutionRunning, Outcome: workflow.OutcomePending},
 			})
 		case "attempt_finished":
 			index, exists := byID[event.AttemptID]
@@ -227,18 +233,24 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				return ReplayedRun{}, roleErr
 			}
 			humanInputApprovalID, approvalIDErr := eventString(event.Data, "human_input_approval_id", false)
+			humanEditOfAgentAttemptID, humanEditErr := eventString(event.Data, "human_edit_of_agent_attempt_id", false)
 			if approvalIDErr != nil {
 				return ReplayedRun{}, approvalIDErr
+			}
+			if humanEditErr != nil {
+				return ReplayedRun{}, humanEditErr
 			}
 			if executor, executorErr := eventString(event.Data, "executor", false); executorErr != nil || (executor != "" && executor != attempt.Executor) {
 				return ReplayedRun{}, fmt.Errorf("attempt_finished %q executor mismatch", event.AttemptID)
 			}
 			if attempt.Executor == "human" && (attempt.ActorID == "" || attempt.ActorRole == "" ||
 				humanInputApprovalID == "" || actorID != attempt.ActorID ||
-				actorRole != attempt.ActorRole || humanInputApprovalID != attempt.HumanInputApprovalID) {
+				actorRole != attempt.ActorRole || humanInputApprovalID != attempt.HumanInputApprovalID ||
+				humanEditOfAgentAttemptID != attempt.HumanEditOfAgentAttemptID) {
 				return ReplayedRun{}, fmt.Errorf("human attempt_finished %q changes its actor or input approval identity", event.AttemptID)
 			}
 			attempt.ActorID, attempt.ActorRole, attempt.HumanInputApprovalID = actorID, actorRole, humanInputApprovalID
+			attempt.HumanEditOfAgentAttemptID = humanEditOfAgentAttemptID
 			attempt.Status, err = eventString(event.Data, "status", true)
 			if err != nil {
 				return ReplayedRun{}, err
@@ -281,9 +293,11 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 						manifest.Decision != string(attempt.State.Decision) || manifest.Outcome != string(attempt.State.Outcome) ||
 						manifest.Verdict != attempt.Verdict || manifest.Blocker != attempt.Blocker || manifest.Error != attempt.Error ||
 						(manifest.Executor != "" && manifest.Executor != attempt.Executor) || manifest.ActorID != attempt.ActorID ||
-						manifest.ActorRole != attempt.ActorRole || manifest.HumanInputApprovalID != attempt.HumanInputApprovalID {
+						manifest.ActorRole != attempt.ActorRole || manifest.HumanInputApprovalID != attempt.HumanInputApprovalID ||
+						manifest.HumanEditOfAgentAttemptID != attempt.HumanEditOfAgentAttemptID {
 						return ReplayedRun{}, fmt.Errorf("attempt_finished %q disagrees with its controller-readable manifest", event.AttemptID)
 					}
+					attempt.HumanEditOfAgentAttemptID = manifest.HumanEditOfAgentAttemptID
 				}
 			} else if attempt.Error == "" || attempt.Status != string(workflow.OutcomeFailed) {
 				return ReplayedRun{}, fmt.Errorf("attempt_finished %q without manifest must be an errored failed attempt", event.AttemptID)
@@ -304,6 +318,48 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			}
 			attempt.Error, _ = eventString(event.Data, "reason", false)
 			finishedCount++
+		case "executor_changed":
+			from, fromErr := eventString(event.Data, "from_executor", true)
+			to, toErr := eventString(event.Data, "to_executor", true)
+			actorID, actorErr := eventString(event.Data, "actor_id", true)
+			approvalID, approvalErr := eventString(event.Data, "approval_id", true)
+			changeID, changeErr := eventString(event.Data, "change_id", true)
+			if strings.TrimSpace(event.Stage) == "" || fromErr != nil || toErr != nil || actorErr != nil || approvalErr != nil || changeErr != nil ||
+				strings.TrimSpace(actorID) == "" || (from != "human" && from != "agent") ||
+				(to != "human" && to != "agent") || from == to || !safeEventIdentifier(approvalID) || !validSHA256(changeID) {
+				return ReplayedRun{}, errors.New("executor_changed contains invalid stage or approval identity")
+			}
+		case "agent_started":
+			index, exists := byID[event.AttemptID]
+			if !exists || agentStartedEvents[event.AttemptID] || result.Attempts[index].Executor != "agent" ||
+				result.Attempts[index].Stage != event.Stage || !event.Timestamp.Equal(result.Attempts[index].StartedAt) {
+				return ReplayedRun{}, fmt.Errorf("agent_started %q does not match an active agent attempt", event.AttemptID)
+			}
+			agentStartedEvents[event.AttemptID] = true
+		case "agent_finished":
+			index, exists := byID[event.AttemptID]
+			status, statusErr := eventString(event.Data, "status", true)
+			if !exists || !agentStartedEvents[event.AttemptID] || agentFinishedEvents[event.AttemptID] ||
+				result.Attempts[index].Executor != "agent" || result.Attempts[index].Stage != event.Stage ||
+				result.Attempts[index].FinishedAt.IsZero() || !event.Timestamp.Equal(result.Attempts[index].FinishedAt) ||
+				statusErr != nil || status != result.Attempts[index].Status {
+				return ReplayedRun{}, fmt.Errorf("agent_finished %q does not match a finished agent attempt", event.AttemptID)
+			}
+			agentFinishedEvents[event.AttemptID] = true
+		case "human_result_edited_agent":
+			index, exists := byID[event.AttemptID]
+			sourceID, sourceErr := eventString(event.Data, "agent_attempt_id", true)
+			actorID, actorErr := eventString(event.Data, "actor_id", true)
+			if !exists || sourceErr != nil || actorErr != nil || result.Attempts[index].Executor != "human" ||
+				result.Attempts[index].Stage != event.Stage || result.Attempts[index].ActorID != actorID ||
+				result.Attempts[index].HumanEditOfAgentAttemptID != sourceID {
+				return ReplayedRun{}, errors.New("human_result_edited_agent does not match a human attempt")
+			}
+			sourceIndex, sourceExists := byID[sourceID]
+			if !sourceExists || result.Attempts[sourceIndex].Executor != "agent" || result.Attempts[sourceIndex].Stage != event.Stage ||
+				result.Attempts[sourceIndex].FinishedAt.IsZero() || result.Attempts[sourceIndex].FinishedAt.After(event.Timestamp) {
+				return ReplayedRun{}, errors.New("human_result_edited_agent source is not a finished prior agent attempt")
+			}
 		case "attempts_invalidated":
 			attemptIDs, fieldErr := eventStrings(event.Data, "attempt_ids")
 			if fieldErr != nil {

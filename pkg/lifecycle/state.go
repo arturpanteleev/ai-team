@@ -27,19 +27,33 @@ const (
 )
 
 type State struct {
-	SchemaVersion     int       `json:"schema_version"`
-	RunID             string    `json:"run_id"`
-	Feature           string    `json:"feature"`
-	TargetDir         string    `json:"target_dir"`
-	Task              string    `json:"task"`
-	Phase             Phase     `json:"phase"`
-	NextStage         string    `json:"next_stage,omitempty"`
-	PendingApprovalID string    `json:"pending_approval_id,omitempty"`
-	AttemptOrdinal    int       `json:"attempt_ordinal"`
-	ConfigSHA256      string    `json:"config_sha256"`
-	WorkflowSHA256    string    `json:"workflow_sha256"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	SchemaVersion     int                         `json:"schema_version"`
+	RunID             string                      `json:"run_id"`
+	Feature           string                      `json:"feature"`
+	TargetDir         string                      `json:"target_dir"`
+	Task              string                      `json:"task"`
+	Phase             Phase                       `json:"phase"`
+	NextStage         string                      `json:"next_stage,omitempty"`
+	PendingApprovalID string                      `json:"pending_approval_id,omitempty"`
+	AttemptOrdinal    int                         `json:"attempt_ordinal"`
+	ConfigSHA256      string                      `json:"config_sha256"`
+	WorkflowSHA256    string                      `json:"workflow_sha256"`
+	ExecutorOverrides map[string]ExecutorOverride `json:"executor_overrides,omitempty"`
+	CreatedAt         time.Time                   `json:"created_at"`
+	UpdatedAt         time.Time                   `json:"updated_at"`
+}
+
+// ExecutorOverride records the human-selected executor for a stage that has
+// reached its ready checkpoint. The selection is kept in the mutable
+// lifecycle checkpoint; the pipeline copies it into immutable evidence when
+// the run resumes.
+type ExecutorOverride struct {
+	Executor         string    `json:"executor"`
+	PreviousExecutor string    `json:"previous_executor"`
+	ActorID          string    `json:"actor_id"`
+	ApprovalID       string    `json:"approval_id"`
+	VisitID          string    `json:"visit_id"`
+	ChangedAt        time.Time `json:"changed_at"`
 }
 
 type Store struct {
@@ -153,6 +167,15 @@ func validate(state State) error {
 		state.AttemptOrdinal < 0 || len(state.ConfigSHA256) != 64 || len(state.WorkflowSHA256) != 64 ||
 		state.CreatedAt.IsZero() || state.UpdatedAt.IsZero() {
 		return errors.New("lifecycle state содержит недопустимые обязательные поля")
+	}
+	for stageID, override := range state.ExecutorOverrides {
+		if stageID == "" || filepath.Base(stageID) != stageID || stageID == "." || stageID == ".." ||
+			(override.Executor != "human" && override.Executor != "agent") ||
+			(override.PreviousExecutor != "human" && override.PreviousExecutor != "agent") ||
+			strings.TrimSpace(override.ActorID) == "" || override.ApprovalID == "" || override.VisitID == "" ||
+			filepath.Base(override.ApprovalID) != override.ApprovalID || filepath.Base(override.VisitID) != override.VisitID || override.ChangedAt.IsZero() {
+			return fmt.Errorf("lifecycle state содержит недопустимый executor override для %q", stageID)
+		}
 	}
 	switch state.Phase {
 	case PhaseRunning, PhaseResumable:

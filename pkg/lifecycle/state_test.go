@@ -77,3 +77,28 @@ func TestStoreRejectsCorruptionAndSymlink(t *testing.T) {
 		t.Fatal("symlink state path должен быть отклонён")
 	}
 }
+
+func TestExecutorOverrideRequiresReadyApprovalVisitIdentity(t *testing.T) {
+	target := t.TempDir()
+	store, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := validState(target)
+	state.Phase = PhaseWaiting
+	state.PendingApprovalID = "approval-a"
+	state.ExecutorOverrides = map[string]ExecutorOverride{
+		"analyst": {Executor: "human", PreviousExecutor: "agent", ActorID: "alice", ApprovalID: "approval-a", VisitID: "approval-a", ChangedAt: time.Now().UTC()},
+	}
+	if err := store.Create(state); err != nil {
+		t.Fatalf("valid visit-bound override should persist: %v", err)
+	}
+	loaded, err := store.Load(state.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.ExecutorOverrides["analyst"] = ExecutorOverride{Executor: "agent", PreviousExecutor: "human", ActorID: "alice", ChangedAt: time.Now().UTC()}
+	if err := store.Save(loaded, loaded); err == nil {
+		t.Fatal("override without approval visit identity must be rejected")
+	}
+}

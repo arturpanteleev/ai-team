@@ -49,12 +49,15 @@ const MaxApprovalRecordBytes = 64 << 20
 // controller derives OutputPath from the configured stage/registry contract;
 // the decision comment supplies the bytes written there on resume.
 type InputPayload struct {
-	Kind       string `json:"kind"`
-	StageID    string `json:"stage_id"`
-	Result     string `json:"result"`
-	LinkKind   string `json:"link_kind,omitempty"`
-	OutputName string `json:"output_name"`
-	OutputPath string `json:"output_path"`
+	Kind                 string `json:"kind"`
+	StageID              string `json:"stage_id"`
+	Result               string `json:"result"`
+	LinkKind             string `json:"link_kind,omitempty"`
+	OutputName           string `json:"output_name"`
+	OutputPath           string `json:"output_path"`
+	AgentEnabled         bool   `json:"agent_enabled,omitempty"`
+	InitialResult        string `json:"initial_result,omitempty"`
+	EditedAgentAttemptID string `json:"edited_agent_attempt_id,omitempty"`
 }
 
 type Decision struct {
@@ -334,6 +337,9 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 		if decision.Action == "submit" && strings.TrimSpace(decision.Comment) == "" {
 			return PendingApproval{}, errors.New("human input submit requires a non-empty comment")
 		}
+		if decision.Action == "refine_agent" && strings.TrimSpace(decision.Comment) == "" {
+			return PendingApproval{}, errors.New("refine_agent requires the current result as input")
+		}
 	}
 	if decision.ActorID == "" || !contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) {
 		return PendingApproval{}, errors.New("решение содержит недопустимого actor, role или action")
@@ -489,6 +495,19 @@ func validate(value PendingApproval) error {
 			}
 		} else if !contains(value.Actions, "submit") || value.Targets["submit"] != value.FromStage || contains(value.Actions, "approve") {
 			return errors.New("md/link input must offer submit/reject on the human stage")
+		}
+		for _, action := range []string{"run_agent", "refine_agent"} {
+			if contains(value.Actions, action) && (!payload.AgentEnabled || value.Targets[action] != value.FromStage) {
+				return fmt.Errorf("%s requires an available same-stage agent route", action)
+			}
+		}
+		for _, action := range value.Actions {
+			if action != "reject" && action != "approve" && action != "submit" && action != "run_agent" && action != "refine_agent" {
+				return fmt.Errorf("input approval action %q is unsupported", action)
+			}
+		}
+		if len(payload.InitialResult) > MaxInputCommentBytes || (payload.EditedAgentAttemptID != "" && !safeName(payload.EditedAgentAttemptID)) {
+			return errors.New("input approval initial agent result is invalid")
 		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {

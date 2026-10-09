@@ -94,6 +94,68 @@ func WriteRegularFileNoFollow(path string, data []byte, mode os.FileMode) error 
 	return file.Close()
 }
 
+// ReplaceRegularFileNoFollow atomically replaces an existing regular file
+// after verifying that neither its leaf nor its parent path is a symlink.
+// This is reserved for explicit, provenance-marked human edits; ordinary
+// evidence writes should continue to use the immutable writer above.
+func ReplaceRegularFileNoFollow(path string, data []byte, mode os.FileMode) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(abs)
+	if err := ensureNoFollowDirChain(parent); err != nil {
+		return err
+	}
+	before, err := os.Lstat(abs)
+	if os.IsNotExist(err) {
+		return WriteRegularFileNoFollow(abs, data, mode)
+	}
+	if err != nil {
+		return err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return fmt.Errorf("controller file %s must be a regular file without symlink", path)
+	}
+	temporary, err := os.CreateTemp(parent, ".replace-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(mode); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := ensureNoFollowDirChain(parent); err != nil {
+		return err
+	}
+	current, err := os.Lstat(abs)
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(before, current) {
+		return fmt.Errorf("controller file %s changed during replacement", path)
+	}
+	if err := os.Rename(temporaryPath, abs); err != nil {
+		return err
+	}
+	directory, err := os.Open(parent)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	return directory.Sync()
+}
+
 // EnsureDirPath создаёт каталог (и недостающие промежуточные) компонентно,
 // отклоняя symlink в любом компоненте цепочки. Отличается от os.MkdirAll:
 // никакой компонент не обходится как symlink.

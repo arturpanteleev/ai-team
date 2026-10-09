@@ -15,6 +15,7 @@ func ValidateWorkerEventType(eventType string) error {
 	switch eventType {
 	case "run_started", "run_resumed", "run_paused", "run_finished", "run_canceled",
 		"attempt_started", "attempt_finished", "attempt_abandoned", "attempts_invalidated",
+		"executor_changed", "agent_started", "agent_finished", "human_result_edited_agent",
 		"approval_requested", "approval_decided", "approval_reused", "transition_selected",
 		"delivery_deferred", "delivery_plan_approved", "deferred_gates_ratified",
 		"test_mutations", "resume_blocked":

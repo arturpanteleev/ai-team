@@ -96,6 +96,21 @@ func TestHumanOutputRetryIsIdempotentAndConflictsFailClosed(t *testing.T) {
 	}
 }
 
+func TestExplicitHumanEditCanReplacePriorAgentResult(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join("feature", "specs", "product", "spec.md")
+	if err := writeHumanOutput(root, path, []byte("# Agent draft\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHumanOutputWithEdit(root, path, []byte("# Human edit\n"), true); err != nil {
+		t.Fatalf("explicit human edit should atomically replace an agent result: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil || string(data) != "# Human edit\n" {
+		t.Fatalf("human-edited result = %q err=%v", data, err)
+	}
+}
+
 func TestRecordedHumanInputDecisionBindsExactSubmittedBytes(t *testing.T) {
 	value := approval.PendingApproval{
 		ID: "approval-human-input", Kind: approval.KindInput,

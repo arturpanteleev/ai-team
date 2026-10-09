@@ -55,7 +55,7 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	default:
 	}
 	stage, ok := rs.p.templateStage(stageID)
-	if !ok || stage.Executor != "human" {
+	if !ok || rs.stageExecutorForRun(stageID) != "human" {
 		return notifier.StageResult{}, fmt.Errorf("stage %s is not a configured human stage", stageID)
 	}
 	definition, err := rs.p.loadStageDefinition(stageID)
@@ -69,6 +69,13 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	inputs, err := rs.humanStageInputs(definition, stageID)
 	if err != nil {
 		return notifier.StageResult{}, err
+	}
+	initialResult, editedAgentAttemptID, initialResultPath, err := rs.latestAgentStageResult(stageID)
+	if err != nil {
+		return notifier.StageResult{}, err
+	}
+	if initialResultPath != "" {
+		inputs = append(inputs, runtime.Artifact{Name: "current-result", Path: initialResultPath})
 	}
 	subject, err := rs.humanInputSubject(stage, outputName, outputPath, inputs)
 	if err != nil {
@@ -105,12 +112,22 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 			payload.Result != stage.Result || payload.OutputName != outputName || payload.OutputPath != outputPath || payload.LinkKind != stage.LinkKind {
 			return notifier.StageResult{}, errors.New("resumed human input contract differs from the pinned stage")
 		}
+		// Older pending human approvals predate the optional agent fields. Keep
+		// them resumable when their subject and base input contract still match;
+		// newly-created approvals bind the current result and available actions.
+		hasAgentContract := payload.AgentEnabled || payload.InitialResult != "" || payload.EditedAgentAttemptID != "" ||
+			containsString(value.Actions, "run_agent") || containsString(value.Actions, "refine_agent")
+		if hasAgentContract && (payload.AgentEnabled != (definition != nil) ||
+			payload.EditedAgentAttemptID != editedAgentAttemptID || payload.InitialResult != initialResult) {
+			return notifier.StageResult{}, errors.New("resumed human input agent contract differs from the pinned stage")
+		}
 		resolved = &value
 	} else {
 		attemptID := rs.evidence.NewAttemptID(stageID, rs.attemptOrdinal+1)
 		payload, payloadErr := json.Marshal(approval.InputPayload{
 			Kind: string(approval.KindInput), StageID: stageID, Result: stage.Result,
 			LinkKind: stage.LinkKind, OutputName: outputName, OutputPath: outputPath,
+			AgentEnabled: definition != nil, InitialResult: initialResult, EditedAgentAttemptID: editedAgentAttemptID,
 		})
 		if payloadErr != nil {
 			return notifier.StageResult{}, payloadErr
@@ -121,12 +138,15 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		} else {
 			actions = append(actions, "submit")
 		}
+		if definition != nil {
+			actions = append(actions, "run_agent", "refine_agent")
+		}
 		roles := []string{stage.Function}
 		value, createErr := rs.approvalStore.Create(approval.PendingApproval{
 			Kind: approval.KindInput, RunID: rs.runID, AttemptID: attemptID,
 			FromStage: stageID, ToStage: stageID, Trigger: humanInputTrigger,
 			SubjectHash: subjectHash, RequiredRoles: roles, Quorum: approval.QuorumAny,
-			Actions: actions, Targets: map[string]string{actions[0]: stageID, actions[1]: stageID}, Payload: payload,
+			Actions: actions, Targets: sameStageTargets(actions, stageID), Payload: payload,
 		})
 		if createErr != nil {
 			return notifier.StageResult{}, fmt.Errorf("create human input approval: %w", createErr)
@@ -160,8 +180,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if decision.SubjectHash != subjectHash || decision.ActorID == "" || decision.ActorRole != stage.Function {
 		return notifier.StageResult{}, errors.New("human input decision actor or subject is invalid")
 	}
-	if stage.Result == "approve" && decision.Action != "approve" && decision.Action != "reject" ||
-		stage.Result != "approve" && decision.Action != "submit" && decision.Action != "reject" {
+	if decision.Action != "run_agent" && decision.Action != "refine_agent" &&
+		(stage.Result == "approve" && decision.Action != "approve" && decision.Action != "reject" ||
+			stage.Result != "approve" && decision.Action != "submit" && decision.Action != "reject") {
 		return notifier.StageResult{}, errors.New("human input action does not match stage result type")
 	}
 	if decision.SubmissionVersion > 0 || decision.ContentSHA256 != "" {
@@ -193,13 +214,20 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		StageIndex: index + 1, TotalStages: len(rs.names), StartedAt: started,
 		Usage: &workflow.AttemptUsage{Attested: true},
 	}
+	if decision.Action == "submit" && definition != nil && editedAgentAttemptID != "" {
+		result.HumanEditOfAgentAttemptID = editedAgentAttemptID
+	}
 	rs.usageTotal.Attested = true
 	rs.ps.StartAgent(index+1, stageID)
 	if rs.p.recorder != nil {
 		rs.p.recorder.StageStarted(rs.runID, attemptID, stageID, index+1, started)
 	}
+	startedData := map[string]any{"stage_index": index + 1, "executor": "human", "actor_id": decision.ActorID, "actor_role": decision.ActorRole, "human_input_approval_id": resolved.ID}
+	if result.HumanEditOfAgentAttemptID != "" {
+		startedData["human_edit_of_agent_attempt_id"] = result.HumanEditOfAgentAttemptID
+	}
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_started", Stage: stageID, AttemptID: attemptID,
-		Timestamp: started, Data: map[string]any{"stage_index": index + 1, "executor": "human", "actor_id": decision.ActorID, "actor_role": decision.ActorRole, "human_input_approval_id": resolved.ID}}); err != nil {
+		Timestamp: started, Data: startedData}); err != nil {
 		result.Err = fmt.Errorf("record human attempt start: %w", err)
 	}
 	if result.Err == nil && decision.Action != "reject" && strings.TrimSpace(decision.Description) == "" {
@@ -219,12 +247,12 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 			defer func() { _ = cleanupEvidenceInputs() }()
 		}
 	}
-	if result.Err == nil && decision.Action != "reject" {
+	if result.Err == nil && decision.Action != "reject" && decision.Action != "run_agent" && decision.Action != "refine_agent" {
 		content, contentErr := humanResultContent(stage, decision, outputName, outputPath)
 		if contentErr != nil {
 			result.Err = contentErr
 			result.ValidationFailed = true
-		} else if writeErr := writeHumanOutput(rs.task.ArtifactRoot, outputPath, content); writeErr != nil {
+		} else if writeErr := writeHumanOutputWithEdit(rs.task.ArtifactRoot, outputPath, content, result.HumanEditOfAgentAttemptID != ""); writeErr != nil {
 			result.Err = writeErr
 		}
 		if result.Err == nil {
@@ -241,6 +269,12 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 			}
 		}
 	}
+	if result.HumanEditOfAgentAttemptID != "" && result.Err == nil {
+		if err := rs.evidence.Append(evidence.Event{Type: "human_result_edited_agent", Stage: stageID, AttemptID: attemptID, Timestamp: started,
+			Data: map[string]any{"agent_attempt_id": result.HumanEditOfAgentAttemptID, "actor_id": decision.ActorID, "approval_id": resolved.ID}}); err != nil {
+			result.Err = fmt.Errorf("record human edit of agent result: %w", err)
+		}
+	}
 	if decision.Action == "reject" {
 		result.Verdict = verdict.Rejected
 	} else if result.Err == nil {
@@ -252,8 +286,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	rs.deriveStageState(&result)
 	manifest := evidence.AttemptManifest{
 		AttemptID: attemptID, Stage: stageID, Executor: "human", ActorID: decision.ActorID, ActorRole: decision.ActorRole,
-		HumanInputApprovalID: resolved.ID,
-		StageIndex:           index + 1, TotalStages: len(rs.names), StartedAt: started, FinishedAt: result.FinishedAt,
+		HumanEditOfAgentAttemptID: result.HumanEditOfAgentAttemptID,
+		HumanInputApprovalID:      resolved.ID,
+		StageIndex:                index + 1, TotalStages: len(rs.names), StartedAt: started, FinishedAt: result.FinishedAt,
 		Status: result.Status, Verdict: string(result.Verdict), Error: errorString(result.Err),
 		Execution: string(result.State.Execution), Decision: string(result.State.Decision), Outcome: string(result.State.Outcome),
 		Usage: result.Usage,
@@ -294,6 +329,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		"status": result.Status, "execution": result.State.Execution, "decision": result.State.Decision,
 		"outcome": result.State.Outcome, "verdict": result.Verdict, "executor": "human",
 		"actor_id": decision.ActorID, "actor_role": decision.ActorRole, "human_input_approval_id": resolved.ID,
+	}
+	if result.HumanEditOfAgentAttemptID != "" {
+		finishedData["human_edit_of_agent_attempt_id"] = result.HumanEditOfAgentAttemptID
 	}
 	if result.Err != nil {
 		finishedData["error"] = result.Err.Error()
@@ -550,6 +588,10 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 }
 
 func writeHumanOutput(artifactRoot, outputPath string, content []byte) error {
+	return writeHumanOutputWithEdit(artifactRoot, outputPath, content, false)
+}
+
+func writeHumanOutputWithEdit(artifactRoot, outputPath string, content []byte, editAgentResult bool) error {
 	path, err := confinedArtifactPath(artifactRoot, filepath.FromSlash(outputPath))
 	if err != nil {
 		return err
@@ -557,6 +599,9 @@ func writeHumanOutput(artifactRoot, outputPath string, content []byte) error {
 	if err := safeio.WriteRegularFileNoFollow(path, content, 0o644); err == nil {
 		return nil
 	} else {
+		if editAgentResult {
+			return safeio.ReplaceRegularFileNoFollow(path, content, 0o644)
+		}
 		info, statErr := os.Lstat(path)
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return err

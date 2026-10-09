@@ -76,17 +76,44 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if err := rs.authorizeStage(current); err != nil {
 			return err
 		}
+		executor := rs.stageExecutorForRun(current)
+		if override, active := rs.activeExecutorOverride(current); active {
+			if err := rs.recordExecutorChanged(current, override.PreviousExecutor, override.Executor, override.ActorID, override.VisitID, override.ChangedAt); err != nil {
+				return err
+			}
+		}
+		if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
+			rs.resumedApproval.FromStage == current &&
+			(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
+			decision := lastApprovalDecision(rs.resumedApproval)
+			if err := rs.recordExecutorChanged(current, "human", "agent", decision.ActorID, rs.resumedApproval.ID, decision.DecidedAt); err != nil {
+				return err
+			}
+		}
 		var result notifier.StageResult
 		replayedHumanAttempt := false
-		if rs.p.stageExecutor(current) == "human" {
+		if executor == "human" {
 			var humanErr error
 			result, humanErr = rs.runHumanStage(ctx, index, current)
 			if humanErr != nil {
 				return humanErr
 			}
 		} else {
+			var cleanup func()
+			if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
+				rs.resumedApproval.FromStage == current && rs.resumedApproval.ResolvedAction == "refine_agent" {
+				var refineErr error
+				cleanup, refineErr = rs.addRefinementInput(current, lastApprovalDecision(rs.resumedApproval).Comment)
+				if refineErr != nil {
+					return refineErr
+				}
+			}
 			result = rs.runStage(ctx, index, current)
+			if cleanup != nil {
+				cleanup()
+			}
 		}
+		rs.clearExecutorOverride(current)
 		for _, previous := range rs.results {
 			if previous.AttemptID == result.AttemptID && result.AttemptID != "" {
 				replayedHumanAttempt = true
@@ -280,8 +307,8 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		result := notifier.StageResult{
 			RunID: run.RunID, AttemptID: attempt.AttemptID, Name: attempt.Stage,
 			Executor: attempt.Executor, ActorID: attempt.ActorID, ActorRole: attempt.ActorRole,
-			HumanInputApprovalID: attempt.HumanInputApprovalID,
-			StageIndex:           attempt.StageIndex, StartedAt: attempt.StartedAt,
+			HumanInputApprovalID: attempt.HumanInputApprovalID, HumanEditOfAgentAttemptID: attempt.HumanEditOfAgentAttemptID,
+			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
 			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
 			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
 			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded, TotalStages: totalStages,
@@ -293,6 +320,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 				return nil, runtime.Usage{}, false, fmt.Errorf("read attempt %s manifest: %w", attempt.AttemptID, err)
 			}
 			result.Checks = append(result.Checks, manifest.Checks...)
+			result.HumanEditOfAgentAttemptID = manifest.HumanEditOfAgentAttemptID
 			result.Usage = manifest.Usage
 			result.Mutations = append([]string(nil), manifest.Mutations...)
 			result.MutationChanges = append([]workflow.MutationChange(nil), manifest.MutationChanges...)
@@ -386,6 +414,12 @@ func (rs *runState) saveWaiting(nextStage, approvalID string) error {
 	next.NextStage = nextStage
 	next.PendingApprovalID = approvalID
 	next.AttemptOrdinal = rs.attemptOrdinal
+	if override, ok := next.ExecutorOverrides[nextStage]; ok && override.Executor == "human" {
+		// Once the human executor has opened its typed input form, bind that
+		// same stage visit to the new approval identity until the human submits.
+		override.ApprovalID = approvalID
+		next.ExecutorOverrides[nextStage] = override
+	}
 	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
 	if err != nil {
 		return fmt.Errorf("lifecycle approval checkpoint: %w", err)

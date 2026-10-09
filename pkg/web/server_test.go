@@ -1035,6 +1035,9 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 		controller.approvalID != "approval-1" || controller.decision.ActorID != "user-1" {
 		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
+	if controller.decision.ControllerAuthenticated {
+		t.Fatal("unauthenticated local server must not mark a decision as controller-authenticated")
+	}
 }
 
 func TestQuestionApprovalRequiresNonEmptyAnswer(t *testing.T) {
@@ -1259,6 +1262,9 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 	}
 	if controller.decision.ActorID != "reviewer@example.com" || controller.decision.ActorRole != "reviewer" {
 		t.Fatalf("decision audit использовал недоверенную identity: %+v", controller.decision)
+	}
+	if !controller.decision.ControllerAuthenticated {
+		t.Fatal("authenticated controller decision must retain its authorization provenance")
 	}
 }
 

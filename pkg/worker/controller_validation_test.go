@@ -51,12 +51,25 @@ func (s *validationApprovalStore) List(string) ([]approval.PendingApproval, erro
 	return append([]approval.PendingApproval(nil), s.values...), nil
 }
 
+func (s *validationApprovalStore) HasAuthenticatedControllerDecision(value approval.PendingApproval) bool {
+	return controllerDecisionMarkedAuthenticated(value)
+}
+
 func validationApproval(runID, id, attemptID, planHash string) approval.PendingApproval {
 	return approval.PendingApproval{
 		RunID: runID, ID: id, AttemptID: attemptID, Trigger: "delivery_plan", SubjectHash: planHash,
 		Status: approval.StatusResolved, ResolvedAction: "approve",
 		FromStage: "deployer", ToStage: "deployer",
 	}
+}
+
+func validationTrustedApproval(runID, id, attemptID, planHash string) approval.PendingApproval {
+	value := validationApproval(runID, id, attemptID, planHash)
+	value.Decisions = []approval.Decision{{
+		ApprovalID: id, ActorID: "release-manager", ActorRole: "release_manager",
+		Action: "approve", SubjectHash: planHash, ControllerAuthenticated: true,
+	}}
+	return value
 }
 
 func TestValidateWorkerDeliveryEventPolicies(t *testing.T) {
@@ -68,7 +81,8 @@ func TestValidateWorkerDeliveryEventPolicies(t *testing.T) {
 	target := filepath.Join(string(filepath.Separator), "tmp", "delivery-validator-target")
 	runDir := filepath.Join(target, ".ai-team", "runs", runID)
 	statePath := filepath.Join(target, ".ai-team", "delivery", "feature.json")
-	resolved := validationApproval(runID, "approval-delivery", attempt, planHash)
+	resolved := validationTrustedApproval(runID, "approval-delivery", attempt, planHash)
+	untrustedResolved := validationApproval(runID, "approval-delivery", attempt, planHash)
 	start := evidence.Event{Type: "attempt_started", AttemptID: attempt}
 	approved := evidence.Event{Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"plan_hash": planHash}}
 	deferred := evidence.Event{Type: "delivery_deferred", AttemptID: attempt, Data: map[string]any{"plan_hash": planHash, "state_path": statePath}}
@@ -89,6 +103,7 @@ func TestValidateWorkerDeliveryEventPolicies(t *testing.T) {
 		{name: "approved hash flag mismatch", server: &workerAPIServer{approvedPlanHash: strings.Repeat("b", 64)}, event: evidence.Event{Type: "delivery_plan_approved", Data: map[string]any{"mode": "hash_flag", "plan_hash": planHash}}, wantError: true},
 		{name: "unsupported approval mode", server: &workerAPIServer{}, event: evidence.Event{Type: "delivery_plan_approved", Data: map[string]any{"mode": "worker", "plan_hash": planHash}}, wantError: true},
 		{name: "resolved plan approval exact", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{values: []approval.PendingApproval{resolved}}}, event: evidence.Event{Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"mode": "resolved_approval", "plan_hash": planHash}}},
+		{name: "resolved plan approval without provenance", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{values: []approval.PendingApproval{untrustedResolved}}}, event: evidence.Event{Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"mode": "resolved_approval", "plan_hash": planHash}}, wantError: true},
 		{name: "resolved plan approval list failure", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{listErr: errors.New("approval database unavailable")}}, event: evidence.Event{Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"mode": "resolved_approval", "plan_hash": planHash}}, wantError: true},
 		{name: "resolved plan approval wrong attempt", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{values: []approval.PendingApproval{validationApproval(runID, "approval-delivery", "another-attempt", planHash)}}}, event: evidence.Event{Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"mode": "resolved_approval", "plan_hash": planHash}}, wantError: true},
 		{name: "deferred path outside prepared directory", server: &workerAPIServer{}, event: evidence.Event{Type: "delivery_deferred", Data: map[string]any{"state_path": filepath.Join(target, "elsewhere.json")}}, runDir: runDir, wantError: true},
@@ -99,6 +114,7 @@ func TestValidateWorkerDeliveryEventPolicies(t *testing.T) {
 		{name: "deferred plan hash mismatch", server: &workerAPIServer{}, event: deferred, prior: []evidence.Event{start, {Type: "delivery_plan_approved", AttemptID: attempt, Data: map[string]any{"plan_hash": strings.Repeat("b", 64)}}}, runDir: runDir, wantError: true},
 		{name: "deferred controller job hash", server: &workerAPIServer{approvedPlanHash: planHash}, event: deferred, prior: []evidence.Event{start, approved}, runDir: runDir},
 		{name: "deferred resolved approval exact", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{values: []approval.PendingApproval{resolved}}}, event: deferred, prior: []evidence.Event{start, approved}, runDir: runDir},
+		{name: "deferred resolved approval without provenance", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{values: []approval.PendingApproval{untrustedResolved}}}, event: deferred, prior: []evidence.Event{start, approved}, runDir: runDir, wantError: true},
 		{name: "deferred approval list failure", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{listErr: errors.New("approval database unavailable")}}, event: deferred, prior: []evidence.Event{start, approved}, runDir: runDir, wantError: true},
 		{name: "deferred approval absent", server: &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &validationApprovalStore{}}, event: deferred, prior: []evidence.Event{start, approved}, runDir: runDir, wantError: true},
 		{name: "ratification gates missing", server: &workerAPIServer{}, event: evidence.Event{Type: "deferred_gates_ratified", Data: map[string]any{}}, wantError: true},
@@ -216,7 +232,7 @@ func TestValidateControllerDeliveryClaimsPolicies(t *testing.T) {
 	deferred := func(attemptID, hash string) evidence.Event {
 		return evidence.Event{Type: "delivery_deferred", AttemptID: attemptID, Data: map[string]any{"plan_hash": hash}}
 	}
-	exact := validationApproval(runID, "approval-1", attempt, planHash)
+	exact := validationTrustedApproval(runID, "approval-1", attempt, planHash)
 	wrong := exact
 	wrong.AttemptID = "another-attempt"
 
@@ -237,6 +253,7 @@ func TestValidateControllerDeliveryClaimsPolicies(t *testing.T) {
 		{name: "hash flag does not match job authority", job: Job{RunID: runID}, events: []evidence.Event{approved("hash_flag", attempt, planHash)}, wantError: true},
 		{name: "resolved approval authority unavailable", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, wantError: true},
 		{name: "resolved approval list fails", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, approvals: &validationApprovalStore{listErr: errors.New("approval database unavailable")}, wantError: true},
+		{name: "resolved approval without authenticated provenance", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, approvals: &validationApprovalStore{values: []approval.PendingApproval{validationApproval(runID, "approval-1", attempt, planHash)}}, wantError: true},
 		{name: "resolved approval exact", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, approvals: &validationApprovalStore{values: []approval.PendingApproval{exact}}},
 		{name: "resolved approval wrong attempt", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, approvals: &validationApprovalStore{values: []approval.PendingApproval{wrong}}, wantError: true},
 		{name: "resolved approval foreign run", job: Job{RunID: runID}, events: []evidence.Event{approved("resolved_approval", attempt, planHash)}, approvals: &validationApprovalStore{values: []approval.PendingApproval{func() approval.PendingApproval { v := exact; v.RunID = "other-run"; return v }()}}, wantError: true},

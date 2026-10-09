@@ -125,6 +125,7 @@ type Pipeline struct {
 	attemptManifestSource evidence.AttemptManifestSource
 	attemptManifestWriter AttemptManifestWriter
 	eventLogSource        evidence.EventLog
+	deliveryApprovalHash  string
 	reportsDir            string
 }
 
@@ -136,6 +137,12 @@ func WithNotifier(n notifier.Notifier) Option {
 
 func WithReportsDir(dir string) Option {
 	return func(p *Pipeline) { p.reportsDir = dir }
+}
+
+// WithDeliveryApprovalHash carries a plan hash explicitly confirmed by the
+// current controller invocation into deferred delivery and recovery checks.
+func WithDeliveryApprovalHash(hash string) Option {
+	return func(p *Pipeline) { p.deliveryApprovalHash = strings.ToLower(strings.TrimSpace(hash)) }
 }
 
 // WithPrompter подменяет интерактив (тесты, будущий web-режим).
@@ -459,6 +466,22 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					}
 				}
 			}
+			if value.Trigger == "delivery_plan" && value.ResolvedAction == "approve" {
+				// A resolved JSON file is not an approval authority: it can be
+				// edited outside this process. Continue only when this invocation
+				// explicitly reasserted the exact plan hash or when the decision
+				// came from a trusted controller decision store/API.
+				if runCfg.ApprovePlanHash != "" {
+					if normalized := strings.ToLower(strings.TrimSpace(runCfg.ApprovePlanHash)); normalized != value.SubjectHash {
+						return RunResult{}, fmt.Errorf("resume run: --approve-plan %s не совпадает с subject approval %s", normalized, value.SubjectHash)
+					}
+				} else if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); !trusted || !trustedStore.HasAuthenticatedControllerDecision(value) {
+					return RunResult{}, &ApprovalRequiredError{
+						Checkpoint: "delivery требует явного --approve-plan в текущем процессе",
+						RunID:      value.RunID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
+					}
+				}
+			}
 			target := value.Targets[value.ResolvedAction]
 			if target == "" {
 				return RunResult{}, fmt.Errorf("resume approval: action %s не имеет target", value.ResolvedAction)
@@ -468,7 +491,14 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					return RunResult{}, fmt.Errorf("%w: delivery отклонён человеком", ErrUserStopped)
 				}
 				runCfg.ApprovePlanHash = value.SubjectHash
-				resumedApproval = &value
+				if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); trusted &&
+					trustedStore.HasAuthenticatedControllerDecision(value) && !approvePlanExplicit {
+					resumedApproval = &value
+				} else {
+					// Local approvals are not authority after process restart. The
+					// explicit hash above authorizes a fresh approval for this attempt.
+					resumedApproval = nil
+				}
 			} else {
 				runCfg.retryFrom = target
 				runCfg.resumeDecisionAction = value.ResolvedAction

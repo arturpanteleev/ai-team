@@ -1679,7 +1679,7 @@ func TestDeliverDaemonRejectsAlreadyDeliveredRun(t *testing.T) {
 	runID := filepath.Base(runDir)
 
 	// Exact retry returns the recorded result and does not invoke delivery again.
-	retry, err := New(nil, nil).DeliverDeferred(context.Background(), runDir, "", dir)
+	retry, err := New(nil, nil, WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || retry.CommitSHA == "" || retry.PlanHash != approvedPlanHash || service.calls != 1 {
 		t.Fatalf("exact retry should be idempotent: record=%+v calls=%d err=%v", retry, service.calls, err)
 	}
@@ -1729,7 +1729,7 @@ func TestDeliverDeferredDoesNotTrustWorkerOrLegacyTerminalRecordForRetry(t *test
 		t.Fatalf("seed legacy run-local record: %v", err)
 	}
 	service := &fakeDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(service)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(service), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("retry must execute despite self-consistent worker/legacy records: %v", err)
 	}
@@ -1740,7 +1740,7 @@ func TestDeliverDeferredDoesNotTrustWorkerOrLegacyTerminalRecordForRetry(t *test
 	if err != nil || !found || trusted.CommitSHA != record.CommitSHA {
 		t.Fatalf("trusted retry receipt missing: record=%+v found=%v err=%v", trusted, found, err)
 	}
-	retried, err := New(nil, nil, WithDeliveryService(service)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(service), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || service.calls != 1 || retried.CommitSHA != record.CommitSHA {
 		t.Fatalf("receipt-backed exact retry must not execute twice: record=%+v calls=%d err=%v", retried, service.calls, err)
 	}
@@ -1915,7 +1915,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	// Retry-путь CLI: DeliverDeferred разрешает evidence через Resume с
 	// корректным корнем (filepath.Dir(runDir), runID) и доставляет.
 	okService := &fakeDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred позитивный путь: %v", err)
 	}
@@ -1943,7 +1943,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	}
 	// Exact retry returns the validated controller record without executing a
 	// second push or pull request creation.
-	retried, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || okService.calls != 1 || retried.CommitSHA != record.CommitSHA || retried.PRURL != record.PRURL {
 		t.Fatalf("exact retry must return the original delivery: record=%+v calls=%d err=%v", retried, okService.calls, err)
 	}
@@ -1983,7 +1983,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	if err := os.WriteFile(statePath, stateBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil || !strings.Contains(err.Error(), "plan hash mismatch") {
+	if _, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil || !strings.Contains(err.Error(), "plan hash mismatch") {
 		t.Fatalf("changed plan must require new approval, got: %v", err)
 	}
 	if okService.calls != 1 {
@@ -2163,7 +2163,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	}
 
 	okService := &capturingDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(marker.PlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred из control target: %v", err)
 	}
@@ -2203,7 +2203,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 		t.Fatalf("prepared plan в worktree обязан существовать: found=%v err=%v", found, loadErr)
 	}
 	// Exact retry returns the original result without another controller call.
-	retried, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(marker.PlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || okService.calls != 1 || retried.CommitSHA != record.CommitSHA || retried.PRURL != record.PRURL {
 		t.Fatalf("exact retry must be idempotent: record=%+v calls=%d err=%v", retried, okService.calls, err)
 	}
@@ -2343,69 +2343,133 @@ func TestRun_DeliveryApprovalPersistedAndResumable(t *testing.T) {
 	}
 }
 
-func TestRun_DeliveryApprovalSurvivesSamePlanResumeAttempt(t *testing.T) {
-	dir := env(t)
-	prepareDelivery(t, dir)
-	rt := newScripted()
-	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-	service := &fakeDeliveryService{}
-	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
-		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		storeKind          string
+		controllerDecision bool
+		resumeHash         bool
+		wrongHash          bool
+		wantExecution      bool
+	}{
+		{name: "resolved filesystem record is not authority", storeKind: "filesystem"},
+		{name: "exact current hash authorizes filesystem record", storeKind: "filesystem", resumeHash: true, wantExecution: true},
+		{name: "mismatched current hash is rejected", storeKind: "filesystem", wrongHash: true},
+		{name: "direct SQLite decision is not authenticated", storeKind: "sqlite"},
+		{name: "legacy file cannot claim authenticated provenance when imported into SQLite", storeKind: "legacy-import", controllerDecision: true},
+		{name: "authenticated controller SQLite decision", storeKind: "sqlite", controllerDecision: true, wantExecution: true},
+		{name: "authenticated controller decision survives worker store wrapper", storeKind: "worker-wrapper", controllerDecision: true, wantExecution: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := env(t)
+			prepareDelivery(t, dir)
+			rt := newScripted()
+			rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+			service := &fakeDeliveryService{}
+			var store ApprovalStore
+			var decisionStore interface {
+				Decide(string, string, approval.Decision) (approval.PendingApproval, error)
+			}
+			var fileStore *approval.Store
+			var workerReadStore ApprovalStore
+			if test.storeKind == "sqlite" || test.storeKind == "worker-wrapper" {
+				if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				db, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				decisionStore = db
+				if test.storeKind == "worker-wrapper" {
+					store = db
+					workerReadStore = approval.NewWorkerStore(db)
+				} else {
+					store = db
+				}
+			} else {
+				var err error
+				fileStore, err = approval.NewStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = fileStore
+				decisionStore = fileStore
+			}
+			p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+				WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(store))
 
-	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
-	var approvalErr *ApprovalRequiredError
-	if !errors.As(err, &approvalErr) || approvalErr.ApprovalID == "" {
-		t.Fatalf("first delivery attempt must wait for a persisted human decision, got: %v", err)
-	}
-	store, err := approval.NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Decide(value.RunID, value.ID, approval.Decision{
-		ActorID: "release-manager-1", ActorRole: deliveryApprovalRole,
-		Action: "approve", SubjectHash: value.SubjectHash,
-	}); err != nil {
-		t.Fatal(err)
-	}
+			err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+			var required *ApprovalRequiredError
+			if !errors.As(err, &required) || required.ApprovalID == "" {
+				t.Fatalf("first delivery attempt must wait for a decision, got: %v", err)
+			}
+			value, err := store.Load(required.RunID, required.ApprovalID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := approval.Decision{
+				ActorID: "release-manager-1", ActorRole: deliveryApprovalRole,
+				Action: "approve", SubjectHash: value.SubjectHash,
+			}
+			if test.controllerDecision {
+				decision.ControllerAuthenticated = true
+			}
+			if _, err := decisionStore.Decide(value.RunID, value.ID, decision); err != nil {
+				t.Fatal(err)
+			}
+			if test.storeKind == "legacy-import" {
+				if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				db, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				if err := db.ImportLegacy(filepath.Join(dir, ".ai-team", "state", "approvals")); err != nil {
+					t.Fatal(err)
+				}
+				store = db
+				p = New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+					WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(store))
+			}
+			if workerReadStore != nil {
+				p = New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+					WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(workerReadStore))
+			}
 
-	// The resume reruns the delivery planner under a fresh stage AttemptID.
-	// Its exact persisted decision must survive that retry without asking the
-	// release manager to approve the same plan again.
-	err = p.Run(context.Background(), RunConfig{ResumeRunID: approvalErr.RunID, TargetDir: dir})
-	if err != nil {
-		t.Fatalf("resume of the same approved delivery plan must finish without another approval loop: %v", err)
-	}
-	if service.calls != 1 {
-		t.Fatalf("same approved plan should execute exactly once after resume, got %d executions", service.calls)
-	}
-	runDir := onlyRunDir(t, dir)
-	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), approvalErr.RunID)
-	if err != nil {
-		t.Fatalf("same-plan approval replay must leave a valid event chain: %v", err)
-	}
-	foundReuse := false
-	for _, event := range events {
-		if event.Type == "delivery_plan_approved" && event.Data["reused"] == true &&
-			event.Data["mode"] == "resolved_approval" {
-			foundReuse = true
-			break
-		}
-	}
-	if !foundReuse {
-		t.Fatalf("same-plan resume must record the canonical approval mode and reuse fact: events=%+v", events)
-	}
-	resolved, err := store.Load(value.RunID, value.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.Status != approval.StatusResolved || resolved.ResolvedAction != "approve" ||
-		len(resolved.Decisions) != 1 || resolved.Decisions[0].ActorID != "release-manager-1" ||
-		resolved.Decisions[0].ActorRole != deliveryApprovalRole {
-		t.Fatalf("resume must retain the exact saved release-manager decision: %+v", resolved)
+			resumeHash := ""
+			if test.resumeHash {
+				resumeHash = value.SubjectHash
+			} else if test.wrongHash {
+				resumeHash = strings.Repeat("f", 64)
+			}
+			err = p.Run(context.Background(), RunConfig{ResumeRunID: required.RunID, TargetDir: dir, ApprovePlanHash: resumeHash})
+			if test.wantExecution {
+				if err != nil {
+					t.Fatalf("authenticated controller decision should resume delivery: %v", err)
+				}
+				if service.calls != 1 {
+					t.Fatalf("trusted database approval should execute once, got %d", service.calls)
+				}
+			} else if test.wrongHash {
+				if err == nil || !strings.Contains(err.Error(), "не совпадает с subject") {
+					t.Fatalf("mismatched current hash must be rejected, got: %v", err)
+				}
+				if service.calls != 0 {
+					t.Fatalf("mismatched hash must not execute delivery, calls=%d", service.calls)
+				}
+			} else {
+				if !errors.As(err, &required) {
+					t.Fatalf("untrusted resolved approval must still require current --approve-plan, got: %v", err)
+				}
+				if service.calls != 0 {
+					t.Fatalf("untrusted approval must not execute delivery, calls=%d", service.calls)
+				}
+			}
+		})
 	}
 }
 

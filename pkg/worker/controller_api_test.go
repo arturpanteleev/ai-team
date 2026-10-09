@@ -806,9 +806,12 @@ func TestWorkerAPILegacyDeferredDeliveryMigrationRequiresControllerAuthority(t *
 		server.close()
 		t.Fatal("Recover accepted a resolved delivery approval from another attempt")
 	}
+	correctValue := approval.PendingApproval{RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: "attempt-delivery",
+		Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"}
+	correctValue.Decisions = []approval.Decision{{ApprovalID: correctValue.ID, ActorID: "release-manager", ActorRole: "release_manager",
+		Action: "approve", SubjectHash: resolvedHash, ControllerAuthenticated: true}}
 	correctAttemptStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
-		resolvedRun.RunID() + "/approval-delivery": {RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: "attempt-delivery",
-			Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"},
+		resolvedRun.RunID() + "/approval-delivery": correctValue,
 	}}
 	server, err := startJob(OperationRecover, resolvedRun.RunID(), "", correctAttemptStore, newSocket("approved"))
 	if err != nil {
@@ -888,17 +891,24 @@ func TestWorkerAPILegacyDeliveryClaimsRequireExactControllerApproval(t *testing.
 	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, resolvedRun.RunID()); err != nil {
 		t.Fatal(err)
 	}
-	makeApprovalStore := func(attemptID string) *apiApprovalStore {
-		return &apiApprovalStore{values: map[string]approval.PendingApproval{
-			resolvedRun.RunID() + "/approval-delivery": {RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: attemptID,
-				Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"},
-		}}
+	makeApprovalStore := func(attemptID string, authenticated bool) *apiApprovalStore {
+		value := approval.PendingApproval{RunID: resolvedRun.RunID(), ID: "approval-delivery", AttemptID: attemptID,
+			Trigger: "delivery_plan", SubjectHash: resolvedHash, Status: approval.StatusResolved, ResolvedAction: "approve"}
+		if authenticated {
+			value.Decisions = []approval.Decision{{ApprovalID: value.ID, ActorID: "release-manager", ActorRole: "release_manager",
+				Action: "approve", SubjectHash: resolvedHash, ControllerAuthenticated: true}}
+		}
+		return &apiApprovalStore{values: map[string]approval.PendingApproval{resolvedRun.RunID() + "/approval-delivery": value}}
 	}
-	if server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("different-attempt"), "wrong-attempt"); err == nil {
+	if server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("different-attempt", true), "wrong-attempt"); err == nil {
 		server.close()
 		t.Fatal("Recover accepted resolved delivery authority from another attempt")
 	}
-	server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("attempt-delivery"), "exact-approval")
+	if server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("attempt-delivery", false), "untrusted-approval"); err == nil {
+		server.close()
+		t.Fatal("Recover accepted resolved approval without authenticated controller provenance")
+	}
+	server, err := startServer(OperationRecover, resolvedRun.RunID(), "", makeApprovalStore("attempt-delivery", true), "exact-approval")
 	if err != nil {
 		t.Fatalf("Recover rejected exact controller delivery authority: %v", err)
 	}
@@ -1298,6 +1308,9 @@ func (s *apiApprovalStore) List(run string) ([]approval.PendingApproval, error) 
 	}
 	return out, nil
 }
+func (s *apiApprovalStore) HasAuthenticatedControllerDecision(value approval.PendingApproval) bool {
+	return controllerDecisionMarkedAuthenticated(value)
+}
 func (s *apiApprovalStore) Decide(string, string, approval.Decision) (approval.PendingApproval, error) {
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
 }
@@ -1470,6 +1483,64 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 	}
 	if _, err := workerApprovals.ResolveDeferred("run-active", "approval-1", approval.Decision{}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
 		t.Fatalf("deferred decision adapter allowed write: %v", err)
+	}
+}
+
+func TestWorkerAPIApprovalTrustRequiresAuthenticatedControllerProvenance(t *testing.T) {
+	valid := approval.PendingApproval{
+		ID: "approval-1", Status: approval.StatusResolved,
+		SubjectHash: strings.Repeat("a", 64), ResolvedAction: "approve",
+		Decisions: []approval.Decision{{
+			ApprovalID: "approval-1", SubjectHash: strings.Repeat("a", 64),
+			Action: "approve", ControllerAuthenticated: true,
+		}},
+	}
+	var nilAdapter *workerAPIApprovals
+	if nilAdapter.HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("nil worker API adapter cannot authenticate a decision")
+	}
+	if (&workerAPIApprovals{}).HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("worker API adapter without controller port cannot authenticate a decision")
+	}
+	adapter := &workerAPIApprovals{port: &workerAPIPort{}}
+	cases := []struct {
+		name  string
+		value approval.PendingApproval
+		want  bool
+	}{
+		{name: "authenticated exact decision", value: valid, want: true},
+		{name: "pending approval", value: func() approval.PendingApproval { v := valid; v.Status = approval.StatusPending; return v }()},
+		{name: "unmarked decision", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].ControllerAuthenticated = false
+			return v
+		}()},
+		{name: "wrong approval", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].ApprovalID = "other"
+			return v
+		}()},
+		{name: "wrong subject", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].SubjectHash = strings.Repeat("f", 64)
+			return v
+		}()},
+		{name: "wrong action", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].Action = "reject"
+			return v
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := adapter.HasAuthenticatedControllerDecision(tc.value); got != tc.want {
+				t.Fatalf("HasAuthenticatedControllerDecision() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }
 

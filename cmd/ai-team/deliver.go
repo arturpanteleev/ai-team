@@ -25,11 +25,12 @@ func cmdDeliver() {
 	target := deliverFlags.String("target", ".", "Путь к целевому проекту (delivery state)")
 	feature := deliverFlags.String("feature", "", "Feature name (если не задан — из run manifest)")
 	runID := deliverFlags.String("run", "", "Run ID завершённого run с deferred delivery")
+	approvePlan := deliverFlags.String("approve-plan", "", "SHA-256 delivery-плана, подтверждённый в этой команде")
 	if err := deliverFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов deliver: %v", err)
 	}
 	if *runID == "" {
-		fatal("Использование: ai-team deliver --run <run_id> [--target <dir>] [--feature <name>]")
+		fatal("Использование: ai-team deliver --run <run_id> [--approve-plan <sha256>] [--target <dir>] [--feature <name>]")
 	}
 	if len(*runID) > 1024 || strings.ContainsAny(*runID, `/\`) {
 		fatal("недопустимый run_id")
@@ -42,6 +43,9 @@ func cmdDeliver() {
 	runDir := filepath.Join(absolute, ".ai-team", "runs", *runID)
 
 	var pipelineOptions []pipeline.Option
+	if strings.TrimSpace(*approvePlan) != "" {
+		pipelineOptions = append(pipelineOptions, pipeline.WithDeliveryApprovalHash(*approvePlan))
+	}
 	legacyCloud, classifyErr := pipeline.ControllerBackedLegacyDeliveryRequiresApproval(absolute, *runID)
 	if classifyErr != nil {
 		fatal("Не удалось проверить controller delivery authority: %v", classifyErr)

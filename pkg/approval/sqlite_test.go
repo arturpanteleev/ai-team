@@ -77,6 +77,101 @@ func TestSQLiteStoreIsIdempotentAndResolvesDeferredOnlyThroughDelivery(t *testin
 	}
 }
 
+func TestSQLiteStoreAuthenticatedControllerDecisionRequiresExactResolvedRecord(t *testing.T) {
+	valid := PendingApproval{
+		ID: "approval-1", Status: StatusResolved, SubjectHash: testSubject,
+		ResolvedAction: "approve",
+		Decisions: []Decision{{
+			ApprovalID: "approval-1", SubjectHash: testSubject,
+			Action: "approve", ControllerAuthenticated: true,
+		}},
+	}
+	var nilStore *SQLiteStore
+	if nilStore.HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("nil SQLite store cannot authenticate a decision")
+	}
+	if (&SQLiteStore{}).HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("SQLite store without a database cannot authenticate a decision")
+	}
+
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	clone := func() PendingApproval {
+		value := valid
+		value.Decisions = append([]Decision(nil), valid.Decisions...)
+		return value
+	}
+
+	cases := []struct {
+		name  string
+		value PendingApproval
+		want  bool
+	}{
+		{name: "authenticated exact decision", value: valid, want: true},
+		{name: "pending approval", value: func() PendingApproval { v := clone(); v.Status = StatusPending; return v }()},
+		{name: "no decisions", value: func() PendingApproval { v := clone(); v.Decisions = nil; return v }()},
+		{name: "unmarked decision", value: func() PendingApproval { v := clone(); v.Decisions[0].ControllerAuthenticated = false; return v }()},
+		{name: "wrong approval", value: func() PendingApproval { v := clone(); v.Decisions[0].ApprovalID = "other"; return v }()},
+		{name: "wrong subject", value: func() PendingApproval { v := clone(); v.Decisions[0].SubjectHash = strings.Repeat("f", 64); return v }()},
+		{name: "wrong action", value: func() PendingApproval { v := clone(); v.Decisions[0].Action = "reject"; return v }()},
+		{name: "mixed quorum is not authenticated", value: func() PendingApproval {
+			v := clone()
+			v.Decisions = append(v.Decisions, Decision{ApprovalID: v.ID, SubjectHash: v.SubjectHash, Action: v.ResolvedAction})
+			return v
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := store.HasAuthenticatedControllerDecision(tc.value); got != tc.want {
+				t.Fatalf("HasAuthenticatedControllerDecision() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestImportLegacyClearsControllerAuthenticatedProvenance(t *testing.T) {
+	target := t.TempDir()
+	legacy, err := NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := legacy.Create(PendingApproval{
+		RunID: "legacy-auth-run", AttemptID: "attempt-1", FromStage: "deployer", ToStage: "done",
+		Trigger: "delivery_plan", SubjectHash: testSubject, RequiredRoles: []string{"release_manager"},
+		Actions: []string{"approve"}, Targets: map[string]string{"approve": "done"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Decide(value.RunID, value.ID, Decision{
+		ActorID: "forged", ActorRole: "release_manager", Action: "approve",
+		SubjectHash: testSubject, ControllerAuthenticated: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(filepath.Join(target, ".ai-team", "web.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := store.Load(value.RunID, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported.Status != StatusResolved || len(imported.Decisions) != 1 || imported.Decisions[0].ControllerAuthenticated {
+		t.Fatalf("legacy import preserved forged controller provenance: %+v", imported)
+	}
+	if store.HasAuthenticatedControllerDecision(imported) {
+		t.Fatal("legacy imported approval must not authorize delivery")
+	}
+}
+
 func TestImportLegacyApprovalsIsIdempotentAndKeepsDBProgress(t *testing.T) {
 	target := t.TempDir()
 	legacy, err := NewStore(target)

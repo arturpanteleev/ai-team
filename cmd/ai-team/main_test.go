@@ -135,7 +135,17 @@ func TestStageTakeCLIUsesAuthenticatedWebSessionAndServerIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestStageActionCLIHelper$")
+	executable := os.Args[0]
+	t.Setenv(stageWebTokenEnv, "cli-cloud-token")
+	previousArgs := os.Args
+	os.Args = append([]string{"ai-team", "stage", "take"}, args...)
+	t.Cleanup(func() { os.Args = previousArgs })
+	previousMode := logging.GetMode()
+	logging.SetMode(logging.ModeQuiet)
+	t.Cleanup(func() { logging.SetMode(previousMode) })
+	cmdStage()
+
+	command := exec.Command(executable, "-test.run=^TestStageActionCLIHelper$")
 	command.Env = append(os.Environ(), "AI_TEAM_STAGE_ACTION_HELPER=1", "AI_TEAM_STAGE_ACTION=take",
 		"AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
 	output, err := command.CombinedOutput()

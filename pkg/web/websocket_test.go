@@ -33,6 +33,16 @@ func TestUpgraderCheckOriginAllowsLoopbackOrigin(t *testing.T) {
 	}
 }
 
+func TestUpgraderCheckOriginAllowsForwardedHTTPSOrigin(t *testing.T) {
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Host = "app.example:443"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Origin", "https://app.example")
+	if !upgrader.CheckOrigin(req) {
+		t.Fatal("browser-facing HTTPS Origin must be allowed when TLS terminates at ingress")
+	}
+}
+
 func TestUpgraderCheckOriginRejectsDifferentPort(t *testing.T) {
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Host = "127.0.0.1:8080"

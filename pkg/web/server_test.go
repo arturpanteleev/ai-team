@@ -1017,6 +1017,7 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 
 	login := newLoopbackRequest(http.MethodGet, "/api/session", nil)
 	login.Header.Set("Authorization", "Bearer "+token)
+	login.Header.Set("X-Forwarded-Proto", "https")
 	loginWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(loginWriter, login)
 	if loginWriter.Code != http.StatusOK {
@@ -1027,10 +1028,14 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 		t.Fatal(err)
 	}
 	cookie := loginWriter.Result().Cookies()[0]
+	if !cookie.Secure {
+		t.Fatal("session cookie behind TLS-terminating ingress must be Secure")
+	}
 
 	bootstrap := newLoopbackRequest(http.MethodGet, "/api/session", nil)
 	bootstrap.AddCookie(cookie)
-	bootstrap.Header.Set("Origin", "http://127.0.0.1")
+	bootstrap.Header.Set("Origin", "https://127.0.0.1")
+	bootstrap.Header.Set("X-Forwarded-Proto", "https")
 	bootstrapWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(bootstrapWriter, bootstrap)
 	if bootstrapWriter.Code != http.StatusOK {
@@ -2003,19 +2008,22 @@ func TestSameOriginMiddlewareRequiresMatchingSchemeHostAndEffectivePort(t *testi
 	}))
 
 	tests := []struct {
-		name   string
-		host   string
-		origin string
-		tls    bool
-		want   int
+		name           string
+		host           string
+		origin         string
+		tls            bool
+		forwardedProto string
+		want           int
 	}{
 		{name: "rejects another local port", host: "localhost:8080", origin: "http://localhost:3000", want: http.StatusForbidden},
-		{name: "accepts exact origin", host: "localhost:8080", origin: "http://localhost:8080", want: http.StatusNoContent},
+		{name: "ordinary local HTTP accepts only matching HTTP origin", host: "localhost:8080", origin: "http://localhost:8080", want: http.StatusNoContent},
 		{name: "accepts implicit HTTP default port", host: "localhost", origin: "http://localhost:80", want: http.StatusNoContent},
 		{name: "accepts explicit HTTP default port", host: "localhost:80", origin: "http://localhost", want: http.StatusNoContent},
 		{name: "rejects wrong scheme", host: "localhost:443", origin: "https://localhost:443", want: http.StatusForbidden},
 		{name: "accepts implicit HTTPS default port", host: "localhost:443", origin: "https://localhost", tls: true, want: http.StatusNoContent},
 		{name: "rejects HTTP origin on HTTPS request", host: "localhost:443", origin: "http://localhost:443", tls: true, want: http.StatusForbidden},
+		{name: "accepts TLS terminated at ingress", host: "localhost:443", origin: "https://localhost", forwardedProto: " https ", want: http.StatusNoContent},
+		{name: "TLS terminated at ingress still rejects another port", host: "localhost:443", origin: "https://localhost:8443", forwardedProto: "https", want: http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2023,6 +2031,9 @@ func TestSameOriginMiddlewareRequiresMatchingSchemeHostAndEffectivePort(t *testi
 			req.Host = tt.host
 			if tt.tls {
 				req.TLS = &tls.ConnectionState{}
+			}
+			if tt.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
 			}
 			req.Header.Set("Origin", tt.origin)
 			w := httptest.NewRecorder()
@@ -2039,16 +2050,24 @@ func TestAuthenticatedOriginMiddlewareStillRequiresSameOrigin(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	for _, tt := range []struct {
-		name   string
-		origin string
-		want   int
+		name           string
+		host           string
+		origin         string
+		forwardedProto string
+		want           int
 	}{
-		{name: "different port rejected", origin: "http://app.example:3000", want: http.StatusForbidden},
-		{name: "same origin accepted", origin: "http://app.example:8080", want: http.StatusNoContent},
+		{name: "different port rejected", host: "app.example:8080", origin: "http://app.example:3000", want: http.StatusForbidden},
+		{name: "same origin accepted", host: "app.example:8080", origin: "http://app.example:8080", want: http.StatusNoContent},
+		{name: "forwarded HTTPS origin accepted", host: "app.example:443", origin: "https://app.example", forwardedProto: "https", want: http.StatusNoContent},
+		{name: "forwarded HTTPS still rejects another port", host: "app.example:443", origin: "https://app.example:8443", forwardedProto: "https", want: http.StatusForbidden},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "http://app.example:8080/", nil)
+			req := httptest.NewRequest(http.MethodGet, "http://app.example/", nil)
+			req.Host = tt.host
 			req.Header.Set("Origin", tt.origin)
+			if tt.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
+			}
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 			if w.Code != tt.want {

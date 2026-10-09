@@ -69,7 +69,10 @@ func effectiveAuthority(authority, scheme string) (hostname, port string, ok boo
 }
 
 func requestScheme(r *http.Request) string {
-	if r.TLS != nil {
+	// When TLS terminates before the Go server, the ingress reports the
+	// browser-facing scheme in X-Forwarded-Proto. Keep this aligned with the
+	// session cookie and CSRF recovery paths in commands.go.
+	if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
 		return "https"
 	}
 	return "http"

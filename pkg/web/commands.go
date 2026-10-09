@@ -162,7 +162,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	s.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: sessionToken, Path: "/",
-		HttpOnly: true, Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		HttpOnly: true, Secure: requestScheme(r) == "https",
 		SameSite: http.SameSiteStrictMode,
 	})
 	response := sessionResponse{CSRFToken: csrfToken}
@@ -177,11 +177,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 func isSameOriginSessionRequest(r *http.Request) bool {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		u, err := url.Parse(origin)
-		requestScheme := "http"
-		if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
-			requestScheme = "https"
-		}
-		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme
+		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme(r)
 	}
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin")
 }

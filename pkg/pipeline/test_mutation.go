@@ -66,7 +66,7 @@ func (rs *runState) enforceTestMutationPolicy(stage string, result notifier.Stag
 		return nil
 	}
 	policy := "off"
-	if a, err := rs.p.reg.Load(stage); err == nil {
+	if a, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(stage)); err == nil {
 		policy = a.EffectiveTestModifyPolicy()
 	}
 

@@ -110,7 +110,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		var transitionPayload json.RawMessage
 		requestKind := approval.KindApprove
 		if result.Status == notifier.StatusBlocked {
-			stage, stageErr := rs.p.reg.Load(current)
+			stage, stageErr := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(current))
 			if stageErr != nil {
 				return fmt.Errorf("load stage %s: %w", current, stageErr)
 			}
@@ -427,7 +427,7 @@ func (rs *runState) stageOutputs(stage, attemptID string) ([]runtime.Artifact, e
 		}
 		return outputs, nil
 	}
-	definition, err := rs.p.reg.Load(stage)
+	definition, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(stage))
 	if err != nil {
 		return nil, fmt.Errorf("approval source stage %s: %w", stage, err)
 	}

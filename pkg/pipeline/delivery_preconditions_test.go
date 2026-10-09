@@ -101,6 +101,63 @@ func TestRun_DeliveryPlanUsesConfiguredChecksWithoutReviewOrQAAgents(t *testing.
 	}
 }
 
+func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
+	dir := env(t)
+	for name, content := range map[string]string{
+		"go.mod":         "module example.test/preset\n\ngo 1.26\n",
+		"answer.go":      "package preset\nfunc answer() int { return 42 }\n",
+		"answer_test.go": "package preset\nimport \"testing\"\nfunc TestAnswer(t *testing.T) { if answer() != 42 { t.Fatal(\"wrong answer\") } }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, warning := cfg.ApplyDetectedChecks(dir)
+	if profile != "go" || warning != "" {
+		t.Fatalf("expected built-in Go profile, got profile=%q warning=%q", profile, warning)
+	}
+	var implementation config.TemplateStage
+	for _, stage := range cfg.Stages {
+		if stage.ID == "implementation" {
+			implementation = stage
+			break
+		}
+	}
+	if implementation.ID != "implementation" || implementation.Agent != "coder" ||
+		strings.Join(implementation.Delivery.RequireChecks, ",") != "go-test,go-vet" {
+		t.Fatalf("built-in Go checks were not attached to stage implementation/coder: %+v", implementation)
+	}
+	cfg.Stages = []config.TemplateStage{implementation}
+	cfg.PipelineAgents = []config.AgentConfig{{Name: implementation.ID}}
+	cfg.Returns = nil
+	cfg.MaxVisits = nil
+	rt := newScripted()
+	notifications := &captureNotifier{}
+	p := New(cfg, deliveryPreconditionsRegistry(), WithRuntimeFactory(rt.factory), WithNotifier(notifications))
+	if err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true}); err != nil {
+		t.Fatalf("stage ID implementation should resolve to registry agent coder and run Go checks: %v", err)
+	}
+	if strings.Join(rt.executed, ",") != "coder" || len(notifications.calls) != 1 || notifications.calls[0].Name != implementation.ID {
+		t.Fatalf("runtime must use registry agent while preserving stable stage identity: executed=%v stages=%+v", rt.executed, notifications.calls)
+	}
+	runDir := onlyRunDir(t, dir)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, filepath.Base(runDir), notifications.calls[0].AttemptID)
+	if err != nil || len(manifest.Checks) != 2 {
+		t.Fatalf("default Go controller checks were not persisted: manifest=%+v err=%v", manifest, err)
+	}
+	seen := map[string]bool{}
+	for _, check := range manifest.Checks {
+		seen[check.Name] = check.Status == checks.StatusPassed
+	}
+	if !seen["go-test"] || !seen["go-vet"] {
+		t.Fatalf("both detected required checks should execute and pass: %+v", manifest.Checks)
+	}
+}
+
 func TestRun_MissingRequiredDeliveryCheckBlocksBeforePlanSideEffects(t *testing.T) {
 	dir := env(t)
 	_ = prepareCheckOnlyDelivery(t, dir, false)

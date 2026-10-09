@@ -455,7 +455,7 @@ func writeControllerJSON(path string, value any) error {
 }
 
 func (rs *runState) prepareControllerStageEvidence(ctx context.Context, stage string) error {
-	definition, err := rs.p.reg.Load(stage)
+	definition, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(stage))
 	if err != nil {
 		return err
 	}

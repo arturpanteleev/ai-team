@@ -259,10 +259,7 @@ func (rs *runState) requiredDeliveryVerdictEvidence(deliveryStage config.Templat
 		if !exists || result.Status != notifier.StatusPassed || result.Err != nil {
 			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s отсутствует или не прошёл", requiredStageID)
 		}
-		definitionName := requiredStage.Agent
-		if definitionName == "" {
-			definitionName = requiredStage.ID
-		}
+		definitionName := rs.p.cfg.RegistryAgentName(requiredStage.ID)
 		definition, loadErr := rs.p.reg.Load(definitionName)
 		if loadErr != nil {
 			return nil, fmt.Errorf("delivery required verdict %s: definition: %w", requiredStageID, loadErr)

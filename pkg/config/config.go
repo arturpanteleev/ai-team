@@ -577,6 +577,20 @@ func (c *Config) AgentNames() []string {
 	return names
 }
 
+// RegistryAgentName resolves a stable v5 stage ID to the agent definition that
+// executes it. Legacy graph nodes are already registry names, so they fall
+// through unchanged.
+func (c *Config) RegistryAgentName(stageID string) string {
+	if c != nil && c.Template != "" {
+		for _, stage := range c.Stages {
+			if stage.ID == stageID && stage.Agent != "" {
+				return stage.Agent
+			}
+		}
+	}
+	return stageID
+}
+
 // CompiledGraph compiles a v5 template or an in-memory legacy workflow into
 // the immutable graph contract used by the current runtime.
 func (c *Config) CompiledGraph() (workflow.Graph, error) {

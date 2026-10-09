@@ -3867,7 +3867,7 @@ func TestWorkerAPIClientAndDispatchRejectBadPeerResponsesAndScope(t *testing.T) 
 	}
 }
 
-func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
+func TestProcessEngineControllerAPILaunchPassesDatabaseOnlyAsReadDenyMetadata(t *testing.T) {
 	target := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "argv.txt")
 	environmentMarker := filepath.Join(t.TempDir(), "environment.json")
@@ -3877,7 +3877,8 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_ARGS_MARKER", "AI_TEAM_WORKER_TEST_ENV_MARKER", "AI_TEAM_WORKER_TEST_MODE")
 	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
 	var factoryCalls int
-	engine, err := NewProcessEngine([]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"}, target, filepath.Join(target, "controller-secret.db"), WithControllerAPI(func() pipeline.Recorder {
+	controllerDBPath := filepath.Join(target, "controller-projection.db")
+	engine, err := NewProcessEngine([]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"}, target, controllerDBPath, WithControllerAPI(func() pipeline.Recorder {
 		factoryCalls++
 		return &apiRecorderSpy{}
 	}, store))
@@ -3898,8 +3899,11 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(args), "--db") || strings.Contains(string(args), "controller-secret.db") {
-		t.Fatalf("worker launch exposed controller DB arguments: %s", args)
+	if strings.Contains(string(args), "--db") {
+		t.Fatalf("worker launch exposed controller DB access arguments: %s", args)
+	}
+	if !strings.Contains(string(args), "--controller-read-deny-path") || !strings.Contains(string(args), controllerDBPath) {
+		t.Fatalf("worker launch omitted deny-only controller DB path metadata: %s", args)
 	}
 	childEnvironment, err := os.ReadFile(environmentMarker)
 	if err != nil {

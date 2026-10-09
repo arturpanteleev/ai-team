@@ -63,6 +63,9 @@ func TestCodexProtectedStageUsesExactReadDenyProfileAndPromptInput(t *testing.T)
 	answerPath := filepath.Join(t.TempDir(), ".ai-team", "runs", "run-1", "inputs", "approval-1-answer.md")
 	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(answerPath)))))
 	approvalJSONPath := filepath.Join(targetDir, ".ai-team", "state", "approvals", "run-1", "approval-1.json")
+	legacyEventPath := filepath.Join(targetDir, ".ai-team", "runs", "run-1", "events.jsonl")
+	reservedEventPath := filepath.Join(targetDir, ".ai-team", "state", "events", "run-1", "events.jsonl")
+	controllerDBPath := filepath.Join(targetDir, ".ai-team", "state", "controller.sqlite")
 	if err := os.MkdirAll(filepath.Dir(answerPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +78,10 @@ func TestCodexProtectedStageUsesExactReadDenyProfileAndPromptInput(t *testing.T)
 	if err := os.WriteFile(approvalJSONPath, []byte(`{"decisions":[{"comment":"durable clarification answer"}]}`), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	launch := Launch{DeniedReadPaths: []string{answerPath, approvalJSONPath}}
+	launch := Launch{DeniedReadPaths: []string{
+		answerPath, approvalJSONPath, legacyEventPath, reservedEventPath,
+		controllerDBPath, controllerDBPath + "-wal", controllerDBPath + "-shm", controllerDBPath + "-journal",
+	}}
 	args, err := (&CodexAdapter{}).Command("codex", launch, "")
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +99,12 @@ func TestCodexProtectedStageUsesExactReadDenyProfileAndPromptInput(t *testing.T)
 		`extends = ":workspace"`,
 		strconv.Quote(answerPath) + ` = "deny"`,
 		strconv.Quote(approvalJSONPath) + ` = "deny"`,
+		strconv.Quote(legacyEventPath) + ` = "deny"`,
+		strconv.Quote(reservedEventPath) + ` = "deny"`,
+		strconv.Quote(controllerDBPath) + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-wal") + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-shm") + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-journal") + ` = "deny"`,
 		`enabled = false`,
 	} {
 		if !strings.Contains(text, required) {

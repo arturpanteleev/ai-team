@@ -107,29 +107,30 @@ type AttemptManifestWriter interface {
 }
 
 type Pipeline struct {
-	cfg                   *config.Config
-	reg                   *agent.Registry
-	notifier              notifier.Notifier
-	prompter              Prompter
-	newRuntime            runtime.Factory
-	recorder              Recorder
-	delivery              delivery.Service
-	approvals             ApprovalStore
-	lifecycle             lifecycle.StorePort
-	evidence              EvidenceStoreFactory
-	briefs                BriefStore
-	candidateMetadata     candidate.MetadataStore
-	usageEnvelopeWriter   UsageEnvelopeWriter
-	terminalRecordWriter  TerminalRecordWriter
-	attestationWriter     AttestationWriter
-	containmentWriter     ContainmentReceiptWriter
-	candidateEvidence     CandidateEvidenceStore
-	attemptManifestSource evidence.AttemptManifestSource
-	attemptManifestWriter AttemptManifestWriter
-	eventLogSource        evidence.EventLog
-	deliveryApprovalHash  string
-	questionAnswerInputs  QuestionAnswerInputProvider
-	reportsDir            string
+	cfg                     *config.Config
+	reg                     *agent.Registry
+	notifier                notifier.Notifier
+	prompter                Prompter
+	newRuntime              runtime.Factory
+	recorder                Recorder
+	delivery                delivery.Service
+	approvals               ApprovalStore
+	lifecycle               lifecycle.StorePort
+	evidence                EvidenceStoreFactory
+	briefs                  BriefStore
+	candidateMetadata       candidate.MetadataStore
+	usageEnvelopeWriter     UsageEnvelopeWriter
+	terminalRecordWriter    TerminalRecordWriter
+	attestationWriter       AttestationWriter
+	containmentWriter       ContainmentReceiptWriter
+	candidateEvidence       CandidateEvidenceStore
+	attemptManifestSource   evidence.AttemptManifestSource
+	attemptManifestWriter   AttemptManifestWriter
+	eventLogSource          evidence.EventLog
+	deliveryApprovalHash    string
+	questionAnswerInputs    QuestionAnswerInputProvider
+	controllerReadDenyPaths []string
+	reportsDir              string
 }
 
 type Option func(*Pipeline)
@@ -192,6 +193,20 @@ func WithEvidenceStoreFactory(factory EvidenceStoreFactory) Option {
 // reads and appends. Local CLI pipelines keep the run-local file implementation.
 func WithEventLogSource(source evidence.EventLog) Option {
 	return func(p *Pipeline) { p.eventLogSource = source }
+}
+
+// WithControllerReadDenyPaths adds exact controller-owned projection paths
+// that can contain approval comments. SQLite-backed web stores pass their
+// database path here; the clarification boundary also protects the standard
+// run-local and reserved event journals.
+func WithControllerReadDenyPaths(paths ...string) Option {
+	return func(p *Pipeline) {
+		for _, path := range paths {
+			if path != "" {
+				p.controllerReadDenyPaths = append(p.controllerReadDenyPaths, filepath.Clean(path))
+			}
+		}
+	}
 }
 
 // WithBusinessBriefStore routes durable business-brief persistence through a
@@ -391,6 +406,34 @@ func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedR
 	if len(answerIDs) == 0 {
 		return nil
 	}
+
+	// Approval decisions are copied into the lifecycle journal, including the
+	// human answer in Decision.Comment. Protect both the worker-visible legacy
+	// journal and the reserved controller journal: either may be readable from
+	// the Codex workspace even though the other runtime adapters deny .ai-team
+	// wholesale. Also protect SQLite projections (and their sidecars), where
+	// web/worker approval and recorder events are stored.
+	controllerProjectionPaths := []string{
+		filepath.Join(rs.evidence.RunDir(), "events.jsonl"),
+		filepath.Join(rs.runCfg.TargetDir, ".ai-team", "state", "events", rs.runID, "events.jsonl"),
+	}
+	if source, ok := rs.p.eventLogSource.(interface{ Path(string) (string, error) }); ok {
+		path, pathErr := source.Path(rs.runID)
+		if pathErr != nil {
+			return fmt.Errorf("resolve controller event log path: %w", pathErr)
+		}
+		controllerProjectionPaths = append(controllerProjectionPaths, path)
+	}
+	controllerDBPaths := append([]string{
+		filepath.Join(rs.runCfg.TargetDir, ".ai-team", "web.db"),
+	}, rs.p.controllerReadDenyPaths...)
+	for _, dbPath := range controllerDBPaths {
+		if dbPath == "" {
+			continue
+		}
+		controllerProjectionPaths = append(controllerProjectionPaths, dbPath, dbPath+"-wal", dbPath+"-shm", dbPath+"-journal")
+	}
+	rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, controllerProjectionPaths...)
 
 	// Clarification versions contain the answer as cumulative brief text. Keep
 	// their durable files in the same exact-path deny set; Go has already loaded

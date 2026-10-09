@@ -846,7 +846,9 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 		})
 	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "questioner"})
 	pr := &scriptedPrompter{}
-	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(pr))
+	controllerDBPath := filepath.Join(dir, ".ai-team", "state", "custom-controller.sqlite")
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(pr),
+		WithControllerReadDenyPaths(controllerDBPath))
 	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
 	var required *ApprovalRequiredError
 	if !errors.As(err, &required) {
@@ -914,6 +916,10 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 		t.Fatal(err)
 	}
 	approvalJSONPath := filepath.Join(resolvedTarget, ".ai-team", "state", "approvals", first.RunID, pending.ID+".json")
+	controllerEventPath, err := (evidence.ControllerEventStore{TargetDir: resolvedTarget}).Path(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, protected := range []string{canonicalPath, projectionPath, approvalJSONPath} {
 		for label, paths := range map[string][]string{"target": targetDenied, "later resume": laterDenied} {
 			found := false
@@ -950,6 +956,28 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 		}
 		if !found {
 			t.Fatalf("%s stage must deny the durable approval JSON containing the answer comment: %v", label, paths)
+		}
+	}
+	for _, protected := range []string{
+		filepath.Join(resolvedTarget, ".ai-team", "runs", first.RunID, "events.jsonl"),
+		controllerEventPath,
+		filepath.Join(resolvedTarget, ".ai-team", "web.db"),
+		filepath.Join(resolvedTarget, ".ai-team", "web.db-wal"),
+		filepath.Join(resolvedTarget, ".ai-team", "web.db-shm"),
+		filepath.Join(resolvedTarget, ".ai-team", "web.db-journal"),
+		controllerDBPath, controllerDBPath + "-wal", controllerDBPath + "-shm", controllerDBPath + "-journal",
+	} {
+		for label, paths := range map[string][]string{"target": targetDenied, "later resume": laterDenied} {
+			found := false
+			for _, path := range paths {
+				if path == protected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s stage must deny controller event/SQLite projection %q: %v", label, protected, paths)
+			}
 		}
 	}
 	versions, err := listBriefVersions(filepath.Join(dir, ".ai-team", "runs", first.RunID, "brief"))

@@ -180,7 +180,7 @@ identity каждого источника истины — `runtime` (digest и
 контроллера через `evidence.ControllerIdentity`), `config` (resolved surface
 cli/model/effort по этапам), по каждому этапу `agent_definition` (canonical
 срез контракта: runtime/cli/kind/mutation/allowed_paths/require_diff/
-test_modify_policy/inputs/outputs/ask_questions/checks/verdict/preconditions),
+test_modify_policy/inputs/outputs/ask_questions/read_scope/checks/verdict/preconditions),
 `prompt` (digest содержимого prompt), `check_suite` (canonical digest
 отсортированного списка checks) и `provider_model`. Base identity фиксируется
 по стабильному {base_commit, base_tree}; candidate — по control metadata

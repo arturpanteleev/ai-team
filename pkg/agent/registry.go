@@ -105,6 +105,12 @@ func validateDefinition(dirName string, a *Agent) error {
 	if a.RuntimeType == "" {
 		return fmt.Errorf("агент %s: runtime обязателен", dirName)
 	}
+	if a.ReadScope != "" && a.ReadScope != runtime.ReadScopeWorkspace && a.ReadScope != runtime.ReadScopeInputsOnly {
+		return fmt.Errorf("агент %s: недопустимый read_scope %q (допустимы %q, %q)", dirName, a.ReadScope, runtime.ReadScopeWorkspace, runtime.ReadScopeInputsOnly)
+	}
+	if a.ReadScope == runtime.ReadScopeInputsOnly && a.RuntimeType != "agentcli" {
+		return fmt.Errorf("агент %s: read_scope %q поддерживает только runtime agentcli", dirName, runtime.ReadScopeInputsOnly)
+	}
 	if a.Verdict != nil {
 		if err := a.Verdict.Validate(); err != nil {
 			return fmt.Errorf("агент %s: %w", dirName, err)
@@ -122,6 +128,12 @@ func validateDefinition(dirName string, a *Agent) error {
 	case "none", "source", "tests", "external":
 	default:
 		return fmt.Errorf("агент %s: неизвестный mutation %q", dirName, a.Mutation)
+	}
+	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Kind == "delivery" {
+		return fmt.Errorf("агент %s: kind delivery не поддерживает read_scope %q", dirName, runtime.ReadScopeInputsOnly)
+	}
+	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Mutation != "none" {
+		return fmt.Errorf("агент %s: read_scope %q несовместим с mutation %q", dirName, runtime.ReadScopeInputsOnly, a.Mutation)
 	}
 	if a.Kind == "delivery" && a.Mutation != "external" {
 		return fmt.Errorf("агент %s: kind delivery требует mutation external", dirName)

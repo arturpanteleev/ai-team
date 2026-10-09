@@ -66,6 +66,9 @@ const (
 	// CapUsageReported — харнесс отдаёт фактический расход (tokens/cost) в
 	// структурированном результате; адаптер реализует UsageSource.
 	CapUsageReported Capability = "usage-reported"
+	// CapInputScopedRead — харнесс может ограничить read-инструмент только
+	// объявленными immutable input snapshots и запретить обходные listing tools.
+	CapInputScopedRead Capability = "input-scoped-read"
 )
 
 // Descriptor — статическая декларация адаптера.
@@ -91,6 +94,8 @@ type Launch struct {
 	// RequireIsolation — этап обязан выполняться под изоляцией сессии
 	// (agent-стадии и eval-судья всегда требуют её).
 	RequireIsolation bool
+	// RequireInputScopedRead — агенту можно читать только объявленные inputs.
+	RequireInputScopedRead bool
 }
 
 // Usage — фактический расход одного запуска харнесса. Поля принимаются ТОЛЬКО
@@ -222,6 +227,9 @@ func RequiredCapabilities(launch Launch) map[Capability]bool {
 	}
 	if launch.Interactive || launch.AskQuestions || launch.RequireIsolation {
 		required[CapSessionIsolation] = true
+	}
+	if launch.RequireInputScopedRead {
+		required[CapInputScopedRead] = true
 	}
 	return required
 }

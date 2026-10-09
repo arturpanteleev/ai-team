@@ -41,7 +41,7 @@ func TestAdapterUnknownName(t *testing.T) {
 
 func TestOpenCodeAdapterAllowsDeclaredRequest(t *testing.T) {
 	adapter, _ := Adapter("opencode")
-	launch := Launch{Model: "gpt-5", Effort: "high", Interactive: true, AskQuestions: true, RequireIsolation: true}
+	launch := Launch{Model: "gpt-5", Effort: "high", Interactive: true, AskQuestions: true, RequireIsolation: true, RequireInputScopedRead: true}
 	if err := adapter.Validate(launch); err != nil {
 		t.Fatalf("opencode must accept its declared capabilities: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestOpenCodeAdapterReadsDefinedCapabilities(t *testing.T) {
 		t.Fatal("OpenCode does not provide attested usage")
 	}
 	for _, capability := range []Capability{
-		CapModelSelection, CapEffortMapping, CapPromptFile, CapSessionIsolation,
+		CapModelSelection, CapEffortMapping, CapPromptFile, CapSessionIsolation, CapInputScopedRead,
 	} {
 		found := false
 		for _, declared := range adapter.Describe().Capabilities {

@@ -40,6 +40,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	// any early return so a failed call or an adapter without UsageSource can
 	// never inherit stale tokens from an earlier execution.
 	r.lastUsage = nil
+	if agent.ReadScope != "" && agent.ReadScope != ReadScopeWorkspace && agent.ReadScope != ReadScopeInputsOnly {
+		return fmt.Errorf("агент %s: неизвестный read scope %q", agent.Name, agent.ReadScope)
+	}
 	cli := agent.CLI
 	if cli == "" {
 		cli = DefaultCLI
@@ -54,23 +57,30 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		return fmt.Errorf("%s: команда не найдена в PATH", cli)
 	}
 
-	prompt, err := r.buildPrompt(agent, task, inputs)
+	executionTask, executionInputs, publishScopedOutputs, cleanupScope, err := prepareInputOnlyWorkspace(agent, task, inputs)
+	if err != nil {
+		return fmt.Errorf("агент %s: подготовка ограниченной workspace: %w", agent.Name, err)
+	}
+	defer cleanupScope()
+
+	prompt, err := r.buildPrompt(agent, executionTask, executionInputs)
 	if err != nil {
 		return fmt.Errorf("ошибка сборки промпта: %w", err)
 	}
 
 	launch := Launch{
-		Model:            agent.Model,
-		Effort:           agent.Effort,
-		Interactive:      task.Interactive,
-		AskQuestions:     agent.AskQuestions,
-		RequireIsolation: true,
+		Model:                  agent.Model,
+		Effort:                 agent.Effort,
+		Interactive:            task.Interactive,
+		AskQuestions:           agent.AskQuestions,
+		RequireIsolation:       true,
+		RequireInputScopedRead: agent.ReadScope == ReadScopeInputsOnly,
 	}
 	if err := adapter.Validate(launch); err != nil {
 		return fmt.Errorf("агент %s: %w", agent.Name, err)
 	}
 
-	targetDir := task.TargetDir
+	targetDir := executionTask.TargetDir
 	if targetDir == "" {
 		targetDir = "."
 	}
@@ -118,7 +128,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		cmd.Stdin = stdin
 	}
 
-	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, task, inputs...)
+	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, executionTask, executionInputs...)
 	if err != nil {
 		return fmt.Errorf("агент %s: изоляция сессии: %w", agent.Name, err)
 	}
@@ -140,6 +150,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
 		}
 		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, err)
+	}
+	if err := publishScopedOutputs(); err != nil {
+		return fmt.Errorf("агент %s: публикация результатов из ограниченной workspace: %w", agent.Name, err)
 	}
 
 	// P1-7: usage принимается ТОЛЬКО от адаптера с attested usage-reported

@@ -1,5 +1,5 @@
-name: reviewer
-description: Reviewer — проверяет код на соответствие спецификации
+name: design-reviewer
+description: Design Reviewer — оценивает техническое решение и фиксирует рекомендацию
 runtime: agentcli
 cli: opencode
 prompt_file: prompt.md
@@ -11,6 +11,6 @@ verdict:
 inputs:
   specs: '{feature}/specs'
   design: '{feature}/design.md'
-  candidate: '{feature}/.control/review-candidate.json'
+  tasks: '{feature}/tasks.md'
 outputs:
-  review: '{feature}/review.md'
+  design-review: '{feature}/design-review.md'

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 func TestCheckCLI_RejectsUnknownAdapter(t *testing.T) {
@@ -219,6 +221,159 @@ func TestOpenCodeIsolationDeniesEffectsAndNarrowsEdits(t *testing.T) {
 	}
 	if environmentValue(environment, "OPENCODE_DISABLE_DEFAULT_PLUGINS") != "true" {
 		t.Fatal("default plugins must be disabled")
+	}
+}
+
+func TestOpenCodeInputOnlyScopeDeniesWorkspaceDiscovery(t *testing.T) {
+	target := t.TempDir()
+	inputPath := filepath.Join(target, "declared-inputs", "000", "task.md")
+	if err := os.MkdirAll(filepath.Dir(inputPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inputPath, []byte("human input"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{TargetDir: target, ArtifactRoot: target, Feature: "feat"}
+	agent := &Agent{
+		Name: "observer", ReadScope: ReadScopeInputsOnly,
+		Outputs: map[string]string{"observation": "{feature}/observation.md"},
+	}
+	environment, cleanup, err := OpenCodeIsolationEnvironment(agent, task, Artifact{Name: "task", Path: inputPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var permission map[string]any
+	if err := json.Unmarshal([]byte(environmentValue(environment, "OPENCODE_PERMISSION")), &permission); err != nil {
+		t.Fatal(err)
+	}
+	reads, ok := permission["read"].(map[string]any)
+	if !ok || reads["*"] != "deny" || reads[filepath.ToSlash(inputPath)] != "allow" {
+		t.Fatalf("input-only read rules must default deny and allow only the declared file: %#v", permission["read"])
+	}
+	for _, tool := range []string{"glob", "grep", "list", "bash", "external_directory"} {
+		if permission[tool] != "deny" {
+			t.Errorf("%s must be denied for input-only observer: %#v", tool, permission[tool])
+		}
+	}
+}
+
+func TestInputOnlyWorkspacePublishesOnlyDeclaredOutputs(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, "tasks", "feat"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(target, "tasks", "feat", "task.md")
+	if err := os.WriteFile(inputPath, []byte("only declared human input"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(target, "repository-secret.txt")
+	if err := os.WriteFile(secretPath, []byte("must not enter scratch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{
+		Name: "observer", ReadScope: ReadScopeInputsOnly,
+		Outputs: map[string]string{"observation": "{feature}/observation.md"},
+	}
+	task := &Task{Feature: "feat", TargetDir: target, ArtifactRoot: target}
+	scopedTask, scopedInputs, publish, cleanup, err := prepareInputOnlyWorkspace(agent, task, []Artifact{{Name: "task", Path: inputPath}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if scopedTask.TargetDir == target || scopedTask.ArtifactRoot != scopedTask.TargetDir {
+		t.Fatalf("agent must execute in a private minimal workspace: %#v", scopedTask)
+	}
+	if _, err := os.Stat(filepath.Join(scopedTask.TargetDir, "repository-secret.txt")); !os.IsNotExist(err) {
+		t.Fatalf("unrelated repository file leaked into scratch workspace: %v", err)
+	}
+	data, err := safeio.ReadRegularFile(scopedInputs[0].Path, inputScopeFileLimit)
+	if err != nil || string(data) != "only declared human input" {
+		t.Fatalf("declared input not copied exactly: data=%q err=%v", data, err)
+	}
+	if info, err := os.Stat(scopedInputs[0].Path); err != nil || info.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("input snapshot must be read-only: info=%v err=%v", info, err)
+	}
+	output := filepath.Join(scopedTask.ArtifactRoot, "feat", "observation.md")
+	if err := os.WriteFile(output, []byte("observation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopedTask.ArtifactRoot, "feat", ".stage-summary", "observer.md"), []byte("summary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopedTask.ArtifactRoot, "unlisted.txt"), []byte("do not publish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publish(); err != nil {
+		t.Fatal(err)
+	}
+	for rel, want := range map[string]string{
+		"feat/observation.md":             "observation",
+		"feat/.stage-summary/observer.md": "summary",
+	} {
+		got, err := os.ReadFile(filepath.Join(target, filepath.FromSlash(rel)))
+		if err != nil || string(got) != want {
+			t.Errorf("published %s = %q, %v; want %q", rel, got, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "unlisted.txt")); !os.IsNotExist(err) {
+		t.Fatalf("undeclared file must not be published: %v", err)
+	}
+}
+
+func TestAgentCLIRuntimeRunsInputOnlyAgentInScratchAndPublishesResults(t *testing.T) {
+	bin := t.TempDir()
+	mock := filepath.Join(bin, "opencode")
+	if err := os.WriteFile(mock, []byte("#!/bin/sh\nprintf '%s' \"$PWD\" > \"$AI_TEAM_SCOPE_CAPTURE\"\ntest -f declared-inputs/000/task.md || exit 21\ntest ! -e repository-secret.txt || exit 22\nmkdir -p feat/.stage-summary\nprintf 'report' > feat/observation.md\nprintf 'summary' > feat/.stage-summary/observer.md\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(HarnessEnvAllowVar, "AI_TEAM_SCOPE_CAPTURE")
+	capture := filepath.Join(t.TempDir(), "cwd.txt")
+	t.Setenv("AI_TEAM_SCOPE_CAPTURE", capture)
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, "tasks", "feat"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(target, "tasks", "feat", "task.md")
+	if err := os.WriteFile(inputPath, []byte("human supplied task"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "repository-secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cliRuntime := &AgentCLIRuntime{}
+	agent := &Agent{
+		Name: "observer", CLI: mock, ReadScope: ReadScopeInputsOnly,
+		Prompt:  "Read only the declared task input.",
+		Outputs: map[string]string{"observation": "{feature}/observation.md"},
+	}
+	task := &Task{Feature: "feat", TargetDir: target, ArtifactRoot: target}
+	if err := cliRuntime.Execute(t.Context(), agent, task, []Artifact{{Name: "task", Path: inputPath}}); err != nil {
+		t.Fatal(err)
+	}
+	cwdBytes, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := string(cwdBytes)
+	if cwd == target || strings.HasPrefix(cwd, target+string(filepath.Separator)) {
+		t.Fatalf("agent ran inside original project workspace: %q", cwd)
+	}
+	for rel, want := range map[string]string{
+		"feat/observation.md":             "report",
+		"feat/.stage-summary/observer.md": "summary",
+	} {
+		got, err := os.ReadFile(filepath.Join(target, filepath.FromSlash(rel)))
+		if err != nil || string(got) != want {
+			t.Errorf("runtime did not publish %s: got %q, err=%v", rel, got, err)
+		}
+	}
+}
+
+func TestCodexFailsClosedForInputOnlyReadScope(t *testing.T) {
+	err := (&CodexAdapter{}).Validate(Launch{RequireIsolation: true, RequireInputScopedRead: true})
+	if err == nil || !strings.Contains(err.Error(), string(CapInputScopedRead)) {
+		t.Fatalf("Codex must reject an input-only stage until it can enforce read scope, got %v", err)
 	}
 }
 

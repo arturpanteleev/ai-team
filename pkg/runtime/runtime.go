@@ -47,7 +47,15 @@ type Agent struct {
 	RequireDiff  bool
 	// AskQuestions — агенту разрешён инструмент question (см. Task.Interactive).
 	AskQuestions bool
+	// ReadScope limits the files an adapter may expose to the agent. The
+	// inputs-only mode is fail-closed: adapters must advertise CapInputScopedRead.
+	ReadScope string
 }
+
+const (
+	ReadScopeWorkspace  = "workspace"
+	ReadScopeInputsOnly = "inputs-only"
+)
 
 type Task struct {
 	Feature      string

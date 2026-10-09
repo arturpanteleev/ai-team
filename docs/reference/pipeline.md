@@ -38,6 +38,7 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 | `reviewer` | проверяет код на соответствие спецификации | `review.md` | ничего | `**Verdict:** APPROVED`, `CHANGES_REQUESTED` или `REJECTED` |
 | `tester` | пишет и запускает тесты | `test-report.md` | только тестовые файлы | `**Result:** PASS` или `FAIL` |
 | `verifier` | итоговая проверка: требования, тесты, ревью вместе | `verification.md` | ничего | `**Verdict:** APPROVED` или `CHANGES_REQUESTED` |
+| `observer` | готовит заготовку отчёта по предоставленным человеком данным | `observation.md` | только объявленный вход и результаты этапа | — |
 | `deployer` | не модель: контроллер строит delivery-план и после подтверждения доставляет | `delivery-plan.json` | коммит, push, PR | — |
 
 Документы этапов лежат в `.ai-team/artifacts/<feature>/`. Тестовыми файлами
@@ -46,6 +47,11 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 
 Определения агентов лежат в `agents/<имя>/def.yaml` (встроенные) и могут быть
 переопределены в проекте. Список и источники показывает `ai-team list`.
+Поле `read_scope: inputs-only` ограничивает этап отдельной временной workspace
+с копиями только объявленных входов и разрешённых результатов. OpenCode
+дополнительно разрешает `read` только для этих входов и запрещает поиск и
+листинг. Runtime, который не умеет принудительно ограничить чтение, отклоняет
+такой этап; например, Codex с `workspace-write` пока не подходит для Observer.
 
 ## Вердикты
 

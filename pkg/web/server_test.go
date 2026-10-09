@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/control"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -28,16 +30,20 @@ import (
 )
 
 type fakeRunController struct {
-	startFeature string
-	startTask    string
-	startCalls   int
-	resumeRunID  string
-	cancelRunID  string
-	cancelErr    error
-	decision     approval.Decision
-	approvalID   string
-	runID        string
-	approvals    []approval.PendingApproval
+	startFeature   string
+	startTask      string
+	startCalls     int
+	resumeRunID    string
+	cancelRunID    string
+	cancelErr      error
+	decision       approval.Decision
+	approvalID     string
+	runID          string
+	approvals      []approval.PendingApproval
+	deliveryRunID  string
+	deliveryRecord delivery.TerminalRecord
+	deliveryErr    error
+	deliveryCalls  int
 }
 
 type approvalBoundaryEngine struct{}
@@ -307,6 +313,11 @@ func (f *fakeRunController) Decide(runID, approvalID string, decision approval.D
 }
 func (f *fakeRunController) Approvals(string) ([]approval.PendingApproval, error) {
 	return f.approvals, nil
+}
+func (f *fakeRunController) DeliverDeferred(_ context.Context, runID string) (delivery.TerminalRecord, error) {
+	f.deliveryCalls++
+	f.deliveryRunID = runID
+	return f.deliveryRecord, f.deliveryErr
 }
 func (f *fakeRunController) Preflight(context.Context) preflight.Report {
 	return preflight.Report{Ready: true, CheckedAt: time.Now().UTC(), Checks: []preflight.Check{{
@@ -775,8 +786,12 @@ func newLoopbackRequest(method, target string, body io.Reader) *http.Request {
 
 func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	artifactRoot := t.TempDir()
-	srv, err := NewServer(":memory:", "", artifactRoot)
+	target := t.TempDir()
+	artifactRoot := filepath.Join(target, ".ai-team", "artifacts")
+	if err := os.MkdirAll(artifactRoot, 0755); err != nil {
+		t.Fatalf("create artifact root: %v", err)
+	}
+	srv, err := NewServer(":memory:", "", artifactRoot, WithTargetDir(target))
 	if err != nil {
 		t.Fatalf("failed to create test server: %v", err)
 	}
@@ -1346,6 +1361,236 @@ func TestGetPipelineByID(t *testing.T) {
 	}
 	if resp["stages"] == nil {
 		t.Error("expected 'stages' in response")
+	}
+}
+
+func TestGetPipelineProjectsDeliveryRecordSeparatelyFromRunStatus(t *testing.T) {
+	target := t.TempDir()
+	artifactRoot := filepath.Join(t.TempDir(), "custom-artifacts", "delivery-output")
+	srv, err := NewServer(":memory:", "", artifactRoot,
+		WithRunController(&fakeRunController{}), WithTargetDir(target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	targetCanonical, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.targetDir != targetCanonical || srv.runRoot != filepath.Join(targetCanonical, ".ai-team", "runs") {
+		t.Fatalf("custom artifact root must not determine project target/run root: target=%q runRoot=%q", srv.targetDir, srv.runRoot)
+	}
+	run := &store.PipelineRun{RunID: "delivery-projection", Feature: "feat", Status: "completed", StartedAt: time.Now().UTC()}
+	if err := srv.Store().CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Store().CreateStage(&store.Stage{
+		PipelineRunID: run.ID, AttemptID: "attempt-1", StageIndex: 1, AgentName: "deployer",
+		Status: "passed", StartedAt: run.StartedAt, DeliveryJSON: `{"plan_hash":"` + strings.Repeat("a", 64) + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	get := func() map[string]any {
+		t.Helper()
+		request := newLoopbackRequest(http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), nil)
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("pipeline details: %d %s", response.Code, response.Body.String())
+		}
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	body := get()
+	deliveryView, ok := body["delivery"].(map[string]any)
+	if !ok || deliveryView["status"] != "pending" {
+		t.Fatalf("completed run must not imply successful delivery: %v", body["delivery"])
+	}
+	record := delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: run.RunID, Feature: run.Feature,
+		PlanHash: strings.Repeat("a", 64), CommitSHA: strings.Repeat("b", 40), PRURL: "https://example.test/pr/12",
+		PerformedAt: time.Now().UTC(),
+	}
+	legacyRunDir := filepath.Join(target, ".ai-team", "runs", run.RunID)
+	if err := os.MkdirAll(legacyRunDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteTerminalRecord(legacyRunDir, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteControllerTerminalRecord(target, run.RunID, record); err != nil {
+		t.Fatal(err)
+	}
+	body = get()
+	deliveryView, ok = body["delivery"].(map[string]any)
+	if !ok || deliveryView["status"] != "pending" {
+		t.Fatalf("worker-submitted terminal record must not project a trusted delivery: %v", body["delivery"])
+	}
+	if err := delivery.WriteControllerDeliveryReceipt(target, record); err != nil {
+		t.Fatal(err)
+	}
+	body = get()
+	deliveryView, ok = body["delivery"].(map[string]any)
+	if !ok || deliveryView["status"] != "recorded" {
+		t.Fatalf("controller delivery receipt must project recorded Git outcome: %v", body["delivery"])
+	}
+	projectedRecord, ok := deliveryView["record"].(map[string]any)
+	if !ok || projectedRecord["commit_sha"] != record.CommitSHA || projectedRecord["pr_url"] != record.PRURL {
+		t.Fatalf("commit and PR missing from projection: %v", deliveryView)
+	}
+	if _, exists := body["deployment"]; exists {
+		t.Fatal("pipeline or Git delivery must not project deployment success")
+	}
+}
+
+func TestRetryDeliveryRequiresAuthorizedActorAndUsesController(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("m", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := delivery.TerminalRecord{
+		SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: "retry-run", Feature: "feat",
+		PlanHash: strings.Repeat("a", 64), CommitSHA: strings.Repeat("b", 40),
+		PRURL: "https://example.test/pr/13", PerformedAt: time.Now().UTC(),
+	}
+	controller := &fakeRunController{deliveryRecord: record}
+	target := t.TempDir()
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
+		WithRunController(controller), WithAuthenticator(manager))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	if err := srv.Store().CreatePipelineRun(&store.PipelineRun{
+		RunID: record.RunID, Feature: record.Feature, Status: "completed", StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ownerCookie, ownerCSRF := cloudSessionForTest(t, srv, manager, "owner@example.test", cloudidentity.RoleProductOwner)
+	invite := teamRequest(srv, ownerCookie, ownerCSRF, http.MethodPost, "/api/team/invitations",
+		`{"email":"reviewer@example.test","roles":["reviewer"]}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite reviewer: %d %s", invite.Code, invite.Body.String())
+	}
+	var invitation struct {
+		Token string `json:"activation_token"`
+	}
+	if err := json.NewDecoder(invite.Body).Decode(&invitation); err != nil {
+		t.Fatal(err)
+	}
+	activate := newLoopbackRequest(http.MethodPost, "/api/team/activate", strings.NewReader(`{"token":"`+invitation.Token+`"}`))
+	activate.Header.Set("Content-Type", "application/json")
+	activation := httptest.NewRecorder()
+	srv.router.ServeHTTP(activation, activate)
+	if activation.Code != http.StatusOK {
+		t.Fatalf("activate reviewer: %d %s", activation.Code, activation.Body.String())
+	}
+	reviewer, err := cloudidentity.NewPrincipal("reviewer@example.test", []cloudidentity.Role{cloudidentity.RoleReviewer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewerToken, err := manager.Issue(reviewer, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/runs/" + record.RunID + "/delivery/retry"
+	denied := httptest.NewRecorder()
+	srv.router.ServeHTTP(denied, authenticatedRequest(t, srv, reviewerToken, http.MethodPost, path, ""))
+	if denied.Code != http.StatusForbidden || controller.deliveryCalls != 0 {
+		t.Fatalf("reviewer must not retry Git delivery: code=%d calls=%d body=%s", denied.Code, controller.deliveryCalls, denied.Body.String())
+	}
+	request := newLoopbackRequest(http.MethodPost, path, nil)
+	request.AddCookie(ownerCookie)
+	request.Header.Set("X-CSRF-Token", ownerCSRF)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || controller.deliveryRunID != record.RunID || controller.deliveryCalls != 1 {
+		t.Fatalf("authorized retry: code=%d run=%q calls=%d body=%s", response.Code, controller.deliveryRunID, controller.deliveryCalls, response.Body.String())
+	}
+	requested, err := srv.Store().LatestRunEvent(record.RunID, "delivery_retry_requested")
+	if err != nil || requested == nil {
+		t.Fatalf("retry actor audit missing: event=%v err=%v", requested, err)
+	}
+	var requestData map[string]string
+	if err := json.Unmarshal([]byte(requested.DataJSON), &requestData); err != nil || requestData["actor_id"] != "owner@example.test" {
+		t.Fatalf("retry audit must use the authenticated actor: data=%v err=%v", requestData, err)
+	}
+}
+
+func TestRetryDeliveryRequiresDurableIntentBeforeControllerCall(t *testing.T) {
+	target := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "retry-audit.db")
+	controller := &fakeRunController{deliveryErr: errors.New("must not execute")}
+	srv, err := NewServer(dbPath, "", filepath.Join(target, ".ai-team", "artifacts"), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	run := &store.PipelineRun{RunID: "retry-audit-required", Feature: "feat", Status: "completed", StartedAt: time.Now().UTC()}
+	if err := srv.Store().CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Close() }()
+	if _, err := blocker.Exec(`CREATE TRIGGER deny_delivery_retry_intent BEFORE INSERT ON events
+		WHEN NEW.type = 'delivery_retry_requested' BEGIN SELECT RAISE(ABORT, 'audit storage unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/"+run.RunID+"/delivery/retry", ""))
+	if response.Code != http.StatusServiceUnavailable || controller.deliveryCalls != 0 {
+		t.Fatalf("delivery must not execute without durable intent audit: status=%d calls=%d body=%s",
+			response.Code, controller.deliveryCalls, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "audit storage unavailable") {
+		t.Fatalf("internal SQLite error leaked to operator response: %s", response.Body.String())
+	}
+}
+
+func TestRetryDeliveryFailureIsProjectedSeparatelyFromCompletedRun(t *testing.T) {
+	controller := &fakeRunController{deliveryErr: errors.New("delivery push failed")}
+	target := t.TempDir()
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	run := &store.PipelineRun{RunID: "retry-failed-run", Feature: "feat", Status: "completed", StartedAt: time.Now().UTC()}
+	if err := srv.Store().CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Store().CreateStage(&store.Stage{
+		PipelineRunID: run.ID, AttemptID: "attempt-1", StageIndex: 1, AgentName: "deployer",
+		Status: "passed", StartedAt: run.StartedAt, DeliveryJSON: `{"plan_hash":"` + strings.Repeat("a", 64) + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retry := httptest.NewRecorder()
+	srv.router.ServeHTTP(retry, authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+run.RunID+"/delivery/retry", ""))
+	if retry.Code != http.StatusConflict {
+		t.Fatalf("retry failure status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	details := httptest.NewRecorder()
+	srv.router.ServeHTTP(details, newLoopbackRequest(http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), nil))
+	var response struct {
+		Run      store.PipelineRun     `json:"run"`
+		Delivery webDeliveryProjection `json:"delivery"`
+	}
+	if err := json.NewDecoder(details.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Run.Status != "completed" || response.Delivery.Status != "failed" || response.Delivery.Error != "delivery retry failed; see controller diagnostics" {
+		t.Fatalf("Git delivery failure must be separate from completed pipeline: run=%+v delivery=%+v", response.Run, response.Delivery)
+	}
+	if strings.Contains(retry.Body.String(), "delivery push failed") {
+		t.Fatalf("internal delivery error leaked in retry response: %s", retry.Body.String())
 	}
 }
 

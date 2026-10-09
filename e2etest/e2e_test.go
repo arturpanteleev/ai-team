@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -936,6 +937,9 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
+	if runtime.GOOS != "linux" {
+		t.Skip("distributed worker E2E requires Linux bubblewrap isolation")
+	}
 	dir := t.TempDir()
 	bin := buildBinary(t)
 	pathEnv := setupMock(t)
@@ -1008,7 +1012,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 			"--worker-command", bin, "--worker-id", "e2e-worker", "--once",
 		)
 		poller.Dir = dir
-		poller.Env = append(os.Environ(), pathEnv)
+		poller.Env = append(os.Environ(), pathEnv, worker.WorkerSandboxEnvVar+"=bubblewrap")
 		if output, pollErr := poller.CombinedOutput(); pollErr != nil {
 			t.Fatalf("scheduler worker: %v\n%s", pollErr, output)
 		}

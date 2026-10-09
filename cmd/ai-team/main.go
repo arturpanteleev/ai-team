@@ -493,7 +493,6 @@ type recoveryEngine interface {
 	Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error)
 	Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error)
 	RecoverInitialLifecycle(runID, targetDir, feature, task string) error
-	ReconcileTerminalDelivery(context.Context, string, string) error
 	LoadLifecycle(targetDir, runID string) (lifecycle.State, error)
 	SaveLifecycle(targetDir string, previous, next lifecycle.State) error
 }
@@ -530,12 +529,10 @@ func executeRecoveredJobWithSources(ctx context.Context, engine recoveryEngine, 
 				return pipeline.RunResult{}, fmt.Errorf("reconcile terminal lifecycle: %w", err)
 			}
 		}
+		// The worker child may be bubblewrap-isolated from controller receipt and
+		// attestation stores. Its parent ProcessEngine runs the trusted
+		// ReconcileTerminalDelivery callback after this command exits.
 		result := pipeline.RunResult{RunID: job.RunID, Outcome: workflow.RunOutcome(outcome)}
-		if outcome == worker.OutcomeCompleted {
-			if err := engine.ReconcileTerminalDelivery(ctx, job.RunID, target); err != nil {
-				return result, fmt.Errorf("reconcile terminal delivery: %w", err)
-			}
-		}
 		if outcome == worker.OutcomeFailed {
 			return result, &pipeline.RunError{Outcome: workflow.RunFailed, Err: errors.New("recovered terminal run failed")}
 		}
@@ -635,6 +632,7 @@ func cmdSchedulerWorker() {
 		fatal("Scheduler worker target: %v", err)
 	}
 	requireControlRoot(target)
+	workerAgentPaths := configuredAgentRegistryPaths()
 	if *workerCommand == "" {
 		executable, executableErr := os.Executable()
 		if executableErr != nil {
@@ -669,8 +667,17 @@ func cmdSchedulerWorker() {
 	}
 	defer func() { _ = controllerApprovalStore.Close() }()
 	workerOptions, err := configuredWorkerProcessOptions(
-		worker.WithAgentRegistryPaths(configuredAgentRegistryPaths()),
+		worker.WithAgentRegistryPaths(workerAgentPaths),
 		worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(controllerRecorderStore) }, controllerApprovalStore),
+		worker.WithTerminalDeliveryReconciler(func(ctx context.Context, runID, targetDir string) error {
+			registry, registryErr := newAgentRegistryWithPaths(targetDir, workerAgentPaths)
+			if registryErr != nil {
+				return fmt.Errorf("trusted delivery recovery registry: %w", registryErr)
+			}
+			cfg := loadValidatedConfig(targetDir, registry)
+			engine := pipeline.NewRunEngine(pipeline.New(cfg, registry, pipeline.WithApprovalStore(controllerApprovalStore)))
+			return engine.ReconcileTerminalDelivery(ctx, runID, targetDir)
+		}),
 	)
 	if err != nil {
 		fatal("Scheduler worker sandbox: %v", err)
@@ -831,7 +838,13 @@ func configuredAgentRegistryPaths() []string {
 		paths = append(paths, pluginDir)
 	}
 	if configDir, err := os.UserConfigDir(); err == nil {
-		paths = append(paths, filepath.Join(configDir, "ai-team", "agents"))
+		userAgents := filepath.Join(configDir, "ai-team", "agents")
+		// The built-in user registry is optional on a clean install. Keep it
+		// when present, and preserve other filesystem errors so downstream path
+		// validation still fails closed instead of silently hiding a problem.
+		if _, statErr := os.Lstat(userAgents); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			paths = append(paths, userAgents)
+		}
 	}
 	return paths
 }
@@ -1838,6 +1851,10 @@ func cmdWeb() {
 		workerOptions, optionErr := configuredWorkerProcessOptions(
 			worker.WithAgentRegistryPaths(agentPaths),
 			worker.WithControllerAPI(func() pipeline.Recorder { return web.NewStoreRecorder(recorderStore) }, approvalStore),
+			worker.WithTerminalDeliveryReconciler(func(ctx context.Context, runID, targetDir string) error {
+				engine := pipeline.NewRunEngine(pipeline.New(cfg, reg, pipeline.WithApprovalStore(approvalStore)))
+				return engine.ReconcileTerminalDelivery(ctx, runID, targetDir)
+			}),
 		)
 		if optionErr != nil {
 			fatal("Worker sandbox: %v", optionErr)
@@ -1855,7 +1872,7 @@ func cmdWeb() {
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)
 	}
-	serverOptions := []web.ServerOption{web.WithRunController(runController)}
+	serverOptions := []web.ServerOption{web.WithRunController(runController), web.WithTargetDir(target)}
 	authEnabled := false
 	if secret := os.Getenv(*authSecretEnv); secret != "" {
 		tokenManager, managerErr := cloudidentity.NewTokenManager([]byte(secret))

@@ -1,4 +1,4 @@
-import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, LogTail, PreflightReport, WorkflowSnapshot, Principal } from './types';
+import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal } from './types';
 
 const API_BASE = '/api';
 
@@ -31,7 +31,7 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
   return fetchJson<PipelineRun[]>(`/pipelines?limit=${limit}&offset=${offset}`);
 }
 
-export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string }> {
+export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; delivery?: DeliveryProjection }> {
   return fetchJson(`/pipelines/${id}`);
 }
 
@@ -139,6 +139,10 @@ export function startRun(feature: string, task: string): Promise<{ run_id: strin
 
 export function resumeRun(runId: string): Promise<{ run_id: string }> {
   return command(`/runs/${encodeURIComponent(runId)}/resume`);
+}
+
+export function retryDelivery(runId: string): Promise<{ run_id: string; delivery: NonNullable<DeliveryProjection['record']> }> {
+  return command(`/runs/${encodeURIComponent(runId)}/delivery/retry`);
 }
 
 export function cancelRun(runId: string): Promise<{ run_id: string }> {

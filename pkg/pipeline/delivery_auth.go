@@ -1,8 +1,12 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,29 +113,6 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 	if err != nil {
 		return err
 	}
-	showPipelineSummary(rs.results)
-	logging.Printf("\n%s\n%s\nPlan SHA-256: %s\n", ui.Colorize("Canonical delivery plan:", ui.ColorBold), canonical, planHash)
-	recordApproval := func(mode string) error {
-		rs.approvedPlanHash = planHash
-		return rs.evidence.Append(evidence.Event{Type: "delivery_plan_approved", AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
-			"plan_hash": planHash, "mode": mode, "approver": "local-user",
-		}})
-	}
-	if rs.approvedPlanHash != "" {
-		if rs.approvedPlanHash != planHash {
-			return fmt.Errorf("delivery approval hash mismatch: approved=%s actual=%s", rs.approvedPlanHash, planHash)
-		}
-		// Явное подтверждение точного canonical plan (--approve-plan) расширяется
-		// на отложенные гейты run'а (APF-1).
-		if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
-			return err
-		}
-		return recordApproval("hash_flag")
-	}
-
-	// Delivery plan — обычный persisted approval с subject = exact plan hash.
-	// Решение можно записать интерактивно, через web decision endpoint или
-	// через `--resume --approve-plan <sha256>` (см. resume в RunWithResult).
 	candidateSHA := ""
 	if rs.candidate != nil {
 		identity, identityErr := rs.candidate.Identity()
@@ -140,6 +121,79 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 		}
 		candidateSHA = identity.WorkspaceSHA256
 	}
+	showPipelineSummary(rs.results)
+	logging.Printf("\n%s\n%s\nPlan SHA-256: %s\n", ui.Colorize("Canonical delivery plan:", ui.ColorBold), canonical, planHash)
+	recordApproval := func(mode string, resolved *approval.PendingApproval) error {
+		if mode == "hash_flag" {
+			value, err := rs.persistHashFlagDeliveryApproval(name, result.AttemptID, planHash, candidateSHA, canonical)
+			if err != nil {
+				return err
+			}
+			resolved = &value
+		}
+		if resolved == nil {
+			return errors.New("delivery approval decision is missing")
+		}
+		if err := requireResolvedDeliveryApproval(rs.approvalStore, rs.runID, name, resolved.AttemptID, planHash, canonical, candidateSHA); err != nil {
+			return err
+		}
+		if resolved.ID != approval.NewID(rs.runID, resolved.AttemptID, name, name, "delivery_plan", planHash) {
+			return errors.New("delivery approval does not identify the saved run, attempt, stage, and plan")
+		}
+		rs.approvedPlanHash = planHash
+		eventMode := mode
+		eventData := map[string]any{
+			"plan_hash": planHash, "mode": eventMode, "approver": "local-user",
+			"approval_attempt_id": resolved.AttemptID, "operation_attempt_id": result.AttemptID,
+		}
+		if mode == "resolved_approval_reused" {
+			// Replay accepts the canonical authority mode; retain reuse as a
+			// separate fact instead of making it an unsupported mode value.
+			eventData["mode"] = "resolved_approval"
+			eventData["reused"] = true
+		}
+		return rs.evidence.Append(evidence.Event{Type: "delivery_plan_approved", AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: eventData})
+	}
+	if rs.approvedPlanHash != "" {
+		if rs.approvedPlanHash != planHash {
+			return fmt.Errorf("delivery approval hash mismatch: approved=%s actual=%s", rs.approvedPlanHash, planHash)
+		}
+		if rs.resumedApproval != nil &&
+			rs.resumedApproval.FromStage == name && rs.resumedApproval.ToStage == name &&
+			rs.resumedApproval.Trigger == "delivery_plan" &&
+			rs.resumedApproval.Status == approval.StatusResolved &&
+			rs.resumedApproval.ResolvedAction == "approve" && rs.resumedApproval.SubjectHash == planHash {
+			// A human approval may outlive a retry of the delivery stage only when
+			// the exact canonical plan and candidate still match its saved subject.
+			if err := requireResolvedDeliveryApproval(rs.approvalStore, rs.runID, name,
+				rs.resumedApproval.AttemptID, planHash, canonical, candidateSHA); err != nil {
+				return fmt.Errorf("saved delivery approval no longer matches the planned operation: %w", err)
+			}
+			if err := approvalAttemptMatchesStage(rs.p.attemptManifestSource, rs.evidence.RunDir(),
+				rs.runID, rs.resumedApproval.AttemptID, name); err != nil {
+				return fmt.Errorf("saved delivery approval attempt cannot be verified: %w", err)
+			}
+			if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
+				return err
+			}
+			return recordApproval("resolved_approval_reused", rs.resumedApproval)
+		}
+		if rs.approvePlanExplicit {
+			// An explicit --approve-plan reasserts the exact subject for this new
+			// attempt, so persist a fresh decision under its deterministic ID.
+			if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
+				return err
+			}
+			return recordApproval("hash_flag", nil)
+		}
+		// A previously resolved approval belongs to an earlier attempt. Do not
+		// transfer it automatically: fall through and request a new decision for
+		// this exact attempt and plan.
+	}
+
+	// Delivery plan — обычный persisted approval с subject = exact plan hash.
+	// Решение можно записать интерактивно, через web decision endpoint или
+	// через `--resume --approve-plan <sha256>` (см. resume в RunWithResult).
 	value, err := rs.approvalStore.Create(approval.PendingApproval{
 		RunID: rs.runID, AttemptID: result.AttemptID,
 		FromStage: name, ToStage: name, Trigger: "delivery_plan",
@@ -220,7 +274,136 @@ func (rs *runState) authorizeDelivery(name string, result notifier.StageResult, 
 	if err := rs.ratifyDeferredGates("local-user", "approve"); err != nil {
 		return err
 	}
-	return recordApproval("resolved_approval")
+	return recordApproval("resolved_approval", &value)
+}
+
+func (rs *runState) persistHashFlagDeliveryApproval(stageName, attemptID, planHash, candidateSHA string, canonical []byte) (approval.PendingApproval, error) {
+	value, err := rs.approvalStore.Create(approval.PendingApproval{
+		RunID: rs.runID, AttemptID: attemptID,
+		FromStage: stageName, ToStage: stageName, Trigger: "delivery_plan",
+		SubjectHash: planHash, CandidateSHA256: candidateSHA,
+		RequiredRoles: []string{deliveryApprovalRole}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "reject"},
+		Targets: map[string]string{"approve": stageName, "reject": stageName},
+		Payload: json.RawMessage(canonical),
+	})
+	if err != nil {
+		return approval.PendingApproval{}, fmt.Errorf("persist hash-flag delivery approval: %w", err)
+	}
+	if value.Status == approval.StatusPending {
+		value, err = rs.approvalStore.Decide(rs.runID, value.ID, approval.Decision{
+			ActorID: "local-user", ActorRole: deliveryApprovalRole,
+			Action: "approve", SubjectHash: planHash,
+		})
+		if err != nil {
+			return approval.PendingApproval{}, fmt.Errorf("resolve hash-flag delivery approval: %w", err)
+		}
+	}
+	if err := requireResolvedDeliveryApproval(rs.approvalStore, rs.runID, stageName, attemptID, planHash, canonical, candidateSHA); err != nil {
+		return approval.PendingApproval{}, fmt.Errorf("hash-flag delivery approval is not a resolved exact-plan approval: %w", err)
+	}
+	return value, nil
+}
+
+func requireResolvedDeliveryApproval(store ApprovalStore, runID, stage, attemptID, planHash string, canonical []byte, candidateSHA string) error {
+	if store == nil {
+		return errors.New("deferred delivery requires controller approval storage")
+	}
+	if runID == "" || stage == "" || attemptID == "" || planHash == "" || len(canonical) == 0 {
+		return errors.New("deferred delivery approval identity or canonical plan is incomplete")
+	}
+	payloadHash := sha256.Sum256(canonical)
+	if hex.EncodeToString(payloadHash[:]) != planHash {
+		return errors.New("deferred delivery canonical plan does not match the expected plan hash")
+	}
+	approvalID := approval.NewID(runID, attemptID, stage, stage, "delivery_plan", planHash)
+	value, err := store.Load(runID, approvalID)
+	if err != nil {
+		return fmt.Errorf("load controller delivery approval %s: %w", approvalID, err)
+	}
+	return validateResolvedDeliveryApproval(value, runID, stage, attemptID, planHash, canonical, candidateSHA)
+}
+
+func validateResolvedDeliveryApproval(value approval.PendingApproval, runID, stage, attemptID, planHash string, canonical []byte, candidateSHA string) error {
+	approvalID := approval.NewID(runID, attemptID, stage, stage, "delivery_plan", planHash)
+	approvedPlan, err := delivery.Parse(value.Payload)
+	if err != nil {
+		return fmt.Errorf("controller delivery approval payload is not a canonical delivery plan: %w", err)
+	}
+	approvedCanonical, err := approvedPlan.CanonicalJSON()
+	if err != nil {
+		return fmt.Errorf("canonicalize controller delivery approval payload: %w", err)
+	}
+	var approvedCompact, expectedCompact bytes.Buffer
+	if err := json.Compact(&approvedCompact, value.Payload); err != nil {
+		return fmt.Errorf("compact controller delivery approval payload: %w", err)
+	}
+	if err := json.Compact(&expectedCompact, canonical); err != nil {
+		return fmt.Errorf("compact expected canonical delivery plan: %w", err)
+	}
+	if value.ID != approvalID || value.RunID != runID || value.AttemptID != attemptID ||
+		value.FromStage != stage || value.ToStage != stage || value.Trigger != "delivery_plan" ||
+		value.SubjectHash != planHash || value.CandidateSHA256 != candidateSHA ||
+		value.Targets["approve"] != stage || !containsString(value.Actions, "approve") ||
+		!bytes.Equal(approvedCanonical, canonical) ||
+		!bytes.Equal(approvedCompact.Bytes(), expectedCompact.Bytes()) {
+		return errors.New("controller delivery approval does not match the canonical plan, candidate, and saved run, attempt, stage, and trigger")
+	}
+	if value.Status != approval.StatusResolved || value.ResolvedAction != "approve" ||
+		!containsString(value.RequiredRoles, deliveryApprovalRole) {
+		return errors.New("deferred delivery requires a resolved release-manager approval for the exact plan")
+	}
+	for _, decision := range value.Decisions {
+		if decision.ApprovalID == value.ID && decision.ActorID != "" && decision.ActorRole == deliveryApprovalRole &&
+			decision.Action == "approve" && decision.SubjectHash == planHash {
+			return nil
+		}
+	}
+	return errors.New("deferred delivery approval has no matching release-manager decision")
+}
+
+// requireResolvedDeliveryOperationApproval reuses a saved human decision only
+// for the same canonical plan and candidate. The approval's originating stage
+// attempt must still have a matching manifest from the selected source, which
+// is controller-owned for cloud runs.
+func requireResolvedDeliveryOperationApproval(store ApprovalStore, source evidence.AttemptManifestSource,
+	runDir, runID, stage, planHash string, canonical []byte, candidateSHA string) error {
+	if store == nil {
+		return errors.New("deferred delivery requires controller approval storage")
+	}
+	values, err := store.List(runID)
+	if err != nil {
+		return fmt.Errorf("list saved controller delivery approvals: %w", err)
+	}
+	var lastErr error
+	for _, value := range values {
+		if value.AttemptID == "" {
+			continue
+		}
+		if err := validateResolvedDeliveryApproval(value, runID, stage, value.AttemptID, planHash, canonical, candidateSHA); err != nil {
+			continue
+		}
+		if err := approvalAttemptMatchesStage(source, runDir, runID, value.AttemptID, stage); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return fmt.Errorf("no saved approval belongs to a controller-recorded delivery attempt: %w", lastErr)
+	}
+	return errors.New("no resolved release-manager approval matches this delivery plan and candidate")
+}
+
+func approvalAttemptMatchesStage(source evidence.AttemptManifestSource, runDir, runID, attemptID, stage string) error {
+	_, attempt, err := evidence.ReadAttemptManifest(source, runDir, runID, attemptID)
+	if err != nil {
+		return fmt.Errorf("read saved delivery approval attempt %s: %w", attemptID, err)
+	}
+	if attempt.RunID != runID || attempt.AttemptID != attemptID || attempt.Stage != stage {
+		return fmt.Errorf("saved delivery approval attempt identity mismatch: run=%q attempt=%q stage=%q", attempt.RunID, attempt.AttemptID, attempt.Stage)
+	}
+	return nil
 }
 
 // pendingDeferredCount — число ждущих consolidated-подтверждения deferred-гейтов

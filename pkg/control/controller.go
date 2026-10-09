@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -213,6 +214,23 @@ func (c *Controller) Decide(runID, approvalID string, decision approval.Decision
 
 func (c *Controller) Approvals(runID string) ([]approval.PendingApproval, error) {
 	return c.approvals.List(runID)
+}
+
+// DeliverDeferred retries the exact deferred delivery prepared by a terminal
+// run. Delivery executes in this trusted controller process and reuses the
+// pipeline's marker, plan, candidate, and workspace-lock checks.
+func (c *Controller) DeliverDeferred(ctx context.Context, runID string) (delivery.TerminalRecord, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: invalid run id: %w", err)
+	}
+	c.mu.Lock()
+	_, active := c.active[runID]
+	c.mu.Unlock()
+	if active {
+		return delivery.TerminalRecord{}, ErrActive
+	}
+	runDir := filepath.Join(c.target, ".ai-team", "runs", runID)
+	return pipeline.New(nil, nil, pipeline.WithApprovalStore(c.approvals)).DeliverDeferred(ctx, runDir, "", c.target)
 }
 
 func (c *Controller) run(runID string, ctx context.Context, lock *evidence.WorkspaceLock, execute func(context.Context) (pipeline.RunResult, error)) {

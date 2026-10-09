@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -403,6 +404,20 @@ func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) LatestRunEvent(runID, eventType string) (*Event, error) {
+	var event Event
+	err := s.db.QueryRow(`SELECT id, run_uid, sequence, type, COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
+		FROM events WHERE run_uid = ? AND type = ? ORDER BY sequence DESC LIMIT 1`, runID, eventType).
+		Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.AttemptID, &event.Timestamp, &event.DataJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &event, nil
 }
 
 func (s *Store) LatestEventCursor() (int64, error) {

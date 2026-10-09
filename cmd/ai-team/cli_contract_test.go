@@ -1293,9 +1293,6 @@ func (mustNotResumeEngine) Resume(context.Context, pipeline.ResumeConfig) (pipel
 func (mustNotResumeEngine) RecoverInitialLifecycle(string, string, string, string) error {
 	return errors.New("unexpected initial recovery")
 }
-func (mustNotResumeEngine) ReconcileTerminalDelivery(context.Context, string, string) error {
-	return nil
-}
 func (mustNotResumeEngine) LoadLifecycle(target, runID string) (lifecycle.State, error) {
 	store, err := lifecycle.NewStore(target)
 	if err != nil {
@@ -1379,13 +1376,7 @@ func TestRecoveryDispatchCompletesQueueFromFinishedEvidenceBeforeTerminalLifecyc
 	}
 }
 
-type failingDeliveryRecoveryEngine struct{ mustNotResumeEngine }
-
-func (failingDeliveryRecoveryEngine) ReconcileTerminalDelivery(context.Context, string, string) error {
-	return errors.New("simulated deferred delivery outage")
-}
-
-func TestRecoveryDispatchDoesNotCompleteJobBeforeDeferredDelivery(t *testing.T) {
+func TestRecoveryDispatchLeavesReceiptIOToTrustedParent(t *testing.T) {
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0755); err != nil {
 		t.Fatal(err)
@@ -1402,7 +1393,10 @@ func TestRecoveryDispatchDoesNotCompleteJobBeforeDeferredDelivery(t *testing.T) 
 	}
 	for _, event := range []evidence.Event{
 		{Type: "run_started", Timestamp: started},
-		{Type: "delivery_deferred", Timestamp: started.Add(time.Second), Data: map[string]any{"plan_hash": strings.Repeat("a", 64)}},
+		{Type: "delivery_deferred", AttemptID: "delivery-attempt", Timestamp: started.Add(time.Second), Data: map[string]any{
+			"plan_hash":  strings.Repeat("a", 64),
+			"state_path": filepath.Join(target, ".ai-team", "delivery", "feature.json"),
+		}},
 		{Type: "run_finished", Timestamp: started.Add(2 * time.Second), Data: map[string]any{"status": string(workflow.RunCompleted), "stage_attempts": 0}},
 	} {
 		if err := evidenceStore.Append(event); err != nil {
@@ -1429,7 +1423,7 @@ func TestRecoveryDispatchDoesNotCompleteJobBeforeDeferredDelivery(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	poller, err := scheduler.NewPoller(queue, recoveryQueueExecutor{target: target, engine: failingDeliveryRecoveryEngine{}}, nil)
+	poller, err := scheduler.NewPoller(queue, recoveryQueueExecutor{target: target, engine: mustNotResumeEngine{}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1438,8 +1432,8 @@ func TestRecoveryDispatchDoesNotCompleteJobBeforeDeferredDelivery(t *testing.T) 
 		t.Fatalf("recovery poll: claimed=%v err=%v", claimed, err)
 	}
 	record, found, err := queue.Get(jobID)
-	if err != nil || !found || record.Status != scheduler.StatusFailed {
-		t.Fatalf("job must remain visibly failed until deferred delivery is reconciled: record=%+v found=%v err=%v", record, found, err)
+	if err != nil || !found || record.Status != scheduler.StatusCompleted {
+		t.Fatalf("recovery child should return terminal state for parent reconciliation: record=%+v found=%v err=%v", record, found, err)
 	}
 }
 

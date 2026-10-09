@@ -25,6 +25,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
+	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -37,6 +38,108 @@ const (
 	sandboxBriefAncestorProbeQuestions  = "where does the controller write?"
 	sandboxBriefAncestorProbeAnswer     = "to its pinned directory"
 )
+
+func TestProcessEngineStartReservesEventAuthorityBeforeCandidateAdmission(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("Linux candidate-admission ordering test requires bubblewrap")
+	}
+	for _, tc := range []struct {
+		name string
+		git  bool
+	}{{name: "non-git"}, {name: "git", git: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := makeBubblewrapTarget(t)
+			if tc.git {
+				if output, err := exec.Command("git", "init", target).CombinedOutput(); err != nil {
+					t.Fatalf("initialize Git target: %v\n%s", err, output)
+				}
+			}
+			runID := "candidate-admission-order-" + tc.name
+			engine, err := NewProcessEngine(
+				[]string{os.Args[0]}, target, filepath.Join(target, "missing-db-parent", "controller.db"),
+				WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.bubblewrap = true
+			job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+			if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "controller database path") {
+				t.Fatalf("expected bubblewrap builder to stop before worker spawn after admission setup, got %v", err)
+			}
+			if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || !reserved {
+				t.Fatalf("event authority must be reserved before candidate admission: reserved=%t err=%v", reserved, err)
+			}
+			if tc.git {
+				if err := (candidate.FileMetadataStore{}).ReadGitAdmission(target, runID); err != nil {
+					t.Fatalf("Git candidate admission proof was not written after event reservation: %v", err)
+				}
+			} else if err := (candidate.FileMetadataStore{}).ReadAbsent(target, runID); err != nil {
+				t.Fatalf("non-Git candidate admission proof was not written after event reservation: %v", err)
+			}
+		})
+	}
+}
+
+func TestProcessEngineStartRejectsConflictingCandidateAdmissionAfterReservation(t *testing.T) {
+	target := makeBubblewrapTarget(t)
+	const runID = "candidate-admission-conflict"
+	events := evidence.ControllerEventStore{TargetDir: target}
+	if err := events.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := (candidate.FileMetadataStore{}).MarkAbsent(target, runID); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0]}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.bubblewrap = true
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+	if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "worker candidate admission: non-Git Start refuses a pre-existing candidate absence marker") {
+		t.Fatalf("conflicting candidate admission must fail after event authority is established: %v", err)
+	}
+	if reserved, err := events.IsReserved(runID); err != nil || !reserved {
+		t.Fatalf("event authority reservation was lost after rejected admission: reserved=%t err=%v", reserved, err)
+	}
+}
+
+func TestProcessEngineAPISocketFailureDoesNotLeaveCandidateAdmissionProof(t *testing.T) {
+	target := makeBubblewrapTarget(t)
+	const runID = "candidate-admission-socket-failure"
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0]}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.bubblewrap = true
+	engine.controlSocketDirCreator = func(target, _, _ string) (string, error) {
+		dir := filepath.Join(target, ".ai-team", "controller", "occupied-socket")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "controller-api.sock"), []byte("occupied"), 0600); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, Feature: "feature", Task: "task"}
+	if _, err := engine.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "worker controller API") || !strings.Contains(err.Error(), "listen on worker controller API socket") {
+		t.Fatalf("expected controller API socket bind failure, got %v", err)
+	}
+	if admitted, err := (candidate.FileMetadataStore{}).HasControllerAdmissionProof(target, runID); err != nil || admitted {
+		t.Fatalf("failed controller setup must not leave candidate admission proof: admitted=%t err=%v", admitted, err)
+	}
+	if reserved, err := (evidence.ControllerEventStore{TargetDir: target}).IsReserved(runID); err != nil || reserved {
+		t.Fatalf("event authority should remain absent when API setup fails: reserved=%t err=%v", reserved, err)
+	}
+}
 
 func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
@@ -117,6 +220,15 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	if err := delivery.WriteControllerTerminalRecord(target, deliveryRecord.RunID, deliveryRecord); err != nil {
 		t.Fatal(err)
 	}
+	if err := delivery.WriteControllerDeliveryReceipt(target, deliveryRecord); err != nil {
+		t.Fatal(err)
+	}
+	// Model an interruption after the Git effect but before the controller
+	// receipt was persisted. The worker must not be able to create it; the
+	// parent reconciler must still be able to issue and read it after exit.
+	if err := os.Remove(filepath.Join(target, ".ai-team", "state", "delivery-receipts", deliveryRecord.RunID+".json")); err != nil {
+		t.Fatal(err)
+	}
 	manifestStore := evidence.ControllerAttemptManifestStore{TargetDir: target}
 	if err := manifestStore.Reserve("sandbox-probe"); err != nil {
 		t.Fatal(err)
@@ -191,6 +303,9 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 	probePath := filepath.Join(target, "sandbox-probe.json")
+	if err := (candidate.FileMetadataStore{}).MarkAbsent(target, "sandbox-probe"); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("AI_TEAM_BUBBLEWRAP_PROBE", "1")
 	// These sentinels are deliberately present in the controller's parent
 	// environment. The runtime probe verifies that none crosses the worker
@@ -202,6 +317,7 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	t.Setenv("AI_TEAM_HOSTING_WRITE_TOKEN", "probe-hosting-control-secret")
 	allowWorkerTestEnvironment(t, "AI_TEAM_BUBBLEWRAP_PROBE")
 	probeApproval := workerQuestionApproval("sandbox-probe", sandboxBriefAncestorProbeApprovalID, sandboxBriefAncestorProbeQuestions, sandboxBriefAncestorProbeAnswer, approval.StatusResolved)
+	var hostRecoveryCalled bool
 	engine, err := NewProcessEngine(
 		[]string{os.Args[0], "-test.run=^TestBubblewrapWorkerProbeHelper$", "--", "--probe-db", dbPath,
 			"--probe-wal", dbPath + "-wal", "--probe-shm", dbPath + "-shm", "--probe-journal", dbPath + "-journal",
@@ -210,6 +326,34 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{"sandbox-probe/" + sandboxBriefAncestorProbeApprovalID: probeApproval}}),
 		WithAgentRegistryPaths([]string{agentDir}),
 		WithLinuxBubblewrapIsolation(),
+		WithTerminalDeliveryReconciler(func(_ context.Context, runID, targetDir string) error {
+			if runID != "sandbox-probe" || targetDir != target {
+				return fmt.Errorf("host recovery scope mismatch: run=%q target=%q", runID, targetDir)
+			}
+			data, readErr := os.ReadFile(probePath)
+			if readErr != nil {
+				return fmt.Errorf("worker probe must finish before host recovery: %w", readErr)
+			}
+			var report sandboxProbeReport
+			if decodeErr := json.Unmarshal(data, &report); decodeErr != nil {
+				return decodeErr
+			}
+			if report.DeliveryReceiptReadable || report.DeliveryReceiptDirectWriteSucceeded || report.DeliveryReceiptAPIWriteSucceeded {
+				return fmt.Errorf("worker crossed delivery-receipt authority boundary: %+v", report)
+			}
+			if _, found, readErr := delivery.ReadControllerDeliveryReceipt(targetDir, runID); readErr != nil || found {
+				return fmt.Errorf("worker unexpectedly created a controller receipt: found=%v err=%v", found, readErr)
+			}
+			if err := delivery.WriteControllerDeliveryReceipt(targetDir, deliveryRecord); err != nil {
+				return fmt.Errorf("trusted host could not reconcile the interrupted delivery: %w", err)
+			}
+			stored, found, readErr := delivery.ReadControllerDeliveryReceipt(targetDir, runID)
+			if readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA || stored.PlanHash != deliveryRecord.PlanHash {
+				return fmt.Errorf("trusted host cannot read its reconciled receipt: record=%+v found=%v err=%v", stored, found, readErr)
+			}
+			hostRecoveryCalled = true
+			return nil
+		}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -225,10 +369,14 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	engine.openAIEgressDial = func(ctx context.Context) (net.Conn, error) {
 		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", strings.TrimPrefix(fakeOpenAI.URL, "https://"))
 	}
-	if _, err := engine.Start(context.Background(), pipeline.RunConfig{
-		RunID: "sandbox-probe", Feature: "probe", TaskDesc: "test worker filesystem boundary", TargetDir: target,
+	if _, err := engine.Execute(context.Background(), Job{
+		SchemaVersion: SchemaVersion, Operation: OperationRecover,
+		RunID: "sandbox-probe", Feature: "probe", Task: "test worker filesystem boundary", TargetDir: target,
 	}); err != nil {
 		t.Fatalf("bubblewrap worker invocation failed (runtime must fail closed): %v", err)
+	}
+	if !hostRecoveryCalled {
+		t.Fatal("trusted host receipt reconciliation did not run after sandboxed recovery")
 	}
 	data, err := os.ReadFile(probePath)
 	if err != nil {
@@ -314,6 +462,12 @@ func TestBubblewrapWorkerCannotReadControllerStateAndCanUseTarget(t *testing.T) 
 	}
 	if stored, found, readErr := delivery.ReadControllerTerminalRecord(target, deliveryRecord.RunID); readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA {
 		t.Fatalf("controller delivery sentinel changed or disappeared: record=%+v found=%v err=%v", stored, found, readErr)
+	}
+	if report.DeliveryReceiptReadable || report.DeliveryReceiptDirectWriteSucceeded || report.DeliveryReceiptAPIWriteSucceeded {
+		t.Fatalf("controller delivery receipt must be hidden and read-only to the worker: %+v", report)
+	}
+	if stored, found, readErr := delivery.ReadControllerDeliveryReceipt(target, deliveryRecord.RunID); readErr != nil || !found || stored.CommitSHA != deliveryRecord.CommitSHA {
+		t.Fatalf("controller delivery receipt sentinel changed or disappeared: record=%+v found=%v err=%v", stored, found, readErr)
 	}
 	if _, err := metrics.ReadUsageEnvelope(target, "sandbox-probe"); err != nil {
 		t.Fatalf("controller did not retain worker usage after process exit: %v", err)
@@ -491,6 +645,17 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 		if !foundEventMask || !foundReadonlyEventShadow {
 			t.Fatalf("bubblewrap event authority root must be masked with a read-only shadow: %v", briefCommand.Args)
 		}
+		deliveryReceiptDir := filepath.Join(target, ".ai-team", "state", "delivery-receipts")
+		foundReadonlyReceiptShadow := false
+		for i := 0; i+1 < len(briefCommand.Args); i++ {
+			if briefCommand.Args[i] == "--remount-ro" && briefCommand.Args[i+1] == deliveryReceiptDir {
+				foundReadonlyReceiptShadow = true
+				break
+			}
+		}
+		if !foundReadonlyReceiptShadow {
+			t.Fatalf("bubblewrap delivery receipt shadow must be read-only: %v", briefCommand.Args)
+		}
 		if _, err := os.Lstat(filepath.Join(target, ".ai-team", "runs", "brief-mask-test")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("bubblewrap brief setup created a fresh run evidence directory: err=%v", err)
 		}
@@ -498,24 +663,50 @@ func TestBubblewrapMasksRunAndRetainsUnixAPIOnlyWhenSocketSetupSucceeds(t *testi
 
 	t.Run("Unix socket setup failure does not fall back to TCP or unsandboxed worker", func(t *testing.T) {
 		target := makeBubblewrapTarget(t)
-		longTempRoot := filepath.Join(t.TempDir(), strings.Repeat("x", 100))
-		if err := os.Mkdir(longTempRoot, 0700); err != nil {
+		workerPath := filepath.Join(t.TempDir(), "worker")
+		if err := os.WriteFile(workerPath, []byte("#!/bin/sh\n: > \"$0.spawned\"\nexit 0\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("TMPDIR", longTempRoot)
-		engine, err := NewProcessEngine([]string{"/bin/true"}, target, filepath.Join(target, "controller.db"),
+		engine, err := NewProcessEngine([]string{workerPath}, target, filepath.Join(target, "controller.db"),
 			WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}))
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Exercise the bubblewrap execution path without requiring the host to
-		// permit namespace creation: Unix socket setup fails before bwrap lookup.
+		// Inject failure at the exact controller-owned socket-directory boundary;
+		// TMPDIR is private and the placement helper deliberately uses /tmp or
+		// /var/tmp, so manipulating TMPDIR cannot reliably cause this failure.
+		socketSetupErr := errors.New("injected socket-directory setup failure")
+		socketDirectoryAttempts := 0
+		engine.controlSocketDirCreator = func(gotTarget, home, temp string) (string, error) {
+			socketDirectoryAttempts++
+			if gotTarget != engine.target || home == "" || temp == "" {
+				t.Fatalf("socket directory creator received target=%q home=%q temp=%q", gotTarget, home, temp)
+			}
+			return "", socketSetupErr
+		}
+		egressDialAttempts := 0
+		engine.openAIEgressDial = func(context.Context) (net.Conn, error) {
+			egressDialAttempts++
+			return nil, errors.New("unexpected OpenAI egress dial")
+		}
+		// Exercise the bubblewrap execution path without requiring namespace
+		// creation. Any attempted child execution writes a sentinel next to the
+		// executable, regardless of whether a sandbox wrapper is present.
 		engine.bubblewrap = true
 		_, err = engine.Start(context.Background(), pipeline.RunConfig{
 			RunID: "socket-setup-failure", Feature: "probe", TaskDesc: "test fail-closed socket setup", TargetDir: target,
 		})
-		if err == nil || !strings.Contains(err.Error(), "worker controller API") {
-			t.Fatalf("controller API Unix socket failure must stop the worker invocation before egress setup, got %v", err)
+		if !errors.Is(err, socketSetupErr) || !strings.Contains(err.Error(), "worker controller socket directory") {
+			t.Fatalf("controller API Unix socket setup failure must stop the worker invocation, got %v", err)
+		}
+		if socketDirectoryAttempts != 1 {
+			t.Fatalf("controller socket directory setup attempts=%d, want exactly one fail-closed attempt", socketDirectoryAttempts)
+		}
+		if egressDialAttempts != 0 {
+			t.Fatalf("OpenAI egress dial attempts=%d after socket setup failed", egressDialAttempts)
+		}
+		if _, err := os.Lstat(workerPath + ".spawned"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("worker executable ran after controller socket setup failed: err=%v", err)
 		}
 	})
 }
@@ -1183,6 +1374,9 @@ type sandboxProbeReport struct {
 	DeliveryStateReadable                  bool `json:"delivery_state_readable"`
 	DeliveryDirectWriteSucceeded           bool `json:"delivery_direct_write_succeeded"`
 	DeliveryAPIWriteSucceeded              bool `json:"delivery_api_write_succeeded"`
+	DeliveryReceiptReadable                bool `json:"delivery_receipt_readable"`
+	DeliveryReceiptDirectWriteSucceeded    bool `json:"delivery_receipt_direct_write_succeeded"`
+	DeliveryReceiptAPIWriteSucceeded       bool `json:"delivery_receipt_api_write_succeeded"`
 	AttestationStateReadable               bool `json:"attestation_state_readable"`
 	AttestationDirectWriteSucceeded        bool `json:"attestation_direct_write_succeeded"`
 	AttestationAPIWriteSucceeded           bool `json:"attestation_api_write_succeeded"`
@@ -1275,6 +1469,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	deliveryPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery", job.RunID+".json")
 	deliveryData, deliveryErr := os.ReadFile(deliveryPath)
 	deliveryDirectWriteErr := os.WriteFile(deliveryPath, []byte("worker-overwrite-attempt"), 0600)
+	deliveryReceiptPath := filepath.Join(job.TargetDir, ".ai-team", "state", "delivery-receipts", job.RunID+".json")
+	deliveryReceiptData, deliveryReceiptErr := os.ReadFile(deliveryReceiptPath)
+	deliveryReceiptDirectWriteErr := os.WriteFile(deliveryReceiptPath, []byte("worker-forged-receipt"), 0600)
 	attestationPath := filepath.Join(job.TargetDir, ".ai-team", "state", "attestation", job.RunID+".json")
 	attestationData, attestationErr := os.ReadFile(attestationPath)
 	attestationDirectWriteErr := os.WriteFile(attestationPath, []byte("worker-overwrite-attempt"), 0600)
@@ -1300,6 +1497,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	adminControlPlaneCallRejected := false
 	usageAPIWriteSucceeded := false
 	deliveryAPIWriteSucceeded := false
+	deliveryReceiptAPIWriteSucceeded := false
 	attestationAPIWriteSucceeded := false
 	containmentAPIWriteSucceeded := false
 	candidateEvidenceAPIWriteReadSucceeded := false
@@ -1355,6 +1553,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		usageAPIWriteSucceeded = port.call("usage.envelope.write", workerAPICall{Usage: usageEnvelope}, nil) == nil
 		deliveryRecord := delivery.TerminalRecord{SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: job.RunID, Feature: "probe", PlanHash: strings.Repeat("c", 64), CommitSHA: strings.Repeat("a", 40), PerformedAt: time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)}
 		deliveryAPIWriteSucceeded = NewWorkerAPITerminalRecordWriter(port).WriteTerminalRecord(deliveryRecord) == nil
+		deliveryReceiptAPIWriteSucceeded = port.call("delivery.receipt.write", workerAPICall{TerminalRecord: deliveryRecord}, nil) == nil
 		workerStatement := &attest.Statement{Type: attest.StatementType, PredicateType: attest.PredicateTypeV1, Predicate: attest.Predicate{SchemaVersion: attest.PredicateSchemaVersion, RunID: job.RunID}}
 		attestationAPIWriteSucceeded = NewWorkerAPIAttestationWriter(port).WriteAttestation(workerStatement) == nil
 		containmentAPIWriteSucceeded = NewWorkerAPIContainmentReceiptWriter(port).WriteContainmentReceipt(containment.DefaultTrustedLocalReceipt()) == nil
@@ -1435,6 +1634,9 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		UsageStateReadable:                     usageErr == nil && strings.Contains(string(usageData), "usage-envelope-secret"),
 		DeliveryStateReadable:                  deliveryErr == nil && len(deliveryData) > 0,
 		DeliveryDirectWriteSucceeded:           deliveryDirectWriteErr == nil,
+		DeliveryReceiptReadable:                deliveryReceiptErr == nil && len(deliveryReceiptData) > 0,
+		DeliveryReceiptDirectWriteSucceeded:    deliveryReceiptDirectWriteErr == nil,
+		DeliveryReceiptAPIWriteSucceeded:       deliveryReceiptAPIWriteSucceeded,
 		DeliveryAPIWriteSucceeded:              deliveryAPIWriteSucceeded,
 		AttestationStateReadable:               attestationErr == nil && len(attestationData) > 0,
 		AttestationDirectWriteSucceeded:        attestationDirectWriteErr == nil,

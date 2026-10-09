@@ -57,6 +57,10 @@ async function waitForServer(url, child) {
 }
 
 test('real React dashboard shows durable scheduler queue, worker failure, reload, and queued cancel', async ({ page }) => {
+  const bubblewrapBinary = process.env.PATH.split(path.delimiter)
+    .map((directory) => path.join(directory, 'bwrap'))
+    .find(existsSync)
+  test.skip(!bubblewrapBinary, 'trusted terminal recovery requires Linux bubblewrap')
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'ai-team-browser-e2e-'))
   const target = path.join(tempRoot, 'target')
   const binary = path.join(tempRoot, 'ai-team')
@@ -99,9 +103,10 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     const gitBinary = process.env.PATH.split(path.delimiter).map((directory) => path.join(directory, 'git')).find(existsSync)
     if (!gitBinary) throw new Error('git executable is required for scheduler admission')
     await symlink(gitBinary, path.join(tempRoot, 'git'))
+    await symlink(bubblewrapBinary, path.join(tempRoot, 'bwrap'))
     worker = start(binary, ['scheduler-worker', '--target', target, '--scheduler-db', '.ai-team/scheduler.db', '--worker-command', wrapper, '--worker-id', 'browser-e2e-worker', '--once', '--poll-interval', '50ms'], {
       cwd: target,
-      env: { ...process.env, PATH: tempRoot },
+      env: { ...process.env, PATH: tempRoot, AI_TEAM_WORKER_SANDBOX: 'bubblewrap' },
     })
 
     await expect(firstRun.getByText('running', { exact: true })).toBeVisible({ timeout: 10_000 })

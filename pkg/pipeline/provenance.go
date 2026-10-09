@@ -61,6 +61,7 @@ func (p *Pipeline) captureProvenance(runID string, identity evidence.ControllerI
 			Inputs:           definition.Inputs,
 			Outputs:          definition.Outputs,
 			AskQuestions:     definition.AskQuestions,
+			ReadScope:        definition.ReadScope,
 			Checks:           definition.Checks,
 			Verdict:          definition.Verdict,
 			Preconditions:    definition.Preconditions,
@@ -124,6 +125,7 @@ type agentDefinitionProjection struct {
 	Inputs           map[string]string            `json:"inputs,omitempty"`
 	Outputs          map[string]string            `json:"outputs,omitempty"`
 	AskQuestions     bool                         `json:"ask_questions,omitempty"`
+	ReadScope        string                       `json:"read_scope,omitempty"`
 	Checks           []checks.Definition          `json:"checks,omitempty"`
 	Verdict          *verdict.Contract            `json:"verdict,omitempty"`
 	Preconditions    map[string]*verdict.Contract `json:"preconditions,omitempty"`

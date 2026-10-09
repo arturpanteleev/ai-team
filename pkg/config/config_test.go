@@ -191,6 +191,9 @@ func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if observer.ReadScope != "inputs-only" {
+		t.Fatalf("observer runtime read scope = %q, want inputs-only", observer.ReadScope)
+	}
 	for _, phrase := range []string{"не используй shell", "Не открывай ссылки", "не добавляй результат от себя"} {
 		if !strings.Contains(observer.Prompt, phrase) {
 			t.Errorf("observer prompt must limit reports to supplied human evidence (%q missing)", phrase)

@@ -26,6 +26,7 @@ func (a *OpenCodeAdapter) Describe() Descriptor {
 			CapEffortMapping,
 			CapPromptFile,
 			CapSessionIsolation,
+			CapInputScopedRead,
 		},
 	}
 }
@@ -93,6 +94,13 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 		"**/.ssh/**": "deny", "**/.aws/**": "deny", "**/.gnupg/**": "deny",
 		"**/credentials": "deny", "**/credentials/**": "deny",
 	}
+	if agent != nil && agent.ReadScope == ReadScopeInputsOnly {
+		// Inputs are copied into a private minimal workspace by AgentCLIRuntime.
+		// Default-deny reads and disable path discovery tools: a narrow `read`
+		// allow-list alone is insufficient while glob/grep/list can enumerate the
+		// project or use a different path-resolution surface.
+		readRules = map[string]string{"*": "deny"}
+	}
 	readRules[filepath.ToSlash(filepath.Join(target, ".ai-team"))+"/**"] = "deny"
 	readRules[filepath.ToSlash(filepath.Join(target, ".git"))+"/**"] = "deny"
 	for _, input := range inputs {
@@ -136,14 +144,18 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 		editRules[filepath.ToSlash(fullPath)+"/**"] = "allow"
 	}
 
+	globPermission, grepPermission, listPermission := "allow", "allow", "allow"
+	if agent != nil && agent.ReadScope == ReadScopeInputsOnly {
+		globPermission, grepPermission, listPermission = "deny", "deny", "deny"
+	}
 	permission := map[string]any{
 		"*":                  "deny",
 		"bash":               "deny",
 		"edit":               editRules,
 		"external_directory": "deny",
-		"glob":               "allow",
-		"grep":               "allow",
-		"list":               "allow",
+		"glob":               globPermission,
+		"grep":               grepPermission,
+		"list":               listPermission,
 		"lsp":                "deny",
 		"question":           questionPermission(agent, task),
 		"read":               readRules,

@@ -29,8 +29,11 @@ type Agent struct {
 	// AskQuestions разрешает агенту инструмент question в интерактивном
 	// TTY-режиме. В non-TTY инструмент всегда запрещён: вопрос повис бы до
 	// таймаута. На уровне pipeline также включает durable вопрос-ответ цикл.
-	AskQuestions bool                `yaml:"ask_questions,omitempty"`
-	Checks       []checks.Definition `yaml:"checks,omitempty"`
+	AskQuestions bool `yaml:"ask_questions,omitempty"`
+	// ReadScope constrains what the runtime can read; inputs-only is enforced
+	// by adapters that advertise the matching capability.
+	ReadScope string              `yaml:"read_scope,omitempty"`
+	Checks    []checks.Definition `yaml:"checks,omitempty"`
 }
 
 // EffectiveTestModifyPolicy возвращает фактическую политику мутаций тестов:

@@ -121,7 +121,15 @@ test('Russian UI supports both accessible themes and fits a 390px viewport', asy
 
     await page.setViewportSize({ width: 390, height: 844 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391)
-    expect(await page.locator('[class*="filters"]').evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true)
+    const filterToggle = page.getByRole('button', { name: 'Статус: Все · Фильтры' })
+    await expect(filterToggle).toBeVisible()
+    await filterToggle.click()
+    await expect(filterToggle).toHaveAttribute('aria-expanded', 'true')
+    const filters = page.locator('#pipeline-status-filters')
+    await expect(filters).toBeVisible()
+    const filterWidth = await filters.evaluate((element) => ({ scroll: element.scrollWidth, client: element.clientWidth }))
+    expect(filterWidth.scroll).toBeLessThanOrEqual(filterWidth.client)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391)
   } finally {
     await stop(webServer)
     await rm(tempRoot, { recursive: true, force: true })

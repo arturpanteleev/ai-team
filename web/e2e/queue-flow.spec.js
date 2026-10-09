@@ -151,6 +151,7 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
   let webServer
   let worker
   const browserErrors = []
+  let captureConsoleErrors = false
 
   try {
     run('go', ['build', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
@@ -160,6 +161,9 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await waitForServer(baseURL, webServer)
 
     page.on('pageerror', (error) => browserErrors.push(`pageerror: ${error.message}`))
+    page.on('console', (message) => {
+      if (captureConsoleErrors && message.type() === 'error') browserErrors.push(`console: ${message.text()}`)
+    })
     let pipelineListReads = 0
     page.on('request', (request) => {
       if (request.method() === 'GET' && /\/api\/pipelines\?/.test(request.url())) pipelineListReads += 1
@@ -168,14 +172,11 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await page.goto(baseURL)
     const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
     await page.getByLabel('Токен доступа').fill(localToken)
+    // Ignore expected unauthorized reads while the login gate is displayed,
+    // but capture console errors from the login request and dashboard mount.
+    captureConsoleErrors = true
     await page.getByRole('button', { name: 'Войти' }).click()
     await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
-    // The application may receive an expected 401 while rendering the login
-    // gate before a local token is supplied. Start collecting console errors
-    // after authentication so the assertion covers actual app work.
-    page.on('console', (message) => {
-      if (message.type() === 'error') browserErrors.push(`console: ${message.text()}`)
-    })
     for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
     for (const width of [360, 390, 430]) {
       await page.setViewportSize({ width, height: 800 })

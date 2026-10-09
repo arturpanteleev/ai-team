@@ -3,6 +3,7 @@
 package worker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,12 @@ func TestWorkerAPIQuestionAnswerReturnsOnlyPreparedPathFromDurableApproval(t *te
 	if err != nil || response != destination {
 		t.Fatalf("typed request should return only the controller-mounted path: response=%v err=%v", response, err)
 	}
+	loadErr := errors.New("approval authority unavailable")
+	store.loadErr = loadErr
+	if _, err := server.dispatch("handoff.question_answer.path", workerAPICall{RunID: runID, A: approvalID}); !errors.Is(err, loadErr) {
+		t.Fatalf("controller must fail closed when durable approval reload fails: %v", err)
+	}
+	store.loadErr = nil
 	if _, err := server.dispatch("handoff.question_answer.path", workerAPICall{RunID: runID, A: "another-approval"}); err == nil {
 		t.Fatal("cross-approval materialization request was accepted")
 	}

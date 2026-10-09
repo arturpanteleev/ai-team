@@ -128,6 +128,24 @@ func TestPrepareQuestionAnswerMountSkipsWaitingStateWithoutRequestableAnswer(t *
 	})
 }
 
+func TestPrepareQuestionAnswerMountAdmitsVerifiedIncompleteClarification(t *testing.T) {
+	api, _, _ := newQuestionAnswerAdmissionFixture(t, false, true)
+	mount, err := api.prepareQuestionAnswerMount(context.Background())
+	if err != nil || mount == nil {
+		t.Fatalf("verified answer for an incomplete analyst target should be admitted: mount=%+v err=%v", mount, err)
+	}
+	if api.questionAnswerID != "approval-old-clarification" || api.questionAnswerPath != mount.TargetPath {
+		t.Fatalf("admitted answer identity was not retained for the scoped API: id=%q path=%q mount=%+v", api.questionAnswerID, api.questionAnswerPath, mount)
+	}
+	if err := validateQuestionAnswerMount(api.scope.TargetDir, api.scope.RunID, *mount); err != nil {
+		t.Fatalf("admitted controller projection should pass mount validation: %v", err)
+	}
+	canonical, err := api.questionAnswerStore.Read(api.scope.RunID, api.questionAnswerID)
+	if err != nil || !strings.Contains(string(canonical), "B2B buyers") {
+		t.Fatalf("admission should expose only the durable controller answer: %q err=%v", canonical, err)
+	}
+}
+
 type questionAnswerEventLogDropOnSecondRead struct {
 	evidence.EventLog
 	reads int

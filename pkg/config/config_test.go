@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
@@ -37,6 +38,163 @@ func TestDefaultProfileWritesOneV5Template(t *testing.T) {
 	}
 	if strings.Contains(string(data), "pipeline:") || strings.Contains(string(data), "workflow:") {
 		t.Fatalf("legacy v4 sections serialized in v5 output:\n%s", data)
+	}
+}
+
+func TestBuiltInTemplateAgentContracts(t *testing.T) {
+	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
+	wantAgents := map[string]string{
+		"product_spec":   "analyst",
+		"tech_design":    "architect",
+		"design_review":  "design-reviewer",
+		"implementation": "coder",
+		"code_review":    "reviewer",
+		"qa":             "tester",
+		"observation":    "observer",
+	}
+	noAgent := map[string]bool{"intent": true, "deploy": true, "acceptance": true}
+
+	for _, profile := range []string{ProfileStandard, ProfileFast, ProfileRegulated} {
+		t.Run(profile, func(t *testing.T) {
+			cfg, err := DefaultProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(registry); err != nil {
+				t.Fatalf("built-in template and its agent artifact ownership must validate: %v", err)
+			}
+			seen := make(map[string]bool, len(cfg.Stages))
+			for _, stage := range cfg.Stages {
+				seen[stage.ID] = true
+				if want, exists := wantAgents[stage.ID]; exists {
+					if stage.Agent != want {
+						t.Errorf("stage %q agent=%q, want %q", stage.ID, stage.Agent, want)
+					}
+					loaded, err := registry.Load(want)
+					if err != nil {
+						t.Errorf("stage %q references unavailable agent %q: %v", stage.ID, want, err)
+					} else if strings.TrimSpace(loaded.Prompt) == "" {
+						t.Errorf("agent %q has an empty prompt", want)
+					}
+				} else if noAgent[stage.ID] {
+					if stage.Agent != "" {
+						t.Errorf("stage %q is intentionally human-only, got agent %q", stage.ID, stage.Agent)
+					}
+				} else {
+					t.Errorf("unclassified built-in stage %q", stage.ID)
+				}
+			}
+			for stageID := range wantAgents {
+				if !seen[stageID] {
+					t.Errorf("built-in profile lacks stage %q", stageID)
+				}
+			}
+			for stageID := range noAgent {
+				if !seen[stageID] {
+					t.Errorf("built-in profile lacks intentionally human-only stage %q", stageID)
+				}
+			}
+		})
+	}
+
+	assertContract := func(name string, wantInputs, wantOutputs map[string]string, marker string, values []string) {
+		t.Helper()
+		loaded, err := registry.Load(name)
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		for key, want := range wantInputs {
+			if got := loaded.Inputs[key]; got != want {
+				t.Errorf("%s input %q=%q, want %q", name, key, got, want)
+			}
+		}
+		for key, want := range wantOutputs {
+			if got := loaded.Outputs[key]; got != want {
+				t.Errorf("%s output %q=%q, want %q", name, key, got, want)
+			}
+		}
+		if marker == "" {
+			if loaded.Verdict != nil {
+				t.Errorf("%s unexpected verdict contract: %+v", name, loaded.Verdict)
+			}
+			return
+		}
+		if loaded.Verdict == nil || loaded.Verdict.Marker != marker {
+			t.Errorf("%s verdict=%+v, want marker %q", name, loaded.Verdict, marker)
+			return
+		}
+		if got := loaded.Verdict.Values; len(got) != len(values) {
+			t.Errorf("%s verdict values=%v, want %v", name, got, values)
+		} else {
+			for i := range values {
+				if string(got[i]) != values[i] {
+					t.Errorf("%s verdict values=%v, want %v", name, got, values)
+					break
+				}
+			}
+		}
+	}
+	assertContract("design-reviewer",
+		map[string]string{"specs": "{feature}/specs", "design": "{feature}/design.md", "tasks": "{feature}/tasks.md"},
+		map[string]string{"design-review": "{feature}/design-review.md"},
+		"Verdict", []string{"APPROVED", "CHANGES_REQUESTED", "REJECTED"})
+	assertContract("reviewer",
+		map[string]string{"specs": "{feature}/specs", "design": "{feature}/design.md", "candidate": "{feature}/.control/review-candidate.json"},
+		map[string]string{"review": "{feature}/review.md"},
+		"Verdict", []string{"APPROVED", "CHANGES_REQUESTED", "REJECTED"})
+	assertContract("tester",
+		map[string]string{"specs": "{feature}/specs", "design": "{feature}/design.md", "review": "{feature}/review.md", "reviewed-candidate": "{feature}/.control/review-candidate.json"},
+		map[string]string{"test-report": "{feature}/test-report.md"},
+		"Result", []string{"PASS", "FAIL"})
+	assertContract("observer",
+		map[string]string{"task": "tasks/{feature}/task.md"},
+		map[string]string{"observation": "{feature}/observation.md"}, "", nil)
+	assertContract("analyst",
+		map[string]string{"task": "tasks/{feature}/task.md"},
+		map[string]string{"proposal": "{feature}/proposal.md", "spec": "{feature}/specs/product/spec.md"}, "", nil)
+	assertContract("architect",
+		map[string]string{"specs": "{feature}/specs"},
+		map[string]string{"design": "{feature}/design.md", "tasks": "{feature}/tasks.md"}, "", nil)
+	assertContract("coder",
+		map[string]string{"design": "{feature}/design.md", "tasks": "{feature}/tasks.md"}, map[string]string{}, "", nil)
+	for _, name := range []string{"design-reviewer", "reviewer", "tester"} {
+		loaded, err := registry.Load(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker := "Verdict"
+		if name == "tester" {
+			marker = "Result"
+		}
+		prompt := strings.Join(strings.Fields(loaded.Prompt), " ")
+		if !strings.Contains(prompt, "ровно одной итоговой строкой") ||
+			!strings.Contains(prompt, "Не повторяй этот маркер") ||
+			!strings.Contains(prompt, "**"+marker+":**") {
+			t.Errorf("%s prompt must request one final control marker compatible with runtime verdict parsing", name)
+		}
+		if name == "tester" && (!strings.Contains(prompt, "по доступным данным нет явного нарушения") ||
+			!strings.Contains(prompt, "FAIL обязателен")) {
+			t.Errorf("tester prompt must require FAIL when the reviewed candidate violates a criterion")
+		}
+	}
+
+	reviewer, err := registry.Load("reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"controller evidence", "не используй сеть", "gh pr diff"} {
+		if !strings.Contains(reviewer.Prompt, phrase) {
+			t.Errorf("reviewer prompt must define the candidate/diff boundary (%q missing)", phrase)
+		}
+	}
+	observer, err := registry.Load("observer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"не используй shell", "Не открывай ссылки", "не добавляй результат от себя"} {
+		if !strings.Contains(observer.Prompt, phrase) {
+			t.Errorf("observer prompt must limit reports to supplied human evidence (%q missing)", phrase)
+		}
 	}
 }
 
@@ -74,7 +232,7 @@ func TestTemplateValidationRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validAgents := fakeLookup{"analyst": true, "verifier": true, "architect": true, "reviewer": true, "coder": true, "tester": true}
+	validAgents := fakeLookup{"analyst": true, "verifier": true, "architect": true, "design-reviewer": true, "reviewer": true, "coder": true, "tester": true, "observer": true}
 	if err := base.Validate(validAgents); err != nil {
 		t.Fatalf("built-in refs should exist: %v", err)
 	}

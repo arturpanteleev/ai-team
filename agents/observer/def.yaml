@@ -1,0 +1,10 @@
+name: observer
+description: Observer — готовит отчёт наблюдения только по данным человека
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  observation: '{feature}/observation.md'

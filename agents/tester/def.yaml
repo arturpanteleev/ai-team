@@ -19,6 +19,7 @@ verdict:
   values: [PASS, FAIL]
 inputs:
   specs: '{feature}/specs'
+  design: '{feature}/design.md'
   review: '{feature}/review.md'
   reviewed-candidate: '{feature}/.control/review-candidate.json'
 outputs:

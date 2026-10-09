@@ -1665,10 +1665,18 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 		return nil, false
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "." || entry.Name() == ".." {
-			continue
+		// Runs are expected to be real directories. In particular, don't let a
+		// symlinked run disappear from the monthly denominator just because
+		// DirEntry.IsDir reports false for symlinks. Check this before the
+		// controller-ID dedup below so duplicate evidence cannot hide it either.
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.IsDir() {
+			return nil, false
 		}
 		runID := entry.Name()
+		if runID == "." || runID == ".." {
+			return nil, false
+		}
 		if _, alreadyRecorded := byRunID[runID]; alreadyRecorded {
 			continue
 		}

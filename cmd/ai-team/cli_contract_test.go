@@ -594,6 +594,48 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
+	t.Run("symlinked local peer disables subscription estimate", func(t *testing.T) {
+		const selectedRunID = "known"
+		const peerRunID = "peer"
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		writeEnvelope := func(dir, runID string, input, output int64) {
+			t.Helper()
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.Build(runID, "fixture-feature", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: input, TokensOutput: output})
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runsDir := filepath.Join(estimateRoot, ".ai-team", "runs")
+		writeEnvelope(filepath.Join(runsDir, selectedRunID), selectedRunID, 40, 60)
+		peerTarget := filepath.Join(t.TempDir(), peerRunID)
+		writeEnvelope(peerTarget, peerRunID, 400, 500)
+		if err := os.Symlink(peerTarget, filepath.Join(runsDir, peerRunID)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, selectedRunID)
+		if code != 0 {
+			t.Fatalf("usage with valid selected run failed: code=%d stderr=%s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Входные токены: 40") || !strings.Contains(stdout, "Выходные токены: 60") {
+			t.Fatalf("selected local usage should remain readable:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("a symlinked peer with 900 tokens must not be omitted from the denominator:\n%s", stdout)
+		}
+	})
+
 	t.Run("controller allocation survives pruned run evidence", func(t *testing.T) {
 		const selectedRunID = "cloud-known"
 		const peerRunID = "cloud-peer"

@@ -109,7 +109,7 @@ func TestBudgetConfigExecutionTimeKeysLoadFromYAML(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			content := "schema_version: 4\npipeline: [analyst]\nbudget:\n  " + test.field + ": 90m\n"
+			content := "schema_version: 5\ntemplate: budget-test\ntitle: Budget test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nbudget:\n  " + test.field + ": 90m\n"
 			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 				t.Fatal(err)
 			}

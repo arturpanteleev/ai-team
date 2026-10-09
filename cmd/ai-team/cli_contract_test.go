@@ -524,7 +524,7 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 		writeEnvelope("known", 40, 60)
 		writeEnvelope("peer", 200, 300)
-		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 4\npipeline: []\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 		stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, "known")

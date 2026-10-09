@@ -88,18 +88,23 @@ func TestPlanRejectsCredentialBearingOrQueryRemoteURLsWithoutEchoingSecrets(t *t
 }
 
 func TestPlanAcceptsOnlySupportedRemoteURLFormats(t *testing.T) {
+	localPathWithURIDelimiter := filepath.Join(t.TempDir(), "team:") + "//remote.git"
 	for name, remoteURL := range map[string]string{
-		"https":             "https://github.com/org/repo.git",
-		"http":              "http://git.example.test/org/repo.git",
-		"ssh with user":     "ssh://git@github.com/org/repo.git",
-		"ssh without user":  "ssh://git.example.test/org/repo.git",
-		"scp":               "git@github.com:org/repo.git",
-		"scp other user":    "ec2-user@host.example.test:org/repo.git",
-		"scp standard user": "user@example.test:org/repo.git",
-		"scp host only":     "host.example.test:org/repo.git",
-		"local bare path":   filepath.Join(t.TempDir(), "remote.git"),
+		"https":                         "https://github.com/org/repo.git",
+		"http":                          "http://git.example.test/org/repo.git",
+		"ssh with user":                 "ssh://git@github.com/org/repo.git",
+		"ssh without user":              "ssh://git.example.test/org/repo.git",
+		"scp":                           "git@github.com:org/repo.git",
+		"scp other user":                "ec2-user@host.example.test:org/repo.git",
+		"scp standard user":             "user@example.test:org/repo.git",
+		"scp host only":                 "host.example.test:org/repo.git",
+		"local bare path":               filepath.Join(t.TempDir(), "remote.git"),
+		"local path with URI delimiter": localPathWithURIDelimiter,
 	} {
 		t.Run("accept_"+name, func(t *testing.T) {
+			if name == "local path with URI delimiter" && runtime.GOOS == "windows" {
+				t.Skip("local path syntax with colon is platform-specific")
+			}
 			if err := validateRemoteURL(remoteURL); err != nil {
 				t.Fatalf("supported remote URL %q rejected: %v", remoteURL, err)
 			}

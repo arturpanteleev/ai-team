@@ -223,10 +223,13 @@ func validateRemoteURL(remoteURL string) error {
 	if strings.ContainsAny(remoteURL, "?#") {
 		return fmt.Errorf("delivery plan: remote_url с query или fragment запрещён")
 	}
+	if filepath.IsAbs(remoteURL) {
+		// Check local paths before URI syntax: an absolute path can contain
+		// "://" in a component (for example /tmp/team://remote.git). It is still
+		// a filesystem destination, not a URI with an unsupported scheme.
+		return nil
+	}
 	if !strings.Contains(remoteURL, "://") {
-		if filepath.IsAbs(remoteURL) {
-			return nil // Local bare repositories are useful delivery destinations too.
-		}
 		if !scpRemotePattern.MatchString(remoteURL) {
 			return fmt.Errorf("delivery plan: remote_url должен быть локальным путём или поддерживаемым SCP-style адресом [user@]host:path")
 		}

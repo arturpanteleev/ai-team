@@ -816,6 +816,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				if err != nil {
 					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
 				}
+				if recoveredClarification == nil {
+					resumedApproval, err = recoveredHumanInputApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+					if err != nil {
+						return RunResult{}, fmt.Errorf("resume human input: %w", err)
+					}
+				}
 			}
 		}
 		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions &&

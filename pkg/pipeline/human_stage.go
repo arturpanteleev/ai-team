@@ -317,7 +317,8 @@ func (rs *runState) finishedHumanAttempt(approvalValue *approval.PendingApproval
 	for index := len(rs.results) - 1; index >= 0; index-- {
 		result := rs.results[index]
 		if result.Name == stageID && result.Executor == "human" && !result.FinishedAt.IsZero() &&
-			!result.Superseded && result.ActorID == decision.ActorID && result.ActorRole == decision.ActorRole &&
+			result.HumanInputApprovalID == approvalValue.ID && !result.Superseded &&
+			result.ActorID == decision.ActorID && result.ActorRole == decision.ActorRole &&
 			!result.FinishedAt.Before(decision.DecidedAt) {
 			return result, true
 		}
@@ -339,7 +340,10 @@ func validateRecordedHumanInputDecision(replayed evidence.ReplayedRun, value app
 		if decision.ID != value.ID {
 			continue
 		}
-		if decision.Kind != string(approval.KindInput) || decision.DecisionSetSHA256 == "" {
+		if decision.Kind != string(approval.KindInput) || decision.DecisionSetSHA256 == "" ||
+			decision.AttemptID != value.AttemptID || decision.SubjectHash != value.SubjectHash ||
+			decision.FromStage != value.FromStage || decision.ToStage != value.ToStage ||
+			decision.Trigger != value.Trigger || decision.Action != value.ResolvedAction {
 			return fmt.Errorf("human input approval %s is not bound to a complete verified decision event", value.ID)
 		}
 		digest, err := evidence.DecisionSetDigest(value.Decisions)
@@ -351,7 +355,46 @@ func validateRecordedHumanInputDecision(replayed evidence.ReplayedRun, value app
 		}
 		return nil
 	}
-	return nil
+	return fmt.Errorf("human input approval %s has no verified decision event", value.ID)
+}
+
+// recoveredHumanInputApproval restores an input after resume cleared the
+// lifecycle's PendingApprovalID. Prefer the verified human attempt binding;
+// when the crash happened before attempt_started, fall back to the latest
+// hash-chained human_input decision for the current stage.
+func recoveredHumanInputApproval(store ApprovalStore, runID, stageID string, replayed evidence.ReplayedRun) (*approval.PendingApproval, error) {
+	load := func(approvalID, expectedAttemptID string) (*approval.PendingApproval, error) {
+		value, err := store.Load(runID, approvalID)
+		if err != nil {
+			return nil, fmt.Errorf("load recovered human input %s: %w", approvalID, err)
+		}
+		if value.Kind != approval.KindInput || value.Trigger != humanInputTrigger || value.FromStage != stageID ||
+			value.Status != approval.StatusResolved || value.AttemptID == "" ||
+			(expectedAttemptID != "" && value.AttemptID != expectedAttemptID) {
+			return nil, fmt.Errorf("recovered human input %s does not match stage %s", approvalID, stageID)
+		}
+		if err := validateRecordedHumanInputDecision(replayed, value); err != nil {
+			return nil, err
+		}
+		return &value, nil
+	}
+	for index := len(replayed.Attempts) - 1; index >= 0; index-- {
+		attempt := replayed.Attempts[index]
+		if attempt.Stage != stageID || attempt.Executor != "human" || attempt.HumanInputApprovalID == "" ||
+			attempt.Superseded || transitionRecorded(replayed, attempt.AttemptID) {
+			continue
+		}
+		return load(attempt.HumanInputApprovalID, "")
+	}
+	for index := len(replayed.ApprovalDecisions) - 1; index >= 0; index-- {
+		decision := replayed.ApprovalDecisions[index]
+		if decision.Kind != string(approval.KindInput) || decision.FromStage != stageID || decision.Trigger != humanInputTrigger ||
+			transitionRecorded(replayed, decision.AttemptID) {
+			continue
+		}
+		return load(decision.ID, decision.AttemptID)
+	}
+	return nil, nil
 }
 
 func transitionRecorded(replayed evidence.ReplayedRun, attemptID string) bool {

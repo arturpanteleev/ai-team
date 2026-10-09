@@ -97,6 +97,9 @@ func TestHumanOutputRetryIsIdempotentAndConflictsFailClosed(t *testing.T) {
 func TestRecordedHumanInputDecisionBindsExactSubmittedBytes(t *testing.T) {
 	value := approval.PendingApproval{
 		ID: "approval-human-input", Kind: approval.KindInput,
+		AttemptID: "attempt-human-input", FromStage: "product_spec", ToStage: "product_spec",
+		Trigger: humanInputTrigger, SubjectHash: strings.Repeat("a", 64),
+		Status: approval.StatusResolved, ResolvedAction: "submit",
 		Decisions: []approval.Decision{{
 			ApprovalID: "approval-human-input", ActorID: "owner", ActorRole: "product_owner",
 			Action: "submit", Comment: "# Original markdown\n", SubjectHash: strings.Repeat("a", 64), DecidedAt: time.Now().UTC(),
@@ -108,6 +111,8 @@ func TestRecordedHumanInputDecisionBindsExactSubmittedBytes(t *testing.T) {
 	}
 	replayed := evidence.ReplayedRun{ApprovalDecisions: []evidence.ReplayedApprovalDecision{{
 		ID: value.ID, Kind: string(approval.KindInput), DecisionSetSHA256: digest,
+		AttemptID: value.AttemptID, FromStage: value.FromStage, ToStage: value.ToStage,
+		Trigger: value.Trigger, SubjectHash: value.SubjectHash, Action: value.ResolvedAction,
 	}}}
 	if err := validateRecordedHumanInputDecision(replayed, value); err != nil {
 		t.Fatalf("exact decision should match verified event: %v", err)
@@ -115,6 +120,11 @@ func TestRecordedHumanInputDecisionBindsExactSubmittedBytes(t *testing.T) {
 	value.Decisions[0].Comment = "# Changed markdown\n"
 	if err := validateRecordedHumanInputDecision(replayed, value); err == nil {
 		t.Fatal("changed input bytes must not match the verified decision event")
+	}
+	value.Decisions[0].Comment = "# Original markdown\n"
+	value.AttemptID = "different-attempt"
+	if err := validateRecordedHumanInputDecision(replayed, value); err == nil {
+		t.Fatal("changed approval identity must not match the verified decision event")
 	}
 }
 
@@ -253,5 +263,184 @@ outputs:
 				t.Fatalf("implementation attempt must consume the submitted spec and publish its link: %+v", manifest)
 			}
 		}
+	}
+}
+
+type humanCrashEvidenceFactory struct {
+	point   string
+	crashed bool
+}
+
+func (f *humanCrashEvidenceFactory) Start(root string, manifest evidence.RunManifest) (EvidenceStore, error) {
+	store, err := (filesystemEvidenceStoreFactory{}).Start(root, manifest)
+	if err != nil {
+		return nil, err
+	}
+	return &humanCrashEvidenceStore{EvidenceStore: store, factory: f}, nil
+}
+
+func (f *humanCrashEvidenceFactory) Resume(root, runID string) (EvidenceStore, evidence.RunManifest, evidence.ReplayedRun, error) {
+	store, manifest, replayed, err := (filesystemEvidenceStoreFactory{}).Resume(root, runID)
+	if err != nil {
+		return nil, evidence.RunManifest{}, evidence.ReplayedRun{}, err
+	}
+	return &humanCrashEvidenceStore{EvidenceStore: store, factory: f}, manifest, replayed, nil
+}
+
+type humanCrashEvidenceStore struct {
+	EvidenceStore
+	factory *humanCrashEvidenceFactory
+}
+
+func (s *humanCrashEvidenceStore) Append(event evidence.Event) error {
+	if !s.factory.crashed && s.factory.point == "before-transition" && event.Type == "transition_selected" {
+		s.factory.crashed = true
+		panic("simulated crash before transition_selected")
+	}
+	return s.EvidenceStore.Append(event)
+}
+
+func (s *humanCrashEvidenceStore) PublishAttempt(manifest evidence.AttemptManifest, artifactRoot string, inputs, outputs []evidence.Artifact) error {
+	if !s.factory.crashed && s.factory.point == "before-publish" {
+		s.factory.crashed = true
+		panic("simulated crash after output write before attempt publish")
+	}
+	return s.EvidenceStore.PublishAttempt(manifest, artifactRoot, inputs, outputs)
+}
+
+func humanApproveCrashFixture(t *testing.T) (string, *config.Config, *agent.Registry, *approval.Store, string, approval.PendingApproval) {
+	t.Helper()
+	dir := env(t)
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "human-crash-recovery-test",
+		Title:         "Human crash recovery test",
+		Stages: []config.TemplateStage{{
+			ID: "intent", Title: "Intent", Function: "business_owner", Result: "approve", Executor: "human", Confirm: "auto",
+		}},
+	}
+	registry := agent.NewFS(fstest.MapFS{})
+	p := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	result, runErr := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "Approve the feature", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(runErr, &required) {
+		t.Fatalf("initial human stage should wait for input: result=%+v err=%v", result, runErr)
+	}
+	pending, err := store.Load(result.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(result.RunID, pending.ID, approval.Decision{
+		ActorID: "alice", ActorRole: "business_owner", Action: "approve", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return dir, cfg, registry, store, result.RunID, pending
+}
+
+func resumeHumanCrashRun(t *testing.T, p *Pipeline, dir, runID string) (RunResult, error) {
+	t.Helper()
+	return p.RunWithResult(context.Background(), RunConfig{ResumeRunID: runID, TargetDir: dir})
+}
+
+func expectHumanCrash(t *testing.T, action func()) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("expected simulated controller crash")
+		}
+	}()
+	action()
+}
+
+func TestHumanInputResumeRecoversAfterOutputBeforeAttemptFinish(t *testing.T) {
+	dir, cfg, registry, store, runID, pending := humanApproveCrashFixture(t)
+	factory := &humanCrashEvidenceFactory{point: "before-publish"}
+	crashing := New(cfg, registry, WithApprovalStore(store), WithEvidenceStoreFactory(factory), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	expectHumanCrash(t, func() {
+		_, _ = resumeHumanCrashRun(t, crashing, dir, runID)
+	})
+	if !factory.crashed {
+		t.Fatal("crash was not injected at the pre-finish boundary")
+	}
+	outputPath := filepath.Join(dir, ".ai-team", "artifacts", "feat", "human", "intent.json")
+	before, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("human output should already exist at injected crash: %v", err)
+	}
+
+	completed, err := resumeHumanCrashRun(t, New(cfg, registry,
+		WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{})), dir, runID)
+	if err != nil || completed.Outcome != workflow.RunCompleted {
+		t.Fatalf("resume did not recover resolved input after an interrupted attempt: result=%+v err=%v", completed, err)
+	}
+	after, err := os.ReadFile(outputPath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("exact approve output retry changed immutable bytes: before=%q after=%q err=%v", before, after, err)
+	}
+	approvals, err := store.List(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputApprovals := 0
+	for _, value := range approvals {
+		if value.Kind == approval.KindInput && value.FromStage == "intent" {
+			inputApprovals++
+			if value.ID != pending.ID || value.Status != approval.StatusResolved {
+				t.Fatalf("resume replaced the original decision: %+v", value)
+			}
+		}
+	}
+	if inputApprovals != 1 {
+		t.Fatalf("expected exactly one input approval after recovery, got %d", inputApprovals)
+	}
+	replayed, err := evidence.ReplayEventLog(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completedHumanAttempts int
+	for _, attempt := range replayed.Attempts {
+		if attempt.Stage == "intent" && attempt.Executor == "human" && !attempt.Superseded && attempt.State.Outcome == workflow.OutcomePassed {
+			completedHumanAttempts++
+		}
+	}
+	if completedHumanAttempts != 1 {
+		t.Fatalf("recovery should publish exactly one successful human attempt, got %+v", replayed.Attempts)
+	}
+}
+
+func TestHumanInputResumeReusesFinishedAttemptBeforeTransition(t *testing.T) {
+	dir, cfg, registry, store, runID, _ := humanApproveCrashFixture(t)
+	factory := &humanCrashEvidenceFactory{point: "before-transition"}
+	crashing := New(cfg, registry, WithApprovalStore(store), WithEvidenceStoreFactory(factory), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	expectHumanCrash(t, func() {
+		_, _ = resumeHumanCrashRun(t, crashing, dir, runID)
+	})
+	if !factory.crashed {
+		t.Fatal("crash was not injected after attempt finish and before transition")
+	}
+	completed, err := resumeHumanCrashRun(t, New(cfg, registry,
+		WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{})), dir, runID)
+	if err != nil || completed.Outcome != workflow.RunCompleted {
+		t.Fatalf("resume did not reuse the finished human attempt: result=%+v err=%v", completed, err)
+	}
+	replayed, err := evidence.ReplayEventLog(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stageAttempts int
+	for _, attempt := range replayed.Attempts {
+		if attempt.Stage == "intent" && attempt.Executor == "human" {
+			stageAttempts++
+		}
+	}
+	if stageAttempts != 1 {
+		t.Fatalf("finished attempt must be reused without a duplicate; attempts=%+v", replayed.Attempts)
 	}
 }

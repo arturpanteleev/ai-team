@@ -40,7 +40,7 @@ type sessionResponse struct {
 }
 
 func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudidentity.Principal, int64, error) {
-	if s.authenticator == nil {
+	if s.authenticator == nil || s.localAuth {
 		return principal, 0, nil
 	}
 	member, err := s.store.TeamMember(principal.ActorID)
@@ -80,7 +80,10 @@ func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudi
 }
 
 func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSONResponse(w, http.StatusOK, map[string]bool{"authentication_required": s.authenticator != nil})
+	writeJSONResponse(w, http.StatusOK, map[string]bool{
+		"authentication_required": s.authenticator != nil,
+		"team_management_enabled": s.authenticator != nil && !s.localAuth,
+	})
 }
 
 func (s *Server) handleCurrentIdentity(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +95,10 @@ func (s *Server) handleCurrentIdentity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	if s.authenticator == nil {
+		http.Error(w, "требуется Bearer token", http.StatusUnauthorized)
+		return
+	}
 	// An authenticated browser recovers its CSRF token from the HttpOnly
 	// session cookie after reload. This endpoint is deliberately same-origin:
 	// don't disclose the token to a request that cannot prove it came from this
@@ -155,7 +162,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	s.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: sessionToken, Path: "/",
-		HttpOnly: true, Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		HttpOnly: true, Secure: requestScheme(r) == "https",
 		SameSite: http.SameSiteStrictMode,
 	})
 	response := sessionResponse{CSRFToken: csrfToken}
@@ -170,17 +177,17 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 func isSameOriginSessionRequest(r *http.Request) bool {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		u, err := url.Parse(origin)
-		requestScheme := "http"
-		if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
-			requestScheme = "https"
-		}
-		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme
+		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) && u.Scheme == requestScheme(r)
 	}
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin")
 }
 
 func (s *Server) writeSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authenticator == nil {
+			http.Error(w, "требуется локальный или cloud bearer token", http.StatusUnauthorized)
+			return
+		}
 		session, ok := s.requestSession(r)
 		if !ok {
 			http.Error(w, "требуется web session", http.StatusUnauthorized)
@@ -225,7 +232,7 @@ func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
 		delete(s.sessions, cookie.Value)
 		return browserSession{}, false
 	}
-	if s.authenticator != nil && session.Principal.ActorID != "" {
+	if s.authenticator != nil && !s.localAuth && session.Principal.ActorID != "" {
 		member, err := s.store.ValidateTeamSession(session.Principal.ActorID, session.SessionEpoch)
 		if err != nil || member == nil {
 			delete(s.sessions, cookie.Value)
@@ -237,13 +244,56 @@ func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
 
 func (s *Server) authorize(r *http.Request, permission cloudidentity.Permission, role cloudidentity.Role) error {
 	if s.authenticator == nil {
-		return nil
+		return errors.New("требуется аутентификация")
 	}
 	session, ok := s.requestSession(r)
 	if !ok {
 		return errors.New("требуется web session")
 	}
 	return cloudidentity.Authorize(session.Principal, permission, role)
+}
+
+func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (cloudidentity.Role, error) {
+	if s.controller == nil {
+		return cloudidentity.RoleProductOwner, nil
+	}
+	values, err := s.controller.Approvals(runID)
+	if err != nil {
+		return "", err
+	}
+	for _, pending := range values {
+		if pending.ID != approvalID {
+			continue
+		}
+		var payload struct {
+			Kind string `json:"kind"`
+		}
+		_ = json.Unmarshal(pending.Payload, &payload)
+		if action == "approve_spec" || payload.Kind == "agreed_spec" {
+			return cloudidentity.RoleProductOwner, nil
+		}
+		votedRoles := make(map[string]bool)
+		for _, decision := range pending.Decisions {
+			if decision.ActorID == actorID {
+				votedRoles[decision.ActorRole] = true
+			}
+		}
+		for _, roleName := range pending.RequiredRoles {
+			role := cloudidentity.Role(roleName)
+			if role == cloudidentity.RoleProductOwner || role == cloudidentity.RoleArchitect ||
+				role == cloudidentity.RoleDeveloper || role == cloudidentity.RoleReviewer ||
+				role == cloudidentity.RoleQA || role == cloudidentity.RoleReleaseManager {
+				if votedRoles[roleName] {
+					continue
+				}
+				return role, nil
+			}
+		}
+		break
+	}
+	// If no pending approval was found, the controller will reject the command;
+	// use the local default only so authorization remains server-derived.
+	return cloudidentity.RoleProductOwner, nil
 }
 
 func constantTimeEqual(actual, expected string) bool {
@@ -400,9 +450,23 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actorID := command.ActorID
+	actorRole := cloudidentity.Role(command.ActorRole)
 	if s.authenticator != nil {
-		role := cloudidentity.Role(command.ActorRole)
-		if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
+		if s.localAuth {
+			session, ok := s.requestSession(r)
+			if !ok {
+				http.Error(w, "требуется web session", http.StatusUnauthorized)
+				return
+			}
+			actorID = session.Principal.ActorID
+			var err error
+			actorRole, err = s.localApprovalRole(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"), command.Action, actorID)
+			if err != nil {
+				http.Error(w, "не удалось определить назначенную роль approval", http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := s.authorize(r, cloudidentity.PermissionDecision, actorRole); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
@@ -443,7 +507,11 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "согласование ТЗ не назначено Product Owner", http.StatusConflict)
 					return
 				}
-				if command.ActorRole != "product_owner" {
+				if command.Action != "approve_spec" {
+					http.Error(w, "согласование ТЗ требует действия approve_spec", http.StatusConflict)
+					return
+				}
+				if actorRole != cloudidentity.RoleProductOwner {
 					http.Error(w, "согласовать ТЗ может только Product Owner", http.StatusForbidden)
 					return
 				}
@@ -497,7 +565,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	value, err := s.controller.Decide(
 		chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"),
 		approval.Decision{
-			ActorID: actorID, ActorRole: command.ActorRole,
+			ActorID: actorID, ActorRole: string(actorRole),
 			Action: command.Action, Comment: command.Comment,
 			SubjectHash:             command.SubjectHash,
 			ArtifactRevisions:       selectedRevisions,

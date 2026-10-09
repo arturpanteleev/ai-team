@@ -18,6 +18,10 @@ Reviewer, QA и Release Manager в нормализованном машинно
 Cloud approval decision MUST использовать actor ID и роли
 аутентифицированного principal.
 
+Local approval decision MUST использовать фиксированный actor ID из local
+principal и server-selected роль из required roles найденного approval;
+значения `actor_id` и `actor_role` из request body MUST игнорироваться.
+
 #### Scenario: Подмена actor ID
 
 - **КОГДА** command пытается передать другой actor ID
@@ -28,6 +32,11 @@ Cloud approval decision MUST использовать actor ID и роли
 
 - **КОГДА** principal выбирает required role, которой у него нет
 - **ТОГДА** decision MUST быть отклонён без изменения approval
+
+#### Scenario: Локальный клиент подменяет роль
+
+- **КОГДА** аутентифицированный local client отправляет `actor_role`, отличающийся от роли, назначенной approval
+- **ТОГДА** server MUST записать server-selected роль и trusted local actor ID
 
 ### Requirement: RBAC control commands
 

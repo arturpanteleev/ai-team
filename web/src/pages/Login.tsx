@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { usePageTitle } from '../hooks/usePageTitle';
 import styles from './Login.module.css';
 
-export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Promise<void>; onActivate: (token: string) => Promise<void> }) {
+export function Login({ allowActivation, onLogin, onActivate }: { allowActivation: boolean; onLogin: (token: string) => Promise<void>; onActivate: (token: string) => Promise<void> }) {
   usePageTitle('Вход');
   const [token, setToken] = useState('');
   const [inviteToken, setInviteToken] = useState('');
@@ -42,7 +42,7 @@ export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Pro
           {pending ? 'Проверка…' : 'Войти'}
         </button>
       </form>
-      <section className={styles.card}>
+      {allowActivation && <section className={styles.card}>
         <h2>Есть код приглашения?</h2>
         <p>Активируйте приглашение, чтобы получить токен доступа к команде.</p>
         <textarea aria-label="Код приглашения" value={inviteToken} onChange={event => setInviteToken(event.target.value)} />
@@ -50,7 +50,7 @@ export function Login({ onLogin, onActivate }: { onLogin: (token: string) => Pro
         <button type="button" disabled={pending || inviteToken.trim() === ''} onClick={() => void activate()}>
           {pending ? 'Активация…' : 'Активировать приглашение'}
         </button>
-      </section>
+      </section>}
     </main>
   );
 }

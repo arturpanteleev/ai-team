@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,79 @@ func TestConfiguredWorkerProcessOptions(t *testing.T) {
 		}
 		if engineErr != nil {
 			t.Fatalf("available Linux bubblewrap option rejected: %v", engineErr)
+		}
+	})
+}
+
+func TestLocalWebTokenIsPersistedWithPrivatePermissions(t *testing.T) {
+	target := t.TempDir()
+	token, path, err := loadOrCreateLocalWebToken(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != 43 || path != filepath.Join(target, localWebTokenRelativePath) {
+		t.Fatalf("unexpected local token or path: token length=%d path=%q", len(token), path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("token permissions = %04o, want 0600", info.Mode().Perm())
+	}
+	second, secondPath, err := loadOrCreateLocalWebToken(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != token || secondPath != path {
+		t.Fatal("local token was not stable across restarts")
+	}
+	var output bytes.Buffer
+	if err := printLocalWebToken(&output, token, path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), token) || !strings.Contains(output.String(), path) {
+		t.Fatalf("local token output omitted its credential or file path: %q", output.String())
+	}
+}
+
+func TestLocalWebTokenRejectsSymlinkAndLoosePermissions(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		target := t.TempDir()
+		controlDir := filepath.Join(target, ".ai-team")
+		if err := os.Mkdir(controlDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		victim := filepath.Join(target, "victim")
+		if err := os.WriteFile(victim, []byte("secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, filepath.Join(controlDir, "web.token")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadOrCreateLocalWebToken(target); err == nil {
+			t.Fatal("symlink token file must be rejected")
+		}
+		data, err := os.ReadFile(victim)
+		if err != nil || string(data) != "secret\n" {
+			t.Fatalf("symlink target was modified: data=%q err=%v", data, err)
+		}
+	})
+
+	t.Run("loose permissions", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX permission bits")
+		}
+		target := t.TempDir()
+		controlDir := filepath.Join(target, ".ai-team")
+		if err := os.Mkdir(controlDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(controlDir, "web.token"), []byte(strings.Repeat("x", 43)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadOrCreateLocalWebToken(target); err == nil || !strings.Contains(err.Error(), "0600") {
+			t.Fatalf("loose permissions must fail closed, got %v", err)
 		}
 	})
 }

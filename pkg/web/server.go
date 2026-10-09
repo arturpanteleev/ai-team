@@ -66,6 +66,45 @@ func WithAuthenticator(verifier IdentityVerifier) ServerOption {
 	return func(server *Server) { server.authenticator = verifier }
 }
 
+// LocalAuthenticator verifies the bearer token generated for a loopback web
+// server. Its identity and available workflow roles are fixed by the server.
+type LocalAuthenticator struct {
+	token     string
+	principal cloudidentity.Principal
+}
+
+// NewLocalAuthenticator creates a verifier for a locally generated token.
+func NewLocalAuthenticator(token string) (*LocalAuthenticator, error) {
+	if len(token) < 32 || strings.ContainsAny(token, "\r\n\x00") {
+		return nil, errors.New("local web token must contain at least 32 characters")
+	}
+	principal, err := cloudidentity.NewPrincipal("local-user", []cloudidentity.Role{
+		cloudidentity.RoleProductOwner, cloudidentity.RoleArchitect,
+		cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer,
+		cloudidentity.RoleQA, cloudidentity.RoleReleaseManager,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &LocalAuthenticator{token: token, principal: principal}, nil
+}
+
+func (a *LocalAuthenticator) Verify(token string) (cloudidentity.Principal, error) {
+	if a == nil || !constantTimeEqual(token, a.token) {
+		return cloudidentity.Principal{}, errors.New("invalid local web token")
+	}
+	return a.principal, nil
+}
+
+// WithLocalAuthenticator enables local mode, where decision roles are derived
+// from the matching server-side approval rather than the request body.
+func WithLocalAuthenticator(verifier *LocalAuthenticator) ServerOption {
+	return func(server *Server) {
+		server.authenticator = verifier
+		server.localAuth = true
+	}
+}
+
 type browserSession struct {
 	CSRFToken    string
 	Principal    cloudidentity.Principal
@@ -87,6 +126,7 @@ type Server struct {
 	eventWorkers   sync.WaitGroup
 	controller     RunController
 	authenticator  IdentityVerifier
+	localAuth      bool
 	sessions       map[string]browserSession
 	sessionMu      sync.Mutex
 	streamID       string
@@ -169,7 +209,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
-	if srv.authenticator == nil {
+	if srv.authenticator == nil || srv.localAuth {
 		srv.router.Use(sameOriginMiddleware)
 	} else {
 		srv.router.Use(authenticatedOriginMiddleware)

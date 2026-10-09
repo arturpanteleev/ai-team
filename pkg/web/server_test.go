@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -801,7 +802,17 @@ func newTestServer(t *testing.T) (*Server, string) {
 
 func authorizedRequest(t *testing.T, srv *Server, method, target, body string) *http.Request {
 	t.Helper()
+	const testLocalToken = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	if srv.authenticator == nil {
+		verifier, err := NewLocalAuthenticator(testLocalToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.authenticator = verifier
+		srv.localAuth = true
+	}
 	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
+	sessionRequest.Header.Set("Authorization", "Bearer "+testLocalToken)
 	sessionWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(sessionWriter, sessionRequest)
 	if sessionWriter.Code != http.StatusOK {
@@ -870,12 +881,117 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	sessionRequest := newLoopbackRequest("GET", "/api/session", nil)
 	sessionWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(sessionWriter, sessionRequest)
+	if sessionWriter.Code != http.StatusUnauthorized {
+		t.Fatalf("session bootstrap without authenticator: %d %s", sessionWriter.Code, sessionWriter.Body.String())
+	}
 	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
-	noCSRF.AddCookie(sessionWriter.Result().Cookies()[0])
+	noCSRF.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "forged-session"})
+	noCSRF.Header.Set("X-CSRF-Token", "forged-csrf")
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, noCSRF)
-	if writer.Code != http.StatusForbidden {
-		t.Fatalf("без CSRF: %d", writer.Code)
+	if writer.Code != http.StatusUnauthorized {
+		t.Fatalf("без authenticator и bearer token: %d", writer.Code)
+	}
+}
+
+func TestLocalWebTokenIsRequiredAndApprovalRoleComesFromServer(t *testing.T) {
+	const token = "local-web-token-for-tests-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-local", RunID: "run-local", AttemptID: "attempt-local",
+		Status: approval.StatusPending, RequiredRoles: []string{"reviewer"},
+		Actions: []string{"approve"}, SubjectHash: testSubjectHash,
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	withoutToken := newLoopbackRequest(http.MethodPost, "/api/runs/run-local/approvals/approval-local/decisions", strings.NewReader(`{"action":"approve"}`))
+	unauthenticated := httptest.NewRecorder()
+	srv.router.ServeHTTP(unauthenticated, withoutToken)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("write without token must be rejected: %d %s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+
+	invalidLogin := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	invalidLogin.Header.Set("Authorization", "Bearer invalid-local-token")
+	invalidResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(invalidResponse, invalidLogin)
+	if invalidResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid local token must be rejected: %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+
+	request := authenticatedRequest(t, srv, token, http.MethodPost,
+		"/api/runs/run-local/approvals/approval-local/decisions",
+		`{"actor_id":"spoofed","actor_role":"release_manager","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("local decision: %d %s", response.Code, response.Body.String())
+	}
+	if controller.decision.ActorID != "local-user" || controller.decision.ActorRole != "reviewer" {
+		t.Fatalf("local identity and role must come from server: %+v", controller.decision)
+	}
+}
+
+func TestLocalAuthenticationKeepsLoopbackOriginAllowlist(t *testing.T) {
+	const token = "local-web-token-origin-check-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	request := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	request.Host = "evil.example"
+	request.Header.Set("Origin", "http://evil.example")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("local auth must reject matching hostile Host/Origin to prevent DNS rebinding, got %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLocalWebQuorumAllAssignsNextUnvotedRequiredRole(t *testing.T) {
+	const token = "local-web-token-for-quorum-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-quorum", RunID: "run-quorum", Status: approval.StatusPending,
+		Quorum: approval.QuorumAll, RequiredRoles: []string{"architect", "reviewer"},
+		Actions: []string{"approve"}, SubjectHash: testSubjectHash,
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	endpoint := "/api/runs/run-quorum/approvals/approval-quorum/decisions"
+	body := `{"actor_id":"spoofed","actor_role":"product_owner","action":"approve","subject_hash":"` + testSubjectHash + `"}`
+	first := authenticatedRequest(t, srv, token, http.MethodPost, endpoint, body)
+	firstWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstWriter, first)
+	if firstWriter.Code != http.StatusOK || controller.decision.ActorRole != "architect" {
+		t.Fatalf("first local vote should use first unvoted required role: code=%d decision=%+v body=%s", firstWriter.Code, controller.decision, firstWriter.Body.String())
+	}
+	controller.approvals[0].Decisions = []approval.Decision{{ActorID: controller.decision.ActorID, ActorRole: controller.decision.ActorRole}}
+	second := authenticatedRequest(t, srv, token, http.MethodPost, endpoint, body)
+	secondWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondWriter, second)
+	if secondWriter.Code != http.StatusOK || controller.decision.ActorRole != "reviewer" {
+		t.Fatalf("second local vote should use the next unvoted required role: code=%d decision=%+v body=%s", secondWriter.Code, controller.decision, secondWriter.Body.String())
 	}
 }
 
@@ -901,6 +1017,7 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 
 	login := newLoopbackRequest(http.MethodGet, "/api/session", nil)
 	login.Header.Set("Authorization", "Bearer "+token)
+	login.Header.Set("X-Forwarded-Proto", "https")
 	loginWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(loginWriter, login)
 	if loginWriter.Code != http.StatusOK {
@@ -911,10 +1028,14 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 		t.Fatal(err)
 	}
 	cookie := loginWriter.Result().Cookies()[0]
+	if !cookie.Secure {
+		t.Fatal("session cookie behind TLS-terminating ingress must be Secure")
+	}
 
 	bootstrap := newLoopbackRequest(http.MethodGet, "/api/session", nil)
 	bootstrap.AddCookie(cookie)
-	bootstrap.Header.Set("Origin", "http://127.0.0.1")
+	bootstrap.Header.Set("Origin", "https://127.0.0.1")
+	bootstrap.Header.Set("X-Forwarded-Proto", "https")
 	bootstrapWriter := httptest.NewRecorder()
 	srv.router.ServeHTTP(bootstrapWriter, bootstrap)
 	if bootstrapWriter.Code != http.StatusOK {
@@ -1032,11 +1153,12 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, decision)
 	if writer.Code != http.StatusOK || controller.runID != "run-1" ||
-		controller.approvalID != "approval-1" || controller.decision.ActorID != "user-1" {
+		controller.approvalID != "approval-1" || controller.decision.ActorID != "local-user" ||
+		controller.decision.ActorRole != "product_owner" {
 		t.Fatalf("decision: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
-	if controller.decision.ControllerAuthenticated {
-		t.Fatal("unauthenticated local server must not mark a decision as controller-authenticated")
+	if !controller.decision.ControllerAuthenticated {
+		t.Fatal("authenticated local token decision must retain controller authorization provenance")
 	}
 }
 
@@ -1161,18 +1283,18 @@ func TestSpecificationApprovalRequiresProductOwnerRoleAndPayload(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 	endpoint := "/api/runs/run-1/approvals/approval-spec/decisions"
-	nonProductOwner := authorizedRequest(t, srv, "POST", endpoint,
+	spoofedRole := authorizedRequest(t, srv, "POST", endpoint,
 		`{"actor_id":"user-1","actor_role":"qa","action":"approve_spec","subject_hash":"`+testSubjectHash+`"}`)
 	writer := httptest.NewRecorder()
-	srv.router.ServeHTTP(writer, nonProductOwner)
-	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
-		t.Fatalf("approve_spec должен быть запрещён другой роли: code=%d controller=%+v", writer.Code, controller)
+	srv.router.ServeHTTP(writer, spoofedRole)
+	if writer.Code != http.StatusOK || controller.decision.ActorRole != "product_owner" || controller.decision.ActorID != "local-user" {
+		t.Fatalf("local server must ignore spoofed actor and assign Product Owner: code=%d controller=%+v", writer.Code, controller)
 	}
 	legacyAction := authorizedRequest(t, srv, "POST", endpoint,
 		`{"actor_id":"user-1","actor_role":"qa","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, legacyAction)
-	if writer.Code != http.StatusForbidden || controller.approvalID != "" {
+	if writer.Code != http.StatusConflict {
 		t.Fatalf("Product Owner role check нельзя обойти общим approve action: code=%d controller=%+v", writer.Code, controller)
 	}
 	productOwner := authorizedRequest(t, srv, "POST", endpoint,
@@ -1584,7 +1706,7 @@ func TestRetryDeliveryFailureIsProjectedSeparatelyFromCompletedRun(t *testing.T)
 		t.Fatalf("retry failure status=%d body=%s", retry.Code, retry.Body.String())
 	}
 	details := httptest.NewRecorder()
-	srv.router.ServeHTTP(details, newLoopbackRequest(http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), nil))
+	srv.router.ServeHTTP(details, authorizedRequest(t, srv, http.MethodGet, "/api/pipelines/"+fmt.Sprint(run.ID), ""))
 	var response struct {
 		Run      store.PipelineRun     `json:"run"`
 		Delivery webDeliveryProjection `json:"delivery"`
@@ -1877,6 +1999,81 @@ func TestSameOriginMiddlewareAllowsLoopbackRequests(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("loopback host %q must not be rejected, got 403", host)
 		}
+	}
+}
+
+func TestSameOriginMiddlewareRequiresMatchingSchemeHostAndEffectivePort(t *testing.T) {
+	handler := sameOriginMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	tests := []struct {
+		name           string
+		host           string
+		origin         string
+		tls            bool
+		forwardedProto string
+		want           int
+	}{
+		{name: "rejects another local port", host: "localhost:8080", origin: "http://localhost:3000", want: http.StatusForbidden},
+		{name: "ordinary local HTTP accepts only matching HTTP origin", host: "localhost:8080", origin: "http://localhost:8080", want: http.StatusNoContent},
+		{name: "accepts implicit HTTP default port", host: "localhost", origin: "http://localhost:80", want: http.StatusNoContent},
+		{name: "accepts explicit HTTP default port", host: "localhost:80", origin: "http://localhost", want: http.StatusNoContent},
+		{name: "rejects wrong scheme", host: "localhost:443", origin: "https://localhost:443", want: http.StatusForbidden},
+		{name: "accepts implicit HTTPS default port", host: "localhost:443", origin: "https://localhost", tls: true, want: http.StatusNoContent},
+		{name: "rejects HTTP origin on HTTPS request", host: "localhost:443", origin: "http://localhost:443", tls: true, want: http.StatusForbidden},
+		{name: "accepts TLS terminated at ingress", host: "localhost:443", origin: "https://localhost", forwardedProto: " https ", want: http.StatusNoContent},
+		{name: "TLS terminated at ingress still rejects another port", host: "localhost:443", origin: "https://localhost:8443", forwardedProto: "https", want: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+			req.Host = tt.host
+			if tt.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			if tt.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
+			}
+			req.Header.Set("Origin", tt.origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status = %d, want %d", w.Code, tt.want)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedOriginMiddlewareStillRequiresSameOrigin(t *testing.T) {
+	handler := authenticatedOriginMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tt := range []struct {
+		name           string
+		host           string
+		origin         string
+		forwardedProto string
+		want           int
+	}{
+		{name: "different port rejected", host: "app.example:8080", origin: "http://app.example:3000", want: http.StatusForbidden},
+		{name: "same origin accepted", host: "app.example:8080", origin: "http://app.example:8080", want: http.StatusNoContent},
+		{name: "forwarded HTTPS origin accepted", host: "app.example:443", origin: "https://app.example", forwardedProto: "https", want: http.StatusNoContent},
+		{name: "forwarded HTTPS still rejects another port", host: "app.example:443", origin: "https://app.example:8443", forwardedProto: "https", want: http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://app.example/", nil)
+			req.Host = tt.host
+			req.Header.Set("Origin", tt.origin)
+			if tt.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status = %d, want %d", w.Code, tt.want)
+			}
+		})
 	}
 }
 

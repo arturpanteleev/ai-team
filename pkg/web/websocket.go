@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,20 +17,16 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Same-origin: пустой Origin (не-браузерные клиенты) разрешён; иначе
-	// Origin должен резолвиться на loopback-хост — сравнение с r.Host не
-	// защищает от DNS rebinding, т.к. оба заголовка одинаково отражают
-	// домен атакующего при rebind (см. isLoopbackHostname).
+	// Empty Origin is allowed for non-browser clients. Browser Origins must
+	// match the request scheme, hostname and effective port; local-mode DNS
+	// rebinding is separately rejected by sameOriginMiddleware's loopback
+	// allow-list.
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return true
 		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		return isLoopbackHostname(u.Host) || strings.EqualFold(u.Host, r.Host)
+		return originMatchesRequest(r, origin)
 	},
 }
 

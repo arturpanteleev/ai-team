@@ -15,6 +15,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -245,7 +246,7 @@ func graphTerminalError(target, stage string, cause error) error {
 	}
 }
 
-func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry, totalStages int) ([]notifier.StageResult, runtime.Usage, bool, error) {
+func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry, cfg *config.Config, totalStages int) ([]notifier.StageResult, runtime.Usage, bool, error) {
 	results := make([]notifier.StageResult, 0, len(run.Attempts))
 	var usage runtime.Usage
 	usageUnknown := false
@@ -302,7 +303,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		if !usageRecordPresent && attempt.State.Execution != workflow.ExecutionPending && attempt.State.Execution != workflow.ExecutionRunning {
 			// Pre-B-51 manifests have no usage field. A completed model attempt
 			// from that format cannot be treated as a zero-token invocation.
-			definition, err := registry.Load(attempt.Stage)
+			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load historical stage %s: %w", attempt.Stage, err)
 			}
@@ -311,7 +312,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			}
 		}
 		if attempt.FinishedAt.IsZero() {
-			definition, err := registry.Load(attempt.Stage)
+			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load interrupted stage %s: %w", attempt.Stage, err)
 			}

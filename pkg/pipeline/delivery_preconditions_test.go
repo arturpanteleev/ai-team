@@ -19,6 +19,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 func deliveryPreconditionsRegistry() *agent.Registry {
@@ -155,6 +156,42 @@ func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
 	}
 	if !seen["go-test"] || !seen["go-vet"] {
 		t.Fatalf("both detected required checks should execute and pass: %+v", manifest.Checks)
+	}
+}
+
+func TestReplayedStageResultsResolveStableStageIDsToRegistryAgents(t *testing.T) {
+	started := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	finished := started.Add(time.Minute)
+	run := evidence.ReplayedRun{
+		RunID: "stage-alias-replay",
+		Attempts: []evidence.ReplayedAttempt{
+			{
+				AttemptID: "legacy-complete", Stage: "implementation", StageIndex: 1,
+				StartedAt: started, FinishedAt: finished, Status: notifier.StatusPassed,
+				State: workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Outcome: workflow.OutcomePassed},
+			},
+			{
+				AttemptID: "interrupted", Stage: "implementation", StageIndex: 1,
+				StartedAt: started, Status: notifier.StatusBlocked,
+				State: workflow.AttemptState{Execution: workflow.ExecutionRunning, Outcome: workflow.OutcomePending},
+			},
+		},
+	}
+	cfg := &config.Config{
+		Template: "stage-alias-replay",
+		Stages:   []config.TemplateStage{{ID: "implementation", Agent: "coder"}},
+	}
+	results, _, usageUnknown, err := replayedStageResults(run, t.TempDir(), nil, deliveryPreconditionsRegistry(), cfg, 1)
+	if err != nil {
+		t.Fatalf("replay should load registry definition coder for stable stage ID implementation: %v", err)
+	}
+	if !usageUnknown || len(results) != 2 {
+		t.Fatalf("legacy/interrupted agent attempts should remain usage-unknown: results=%+v unknown=%t", results, usageUnknown)
+	}
+	for i, result := range results {
+		if result.Name != "implementation" || result.AttemptID != run.Attempts[i].AttemptID {
+			t.Fatalf("replay must preserve stage ID and attempt identity: result[%d]=%+v", i, result)
+		}
 	}
 }
 

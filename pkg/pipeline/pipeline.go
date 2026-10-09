@@ -1119,7 +1119,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 	if runCfg.ResumeRunID != "" {
 		var usage runtime.Usage
-		rs.results, usage, rs.usageUnknown, err = replayedStageResults(replayedRun, evidenceStore.RunDir(), p.attemptManifestSource, p.reg, len(compiledGraph.Nodes))
+		rs.results, usage, rs.usageUnknown, err = replayedStageResults(replayedRun, evidenceStore.RunDir(), p.attemptManifestSource, p.reg, p.cfg, len(compiledGraph.Nodes))
 		if err != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume attempt manifests: %w", err)
 		}

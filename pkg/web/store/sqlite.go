@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -580,7 +580,11 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS team_audit (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL, action TEXT NOT NULL,
 			target_actor_id TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}', created_at DATETIME NOT NULL)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP)`,
+		`CREATE TABLE IF NOT EXISTS api_idempotency (
+			scope TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+			status_code INTEGER NOT NULL DEFAULT 0, response_headers TEXT NOT NULL DEFAULT '{}', response_body BLOB,
+			created_at DATETIME NOT NULL, PRIMARY KEY(scope, request_key))`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if _, err := tx.Exec(query); err != nil {

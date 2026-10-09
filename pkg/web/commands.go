@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
@@ -199,6 +201,7 @@ func (s *Server) writeSecurity(next http.Handler) http.Handler {
 			http.Error(w, "web control plane не настроен", http.StatusServiceUnavailable)
 			return
 		}
+		r = r.WithContext(context.WithValue(r.Context(), requestSessionContextKey{}, session))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -311,9 +314,14 @@ func constantTimeEqual(actual, expected string) bool {
 }
 
 type startRunCommand struct {
-	Feature         string `json:"feature"`
-	Task            string `json:"task"`
-	TemplateVersion string `json:"template_version,omitempty"`
+	Feature         string   `json:"feature"`
+	Task            string   `json:"task"`
+	Title           string   `json:"title,omitempty"`
+	Idea            string   `json:"idea,omitempty"`
+	Template        string   `json:"template,omitempty"`
+	TemplateVersion string   `json:"template_version,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
+	ExternalLinks   []string `json:"external_links,omitempty"`
 }
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
@@ -326,18 +334,38 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if command.Mode != "" && command.Mode != "manual" && command.Mode != "auto" {
+		writeJSONAPIError(w, http.StatusBadRequest, "mode must be manual or auto", "bad_mode")
+		return
+	}
 	actorID := "local-user"
 	if session, ok := s.requestSession(r); ok && session.Principal.ActorID != "" {
 		actorID = session.Principal.ActorID
 	}
 	now := time.Now().UTC()
 	admissionFailed := false
-	runID, err := s.controller.StartWithAdmission(command.Feature, command.Task, func(runID string) error {
+	admit := func(runID string) error {
 		s.templateMu.Lock()
 		defer s.templateMu.Unlock()
 		if templateStore, storeErr := s.templateStore(); storeErr != nil {
 			return storeErr
 		} else if version, pinErr := templateStore.PinCurrentForRun(runID, runID); pinErr == nil {
+			if command.TemplateVersion != "" && command.TemplateVersion != version {
+				return fmt.Errorf("requested template version is not the active project template")
+			}
+			if command.Template != "" {
+				data, _, found, readErr := templateStore.ReadPinnedRun(runID)
+				if readErr != nil || !found {
+					if readErr == nil {
+						readErr = os.ErrNotExist
+					}
+					return readErr
+				}
+				cfg, parseErr := config.ParseYAML(data)
+				if parseErr != nil || cfg.Template != command.Template {
+					return fmt.Errorf("requested template does not match the active project template")
+				}
+			}
 			command.TemplateVersion = version
 		} else if !errors.Is(pinErr, os.ErrNotExist) {
 			return fmt.Errorf("pin project template: %w", pinErr)
@@ -353,7 +381,20 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		return nil
-	})
+	}
+	advancedRequest := command.Mode != "" || command.Title != "" || command.Idea != "" || len(command.ExternalLinks) > 0
+	var runID string
+	var err error
+	if advancedRequest {
+		controller, ok := s.controller.(TaskCreateController)
+		if !ok {
+			writeJSONAPIError(w, http.StatusServiceUnavailable, "task create options are not connected to the task controller", "controller_action_unavailable")
+			return
+		}
+		runID, err = controller.StartTask(r.Context(), command, admit)
+	} else {
+		runID, err = s.controller.StartWithAdmission(command.Feature, command.Task, admit)
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if admissionFailed {

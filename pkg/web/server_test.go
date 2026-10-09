@@ -2415,10 +2415,9 @@ func TestUnsupportedMethodKeepsAllowHeader(t *testing.T) {
 		{http.MethodPatch, "/api/runs/run-1/cancel", []string{"POST"}},
 		{http.MethodOptions, "/api/pipelines", []string{"GET"}},
 		{http.MethodHead, "/api/pipelines", []string{"GET"}},
-		{http.MethodPut, "/api/runs", []string{"POST"}},
-		// GET на путь, зарегистрированный только под POST, раньше проваливался
-		// в SPA-fallback и отдавал HTML.
-		{http.MethodGet, "/api/runs", []string{"POST"}},
+		{http.MethodPut, "/api/runs", []string{"GET", "POST"}},
+		// GET списка задач и POST создания теперь живут на одном пути.
+		{http.MethodDelete, "/api/runs", []string{"GET", "POST"}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.method+" "+testCase.target, func(t *testing.T) {

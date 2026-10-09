@@ -722,6 +722,7 @@ func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 		cases := []struct {
 			name      string
 			noStore   bool
+			noTarget  bool
 			loadError error
 			mutate    func(*approval.PendingApproval, *evidence.AttemptManifest)
 		}{
@@ -756,10 +757,36 @@ func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 			{name: "description mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
 				manifest.HumanSubmissionDescription = "different"
 			}},
+			{name: "unsupported resolved action", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Decisions[0].Action = "annotate"
+			}},
+			{name: "markdown with approve action", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Decisions[0].Action = "approve"
+			}},
+			{name: "missing output", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs = nil
+			}},
+			{name: "wrong output type", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs[0].Type = "directory"
+			}},
+			{name: "wrong output name", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs[0].Name = "other"
+			}},
+			{name: "output outside attempt", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs[0].EvidencePath = "other-attempt/artifacts/result.md"
+			}},
+			{name: "unclean output path", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs[0].EvidencePath = "attempts/attempt-writer-1/artifacts/../result.md"
+			}},
+			{name: "output size mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.Outputs[0].Size++
+			}},
+			{name: "artifact root unavailable", noTarget: true},
 		}
 		for _, test := range cases {
 			t.Run(test.name, func(t *testing.T) {
 				value, manifest := makeApproval(), baseManifest
+				manifest.Outputs = append([]evidence.ArtifactRecord(nil), baseManifest.Outputs...)
 				if test.mutate != nil {
 					test.mutate(&value, &manifest)
 				}
@@ -768,7 +795,11 @@ func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 					store = makeStore(value)
 					store.loadErr = test.loadError
 				}
-				server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}}
+				targetDir := target
+				if test.noTarget {
+					targetDir = ""
+				}
+				server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: targetDir}}
 				if store != nil {
 					server.approvals = store
 				}
@@ -4437,6 +4468,70 @@ func TestWorkerAPIClientAndDispatchRejectBadPeerResponsesAndScope(t *testing.T) 
 	recorder.RunStarted(job.RunID, "feature", "snapshot", time.Now())
 	if recorder.Error() == nil {
 		t.Fatal("recorder transport failure was silently discarded")
+	}
+}
+
+func TestWorkerAPIApprovalReadRejectsStorageFaultsAndMalformedPages(t *testing.T) {
+	const runID = "approval-read-bounds"
+	cases := []struct {
+		name   string
+		method string
+		call   workerAPICall
+		store  *apiApprovalStore
+	}{
+		{name: "load storage error", method: "approval.load", call: workerAPICall{A: "missing"}, store: &apiApprovalStore{loadErr: errors.New("read failed")}},
+		{name: "load invalid JSON record", method: "approval.load", call: workerAPICall{A: "bad"}, store: &apiApprovalStore{values: map[string]approval.PendingApproval{
+			runID + "/bad": {ID: "bad", RunID: runID, Payload: json.RawMessage(`{`)},
+		}}},
+		{name: "list storage error", method: "approval.list", store: &apiApprovalStore{listErr: errors.New("list failed")}},
+		{name: "negative list offset", method: "approval.list", call: workerAPICall{Index: -1}, store: &apiApprovalStore{values: map[string]approval.PendingApproval{}}},
+		{name: "list offset past end", method: "approval.list", call: workerAPICall{Index: 1}, store: &apiApprovalStore{values: map[string]approval.PendingApproval{}}},
+		{name: "list invalid JSON record", method: "approval.list", store: &apiApprovalStore{values: map[string]approval.PendingApproval{
+			runID + "/bad": {ID: "bad", RunID: runID, Payload: json.RawMessage(`{`)},
+		}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: test.store}
+			if _, err := server.dispatch(test.method, test.call); err == nil {
+				t.Fatal("invalid approval read unexpectedly succeeded")
+			}
+		})
+	}
+
+	for _, body := range []string{
+		`{"values":[],"next_offset":1,"has_more":false}`,
+		`{"values":[],"next_offset":-1,"has_more":false}`,
+		`{"values":[],"next_offset":0,"has_more":true}`,
+	} {
+		t.Run("malformed page "+body, func(t *testing.T) {
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer peer.Close()
+			port := &workerAPIPort{address: peer.URL, token: "token", scope: workerAPIScope{RunID: runID}, client: peer.Client()}
+			if _, err := (&workerAPIApprovals{port: port}).List(runID); err == nil {
+				t.Fatal("approval client accepted a malformed list page")
+			}
+		})
+	}
+}
+
+func TestWorkerAPIApprovalAdapterCannotDecideAndFailsClosedOnListTransport(t *testing.T) {
+	adapter := &workerAPIApprovals{}
+	if _, err := adapter.Decide("run", "approval", approval.Decision{}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
+		t.Fatalf("worker approval adapter must reject decisions: %v", err)
+	}
+	if _, err := adapter.ResolveDeferred("run", "approval", approval.Decision{}); !errors.Is(err, approval.ErrWorkerDecisionWrite) {
+		t.Fatalf("worker approval adapter must reject deferred decisions: %v", err)
+	}
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	address := closed.URL
+	closed.Close()
+	port := &workerAPIPort{address: address, token: "token", scope: workerAPIScope{RunID: "run"}, client: &http.Client{Timeout: time.Second}}
+	if _, err := (&workerAPIApprovals{port: port}).List("run"); err == nil {
+		t.Fatal("approval list transport failure must stop resume")
 	}
 }
 

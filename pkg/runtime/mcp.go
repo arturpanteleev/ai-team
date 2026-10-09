@@ -168,7 +168,10 @@ func validateMCPString(value string, maxBytes int) error {
 
 func isMCPCommandShell(command string) bool {
 	switch strings.ToLower(filepath.Base(command)) {
-	case "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+	case "sh", "sh.exe", "bash", "bash.exe", "dash", "dash.exe",
+		"zsh", "zsh.exe", "fish", "fish.exe", "ksh", "ksh.exe",
+		"csh", "csh.exe", "tcsh", "tcsh.exe",
+		"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		return true
 	default:
 		return false

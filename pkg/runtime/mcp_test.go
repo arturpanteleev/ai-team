@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,6 +31,20 @@ func TestMCPServerConfigRejectsUnsafeCommandsAndInputs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.server.Validate("docs"); err == nil {
 				t.Fatal("unsafe definition must be rejected")
+			}
+		})
+	}
+}
+
+func TestMCPServerConfigRejectsShellExecutableSuffixesAcrossPlatforms(t *testing.T) {
+	for _, executable := range []string{
+		"sh.exe", "bash.exe", "dash.exe", "zsh.exe", "fish.exe",
+		"ksh.exe", "csh.exe", "tcsh.exe", "BASH.EXE",
+	} {
+		t.Run(executable, func(t *testing.T) {
+			server := MCPServerConfig{Command: filepath.Join(t.TempDir(), executable)}
+			if err := server.Validate("shell"); err == nil {
+				t.Fatalf("shell executable %q must be rejected", server.Command)
 			}
 		})
 	}

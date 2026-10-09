@@ -1473,6 +1473,64 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 	}
 }
 
+func TestWorkerAPIApprovalTrustRequiresAuthenticatedControllerProvenance(t *testing.T) {
+	valid := approval.PendingApproval{
+		ID: "approval-1", Status: approval.StatusResolved,
+		SubjectHash: strings.Repeat("a", 64), ResolvedAction: "approve",
+		Decisions: []approval.Decision{{
+			ApprovalID: "approval-1", SubjectHash: strings.Repeat("a", 64),
+			Action: "approve", ControllerAuthenticated: true,
+		}},
+	}
+	var nilAdapter *workerAPIApprovals
+	if nilAdapter.HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("nil worker API adapter cannot authenticate a decision")
+	}
+	if (&workerAPIApprovals{}).HasAuthenticatedControllerDecision(valid) {
+		t.Fatal("worker API adapter without controller port cannot authenticate a decision")
+	}
+	adapter := &workerAPIApprovals{port: &workerAPIPort{}}
+	cases := []struct {
+		name  string
+		value approval.PendingApproval
+		want  bool
+	}{
+		{name: "authenticated exact decision", value: valid, want: true},
+		{name: "pending approval", value: func() approval.PendingApproval { v := valid; v.Status = approval.StatusPending; return v }()},
+		{name: "unmarked decision", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].ControllerAuthenticated = false
+			return v
+		}()},
+		{name: "wrong approval", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].ApprovalID = "other"
+			return v
+		}()},
+		{name: "wrong subject", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].SubjectHash = strings.Repeat("f", 64)
+			return v
+		}()},
+		{name: "wrong action", value: func() approval.PendingApproval {
+			v := valid
+			v.Decisions = append([]approval.Decision(nil), valid.Decisions...)
+			v.Decisions[0].Action = "reject"
+			return v
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := adapter.HasAuthenticatedControllerDecision(tc.value); got != tc.want {
+				t.Fatalf("HasAuthenticatedControllerDecision() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWorkerUsageEnvelopeAPIIsWriteOnlyAndRunScoped(t *testing.T) {
 	target := t.TempDir()
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "usage-api-run", TargetDir: target, ExecutionID: strings.Repeat("b", ExecutionIDBytes*2)}

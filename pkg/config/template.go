@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -247,6 +248,7 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 	}
 	projectCheckNames := make(map[string]bool, len(c.Checks))
+	projectChecks := make(map[string]checks.Definition, len(c.Checks))
 	for _, check := range c.Checks {
 		if err := check.Validate(); err != nil {
 			add("checks: %v", err)
@@ -255,6 +257,20 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 			add("checks: имя %q повторяется", check.Name)
 		}
 		projectCheckNames[check.Name] = true
+		projectChecks[check.Name] = check
+	}
+	for i, stage := range c.Stages {
+		if stage.Delivery == nil {
+			continue
+		}
+		for _, requiredCheck := range stage.Delivery.RequireChecks {
+			check, exists := projectChecks[requiredCheck]
+			if !exists {
+				add("stages[%d] (%s): delivery.require_checks ссылается на неизвестную проверку %q", i, stage.ID, requiredCheck)
+			} else if check.Policy != checks.PolicyRequired {
+				add("stages[%d] (%s): delivery.require_checks проверка %q должна иметь policy required", i, stage.ID, requiredCheck)
+			}
+		}
 	}
 	for i, route := range c.Returns {
 		from, fromExists := index[route.From]
@@ -284,6 +300,17 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 				add("stages[%d] (%s): delivery.require_verdicts должен ссылаться на этап до delivery, получен %q", i, stage.ID, verdictStage)
 			} else if c.Stages[verdictIndex].Agent == "" {
 				add("stages[%d] (%s): required verdict stage %q должен иметь agent с verdict contract", i, stage.ID, verdictStage)
+			} else if reg == nil {
+				add("stages[%d] (%s): проверка delivery.require_verdicts для %q требует registry с verdict contract", i, stage.ID, verdictStage)
+			} else if lookup, ok := reg.(requiredVerdictContractLookup); !ok {
+				add("stages[%d] (%s): registry не поддерживает проверку required verdict contract для %q", i, stage.ID, verdictStage)
+			} else {
+				hasContract, err := lookup.HasRequiredVerdictContract(c.Stages[verdictIndex].Agent)
+				if err != nil {
+					add("stages[%d] (%s): проверить verdict contract агента %q для этапа %q: %v", i, stage.ID, c.Stages[verdictIndex].Agent, verdictStage, err)
+				} else if !hasContract {
+					add("stages[%d] (%s): required verdict stage %q должен иметь verdict.required contract в registry definition агента %q", i, stage.ID, verdictStage, c.Stages[verdictIndex].Agent)
+				}
 			}
 		}
 	}

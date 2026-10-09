@@ -452,6 +452,15 @@ func TestStageDefaultsAndProjectChecks(t *testing.T) {
 	if err := projectConfig.Validate(nil); err != nil {
 		t.Fatalf("detected config invalid: %v", err)
 	}
+	var required []string
+	for _, stage := range projectConfig.Stages {
+		if stage.Delivery != nil {
+			required = stage.Delivery.RequireChecks
+		}
+	}
+	if strings.Join(required, ",") != "go-test,go-vet" {
+		t.Fatalf("detected delivery checks not attached to implementation stage: %v", required)
+	}
 }
 
 func TestAgentConfigFallbackAndLegacyRuntimeDefault(t *testing.T) {

@@ -114,8 +114,8 @@ func TestRun_MissingRequiredDeliveryCheckBlocksBeforePlanSideEffects(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "project-vet") {
 		t.Fatalf("missing controller check should block delivery, got %v", err)
 	}
-	if strings.Join(rt.executed, ",") != "coder" || service.calls != 0 {
-		t.Fatalf("missing check reached delivery side effects: runtime=%v service=%d", rt.executed, service.calls)
+	if len(rt.executed) != 0 || service.calls != 0 {
+		t.Fatalf("missing check was not rejected during config validation: runtime=%v service=%d", rt.executed, service.calls)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "delivery-plan.json")); !os.IsNotExist(err) {
 		t.Fatalf("delivery plan was written despite missing check: %v", err)
@@ -147,6 +147,20 @@ func TestRun_FailedRequiredDeliveryCheckBlocksBeforePlanSideEffects(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "delivery-plan.json")); !os.IsNotExist(err) {
 		t.Fatalf("delivery plan was written after failed check: %v", err)
+	}
+}
+
+func TestDeliveryWithoutConfiguredChecksFailsClosed(t *testing.T) {
+	rs := deliveryVerdictRunState(t, false, "", "")
+	for i := range rs.p.cfg.Stages {
+		if rs.p.cfg.Stages[i].Delivery != nil {
+			rs.p.cfg.Stages[i].Delivery.RequireChecks = nil
+			rs.p.cfg.Stages[i].Delivery.RequireVerdicts = nil
+		}
+	}
+	err := rs.validateDeliveryChecks()
+	if err == nil || !strings.Contains(err.Error(), "require_checks не задано") {
+		t.Fatalf("delivery without detected/configured required checks must stay blocked, got %v", err)
 	}
 }
 

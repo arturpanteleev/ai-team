@@ -716,6 +716,12 @@ type productSpecContractLookup interface {
 	HasProductSpecContract(name string) (bool, error)
 }
 
+// requiredVerdictContractLookup lets template validation verify that an
+// explicitly required earlier stage has an immutable verdict contract.
+type requiredVerdictContractLookup interface {
+	HasRequiredVerdictContract(name string) (bool, error)
+}
+
 // Validate проверяет конфиг до запуска пайплайна (fail fast).
 func (c *Config) Validate(reg AgentLookup) error {
 	if c.Template == "" && len(c.PipelineAgents) == 0 {

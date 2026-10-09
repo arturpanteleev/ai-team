@@ -81,3 +81,22 @@ func TestApplyDetectedChecksDoesNotGuessUnknownProject(t *testing.T) {
 		t.Fatalf("unknown stack не должен получать guessed command: profile=%q", profile)
 	}
 }
+
+func TestDefaultProfileUnknownStackLeavesDeliveryChecksUnconfigured(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, warning := cfg.ApplyDetectedChecks(t.TempDir())
+	if profile != "" || warning != "" || len(cfg.Checks) != 0 {
+		t.Fatalf("unknown stack should not guess checks: profile=%q warning=%q checks=%v", profile, warning, cfg.Checks)
+	}
+	for _, stage := range cfg.Stages {
+		if stage.Delivery != nil && len(stage.Delivery.RequireChecks) != 0 {
+			t.Fatalf("undetected stack must not retain unknown default check refs: %v", stage.Delivery.RequireChecks)
+		}
+	}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("default profile without a detected check profile should remain valid before delivery: %v", err)
+	}
+}

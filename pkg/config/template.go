@@ -414,6 +414,13 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		}
 		graph.Nodes = append(graph.Nodes, workflow.Node{ID: stage.ID, Agent: stage.Agent, MaxVisits: visits})
 	}
+	bySource := make(map[string][]string)
+	for _, route := range c.Returns {
+		bySource[route.From] = append(bySource[route.From], route.To)
+	}
+	for source := range bySource {
+		sort.Strings(bySource[source])
+	}
 	for i, stage := range c.Stages {
 		next := workflow.TerminalComplete
 		if i+1 < len(c.Stages) {
@@ -424,14 +431,19 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		if confirm == "" {
 			confirm = defaultConfirmForResult(stage.Result)
 		}
-		if next != workflow.TerminalComplete && confirm == "required" {
-			edge.Approval = generatedApproval(stage.Function, next, nil)
+		// A configured return is a human stage action as well as a rejected
+		// outcome route. Keep it available even when the forward transition is
+		// otherwise automatic; this stage needs an explicit choice among the
+		// forward and backward targets.
+		if (next != workflow.TerminalComplete && confirm == "required") || len(bySource[stage.ID]) > 0 {
+			edge.Approval = generatedApprovalWithReturns(stage.Function, next, bySource[stage.ID])
+		}
+		if stage.Skippable {
+			graph.Edges = append(graph.Edges, workflow.Edge{
+				From: stage.ID, Outcome: workflow.OutcomeSkipped, To: next,
+			})
 		}
 		graph.Edges = append(graph.Edges, edge)
-	}
-	bySource := make(map[string][]string)
-	for _, route := range c.Returns {
-		bySource[route.From] = append(bySource[route.From], route.To)
 	}
 	sources := make([]string, 0, len(bySource))
 	for source := range bySource {
@@ -452,8 +464,9 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		})
 	}
 	// Schema v5 controls confirmation per stage. Forward transitions with
-	// confirm:auto are valid without an edge approval; required stages compile
-	// one above, and backward return transitions always retain their approval.
+	// confirm:auto and no return routes are valid without an edge approval;
+	// required stages and stages with explicit return actions compile a gate,
+	// and backward return transitions always retain their approval.
 	if err := graph.Validate(false, false); err != nil {
 		return graph, err
 	}
@@ -469,6 +482,17 @@ func generatedApproval(function, primary string, actions map[string]string) *wor
 		role = "operator"
 	}
 	return &workflow.ApprovalPolicy{Roles: []string{role}, Quorum: "any", Actions: actions}
+}
+
+func generatedApprovalWithReturns(function, primary string, returnTargets []string) *workflow.ApprovalPolicy {
+	if len(returnTargets) == 0 {
+		return generatedApproval(function, primary, nil)
+	}
+	actions := map[string]string{"approve": primary, "reject": workflow.TerminalStop}
+	for _, target := range returnTargets {
+		actions["return_to_"+target] = target
+	}
+	return generatedApproval(function, primary, actions)
 }
 
 func cloudRoleForFunction(function string) string {

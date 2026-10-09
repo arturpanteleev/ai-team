@@ -24,6 +24,7 @@ type ReplayedRun struct {
 	Status            workflow.RunOutcome        `json:"status,omitempty"`
 	Attempts          []ReplayedAttempt          `json:"attempts"`
 	Transitions       []ReplayedTransition       `json:"transitions,omitempty"`
+	StageSkips        []ReplayedStageSkip        `json:"stage_skips,omitempty"`
 	ApprovalDecisions []ReplayedApprovalDecision `json:"approval_decisions,omitempty"`
 	ApprovalReuses    []ReplayedApprovalReuse    `json:"approval_reuses,omitempty"`
 	LastEventSHA256   string                     `json:"last_event_sha256"`
@@ -40,6 +41,13 @@ type ReplayedTransition struct {
 	EdgeTarget string `json:"edge_target"`
 	Action     string `json:"action,omitempty"`
 	Target     string `json:"target"`
+}
+
+type ReplayedStageSkip struct {
+	Sequence  uint64 `json:"sequence"`
+	AttemptID string `json:"attempt_id"`
+	Stage     string `json:"stage"`
+	Reason    string `json:"reason"`
 }
 
 // ReplayedApprovalDecision retains the event identity needed to bind a
@@ -159,6 +167,7 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 	approvalSubjects := make(map[string]string)
 	decidedApprovals := make(map[string]bool)
 	selectedTransitions := make(map[string]bool)
+	stageSkippedAttempts := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
 	canceled := false
@@ -385,6 +394,21 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			result.Transitions = append(result.Transitions, ReplayedTransition{
 				Sequence: event.Sequence, AttemptID: event.AttemptID, From: from,
 				Outcome: outcome, EdgeTarget: edgeTarget, Action: action, Target: target,
+			})
+		case "stage_skipped":
+			index, exists := byID[event.AttemptID]
+			reason, reasonErr := eventString(event.Data, "reason", true)
+			warning, warningOK := event.Data["warning"].(bool)
+			if !exists || stageSkippedAttempts[event.AttemptID] ||
+				result.Attempts[index].Stage != event.Stage || result.Attempts[index].FinishedAt.IsZero() ||
+				result.Attempts[index].State.Outcome != workflow.OutcomeSkipped ||
+				event.Timestamp.Before(result.Attempts[index].FinishedAt) || reasonErr != nil ||
+				strings.TrimSpace(reason) == "" || !warningOK || !warning {
+				return ReplayedRun{}, fmt.Errorf("stage_skipped %q has invalid attempt, warning, or reason", event.AttemptID)
+			}
+			stageSkippedAttempts[event.AttemptID] = true
+			result.StageSkips = append(result.StageSkips, ReplayedStageSkip{
+				Sequence: event.Sequence, AttemptID: event.AttemptID, Stage: event.Stage, Reason: reason,
 			})
 		case "run_finished":
 			if result.StartedAt.IsZero() {

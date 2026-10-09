@@ -121,12 +121,19 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		} else {
 			actions = append(actions, "submit")
 		}
+		if stage.Skippable {
+			actions = append(actions, "skip")
+		}
 		roles := []string{stage.Function}
+		targets := make(map[string]string, len(actions))
+		for _, action := range actions {
+			targets[action] = stageID
+		}
 		value, createErr := rs.approvalStore.Create(approval.PendingApproval{
 			Kind: approval.KindInput, RunID: rs.runID, AttemptID: attemptID,
 			FromStage: stageID, ToStage: stageID, Trigger: humanInputTrigger,
 			SubjectHash: subjectHash, RequiredRoles: roles, Quorum: approval.QuorumAny,
-			Actions: actions, Targets: map[string]string{actions[0]: stageID, actions[1]: stageID}, Payload: payload,
+			Actions: actions, Targets: targets, Payload: payload,
 		})
 		if createErr != nil {
 			return notifier.StageResult{}, fmt.Errorf("create human input approval: %w", createErr)
@@ -160,7 +167,11 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if decision.SubjectHash != subjectHash || decision.ActorID == "" || decision.ActorRole != stage.Function {
 		return notifier.StageResult{}, errors.New("human input decision actor or subject is invalid")
 	}
-	if stage.Result == "approve" && decision.Action != "approve" && decision.Action != "reject" ||
+	if decision.Action == "skip" {
+		if !stage.Skippable || strings.TrimSpace(decision.Comment) == "" {
+			return notifier.StageResult{}, errors.New("stage skip requires a skippable stage and a non-empty reason")
+		}
+	} else if stage.Result == "approve" && decision.Action != "approve" && decision.Action != "reject" ||
 		stage.Result != "approve" && decision.Action != "submit" && decision.Action != "reject" {
 		return notifier.StageResult{}, errors.New("human input action does not match stage result type")
 	}
@@ -219,7 +230,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 			defer func() { _ = cleanupEvidenceInputs() }()
 		}
 	}
-	if result.Err == nil && decision.Action != "reject" {
+	if result.Err == nil && decision.Action == "skip" {
+		result.ControlStopped = true
+	} else if result.Err == nil && decision.Action != "reject" {
 		content, contentErr := humanResultContent(stage, decision, outputName, outputPath)
 		if contentErr != nil {
 			result.Err = contentErr
@@ -243,7 +256,7 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	}
 	if decision.Action == "reject" {
 		result.Verdict = verdict.Rejected
-	} else if result.Err == nil {
+	} else if decision.Action != "skip" && result.Err == nil {
 		result.Verdict = verdict.Approved
 	}
 	result.FinishedAt = time.Now().UTC()
@@ -322,6 +335,16 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	}
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_finished", Stage: stageID, AttemptID: attemptID, Timestamp: result.FinishedAt, Data: finishedData}); err != nil {
 		result.Err = errors.Join(result.Err, fmt.Errorf("record human attempt finish: %w", err))
+	}
+	if decision.Action == "skip" && result.Err == nil {
+		if err := rs.evidence.Append(evidence.Event{Type: "stage_skipped", Stage: stageID, AttemptID: attemptID,
+			Timestamp: result.FinishedAt, Data: map[string]any{
+				"reason": decision.Comment, "warning": true,
+				"actor_id": decision.ActorID, "actor_role": decision.ActorRole,
+			}}); err != nil {
+			result.Err = errors.Join(result.Err, fmt.Errorf("record stage skip warning: %w", err))
+			rs.deriveStageState(&result)
+		}
 	}
 	if rs.p.recorder != nil {
 		rs.p.recorder.StageFinished(result)
@@ -526,6 +549,9 @@ func (rs *runState) humanInputSubject(stage config.TemplateStage, name, outputPa
 }
 
 func humanResultContent(stage config.TemplateStage, decision approval.Decision, outputName, outputPath string) ([]byte, error) {
+	if decision.Action == "skip" {
+		return nil, errors.New("skipped human stage has no result artifact")
+	}
 	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, decision.Comment); err != nil {
 		return nil, err
 	}

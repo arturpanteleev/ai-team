@@ -298,6 +298,8 @@ type RunConfig struct {
 	// что pipeline захватывает lock самостоятельно (CLI-путь).
 	WorkspaceLock        *evidence.WorkspaceLock
 	resumeDecisionAction string
+	skipStageID          string
+	skipReason           string
 	// CancelRequested is polled only between stage attempts so cancellation
 	// never interrupts an agent while it is mutating its workspace.
 	CancelRequested func() bool
@@ -347,6 +349,8 @@ type runState struct {
 	brief                     briefVersion
 	graph                     workflow.Graph
 	visits                    map[string]int
+	stageSkipReasons          map[string]string
+	stageSkipTransitioned     map[string]bool
 	candidate                 *candidate.Manager
 	sourceTarget              string
 	liveWorkspaceSHA          string
@@ -524,6 +528,19 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if err != nil {
 		return RunResult{}, err
 	}
+	if runCfg.skipStageID != "" {
+		if runCfg.ResumeRunID == "" {
+			return RunResult{}, errors.New("stage skip requires an existing run")
+		}
+		stage, exists := p.templateStage(runCfg.skipStageID)
+		if !exists || !stage.Skippable {
+			return RunResult{}, fmt.Errorf("stage %q is not configured as skippable", runCfg.skipStageID)
+		}
+		runCfg.skipReason = strings.TrimSpace(runCfg.skipReason)
+		if runCfg.skipReason == "" {
+			return RunResult{}, errors.New("пропуск этапа требует причину")
+		}
+	}
 	if runCfg.ResumeRunID == "" && !workflow.ValidFeature(runCfg.Feature) {
 		return RunResult{}, fmt.Errorf("недопустимое имя feature %q", runCfg.Feature)
 	}
@@ -603,7 +620,20 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				return RunResult{}, fmt.Errorf("resume approval: %w", loadErr)
 			}
 			if value.Status != approval.StatusResolved {
-				if value.Trigger == "delivery_plan" && runCfg.ApprovePlanHash != "" {
+				if runCfg.skipStageID != "" && value.Kind == approval.KindInput &&
+					value.Trigger == humanInputTrigger && value.FromStage == runCfg.skipStageID {
+					if !containsString(value.Actions, "skip") || value.Targets["skip"] != runCfg.skipStageID {
+						return RunResult{}, fmt.Errorf("stage %q has no pending skippable input action", runCfg.skipStageID)
+					}
+					stage, _ := p.templateStage(runCfg.skipStageID)
+					value, err = approvalStore.Decide(value.RunID, value.ID, approval.Decision{
+						ActorID: "local-user", ActorRole: stage.Function, Action: "skip",
+						Comment: runCfg.skipReason, SubjectHash: value.SubjectHash,
+					})
+					if err != nil {
+						return RunResult{}, fmt.Errorf("skip stage input: %w", err)
+					}
+				} else if value.Trigger == "delivery_plan" && runCfg.ApprovePlanHash != "" {
 					// CLI-флаг --approve-plan записывает exact-subject решение
 					// вместо прямого обхода approval-модели.
 					if normalized := strings.ToLower(strings.TrimSpace(runCfg.ApprovePlanHash)); normalized != value.SubjectHash {
@@ -621,6 +651,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 						Checkpoint: "переход ожидает решения", RunID: value.RunID,
 						ApprovalID: value.ID, SubjectHash: value.SubjectHash,
 					}
+				}
+			}
+			if runCfg.skipStageID != "" && value.Kind == approval.KindInput &&
+				value.Trigger == humanInputTrigger && value.FromStage == runCfg.skipStageID {
+				if value.ResolvedAction != "skip" || len(value.Decisions) == 0 ||
+					strings.TrimSpace(value.Decisions[len(value.Decisions)-1].Comment) != runCfg.skipReason {
+					return RunResult{}, fmt.Errorf("stage %q input was not resolved with this skip reason", runCfg.skipStageID)
 				}
 			}
 			if value.Trigger == "delivery_plan" && value.ResolvedAction == "approve" {
@@ -673,6 +710,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					}
 				}
 			}
+		}
+		if runCfg.skipStageID != "" && runCfg.retryFrom != runCfg.skipStageID {
+			return RunResult{}, fmt.Errorf("skip stage %q does not match current stage %q", runCfg.skipStageID, runCfg.retryFrom)
 		}
 	}
 	// task.md is a workflow input and therefore must be created/read while the
@@ -856,6 +896,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
 				return RunResult{}, fmt.Errorf("resume clarification approval: %w", err)
 			}
+		}
+		if runCfg.skipStageID != "" && runCfg.retryFrom != runCfg.skipStageID {
+			if !replayedStageSkipTransition(replayedRun, compiledGraph, runCfg.skipStageID, runCfg.skipReason) {
+				return RunResult{}, fmt.Errorf("skip stage %q does not match current stage %q", runCfg.skipStageID, runCfg.retryFrom)
+			}
+			// A crash after the skipped transition reached the event log but before
+			// its lifecycle checkpoint leaves the old stage in NextStage. Reconcile
+			// that exact, reason-bound transition and continue at its target.
+			runCfg.skipStageID = ""
+			runCfg.skipReason = ""
 		}
 		configDigest := sha256.Sum256(configSnapshot)
 		workflowDigest := sha256.Sum256(workflowSnapshot)
@@ -1175,9 +1225,25 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		brief:                  currentBrief,
 		graph:                  compiledGraph,
 		visits:                 make(map[string]int),
-		candidate:              candidateManager,
-		sourceTarget:           sourceTarget,
-		budgetConfig:           p.cfg.Budget,
+		stageSkipReasons: func() map[string]string {
+			values := make(map[string]string, len(replayedRun.StageSkips))
+			for _, skip := range replayedRun.StageSkips {
+				values[skip.AttemptID] = skip.Reason
+			}
+			return values
+		}(),
+		stageSkipTransitioned: func() map[string]bool {
+			values := make(map[string]bool, len(replayedRun.Transitions))
+			for _, transition := range replayedRun.Transitions {
+				if transition.Outcome == string(workflow.OutcomeSkipped) {
+					values[transition.AttemptID] = true
+				}
+			}
+			return values
+		}(),
+		candidate:    candidateManager,
+		sourceTarget: sourceTarget,
+		budgetConfig: p.cfg.Budget,
 	}
 	if runCfg.ResumeRunID != "" {
 		var usage runtime.Usage

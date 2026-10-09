@@ -33,6 +33,26 @@ exact node или terminal target.
 - **КОГДА** выбранное ребро ведёт к узлу, чей max_visits уже исчерпан
 - **ТОГДА** run MUST завершиться ошибкой до запуска нового attempt
 
+### Requirement: Явный outcome пропуска
+
+Schema v5 MUST compile `OutcomeSkipped` only for stages declared with
+`skippable: true`, and that edge MUST continue to the next stage in template
+order (or `$complete` for the final stage). A skip MUST be represented by a
+finished attempt and a warning event with its mandatory reason.
+
+#### Scenario: Skippable stage is omitted
+
+- **КОГДА** an operator skips a stage whose template has `skippable: true`
+- **ТОГДА** the engine MUST record a synthetic or human `OutcomeSkipped`
+  attempt and `stage_skipped` warning with the reason
+- **И** MUST continue through the stage's skipped edge without invoking the
+  agent for a synthetic agent skip
+
+#### Scenario: Non-skippable stage is requested
+
+- **КОГДА** an operator requests a skip for a stage without `skippable: true`
+- **ТОГДА** the request MUST fail before advancing the graph
+
 ### Requirement: Approval принадлежит ребру
 
 Каждое non-terminal edge schema v4 MUST иметь policy с roles, quorum и exact

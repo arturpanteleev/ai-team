@@ -339,7 +339,7 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			next = c.Stages[i+1].ID
 		}
 		edge := workflow.Edge{From: stage.ID, Outcome: workflow.OutcomePassed, To: next}
-		if next != workflow.TerminalComplete {
+		if next != workflow.TerminalComplete && stage.Confirm == "required" {
 			edge.Approval = generatedApproval(stage.Function, next, nil)
 		}
 		graph.Edges = append(graph.Edges, edge)
@@ -366,7 +366,10 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			Approval: generatedApproval(stageFunction(c.Stages, source), targets[0], actions),
 		})
 	}
-	if err := graph.Validate(true, false); err != nil {
+	// Schema v5 controls confirmation per stage. Forward transitions with
+	// confirm:auto are valid without an edge approval; required stages compile
+	// one above, and backward return transitions always retain their approval.
+	if err := graph.Validate(false, false); err != nil {
 		return graph, err
 	}
 	return graph, nil

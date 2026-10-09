@@ -29,6 +29,23 @@ import (
 // stage.go — исполнение одного этапа: runtime вызов, guard артефактов,
 // парсинг вердикта и сбор входов/выходов.
 
+func uniqueAbsoluteReadPaths(paths []string) ([]string, error) {
+	seen := make(map[string]bool, len(paths))
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, fmt.Errorf("denied path must be absolute and clean: %q", path)
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 // ErrStageTimeout — отдельный sentinel таймаута отдельной стадии. Намеренно
 // НЕ оборачивает context.DeadlineExceeded (в отличие от типовой ошибки),
 // чтобы бюджетный guard в pipeline.go (errors.Is(runErr, context.DeadlineExceeded))
@@ -180,9 +197,34 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(err)
 	}
+	if rs.questionAnswerTargetStage != "" && name != rs.questionAnswerTargetStage {
+		for _, input := range inputArtifacts {
+			inputPath, absErr := filepath.Abs(input.Path)
+			if absErr != nil {
+				return fail(fmt.Errorf("agent %s: clarification input path: %w", name, absErr))
+			}
+			for _, protected := range rs.questionAnswerDeniedPaths {
+				if filepath.Clean(inputPath) == protected {
+					return fail(fmt.Errorf("agent %s: refusing to pass a prior clarification answer into a later stage", name))
+				}
+			}
+		}
+	}
 	evidenceInputs, cleanupEvidenceInputs, err = rs.evidence.SnapshotInputs(attemptID, toEvidenceArtifacts(inputArtifacts))
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: immutable input snapshot: %w", name, err))
+	}
+	for index, input := range inputArtifacts {
+		if input.Name != "clarification-answer" {
+			continue
+		}
+		inputName := fmt.Sprintf("%03d-clarification-answer", index+1)
+		if index >= len(evidenceInputs) {
+			return fail(fmt.Errorf("agent %s: clarification input snapshot is missing", name))
+		}
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, evidenceInputs[index].Path)
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths,
+			filepath.Join(rs.evidence.RunDir(), "attempts", attemptID, "inputs", inputName, filepath.Base(input.Path)))
 	}
 	inputs := toRuntimeArtifacts(evidenceInputs)
 	if rs.p.questionAnswerInputs != nil {
@@ -293,7 +335,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if a.Kind == "delivery" {
 		execErr = rs.writeDeliveryPlan(stageCtx, a, preconditions)
 	} else {
-		execErr = stageRuntime.Execute(stageCtx, runtimeAgent, rs.task, inputs)
+		stageTask := *rs.task
+		stageTask.DeniedReadPaths, err = uniqueAbsoluteReadPaths(rs.questionAnswerDeniedPaths)
+		if err != nil {
+			return fail(fmt.Errorf("agent %s: clarification read boundary: %w", name, err))
+		}
+		execErr = stageRuntime.Execute(stageCtx, runtimeAgent, &stageTask, inputs)
 	}
 	// Persist reported usage before interpreting the execution result so that
 	// interrupted or failed model invocations still contribute their attested

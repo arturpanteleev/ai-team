@@ -34,7 +34,7 @@ func createInitialBriefAt(int, string, string) (BriefDocument, error) {
 	return BriefDocument{}, errSecureBriefMigrationUnsupported
 }
 
-func appendBriefClarificationAt(int, string, string, string, string) (BriefDocument, error) {
+func appendBriefClarificationAt(int, string, string, ClarificationProvenance, string, string) (BriefDocument, error) {
 	return BriefDocument{}, errSecureBriefMigrationUnsupported
 }
 

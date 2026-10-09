@@ -38,7 +38,7 @@ func TestWorkerAPIQuestionAnswerProviderBindsResponseToRequestAndReadOnlyFile(t 
 	if err := os.MkdirAll(filepath.Dir(expected), 0700); err != nil {
 		t.Fatal(err)
 	}
-	answer := []byte("# Ответ Product Owner\n\nB2B buyers\n")
+	answer := []byte("# Ответ на вопросы\n\nB2B buyers\n")
 	if err := os.WriteFile(expected, answer, 0444); err != nil {
 		t.Fatal(err)
 	}

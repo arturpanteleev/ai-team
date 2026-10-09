@@ -790,7 +790,11 @@ func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, sub
 	if strings.TrimSpace(submittedAnswer) != answer {
 		return nil, errors.New("clarification answer does not match the durable decision")
 	}
-	return s.briefs.AppendClarification(s.scope.RunID, value.ID, payload.Markdown, answer)
+	provenance, err := pipeline.QuestionAnswerProvenance(value)
+	if err != nil {
+		return nil, fmt.Errorf("clarification durable provenance: %w", err)
+	}
+	return s.briefs.AppendClarification(s.scope.RunID, value.ID, provenance, payload.Markdown, answer)
 }
 
 func containsWorkerString(values []string, expected string) bool {
@@ -2106,9 +2110,12 @@ func (b *workerAPIBriefs) CreateInitial(runID, intention string) (pipeline.Brief
 	return result, err
 }
 
-func (b *workerAPIBriefs) AppendClarification(runID, approvalID, questions, answer string) (pipeline.BriefDocument, error) {
+func (b *workerAPIBriefs) AppendClarification(runID, approvalID string, provenance pipeline.ClarificationProvenance, questions, answer string) (pipeline.BriefDocument, error) {
 	if err := b.checkRun(runID); err != nil {
 		return pipeline.BriefDocument{}, err
+	}
+	if strings.TrimSpace(provenance.Stage) == "" || strings.TrimSpace(provenance.ActorID) == "" || strings.TrimSpace(provenance.ActorRole) == "" {
+		return pipeline.BriefDocument{}, errors.New("clarification provenance is required")
 	}
 	var result pipeline.BriefDocument
 	err := b.port.call("brief.append_clarification", workerAPICall{A: approvalID, B: questions, C: answer}, &result)

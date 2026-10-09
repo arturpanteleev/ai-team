@@ -311,6 +311,8 @@ type runState struct {
 	names                     []string
 	results                   []notifier.StageResult
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
+	questionAnswerTargetStage string
+	questionAnswerDeniedPaths []string
 	ps                        *ui.PipelineStatus
 	startTime                 time.Time
 	approvedPlanHash          string
@@ -838,8 +840,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if json.Unmarshal(answerApproval.Payload, &payload) != nil || payload.Kind != "questions" {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification payload")
 			}
+			provenance, provenanceErr := QuestionAnswerProvenance(*answerApproval)
+			if provenanceErr != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification provenance: %w", provenanceErr)
+			}
 			var document BriefDocument
-			document, err = briefStore.AppendClarification(runID, answerApproval.ID, payload.Markdown, questionAnswer(answerApproval.Decisions))
+			document, err = briefStore.AppendClarification(runID, answerApproval.ID, provenance, payload.Markdown, questionAnswer(answerApproval.Decisions))
 			if err == nil {
 				currentBrief, err = materializeBriefDocument(briefWorkspace, document)
 			}
@@ -990,6 +996,23 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 	if inputApproval == nil && !rs.resumed {
 		rs.extraInputs[rs.graph.Entry] = briefInputs(rs.brief)
+	}
+	if inputApproval != nil && inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
+		rs.questionAnswerTargetStage = inputApproval.FromStage
+		canonicalPath, pathErr := QuestionAnswerCanonicalPath(runCfg.TargetDir, runID, inputApproval.ID)
+		if pathErr != nil {
+			outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", pathErr))
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		projectionPath, pathErr := QuestionAnswerMaterializationPath(runCfg.TargetDir, runID, inputApproval.ID)
+		if pathErr != nil {
+			outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", pathErr))
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonicalPath, projectionPath)
+		if rs.brief.Kind == "clarification" && rs.brief.ApprovalID == inputApproval.ID && rs.brief.Path != "" {
+			rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, rs.brief.Path)
+		}
 	}
 	if inputApproval != nil && (inputApproval.Kind == approval.KindQuestions || isApprovedSpecPayload(inputApproval.Payload) || isBackwardTransition(rs.graph, inputApproval)) {
 		inputs, inputErr := rs.stageOutputs(inputApproval.FromStage, inputApproval.AttemptID)

@@ -75,6 +75,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		AskQuestions:           agent.AskQuestions,
 		RequireIsolation:       true,
 		RequireInputScopedRead: agent.ReadScope == ReadScopeInputsOnly,
+		DeniedReadPaths:        append([]string(nil), executionTask.DeniedReadPaths...),
 	}
 	if err := adapter.Validate(launch); err != nil {
 		return fmt.Errorf("агент %s: %w", agent.Name, err)
@@ -128,7 +129,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		cmd.Stdin = stdin
 	}
 
-	isolatedEnv, cleanupEnv, err := adapter.Environment(agent, executionTask, executionInputs...)
+	runtimeAgent := *agent
+	runtimeAgent.CLI = cli
+	isolatedEnv, cleanupEnv, err := adapter.Environment(&runtimeAgent, executionTask, executionInputs...)
 	if err != nil {
 		return fmt.Errorf("агент %s: изоляция сессии: %w", agent.Name, err)
 	}

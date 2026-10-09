@@ -78,7 +78,7 @@ func TestWorkerAPIQuestionAnswerReturnsOnlyPreparedPathFromDurableApproval(t *te
 		t.Fatalf("canonical bytes not rebound to current durable approval: %v", err)
 	}
 	stored, err := answerStore.Read(runID, approvalID)
-	if err != nil || string(stored) != "# Ответ Product Owner\n\nB2B buyers\n" {
+	if err != nil || string(stored) != "# Ответ на вопросы\n\nB2B buyers\n" {
 		t.Fatalf("changed durable approval overwrote canonical bytes: data=%q err=%v", stored, err)
 	}
 	store.values[runID+"/"+approvalID] = value
@@ -162,7 +162,7 @@ func TestWorkerAPIQuestionAnswerDispatchRequiresPreparedAdmission(t *testing.T) 
 }
 
 func TestPrepareQuestionAnswerMountpointRecoversOnlyExactSingleLinkProjection(t *testing.T) {
-	expected := []byte("# Ответ Product Owner\n\nDurable answer\n")
+	expected := []byte("# Ответ на вопросы\n\nDurable answer\n")
 	path := filepath.Join(t.TempDir(), ".ai-team", "runs", "run-recovery", "inputs", "approval-recovery-answer.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)

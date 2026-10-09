@@ -50,7 +50,7 @@ func TestControllerQuestionAnswerStorePrepareIsExactRetryAndRejectsConflict(t *t
 		t.Fatalf("exact retry was not idempotent: first=%q second=%q err=%v", firstPath, secondPath, err)
 	}
 	data, err := store.Read(value.RunID, value.ID)
-	if err != nil || string(data) != "# Ответ Product Owner\n\nB2B buyers\n" {
+	if err != nil || string(data) != "# Ответ на вопросы\n\nB2B buyers\n" {
 		t.Fatalf("unexpected canonical input: data=%q err=%v", data, err)
 	}
 	info, err := os.Lstat(firstPath)
@@ -157,8 +157,26 @@ func TestControllerQuestionAnswerStoreReadRejectsSymlinkParents(t *testing.T) {
 		t.Fatal("canonical read followed a symlink parent")
 	}
 	data, err := os.ReadFile(filepath.Join(backupDir, "answer.md"))
-	if err != nil || string(data) != "# Ответ Product Owner\n\nknown answer\n" {
+	if err != nil || string(data) != "# Ответ на вопросы\n\nknown answer\n" {
 		t.Fatalf("symlink probe altered the original answer: data=%q err=%v", data, err)
+	}
+}
+
+func TestQuestionAnswerProvenanceUsesDurableStageAndResolvingActor(t *testing.T) {
+	value := testResolvedQuestionApproval("approval-provenance", "answer")
+	value.FromStage = "incident_triage"
+	value.ToStage = "incident_triage"
+	value.RequiredRoles = []string{"incident_commander"}
+	value.Targets["answer_questions"] = "incident_triage"
+	value.Decisions[0].ActorID = "commander-17"
+	value.Decisions[0].ActorRole = "incident_commander"
+	got, err := QuestionAnswerProvenance(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ClarificationProvenance{Stage: "incident_triage", ActorID: "commander-17", ActorRole: "incident_commander"}
+	if got != want {
+		t.Fatalf("provenance=%+v, want durable stage/actor %+v", got, want)
 	}
 }
 

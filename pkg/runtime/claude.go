@@ -134,8 +134,13 @@ func (a *ClaudeAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact
 	}
 	cleanup := func() { _ = os.RemoveAll(configDir) }
 
+	settings, err := claudeSessionSettings(task)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
 	settingsPath := filepath.Join(configDir, "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(claudeSettingsJSON), 0600); err != nil {
+	if err := os.WriteFile(settingsPath, settings, 0600); err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}
@@ -144,6 +149,36 @@ func (a *ClaudeAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact
 	env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
 	sort.Strings(env)
 	return env, cleanup, nil
+}
+
+func claudeSessionSettings(task *Task) ([]byte, error) {
+	var settings struct {
+		PermissionMode  string   `json:"permissionMode"`
+		DisallowedTools []string `json:"disallowedTools"`
+		Permissions     struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(claudeSettingsJSON), &settings); err != nil {
+		return nil, fmt.Errorf("claude: decode trusted session policy: %w", err)
+	}
+	paths, err := exactDeniedReadPaths(task)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		rule, ruleErr := claudeReadDenyRule(path)
+		if ruleErr != nil {
+			return nil, ruleErr
+		}
+		settings.Permissions.Deny = append(settings.Permissions.Deny, rule)
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("claude: encode stage session policy: %w", err)
+	}
+	return encoded, nil
 }
 
 // claudeResultLine — JSON result, который печатает `claude -p

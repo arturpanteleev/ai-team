@@ -53,7 +53,10 @@ func createInitialBriefAt(rootFD int, runID, intention string) (document BriefDo
 	return BriefDocument{Version: version, Content: content}, err
 }
 
-func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer string) (document BriefDocument, err error) {
+func appendBriefClarificationAt(rootFD int, runID, approvalID string, provenance ClarificationProvenance, questions, answer string) (document BriefDocument, err error) {
+	if err := validateClarificationProvenance(provenance); err != nil {
+		return BriefDocument{}, err
+	}
 	answer = strings.TrimSpace(answer)
 	if answer == "" || len(answer) > maxAnswerBytes {
 		return BriefDocument{}, errors.New("answer must contain 1..16384 bytes")
@@ -84,7 +87,7 @@ func appendBriefClarificationAt(rootFD int, runID, approvalID, questions, answer
 		return BriefDocument{}, err
 	}
 	name := fmt.Sprintf("%04d-answer-%s.md", len(versions)+1, filepath.Base(approvalID))
-	addition := []byte(fmt.Sprintf("\n## Уточнение %d\n\n### Вопросы аналитика\n\n%s\n\n### Ответ Product Owner\n\n%s\n", len(versions), strings.TrimSpace(questions), answer))
+	addition := clarificationAddition(len(versions), provenance, questions, answer)
 	content := append(append([]byte(nil), parentData...), addition...)
 	if len(content) > maxBriefBytes {
 		return BriefDocument{}, errors.New("versioned business brief exceeds 262144 bytes")

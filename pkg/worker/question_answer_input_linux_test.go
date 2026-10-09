@@ -315,7 +315,7 @@ func TestBubblewrapQuestionAnswerProbeHelper(t *testing.T) {
 	}
 	report := questionAnswerProbeReport{
 		CanonicalHidden:       errors.Is(canonicalErr, os.ErrNotExist),
-		InputReadable:         inputErr == nil && string(input) == "# Ответ Product Owner\n\nB2B buyer\n",
+		InputReadable:         inputErr == nil && string(input) == "# Ответ на вопросы\n\nB2B buyer\n",
 		InputWriteBlocked:     remountErr != nil && (errors.Is(writeInputErr, os.ErrPermission) || errors.Is(writeInputErr, syscall.EROFS)),
 		InputRemountSucceeded: remountErr == nil,
 		WorkspaceReadable:     visibleErr == nil && string(visible) == "workspace-visible",

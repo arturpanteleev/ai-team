@@ -258,6 +258,42 @@ func TestOpenCodeInputOnlyScopeDeniesWorkspaceDiscovery(t *testing.T) {
 	}
 }
 
+func TestOpenCodeStageReadDenyBlocksReadAndSearchWhilePromptKeepsTargetInput(t *testing.T) {
+	target := t.TempDir()
+	answerPath := filepath.Join(target, ".ai-team", "runs", "run-1", "inputs", "approval-1-answer.md")
+	if err := os.MkdirAll(filepath.Dir(answerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(answerPath, []byte("durable clarification answer"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{TargetDir: target, ArtifactRoot: filepath.Join(target, ".ai-team", "artifacts"), DeniedReadPaths: []string{answerPath}}
+	input := Artifact{Name: "clarification-answer", Path: answerPath}
+	prompt, err := (&AgentCLIRuntime{}).buildPrompt(&Agent{Name: "target", Prompt: "continue"}, task, []Artifact{input})
+	if err != nil || !strings.Contains(prompt, "durable clarification answer") {
+		t.Fatalf("target stage must still receive the answer in its prompt: prompt=%q err=%v", prompt, err)
+	}
+
+	for _, inputs := range [][]Artifact{{input}, nil} { // target and following-stage invocations
+		environment, cleanup, err := OpenCodeIsolationEnvironment(&Agent{Name: "coder"}, task, inputs...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		var permission map[string]any
+		if err := json.Unmarshal([]byte(environmentValue(environment, "OPENCODE_PERMISSION")), &permission); err != nil {
+			t.Fatal(err)
+		}
+		reads, ok := permission["read"].(map[string]any)
+		if !ok || reads[filepath.ToSlash(answerPath)] != "deny" {
+			t.Fatalf("read policy must deny known answer path: %#v", permission["read"])
+		}
+		if permission["grep"] != "deny" {
+			t.Fatalf("grep could bypass a path-scoped read denial: %#v", permission["grep"])
+		}
+	}
+}
+
 func TestInputOnlyWorkspacePublishesOnlyDeclaredOutputs(t *testing.T) {
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(target, "tasks", "feat"), 0o755); err != nil {

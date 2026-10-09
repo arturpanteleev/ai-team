@@ -91,6 +91,10 @@ type Launch struct {
 	Effort       string
 	Interactive  bool
 	AskQuestions bool
+	// DeniedReadPaths are trusted exact file paths to deny in the stage's
+	// runtime-specific filesystem policy. Adapters with filesystem-level
+	// profiles must keep their security boundary active when this is nonempty.
+	DeniedReadPaths []string
 	// RequireIsolation — этап обязан выполняться под изоляцией сессии
 	// (agent-стадии и eval-судья всегда требуют её).
 	RequireIsolation bool

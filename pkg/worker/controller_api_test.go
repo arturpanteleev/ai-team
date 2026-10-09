@@ -4011,9 +4011,18 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if err != nil || len(versions) != 1 || versions[0].ID != created.Version.ID {
 		t.Fatalf("brief list=%+v err=%v", versions, err)
 	}
-	clarified, err := briefs.AppendClarification(job.RunID, approvalID, questions, answer)
+	provenance := pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "qa@example.com", ActorRole: "qa"}
+	clarified, err := briefs.AppendClarification(job.RunID, approvalID, provenance, questions, answer)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, expected := range []string{"Вопросы этапа \"questioner\"", "Ответ от роли \"qa\"", "участник \"qa@example.com\""} {
+		if !strings.Contains(string(clarified.Content), expected) {
+			t.Fatalf("controller brief omitted approval provenance %q: %s", expected, clarified.Content)
+		}
+	}
+	if strings.Contains(string(clarified.Content), "Product Owner") || strings.Contains(string(clarified.Content), "аналитик") {
+		t.Fatalf("generic AskQuestions brief hard-coded a role label: %s", clarified.Content)
 	}
 	if clarified.Version.ParentID != created.Version.ID || clarified.Version.ID == created.Version.ID {
 		t.Fatalf("clarification is not a new immutable child version: initial=%+v clarified=%+v", created.Version, clarified.Version)
@@ -4062,7 +4071,7 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 		loaded.Version.ApprovalID != approvalID || string(loaded.Content) != string(clarified.Content) {
 		t.Fatalf("persisted brief read=%+v err=%v", loaded, err)
 	}
-	retry, err := briefs.AppendClarification(resumeJob.RunID, approvalID, questions, answer)
+	retry, err := briefs.AppendClarification(resumeJob.RunID, approvalID, provenance, questions, answer)
 	if err != nil || retry.Version.ID != clarified.Version.ID {
 		t.Fatalf("retry of the same durable answer should be idempotent: version=%+v err=%v", retry.Version, err)
 	}
@@ -4147,7 +4156,7 @@ func TestWorkerControllerBriefAppendRequiresDurableQuestionsApproval(t *testing.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := briefs.AppendClarification(job.RunID, tc.approvalID, tc.questions, tc.answer); err == nil {
+			if _, err := briefs.AppendClarification(job.RunID, tc.approvalID, pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "qa@example.com", ActorRole: "qa"}, tc.questions, tc.answer); err == nil {
 				t.Fatal("unverified clarification input was accepted")
 			}
 		})

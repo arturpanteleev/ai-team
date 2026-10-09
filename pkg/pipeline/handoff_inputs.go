@@ -147,7 +147,22 @@ func CanonicalQuestionAnswerContent(value approval.PendingApproval) ([]byte, err
 	if answer == "" || len(answer) > maxAnswerBytes {
 		return nil, errors.New("clarification approval has no valid durable answer")
 	}
-	return []byte("# Ответ Product Owner\n\n" + answer + "\n"), nil
+	return []byte("# Ответ на вопросы\n\n" + answer + "\n"), nil
+}
+
+// QuestionAnswerProvenance returns the stage and resolving actor recorded by
+// the approval store. It intentionally does not infer business roles from
+// stage names or hard-code a particular organization chart.
+func QuestionAnswerProvenance(value approval.PendingApproval) (ClarificationProvenance, error) {
+	if _, err := CanonicalQuestionAnswerContent(value); err != nil {
+		return ClarificationProvenance{}, err
+	}
+	for _, decision := range value.Decisions {
+		if decision.Action == value.ResolvedAction && decision.DecidedAt.Equal(value.ResolvedAt) {
+			return ClarificationProvenance{Stage: value.FromStage, ActorID: decision.ActorID, ActorRole: decision.ActorRole}, nil
+		}
+	}
+	return ClarificationProvenance{}, errors.New("clarification approval has no resolving actor provenance")
 }
 
 func containsApprovalRole(roles []string, role string) bool {

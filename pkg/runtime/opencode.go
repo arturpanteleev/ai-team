@@ -113,6 +113,24 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 			readRules[filepath.ToSlash(inputPath)+"/**"] = "allow"
 		}
 	}
+	deniedReadPaths, err := exactDeniedReadPaths(task)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	for _, deniedPath := range deniedReadPaths {
+		fullPath, absErr := filepath.Abs(deniedPath)
+		if absErr != nil || fullPath != deniedPath {
+			return nil, func() {}, fmt.Errorf("stage read-deny path must stay absolute and clean: %q", deniedPath)
+		}
+		readRules[filepath.ToSlash(fullPath)] = "deny"
+		relative, relErr := filepath.Rel(target, fullPath)
+		if relErr != nil {
+			return nil, func() {}, relErr
+		}
+		if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			readRules[filepath.ToSlash(relative)] = "deny"
+		}
+	}
 	if agent.Mutation == "source" || agent.Mutation == "tests" {
 		for _, pattern := range agent.AllowedPaths {
 			editRules[filepath.ToSlash(pattern)] = "allow"
@@ -163,6 +181,12 @@ func openCodeIsolationEnvironment(agent *Agent, task *Task, inputs ...Artifact) 
 		"task":               "deny",
 		"webfetch":           "deny",
 		"websearch":          "deny",
+	}
+	if len(deniedReadPaths) > 0 {
+		// OpenCode's grep permission is matched against the search expression,
+		// not the searched path. A path-scoped read denial alone would therefore
+		// leave content-search as a bypass for the protected file.
+		permission["grep"] = "deny"
 	}
 	permissionJSON, err := json.Marshal(permission)
 	if err != nil {

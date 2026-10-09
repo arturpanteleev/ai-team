@@ -188,6 +188,7 @@ type scriptedRuntime struct {
 	skipWrite map[string]bool   // agent -> не создавать выходы
 	waitCtx   map[string]bool   // agent -> блокироваться до отмены ctx
 	onExec    func(agentName string, inputs []runtime.Artifact)
+	onExecute func(agentName string, task *runtime.Task, inputs []runtime.Artifact)
 	calls     map[string]int
 	targetDir string
 	usage     *runtime.Usage
@@ -247,6 +248,9 @@ func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *r
 	}
 	if r.onExec != nil {
 		r.onExec(a.Name, inputs)
+	}
+	if r.onExecute != nil {
+		r.onExecute(a.Name, task, inputs)
 	}
 	if r.waitCtx[a.Name] {
 		<-ctx.Done()
@@ -768,6 +772,7 @@ func TestRun_NonInteractiveApprovalDecisionResumeSkipsCompletedStage(t *testing.
 func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
+	var targetDenied, laterDenied []string
 	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
 	rt.content["analyst"] = map[string]string{"proposal": "готовая спецификация"}
 	rt.onExec = func(name string, inputs []runtime.Artifact) {
@@ -820,6 +825,16 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 			t.Errorf("resume inputs: questions=%v answer=%v brief=%v version=%v", gotQuestion, gotAnswer, gotBrief, gotBriefVersion)
 		}
 	}
+	rt.onExecute = func(name string, task *runtime.Task, _ []runtime.Artifact) {
+		switch name {
+		case "analyst":
+			if rt.calls[name] == 2 {
+				targetDenied = append([]string(nil), task.DeniedReadPaths...)
+			}
+		case "questioner":
+			laterDenied = append([]string(nil), task.DeniedReadPaths...)
+		}
+	}
 	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
 		wf.MaxVisits["analyst"] = 4
 		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
@@ -829,7 +844,7 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
 			},
 		})
-	}, config.AgentConfig{Name: "analyst"})
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "questioner"})
 	pr := &scriptedPrompter{}
 	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(pr))
 	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
@@ -859,12 +874,30 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
 	if err != nil {
 		t.Fatalf("resume должен продолжить тот же run: result=%+v err=%v", second, err)
 	}
-	if second.RunID != first.RunID || rt.calls["analyst"] != 2 || second.Outcome != "completed" {
+	if second.RunID != first.RunID || rt.calls["analyst"] != 2 || rt.calls["questioner"] != 1 || second.Outcome != "completed" {
 		t.Fatalf("неверный resume: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+	if len(targetDenied) == 0 || len(laterDenied) == 0 {
+		t.Fatalf("both target and following stage must receive a per-stage answer deny policy: target=%v later=%v", targetDenied, laterDenied)
+	}
+	for _, path := range targetDenied {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			t.Fatalf("target stage received invalid denied path %q", path)
+		}
+		found := false
+		for _, later := range laterDenied {
+			if later == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("later stage lost protected path %q: target=%v later=%v", path, targetDenied, laterDenied)
+		}
 	}
 	versions, err := listBriefVersions(filepath.Join(dir, ".ai-team", "runs", first.RunID, "brief"))
 	if err != nil || len(versions) != 2 {

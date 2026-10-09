@@ -1133,6 +1133,11 @@ func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry
 	if job.Operation == worker.OperationCancel {
 		return loadValidatedConfig(target, reg)
 	}
+	if _, overridden := e2eInMemoryLegacyConfig(target); overridden {
+		// The E2E fixture deliberately supplies an in-memory legacy workflow; it
+		// must remain aligned with the matching test registry/runtime override.
+		return loadValidatedConfig(target, reg)
+	}
 	store, err := config.NewTemplateStore(target)
 	if err != nil {
 		fatal("Template pin store: %v", err)

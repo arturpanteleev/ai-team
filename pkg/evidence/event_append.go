@@ -42,11 +42,31 @@ func ValidateControllerEventAppend(events []Event, runID, runDir string, candida
 	return validateEventAppend(events, runID, runDir, candidate, expectedSequence, expectedPreviousSHA256, manifests, true)
 }
 
-func validateEventAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource, controllerOnly bool) (Event, bool, error) {
+// ValidateControllerHumanAttemptAppend validates an attempt event constructed
+// by the trusted controller from a resolved human input approval.
+func ValidateControllerHumanAttemptAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource) (Event, bool, error) {
+	if (candidate.Type != "attempt_started" && candidate.Type != "attempt_finished") || candidate.Data["executor"] != "human" {
+		return Event{}, false, errors.New("controller human attempt append requires a human attempt event")
+	}
+	return validateEventAppend(events, runID, runDir, candidate, expectedSequence, expectedPreviousSHA256, manifests, true)
+}
+
+// ValidateControllerStageSkipAppend validates a warning that the trusted
+// controller derives from a resolved human input approval. Worker API clients
+// cannot append stage_skipped directly; the controller calls this only after
+// authorizing the related human attempt.
+func ValidateControllerStageSkipAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource) (Event, bool, error) {
+	if candidate.Type != "stage_skipped" {
+		return Event{}, false, errors.New("controller stage skip append requires stage_skipped")
+	}
+	return validateEventAppend(events, runID, runDir, candidate, expectedSequence, expectedPreviousSHA256, manifests, true)
+}
+
+func validateEventAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource, controllerOwned bool) (Event, bool, error) {
 	if err := ValidateRunID(runID); err != nil {
 		return Event{}, false, err
 	}
-	if controllerOnly && candidate.Type == "description_missing" {
+	if controllerOwned && candidate.Type == "description_missing" {
 		// Only this known controller-owned type is admitted by this path.
 		if candidate.Stage == "" || candidate.AttemptID == "" || len(candidate.Data) != 2 || candidate.Data["field"] != "description" {
 			return Event{}, false, errors.New("description_missing must bind one stage attempt and description field")
@@ -54,20 +74,50 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 		if _, ok := candidate.Data["approval_id"].(string); !ok || candidate.Data["approval_id"] == "" {
 			return Event{}, false, errors.New("description_missing must bind its input approval")
 		}
-	} else if err := ValidateWorkerEventType(candidate.Type); err != nil {
-		return Event{}, false, err
-	}
-	if candidate.Type == "attempt_started" {
-		if _, claimed := candidate.Data["stage_action"]; claimed {
-			return Event{}, false, errors.New("worker cannot claim controller-authorized stage actions")
+	} else if !controllerOwned || candidate.Type != "stage_skipped" {
+		if err := ValidateWorkerEventType(candidate.Type); err != nil {
+			return Event{}, false, err
 		}
-		if _, claimed := candidate.Data["stage_skip_version"]; claimed {
-			return Event{}, false, errors.New("worker cannot claim controller-owned skip evidence")
+	}
+	// Raw worker appends cannot choose a human executor or claim skip authority.
+	// The trusted controller uses the controller-specific helpers above only
+	// after deriving each event from a resolved approval.
+	if candidate.Type == "attempt_started" {
+		executor, _ := candidate.Data["executor"].(string)
+		_, hasAction := candidate.Data["stage_action"]
+		_, hasVersion := candidate.Data["stage_skip_version"]
+		if executor == "human" && !controllerOwned {
+			return Event{}, false, errors.New("worker event append cannot claim human executor")
+		}
+		if hasAction || hasVersion {
+			stageAction, actionOK := candidate.Data["stage_action"].(string)
+			version, versionErr := optionalEventInt(candidate.Data, "stage_skip_version")
+			if !controllerOwned || executor != "human" || !actionOK || stageAction != "skip" || versionErr != nil || version != StageSkipProtocolVersion {
+				return Event{}, false, errors.New("worker cannot claim an unauthorized stage skip")
+			}
+		}
+		if executor != "human" {
+			for _, field := range []string{"actor_id", "actor_role", "human_input_approval_id"} {
+				if _, claimed := candidate.Data[field]; claimed {
+					return Event{}, false, errors.New("worker cannot claim human stage identity")
+				}
+			}
 		}
 	}
 	if candidate.Type == "attempt_finished" {
-		if _, claimed := candidate.Data["stage_skip_reason"]; claimed {
-			return Event{}, false, errors.New("worker cannot claim controller-owned stage skip reason")
+		executor, _ := candidate.Data["executor"].(string)
+		status, _ := candidate.Data["status"].(string)
+		outcome, _ := candidate.Data["outcome"].(string)
+		if executor == "human" && !controllerOwned {
+			return Event{}, false, errors.New("worker event append cannot claim human executor")
+		}
+		if executor != "human" {
+			if _, claimed := candidate.Data["stage_skip_reason"]; claimed {
+				return Event{}, false, errors.New("worker cannot claim controller-owned stage skip reason")
+			}
+			if status == string(workflow.OutcomeSkipped) || outcome == string(workflow.OutcomeSkipped) {
+				return Event{}, false, errors.New("worker cannot claim a skipped agent outcome")
+			}
 		}
 	}
 	if uint64(len(events)) == expectedSequence+1 && len(events) > 0 &&

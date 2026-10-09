@@ -64,6 +64,7 @@ const (
 	workerAPIRequestTTL              = 30 * time.Second
 	workerAPIFutureSkew              = 5 * time.Second
 	workerAPIMaxNonces               = 4096
+	workerHumanInputTrigger          = "human_input"
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -379,9 +380,35 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		if reserved {
 			if job.Operation == OperationResume || job.Operation == OperationRecover {
 				events, readErr := store.Read(job.RunID)
-				if readErr == nil {
-					readErr = validateControllerDeliveryClaims(job, events, approvals)
+				if readErr != nil {
+					_ = listener.Close()
+					_ = os.Remove(socketPath)
+					return nil, fmt.Errorf("read controller event chain before recovery: %w", readErr)
 				}
+				if len(events) > 0 {
+					// The controller owns this repair. Do it before the worker gets a
+					// pinned append capability or any resumed pipeline can replay the
+					// incomplete prefix. Only a human skip backed by the durable input
+					// approval may be repaired at this boundary.
+					if err := api.validateMissingHumanSkipAuthorities(events); err != nil {
+						_ = listener.Close()
+						_ = os.Remove(socketPath)
+						return nil, fmt.Errorf("validate controller human skip recovery: %w", err)
+					}
+					if err := evidence.RecoverMissingStageSkipEvents(runDir, job.RunID, store,
+						evidence.ReservedAttemptManifestSource{TargetDir: canonicalTarget}); err != nil {
+						_ = listener.Close()
+						_ = os.Remove(socketPath)
+						return nil, fmt.Errorf("recover controller stage skip evidence: %w", err)
+					}
+					events, readErr = store.Read(job.RunID)
+					if readErr != nil {
+						_ = listener.Close()
+						_ = os.Remove(socketPath)
+						return nil, fmt.Errorf("read recovered controller event chain: %w", readErr)
+					}
+				}
+				readErr = validateControllerDeliveryClaims(job, events, approvals)
 				if readErr != nil {
 					_ = listener.Close()
 					_ = os.Remove(socketPath)
@@ -1030,6 +1057,75 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			c.Event = validated
 		}
 		appended, err := s.eventLogs.Append(s.scope.RunID, c.Event, c.ExpectedSequence, c.ExpectedPreviousSHA256)
+		if err != nil {
+			return nil, err
+		}
+		s.eventSnapshot = nil
+		s.eventSnapshotToken = ""
+		return workerAPIEventAppendResult{
+			SchemaVersion: appended.SchemaVersion, Sequence: appended.Sequence, RunID: appended.RunID,
+			Type: appended.Type, Stage: appended.Stage, AttemptID: appended.AttemptID, Timestamp: appended.Timestamp,
+			PreviousSHA256: appended.PreviousSHA256, SHA256: appended.SHA256,
+		}, nil
+	case "human_attempt.start":
+		if !s.usageAllowed || s.eventLogs == nil {
+			return nil, errors.New("controller human attempts require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("human attempt start run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("controller human attempt is not allowed for operation %q", s.scope.Operation)
+		}
+		appended, err := s.appendControllerHumanAttemptStarted(c.Event)
+		if err != nil {
+			return nil, err
+		}
+		return workerAPIEventAppendResult{
+			SchemaVersion: appended.SchemaVersion, Sequence: appended.Sequence, RunID: appended.RunID,
+			Type: appended.Type, Stage: appended.Stage, AttemptID: appended.AttemptID, Timestamp: appended.Timestamp,
+			PreviousSHA256: appended.PreviousSHA256, SHA256: appended.SHA256,
+		}, nil
+	case "human_attempt.finish":
+		if !s.usageAllowed || s.eventLogs == nil {
+			return nil, errors.New("controller human attempts require bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("human attempt finish run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("controller human attempt is not allowed for operation %q", s.scope.Operation)
+		}
+		appended, err := s.appendControllerHumanAttemptFinished(c.Event)
+		if err != nil {
+			return nil, err
+		}
+		return workerAPIEventAppendResult{
+			SchemaVersion: appended.SchemaVersion, Sequence: appended.Sequence, RunID: appended.RunID,
+			Type: appended.Type, Stage: appended.Stage, AttemptID: appended.AttemptID, Timestamp: appended.Timestamp,
+			PreviousSHA256: appended.PreviousSHA256, SHA256: appended.SHA256,
+		}, nil
+	case "stage_skip.complete":
+		if !s.usageAllowed || s.eventLogs == nil {
+			return nil, errors.New("controller stage skip requires bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID || c.Event.Type != "stage_skipped" || len(c.Event.Data) != 0 {
+			return nil, errors.New("worker stage skip request must contain only run, stage, and attempt identity")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("controller stage skip is not allowed for operation %q", s.scope.Operation)
+		}
+		events, err := s.eventLogs.Read(s.scope.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("read event chain before controller stage skip: %w", err)
+		}
+		appended, err := s.appendControllerHumanStageSkip(c.Event, events)
 		if err != nil {
 			return nil, err
 		}
@@ -2053,6 +2149,45 @@ func (s *workerAPIEventLog) Append(runID string, event evidence.Event, expectedS
 	if runID != s.port.scope.RunID {
 		return evidence.Event{}, errors.New("worker event log API run mismatch")
 	}
+	if event.Type == "attempt_started" && event.Data["executor"] == "human" {
+		// Human authority fields are never forwarded as worker event data. The
+		// trusted API reloads the resolved approval and builds the canonical event.
+		var result workerAPIEventAppendResult
+		requestEvent := evidence.Event{
+			Type: "attempt_started", Stage: event.Stage, AttemptID: event.AttemptID, Timestamp: event.Timestamp,
+			Data: map[string]any{
+				"stage_index":             event.Data["stage_index"],
+				"human_input_approval_id": event.Data["human_input_approval_id"],
+			},
+		}
+		if err := s.port.call("human_attempt.start", workerAPICall{RunID: runID, Event: requestEvent}, &result); err != nil {
+			return evidence.Event{}, err
+		}
+		return workerAPIEventFromAppendResult(result), nil
+	}
+	if event.Type == "attempt_finished" && event.Data["executor"] == "human" {
+		// The controller loads the published manifest and approval record; no
+		// worker-supplied actor, skip reason, or terminal state is forwarded.
+		var result workerAPIEventAppendResult
+		requestEvent := evidence.Event{Type: "attempt_finished", Stage: event.Stage, AttemptID: event.AttemptID, Timestamp: event.Timestamp}
+		if err := s.port.call("human_attempt.finish", workerAPICall{RunID: runID, Event: requestEvent}, &result); err != nil {
+			return evidence.Event{}, err
+		}
+		return workerAPIEventFromAppendResult(result), nil
+	}
+	if event.Type == "stage_skipped" {
+		// The worker can request completion for an authorized human skip, but
+		// sends no warning payload or reason. The controller re-reads the
+		// resolved approval and constructs the durable warning itself.
+		var result workerAPIEventAppendResult
+		err := s.port.call("stage_skip.complete", workerAPICall{
+			RunID: runID, Event: evidence.Event{Type: "stage_skipped", Stage: event.Stage, AttemptID: event.AttemptID},
+		}, &result)
+		if err != nil {
+			return evidence.Event{}, err
+		}
+		return workerAPIEventFromAppendResult(result), nil
+	}
 	var result workerAPIEventAppendResult
 	err := s.port.call("event_log.append", workerAPICall{
 		RunID: runID, Event: event, ExpectedSequence: expectedSequence,
@@ -2061,16 +2196,15 @@ func (s *workerAPIEventLog) Append(runID string, event evidence.Event, expectedS
 	if err != nil {
 		return evidence.Event{}, err
 	}
-	event.SchemaVersion = result.SchemaVersion
-	event.Sequence = result.Sequence
-	event.RunID = result.RunID
-	event.Type = result.Type
-	event.Stage = result.Stage
-	event.AttemptID = result.AttemptID
-	event.Timestamp = result.Timestamp
-	event.PreviousSHA256 = result.PreviousSHA256
-	event.SHA256 = result.SHA256
-	return event, nil
+	return workerAPIEventFromAppendResult(result), nil
+}
+
+func workerAPIEventFromAppendResult(result workerAPIEventAppendResult) evidence.Event {
+	return evidence.Event{
+		SchemaVersion: result.SchemaVersion, Sequence: result.Sequence, RunID: result.RunID,
+		Type: result.Type, Stage: result.Stage, AttemptID: result.AttemptID, Timestamp: result.Timestamp,
+		PreviousSHA256: result.PreviousSHA256, SHA256: result.SHA256,
+	}
 }
 
 func (s *workerAPIEventLog) AppendControllerEvent(runID string, event evidence.Event, expectedSequence uint64, expectedPreviousSHA256 string) (evidence.Event, error) {

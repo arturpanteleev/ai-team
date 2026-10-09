@@ -102,7 +102,7 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 	if utf8.RuneCountInString(fileSummary) > 220 {
 		fileSummary = fmt.Sprintf("%d файлов", len(files))
 	}
-	body := fmt.Sprintf("Что изменено: %s.\nЗачем: %s.\nПроверка: обязательные проверки, review, tests и verification пройдены контроллером.", fileSummary, description)
+	body := fmt.Sprintf("Что изменено: %s.\nЗачем: %s.\nПроверка: обязательные проверки и настроенные предусловия подтверждены контроллером.", fileSummary, description)
 	plan := Plan{
 		SchemaVersion: SchemaVersion,
 		Branch:        branch, BaseBranch: base, Remote: "origin", RemoteURL: remoteURL, Files: files,

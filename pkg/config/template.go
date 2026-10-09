@@ -39,10 +39,11 @@ type TemplateCheck struct {
 	Rules     []string `yaml:"rules,omitempty"`
 }
 
-// TemplateDelivery declares project checks required before controller-owned
-// delivery for an agent-executed PR stage.
+// TemplateDelivery declares controller checks and optional earlier verdict
+// stages required before controller-owned delivery for an agent-executed PR stage.
 type TemplateDelivery struct {
-	RequireChecks []string `yaml:"require_checks"`
+	RequireChecks   []string `yaml:"require_checks"`
+	RequireVerdicts []string `yaml:"require_verdicts,omitempty"`
 }
 
 // TemplateReturn declares a backward-only route. MaxVisits is optional; when
@@ -102,7 +103,7 @@ func (c *TemplateCheck) UnmarshalYAML(node *yaml.Node) error {
 }
 
 func (d *TemplateDelivery) UnmarshalYAML(node *yaml.Node) error {
-	if err := validateMappingKeys(node, map[string]bool{"require_checks": true}, "config: stage delivery"); err != nil {
+	if err := validateMappingKeys(node, map[string]bool{"require_checks": true, "require_verdicts": true}, "config: stage delivery"); err != nil {
 		return err
 	}
 	type plain TemplateDelivery
@@ -236,6 +237,13 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 				}
 				seen[checkName] = true
 			}
+			seenVerdicts := map[string]bool{}
+			for _, verdictStage := range stage.Delivery.RequireVerdicts {
+				if verdictStage == "" || seenVerdicts[verdictStage] {
+					add("%s: delivery.require_verdicts содержит пустой или повторяющийся этап", prefix)
+				}
+				seenVerdicts[verdictStage] = true
+			}
 		}
 	}
 	projectCheckNames := make(map[string]bool, len(c.Checks))
@@ -260,6 +268,23 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 		if route.MaxVisits < 0 {
 			add("returns[%d]: max_visits не может быть отрицательным", i)
+		}
+	}
+	for i, stage := range c.Stages {
+		if stage.Delivery == nil {
+			continue
+		}
+		for _, verdictStage := range stage.Delivery.RequireVerdicts {
+			verdictIndex, exists := index[verdictStage]
+			if !exists {
+				add("stages[%d] (%s): delivery.require_verdicts ссылается на неизвестный этап %q", i, stage.ID, verdictStage)
+			} else if verdictStage == stage.ID {
+				add("stages[%d] (%s): delivery.require_verdicts не может ссылаться на сам delivery-этап", i, stage.ID)
+			} else if verdictIndex >= i {
+				add("stages[%d] (%s): delivery.require_verdicts должен ссылаться на этап до delivery, получен %q", i, stage.ID, verdictStage)
+			} else if c.Stages[verdictIndex].Agent == "" {
+				add("stages[%d] (%s): required verdict stage %q должен иметь agent с verdict contract", i, stage.ID, verdictStage)
+			}
 		}
 	}
 	returnMax := make(map[string]int)

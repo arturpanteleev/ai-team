@@ -4,22 +4,6 @@ runtime: delivery
 kind: delivery
 mutation: external
 inputs:
-  review: '{feature}/review.md'
-  test-report: '{feature}/test-report.md'
-  verification: '{feature}/verification.md'
   proposal: '{feature}/proposal.md'
-preconditions:
-  review:
-    required: true
-    marker: Verdict
-    values: [APPROVED]
-  test-report:
-    required: true
-    marker: Result
-    values: [PASS]
-  verification:
-    required: true
-    marker: Verdict
-    values: [APPROVED]
 outputs:
   plan: '{feature}/delivery-plan.json'

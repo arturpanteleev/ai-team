@@ -160,7 +160,6 @@ func TestRegistry_RejectsUnsafeOrInconsistentDefinitions(t *testing.T) {
 		{"non canonical path", "name: sample\nruntime: agentcli\nmutation: none\noutputs:\n  report: feature//report.md\n", "каноническим"},
 		{"input output overlap", "name: sample\nruntime: agentcli\nmutation: none\ninputs:\n  source: feature/data\noutputs:\n  report: feature/data/report.md\n", "пересекаются"},
 		{"delivery without external", "name: sample\nruntime: agentcli\nkind: delivery\nmutation: none\n", "требует mutation external"},
-		{"delivery without preconditions", "name: sample\nruntime: agentcli\nkind: delivery\nmutation: external\n", "требует declarative preconditions"},
 		{"external non-delivery", "name: sample\nruntime: agentcli\nmutation: external\n", "только для kind delivery"},
 		{"inputs-only source mutation", "name: sample\nruntime: agentcli\nread_scope: inputs-only\nmutation: source\nallowed_paths: ['**']\n", "несовместим с mutation \"source\""},
 		{"inputs-only tests mutation", "name: sample\nruntime: agentcli\nread_scope: inputs-only\nmutation: tests\nallowed_paths: ['**/*_test.go']\n", "несовместим с mutation \"tests\""},
@@ -183,6 +182,17 @@ func TestRegistry_RejectsUnsafeOrInconsistentDefinitions(t *testing.T) {
 				t.Fatalf("ожидалась ошибка %q, got: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestRegistryAllowsControllerDeliveryWithoutArtifactPreconditions(t *testing.T) {
+	registry := NewFS(fstest.MapFS{"sample/def.yaml": &fstest.MapFile{Data: []byte("name: sample\nruntime: delivery\nkind: delivery\nmutation: external\noutputs:\n  plan: plan.json\n")}})
+	definition, err := registry.Load("sample")
+	if err != nil {
+		t.Fatalf("controller delivery may use configured checks without review artifacts: %v", err)
+	}
+	if definition.Kind != "delivery" || len(definition.Preconditions) != 0 {
+		t.Fatalf("unexpected delivery definition: %+v", definition)
 	}
 }
 

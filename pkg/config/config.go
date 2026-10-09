@@ -637,6 +637,7 @@ func copyTargets(source map[string]string) map[string]string {
 // AgentConfig возвращает конфигурацию агента с подставленными глобальными
 // значениями и дефолтами.
 func (c *Config) AgentConfig(name string) *AgentConfig {
+	var resolved *AgentConfig
 	for _, a := range c.PipelineAgents {
 		if a.Name == name {
 			cfg := a
@@ -652,10 +653,29 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 			if cfg.Timeout == "" {
 				cfg.Timeout = c.StageTimeout
 			}
-			return &cfg
+			resolved = &cfg
+			break
 		}
 	}
-	return nil
+	if c.Template != "" {
+		for _, stage := range c.Stages {
+			if stage.Delivery == nil || (stage.ID != name && stage.Agent != name) {
+				continue
+			}
+			if resolved == nil {
+				resolved = &AgentConfig{Name: name}
+			}
+			for _, requiredName := range stage.Delivery.RequireChecks {
+				for _, definition := range c.Checks {
+					if definition.Name == requiredName {
+						resolved.Checks = append(resolved.Checks, definition)
+						break
+					}
+				}
+			}
+		}
+	}
+	return resolved
 }
 
 // StageTimeoutFor возвращает таймаут этапа: явный (per-agent `timeout` или

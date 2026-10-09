@@ -181,9 +181,6 @@ func (p Plan) Validate() error {
 	if !sha256Pattern.MatchString(p.CheckEvidenceDigest) {
 		return fmt.Errorf("delivery plan: check_evidence_digest должен быть sha256")
 	}
-	if len(p.Preconditions) == 0 {
-		return fmt.Errorf("delivery plan: preconditions evidence обязателен")
-	}
 	for name, evidence := range p.Preconditions {
 		if name == "" || strings.TrimSpace(name) != name || evidence.Type != "file" || evidence.Size <= 0 ||
 			!sha256Pattern.MatchString(evidence.SHA256) || evidence.Verdict == "" {

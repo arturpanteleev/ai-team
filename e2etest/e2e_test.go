@@ -1000,7 +1000,10 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	// This flow exercises the scheduler against the pre-v5 runtime. Keep the
 	// public init/config path on v5, but use the test-only in-memory runtime
 	// projection in both the web server and the disposable worker processes.
-	runtimeFixtureEnv := e2eRuntimeFixtureEnv(t, dir, []string{"run"})
+	runtimeFixtureEnv := append(
+		e2eRuntimeFixtureEnv(t, dir, []string{"run"}),
+		worker.WorkerEnvAllowVar+"=AI_TEAM_E2E_IN_MEMORY_LEGACY_RUNTIME",
+	)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

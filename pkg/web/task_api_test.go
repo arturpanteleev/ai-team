@@ -14,6 +14,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -66,7 +67,7 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 		{"run details", "/api/runs/run-read-api", `"attempt_id":"attempt-1"`},
 		{"run events", "/api/runs/run-read-api/events?after=0", `"type":"run_started"`},
 		{"global events", "/api/events?after=0", `"run_id":"run-read-api"`},
-		{"flow metrics", "/api/metrics/flow?from=" + started.Add(-time.Minute).Format(time.RFC3339) + "&to=" + started.Add(24*time.Hour).Format(time.RFC3339), `"unknown_runs":1`},
+		{"flow metrics", "/api/metrics/flow?from=" + started.Add(-time.Minute).Format(time.RFC3339) + "&to=" + started.Add(24*time.Hour).Format(time.RFC3339), `"tokens_input":null`},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -85,7 +86,7 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/csv") ||
-		!strings.Contains(response.Body.String(), "tokens_input,,") {
+		!strings.Contains(response.Body.String(), `tokens_input,"",,"tokens","unknown","metrics.UsageEnvelope"`) {
 		t.Fatalf("flow CSV: status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 	}
 }
@@ -257,6 +258,22 @@ func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testin
 
 func TestFlowMetricsReportsPerStageUsageAndAgentEdits(t *testing.T) {
 	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Usage = &config.UsageConfig{MonthlySubscriptionAmount: 50, MonthlySubscriptionCurrency: "USD"}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
 		WithTargetDir(target), WithRunController(&fakeRunController{}))
 	if err != nil {
@@ -316,12 +333,108 @@ func TestFlowMetricsReportsPerStageUsageAndAgentEdits(t *testing.T) {
 			review = &result.ByStage[index]
 		}
 	}
-	if implementation == nil || implementation.TokensInput != 12 || implementation.TokensOutput != 8 ||
-		implementation.UsageKnownAttempts != 1 || implementation.UsageUnknownAttempts != 0 {
+	if implementation == nil || implementation.TokensInput == nil || *implementation.TokensInput != 12 ||
+		implementation.TokensOutput == nil || *implementation.TokensOutput != 8 ||
+		implementation.UsageKnownAttempts != 1 || implementation.UsageUnknownAttempts != 0 ||
+		implementation.UsageAttestation != "complete" || implementation.UsageSource != "attempt_manifest" {
 		t.Fatalf("implementation usage=%+v", implementation)
 	}
-	if review == nil || review.UsageUnknownAttempts != 1 || result.Usage.UnknownRuns != 1 {
+	if review == nil || review.UsageUnknownAttempts != 1 || review.UsageAttestation != "unknown" ||
+		result.Usage.UnknownRuns != 1 || result.Usage.TokensInput != nil || result.Usage.SubscriptionShareEstimate != nil {
 		t.Fatalf("unknown usage was not explicit: review=%+v totals=%+v", review, result.Usage)
+	}
+}
+
+func TestFlowMetricsUsesSubscriptionShareAndPreservesUsageProvenance(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Usage = &config.UsageConfig{MonthlySubscriptionAmount: 100, MonthlySubscriptionCurrency: "USD"}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"), WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	month := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+	first := store.PipelineRun{RunID: "run-usage-first", Feature: "usage", Status: "completed", StartedAt: month,
+		CompletedAt: timePointer(month.Add(time.Hour))}
+	peer := store.PipelineRun{RunID: "run-usage-peer", Feature: "usage", Status: "completed", StartedAt: month.Add(24 * time.Hour),
+		CompletedAt: timePointer(month.Add(25 * time.Hour))}
+	envelopeStore := metrics.FileUsageEnvelopeStore{}
+	for _, run := range []store.PipelineRun{first, peer} {
+		if err := srv.store.CreatePipelineRun(&run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEnvelope := func(runID string, startedAt, finishedAt time.Time, input, output int64) {
+		t.Helper()
+		envelope := metrics.UsageEnvelope{SchemaVersion: metrics.SchemaVersion, RunID: runID, Feature: "usage",
+			StartedAt: startedAt, FinishedAt: finishedAt, UsageReported: true, TokensInput: input, TokensOutput: output, Outcome: "completed"}
+		if runID == first.RunID {
+			runDir := filepath.Join(controlDir, "runs", runID)
+			if err := os.MkdirAll(runDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err := envelopeStore.Reserve(target, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := envelopeStore.Write(target, runID, envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEnvelope(first.RunID, month, month.Add(time.Hour), 40, 60)
+	writeEnvelope(peer.RunID, month.Add(24*time.Hour), month.Add(25*time.Hour), 200, 300)
+
+	result, err := srv.buildFlowMetrics(month.Add(-time.Minute), month.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.KnownRuns != 1 || result.Usage.UnknownRuns != 0 || result.Usage.Attestation != "complete" ||
+		result.Usage.Source != "metrics.UsageEnvelope" || result.Usage.TokensInput == nil || *result.Usage.TokensInput != 40 ||
+		result.Usage.TokensOutput == nil || *result.Usage.TokensOutput != 60 {
+		t.Fatalf("run usage lost token attestation/provenance: %+v", result.Usage)
+	}
+	if result.Usage.SubscriptionShareEstimate == nil || *result.Usage.SubscriptionShareEstimate < 16.6666 || *result.Usage.SubscriptionShareEstimate > 16.6667 ||
+		result.Usage.SubscriptionCurrency != "USD" || result.Usage.EstimateSource != "project_config+metrics.UsageEnvelope" ||
+		result.Usage.EstimateBasis != "monthly_subscription_weighted_by_attested_tokens" {
+		t.Fatalf("subscription share estimate=%+v, want ≈16.67 USD from 100/600 tokens", result.Usage)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"cost_usd"`) {
+		t.Fatalf("flow API must not report provider token prices as subscription cost: %s", encoded)
+	}
+	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow.csv?from="+month.Add(-time.Minute).Format(time.RFC3339)+"&to="+month.Add(2*time.Hour).Format(time.RFC3339), nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `subscription_share_estimate,"",16.666667,"USD","estimated","project_config+metrics.UsageEnvelope","monthly_subscription_weighted_by_attested_tokens"`) ||
+		!strings.Contains(response.Body.String(), `"complete","metrics.UsageEnvelope"`) {
+		t.Fatalf("flow CSV lost estimate provenance: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

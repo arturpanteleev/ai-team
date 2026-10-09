@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +22,8 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/go-chi/chi/v5"
 )
@@ -1012,16 +1015,17 @@ type flowDurationStats struct {
 }
 
 type flowStageStats struct {
-	Stage                string  `json:"stage"`
-	Attempts             int     `json:"attempts"`
-	DurationMS           int64   `json:"duration_ms"`
-	Human                int     `json:"human_attempts"`
-	Agent                int     `json:"agent_attempts"`
-	TokensInput          int64   `json:"tokens_input,omitempty"`
-	TokensOutput         int64   `json:"tokens_output,omitempty"`
-	CostUSD              float64 `json:"cost_usd,omitempty"`
-	UsageKnownAttempts   int     `json:"usage_known_attempts,omitempty"`
-	UsageUnknownAttempts int     `json:"usage_unknown_attempts,omitempty"`
+	Stage                string `json:"stage"`
+	Attempts             int    `json:"attempts"`
+	DurationMS           int64  `json:"duration_ms"`
+	Human                int    `json:"human_attempts"`
+	Agent                int    `json:"agent_attempts"`
+	TokensInput          *int64 `json:"tokens_input"`
+	TokensOutput         *int64 `json:"tokens_output"`
+	UsageKnownAttempts   int    `json:"usage_known_attempts"`
+	UsageUnknownAttempts int    `json:"usage_unknown_attempts"`
+	UsageAttestation     string `json:"usage_attestation"`
+	UsageSource          string `json:"usage_source,omitempty"`
 }
 
 type flowMetricsResponse struct {
@@ -1040,11 +1044,16 @@ type flowMetricsResponse struct {
 }
 
 type flowUsageStats struct {
-	KnownRuns    int     `json:"known_runs"`
-	UnknownRuns  int     `json:"unknown_runs"`
-	TokensInput  int64   `json:"tokens_input,omitempty"`
-	TokensOutput int64   `json:"tokens_output,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	KnownRuns                 int      `json:"known_runs"`
+	UnknownRuns               int      `json:"unknown_runs"`
+	TokensInput               *int64   `json:"tokens_input"`
+	TokensOutput              *int64   `json:"tokens_output"`
+	Attestation               string   `json:"attestation"`
+	Source                    string   `json:"source"`
+	SubscriptionShareEstimate *float64 `json:"subscription_share_estimate"`
+	SubscriptionCurrency      string   `json:"subscription_currency,omitempty"`
+	EstimateSource            string   `json:"estimate_source,omitempty"`
+	EstimateBasis             string   `json:"estimate_basis,omitempty"`
 }
 
 func (s *Server) handleGetFlowMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1108,10 +1117,30 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			break
 		}
 	}
+	usageEnvelopes := make([]metrics.UsageEnvelope, 0, len(runs))
+	envelopesByRunID := make(map[string]metrics.UsageEnvelope, len(runs))
+	for _, run := range runs {
+		envelope, readErr := readTaskUsageEnvelope(s, run.RunID)
+		if readErr == nil {
+			envelopesByRunID[run.RunID] = envelope
+			usageEnvelopes = append(usageEnvelopes, envelope)
+			continue
+		}
+		finishedAt := run.StartedAt
+		if run.CompletedAt != nil {
+			finishedAt = *run.CompletedAt
+		}
+		// A missing or unreadable envelope is an unknown monthly denominator,
+		// so subscription allocation must fail closed for that month.
+		usageEnvelopes = append(usageEnvelopes, metrics.UsageEnvelope{RunID: run.RunID, FinishedAt: finishedAt})
+	}
+	var tokenInputTotal, tokenOutputTotal int64
+	requestedRuns := 0
 	for _, run := range runs {
 		if run.StartedAt.Before(from) || !run.StartedAt.Before(to) {
 			continue
 		}
+		requestedRuns++
 		stages, err := s.store.GetStagesByPipelineRunID(run.ID)
 		if err != nil {
 			return response, err
@@ -1146,9 +1175,22 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 				manifest, manifestErr := readTaskAttemptManifest(s, run.RunID, stage.AttemptID)
 				if manifestErr == nil && manifest.Usage != nil && manifest.Usage.Attested {
 					stat.UsageKnownAttempts++
-					stat.TokensInput += manifest.Usage.TokensInput
-					stat.TokensOutput += manifest.Usage.TokensOutput
-					stat.CostUSD += manifest.Usage.CostUSD
+					input, output := int64(0), int64(0)
+					if stat.TokensInput != nil {
+						input = *stat.TokensInput
+					}
+					if stat.TokensOutput != nil {
+						output = *stat.TokensOutput
+					}
+					if manifest.Usage.TokensInput < 0 || manifest.Usage.TokensOutput < 0 ||
+						input > math.MaxInt64-manifest.Usage.TokensInput || output > math.MaxInt64-manifest.Usage.TokensOutput {
+						stat.UsageKnownAttempts--
+						stat.UsageUnknownAttempts++
+					} else {
+						input += manifest.Usage.TokensInput
+						output += manifest.Usage.TokensOutput
+						stat.TokensInput, stat.TokensOutput = &input, &output
+					}
 				} else {
 					stat.UsageUnknownAttempts++
 				}
@@ -1184,13 +1226,84 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 				response.Returns[stageID]++
 			}
 		}
-		if envelope, err := metrics.ReadUsageEnvelope(s.targetDir, run.RunID); err == nil && envelope.HasCompleteTokenUsage() {
+		if envelope, found := envelopesByRunID[run.RunID]; found && envelope.HasCompleteTokenUsage() {
 			response.Usage.KnownRuns++
-			response.Usage.TokensInput += envelope.TokensInput
-			response.Usage.TokensOutput += envelope.TokensOutput
-			response.Usage.CostUSD += envelope.CostUSD
+			if envelope.TokensInput < 0 || envelope.TokensOutput < 0 ||
+				tokenInputTotal > math.MaxInt64-envelope.TokensInput || tokenOutputTotal > math.MaxInt64-envelope.TokensOutput {
+				response.Usage.KnownRuns--
+				response.Usage.UnknownRuns++
+			} else {
+				tokenInputTotal += envelope.TokensInput
+				tokenOutputTotal += envelope.TokensOutput
+			}
 		} else {
 			response.Usage.UnknownRuns++
+		}
+	}
+	for index := range response.ByStage {
+		stage := &response.ByStage[index]
+		switch {
+		case stage.Agent == 0:
+			stage.UsageAttestation = "not_applicable"
+		case stage.UsageUnknownAttempts == 0 && stage.UsageKnownAttempts > 0:
+			stage.UsageAttestation = "complete"
+		case stage.UsageKnownAttempts > 0:
+			stage.UsageAttestation = "partial"
+			stage.TokensInput, stage.TokensOutput = nil, nil
+		default:
+			stage.UsageAttestation = "unknown"
+			stage.TokensInput, stage.TokensOutput = nil, nil
+		}
+		if stage.Agent > 0 {
+			stage.UsageSource = "attempt_manifest"
+		}
+	}
+	response.Usage.Source = "metrics.UsageEnvelope"
+	switch {
+	case response.Usage.KnownRuns == 0 && response.Usage.UnknownRuns == 0:
+		response.Usage.Attestation = "unknown"
+	case response.Usage.UnknownRuns == 0:
+		response.Usage.Attestation = "complete"
+	case response.Usage.KnownRuns > 0:
+		response.Usage.Attestation = "partial"
+	default:
+		response.Usage.Attestation = "unknown"
+	}
+	if response.Usage.UnknownRuns == 0 && response.Usage.KnownRuns > 0 {
+		response.Usage.TokensInput = &tokenInputTotal
+		response.Usage.TokensOutput = &tokenOutputTotal
+	}
+	if requestedRuns > 0 {
+		if cfg, cfgErr := config.Load(filepath.Join(s.targetDir, ".ai-team", "config.yaml")); cfgErr == nil &&
+			cfg.Usage != nil && cfg.Usage.Validate() == nil && cfg.Usage.MonthlySubscriptionAmount > 0 {
+			currency := cfg.Usage.MonthlySubscriptionCurrency
+			if currency == "" {
+				currency = "USD"
+			}
+			response.Usage.SubscriptionCurrency = currency
+			response.Usage.EstimateSource = "project_config+metrics.UsageEnvelope"
+			response.Usage.EstimateBasis = "monthly_subscription_weighted_by_attested_tokens"
+			totalEstimate := float64(0)
+			estimateComplete := true
+			for _, run := range runs {
+				if run.StartedAt.Before(from) || !run.StartedAt.Before(to) {
+					continue
+				}
+				envelope, found := envelopesByRunID[run.RunID]
+				if !found || !envelope.HasCompleteTokenUsage() {
+					estimateComplete = false
+					break
+				}
+				share, available := metrics.EstimateSubscriptionShare(cfg.Usage.MonthlySubscriptionAmount, envelope, usageEnvelopes)
+				if !available {
+					estimateComplete = false
+					break
+				}
+				totalEstimate += share
+			}
+			if estimateComplete {
+				response.Usage.SubscriptionShareEstimate = &totalEstimate
+			}
 		}
 	}
 	response.LeadTime = summarizeDurations(leadTimes)
@@ -1216,6 +1329,35 @@ func readTaskAttemptManifest(s *Server, runID, attemptID string) (evidence.Attem
 		return evidence.AttemptManifest{}, errors.New("attempt manifest identity mismatch")
 	}
 	return manifest, nil
+}
+
+func readTaskUsageEnvelope(s *Server, runID string) (metrics.UsageEnvelope, error) {
+	if !safeIdentity(runID) {
+		return metrics.UsageEnvelope{}, errors.New("invalid run identity")
+	}
+	reserved, err := metrics.UsageEnvelopeReservation(s.targetDir, runID)
+	if err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	if reserved {
+		return metrics.ReadUsageEnvelope(s.targetDir, runID)
+	}
+	if _, err := safeio.ExistingDir(s.targetDir, ".ai-team", "runs", runID); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	path := filepath.Join(s.targetDir, ".ai-team", "runs", runID, "usage.json")
+	data, err := safeio.ReadRegularFile(path, 8<<20)
+	if err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	var envelope metrics.UsageEnvelope
+	if err := strictjson.Unmarshal(data, 8<<20, &envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	if err := metrics.ValidateUsageEnvelope(runID, envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	return envelope, nil
 }
 
 func taskStageSucceeded(stage store.Stage) bool {
@@ -1296,26 +1438,48 @@ func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=flow-metrics.csv")
-	_, _ = fmt.Fprintln(w, "metric,stage,value,unit")
-	writeCSVMetric(w, "lead_time_median", "", value.LeadTime.MedianMS, "ms")
-	writeCSVMetric(w, "lead_time_p80", "", value.LeadTime.P80MS, "ms")
-	writeCSVMetric(w, "cycle_time_median", "", value.CycleTime.MedianMS, "ms")
-	writeCSVMetric(w, "cycle_time_p80", "", value.CycleTime.P80MS, "ms")
+	_, _ = fmt.Fprintln(w, "metric,stage,value,unit,attestation,source,basis")
+	writeCSVMetric(w, "lead_time_median", "", value.LeadTime.MedianMS, "ms", "not_applicable", "sqlite")
+	writeCSVMetric(w, "lead_time_p80", "", value.LeadTime.P80MS, "ms", "not_applicable", "sqlite")
+	writeCSVMetric(w, "cycle_time_median", "", value.CycleTime.MedianMS, "ms", "not_applicable", "sqlite")
+	writeCSVMetric(w, "cycle_time_p80", "", value.CycleTime.P80MS, "ms", "not_applicable", "sqlite")
 	for _, stage := range value.ByStage {
-		_, _ = fmt.Fprintf(w, "stage_duration,%s,%d,ms\n", csvField(stage.Stage), stage.DurationMS)
+		writeCSVMetric(w, "stage_duration", stage.Stage, int64Pointer(stage.DurationMS), "ms", "not_applicable", "sqlite")
+		writeCSVMetric(w, "stage_tokens_input", stage.Stage, stage.TokensInput, "tokens", stage.UsageAttestation, stage.UsageSource)
+		writeCSVMetric(w, "stage_tokens_output", stage.Stage, stage.TokensOutput, "tokens", stage.UsageAttestation, stage.UsageSource)
+		writeCSVMetric(w, "stage_usage_known_attempts", stage.Stage, int64Pointer(int64(stage.UsageKnownAttempts)), "attempts", stage.UsageAttestation, stage.UsageSource)
+		writeCSVMetric(w, "stage_usage_unknown_attempts", stage.Stage, int64Pointer(int64(stage.UsageUnknownAttempts)), "attempts", stage.UsageAttestation, stage.UsageSource)
 	}
-	_, _ = fmt.Fprintf(w, "tokens_input,,%d,tokens\n", value.Usage.TokensInput)
-	_, _ = fmt.Fprintf(w, "tokens_output,,%d,tokens\n", value.Usage.TokensOutput)
-	_, _ = fmt.Fprintf(w, "cost,,%.6f,usd\n", value.Usage.CostUSD)
+	writeCSVMetric(w, "tokens_input", "", value.Usage.TokensInput, "tokens", value.Usage.Attestation, value.Usage.Source)
+	writeCSVMetric(w, "tokens_output", "", value.Usage.TokensOutput, "tokens", value.Usage.Attestation, value.Usage.Source)
+	writeCSVMetric(w, "usage_known_runs", "", int64Pointer(int64(value.Usage.KnownRuns)), "runs", value.Usage.Attestation, value.Usage.Source)
+	writeCSVMetric(w, "usage_unknown_runs", "", int64Pointer(int64(value.Usage.UnknownRuns)), "runs", value.Usage.Attestation, value.Usage.Source)
+	estimateValue := ""
+	if value.Usage.SubscriptionShareEstimate != nil {
+		estimateValue = fmt.Sprintf("%.6f", *value.Usage.SubscriptionShareEstimate)
+	}
+	_, _ = fmt.Fprintf(w, "subscription_share_estimate,%s,%s,%s,%s,%s,%s\n", csvField(""), estimateValue,
+		csvField(value.Usage.SubscriptionCurrency), csvField(csvEstimateAttestation(value.Usage.SubscriptionShareEstimate)),
+		csvField(value.Usage.EstimateSource), csvField(value.Usage.EstimateBasis))
 }
 
-func writeCSVMetric(w http.ResponseWriter, name, stage string, value *int64, unit string) {
+func csvEstimateAttestation(value *float64) string {
 	if value == nil {
-		_, _ = fmt.Fprintf(w, "%s,%s,,%s\n", name, csvField(stage), unit)
-		return
+		return "unavailable"
 	}
-	_, _ = fmt.Fprintf(w, "%s,%s,%d,%s\n", name, csvField(stage), *value, unit)
+	return "estimated"
 }
+
+func writeCSVMetric(w http.ResponseWriter, name, stage string, value *int64, unit, attestation, source string) {
+	valueString := ""
+	if value != nil {
+		valueString = strconv.FormatInt(*value, 10)
+	}
+	_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%s\n", name, csvField(stage), valueString,
+		csvField(unit), csvField(attestation), csvField(source), csvField(""))
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func csvField(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`

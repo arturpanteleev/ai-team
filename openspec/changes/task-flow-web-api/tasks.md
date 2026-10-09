@@ -10,7 +10,9 @@
   from B-32/B-34/B-41/B-42.
 - [ ] Add per-action success, invalid-state, repeated-request, and no-token
   regressions with controller-backed fixtures.
-- [ ] Complete stage-level usage and agent-acceptance metrics.
-- [ ] Update OpenSpec and API documentation for final request/response shapes.
+- [x] Add stage-level attested token usage, agent-acceptance metrics, and
+  token-weighted subscription-share estimates with explicit provenance.
+- [x] Document the current flow-metrics response and CSV attestation semantics.
+- [ ] Update action request/response documentation after controller integration.
 - [ ] Run `openspec validate --all --strict --no-interactive`.
 - [ ] Run `GOTOOLCHAIN=go1.26.9 make verify` on the final commit.

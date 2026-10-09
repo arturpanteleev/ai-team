@@ -44,4 +44,13 @@ with JSON 503 while their engine work is being integrated.
 
 Task API errors use `{ "error": "...", "code": "..." }`. A lifecycle
 conflict returns 409 with `code: "invalid_state"` and `allowed_actions`.
-Incomplete token usage is counted as unknown and excluded from totals.
+Flow metrics include token totals only when all selected runs have complete
+usage envelopes; otherwise token values are `null`, with known/unknown counts,
+attestation state, and source retained in both JSON and CSV. Per-stage token
+totals use attested attempt manifests and are `null` when any agent attempt for
+that stage is unknown. When `usage.monthly_subscription_amount` is configured,
+the API estimates the selected runs' share of that monthly subscription in
+proportion to their attested tokens. It does not apply per-model token prices;
+the estimate is unavailable when usage in the same monthly denominator is
+unknown. JSON includes the envelope/configuration source and estimate basis;
+CSV rows include attestation, source, and basis columns for usage values.

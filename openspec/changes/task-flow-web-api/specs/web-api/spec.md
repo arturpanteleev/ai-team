@@ -64,11 +64,27 @@ include lead/cycle durations, stage durations and execution counts, override,
 skip, and return counts, and token usage completeness. Missing or incomplete
 usage MUST be reported as unknown rather than zero.
 
+Run token totals MUST come from complete attested usage envelopes, and stage
+token totals MUST come from attested attempt manifests. JSON and CSV MUST
+preserve attestation state and data source. If a configured monthly
+subscription amount is available, the report MAY estimate each selected run's
+subscription share in proportion to its attested tokens; it MUST NOT calculate
+an API cost from per-model token prices. The estimate MUST be unavailable when
+the selected run or a run in its monthly token denominator has unknown usage.
+
 #### Scenario: Unknown token usage
 
 - **WHEN** a run has no complete attested usage envelope
 - **THEN** the flow report MUST increment its unknown usage count
 - **AND** MUST NOT include that run in known token totals
+- **AND** token totals MUST be null when the selected period has incomplete usage
+
+#### Scenario: Subscription share estimate
+
+- **WHEN** a monthly subscription amount and complete usage envelopes are
+  available for all runs in the relevant UTC month
+- **THEN** the flow report MAY show a token-weighted subscription-share estimate
+- **AND** the report MUST identify it as an estimate and retain usage provenance
 
 ### Requirement: JSON API errors
 

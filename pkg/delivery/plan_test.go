@@ -290,7 +290,7 @@ func TestCompletedStateIsArchivedBeforeNewPlan(t *testing.T) {
 	}
 	completed := &state{
 		SchemaVersion: deliveryStateSchemaVersion, PlanHash: firstHash, Plan: firstPlan,
-		CommitSHA: strings.Repeat("f", 40), CommitVerified: true, Pushed: true, PRURL: "https://example.test/pr/1",
+		CommitSHA: strings.Repeat("f", 40), CommitVerified: true, Pushed: true, PRURL: "https://example.test/pull/1",
 	}
 	if err := writeState(statePath, completed); err != nil {
 		t.Fatal(err)
@@ -686,7 +686,7 @@ func TestTerminalRecordRoundtripAndTamper(t *testing.T) {
 		Feature:           "feat",
 		PlanHash:          strings.Repeat("c", 64),
 		CommitSHA:         strings.Repeat("a", 40),
-		PRURL:             "https://example.test/pr/1",
+		PRURL:             "https://example.test/pull/1",
 		Trailers:          []string{"ai-team-run: 20260901T120000.000000000Z-abcdef0123456789", "ai-team-runtime: " + strings.Repeat("b", 64)},
 		AttestationSHA256: "",
 		RuntimeIdentity:   strings.Repeat("b", 64),
@@ -904,7 +904,7 @@ func TestControllerStagesExactFilesAndCreatesPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.CommitSHA == "" || result.PRURL != "https://example.test/pr/1" || len(result.Steps) == 0 {
+	if result.CommitSHA == "" || result.PRURL != "https://example.test/pull/1" || len(result.Steps) == 0 {
 		t.Fatalf("неполный delivery result: %+v", result)
 	}
 	changed := git(t, repo, "show", "--name-only", "--format=", "HEAD")
@@ -1338,7 +1338,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     exit 1
   fi
   oid=$(git rev-parse HEAD)
-  printf '{"url":"https://example.test/pr/1","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
+  printf '{"url":"https://example.test/pull/1","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
   exit 0
 fi
 if [ "$AI_TEAM_FAKE_GH_FAIL" = "1" ]; then
@@ -1346,7 +1346,7 @@ if [ "$AI_TEAM_FAKE_GH_FAIL" = "1" ]; then
   exit 2
 fi
 touch "` + marker + `"
-echo "https://example.test/pr/1"
+echo "https://example.test/pull/1"
 `
 	path := filepath.Join(dir, "gh")
 	writeFile(t, path, script)

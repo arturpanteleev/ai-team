@@ -119,11 +119,11 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     exit 1
   fi
   oid=$(git rev-parse HEAD)
-  printf '{"url":"https://example.test/pr/e2e","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
+  printf '{"url":"https://example.test/pull/9","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
   exit 0
 fi
 touch "` + ghMarker + `"
-echo https://example.test/pr/e2e
+echo https://example.test/pull/9
 `
 	if err := os.WriteFile(ghPath, []byte(ghScript), 0755); err != nil {
 		t.Fatalf("write gh mock: %v", err)

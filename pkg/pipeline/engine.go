@@ -34,6 +34,7 @@ type ResumeConfig struct {
 type CancelConfig struct {
 	RunID     string
 	TargetDir string
+	Reason    string
 }
 
 type SkipStageConfig struct {
@@ -58,11 +59,70 @@ func (e *RunEngine) Start(ctx context.Context, config RunConfig) (RunResult, err
 		}
 		config.RunID = runID
 	}
+	if err := e.pinRunMode(config.RunID, config.TargetDir, config.Mode); err != nil {
+		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, err
+	}
 	runPipeline, err := e.pipelineForTask(config.RunID, config.TargetDir, true)
 	if err != nil {
 		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, err
 	}
 	return runPipeline.RunWithResult(ctx, config)
+}
+
+func (e *RunEngine) pinRunMode(runID, targetDir, mode string) error {
+	if mode == "" {
+		return nil
+	}
+	if mode != "auto" {
+		return fmt.Errorf("unsupported run mode %q", mode)
+	}
+	if e == nil || e.pipeline == nil || e.pipeline.cfg == nil || targetDir == "" {
+		return errors.New("auto mode требует доступного template pipeline и target")
+	}
+	data, err := e.pipeline.cfg.Marshal()
+	if err != nil {
+		return fmt.Errorf("serialize auto template: %w", err)
+	}
+	cfg, err := config.ParseYAML(data)
+	if err != nil {
+		return fmt.Errorf("copy auto template: %w", err)
+	}
+	if cfg.Template == "" || len(cfg.Stages) == 0 {
+		return errors.New("auto mode поддерживается только для шаблона этапов")
+	}
+	for index := range cfg.Stages {
+		stage := &cfg.Stages[index]
+		if stage.Agent != "" {
+			stage.Executor = "agent"
+		}
+		stage.Confirm = "auto"
+	}
+	var registry config.AgentLookup
+	if e.pipeline.reg != nil {
+		registry = e.pipeline.reg
+	}
+	if err := cfg.Validate(registry); err != nil {
+		return fmt.Errorf("auto template validation: %w", err)
+	}
+	data, err = cfg.Marshal()
+	if err != nil {
+		return fmt.Errorf("serialize auto template: %w", err)
+	}
+	store, err := config.NewTemplateStore(targetDir)
+	if err != nil {
+		return fmt.Errorf("open auto template store: %w", err)
+	}
+	if _, err := store.PinDataForRun(runID, runID, data); err != nil {
+		return fmt.Errorf("pin auto template for run: %w", err)
+	}
+	pinned, _, found, err := store.ReadPinnedRun(runID)
+	if err != nil {
+		return fmt.Errorf("verify auto template pin: %w", err)
+	}
+	if !found || string(pinned) != string(data) {
+		return errors.New("auto template pin conflicts with an existing run template")
+	}
+	return nil
 }
 
 func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult, error) {
@@ -257,9 +317,13 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 		return RunResult{}, err
 	}
 	now := time.Now().UTC()
+	reason := strings.TrimSpace(config.Reason)
+	if reason == "" {
+		reason = "human_cancel"
+	}
 	if err := evidenceStore.Append(evidence.Event{
 		Type: "run_canceled", Timestamp: now,
-		Data: map[string]any{"reason": "human_cancel"},
+		Data: map[string]any{"reason": reason},
 	}); err != nil {
 		return RunResult{}, err
 	}

@@ -285,11 +285,14 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 }
 
 type RunConfig struct {
-	RunID           string
-	ResumeRunID     string
-	Feature         string
-	TaskDesc        string
-	TargetDir       string
+	RunID       string
+	ResumeRunID string
+	Feature     string
+	TaskDesc    string
+	TargetDir   string
+	// Mode is the run-level execution mode. It is consumed by RunEngine before
+	// the immutable task template pin is resolved.
+	Mode            string
 	retryFrom       string // внутреннее: следующий этап при resume; не задаётся извне
 	ApproveGates    bool
 	ApprovePlanHash string

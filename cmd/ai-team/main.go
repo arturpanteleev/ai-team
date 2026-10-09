@@ -72,6 +72,12 @@ func main() {
 		cmdInit()
 	case "run":
 		cmdRun()
+	case "runs":
+		cmdTaskRuns()
+	case "show":
+		cmdTaskShow()
+	case "cancel":
+		cmdTaskCancel()
 	case "decision":
 		cmdDecision()
 	case "stage":
@@ -124,6 +130,10 @@ func printUsage() {
   ai-team init [--target <path>] [--write-gitignore]
                                      Инициализировать .ai-team/ в проекте
   ai-team run                      Запустить пайплайн агентов
+  ai-team runs [--target <path>]   Показать задачи проекта
+  ai-team show <run_id>            Показать этапы и состояние задачи
+  ai-team cancel <run_id> --reason <text>
+                                   Отменить задачу с причиной
   ai-team decision                 Записать решение человека по pending approval
   ai-team stage submit <run_id> --stage <id>
                                    --md <file> | --text <markdown> |
@@ -210,6 +220,8 @@ Exit-коды gate: 0 — PASS, 1 — FAIL (diff-policy/required checks), 2 — 
 Флаги run:
   --feature <name>          Имя фичи (буквы, цифры, "-", "_", ".")
   --task <description>      Описание задачи
+  --template <id>           Проверить id активного шаблона проекта
+  --mode auto               Запустить этапы с агентами автоматически (если поддерживается шаблоном)
   --target <path>           Путь к целевому проекту (по умолчанию текущая директория)
 	  --resume <run_id>         Продолжить non-terminal run с той же identity
 	  --approve-gates           Явно подтвердить обычные gate-точки в non-interactive режиме
@@ -1219,9 +1231,14 @@ func cmdRun() {
 	resumeRunID := runFlags.String("resume", "", "Продолжить non-terminal run")
 	approveGates := runFlags.Bool("approve-gates", false, "Подтвердить gate-точки в non-interactive режиме (forward-гейты default-профилей отложены до delivery-решения, APF-1)")
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan (ratify-ит отложенные гейты run'а)")
+	templateID := runFlags.String("template", "", "ID активного шаблона проекта")
+	mode := runFlags.String("mode", "", "Режим выполнения: auto")
 
 	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
-	_ = runFlags.Parse(os.Args[2:])
+	_ = runFlags.Parse(interspersedTaskArgs(os.Args[2:], map[string]bool{
+		"--feature": true, "--task": true, "--target": true, "--resume": true,
+		"--approve-plan": true, "--template": true, "--mode": true,
+	}))
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
 		fatal("Ошибка target: %v", err)
@@ -1239,6 +1256,12 @@ func cmdRun() {
 	} else if *feature != "" || *taskDesc != "" {
 		fatal("--resume нельзя сочетать с --feature или --task; identity и next stage загружаются из state")
 	}
+	if *mode != "" && *mode != "auto" {
+		fatal("недопустимый режим %q (допустим auto)", *mode)
+	}
+	if *resumeRunID != "" && (*templateID != "" || *mode != "") {
+		fatal("--resume нельзя сочетать с --template или --mode; настройки run уже закреплены")
+	}
 
 	// Config/registry validation is intentionally before task.md writes: a bad
 	// control-plane definition must fail without mutating the target workspace.
@@ -1247,6 +1270,15 @@ func cmdRun() {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
 	cfg := loadValidatedConfig(*target, reg)
+	if *templateID != "" && *templateID != cfg.Template {
+		fatal("шаблон %q не является активным шаблоном проекта %q", *templateID, cfg.Template)
+	}
+	if *mode == "auto" {
+		cfg, err = taskAutoConfig(cfg, reg)
+		if err != nil {
+			fatal("Не удалось включить auto mode: %v", err)
+		}
+	}
 
 	// Read-only preflight ДО старта run, как у web-контроллера и worker
 	// (AUD-09): та же классификация отсутствующих runtime/gh/origin, чтобы
@@ -1267,7 +1299,6 @@ func cmdRun() {
 		}
 		warnIfAlreadyDelivered(*target, *feature)
 	}
-
 	opts := []pipeline.Option{pipeline.WithControllerReadDenyPaths(filepath.Join(*target, ".ai-team", "web.db"))}
 	if recorder, closeStore := openRecorder(*target); recorder != nil {
 		opts = append(opts, pipeline.WithRecorder(recorder))
@@ -1291,19 +1322,31 @@ func cmdRun() {
 		})
 	} else {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{
-			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target,
+			Feature: *feature, TaskDesc: *taskDesc, TargetDir: *target, Mode: *mode,
 			ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
 			ContainmentProfile: containmentProfile,
 		})
 	}
 	if err != nil {
 		code := exitCodeFor(err)
+		stoppedRunID := runResult.RunID
+		if stoppedRunID == "" {
+			stoppedRunID = *resumeRunID
+		}
+		if stoppedRunID == "" {
+			stoppedRunID = ""
+		}
+		nextAction := taskNextActionForRunError(*target, stoppedRunID)
+		if nextAction != "" {
+			logging.Printf("\nСледующая команда:\n  %s\n", nextAction)
+		}
 		// Единственное место, где печатается финальная остановка run: все
 		// терминальные исходы (BLOCKED, негативный вердикт, отказ resume,
 		// отмена) приходят сюда одной ошибкой и печатаются один раз.
 		logging.Fail(logging.Record{
 			Level: "error", Command: "run", Type: "run",
-			Message: "Пайплайн остановлен: " + err.Error(), Exit: code,
+			Message: "Пайплайн остановлен: " + err.Error(),
+			Data:    map[string]any{"run_id": stoppedRunID, "next_action": nextAction}, Exit: code,
 		}, "%s Пайплайн остановлен: %v", ui.Colorize("✗", ui.ColorRed), err)
 		os.Exit(code)
 	}
@@ -1313,18 +1356,16 @@ func cmdRun() {
 	} else {
 		logging.Printf("\n%s Пайплайн выполнен\n", ui.Colorize("✓", ui.ColorGreen))
 	}
-	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
-		logging.Emit(logging.Record{
-			Level: "ok", Command: "run", Type: "run",
-			Message: "Пайплайн выполнен",
-			Data: map[string]any{
-				"outcome": string(runResult.Outcome),
-				"run_id":  runResult.RunID,
-				"feature": *feature,
-			},
-			Exit: exitOK,
-		})
-	}
+	logging.Emit(logging.Record{
+		Level: "ok", Command: "run", Type: "run",
+		Message: "Пайплайн выполнен: " + runResult.RunID,
+		Data: map[string]any{
+			"outcome": string(runResult.Outcome),
+			"run_id":  runResult.RunID,
+			"feature": *feature,
+		},
+		Exit: exitOK,
+	})
 }
 
 // runPreflight выполняет read-only preflight ДО старта run (AUD-09): тот же

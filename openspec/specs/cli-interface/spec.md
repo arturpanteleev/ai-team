@@ -3,7 +3,7 @@
 Единый безопасный CLI для инициализации, запуска, оценки и наблюдения workflow.
 ## Requirements
 ### Requirement: CLI commands and exit codes
-CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `db backup`, `db restore`, `version`, `help`; run MUST возвращать 0 для success, 1 для failure/rejection, 2 для BLOCKED и 3 для stopped.
+CLI MUST предоставлять `init`, `run`, `runs`, `show`, `cancel`, `list`, `eval`, `web`, `db backup`, `db restore`, `version`, `help`; run MUST возвращать 0 для success, 1 для failure/rejection, 2 для BLOCKED и 3 для stopped.
 
 #### Scenario: Unknown command
 - **КОГДА** передана неизвестная команда
@@ -17,6 +17,36 @@ CLI MUST предоставлять `init`, `run`, `list`, `eval`, `web`, `db ba
 - **И** machine-readable record о той же ошибке MUST печататься только в режиме
   `--json` и только в stdout
 - **И** exit-код MUST остаться прежним
+
+#### Scenario: Остановка печатает следующее действие
+- **КОГДА** run останавливается в состоянии ожидания human input, approval или resumable checkpoint
+- **ТОГДА** CLI MUST напечатать готовую команду для следующего действия, включая run identity и target
+- **И** machine-readable record в `--json` MUST включить `run_id` и `next_action`
+
+#### Scenario: JSON для команд задач
+- **КОГДА** пользователь вызывает `runs`, `show` или `cancel` с `--json`
+- **ТОГДА** CLI MUST печатать только JSON records на stdout, а человеко-читаемый прогресс направлять в stderr
+
+### Requirement: Task run inspection
+`runs` MUST показывать сохранённые lifecycle runs проекта, а `show` MUST проверять соответствие lifecycle identity immutable run evidence перед показом этапов, попыток и ожидания.
+
+#### Scenario: Список задач
+- **КОГДА** пользователь вызывает `ai-team runs --target <path>`
+- **ТОГДА** CLI MUST перечислить lifecycle runs проекта с feature, phase, next stage и временем обновления
+
+#### Scenario: Подробности прогона
+- **КОГДА** пользователь вызывает `ai-team show <run_id>`
+- **ТОГДА** CLI MUST проверить manifest, event chain и attempt manifests до показа истории попыток
+- **И** MUST показать токены и приблизительную долю месячной подписки только при достаточных данных
+- **И** MUST NOT показывать точную цену API
+
+### Requirement: Task run cancellation
+`cancel` MUST завершить только non-terminal run и сохранить непустую пользовательскую причину в событии `run_canceled`.
+
+#### Scenario: Отмена run
+- **КОГДА** пользователь вызывает `ai-team cancel <run_id> --reason <text>` для незавершённого run
+- **ТОГДА** CLI MUST записать причину в verified event journal и перевести lifecycle в terminal
+- **И** уже terminal run MUST быть отклонён
 
 ### Requirement: Init
 `ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и
@@ -65,6 +95,17 @@ workspace lock и использовать одну immutable run_id на вес
 - **КОГДА** пользователь запускает `ai-team run --resume <run_id>`
 - **ТОГДА** CLI MUST восстановить feature, task и next stage
 - **И** MUST продолжить ту же run identity после fail-closed проверок
+
+#### Scenario: Активный шаблон
+- **КОГДА** пользователь запускает run с `--template <id>`
+- **ТОГДА** CLI MUST принять только id единственного активного шаблона проекта и закрепить его версию за run
+- **И** неизвестный id MUST быть отклонён до запуска агентов
+
+#### Scenario: Автоматический режим
+- **КОГДА** пользователь запускает графовый run с `--mode auto`
+- **ТОГДА** CLI MUST закрепить отдельную неизменяемую версию шаблона, где этапы с агентом исполняются агентом и подтверждения переходят автоматически
+- **И** MUST NOT изменять активную версию шаблона проекта
+- **И** resume MUST продолжить по закреплённой версии
 
 #### Scenario: Повторный run уже доставленной фичи
 - **КОГДА** пользователь запускает `run --feature F`, и прошлый run той же `F` уже довёл её до успешной delivery (записанный commit и/или PR), независимо от того, как названа delivery-стадия в конфиге

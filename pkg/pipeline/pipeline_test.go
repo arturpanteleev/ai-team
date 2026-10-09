@@ -4641,7 +4641,7 @@ func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
 	if err == nil || started.RunID == "" {
 		t.Fatalf("не создан resumable run: %+v %v", started, err)
 	}
-	result, err := NewRunEngine(p).Cancel(CancelConfig{RunID: started.RunID, TargetDir: dir})
+	result, err := NewRunEngine(p).Cancel(CancelConfig{RunID: started.RunID, TargetDir: dir, Reason: "operator requested"})
 	if err != nil || result.Outcome != workflow.RunCanceled {
 		t.Fatalf("cancel: result=%+v err=%v", result, err)
 	}
@@ -4667,11 +4667,62 @@ func TestRunEngineCancelTerminatesResumableRun(t *testing.T) {
 	}
 	canceled, finished := false, false
 	for _, event := range events {
-		canceled = canceled || event.Type == "run_canceled"
+		if event.Type == "run_canceled" {
+			canceled = true
+			if reason, _ := event.Data["reason"].(string); reason != "operator requested" {
+				t.Fatalf("run_canceled must preserve user reason, got %q", reason)
+			}
+		}
 		finished = finished || event.Type == "run_finished"
 	}
 	if !canceled || !finished {
 		t.Fatalf("cancel evidence must include run_canceled and run_finished: canceled=%t finished=%t", canceled, finished)
+	}
+}
+
+func TestRunEngineAutoModePinsRunSpecificTemplate(t *testing.T) {
+	target := env(t)
+	cfg, err := config.ParseYAML([]byte(`schema_version: 5
+template: auto-test
+title: Auto test
+stages:
+  - id: implementation
+    title: Implementation
+    function: developer
+    result: md
+    executor: human
+    agent: coder
+    confirm: required
+  - id: acceptance
+    title: Acceptance
+    function: product_owner
+    result: approve
+    executor: human
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewRunEngine(New(cfg, nil))
+	if err := engine.pinRunMode("run-auto", target, "auto"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _, found, err := store.ReadPinnedRun("run-auto")
+	if err != nil || !found {
+		t.Fatalf("auto run template not pinned: found=%t err=%v", found, err)
+	}
+	pinned, err := config.ParseYAML(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Stages[0].Executor != "agent" || pinned.Stages[0].Confirm != "auto" || pinned.Stages[1].Executor != "human" || pinned.Stages[1].Confirm != "auto" {
+		t.Fatalf("wrong run-specific auto projection: %+v", pinned.Stages)
+	}
+	if cfg.Stages[0].Executor != "human" || cfg.Stages[0].Confirm != "required" {
+		t.Fatalf("auto mode mutated active config: %+v", cfg.Stages[0])
 	}
 }
 

@@ -3239,6 +3239,38 @@ func TestProcessEngineCandidateAbsenceRequiresBubblewrapMask(t *testing.T) {
 	}
 }
 
+func TestProcessEnginePersistsGitAdmissionBeforeIsolatedStart(t *testing.T) {
+	target := t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", target).CombinedOutput(); err != nil {
+		t.Fatalf("initialize candidate Git repository: %v: %s", err, output)
+	}
+	job := Job{Operation: OperationStart, RunID: "git-admission-run"}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || allowed {
+		t.Fatalf("isolated Git start must be admitted without a non-Git absence marker: allowed=%v err=%v", allowed, err)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadGitAdmission(target, job.RunID); err != nil {
+		t.Fatalf("isolated Git start must persist positive admission metadata: %v", err)
+	}
+}
+
+func TestProcessEngineRejectsInvalidGitAdmissionIdentity(t *testing.T) {
+	target := t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", target).CombinedOutput(); err != nil {
+		t.Fatalf("initialize candidate Git repository: %v: %s", err, output)
+	}
+	job := Job{Operation: OperationStart, RunID: "../escape"}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid run id") || allowed {
+		t.Fatalf("invalid run identity must fail before candidate admission: allowed=%v err=%v", allowed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid run identity must not create controller admission state: %v", err)
+	}
+}
+
 type candidateMetadataStoreStub struct {
 	metadata  candidate.Metadata
 	createErr error
@@ -3917,6 +3949,19 @@ func TestProcessEngineControllerAPILaunchPassesDatabaseOnlyAsReadDenyMetadata(t 
 		if _, exists := environment[name]; exists {
 			t.Fatalf("unsandboxed controller-API worker received egress setting %s", name)
 		}
+	}
+}
+
+func TestProcessEngineRejectsResumeWithoutPersistedControllerTask(t *testing.T) {
+	target := t.TempDir()
+	engine, err := NewProcessEngine([]string{"worker-must-not-start"}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Resume(context.Background(), pipeline.ResumeConfig{RunID: "missing-controller-task", TargetDir: target})
+	if err == nil || !strings.Contains(err.Error(), "worker controller API task") {
+		t.Fatalf("resume without controller-persisted task must fail before worker spawn, got %v", err)
 	}
 }
 

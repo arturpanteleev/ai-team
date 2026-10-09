@@ -35,15 +35,14 @@ func TestLoadAppliesTreeHashIgnoreDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte(`
-schema_version: 4
-pipeline: [a]
-workflow:
-  entry: a
-  max_visits: {a: 1}
-  edges:
-    - from: a
-      outcome: passed
-      to: $complete
+schema_version: 5
+template: test
+title: Test
+stages:
+  - id: a
+    title: A
+    function: bo
+    result: approve
 tree_hash:
   ignore_dirs:
     - build
@@ -80,15 +79,14 @@ func TestLoadRejectsInvalidTreeHash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte(`
-schema_version: 4
-pipeline: [a]
-workflow:
-  entry: a
-  max_visits: {a: 1}
-  edges:
-    - from: a
-      outcome: passed
-      to: $complete
+schema_version: 5
+template: test
+title: Test
+stages:
+  - id: a
+    title: A
+    function: bo
+    result: approve
 tree_hash:
   ignore_dirs:
     - foo/bar

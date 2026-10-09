@@ -11,489 +11,111 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestDefault(t *testing.T) {
-	cfg := Default()
-	if cfg.CLI != "opencode" {
-		t.Errorf("expected opencode, got %s", cfg.CLI)
-	}
-	if len(cfg.PipelineAgents) != 7 {
-		t.Errorf("expected 7 agents, got %d", len(cfg.PipelineAgents))
-	}
-	graph, err := cfg.CompiledGraph()
-	if err != nil {
-		t.Fatalf("default graph: %v", err)
-	}
-	if graph.Entry != "analyst" || len(graph.Edges) < len(cfg.PipelineAgents) {
-		t.Fatalf("default graph неполон: %+v", graph)
-	}
-}
-
-func TestSchemaV4RejectsUnknownAndUnboundedGraph(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := []byte(`
-schema_version: 4
-pipeline: [a, b]
-workflow:
-  entry: a
-  max_visits: {}
-  edges:
-    - from: a
-      outcome: passed
-      to: b
-      approval:
-        roles: [operator]
-        quorum: any
-        actions: {approve: b, reject: $stop}
-    - from: b
-      outcome: rejected
-      to: a
-      approval:
-        roles: [operator]
-        quorum: any
-        actions: {approve: a, reject: $stop}
-    - from: b
-      outcome: passed
-      to: $complete
-`)
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
+func TestDefaultProfileWritesOneV5Template(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "max_visits") {
-		t.Fatalf("unbounded graph принят: %v", err)
+	if cfg.SchemaVersion != 5 || cfg.Template != "idea-to-prod" || len(cfg.Stages) != 10 {
+		t.Fatalf("unexpected standard template: schema=%d template=%q stages=%d", cfg.SchemaVersion, cfg.Template, len(cfg.Stages))
 	}
-}
-
-func TestSchemaV4RejectsUnknownMaxVisitAndDuplicateAction(t *testing.T) {
-	for name, fragment := range map[string]string{
-		"unknown max visit": "max_visits: {ghost: 2}\n",
-		"duplicate action":  "max_visits: {}\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			actions := "{approve: b, reject: $stop}"
-			if name == "duplicate action" {
-				actions = "{approve: b, approve: $stop}"
-			}
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			content := fmt.Sprintf(`schema_version: 4
-pipeline: [a, b]
-workflow:
-  entry: a
-  %s  edges:
-    - from: a
-      outcome: passed
-      to: b
-      approval:
-        roles: [operator]
-        quorum: any
-        actions: %s
-    - from: b
-      outcome: passed
-      to: $complete
-`, fragment, actions)
-			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := Load(path)
-			if name == "duplicate action" {
-				if err == nil {
-					t.Fatal("duplicate action принят")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "ghost") {
-				t.Fatalf("unknown max_visits принят: %v", err)
-			}
-		})
-	}
-}
-
-func TestLegacySchemasRejected(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3, 5} {
-		t.Run(fmt.Sprintf("schema_%d", version), func(t *testing.T) {
-			cfg := &Config{
-				SchemaVersion:  version,
-				PipelineAgents: []AgentConfig{{Name: "analyst"}, {Name: "coder"}},
-			}
-			err := cfg.Validate(nil)
-			if err == nil {
-				t.Fatalf("schema_version %d должен быть отклонён", version)
-			}
-			if !strings.Contains(err.Error(), "легаси схемы") && version <= 3 {
-				t.Fatalf("ожидалась подсказка про легаси схемы: %v", err)
-			}
-		})
-	}
-}
-
-func TestLoadOldFormatRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	content := []byte("cli: claude\npipeline: [analyst, coder]\n")
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("config без schema_version должен быть отклонён")
-	}
-}
-
-func TestLoadNewFormat(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	content := []byte(`
-schema_version: 4
-workflow:
-  entry: analyst
-  edges:
-    - from: analyst
-      outcome: passed
-      to: coder
-      approval:
-        roles: [operator]
-        quorum: any
-        actions: {approve: coder, reject: $stop}
-    - from: coder
-      outcome: passed
-      to: $complete
-cli: opencode
-model: claude-sonnet-4-20250514
-pipeline:
-  - name: analyst
-    model: claude-sonnet-4-20250514
-    effort: high
-  - name: coder
-    model: claude-opus-4-20250514
-    cli: claude
-`)
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.PipelineAgents) != 2 {
-		t.Fatalf("expected 2 agents, got %d", len(cfg.PipelineAgents))
-	}
-	if cfg.PipelineAgents[0].Name != "analyst" {
-		t.Errorf("expected analyst, got %s", cfg.PipelineAgents[0].Name)
-	}
-	if cfg.PipelineAgents[0].Model != "claude-sonnet-4-20250514" {
-		t.Errorf("expected sonnet model, got %s", cfg.PipelineAgents[0].Model)
-	}
-	if cfg.PipelineAgents[0].Effort != "high" {
-		t.Errorf("expected high effort, got %s", cfg.PipelineAgents[0].Effort)
-	}
-	if _, err := cfg.CompiledGraph(); err != nil {
-		t.Errorf("v4 config должен компилироваться: %v", err)
-	}
-}
-
-func TestLoadRejectsLegacyAgentFields(t *testing.T) {
-	tests := map[string]string{
-		"transition":       "schema_version: 4\npipeline:\n  - name: analyst\n    transition: by_confirm\n",
-		"gate_after":       "schema_version: 4\npipeline:\n  - name: analyst\n    gate_after: true\n",
-		"checkpoint_after": "schema_version: 4\npipeline:\n  - name: analyst\n    checkpoint_after: interactive\n",
-		"loopback_to":      "schema_version: 4\npipeline:\n  - name: analyst\n    loopback_to: coder\n",
-		"approval_roles":   "schema_version: 4\npipeline:\n  - name: analyst\n    approval_roles: [operator]\n",
-		"on_negative":      "schema_version: 4\npipeline:\n  - name: analyst\n    on_negative_verdict: ask\n",
-	}
-	for name, content := range tests {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(path); err == nil {
-				t.Fatal("legacy поле должно быть отклонено как unknown field")
-			}
-		})
-	}
-}
-
-func TestLoadRejectsUnknownDuplicateAndExtraDocuments(t *testing.T) {
-	tests := map[string]string{
-		"unknown top-level":   "schema_version: 4\npipeline: [analyst]\ngate_afer: true\n",
-		"unknown agent field": "schema_version: 4\npipeline:\n  - name: analyst\n    gate_afer: true\n",
-		"duplicate field":     "schema_version: 4\npipeline: [analyst]\ncli: one\ncli: two\n",
-		"extra document":      "schema_version: 4\npipeline: [analyst]\n---\npipeline: [coder]\n",
-	}
-	for name, content := range tests {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(path); err == nil {
-				t.Fatal("невалидный YAML должен быть отклонён")
-			}
-		})
-	}
-}
-
-func TestAgentConfigFallback(t *testing.T) {
-	cfg := &Config{
-		SchemaVersion: CurrentSchemaVersion,
-		PipelineAgents: []AgentConfig{
-			{Name: "analyst", Effort: "high"},
-			{Name: "coder"},
-		},
-		CLI:    "opencode",
-		Model:  "auto",
-		Effort: "medium",
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("default template invalid: %v", err)
 	}
 
-	ac := cfg.AgentConfig("analyst")
-	if ac.Model != "auto" {
-		t.Errorf("expected auto model fallback, got %s", ac.Model)
-	}
-	if ac.Effort != "high" {
-		t.Errorf("expected high effort, got %s", ac.Effort)
-	}
-	if ac.CLI != "opencode" {
-		t.Errorf("expected opencode CLI fallback, got %s", ac.CLI)
-	}
-
-	ac2 := cfg.AgentConfig("coder")
-	if ac2.Effort != "medium" {
-		t.Errorf("expected medium effort fallback, got %s", ac2.Effort)
-	}
-}
-
-func TestDefaultWithGraphApprovals(t *testing.T) {
-	cfg := Default()
-	if cfg.SchemaVersion != CurrentSchemaVersion {
-		t.Errorf("default schema_version=%d", cfg.SchemaVersion)
-	}
-	if cfg.Workflow == nil || cfg.Workflow.Edges[0].Approval == nil ||
-		cfg.Workflow.Edges[0].Approval.Roles[0] != "product_owner" {
-		t.Errorf("expected graph edge approval role product_owner, got %+v", cfg.Workflow)
-	}
-	rejectedEdges := 0
-	for _, edge := range cfg.Workflow.Edges {
-		if edge.Outcome == "rejected" && edge.To == "coder" {
-			rejectedEdges++
-		}
-	}
-	if rejectedEdges == 0 {
-		t.Error("default workflow должен содержать rejected→coder loopback рёбра")
-	}
-}
-
-func TestValidate(t *testing.T) {
-	v4Workflow := func() *WorkflowConfig {
-		return &WorkflowConfig{
-			Entry: "a",
-			Edges: []WorkflowEdgeConfig{{From: "a", Outcome: "passed", To: "$complete"}},
-		}
-	}
-	valid := &Config{
-		SchemaVersion:  CurrentSchemaVersion,
-		PipelineAgents: []AgentConfig{{Name: "a", Effort: "high", Timeout: "45m"}},
-		StageTimeout:   "30m",
-		Workflow:       v4Workflow(),
-	}
-	if err := valid.Validate(nil); err != nil {
-		t.Errorf("валидный конфиг не должен давать ошибку: %v", err)
-	}
-
-	cases := []struct {
-		name string
-		cfg  *Config
-	}{
-		{"empty pipeline", &Config{}},
-		{"bad effort", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Effort: "max"}}}},
-		{"bad global cli", &Config{SchemaVersion: 4, CLI: "nonexistent-cli", PipelineAgents: []AgentConfig{{Name: "a"}}}},
-		{"bad agent cli", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", CLI: "nonexistent-cli"}}}},
-		{"bad timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Timeout: "30 minutes"}}}},
-		{"bad stage_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, StageTimeout: "later"}},
-		{"bad preflight_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, PreflightTimeout: "скоро"}},
-		{"nonpositive preflight_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, PreflightTimeout: "0s"}},
-		{"bad delivery_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, DeliveryTimeout: "когда-нибудь"}},
-		{"nonpositive delivery_timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}, DeliveryTimeout: "0s"}},
-		{"unsupported schema", &Config{SchemaVersion: 99, PipelineAgents: []AgentConfig{{Name: "a"}}}},
-		{"nonpositive global timeout", &Config{SchemaVersion: 4, StageTimeout: "0s", PipelineAgents: []AgentConfig{{Name: "a"}}}},
-		{"nonpositive stage timeout", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Timeout: "-1s"}}}},
-		{"duplicate stage", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}, {Name: "a"}}}},
-		{"missing workflow", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a"}}}},
-		{"bad check", &Config{SchemaVersion: 4, PipelineAgents: []AgentConfig{{Name: "a", Checks: []checks.Definition{{Name: "", Class: "unit", Policy: "required"}}}}}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.cfg.Validate(nil); err == nil {
-				t.Error("ожидалась ошибка валидации")
-			}
-		})
-	}
-}
-
-type fakeLookup map[string]bool
-
-func (f fakeLookup) Exists(name string) bool { return f[name] }
-
-type fakeProductSpecLookup struct{ hasContract bool }
-
-func (fakeProductSpecLookup) Exists(string) bool { return true }
-func (f fakeProductSpecLookup) HasProductSpecContract(name string) (bool, error) {
-	return name == "analyst" && f.hasContract, nil
-}
-
-func TestApproveSpecRequiresDeclaredAnalystContract(t *testing.T) {
-	cfg := Default()
-	if err := cfg.Validate(fakeProductSpecLookup{}); err == nil ||
-		!strings.Contains(err.Error(), "outputs proposal и spec") {
-		t.Fatalf("approve_spec без двух outputs должен завершиться actionable validation error, got %v", err)
-	}
-	if err := cfg.Validate(fakeProductSpecLookup{hasContract: true}); err != nil {
-		t.Fatalf("approve_spec с заявленным контрактом должен быть допустим: %v", err)
-	}
-}
-
-func TestCustomAnalystWorkflowKeepsRegularApproval(t *testing.T) {
-	cfg := buildConfig(ProfileStandard, []stageSpec{{name: "analyst"}, {name: "worker"}}, QuorumAny(), QuorumAny(), 3)
-	for _, edge := range cfg.Workflow.Edges {
-		if edge.From != "analyst" || edge.Outcome != "passed" {
-			continue
-		}
-		if edge.Approval == nil || edge.Approval.Actions["approve"] != "worker" {
-			t.Fatalf("custom analyst без product-spec contract должен оставить approve, got %+v", edge.Approval)
-		}
-		if _, exists := edge.Approval.Actions["approve_spec"]; exists {
-			t.Fatalf("custom analyst без product-spec contract получил approve_spec: %+v", edge.Approval.Actions)
-		}
-		return
-	}
-	t.Fatal("не найден analyst passed edge")
-}
-
-func TestValidate_UnknownAgent(t *testing.T) {
-	cfg := &Config{PipelineAgents: []AgentConfig{{Name: "analyst"}, {Name: "ghost"}}}
-	err := cfg.Validate(fakeLookup{"analyst": true})
-	if err == nil || !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("ожидалась ошибка про ghost, got: %v", err)
-	}
-}
-
-func TestAgentConfig_Defaults(t *testing.T) {
-	cfg := &Config{
-		PipelineAgents: []AgentConfig{{Name: "a"}},
-		StageTimeout:   "30m",
-	}
-	ac := cfg.AgentConfig("a")
-	if ac.Timeout != "30m" {
-		t.Errorf("timeout должен наследоваться из stage_timeout, got %q", ac.Timeout)
-	}
-	d, err := ac.StageTimeoutFor()
-	if err != nil || d.Minutes() != 30 {
-		t.Errorf("StageTimeoutFor() = %v, %v", d, err)
-	}
-}
-
-// Конфиг, написанный руками (не через `ai-team init`), не содержит
-// stage_timeout — и до QS-09 шёл вообще без бюджета стадии.
-func TestStageTimeoutFor_DefaultsWithoutConfiguredValue(t *testing.T) {
-	cfg := &Config{PipelineAgents: []AgentConfig{{Name: "a"}}}
-	ac := cfg.AgentConfig("a")
-	d, err := ac.StageTimeoutFor()
-	if err != nil {
-		t.Fatalf("StageTimeoutFor(): %v", err)
-	}
-	if d != DefaultStageTimeout {
-		t.Fatalf("отсутствующий stage_timeout -> %v, ожидался дефолт %v", d, DefaultStageTimeout)
-	}
-	if d <= 0 {
-		t.Fatalf("нулевой таймаут оставляет стадию без верхней границы")
-	}
-
-	var nilAgent *AgentConfig
-	if d, err = nilAgent.StageTimeoutFor(); err != nil || d != DefaultStageTimeout {
-		t.Fatalf("nil agent -> (%v, %v), ожидался дефолт", d, err)
-	}
-}
-
-// Неположительный таймаут — не «без таймаута», а ошибка: молча подменить
-// написанное пользователем значение другим бюджетом хуже, чем остановиться.
-func TestStageTimeoutFor_RejectsNonPositive(t *testing.T) {
-	for _, raw := range []string{"-5m", "0s", "не длительность"} {
-		ac := &AgentConfig{Name: "a", Timeout: raw}
-		if d, err := ac.StageTimeoutFor(); err == nil {
-			t.Errorf("timeout=%q принят как %v", raw, d)
-		}
-	}
-}
-
-func TestMarshalRoundTrip(t *testing.T) {
-	src := Default()
-	data, err := src.Marshal()
+	data, err := cfg.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var loaded Config
 	if err := yaml.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("сериализованный Default не парсится: %v\n%s", err, data)
+		t.Fatalf("v5 round-trip failed: %v\n%s", err, data)
 	}
-	if len(loaded.PipelineAgents) != len(src.PipelineAgents) {
-		t.Fatalf("агентов после round-trip: %d, ожидалось %d", len(loaded.PipelineAgents), len(src.PipelineAgents))
+	if loaded.Template != cfg.Template || len(loaded.Stages) != len(cfg.Stages) || len(loaded.PipelineAgents) != len(cfg.Stages) {
+		t.Fatalf("template lost in round-trip: template=%q stages=%d runtime projection=%d", loaded.Template, len(loaded.Stages), len(loaded.PipelineAgents))
 	}
-	if loaded.Workflow == nil || loaded.Workflow.Edges[0].Approval == nil ||
-		loaded.Workflow.Edges[0].Approval.Roles[0] != "product_owner" {
-		t.Errorf("edge approval у analyst потерян при round-trip: %+v", loaded.Workflow)
-	}
-	if loaded.Workflow.MaxVisits["coder"] != 3 {
-		t.Error("max_visits у coder потерян при round-trip")
-	}
-	if loaded.StageTimeout != "30m" {
-		t.Errorf("stage_timeout после round-trip: %q", loaded.StageTimeout)
+	if strings.Contains(string(data), "pipeline:") || strings.Contains(string(data), "workflow:") {
+		t.Fatalf("legacy v4 sections serialized in v5 output:\n%s", data)
 	}
 }
 
-func TestDefaultProfiles(t *testing.T) {
-	fast, err := DefaultProfile(ProfileFast)
-	if err != nil {
+func TestSchemaV4RejectedWithMigrationInstructions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: 4\npipeline: [analyst]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(fast.PipelineAgents); got != 5 {
-		t.Fatalf("fast: %d агентов, ожидалось 5", got)
-	}
-	if err := fast.Validate(nil); err != nil {
-		t.Fatalf("fast конфиг невалиден: %v", err)
-	}
-
-	regulated, err := DefaultProfile(ProfileRegulated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := regulated.Validate(nil); err != nil {
-		t.Fatalf("regulated конфиг невалиден: %v", err)
-	}
-	for _, edge := range regulated.Workflow.Edges {
-		if edge.Approval != nil && edge.Approval.Quorum != "all" &&
-			edge.Outcome == "passed" && edge.To != "$complete" {
-			t.Fatalf("regulated: ребро %s→%s с quorum %s, ожидался all", edge.From, edge.To, edge.Approval.Quorum)
-		}
-	}
-	if regulated.Workflow.MaxVisits["coder"] != 2 {
-		t.Fatalf("regulated max_visits coder = %d", regulated.Workflow.MaxVisits["coder"])
-	}
-
-	standard := Default()
-	if err := standard.Validate(nil); err != nil {
-		t.Fatalf("standard сломан рефакторингом: %v", err)
-	}
-
-	if _, err := DefaultProfile("unknown"); err == nil {
-		t.Fatal("неизвестный профиль должен быть отклонён")
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "ai-team init --force") || !strings.Contains(err.Error(), "manual") && !strings.Contains(err.Error(), "вручную") {
+		t.Fatalf("expected actionable v4 migration error, got %v", err)
 	}
 }
 
-func TestStandardProfileProvidesHumanReturnRoutes(t *testing.T) {
+func TestV5RejectsUnknownDuplicateAndLegacyFields(t *testing.T) {
+	cases := map[string]string{
+		"noninteger schema version": "schema_version: v5\ntemplate: x\ntitle: X\nstages: []\n",
+		"unknown top-level":         "schema_version: 5\ntemplate: x\ntitle: X\nstages: []\nworkflow: {}\n",
+		"duplicate top-level":       "schema_version: 5\ntemplate: x\ntemplate: y\ntitle: X\nstages: []\n",
+		"unknown stage field":       "schema_version: 5\ntemplate: x\ntitle: X\nstages:\n  - id: x\n    title: X\n    function: bo\n    result: approve\n    model: bad\n",
+		"duplicate stage field":     "schema_version: 5\ntemplate: x\ntitle: X\nstages:\n  - id: x\n    id: y\n    title: X\n    function: bo\n    result: approve\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			var cfg Config
+			if err := yaml.Unmarshal([]byte(content), &cfg); err == nil {
+				t.Fatal("invalid schema accepted")
+			}
+		})
+	}
+}
+
+func TestTemplateValidationRules(t *testing.T) {
+	base, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validAgents := fakeLookup{"analyst": true, "verifier": true, "architect": true, "reviewer": true, "coder": true, "tester": true}
+	if err := base.Validate(validAgents); err != nil {
+		t.Fatalf("built-in refs should exist: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"duplicate stage id", func(c *Config) { c.Stages[1].ID = c.Stages[0].ID }, "id повторяется"},
+		{"missing agent for agent executor", func(c *Config) { c.Stages[2].Agent = "" }, "executor agent требует agent"},
+		{"missing registry agent", func(c *Config) { c.Stages[2].Agent = "ghost" }, "не найден в registry"},
+		{"invalid result", func(c *Config) { c.Stages[0].Result = "json" }, "result"},
+		{"invalid link kind", func(c *Config) { c.Stages[4].LinkKind = "issue" }, "link_kind"},
+		{"link kind on md", func(c *Config) { c.Stages[5].LinkKind = "pr" }, "link_kind допустим только"},
+		{"sections on approve", func(c *Config) { c.Stages[0].RequiredSections = []string{"Decision"} }, "required_sections допустим только"},
+		{"forward return", func(c *Config) { c.Returns[0].To = "acceptance" }, "должен вести только назад"},
+		{"unknown return stage", func(c *Config) { c.Returns[0].From = "ghost" }, "существующие stages"},
+		{"unknown max visits stage", func(c *Config) { c.MaxVisits["ghost"] = 2 }, "неизвестный stage"},
+		{"max visits without return", func(c *Config) { c.MaxVisits["intent"] = 2 }, "только для stage, в который ведёт возврат"},
+		{"nonpositive max visits", func(c *Config) { c.MaxVisits["implementation"] = 0 }, "должен быть положительным"},
+		{"conflicting route limits", func(c *Config) {
+			c.Returns[0].MaxVisits = 4
+			c.MaxVisits["product_spec"] = 3
+		}, "не совпадает с лимитом возврата"},
+		{"bad check agent", func(c *Config) { c.Stages[1].Check.Agent = "ghost" }, "агент проверки"},
+		{"invalid executor", func(c *Config) { c.Stages[0].Executor = "robot" }, "executor"},
+		{"delivery without PR", func(c *Config) { c.Stages[4].LinkKind = "build" }, "delivery допустим"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			copy := cloneConfig(t, base)
+			tc.edit(copy)
+			err := copy.Validate(validAgents)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestTemplateGraphUsesOrderAndBackwardReturns(t *testing.T) {
 	cfg, err := DefaultProfile(ProfileStandard)
 	if err != nil {
 		t.Fatal(err)
@@ -502,117 +124,219 @@ func TestStandardProfileProvidesHumanReturnRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []struct{ from, action, target string }{
-		{"architect", "return_to_analyst", "analyst"},
-		{"reviewer", "return_to_architect", "architect"},
-		{"reviewer", "return_to_coder", "coder"},
-		{"tester", "return_to_architect", "architect"},
-		{"tester", "return_to_coder", "coder"},
-	} {
-		edge, ok := graph.Edge(expected.from, "rejected")
-		if !ok || edge.Approval == nil || edge.Approval.Actions[expected.action] != expected.target {
-			t.Fatalf("route %s/%s → %s missing: %+v", expected.from, expected.action, expected.target, edge)
+	if graph.Entry != "intent" || len(graph.Nodes) != len(cfg.Stages) {
+		t.Fatalf("unexpected graph entry/nodes: %s/%d", graph.Entry, len(graph.Nodes))
+	}
+	for i, stage := range cfg.Stages {
+		if graph.Nodes[i].Key() != stage.ID {
+			t.Fatalf("node %d = %q, want stage %q", i, graph.Nodes[i].Key(), stage.ID)
+		}
+		want := "$complete"
+		if i+1 < len(cfg.Stages) {
+			want = cfg.Stages[i+1].ID
+		}
+		edge, ok := graph.Edge(stage.ID, "passed")
+		if !ok || edge.To != want {
+			t.Fatalf("stage-order edge %s → %s missing: %+v", stage.ID, want, edge)
 		}
 	}
-	architect, ok := graph.Node("architect")
-	if !ok || architect.MaxVisits < 1 {
-		t.Fatal("architect return cycle needs a finite visit limit")
+	for _, route := range cfg.Returns {
+		node, ok := graph.Node(route.To)
+		if !ok || node.MaxVisits != 3 {
+			t.Fatalf("return target %q max_visits=%d, want 3", route.To, node.MaxVisits)
+		}
+		edge, ok := graph.Edge(route.From, "rejected")
+		if !ok || edge.Approval == nil || edge.Approval.Actions["return_to_"+route.To] != route.To {
+			t.Fatalf("return route %s → %s missing: %+v", route.From, route.To, edge)
+		}
+	}
+	cfg.Returns[0].MaxVisits = 4
+	cfg.MaxVisits["product_spec"] = 4
+	graph, err = cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node, ok := graph.Node("product_spec"); !ok || node.MaxVisits != 4 {
+		t.Fatalf("explicit max_visits not compiled: node=%+v exists=%v", node, ok)
 	}
 }
 
-func TestDefaultProfilesDeferredGates(t *testing.T) {
-	for _, profile := range []string{ProfileFast, ProfileStandard} {
-		cfg, err := DefaultProfile(profile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, edge := range cfg.Workflow.Edges {
-			switch {
-			case edge.Outcome == "blocked":
-				if edge.From != "analyst" || edge.To != "analyst" || edge.Approval == nil || edge.Approval.Deferred {
-					t.Fatalf("%s: clarification edge analyst/blocked должен требовать немедленного решения", profile)
-				}
-			case edge.Outcome == "rejected":
-				if edge.Approval != nil && edge.Approval.Deferred {
-					t.Fatalf("%s: loopback-ребро %s→%s не должно быть deferred", profile, edge.From, edge.To)
-				}
-			case edge.To != "$complete" && edge.Approval == nil:
-				t.Fatalf("%s: forward-ребро %s→%s без approval", profile, edge.From, edge.To)
-			case edge.To != "$complete" && edge.From == "analyst" && edge.Approval.Deferred:
-				t.Fatalf("%s: согласование продуктовых требований должно быть явным до архитектора", profile)
-			case edge.To != "$complete" && edge.From == "analyst" && edge.Approval.Actions["approve_spec"] != edge.To:
-				t.Fatalf("%s: bundled analyst должен сохранять явное approve_spec Product Owner, actions=%v", profile, edge.Approval.Actions)
-			case edge.To != "$complete" && edge.From != "analyst" && !edge.Approval.Deferred && profile != ProfileRegulated:
-				t.Fatalf("%s: forward-ребро %s→%s должно оставаться deferred (APF-1 consolidation)", profile, edge.From, edge.To)
-			}
-		}
-		graph, err := cfg.CompiledGraph()
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, edge := range graph.Edges {
-			if edge.Approval != nil && edge.Approval.Deferred && edge.Outcome == "rejected" {
-				t.Fatalf("%s: compile потерял deferred distinction на loopback %s→%s", profile, edge.From, edge.To)
-			}
-		}
+func TestProfilePresetsAreDistinctTemplates(t *testing.T) {
+	standard, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, err := DefaultProfile(ProfileFast)
+	if err != nil {
+		t.Fatal(err)
 	}
 	regulated, err := DefaultProfile(ProfileRegulated)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, edge := range regulated.Workflow.Edges {
-		if edge.Approval != nil && edge.Approval.Deferred {
-			t.Fatalf("regulated: ребро %s→%s не должно быть deferred (строгий пошаговый контроль)", edge.From, edge.To)
+	if standard.Template != "idea-to-prod" || fast.Template == standard.Template || regulated.Template == standard.Template || fast.Template == regulated.Template {
+		t.Fatalf("profiles must materialize distinct templates: %q %q %q", standard.Template, fast.Template, regulated.Template)
+	}
+	for _, cfg := range []*Config{standard, fast, regulated} {
+		if err := cfg.Validate(nil); err != nil {
+			t.Errorf("%s: %v", cfg.Template, err)
 		}
+		if _, err := cfg.CompiledGraph(); err != nil {
+			t.Errorf("%s graph: %v", cfg.Template, err)
+		}
+	}
+	if fast.Stages[0].Confirm != "auto" || regulated.Stages[0].Confirm != "required" || standard.Stages[0].Confirm != "auto" {
+		t.Fatalf("profile confirm defaults differ: standard=%s fast=%s regulated=%s", standard.Stages[0].Confirm, fast.Stages[0].Confirm, regulated.Stages[0].Confirm)
+	}
+	if _, err := DefaultProfile("unknown"); err == nil {
+		t.Fatal("unknown profile accepted")
 	}
 }
 
-func TestWorkflowApprovalDeferredParsesAndCompiles(t *testing.T) {
-	cfg := Default()
-	cfg.Workflow.Edges[0].Approval.Deferred = true
-	data, err := yaml.Marshal(cfg)
+func TestStageDefaultsAndProjectChecks(t *testing.T) {
+	cfg := &Config{Stages: []TemplateStage{
+		{ID: "brief", Title: "Brief", Function: "po", Result: "md"},
+		{ID: "gate", Title: "Gate", Function: "bo", Result: "approve"},
+	}}
+	if err := yaml.Unmarshal([]byte("schema_version: 5\ntemplate: x\ntitle: X\nstages:\n  - id: brief\n    title: Brief\n    function: po\n    result: md\n  - id: gate\n    title: Gate\n    function: bo\n    result: approve\n"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Stages[0].Executor != "human" || cfg.Stages[0].Confirm != "required" || cfg.Stages[1].Confirm != "auto" {
+		t.Fatalf("stage defaults not applied: %+v %+v", cfg.Stages[0], cfg.Stages[1])
+	}
+	goTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(goTarget, "go.mod"), []byte("module example.test\n\ngo 1.27\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig, err := DefaultProfile(ProfileStandard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded Config
-	if err := yaml.Unmarshal(data, &decoded); err != nil {
-		t.Fatal(err)
+	detected, warning := projectConfig.ApplyDetectedChecks(goTarget)
+	if detected != "go" || warning != "" || len(projectConfig.Checks) != 2 {
+		t.Fatalf("detected project checks missing: profile=%q warning=%q checks=%d", detected, warning, len(projectConfig.Checks))
 	}
-	if !decoded.Workflow.Edges[0].Approval.Deferred {
-		t.Fatal("deferred не должен потеряться при YAML round-trip")
-	}
-	// CompiledGraph должен нести флаг в runtime-контракт.
-	graph, err := decoded.CompiledGraph()
-	if err != nil {
-		t.Fatal(err)
-	}
-	edge, found := graph.Edge("analyst", "passed")
-	if !found || edge.Approval == nil || !edge.Approval.Deferred {
-		t.Fatalf("compiled edge analyst→passed deferred=%v approval=%v found=%v", edge.Approval, edge.Approval, found)
-	}
-	// Неизвестный ключ approval должен оставаться запрещённым.
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := `
-schema_version: 4
-pipeline:
-  - name: a
-workflow:
-  entry: a
-  edges:
-    - from: a
-      outcome: passed
-      to: $complete
-      approval:
-        roles: [operator]
-        quorum: any
-        actions:
-          approve: $complete
-        bogus_key: true
-`
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "workflow approval") {
-		t.Fatalf("неизвестный approval-ключ должен отклоняться, got %v", err)
+	if err := projectConfig.Validate(nil); err != nil {
+		t.Fatalf("detected config invalid: %v", err)
 	}
 }
+
+func TestAgentConfigFallbackAndLegacyRuntimeDefault(t *testing.T) {
+	cfg := &Config{
+		SchemaVersion:  CurrentSchemaVersion,
+		PipelineAgents: []AgentConfig{{Name: "analyst", Effort: "high"}, {Name: "coder"}},
+		CLI:            "opencode", Model: "auto", Effort: "medium", StageTimeout: "30m",
+	}
+	ac := cfg.AgentConfig("analyst")
+	if ac.Model != "auto" || ac.Effort != "high" || ac.CLI != "opencode" || ac.Timeout != "30m" {
+		t.Fatalf("agent fallback mismatch: %+v", ac)
+	}
+	defaultConfig := Default()
+	if err := defaultConfig.Validate(nil); err != nil {
+		t.Fatalf("legacy runtime default graph invalid: %v", err)
+	}
+	if graph, err := defaultConfig.CompiledGraph(); err != nil || graph.Entry != "analyst" {
+		t.Fatalf("legacy in-memory graph: entry=%q err=%v", graph.Entry, err)
+	}
+}
+
+func TestLegacyRuntimeConfigValidationRemainsAvailableInMemory(t *testing.T) {
+	base := &Config{
+		SchemaVersion:  CurrentSchemaVersion,
+		PipelineAgents: []AgentConfig{{Name: "a"}},
+		Workflow:       &WorkflowConfig{Entry: "a", Edges: []WorkflowEdgeConfig{{From: "a", Outcome: "passed", To: "$complete"}}},
+	}
+	if err := base.Validate(nil); err != nil {
+		t.Fatalf("in-memory runtime fixture invalid: %v", err)
+	}
+	cases := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"bad effort", func(c *Config) { c.Effort = "max" }},
+		{"bad global cli", func(c *Config) { c.CLI = "missing-cli" }},
+		{"bad stage timeout", func(c *Config) { c.StageTimeout = "later" }},
+		{"zero preflight timeout", func(c *Config) { c.PreflightTimeout = "0s" }},
+		{"bad delivery timeout", func(c *Config) { c.DeliveryTimeout = "soon" }},
+		{"duplicate runtime stage", func(c *Config) { c.PipelineAgents = append(c.PipelineAgents, AgentConfig{Name: "a"}) }},
+		{"missing runtime workflow", func(c *Config) { c.Workflow = nil }},
+		{"bad runtime check", func(c *Config) {
+			c.PipelineAgents[0].Checks = []checks.Definition{{Name: "broken", Class: "unit", Policy: "required"}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			copy := *base
+			copy.PipelineAgents = append([]AgentConfig(nil), base.PipelineAgents...)
+			copy.Workflow = base.Workflow
+			tc.edit(&copy)
+			if err := copy.Validate(nil); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+type fakeProductSpecLookup struct{ hasContract bool }
+
+func (fakeProductSpecLookup) Exists(string) bool { return true }
+func (f fakeProductSpecLookup) HasProductSpecContract(name string) (bool, error) {
+	return name == "analyst" && f.hasContract, nil
+}
+
+func TestLegacyApproveSpecContractIsOnlyForInMemoryFixture(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(fakeProductSpecLookup{}); err == nil || !strings.Contains(err.Error(), "outputs proposal и spec") {
+		t.Fatalf("approve_spec without registry contract should fail, got %v", err)
+	}
+	if err := cfg.Validate(fakeProductSpecLookup{hasContract: true}); err != nil {
+		t.Fatalf("in-memory legacy fixture with contract should pass: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: 4\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "ai-team init --force") {
+		t.Fatalf("the public parser must still reject v4: %v", err)
+	}
+}
+
+func TestLegacyConfigRejectsUnknownAgent(t *testing.T) {
+	cfg := &Config{
+		SchemaVersion:  CurrentSchemaVersion,
+		PipelineAgents: []AgentConfig{{Name: "analyst"}, {Name: "ghost"}},
+		Workflow:       &WorkflowConfig{Entry: "analyst", Edges: []WorkflowEdgeConfig{{From: "analyst", Outcome: "passed", To: "$complete"}}},
+	}
+	if err := cfg.Validate(fakeLookup{"analyst": true}); err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("unknown in-memory runtime agent should fail, got %v", err)
+	}
+}
+
+func TestSchemaVersionsAndRuntimeTimeoutValidation(t *testing.T) {
+	for _, version := range []int{0, 1, 2, 3, 4, 99} {
+		t.Run(fmt.Sprintf("schema_%d", version), func(t *testing.T) {
+			cfg := &Config{SchemaVersion: version, Template: "x", Title: "X", Stages: []TemplateStage{{ID: "x", Title: "X", Function: "bo", Result: "approve"}}}
+			err := cfg.Validate(nil)
+			if err == nil {
+				t.Fatalf("unsupported schema %d accepted", version)
+			}
+		})
+	}
+}
+
+func cloneConfig(t *testing.T, source *Config) *Config {
+	t.Helper()
+	data, err := yaml.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result Config
+	if err := yaml.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return &result
+}
+
+type fakeLookup map[string]bool
+
+func (f fakeLookup) Exists(name string) bool { return f[name] }

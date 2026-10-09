@@ -1630,24 +1630,33 @@ func TestInitCommandContract(t *testing.T) {
 		if !bytes.Equal(after, edited) {
 			t.Fatalf("повторный init затёр пользовательский config.yaml:\n%s", after)
 		}
+		if _, code, stderr := runCLI(t, "init", "--target", target, "--profile", "fast", "--force"); code != 0 {
+			t.Fatalf("init --force: exit %d; stderr: %s", code, stderr)
+		}
+		forced, err := config.Load(configPath)
+		if err != nil {
+			t.Fatalf("init --force должен записать валидный v5 config: %v", err)
+		}
+		if forced.Template != "idea-to-prod-fast" || len(forced.Stages) != 10 {
+			t.Fatalf("init --force должен заменить конфиг выбранным шаблоном: %q/%d", forced.Template, len(forced.Stages))
+		}
 	})
 
-	t.Run("fast-профиль кладёт project-local reviewer", func(t *testing.T) {
+	t.Run("fast-профиль сохраняется как шаблон", func(t *testing.T) {
 		target := t.TempDir()
 		_, code, stderr := runCLI(t, "init", "--target", target, "--profile", "fast")
 		if code != 0 {
 			t.Fatalf("ожидался exit 0, получен %d; stderr: %s", code, stderr)
 		}
-		def, err := os.ReadFile(filepath.Join(target, ".ai-team", "agents", "reviewer", "def.yaml"))
+		cfg, err := config.Load(filepath.Join(target, ".ai-team", "config.yaml"))
 		if err != nil {
-			t.Fatalf("fast-профиль обязан создавать override reviewer: %v", err)
+			t.Fatal(err)
 		}
-		if !strings.Contains(string(def), "verification") {
-			t.Fatalf("override reviewer обязан объявлять verification-выход:\n%s", def)
+		if cfg.Template != "idea-to-prod-fast" || len(cfg.Stages) != 10 || cfg.Stages[0].Confirm != "auto" {
+			t.Fatalf("fast profile should be materialized as a v5 template: %q, stages=%d", cfg.Template, len(cfg.Stages))
 		}
-		prompt, err := os.ReadFile(filepath.Join(target, ".ai-team", "agents", "reviewer", "prompt.md"))
-		if err != nil || !strings.Contains(string(prompt), "Верификация") {
-			t.Fatalf("prompt override обязан содержать секцию верификации: %v", err)
+		if _, err := os.Stat(filepath.Join(target, ".ai-team", "agents")); !os.IsNotExist(err) {
+			t.Fatalf("fast profile must not rely on a hidden agent override, got stat err %v", err)
 		}
 	})
 }

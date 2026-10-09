@@ -46,7 +46,7 @@ func (o *synchronizedOutput) String() string {
 func buildBinary(t *testing.T) string {
 	t.Helper()
 	binPath := filepath.Join(t.TempDir(), "ai-team")
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/ai-team")
+	cmd := exec.Command("go", "build", "-tags=e2etest", "-o", binPath, "./cmd/ai-team")
 	cmd.Dir = findModuleRoot()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -81,6 +81,7 @@ func runAI(t *testing.T, binPath, dir string, envs []string, args ...string) (in
 	cmd.Stderr = &out
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, envs...)
+	cmd.Env = append(cmd.Env, e2eRuntimeFixtureEnv(t, dir, args)...)
 	err := cmd.Run()
 	code := 0
 	if err != nil {
@@ -199,6 +200,7 @@ func runAIJSON(t *testing.T, binPath, dir string, envs []string, args ...string)
 	cmd.Stderr = &stderr
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, envs...)
+	cmd.Env = append(cmd.Env, e2eRuntimeFixtureEnv(t, dir, args)...)
 	err := cmd.Run()
 	code := 0
 	if err != nil {
@@ -225,7 +227,7 @@ func useGenericAutoApprovalFixture(t *testing.T, dir string, args []string) {
 		t.Fatalf("load generic auto-approval fixture: %v", err)
 	}
 	if cfg.Workflow == nil {
-		t.Fatalf("generic auto-approval fixture requires workflow config")
+		return // schema v5 E2E uses the build-tagged in-memory runtime fixture.
 	}
 	updated := false
 	for i := range cfg.Workflow.Edges {
@@ -248,6 +250,22 @@ func useGenericAutoApprovalFixture(t *testing.T, dir string, args []string) {
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write generic auto-approval fixture: %v", err)
 	}
+}
+
+func e2eRuntimeFixtureEnv(t *testing.T, dir string, args []string) []string {
+	t.Helper()
+	if len(args) == 0 || args[0] == "init" {
+		return nil
+	}
+	cfg, err := config.Load(filepath.Join(dir, ".ai-team", "config.yaml"))
+	if err != nil || cfg.Template == "" {
+		return nil
+	}
+	envs := []string{"AI_TEAM_E2E_IN_MEMORY_LEGACY_RUNTIME=1"}
+	if args[0] == "run" && containsArg(args, "--approve-gates") {
+		envs = append(envs, "AI_TEAM_E2E_GENERIC_APPROVAL_FIXTURE=1")
+	}
+	return envs
 }
 
 func containsArg(args []string, want string) bool {
@@ -476,6 +494,7 @@ func TestE2E_DisposableWorkerPersistsPendingApproval(t *testing.T) {
 	command := exec.Command(bin, "worker", "--target", dir, "--db", filepath.Join(dir, ".ai-team", "web.db"))
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
+	command.Env = append(command.Env, e2eRuntimeFixtureEnv(t, dir, []string{"worker"})...)
 	command.Stdin = strings.NewReader(string(job))
 	output, commandErr := command.CombinedOutput()
 	exit := 0
@@ -628,8 +647,8 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 		t.Fatalf("config.yaml should exist after init: %v", err)
 	}
 	cfg := string(data)
-	// Init сериализует полный graph config: edge approvals и visit limits не теряются.
-	for _, want := range []string{"schema_version: 4", "workflow:", "outcome: passed", "cli: opencode", "roles:", "product_owner", "max_visits:", "stage_timeout: 30m"} {
+	// Init сериализует schema v5 template, стадии, возвраты и проектные checks.
+	for _, want := range []string{"schema_version: 5", "template: idea-to-prod", "id: intent", "id: acceptance", "returns:", "max_visits:", "cli: opencode", "stage_timeout: 30m"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config.yaml должен содержать %q:\n%s", want, cfg)
 		}
@@ -641,6 +660,35 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	gitignore, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if err != nil || !strings.Contains(string(gitignore), ".ai-team/") {
 		t.Fatalf("--write-gitignore должен записать правило: err=%v\n%s", err, gitignore)
+	}
+}
+
+func TestE2E_InitLoadsAndCompilesV5Template(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildBinary(t)
+	setupMock(t)
+	if code, out := runAI(t, bin, dir, nil, "init"); code != 0 {
+		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
+	}
+	cfg, err := config.Load(filepath.Join(dir, ".ai-team", "config.yaml"))
+	if err != nil {
+		t.Fatalf("init output should load as schema v5: %v", err)
+	}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("init template should validate: %v", err)
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatalf("init template graph should compile: %v", err)
+	}
+	if graph.Entry != "intent" || len(graph.Nodes) != 10 {
+		t.Fatalf("unexpected compiled graph entry/nodes: %q/%d", graph.Entry, len(graph.Nodes))
+	}
+	for _, route := range cfg.Returns {
+		edge, ok := graph.Edge(route.From, "rejected")
+		if !ok || edge.Approval == nil || edge.Approval.Actions["return_to_"+route.To] != route.To {
+			t.Fatalf("compiled graph lost return %s → %s: %+v", route.From, route.To, edge)
+		}
 	}
 }
 
@@ -685,14 +733,14 @@ func TestE2E_InvalidConfigDoesNotMutateTaskArtifacts(t *testing.T) {
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("init failed (%d):\n%s", code, out)
 	}
-	badConfig := "schema_version: 2\ncli: opencode\npipeline:\n  - name: analyst\n    checkpoint_afer: require_explicit\n"
+	badConfig := "schema_version: 4\npipeline:\n  - name: analyst\n"
 	if err := os.WriteFile(filepath.Join(dir, ".ai-team", "config.yaml"), []byte(badConfig), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	feature := "invalid-config"
 	code, out := runAI(t, bin, dir, []string{pathEnv}, "run", "--feature", feature, "--task", "must not persist")
-	if code == 0 || !strings.Contains(out, "checkpoint_afer") {
+	if code == 0 || !strings.Contains(out, "ai-team init --force") || !strings.Contains(out, "вручную") {
 		t.Fatalf("invalid config must fail before execution: code=%d\n%s", code, out)
 	}
 	checkAbsent(t, filepath.Join(dir, ".ai-team", "artifacts", "tasks", feature, "task.md"))
@@ -722,6 +770,7 @@ func TestE2E_ResumeKeepsRunIdentityAfterProcessStop(t *testing.T) {
 		"MOCK_WAIT_FILE="+waitFile,
 		"AI_TEAM_OPENCODE_ENV_ALLOW=MOCK_WAIT_AGENT,MOCK_WAIT_FILE",
 	)
+	command.Env = append(command.Env, e2eRuntimeFixtureEnv(t, dir, resumeArgs)...)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -783,6 +832,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	command := exec.Command(bin, "web", "--port", port, "--dist=")
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
+	command.Env = append(command.Env, e2eRuntimeFixtureEnv(t, dir, []string{"web"})...)
 	var serverOutput synchronizedOutput
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {

@@ -45,9 +45,8 @@ var defaultStageRoles = map[string][]string{
 	"verifier":  {"qa"},
 }
 
-// Profile — уровень строгости workflow, разворачиваемый init'ом в готовый
-// конфиг v4. Профиль — свойство генерации конфига, не runtime-сущность:
-// итоговый config.yaml остаётся обычным явным графом.
+// Profile — предустановленный вариант единственного project template, который
+// init разворачивает в обычный schema v5 конфиг.
 const (
 	ProfileStandard  = "standard"
 	ProfileFast      = "fast"
@@ -62,55 +61,92 @@ type stageSpec struct {
 	productSpecOutput bool
 }
 
-// DefaultProfile строит готовый конфиг v4 для профиля:
-//
-//   - standard: полный конвейер из 7 стадий, quorum any;
-//   - fast: без verifier, reviewer совмещает ревью и верификацию
-//     (project-local override пишет cmd/init), меньше max_visits;
-//   - regulated: полный конвейер, quorum all на смысловых рёбрах,
-//     max_visits снижен.
+var defaultTemplateReturns = []TemplateReturn{
+	{From: "tech_design", To: "product_spec"},
+	{From: "design_review", To: "tech_design"},
+	{From: "code_review", To: "implementation"},
+	{From: "qa", To: "implementation"},
+	{From: "qa", To: "product_spec"},
+	{From: "observation", To: "implementation"},
+	{From: "acceptance", To: "product_spec"},
+}
+
+func ideaToProdStages() []TemplateStage {
+	return []TemplateStage{
+		{ID: "intent", Title: "Бизнес-идея", Function: "bo", Result: "approve", Executor: "human"},
+		{ID: "product_spec", Title: "Продуктовая спецификация", Function: "po", Result: "md", Executor: "human", Agent: "analyst", RequiredSections: []string{"Критерии приёмки"}, Check: &TemplateCheck{Kind: "agent", Agent: "verifier", Mode: "grill", MaxRounds: 3}},
+		{ID: "tech_design", Title: "Техническое решение", Function: "architect", Result: "md", Executor: "agent", Agent: "architect", Check: &TemplateCheck{Kind: "agent", Agent: "verifier"}, Confirm: "required", Skippable: true},
+		{ID: "design_review", Title: "Ревью техрешения", Function: "reviewer", Result: "approve", Executor: "human", Agent: "reviewer", Skippable: true},
+		{ID: "implementation", Title: "Реализация", Function: "developer", Result: "link", LinkKind: "pr", Executor: "human", Agent: "coder", Delivery: &TemplateDelivery{RequireChecks: []string{"go-test", "go-vet"}}, Check: &TemplateCheck{Kind: "hard", Rules: []string{"pr_exists", "pr_open", "pr_base_branch"}}},
+		{ID: "code_review", Title: "Код-ревью", Function: "reviewer", Result: "md", Executor: "human", Agent: "reviewer", Check: &TemplateCheck{Kind: "hard", Rules: []string{"verdict_marker"}}},
+		{ID: "qa", Title: "Тестирование", Function: "qa", Result: "md", Executor: "human", Agent: "tester"},
+		{ID: "deploy", Title: "Выкладка", Function: "deployer", Result: "link", LinkKind: "build", Executor: "human"},
+		{ID: "observation", Title: "Наблюдение после выкладки", Function: "deployer", Result: "md", Executor: "human"},
+		{ID: "acceptance", Title: "Окончательная готовность", Function: "bo", Result: "approve", Executor: "human"},
+	}
+}
+
+// DefaultProfile builds one v5 process template from an init preset. The
+// standard preset is the built-in idea-to-prod template; fast and regulated
+// materialize variants as distinct template names rather than runtime modes.
 func DefaultProfile(profile string) (*Config, error) {
-	var stages []stageSpec
-	quorum := QuorumAny()
-	loopbackQuorum := QuorumAny()
+	stages := ideaToProdStages()
+	templateName := "idea-to-prod"
+	title := "От идеи до продакшена"
 	maxVisits := 3
 	switch profile {
 	case ProfileStandard:
-		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
-			{name: "architect", roles: []string{"architect"}},
-			{name: "coder", roles: []string{"developer"}, maxVisits: 3},
-			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 3},
-			{name: "tester", roles: []string{"qa"}, maxVisits: 3},
-			{name: "verifier", roles: []string{"qa"}, maxVisits: 3},
-			{name: "deployer"},
-		}
 	case ProfileFast:
-		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
-			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
-			{name: "tester", roles: []string{"qa"}, maxVisits: 2},
-			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
-			{name: "deployer"},
-		}
-	case ProfileRegulated:
-		quorum = QuorumAll()
-		loopbackQuorum = QuorumAll()
+		templateName = "idea-to-prod-fast"
+		title = "Быстрый поток от идеи до продакшена"
 		maxVisits = 2
-		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
-			{name: "architect", roles: []string{"architect"}},
-			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
-			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
-			{name: "tester", roles: []string{"qa"}, maxVisits: 2},
-			{name: "verifier", roles: []string{"qa"}, maxVisits: 2},
-			{name: "deployer"},
-		}
+	case ProfileRegulated:
+		templateName = "idea-to-prod-regulated"
+		title = "Регламентированный поток от идеи до продакшена"
+		maxVisits = 2
 	default:
 		return nil, fmt.Errorf("неизвестный профиль %q (допустимы %s, %s, %s)",
 			profile, ProfileFast, ProfileStandard, ProfileRegulated)
 	}
-	return buildConfig(profile, stages, quorum, loopbackQuorum, maxVisits), nil
+	if profile == ProfileFast {
+		for index := range stages {
+			stages[index].Confirm = "auto"
+		}
+	}
+	if profile == ProfileRegulated {
+		for index := range stages {
+			stages[index].Confirm = "required"
+		}
+	}
+	for index := range stages {
+		if stages[index].Confirm == "" {
+			if stages[index].Result == "approve" {
+				stages[index].Confirm = "auto"
+			} else {
+				stages[index].Confirm = "required"
+			}
+		}
+	}
+	maxVisitsByTarget := map[string]int{}
+	for _, route := range defaultTemplateReturns {
+		maxVisitsByTarget[route.To] = maxVisits
+	}
+	cfg := &Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Template:      templateName,
+		Title:         title,
+		StallAfter:    "24h",
+		Stages:        stages,
+		Returns:       append([]TemplateReturn(nil), defaultTemplateReturns...),
+		MaxVisits:     maxVisitsByTarget,
+		CLI:           "opencode",
+		Effort:        "medium",
+		StageTimeout:  "30m",
+	}
+	for _, stage := range stages {
+		cfg.PipelineAgents = append(cfg.PipelineAgents, AgentConfig{Name: stage.ID})
+	}
+	return cfg, nil
 }
 
 func QuorumAny() string { return "any" }
@@ -248,17 +284,22 @@ func loopbackActions(index map[string]int, override string) map[string]string {
 	return actions
 }
 
-// Default — стандартный профиль (совместимость со старыми вызовами).
+// Default returns the legacy in-memory standard graph for current Go runtime
+// callers. `init` uses DefaultProfile and always writes schema v5.
 func Default() *Config {
-	cfg, err := DefaultProfile(ProfileStandard)
-	if err != nil {
-		panic(err)
+	stages := []stageSpec{
+		{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
+		{name: "architect", roles: []string{"architect"}},
+		{name: "coder", roles: []string{"developer"}, maxVisits: 3},
+		{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 3},
+		{name: "tester", roles: []string{"qa"}, maxVisits: 3},
+		{name: "verifier", roles: []string{"qa"}, maxVisits: 3},
+		{name: "deployer"},
 	}
-	return cfg
+	return buildConfig(ProfileStandard, stages, QuorumAny(), QuorumAny(), 3)
 }
 
-// Marshal сериализует конфиг в YAML (используется init-ом: граф и
-// approval-политики сохраняются целиком).
+// Marshal serializes the project template and supported configuration fields.
 func (c *Config) Marshal() ([]byte, error) {
 	return yaml.Marshal(c)
 }

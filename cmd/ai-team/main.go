@@ -916,7 +916,8 @@ func requireControlRoot(target string) {
 func cmdInit() {
 	initFlags := flag.NewFlagSet("init", flag.ExitOnError)
 	targetFlag := initFlags.String("target", ".", "Путь к целевому проекту")
-	profileFlag := initFlags.String("profile", config.ProfileStandard, "Профиль workflow: fast, standard или regulated")
+	profileFlag := initFlags.String("profile", config.ProfileStandard, "Шаблон процесса: fast, standard или regulated")
+	force := initFlags.Bool("force", false, "Перезаписать существующий .ai-team/config.yaml")
 	writeGitignore := initFlags.Bool("write-gitignore", false, "Записать разделяемое правило в .gitignore вместо локального Git exclude")
 	if err := initFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов init: %v", err)
@@ -958,25 +959,16 @@ func cmdInit() {
 		fmt.Fprintln(os.Stderr, "Предупреждение: тестовый профиль не обнаружен; delivery будет запрещён до настройки required unit/integration/e2e check")
 	}
 	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		data, err := cfg.Marshal()
-		if err != nil {
-			fatal("Ошибка сериализации конфига: %v", err)
-		}
-		if err := os.WriteFile(cfgPath, data, 0644); err != nil {
-			fatal("Ошибка создания конфига: %v", err)
-		}
+	data, err := cfg.Marshal()
+	if err != nil {
+		fatal("Ошибка сериализации конфига: %v", err)
+	}
+	if err := writeInitConfig(cfgPath, data, *force); err != nil {
+		fatal("Ошибка создания конфига: %v", err)
 	}
 
 	if err := runtime.CheckCLI(cfg.CLI); err != nil {
 		fmt.Fprintf(os.Stderr, "Предупреждение: %v\n", err)
-	}
-
-	if *profileFlag == config.ProfileFast {
-		if err := writeFastReviewerOverride(target); err != nil {
-			fatal("Ошибка project-local override для fast-профиля: %v", err)
-		}
-		logging.Printf("✓ fast-профиль: reviewer совмещает ревью и верификацию (.ai-team/agents/reviewer/)\n")
 	}
 
 	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
@@ -990,62 +982,54 @@ func cmdInit() {
 	logging.Printf("✓ .ai-team/ инициализирован в %s\n", target)
 }
 
-// writeFastReviewerOverride создаёт project-local определение reviewer'а,
-// которое совмещает ревью и верификацию (output verification с тем же
-// verdict-маркером) — deployer precondition остаётся выполнимым без
-// отдельной стадии verifier. Prompt наследует встроенный и дополняется
-// секцией про верификацию.
-func writeFastReviewerOverride(target string) error {
-	embedded, err := fs.Sub(agentdata.Agents, "agents/reviewer")
+// writeInitConfig preserves an existing config unless the caller explicitly
+// requests replacement. Replacements use a temporary regular file and rename
+// so a failed write never truncates the user's current config.
+func writeInitConfig(path string, data []byte, force bool) error {
+	existing, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return safeio.WriteRegularFileNoFollow(path, data, 0644)
+	}
 	if err != nil {
 		return err
 	}
-	basePrompt, err := fs.ReadFile(embedded, "prompt.md")
+	if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
+		return fmt.Errorf("%s должен быть regular file без symlink", path)
+	}
+	if !force {
+		return nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.yaml-*.tmp")
 	if err != nil {
-		return fmt.Errorf("встроенный prompt reviewer: %w", err)
-	}
-	overrideDir := filepath.Join(target, ".ai-team", "agents", "reviewer")
-	if _, err := safeio.EnsureDir(target, ".ai-team", "agents", "reviewer"); err != nil {
 		return err
 	}
-	def := `name: reviewer
-description: Reviewer (fast) — ревью кода и верификация одним проходом
-runtime: agentcli
-cli: opencode
-prompt_file: prompt.md
-mutation: none
-verdict:
-  required: true
-  marker: Verdict
-  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
-inputs:
-  specs: '{feature}/specs'
-  test-report: '{feature}/test-report.md'
-  candidate: '{feature}/.control/review-candidate.json'
-outputs:
-  review: '{feature}/review.md'
-  verification: '{feature}/verification.md'
-`
-	prompt := strings.TrimSpace(string(basePrompt)) + `
-
-## Верификация (fast profile)
-
-Дополнительно к review.md подготовь verification.md — итог самопроверки
-реализации перед доставкой: соответствие acceptance criteria из proposal,
-результаты ручной проверки ключевых сценариев, известные ограничения и
-непроверенные сценарии. Заверши файл тем же маркером вердикта:
-
-**Verdict:** APPROVED | CHANGES_REQUESTED | REJECTED
-`
-	defPath := filepath.Join(overrideDir, "def.yaml")
-	if err := os.WriteFile(defPath, []byte(def), 0644); err != nil {
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	promptPath := filepath.Join(overrideDir, "prompt.md")
-	if err := os.WriteFile(promptPath, []byte(prompt+"\n"), 0644); err != nil {
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	return nil
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Rename replaces a regular file atomically and replaces (never follows) a
+	// leaf symlink if another process raced this check. Refuse special files.
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() {
+		return fmt.Errorf("%s изменился и больше не является regular file", path)
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // ensureControlIgnored гарантирует исключение .ai-team/ из Git. По умолчанию
@@ -1116,7 +1100,11 @@ func loadValidatedConfig(target string, reg *agent.Registry) *config.Config {
 	if err := safeio.RejectSymlink(cfgPath); err != nil {
 		fatal("Небезопасный config path: %v", err)
 	}
-	cfg, err := config.Load(cfgPath)
+	cfg, overridden := e2eInMemoryLegacyConfig(target)
+	var err error
+	if !overridden {
+		cfg, err = config.Load(cfgPath)
+	}
 	if err != nil {
 		fatal("Ошибка загрузки конфига: %v", err)
 	}

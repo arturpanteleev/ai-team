@@ -13,11 +13,11 @@
 Контроллер строго проверяет конфиг до первого вызова модели. Отклоняются:
 
 - неизвестные и повторяющиеся поля, несколько YAML-документов в файле;
-- `schema_version`, отличная от `4`; конфиги схем 1–3 больше не
-  поддерживаются;
+- конфиги схемы, отличной от `5`; v4 явно отклоняется с подсказкой о запуске
+  `ai-team init --force` или ручном переносе;
+- уникальность ID этапов, наличие ссылочных агентов и допустимость результатов,
+  ссылок и возвратов;
 - неизвестный рантайм в `cli`, недопустимый `effort`, непарсящиеся длительности;
-- неоднозначные переходы, недостижимые этапы, циклы без ограничения
-  `max_visits`;
 - некорректные проверки (`checks`) и пути.
 
 Ошибки выводятся списком, сразу все:
@@ -30,57 +30,61 @@
 
 ## Пример
 
-Так выглядит начало конфига профиля `standard`, который `init` создаёт в
-Go-проекте (переходы сокращены):
+Ниже сокращённый фрагмент профиля `standard`, который `init` создаёт в
+Go-проекте:
 
 ```yaml
-schema_version: 4
-pipeline:
-  - name: analyst
-  - name: architect
-  - name: coder
-  - name: reviewer
-  - name: tester
-    checks:
-      - name: go-test
-        class: unit
-        adapter: go-test-json
-        command: [go, test, -json, -count=1, ./...]
-        policy: required
-        timeout: 20m
-      - name: go-vet
-        class: lint
-        command: [go, vet, ./...]
-        policy: required
-        timeout: 10m
-  - name: verifier
-  - name: deployer
-workflow:
-  entry: analyst
-  max_visits: {coder: 3, reviewer: 3, tester: 3, verifier: 3}
-  edges:
-    - from: analyst
-      outcome: passed
-      to: architect
-      approval:
-        roles: [product_owner]
-        quorum: any
-        actions: {approve: architect, reject: $stop}
-        deferred: true
-    # остальные переходы passed задаются так же
-    - from: deployer
-      outcome: passed
-      to: $complete
-    - from: reviewer
-      outcome: rejected
-      to: coder
-      approval:
-        roles: [reviewer]
-        quorum: any
-        actions:
-          return_to_coder: coder
-          override_approve: tester
-          reject: $stop
+schema_version: 5
+template: idea-to-prod
+title: От идеи до продакшена
+stall_after: 24h
+stages:
+  - id: intent
+    title: Бизнес-идея
+    function: bo
+    result: approve
+    executor: human
+  - id: product_spec
+    title: Продуктовая спецификация
+    function: po
+    result: md
+    executor: human
+    agent: analyst
+    required_sections: [Критерии приёмки]
+  - id: tech_design
+    title: Техническое решение
+    function: architect
+    result: md
+    executor: agent
+    agent: architect
+    confirm: required
+  - id: implementation
+    title: Реализация
+    function: developer
+    result: link
+    link_kind: pr
+    executor: human
+    agent: coder
+    delivery:
+      require_checks: [go-test, go-vet]
+  - id: acceptance
+    title: Окончательная готовность
+    function: bo
+    result: approve
+    executor: human
+returns:
+  - {from: tech_design, to: product_spec}
+  - {from: implementation, to: tech_design}
+checks:
+  - name: go-test
+    class: unit
+    adapter: go-test-json
+    command: [go, test, -json, -count=1, ./...]
+    policy: required
+  - name: go-vet
+    class: lint
+    command: [go, vet, ./...]
+    policy: required
 cli: opencode
 effort: medium
 stage_timeout: 30m
@@ -90,9 +94,14 @@ stage_timeout: 30m
 
 | Поле | Обязательно | По умолчанию | Что задаёт |
 |---|---|---|---|
-| `schema_version` | да | — | версия схемы; поддерживается только `4` |
-| `pipeline` | да | — | список этапов (агентов) и их настроек; см. [ниже](#этапы-pipeline) |
-| `workflow` | да | — | граф переходов между этапами и подтверждения; см. [ниже](#переходы-workflow) |
+| `schema_version` | да | — | версия схемы; поддерживается только `5` |
+| `template` | да | — | ID единственного шаблона процесса проекта |
+| `title` | да | — | название шаблона для людей |
+| `stages` | да | — | упорядоченные этапы шаблона; см. [ниже](#этапы-шаблона) |
+| `returns` | нет | — | разрешённые возвраты между этапами; только назад по списку |
+| `max_visits` | нет | `3` | лимиты повторов для этапов, куда ведут возвраты |
+| `stall_after` | нет | — | срок, после которого незавершённый run считается застоявшимся |
+| `checks` | нет | — | проверки проекта, доступные delivery-переходам |
 | `cli` | нет | из определения агента (у встроенных — `opencode`) | рантайм агента: `opencode`, `codex` или `claude` |
 | `model` | нет | выбирает рантайм | модель; `auto` или пусто — на усмотрение рантайма |
 | `effort` | нет | — (`init` пишет `medium`) | усилие модели: `low`, `medium`, `high` |
@@ -140,7 +149,7 @@ delivery_timeout: 10m
 | `budget.max_wall_time` | `24h` | общее время прогона, включая ожидание ваших решений |
 | `budget.max_attempts` | `100` | суммарное число попыток всех этапов |
 | `stage_timeout` | `30m` | время одного этапа; `init` пишет это значение явно |
-| `timeout` (у этапа в `pipeline`) | значение `stage_timeout` | время конкретного этапа, перекрывает общее |
+| `timeout` (у агента этапа) | значение `stage_timeout` | время конкретного этапа, перекрывает общее |
 
 ```yaml
 budget:
@@ -199,32 +208,48 @@ tree_hash:
 > `trusted-local` — это ограничения на уровне приложения, а не песочница ОС.
 > Подробнее — в [Граница безопасности](security.md).
 
-## Этапы pipeline
+## Этапы шаблона
 
-Каждый элемент `pipeline` — этап конвейера. Имя должно совпадать с агентом
-из реестра (`ai-team list`). Можно написать просто имя строкой или объект:
+`stages` задаёт единственный процесс проекта. ID этапа — отдельный от имени
+агента ключ, а список определяет порядок обычных переходов.
 
 | Поле | Что задаёт |
 |---|---|
-| `name` | имя агента, обязательно |
-| `cli`, `model`, `effort` | переопределяют глобальные значения для этого этапа |
-| `timeout` | таймаут этапа вместо `stage_timeout` |
-| `checks` | проверки, которые контроллер запускает после этапа |
+| `id` | уникальный ID этапа |
+| `title` | название для людей |
+| `function` | отвечающая за этап функция, например `po`, `architect` или `qa` |
+| `result` | тип результата: `md`, `link` или `approve` |
+| `executor` | `human` (по умолчанию) или `agent` |
+| `agent` | существующий агент из `ai-team list`, если для этапа доступно исполнение агентом |
+| `link_kind` | для `result: link`: `pr`, `build` или `other` |
+| `required_sections` | обязательные заголовки, только для `result: md` |
+| `check` | проверка результата: `{kind: hard, rules: [...]}` или `{kind: agent, agent: ...}` |
+| `confirm` | `required` или `auto`; по умолчанию `auto` для `approve`, иначе `required` |
+| `skippable` | можно ли пропустить этап с причиной; по умолчанию `false` |
+| `delivery` | требования delivery для PR-этапа с указанным `agent`, например `require_checks: [go-test]` |
 
-Что делает каждый встроенный агент — в [Агенты и этапы](pipeline.md).
+Если указан `executor: agent`, поле `agent` обязательно. Все agent-ссылки,
+включая `check.agent`, проверяются по registry. `required_sections` нельзя
+задавать для `link` или `approve`.
+
+Шаблон содержит возвраты между этапами. `to` должен быть раньше `from` в
+списке `stages`; для каждого этапа, в который ведёт возврат, действует лимит
+`max_visits` (по умолчанию 3). Граф строится контроллером из порядка этапов и
+списка `returns`, поэтому отдельный раздел `workflow` в конфиге отсутствует.
 
 ### Проверки (checks)
 
-Проверки запускает контроллер, а не модель. Обязательные (`required`)
-проверки должны пройти, иначе delivery запрещена.
+Проверки запускает контроллер, а не модель. Определения находятся на верхнем
+уровне конфига; PR delivery может ссылаться на них по имени. Обязательные
+(`required`) проверки должны пройти до delivery.
 
 | Поле | Что задаёт |
 |---|---|
-| `name` | имя проверки, уникальное внутри этапа |
-| `class` | вид: `formatter`, `lint`, `build`, `unit`, `integration`, `e2e`, `coverage`, `race`, `security` |
+| `name` | уникальное имя проверки проекта |
+| `class` | `formatter`, `lint`, `build`, `unit`, `integration`, `e2e`, `coverage`, `race` или `security` |
 | `command` | команда списком аргументов, без shell |
-| `adapter` | как читать результат: `command` (по коду выхода, по умолчанию), `go-test-json`, `junit-xml` |
-| `report_file` | путь к JUnit XML внутри проекта; только для `junit-xml` |
+| `adapter` | чтение результата: `command`, `go-test-json` или `junit-xml` |
+| `report_file` | путь к JUnit XML; только для `junit-xml` |
 | `policy` | `required` или `optional` |
 | `timeout` | таймаут проверки |
 | `working_dir` | каталог запуска внутри проекта |
@@ -233,68 +258,31 @@ tree_hash:
 `go-test-json` и `junit-xml` допустимы только для классов `unit`,
 `integration` и `e2e`.
 
-```yaml
-- name: tester
-  checks:
-    - name: pytest
-      class: unit
-      adapter: junit-xml
-      command: [pytest, --junitxml=report.xml]
-      report_file: report.xml
-      policy: required
-      timeout: 15m
-```
-
 Пошаговая настройка для разных стеков — в
 [Настроить проверки проекта](../guides/project-checks.md).
 
-## Переходы workflow
+### Переход с v4
 
-`workflow` описывает граф: какой этап идёт после какого и где нужен человек.
-
-| Поле | Что задаёт |
-|---|---|
-| `entry` | первый этап |
-| `max_visits` | сколько раз можно зайти в этап; ограничивает циклы возврата |
-| `edges` | список переходов |
-
-Переход (`edges[]`):
-
-| Поле | Что задаёт |
-|---|---|
-| `from` | этап-источник |
-| `outcome` | исход этапа; встроенные профили используют `passed` и `rejected`, схема допускает также `failed`, `blocked`, `canceled`, `skipped`, `warning` |
-| `to` | следующий этап или `$complete` |
-| `approval` | подтверждение человека на этом переходе, необязательно |
-
-Подтверждение (`approval`):
-
-| Поле | Что задаёт |
-|---|---|
-| `roles` | какие роли могут решать: `product_owner`, `architect`, `developer`, `reviewer`, `qa`, `release_manager` |
-| `quorum` | `any` — достаточно одной роли, `all` — нужны все |
-| `actions` | действия и куда они ведут; `$stop` останавливает прогон |
-| `deferred` | `true` — не останавливаться, а подтвердить вместе с delivery |
-
-Подтверждение delivery — отдельное и обязательное всегда. Его нельзя
-отключить конфигом. Подробнее — в [Агенты и этапы](pipeline.md#где-решает-человек).
+Конфиг schema v4 больше не загружается. Выполните `ai-team init --force`,
+чтобы создать встроенный шаблон заново, либо перенесите настройки вручную по
+примеру выше. `init` без `--force` сохраняет существующий конфиг.
 
 ## Профили init
 
-Флаг `ai-team init --profile` выбирает, как часто спрашивать человека.
+Флаг `ai-team init --profile` материализует один из трёх шаблонов в
+`.ai-team/config.yaml`.
 
 | Профиль | Этапы | Подтверждения переходов | Когда выбирать |
 |---|---|---|---|
-| `standard` (по умолчанию) | `analyst → architect → coder → reviewer → tester → verifier → deployer` | отложенные: одно решение вместе с delivery, `quorum: any` | обычный режим: одно решение на фичу |
-| `fast` | `analyst → coder → tester → reviewer → deployer` | отложенные, как в `standard`; `max_visits` — 2 | прототипы и внутренние фичи, где хочется быстрее |
-| `regulated` | как в `standard` | пошаговые: каждый переход ждёт человека, `quorum: all`; `max_visits` — 2 | рискованные изменения, где нужен контроль на каждом шаге |
+| Профиль | ID шаблона | Отличие |
+|---|---|---|
+| `standard` (по умолчанию) | `idea-to-prod` | стандартные `confirm`, лимит возвратов — 3 |
+| `fast` | `idea-to-prod-fast` | все этапы с `confirm: auto`, лимит возвратов — 2 |
+| `regulated` | `idea-to-prod-regulated` | все этапы с `confirm: required`, лимит возвратов — 2 |
 
-В `fast` нет этапов `architect` и `verifier`. Вместо отдельной верификации
-`init` кладёт в проект переопределённого агента
-`.ai-team/agents/reviewer/`: он делает ревью и верификацию за один проход.
-
-Переходы возврата (`rejected → coder`) не откладываются ни в одном профиле:
-если ревьюер или тестировщик вернул работу, решение нужно сразу.
+Каждый профиль хранит обычный список этапов и возвратов; специальные runtime-
+режимы профиля не сохраняются. Встроенный `idea-to-prod` включает этапы от
+`intent` до `acceptance`.
 
 ```bash
 ai-team init --profile regulated

@@ -25,10 +25,15 @@ logs directories. В Git repository команда MUST обеспечить ign
 
 #### Scenario: Флаги init
 - **КОГДА** пользователь передаёт `--target <path>` и/или
-  `--write-gitignore` в любом поддерживаемом порядке
+  `--write-gitignore` и/или `--force` в любом поддерживаемом порядке
 - **ТОГДА** CLI MUST применить оба флага
 - **И** неизвестный флаг или отсутствующее значение MUST привести к
   ненулевому exit code
+
+#### Scenario: Явная перезапись v5-конфига
+- **КОГДА** существует `.ai-team/config.yaml` и пользователь запускает `init --force`
+- **ТОГДА** CLI MUST атомарно заменить regular config выбранным v5-шаблоном
+- **И** leaf symlink или special file MUST быть отклонён
 
 #### Scenario: Поведение по умолчанию
 - **КОГДА** `init` запускается в Git repository без `--write-gitignore`

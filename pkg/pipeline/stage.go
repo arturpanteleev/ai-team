@@ -92,7 +92,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			rs.usageTotal.Attested = true
 		}
 		manifest := evidence.AttemptManifest{
-			AttemptID: attemptID, Stage: name, StageIndex: i + 1,
+			AttemptID: attemptID, Stage: name, StageIndex: i + 1, TotalStages: len(rs.names),
 			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
 			Status: r.Status, Verdict: string(r.Verdict), Blocker: r.Blocker,
 			Execution: string(r.State.Execution), Decision: string(r.State.Decision), Outcome: string(r.State.Outcome),
@@ -287,15 +287,18 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		r.Usage = &workflow.AttemptUsage{}
 		reported := false
 		if reporter, ok := stageRuntime.(runtime.UsageReporter); ok {
-			if u := reporter.Usage(); u != nil && u.Attested && u.TokensInput >= 0 && u.TokensOutput >= 0 {
-				r.Usage = &workflow.AttemptUsage{Attested: true, TokensInput: u.TokensInput, TokensOutput: u.TokensOutput}
+			if u := reporter.Usage(); u != nil && u.Attested && u.TokensInput >= 0 && u.TokensOutput >= 0 &&
+				!math.IsNaN(u.CostUSD) && !math.IsInf(u.CostUSD, 0) && u.CostUSD >= 0 {
+				r.Usage = &workflow.AttemptUsage{Attested: true, TokensInput: u.TokensInput, TokensOutput: u.TokensOutput, CostUSD: u.CostUSD}
 				reported = true
 				rs.usageTotal.Attested = true
-				if rs.usageTotal.TokensInput > math.MaxInt64-u.TokensInput || rs.usageTotal.TokensOutput > math.MaxInt64-u.TokensOutput {
+				costTotal := rs.usageTotal.CostUSD + u.CostUSD
+				if rs.usageTotal.TokensInput > math.MaxInt64-u.TokensInput || rs.usageTotal.TokensOutput > math.MaxInt64-u.TokensOutput || math.IsInf(costTotal, 0) {
 					rs.usageUnknown = true
 				} else {
 					rs.usageTotal.TokensInput += u.TokensInput
 					rs.usageTotal.TokensOutput += u.TokensOutput
+					rs.usageTotal.CostUSD = costTotal
 				}
 			}
 		}

@@ -636,6 +636,96 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
+	t.Run("usage rejects symlinked directory ancestors even without subscription estimate", func(t *testing.T) {
+		const runID = "selected-run"
+		started := time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC)
+		writeLocalEnvelope := func(dir string) {
+			t.Helper()
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.Build(runID, "fixture", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: 40, TokensOutput: 60})
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Run("ai-team root", func(t *testing.T) {
+			root := newControlRoot(t)
+			offTree := t.TempDir()
+			writeLocalEnvelope(filepath.Join(offTree, "runs", runID))
+			if err := os.Remove(filepath.Join(root, ".ai-team")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(offTree, filepath.Join(root, ".ai-team")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed a symlinked .ai-team root: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("state usage directory containing off-tree controller envelope", func(t *testing.T) {
+			root := newControlRoot(t)
+			stateDir := filepath.Join(root, ".ai-team", "state")
+			if err := os.MkdirAll(stateDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			store := metrics.FileUsageEnvelopeStore{}
+			envelope := metrics.Build(runID, "fixture", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: 40, TokensOutput: 60})
+			if err := store.Reserve(root, runID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Write(root, runID, envelope); err != nil {
+				t.Fatal(err)
+			}
+			offTreeUsage := filepath.Join(t.TempDir(), "usage")
+			if err := os.Rename(filepath.Join(stateDir, "usage"), offTreeUsage); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(offTreeUsage, filepath.Join(stateDir, "usage")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed off-tree state/usage: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("runs directory", func(t *testing.T) {
+			root := newControlRoot(t)
+			offTreeRuns := filepath.Join(t.TempDir(), "runs")
+			writeLocalEnvelope(filepath.Join(offTreeRuns, runID))
+			if err := os.Symlink(offTreeRuns, filepath.Join(root, ".ai-team", "runs")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed symlinked runs directory: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("run ID directory", func(t *testing.T) {
+			root := newControlRoot(t)
+			runsDir := filepath.Join(root, ".ai-team", "runs")
+			if err := os.MkdirAll(runsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			offTreeRun := filepath.Join(t.TempDir(), runID)
+			writeLocalEnvelope(offTreeRun)
+			if err := os.Symlink(offTreeRun, filepath.Join(runsDir, runID)); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed symlinked run directory: code=%d stdout=%q", code, stdout)
+			}
+		})
+	})
+
 	t.Run("controller allocation with reserved-suffix run ID survives pruned run evidence", func(t *testing.T) {
 		const selectedRunID = "cloud.reserved"
 		const peerRunID = "cloud-peer"

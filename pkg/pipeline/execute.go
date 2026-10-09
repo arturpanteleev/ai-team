@@ -245,7 +245,7 @@ func graphTerminalError(target, stage string, cause error) error {
 	}
 }
 
-func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry) ([]notifier.StageResult, runtime.Usage, bool, error) {
+func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry, totalStages int) ([]notifier.StageResult, runtime.Usage, bool, error) {
 	results := make([]notifier.StageResult, 0, len(run.Attempts))
 	var usage runtime.Usage
 	usageUnknown := false
@@ -259,7 +259,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
 			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
 			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
-			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded,
+			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded, TotalStages: totalStages,
 		}
 		usageRecordPresent := false
 		if attempt.ManifestSHA256 != "" {
@@ -269,6 +269,12 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			}
 			result.Checks = append(result.Checks, manifest.Checks...)
 			result.Usage = manifest.Usage
+			result.Mutations = append([]string(nil), manifest.Mutations...)
+			result.MutationChanges = append([]workflow.MutationChange(nil), manifest.MutationChanges...)
+			result.Delivery = manifest.Delivery
+			if manifest.TotalStages > 0 {
+				result.TotalStages = manifest.TotalStages
+			}
 			usageRecordPresent = manifest.Usage != nil
 			for _, input := range manifest.Inputs {
 				result.Inputs = append(result.Inputs, workflow.Artifact{Name: input.Name, Path: input.SourcePath, Size: input.Size})
@@ -279,11 +285,15 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			// Count model work even when a later loopback invalidated the attempt.
 			if manifest.Usage != nil && manifest.Usage.Attested {
 				usage.Attested = true
-				if usage.TokensInput > math.MaxInt64-manifest.Usage.TokensInput || usage.TokensOutput > math.MaxInt64-manifest.Usage.TokensOutput {
+				costTotal := usage.CostUSD + manifest.Usage.CostUSD
+				if manifest.Usage.TokensInput < 0 || manifest.Usage.TokensOutput < 0 ||
+					usage.TokensInput > math.MaxInt64-manifest.Usage.TokensInput || usage.TokensOutput > math.MaxInt64-manifest.Usage.TokensOutput ||
+					math.IsNaN(manifest.Usage.CostUSD) || math.IsInf(manifest.Usage.CostUSD, 0) || manifest.Usage.CostUSD < 0 || math.IsInf(costTotal, 0) {
 					usageUnknown = true
 				} else {
 					usage.TokensInput += manifest.Usage.TokensInput
 					usage.TokensOutput += manifest.Usage.TokensOutput
+					usage.CostUSD = costTotal
 				}
 			} else if manifest.Usage != nil {
 				usageUnknown = true

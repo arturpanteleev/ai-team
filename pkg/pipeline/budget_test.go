@@ -4,17 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
+	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 func TestRun_BudgetAttemptsCap(t *testing.T) {
@@ -144,8 +149,60 @@ func TestRun_AttestedUsagePersisted(t *testing.T) {
 	if !envelope.UsageReported || envelope.TokensUnknown {
 		t.Fatalf("ожидали attested usage: %+v", envelope)
 	}
-	if envelope.TokensInput != 121 || envelope.TokensOutput != 27 || envelope.CostUSD != 0 {
+	if envelope.TokensInput != 121 || envelope.TokensOutput != 27 || envelope.CostUSD != 1.35 {
 		t.Fatalf("usage-значения: %+v", envelope)
+	}
+}
+
+type fixedAttemptManifestSource []byte
+
+func (s fixedAttemptManifestSource) ReadAttemptManifest(_, _, _ string) ([]byte, error) {
+	return append([]byte(nil), s...), nil
+}
+
+func TestReplayedStageResultRestoresManifestReportFields(t *testing.T) {
+	started := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	finished := started.Add(2 * time.Second)
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: "replay-fields", AttemptID: "attempt-coder-2",
+		Stage: "coder", StageIndex: 2, TotalStages: 5, StartedAt: started, FinishedAt: finished,
+		Status: "passed", Mutations: []string{"src/changed.go"},
+		MutationChanges: []workflow.MutationChange{{Path: "pkg/example_test.go", Kind: workflow.MutationAdded, Class: "tests"}},
+		Delivery:        &delivery.Result{PlanHash: "plan-123", CommitSHA: "commit-456"},
+		Usage:           &workflow.AttemptUsage{Attested: true, TokensInput: 17, TokensOutput: 4, CostUSD: 0.75},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := evidence.ReplayedRun{RunID: manifest.RunID, Attempts: []evidence.ReplayedAttempt{{
+		AttemptID: manifest.AttemptID, Stage: manifest.Stage, StageIndex: manifest.StageIndex,
+		StartedAt: started, FinishedAt: finished, Status: manifest.Status, ManifestSHA256: "manifest-digest",
+	}}}
+	results, usage, unknown, err := replayedStageResults(run, t.TempDir(), fixedAttemptManifestSource(data), testRegistry(), 5)
+	if err != nil {
+		t.Fatalf("replay attempt: %v", err)
+	}
+	if unknown || usage.CostUSD != 0.75 || usage.TokensInput != 17 || usage.TokensOutput != 4 {
+		t.Fatalf("replayed usage was not restored: usage=%+v unknown=%t", usage, unknown)
+	}
+	result := results[0]
+	if result.TotalStages != 5 || !reflect.DeepEqual(result.Mutations, manifest.Mutations) ||
+		!reflect.DeepEqual(result.MutationChanges, manifest.MutationChanges) || !reflect.DeepEqual(result.Delivery, manifest.Delivery) {
+		t.Fatalf("attempt report fields were not restored from manifest: %+v", result)
+	}
+	reportsDir := t.TempDir()
+	if err := report.GenerateStageReport(reportsDir, "feature", result.AttemptID, result, t.TempDir()); err != nil {
+		t.Fatalf("generate replayed report: %v", err)
+	}
+	page, err := os.ReadFile(filepath.Join(reportsDir, "feature", "attempts", result.AttemptID, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Stage:</strong> 2/5", "src/changed.go", "pkg/example_test.go", "plan-123", "commit-456"} {
+		if !strings.Contains(string(page), expected) {
+			t.Fatalf("restored stage report missing %q:\n%s", expected, page)
+		}
 	}
 }
 
@@ -181,9 +238,9 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 	rt := newScripted()
 	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 	rt.usagePer = map[string]*runtime.Usage{
-		"analyst":  {Attested: true, TokensInput: 5, TokensOutput: 2},
-		"reviewer": {Attested: true, TokensInput: 7, TokensOutput: 3},
-		"deployer": {Attested: true, TokensInput: 11, TokensOutput: 4},
+		"analyst":  {Attested: true, TokensInput: 5, TokensOutput: 2, CostUSD: 0.11},
+		"reviewer": {Attested: true, TokensInput: 7, TokensOutput: 3, CostUSD: 0.22},
+		"deployer": {Attested: true, TokensInput: 11, TokensOutput: 4, CostUSD: 0.33},
 	}
 	cfg := cfgForGraph(nil,
 		config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "reviewer"}, config.AgentConfig{Name: "deployer"})
@@ -244,7 +301,7 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.TokensUnknown || !envelope.UsageReported || envelope.TokensInput != 23 || envelope.TokensOutput != 9 {
+	if envelope.TokensUnknown || !envelope.UsageReported || envelope.TokensInput != 23 || envelope.TokensOutput != 9 || envelope.CostUSD < 0.659999 || envelope.CostUSD > 0.660001 {
 		t.Fatalf("two-pause totals were lost or double-counted: %+v", envelope)
 	}
 	var manifestStartedAt time.Time
@@ -265,6 +322,7 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 		t.Fatalf("expected three durable attempts: entries=%d err=%v", len(attemptEntries), err)
 	}
 	var inputTotal, outputTotal int64
+	var costTotal float64
 	for _, entry := range attemptEntries {
 		data, err := os.ReadFile(filepath.Join(runDir, "attempts", entry.Name(), "manifest.json"))
 		if err != nil {
@@ -276,6 +334,9 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 		}
 		if attempt.Usage == nil || !attempt.Usage.Attested {
 			t.Fatalf("attempt %s did not persist attested usage: %+v", entry.Name(), attempt.Usage)
+		}
+		if attempt.TotalStages != 3 {
+			t.Fatalf("attempt %s should persist total stage count 3, got %d", entry.Name(), attempt.TotalStages)
 		}
 		stageHTML, err := os.ReadFile(filepath.Join(reportsDir, "attempts", entry.Name(), "index.html"))
 		if err != nil {
@@ -290,6 +351,9 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 				t.Fatalf("restored report for %s is missing manifest artifact %s", attempt.Stage, artifact)
 			}
 		}
+		if !strings.Contains(string(stageHTML), fmt.Sprintf("Stage:</strong> %d/3", attempt.StageIndex)) {
+			t.Fatalf("restored report for %s should preserve stage count n/3:\n%s", entry.Name(), stageHTML)
+		}
 		finalHTML, err := os.ReadFile(filepath.Join(reportsDir, "index.html"))
 		if err != nil {
 			t.Fatalf("final report: %v", err)
@@ -299,9 +363,10 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 		}
 		inputTotal += attempt.Usage.TokensInput
 		outputTotal += attempt.Usage.TokensOutput
+		costTotal += attempt.Usage.CostUSD
 	}
-	if inputTotal != envelope.TokensInput || outputTotal != envelope.TokensOutput {
-		t.Fatalf("manifest sum does not equal run envelope: attempts=%d/%d envelope=%d/%d", inputTotal, outputTotal, envelope.TokensInput, envelope.TokensOutput)
+	if inputTotal != envelope.TokensInput || outputTotal != envelope.TokensOutput || costTotal < envelope.CostUSD-0.000001 || costTotal > envelope.CostUSD+0.000001 {
+		t.Fatalf("manifest sums do not equal run envelope: attempts=%d/%d/%.4f envelope=%d/%d/%.4f", inputTotal, outputTotal, costTotal, envelope.TokensInput, envelope.TokensOutput, envelope.CostUSD)
 	}
 	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), first.RunID)
 	if err != nil {

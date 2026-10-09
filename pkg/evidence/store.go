@@ -104,6 +104,7 @@ type AttemptManifest struct {
 	AttemptID       string                    `json:"attempt_id"`
 	Stage           string                    `json:"stage"`
 	StageIndex      int                       `json:"stage_index"`
+	TotalStages     int                       `json:"total_stages,omitempty"`
 	StartedAt       time.Time                 `json:"started_at"`
 	FinishedAt      time.Time                 `json:"finished_at"`
 	Status          string                    `json:"status"`

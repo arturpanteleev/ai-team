@@ -43,13 +43,14 @@ type MutationChange struct {
 	Class string `json:"class"`
 }
 
-// AttemptUsage contains attested model token counts for one stage invocation.
-// A nil value means the runtime did not report usage; an attested zero is
-// represented by a non-nil value with both counters set to zero.
+// AttemptUsage contains attested model token and cost totals for one stage
+// invocation. A nil value means the runtime did not report usage; an attested
+// zero is represented by a non-nil value with zero counters.
 type AttemptUsage struct {
-	Attested     bool  `json:"attested"`
-	TokensInput  int64 `json:"tokens_input,omitempty"`
-	TokensOutput int64 `json:"tokens_output,omitempty"`
+	Attested     bool    `json:"attested"`
+	TokensInput  int64   `json:"tokens_input,omitempty"`
+	TokensOutput int64   `json:"tokens_output,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
 }
 
 // StageResult is the domain record of one immutable stage attempt.

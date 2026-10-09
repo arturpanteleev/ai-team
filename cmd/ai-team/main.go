@@ -1541,6 +1541,15 @@ func cmdUsage() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
+	for _, components := range [][]string{
+		{".ai-team", "state", "usage"},
+		{".ai-team", "runs"},
+		{".ai-team", "runs", runID},
+	} {
+		if err := checkExistingDirectoryChainNoSymlink(absolute, components...); err != nil {
+			fatal("Небезопасный usage path: %v", err)
+		}
+	}
 	envelope, err := metrics.ReadUsageEnvelope(absolute, runID)
 	if errors.Is(err, os.ErrNotExist) {
 		controllerStorePresent, stateErr := metrics.UsageEnvelopeReservation(absolute, runID)
@@ -1605,6 +1614,9 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 	// their durable store first so pruning .ai-team/runs does not erase known
 	// usage from the subscription denominator.
 	usageDir := filepath.Join(target, ".ai-team", "state", "usage")
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "state", "usage"); err != nil {
+		return nil, false
+	}
 	usageEntries, err := os.ReadDir(usageDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, false
@@ -1675,6 +1687,9 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 	}
 
 	runsDir := filepath.Join(target, ".ai-team", "runs")
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs"); err != nil {
+		return nil, false
+	}
 	entries, err := os.ReadDir(runsDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, false
@@ -1684,12 +1699,15 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 		// symlinked run disappear from the monthly denominator just because
 		// DirEntry.IsDir reports false for symlinks. Check this before the
 		// controller-ID dedup below so duplicate evidence cannot hide it either.
-		info, infoErr := entry.Info()
-		if infoErr != nil || !info.IsDir() {
-			return nil, false
-		}
 		runID := entry.Name()
 		if runID == "." || runID == ".." {
+			return nil, false
+		}
+		if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs", runID); err != nil {
+			return nil, false
+		}
+		info, infoErr := os.Lstat(filepath.Join(runsDir, runID))
+		if infoErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return nil, false
 		}
 		if _, alreadyRecorded := byRunID[runID]; alreadyRecorded {
@@ -1741,6 +1759,9 @@ func isUsageReservationRecord(data []byte) (bool, error) {
 }
 
 func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error) {
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs", runID); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
 	path := filepath.Join(target, ".ai-team", "runs", runID, "usage.json")
 	data, err := safeio.ReadRegularFile(path, 8<<20)
 	if err != nil {
@@ -1763,6 +1784,30 @@ func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error)
 		return metrics.UsageEnvelope{}, err
 	}
 	return envelope, nil
+}
+
+// checkExistingDirectoryChainNoSymlink rejects symlinks and non-directory
+// components while allowing a missing suffix. It keeps usage readers from
+// following off-tree state even when the subscription estimate is disabled.
+func checkExistingDirectoryChainNoSymlink(root string, components ...string) error {
+	current := root
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component || strings.ContainsAny(component, `/\\`) {
+			return fmt.Errorf("unsafe directory component %q", component)
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("%s must be a directory without symlink", current)
+		}
+	}
+	return nil
 }
 
 func cmdList() {

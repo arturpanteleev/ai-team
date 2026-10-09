@@ -431,6 +431,9 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
 
     await page.setViewportSize({ width: 360, height: 800 })
     await page.goto(baseURL)
+    const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
+    await page.getByLabel('Токен доступа').fill(localToken)
+    await page.getByRole('button', { name: 'Войти' }).click()
     await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
 
@@ -445,12 +448,14 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     expect(runID).toBeTruthy()
 
     const readDetail = async () => {
-      const runsResponse = await fetch(`${baseURL}/api/pipelines`)
+      // APIRequestContext shares this browser context's cookie jar, unlike
+      // Node's global fetch, so these reads exercise the authenticated session.
+      const runsResponse = await page.request.get(`${baseURL}/api/pipelines`)
       if (!runsResponse.ok) return null
       const runs = await runsResponse.json()
       const run = runs.find((value) => value.run_id === runID)
       if (!run) return null
-      const response = await fetch(`${baseURL}/api/pipelines/${run.id}`)
+      const response = await page.request.get(`${baseURL}/api/pipelines/${run.id}`)
       return response.ok ? response.json() : null
     }
     let detail
@@ -624,6 +629,11 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     // Seeing its persisted event arrive on the app's WebSocket proves the new
     // connection completed and is delivering live server events.
     await page.goto(baseURL)
+    // Server sessions are process-local, so the restart above revoked this
+    // browser's cookie. Re-authenticate before sending the recovery probe.
+    await page.getByLabel('Токен доступа').fill(localToken)
+    await page.getByRole('button', { name: 'Войти' }).click()
+    await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await page.getByLabel('Название инициативы').fill('websocket-recovery-probe')
     await page.getByLabel('Какого результата хотите достичь?').fill('Проверить доставку события после восстановления WebSocket.')
     const recoveryRunResponsePromise = page.waitForResponse((response) =>

@@ -1598,20 +1598,80 @@ func approximateSubscriptionShare(target string, run metrics.UsageEnvelope) stri
 }
 
 func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
-	runsDir := filepath.Join(target, ".ai-team", "runs")
-	entries, err := os.ReadDir(runsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, true
-	}
-	if err != nil {
+	byRunID := make(map[string]metrics.UsageEnvelope)
+	var envelopes []metrics.UsageEnvelope
+
+	// Controller summaries outlive immutable run evidence. Enumerate them from
+	// their durable store first so pruning .ai-team/runs does not erase known
+	// usage from the subscription denominator.
+	usageDir := filepath.Join(target, ".ai-team", "state", "usage")
+	usageEntries, err := os.ReadDir(usageDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, false
 	}
-	var envelopes []metrics.UsageEnvelope
+	reservedIDs := make(map[string]bool)
+	envelopeIDs := make(map[string]bool)
+	for _, entry := range usageEntries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".usage-") && strings.HasSuffix(name, ".tmp") {
+			// Atomic writes can leave a temporary file after a process crash.
+			// The reservation/envelope pair checks below still detect any
+			// incomplete controller record.
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil, false
+		}
+		switch {
+		case strings.HasSuffix(name, ".reserved.json"):
+			runID := strings.TrimSuffix(name, ".reserved.json")
+			if runID == "" || reservedIDs[runID] {
+				return nil, false
+			}
+			reservedIDs[runID] = true
+		case strings.HasSuffix(name, ".json"):
+			runID := strings.TrimSuffix(name, ".json")
+			if runID == "" || envelopeIDs[runID] {
+				return nil, false
+			}
+			envelopeIDs[runID] = true
+		default:
+			return nil, false
+		}
+	}
+	for runID := range reservedIDs {
+		if !envelopeIDs[runID] {
+			return nil, false
+		}
+	}
+	for runID := range envelopeIDs {
+		if !reservedIDs[runID] {
+			return nil, false
+		}
+	}
+	for runID := range reservedIDs {
+		envelope, readErr := metrics.ReadUsageEnvelope(target, runID)
+		if readErr != nil {
+			return nil, false
+		}
+		byRunID[runID] = envelope
+		envelopes = append(envelopes, envelope)
+	}
+
+	runsDir := filepath.Join(target, ".ai-team", "runs")
+	entries, err := os.ReadDir(runsDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Name() == "." || entry.Name() == ".." {
 			continue
 		}
 		runID := entry.Name()
+		if _, alreadyRecorded := byRunID[runID]; alreadyRecorded {
+			continue
+		}
 		reserved, reserveErr := metrics.UsageEnvelopeReservation(target, runID)
 		if reserveErr != nil {
 			return nil, false
@@ -1631,6 +1691,7 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 		if err != nil {
 			return nil, false
 		}
+		byRunID[runID] = envelope
 		envelopes = append(envelopes, envelope)
 	}
 	return envelopes, true

@@ -594,6 +594,63 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
+	t.Run("controller allocation survives pruned run evidence", func(t *testing.T) {
+		const selectedRunID = "cloud-known"
+		const peerRunID = "cloud-peer"
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		store := metrics.FileUsageEnvelopeStore{}
+		for _, item := range []struct {
+			runID  string
+			input  int64
+			output int64
+		}{
+			{runID: selectedRunID, input: 40, output: 60},
+			{runID: peerRunID, input: 400, output: 500},
+		} {
+			envelope := metrics.Build(item.runID, "fixture-feature", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: item.input, TokensOutput: item.output})
+			if err := store.Reserve(estimateRoot, item.runID); err != nil {
+				t.Fatalf("reserve controller usage for %s: %v", item.runID, err)
+			}
+			if err := store.Write(estimateRoot, item.runID, envelope); err != nil {
+				t.Fatalf("write controller usage for %s: %v", item.runID, err)
+			}
+
+			// Controller records take precedence for these IDs. Keeping matching
+			// local evidence here also proves the same run is counted only once.
+			runDir := filepath.Join(estimateRoot, ".ai-team", "runs", item.runID)
+			if err := os.MkdirAll(runDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		assertShare := func(stage string) {
+			t.Helper()
+			stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, selectedRunID)
+			if code != 0 {
+				t.Fatalf("%s: usage failed: code=%d stderr=%s", stage, code, stderr)
+			}
+			if !strings.Contains(stdout, "Доля подписки (приблизительно): ≈ 5.00 USD") {
+				t.Fatalf("%s: both 1,000 controller tokens must form the denominator:\n%s", stage, stdout)
+			}
+		}
+		assertShare("before pruning")
+		if err := os.RemoveAll(filepath.Join(estimateRoot, ".ai-team", "runs")); err != nil {
+			t.Fatal(err)
+		}
+		assertShare("after pruning run evidence")
+	})
+
 	t.Run("controller usage missing does not fall back to worker-visible evidence", func(t *testing.T) {
 		const runID = "cloud-usage-missing"
 		runDir := filepath.Join(root, ".ai-team", "runs", runID)

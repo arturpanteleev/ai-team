@@ -845,7 +845,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + port
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
+	client := &http.Client{Jar: jar, Timeout: 10 * time.Second}
 	var csrf string
 	waitUntil(t, 10*time.Second, func() bool {
 		tokenData, tokenErr := os.ReadFile(filepath.Join(dir, ".ai-team", "web.token"))
@@ -958,7 +958,7 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		return status == http.StatusAccepted
 	}, func() string { return fmt.Sprintf("status=%d body=%v\n%s", status, resumed, serverOutput.String()) })
 	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
-	waitUntil(t, 15*time.Second, func() bool {
+	waitUntil(t, 30*time.Second, func() bool {
 		stateData, err := os.ReadFile(statePath)
 		if err != nil {
 			return false

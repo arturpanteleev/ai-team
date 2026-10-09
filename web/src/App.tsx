@@ -6,6 +6,7 @@ import { PipelineDetail } from './pages/PipelineDetail';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
 import { Team } from './pages/Team';
+import { TemplateEditor } from './pages/TemplateEditor';
 import { activateTeamInvitation, getAuthConfig, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }) {
@@ -14,6 +15,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
       <Routes routes={[
         { path: '/', element: <Dashboard /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },
+        { path: '/template', element: <TemplateEditor /> },
         { path: '/pipelines/:id', element: <PipelineDetail /> },
         { path: '/artifacts/*', element: <ArtifactViewer /> },
       ]} fallback={<main role="status">Страница не найдена.</main>} />

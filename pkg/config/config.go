@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -840,8 +841,20 @@ func (c *Config) Validate(reg AgentLookup) error {
 			}
 		}
 	}
-	if _, err := c.CompiledGraph(); err != nil {
-		errs = append(errs, err.Error())
+	compiledGraph, graphErr := c.CompiledGraph()
+	if graphErr != nil {
+		errs = append(errs, graphErr.Error())
+	} else if c.Template != "" {
+		for _, edge := range compiledGraph.Edges {
+			if edge.Approval == nil {
+				continue
+			}
+			for _, role := range edge.Approval.Roles {
+				if _, err := cloudidentity.ParseRoles([]string{role}); err != nil {
+					errs = append(errs, fmt.Sprintf("workflow: роль approval %q недоступна в cloud", role))
+				}
+			}
+		}
 	}
 	if c.Containment != nil {
 		if err := c.Containment.Validate(); err != nil {

@@ -302,8 +302,9 @@ func constantTimeEqual(actual, expected string) bool {
 }
 
 type startRunCommand struct {
-	Feature string `json:"feature"`
-	Task    string `json:"task"`
+	Feature         string `json:"feature"`
+	Task            string `json:"task"`
+	TemplateVersion string `json:"template_version,omitempty"`
 }
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
@@ -321,13 +322,21 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		actorID = session.Principal.ActorID
 	}
 	now := time.Now().UTC()
-	admissionSnapshot, err := json.Marshal(command)
-	if err != nil {
-		http.Error(w, "invalid admission snapshot", http.StatusBadRequest)
-		return
-	}
 	admissionFailed := false
 	runID, err := s.controller.StartWithAdmission(command.Feature, command.Task, func(runID string) error {
+		s.templateMu.Lock()
+		defer s.templateMu.Unlock()
+		if templateStore, storeErr := s.templateStore(); storeErr != nil {
+			return storeErr
+		} else if version, pinErr := templateStore.PinCurrentForRun(runID, runID); pinErr == nil {
+			command.TemplateVersion = version
+		} else if !errors.Is(pinErr, os.ErrNotExist) {
+			return fmt.Errorf("pin project template: %w", pinErr)
+		}
+		admissionSnapshot, marshalErr := json.Marshal(command)
+		if marshalErr != nil {
+			return fmt.Errorf("invalid admission snapshot: %w", marshalErr)
+		}
 		if err := s.store.AdmitPipelineRun(&store.PipelineRun{
 			RunID: runID, Feature: command.Feature, Status: "queued", StartedAt: now, ConfigSnapshot: string(admissionSnapshot),
 		}); err != nil {
@@ -344,8 +353,12 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued", "actor_id": actorID})
-	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
+	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued", "actor_id": actorID, "template_version": command.TemplateVersion})
+	response := map[string]string{"run_id": runID}
+	if command.TemplateVersion != "" {
+		response["template_version"] = command.TemplateVersion
+	}
+	writeJSONResponse(w, http.StatusAccepted, response)
 }
 
 func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {

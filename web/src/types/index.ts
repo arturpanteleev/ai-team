@@ -138,6 +138,44 @@ export interface WorkflowSnapshot {
   graph?: WorkflowGraph;
 }
 
+export interface ProjectTemplateStage {
+  id: string;
+  title: string;
+  function: string;
+  result: 'md' | 'link' | 'approve';
+  executor: 'human' | 'agent';
+  agent?: string;
+  max_visits?: number;
+}
+
+export interface ProjectTemplateReturn {
+  from: string;
+  to: string;
+  max_visits?: number;
+}
+
+export interface TemplateVersion {
+  id: string;
+  created_at?: string;
+}
+
+export interface TemplateValidation {
+  valid: boolean;
+  diagnostic?: string;
+  template?: string;
+  title?: string;
+  version?: string;
+  yaml?: string;
+  graph?: WorkflowGraph;
+  stages?: ProjectTemplateStage[];
+  returns?: ProjectTemplateReturn[];
+}
+
+export interface ProjectTemplateResponse {
+  template: TemplateValidation;
+  versions: TemplateVersion[];
+}
+
 // Ответ GET /api/pipelines/{id}/artifacts; path — относительный к корню
 // артефактов, он же аргумент для getArtifact().
 export interface Artifact {

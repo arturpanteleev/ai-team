@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -40,20 +42,86 @@ func (e *RunEngine) Start(ctx context.Context, config RunConfig) (RunResult, err
 	if config.ResumeRunID != "" {
 		return RunResult{}, errors.New("RunEngine.Start не принимает resume_run_id")
 	}
-	return e.pipeline.RunWithResult(ctx, config)
+	if config.RunID == "" {
+		runID, err := evidence.NewRunID(time.Now().UTC())
+		if err != nil {
+			return RunResult{}, err
+		}
+		config.RunID = runID
+	}
+	runPipeline, err := e.pipelineForTask(config.RunID, config.TargetDir, true)
+	if err != nil {
+		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, err
+	}
+	return runPipeline.RunWithResult(ctx, config)
 }
 
 func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult, error) {
 	if config.RunID == "" {
 		return RunResult{}, errors.New("RunEngine.Resume требует run_id")
 	}
-	return e.pipeline.RunWithResult(ctx, RunConfig{
+	runPipeline, err := e.pipelineForTask(config.RunID, config.TargetDir, false)
+	if err != nil {
+		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, err
+	}
+	return runPipeline.RunWithResult(ctx, RunConfig{
 		ResumeRunID:     config.RunID,
 		TargetDir:       config.TargetDir,
 		ApproveGates:    config.ApproveGates,
 		ApprovePlanHash: config.ApprovePlanHash,
 		CancelRequested: config.CancelRequested,
 	})
+}
+
+func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*Pipeline, error) {
+	if targetDir == "" || runID == "" || e.pipeline.cfg.Template == "" {
+		// Legacy in-memory workflow configs have no project process template to
+		// version. Keep their established execution behavior; the editor only
+		// publishes schema v5 project templates.
+		return e.pipeline, nil
+	}
+	store, err := config.NewTemplateStore(targetDir)
+	if err != nil {
+		return nil, fmt.Errorf("template task pin store: %w", err)
+	}
+	data, _, found, err := store.ReadPinnedRun(runID)
+	if err != nil {
+		return nil, fmt.Errorf("read template task pin: %w", err)
+	}
+	if !found && createPin {
+		data, _, err = store.ReadCurrent()
+		if errors.Is(err, os.ErrNotExist) {
+			data, err = e.pipeline.cfg.Marshal()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve template for new task: %w", err)
+		}
+		if _, err := store.PinDataForRun(runID, runID, data); err != nil {
+			return nil, fmt.Errorf("pin template for new task: %w", err)
+		}
+		data, _, found, err = store.ReadPinnedRun(runID)
+		if err != nil || !found {
+			if err == nil {
+				err = errors.New("task template pin was not created")
+			}
+			return nil, fmt.Errorf("read created template task pin: %w", err)
+		}
+	}
+	if !found {
+		// Existing pre-editor runs have no task pin. Preserve their historical
+		// resume behavior, whose evidence digest still rejects config drift.
+		return e.pipeline, nil
+	}
+	pinned, err := config.ParseYAML(data)
+	if err != nil {
+		return nil, fmt.Errorf("pinned task template YAML: %w", err)
+	}
+	if err := pinned.Validate(e.pipeline.reg); err != nil {
+		return nil, fmt.Errorf("pinned task template validation: %w", err)
+	}
+	runPipeline := *e.pipeline
+	runPipeline.cfg = pinned
+	return &runPipeline, nil
 }
 
 // RecoverInitialLifecycle reconstructs the lifecycle checkpoint when a worker

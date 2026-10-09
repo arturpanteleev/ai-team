@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useParams, Link } from '../router';
 import type { Stage, Approval, CloudRole, DeliveryProjection } from '../types';
-import { decideApproval, resumeRun, cancelRun, getActivePrincipal, retryDelivery } from '../api';
+import { decideApproval, resumeRun, cancelRun, getActivePrincipal, retryDelivery, getRunTemplateVersion } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
@@ -34,6 +34,7 @@ export function PipelineDetail() {
   const [controlError, setControlError] = useState('');
   const [deliveryRetryError, setDeliveryRetryError] = useState('');
   const [deliveryRetrying, setDeliveryRetrying] = useState(false);
+  const [templateVersion, setTemplateVersion] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const run = snapshot?.run ?? null;
@@ -50,8 +51,10 @@ export function PipelineDetail() {
     if (!id) return;
     try {
       const fresh = await loadPipelineSnapshot(Number(id));
+      const pinnedTemplate = await getRunTemplateVersion(fresh.run.run_id).catch(() => null);
       snapshotRef.current = fresh;
       setSnapshot(fresh);
+      setTemplateVersion(pinnedTemplate?.version ?? '');
       setError(null);
     } catch {
       setError('Не удалось загрузить задачу. Попробуйте обновить страницу.');
@@ -167,6 +170,7 @@ export function PipelineDetail() {
         <h1 className={styles.title}>{run.feature}</h1>
         <div className={styles.meta}>
           <span className={styles.identifier}>Задача: {run.run_id}</span>
+          {templateVersion && <span>Версия шаблона: <code title={templateVersion}>{templateVersion.slice(0, 12)}…{templateVersion.slice(-8)}</code></span>}
           <span>Создана: {new Date(run.started_at).toLocaleString('ru-RU')}</span>
           <span>Длительность: {duration}</span>
           <StatusBadge status={run.status} />

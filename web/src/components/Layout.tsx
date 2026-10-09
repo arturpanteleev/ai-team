@@ -24,6 +24,9 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           >
             Задачи
           </NavLink>
+          <NavLink to="/template" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>
+            Шаблон
+          </NavLink>
           {teamManagementEnabled && principal?.roles.includes('product_owner') && <NavLink to="/team" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>Команда</NavLink>}
         </nav>
         {principal && <small>{principal.actor_id}<br />{principal.roles.map((role) => roleNames[role] ?? role).join(', ')}</small>}

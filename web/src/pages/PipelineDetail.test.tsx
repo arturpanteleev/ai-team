@@ -65,6 +65,7 @@ vi.mock('../api', () => ({
       }],
     },
   }),
+  getRunTemplateVersion: vi.fn().mockResolvedValue({ version: 'f'.repeat(64) }),
   decideApproval: vi.fn(),
   resumeRun: vi.fn(),
   cancelRun: vi.fn(),

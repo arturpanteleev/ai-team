@@ -1,0 +1,269 @@
+.container {
+  width: min(100%, 1000px);
+  padding: 24px;
+  margin: 0 auto;
+}
+
+.header,
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.header {
+  margin-bottom: 16px;
+}
+
+.header h1,
+.panel h2 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.header p,
+.panelHeader p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+}
+
+.version {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.version code,
+.versionList code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.pinNotice {
+  padding: 12px 14px;
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.panel {
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.panelHeader {
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.panelHeader h2 {
+  font-size: 18px;
+}
+
+.draftBadge,
+.unsaved {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.flow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  margin: 20px 0;
+  list-style: none;
+}
+
+.flow li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stage {
+  display: flex;
+  width: min(100%, 700px);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.stageNumber {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.stageText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.stageText code,
+.returnRoute code {
+  color: var(--text-primary);
+}
+
+.forward {
+  padding: 5px 0;
+  color: var(--link);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.returns {
+  max-width: 700px;
+  padding-top: 16px;
+  margin: 0 auto;
+  border-top: 1px dashed var(--border-strong);
+}
+
+.returns h3 {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.returnRoute {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.returnRoute > span:first-child {
+  color: var(--link);
+  font-size: 20px;
+}
+
+.returnRoute small {
+  color: var(--text-muted);
+}
+
+.editorLabel {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.editor {
+  display: block;
+  width: 100%;
+  min-height: 440px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.secondary {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.status {
+  color: var(--success-fg);
+}
+
+.diagnostic {
+  max-height: 240px;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--danger-fg);
+  white-space: pre-wrap;
+}
+
+.error {
+  padding: 20px;
+  color: var(--danger-fg);
+}
+
+.state,
+.emptyGraph {
+  padding: 24px;
+  color: var(--text-secondary);
+}
+
+.versionList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.versionList li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.versionList strong,
+.versionList time {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 16px;
+  }
+
+  .header,
+  .panelHeader {
+    flex-direction: column;
+  }
+
+  .version {
+    align-items: flex-start;
+  }
+
+  .editor {
+    min-height: 340px;
+  }
+}

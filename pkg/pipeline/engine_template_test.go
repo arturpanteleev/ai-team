@@ -67,3 +67,48 @@ func TestRunEngineUsesPinnedTemplateForContinuationAndCurrentForNewTask(t *testi
 		t.Fatalf("new task title=%q want %q", newTask.cfg.Title, updated.Title)
 	}
 }
+
+func TestRunEnginePreservesLegacyExecutionOverrideButPinsDeliveryRecovery(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.Mkdir(controlDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	published, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedYAML, err := published.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), publishedYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID = "legacy-override-recovery"
+	if _, err := store.PinCurrentForRun(runID, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyOverride := config.Default()
+	engine := NewRunEngine(New(legacyOverride, nil))
+	resumed, err := engine.pipelineForTask(runID, target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.cfg.Template != "" || resumed.cfg.Workflow == nil {
+		t.Fatalf("Resume replaced explicit in-memory legacy config with template %q", resumed.cfg.Template)
+	}
+	pinnedDelivery, err := engine.pipelineForPinnedDelivery(runID, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinnedDelivery.cfg.Template != published.Template || pinnedDelivery.cfg.DeliveryTimeout != published.DeliveryTimeout {
+		t.Fatalf("delivery recovery did not resolve pinned template: got template=%q timeout=%q, want template=%q timeout=%q",
+			pinnedDelivery.cfg.Template, pinnedDelivery.cfg.DeliveryTimeout, published.Template, published.DeliveryTimeout)
+	}
+}

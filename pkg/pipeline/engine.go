@@ -75,6 +75,18 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 }
 
 func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*Pipeline, error) {
+	return e.resolvePipelineForTask(runID, targetDir, createPin, false)
+}
+
+// pipelineForPinnedDelivery resolves the immutable pin even when the engine
+// was constructed with a legacy in-memory config. Retry and recovery must
+// retain the originating run's delivery timeout; Start/Resume must retain an
+// explicitly supplied legacy workflow override.
+func (e *RunEngine) pipelineForPinnedDelivery(runID, targetDir string) (*Pipeline, error) {
+	return e.resolvePipelineForTask(runID, targetDir, false, true)
+}
+
+func (e *RunEngine) resolvePipelineForTask(runID, targetDir string, createPin, forcePinned bool) (*Pipeline, error) {
 	if targetDir == "" || runID == "" || e == nil || e.pipeline == nil {
 		if e == nil || e.pipeline == nil {
 			return nil, errors.New("RunEngine pipeline is unavailable")
@@ -85,13 +97,10 @@ func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*P
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	// Preserve legacy in-memory starts: they have no published process template
-	// to pin. Recovery still checks for an existing task pin so deferred actions
-	// can use the exact template that created the run.
-	if createPin && cfg.Template == "" {
-		// Legacy in-memory workflow configs have no project process template to
-		// version. Keep their established execution behavior; the editor only
-		// publishes schema v5 project templates.
+	// Preserve explicit legacy in-memory configuration overrides across Start
+	// and Resume. Delivery recovery opts into pinned resolution separately so a
+	// default CLI engine can still honor an existing task pin.
+	if cfg.Template == "" && !forcePinned {
 		return e.pipeline, nil
 	}
 	store, err := config.NewTemplateStore(targetDir)
@@ -154,7 +163,7 @@ func (e *RunEngine) RecoverInitialLifecycle(runID, targetDir, feature, task stri
 // delivery reached its durable terminal record. If delivery was interrupted,
 // it resumes through the same validated delivery state machine.
 func (e *RunEngine) ReconcileTerminalDelivery(ctx context.Context, runID, targetDir string) error {
-	runPipeline, err := e.pipelineForTask(runID, targetDir, false)
+	runPipeline, err := e.pipelineForPinnedDelivery(runID, targetDir)
 	if err != nil {
 		return fmt.Errorf("resolve template for delivery recovery: %w", err)
 	}
@@ -174,7 +183,7 @@ func (e *RunEngine) DeliverDeferredForFeature(ctx context.Context, runID, featur
 	if err := evidence.ValidateRunID(runID); err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: invalid run id: %w", err)
 	}
-	runPipeline, err := e.pipelineForTask(runID, targetDir, false)
+	runPipeline, err := e.pipelineForPinnedDelivery(runID, targetDir)
 	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("resolve template for deferred delivery: %w", err)
 	}

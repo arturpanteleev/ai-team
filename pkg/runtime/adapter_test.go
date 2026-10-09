@@ -49,6 +49,9 @@ func TestOpenCodeAdapterAllowsDeclaredRequest(t *testing.T) {
 
 func TestOpenCodeAdapterReadsDefinedCapabilities(t *testing.T) {
 	adapter, _ := Adapter("opencode")
+	if _, ok := adapter.(UsageSource); ok {
+		t.Fatal("OpenCode does not provide attested usage")
+	}
 	for _, capability := range []Capability{
 		CapModelSelection, CapEffortMapping, CapPromptFile, CapSessionIsolation,
 	} {
@@ -61,6 +64,11 @@ func TestOpenCodeAdapterReadsDefinedCapabilities(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("opencode should declare capability %q", capability)
+		}
+	}
+	for _, capability := range adapter.Describe().Capabilities {
+		if capability == CapUsageReported {
+			t.Fatal("OpenCode must not claim usage reporting without a structured usage source")
 		}
 	}
 }

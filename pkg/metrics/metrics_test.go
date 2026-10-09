@@ -76,6 +76,50 @@ func TestBuildZeroTimesOmitsTotalDuration(t *testing.T) {
 	}
 }
 
+func TestBuildIncompleteUsageDoesNotPublishPartialTotalsAsZero(t *testing.T) {
+	started := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	envelope := Build("partial", "feature", started, started.Add(time.Second), nil, 0, "completed",
+		Usage{Attested: true, Unknown: true, TokensInput: 99, TokensOutput: 17})
+	if !envelope.TokensUnknown || !envelope.UsageReported {
+		t.Fatalf("partial reported usage must be marked both reported and incomplete: %+v", envelope)
+	}
+	if envelope.TokensInput != 0 || envelope.TokensOutput != 0 {
+		t.Fatalf("partial token sums must not be exposed as full-run totals: %+v", envelope)
+	}
+}
+
+func TestEstimateSubscriptionShareUsesMonthlyTokenProportion(t *testing.T) {
+	month := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	first := UsageEnvelope{SchemaVersion: SchemaVersion, RunID: "first", StartedAt: month, FinishedAt: month.Add(time.Hour), TokensInput: 40, TokensOutput: 60, UsageReported: true}
+	peer := UsageEnvelope{SchemaVersion: SchemaVersion, RunID: "peer", StartedAt: month, FinishedAt: month.Add(2 * time.Hour), TokensInput: 200, TokensOutput: 300, UsageReported: true}
+	share, ok := EstimateSubscriptionShare(50, first, []UsageEnvelope{first, peer})
+	if !ok || share < 8.333 || share > 8.334 {
+		t.Fatalf("share = %.4f, available=%v, want ≈8.333", share, ok)
+	}
+	peer.TokensUnknown = true
+	if _, ok := EstimateSubscriptionShare(50, first, []UsageEnvelope{first, peer}); ok {
+		t.Fatal("unknown monthly run usage must make allocation unavailable")
+	}
+}
+
+func TestLegacyUsageTotalsAreNotTreatedAsComplete(t *testing.T) {
+	month := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	legacy := UsageEnvelope{
+		SchemaVersion: LegacySchemaVersion, RunID: "legacy", Feature: "feature",
+		StartedAt: month, FinishedAt: month.Add(time.Hour), TokensInput: 120,
+		TokensOutput: 30, UsageReported: true, Outcome: "completed",
+	}
+	if err := ValidateUsageEnvelope(legacy.RunID, legacy); err != nil {
+		t.Fatalf("legacy v1 envelope should remain readable: %v", err)
+	}
+	if legacy.HasCompleteTokenUsage() {
+		t.Fatal("v1 aggregate with no per-attempt completeness proof must be unknown")
+	}
+	if _, ok := EstimateSubscriptionShare(50, legacy, []UsageEnvelope{legacy}); ok {
+		t.Fatal("legacy potentially partial totals must not contribute to subscription allocation")
+	}
+}
+
 func TestFormatTable(t *testing.T) {
 	started := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	envelope := Build("run-1", "feature-x", started, started.Add(35*time.Second), []workflow.StageResult{

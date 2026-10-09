@@ -166,7 +166,8 @@ func TestReadmeLinksToCompanionDocs(t *testing.T) {
 func TestConfigReferenceBudgetDefaultsMatchCode(t *testing.T) {
 	ref := readRepoFile(t, "reference/config.md")
 	assertContainsAll(t, ref, "docs/reference/config.md", []string{
-		"| `budget.max_wall_time` | `" + config.DefaultBudgetMaxWallTime + "` |",
+		"| `budget.max_execution_time` | `" + config.DefaultBudgetMaxWallTime + "` |",
+		"`budget.max_wall_time` продолжает приниматься как устаревший псевдоним",
 		"| `budget.max_attempts` | `" + strconv.Itoa(config.DefaultBudgetMaxAttempts) + "` |",
 		"| `stage_timeout` | `30m` |",
 	})

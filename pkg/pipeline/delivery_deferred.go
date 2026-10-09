@@ -40,8 +40,8 @@ var errDeferredMarkerNotFound = errors.New("delivery_deferred event не най�
 // и с deferred-маркером стадии.
 // QS-06: parent — контекст процесса (signal.NotifyContext в cmd/ai-team), а НЕ
 // budgetCtx run'а. Доставка уже одобрена человеком и исполняется после
-// терминального finalize, поэтому исчерпанный max_wall_time не должен её
-// обрывать; но Ctrl-C обязан, и собственный delivery_timeout — тоже.
+// терминального finalize, поэтому исчерпанный max_execution_time не должен
+// её обрывать; но Ctrl-C обязан, и собственный delivery_timeout — тоже.
 func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	if rs.deferredDelivery == nil {
 		return nil

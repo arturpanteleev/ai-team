@@ -202,14 +202,12 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 
 	data := finalData{
 		Feature:   feature,
-		StartTime: startTime.Format(time.RFC3339),
-		EndTime:   endTime.Format(time.RFC3339),
+		StartTime: startTime.UTC().Format(time.RFC3339),
+		EndTime:   endTime.UTC().Format(time.RFC3339),
 	}
 	if len(stages) > 0 {
 		data.RunID = stages[0].RunID
 	}
-
-	var totalDuration time.Duration
 
 	for _, s := range stages {
 		switch {
@@ -226,8 +224,6 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 		default:
 			data.Failed++
 		}
-		totalDuration += s.Duration
-
 		data.Stages = append(data.Stages, finalStageData{
 			Name:        s.Name,
 			AttemptID:   s.AttemptID,
@@ -248,6 +244,10 @@ func GenerateFinalReport(reportsDir, feature string, stages []notifier.StageResu
 
 	data.OverallStatus, data.OverallStatusClass, data.OverallStatusEmoji = runPresentation(runStatus)
 	data.TotalStages = len(stages)
+	totalDuration := endTime.Sub(startTime)
+	if totalDuration < 0 {
+		totalDuration = 0
+	}
 	data.TotalDuration = totalDuration.Round(time.Second).String()
 
 	f, err := os.Create(filepath.Join(dir, "index.html"))

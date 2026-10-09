@@ -36,6 +36,10 @@ func (r *AgentCLIRuntime) Usage() *Usage {
 }
 
 func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task, inputs []Artifact) error {
+	// Usage describes this invocation only. Clear the previous attempt before
+	// any early return so a failed call or an adapter without UsageSource can
+	// never inherit stale tokens from an earlier execution.
+	r.lastUsage = nil
 	cli := agent.CLI
 	if cli == "" {
 		cli = DefaultCLI

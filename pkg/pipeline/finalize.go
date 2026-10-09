@@ -133,7 +133,7 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 // API for cloud workers, while local CLI runs retain the filesystem format.
 func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) error {
 	envelope := metrics.Build(rs.runID, rs.runCfg.Feature, rs.startTime, finishedAt,
-		rs.results, rs.loopbackCycles, status, usageToMetrics(rs.usageTotal))
+		rs.results, rs.loopbackCycles, status, usageToMetrics(rs.usageTotal, rs.usageUnknown))
 	if rs.p.usageEnvelopeWriter != nil {
 		return rs.p.usageEnvelopeWriter.WriteUsageEnvelope(envelope)
 	}
@@ -142,9 +142,10 @@ func (rs *runState) writeUsageEnvelope(finishedAt time.Time, status string) erro
 
 // usageToMetrics переносит attested usage из runtime-слоя в metrics-слой
 // (P1-7). metrics остаётся без зависимости на runtime.
-func usageToMetrics(u runtime.Usage) metrics.Usage {
+func usageToMetrics(u runtime.Usage, unknown bool) metrics.Usage {
 	return metrics.Usage{
 		Attested:     u.Attested,
+		Unknown:      unknown,
 		TokensInput:  u.TokensInput,
 		TokensOutput: u.TokensOutput,
 		CostUSD:      u.CostUSD,

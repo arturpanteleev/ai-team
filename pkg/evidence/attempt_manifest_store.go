@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,11 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 	}
 	if manifest.SchemaVersion != SchemaVersion || strings.TrimSpace(manifest.Stage) == "" || manifest.StageIndex < 1 || manifest.StartedAt.IsZero() || manifest.FinishedAt.IsZero() {
 		return errors.New("attempt manifest required schema or identity fields are invalid")
+	}
+	if manifest.Usage != nil && (manifest.Usage.TokensInput < 0 || manifest.Usage.TokensOutput < 0 ||
+		math.IsNaN(manifest.Usage.CostUSD) || math.IsInf(manifest.Usage.CostUSD, 0) || manifest.Usage.CostUSD < 0 ||
+		(!manifest.Usage.Attested && (manifest.Usage.TokensInput != 0 || manifest.Usage.TokensOutput != 0 || manifest.Usage.CostUSD != 0))) {
+		return errors.New("attempt manifest usage is invalid")
 	}
 	for _, records := range [][]ArtifactRecord{manifest.Inputs, manifest.Outputs} {
 		for _, record := range records {

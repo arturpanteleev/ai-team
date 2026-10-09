@@ -259,7 +259,7 @@ func ValidateUsageEnvelope(runID string, envelope UsageEnvelope) error {
 	if err := validateUsageRunID(runID); err != nil {
 		return err
 	}
-	if envelope.SchemaVersion != SchemaVersion || envelope.RunID != runID {
+	if (envelope.SchemaVersion != SchemaVersion && envelope.SchemaVersion != LegacySchemaVersion) || envelope.RunID != runID {
 		return errors.New("usage envelope schema or run identity mismatch")
 	}
 	if strings.TrimSpace(envelope.Feature) == "" || strings.TrimSpace(envelope.Outcome) == "" || envelope.StartedAt.IsZero() || envelope.FinishedAt.IsZero() || envelope.FinishedAt.Before(envelope.StartedAt) {
@@ -268,8 +268,23 @@ func ValidateUsageEnvelope(runID string, envelope UsageEnvelope) error {
 	if envelope.TotalDurationMS < 0 || envelope.LoopbackCycles < 0 || envelope.TokensInput < 0 || envelope.TokensOutput < 0 || math.IsNaN(envelope.CostUSD) || math.IsInf(envelope.CostUSD, 0) || envelope.CostUSD < 0 {
 		return errors.New("usage envelope contains invalid aggregate values")
 	}
-	if envelope.TokensUnknown && envelope.UsageReported {
-		return errors.New("usage envelope token attestation flags conflict")
+	if envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {
+		return errors.New("usage envelope token total overflows")
+	}
+	if envelope.SchemaVersion == LegacySchemaVersion {
+		// V1 considered any run with at least one attested stage to be known.
+		// Preserve the old envelope's structural contract for reading, while
+		// HasCompleteTokenUsage deliberately keeps its totals unavailable.
+		if envelope.TokensUnknown && envelope.UsageReported {
+			return errors.New("legacy usage envelope token attestation flags conflict")
+		}
+	} else {
+		if !envelope.TokensUnknown && !envelope.UsageReported {
+			return errors.New("usage envelope cannot claim known tokens without an attested report")
+		}
+		if envelope.TokensUnknown && (envelope.TokensInput != 0 || envelope.TokensOutput != 0) {
+			return errors.New("usage envelope cannot publish partial token sums as a total")
+		}
 	}
 	for _, stage := range envelope.Stages {
 		if strings.TrimSpace(stage.Stage) == "" || stage.Attempts < 0 || stage.DurationMS < 0 {

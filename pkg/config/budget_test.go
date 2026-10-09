@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -60,34 +62,74 @@ func TestDefaultBudgetWallTimeConstantsAgree(t *testing.T) {
 	}
 }
 
-// Дефолт обязан переживать ожидание человека на approval-гейте: run целиком
-// (включая гейты) исполняется под budget-контекстом.
-func TestDefaultBudgetSurvivesOvernightApproval(t *testing.T) {
+// Each execution gets a bounded default; paused time belongs only to the task
+// duration and is outside this execution budget.
+func TestDefaultExecutionBudgetIsBounded(t *testing.T) {
 	if DefaultBudgetMaxWallTimeDuration < 12*time.Hour {
 		t.Fatalf("дефолт %v убьёт run, ждущий оператора до утра", DefaultBudgetMaxWallTimeDuration)
 	}
 }
 
 func TestBudgetConfigExplicit(t *testing.T) {
-	bc := &BudgetConfig{MaxWallTime: "2h", MaxAttempts: 50}
+	bc := &BudgetConfig{MaxExecutionTime: "2h", MaxAttempts: 50}
 	if err := bc.Validate(); err != nil {
 		t.Fatalf("valid: %v", err)
 	}
 	dur, str := bc.EffectiveMaxWallTime()
 	want := 2 * time.Hour
 	if dur != want || str != "2h" {
-		t.Fatalf("wall = (%v, %s), want (%v, 2h)", dur, str, want)
+		t.Fatalf("execution = (%v, %s), want (%v, 2h)", dur, str, want)
 	}
 	if bc.EffectiveMaxAttempts() != 50 {
 		t.Fatalf("attempts = %d", bc.EffectiveMaxAttempts())
 	}
 }
 
+func TestBudgetConfigLegacyMaxWallTimeAlias(t *testing.T) {
+	legacy := &BudgetConfig{MaxWallTime: "45m"}
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy max_wall_time should remain valid: %v", err)
+	}
+	dur, _ := legacy.EffectiveMaxExecutionTime()
+	if dur != 45*time.Minute {
+		t.Fatalf("legacy alias produced %v, want 45m", dur)
+	}
+	if err := (&BudgetConfig{MaxExecutionTime: "2h", MaxWallTime: "3h"}).Validate(); err == nil {
+		t.Fatal("setting new and legacy keys together must be rejected")
+	}
+}
+
+func TestBudgetConfigExecutionTimeKeysLoadFromYAML(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		field string
+	}{
+		{name: "canonical", field: "max_execution_time"},
+		{name: "legacy", field: "max_wall_time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "schema_version: 5\ntemplate: budget-test\ntitle: Budget test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nbudget:\n  " + test.field + ": 90m\n"
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("load %s: %v", test.field, err)
+			}
+			duration, _ := cfg.Budget.EffectiveMaxExecutionTime()
+			if duration != 90*time.Minute {
+				t.Fatalf("%s loaded as %v, want 90m", test.field, duration)
+			}
+		})
+	}
+}
+
 func TestBudgetConfigValidateRejects(t *testing.T) {
 	cases := map[string]*BudgetConfig{
-		"bad-duration": {MaxWallTime: "-2h", MaxAttempts: 10},
+		"bad-duration": {MaxExecutionTime: "-2h", MaxAttempts: 10},
 		"parse-fail":   {MaxWallTime: "xyz", MaxAttempts: 10},
-		"neg-attempts": {MaxWallTime: "1h", MaxAttempts: -5},
+		"neg-attempts": {MaxExecutionTime: "1h", MaxAttempts: -5},
 	}
 	for name, bc := range cases {
 		if err := bc.Validate(); err == nil {

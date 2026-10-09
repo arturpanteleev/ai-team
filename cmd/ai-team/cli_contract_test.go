@@ -457,6 +457,29 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
+	t.Run("локальный usage отвергает данные после JSON envelope", func(t *testing.T) {
+		const runID = "trailing-usage"
+		runDir := filepath.Join(root, ".ai-team", "runs", runID)
+		if err := os.MkdirAll(runDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		envelope := metrics.Build(runID, "fixture", started, started.Add(time.Second), nil, 0, "completed",
+			metrics.Usage{Attested: true, TokensInput: 12, TokensOutput: 3})
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, []byte("\n{}")...)
+		if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, code, stderr := runCLI(t, "usage", "--target", root, runID)
+		if code != 1 || !strings.Contains(stderr, "Повреждённый usage.json") {
+			t.Fatalf("trailing JSON must fail closed: code=%d stderr=%s", code, stderr)
+		}
+	})
+
 	t.Run("валидный usage", func(t *testing.T) {
 		runDir := filepath.Join(root, ".ai-team", "runs", "good")
 		if err := os.MkdirAll(runDir, 0755); err != nil {
@@ -486,11 +509,278 @@ func TestUsageCommandContract(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("ожидался exit 0, получен %d; stderr: %s", code, stderr)
 		}
-		for _, expected := range []string{"fixture-feature", "completed", "coder", "Loopback: 1"} {
+		for _, expected := range []string{
+			"Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных",
+			"Доля подписки (приблизительно): оценка недоступна",
+		} {
 			if !strings.Contains(stdout, expected) {
 				t.Fatalf("usage-сводка должна содержать %q:\n%s", expected, stdout)
 			}
 		}
+		for _, noisy := range []string{"Loopback", "Containment", "Попытки", "unknown"} {
+			if strings.Contains(stdout, noisy) {
+				t.Fatalf("usage output contains unrelated counter %q:\n%s", noisy, stdout)
+			}
+		}
+	})
+
+	t.Run("known token totals and approximate subscription allocation", func(t *testing.T) {
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		writeEnvelope := func(runID string, schemaVersion int, input, output int64) {
+			runDir := filepath.Join(estimateRoot, ".ai-team", "runs", runID)
+			if err := os.MkdirAll(runDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.UsageEnvelope{
+				SchemaVersion: schemaVersion, RunID: runID, Feature: "fixture-feature",
+				StartedAt: started, FinishedAt: started.Add(time.Minute), TokensInput: input,
+				TokensOutput: output, UsageReported: true, Outcome: "completed",
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeEnvelope("known", metrics.SchemaVersion, 40, 60)
+		writeEnvelope("peer", metrics.SchemaVersion, 200, 300)
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, "known")
+		if code != 0 {
+			t.Fatalf("known usage failed: code=%d stderr=%s", code, stderr)
+		}
+		for _, expected := range []string{
+			"Входные токены: 40", "Выходные токены: 60", "Всего токенов: 100",
+			"Доля подписки (приблизительно): ≈ 8.33 USD",
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("usage output missing %q:\n%s", expected, stdout)
+			}
+		}
+		writeEnvelope("legacy", metrics.LegacySchemaVersion, 900, 100)
+		legacyOut, legacyCode, legacyErr := runCLI(t, "usage", "--target", estimateRoot, "legacy")
+		if legacyCode != 0 {
+			t.Fatalf("legacy usage should remain readable: code=%d stderr=%s", legacyCode, legacyErr)
+		}
+		for _, unavailable := range []string{
+			"Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных",
+			"Доля подписки (приблизительно): оценка недоступна",
+		} {
+			if !strings.Contains(legacyOut, unavailable) {
+				t.Fatalf("legacy v1 usage must fail closed for %q:\n%s", unavailable, legacyOut)
+			}
+		}
+		knownOutWithLegacy, knownCode, knownErr := runCLI(t, "usage", "--target", estimateRoot, "known")
+		if knownCode != 0 {
+			t.Fatalf("known run with legacy monthly input failed: code=%d stderr=%s", knownCode, knownErr)
+		}
+		if !strings.Contains(knownOutWithLegacy, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("legacy partial totals must not enter the estimate denominator:\n%s", knownOutWithLegacy)
+		}
+		if err := os.MkdirAll(filepath.Join(estimateRoot, ".ai-team", "runs", "missing-usage"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr = runCLI(t, "usage", "--target", estimateRoot, "known")
+		if code != 0 {
+			t.Fatalf("known usage with incomplete monthly inputs failed: code=%d stderr=%s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("incomplete monthly usage inputs must disable the estimate:\n%s", stdout)
+		}
+	})
+
+	t.Run("symlinked local peer disables subscription estimate", func(t *testing.T) {
+		const selectedRunID = "known"
+		const peerRunID = "peer"
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		writeEnvelope := func(dir, runID string, input, output int64) {
+			t.Helper()
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.Build(runID, "fixture-feature", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: input, TokensOutput: output})
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runsDir := filepath.Join(estimateRoot, ".ai-team", "runs")
+		writeEnvelope(filepath.Join(runsDir, selectedRunID), selectedRunID, 40, 60)
+		peerTarget := filepath.Join(t.TempDir(), peerRunID)
+		writeEnvelope(peerTarget, peerRunID, 400, 500)
+		if err := os.Symlink(peerTarget, filepath.Join(runsDir, peerRunID)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, selectedRunID)
+		if code != 0 {
+			t.Fatalf("usage with valid selected run failed: code=%d stderr=%s", code, stderr)
+		}
+		if !strings.Contains(stdout, "Входные токены: 40") || !strings.Contains(stdout, "Выходные токены: 60") {
+			t.Fatalf("selected local usage should remain readable:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("a symlinked peer with 900 tokens must not be omitted from the denominator:\n%s", stdout)
+		}
+	})
+
+	t.Run("usage rejects symlinked directory ancestors even without subscription estimate", func(t *testing.T) {
+		const runID = "selected-run"
+		started := time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC)
+		writeLocalEnvelope := func(dir string) {
+			t.Helper()
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			envelope := metrics.Build(runID, "fixture", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: 40, TokensOutput: 60})
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Run("ai-team root", func(t *testing.T) {
+			root := newControlRoot(t)
+			offTree := t.TempDir()
+			writeLocalEnvelope(filepath.Join(offTree, "runs", runID))
+			if err := os.Remove(filepath.Join(root, ".ai-team")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(offTree, filepath.Join(root, ".ai-team")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed a symlinked .ai-team root: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("state usage directory containing off-tree controller envelope", func(t *testing.T) {
+			root := newControlRoot(t)
+			stateDir := filepath.Join(root, ".ai-team", "state")
+			if err := os.MkdirAll(stateDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			store := metrics.FileUsageEnvelopeStore{}
+			envelope := metrics.Build(runID, "fixture", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: 40, TokensOutput: 60})
+			if err := store.Reserve(root, runID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Write(root, runID, envelope); err != nil {
+				t.Fatal(err)
+			}
+			offTreeUsage := filepath.Join(t.TempDir(), "usage")
+			if err := os.Rename(filepath.Join(stateDir, "usage"), offTreeUsage); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(offTreeUsage, filepath.Join(stateDir, "usage")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed off-tree state/usage: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("runs directory", func(t *testing.T) {
+			root := newControlRoot(t)
+			offTreeRuns := filepath.Join(t.TempDir(), "runs")
+			writeLocalEnvelope(filepath.Join(offTreeRuns, runID))
+			if err := os.Symlink(offTreeRuns, filepath.Join(root, ".ai-team", "runs")); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed symlinked runs directory: code=%d stdout=%q", code, stdout)
+			}
+		})
+		t.Run("run ID directory", func(t *testing.T) {
+			root := newControlRoot(t)
+			runsDir := filepath.Join(root, ".ai-team", "runs")
+			if err := os.MkdirAll(runsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			offTreeRun := filepath.Join(t.TempDir(), runID)
+			writeLocalEnvelope(offTreeRun)
+			if err := os.Symlink(offTreeRun, filepath.Join(runsDir, runID)); err != nil {
+				t.Fatal(err)
+			}
+			stdout, code, _ := runCLI(t, "usage", "--target", root, runID)
+			if code != 1 || strings.Contains(stdout, "Входные токены: 40") {
+				t.Fatalf("usage followed symlinked run directory: code=%d stdout=%q", code, stdout)
+			}
+		})
+	})
+
+	t.Run("controller allocation with reserved-suffix run ID survives pruned run evidence", func(t *testing.T) {
+		const selectedRunID = "cloud.reserved"
+		const peerRunID = "cloud-peer"
+		estimateRoot := newControlRoot(t)
+		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
+		store := metrics.FileUsageEnvelopeStore{}
+		for _, item := range []struct {
+			runID  string
+			input  int64
+			output int64
+		}{
+			{runID: selectedRunID, input: 40, output: 60},
+			{runID: peerRunID, input: 400, output: 500},
+		} {
+			envelope := metrics.Build(item.runID, "fixture-feature", started, started.Add(time.Minute), nil, 0, "completed",
+				metrics.Usage{Attested: true, TokensInput: item.input, TokensOutput: item.output})
+			if err := store.Reserve(estimateRoot, item.runID); err != nil {
+				t.Fatalf("reserve controller usage for %s: %v", item.runID, err)
+			}
+			if err := store.Write(estimateRoot, item.runID, envelope); err != nil {
+				t.Fatalf("write controller usage for %s: %v", item.runID, err)
+			}
+
+			// Controller records take precedence for these IDs. Keeping matching
+			// local evidence here also proves the same run is counted only once.
+			runDir := filepath.Join(estimateRoot, ".ai-team", "runs", item.runID)
+			if err := os.MkdirAll(runDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		assertShare := func(stage string) {
+			t.Helper()
+			stdout, code, stderr := runCLI(t, "usage", "--target", estimateRoot, selectedRunID)
+			if code != 0 {
+				t.Fatalf("%s: usage failed: code=%d stderr=%s", stage, code, stderr)
+			}
+			if !strings.Contains(stdout, "Доля подписки (приблизительно): ≈ 5.00 USD") {
+				t.Fatalf("%s: both 1,000 controller tokens must form the denominator:\n%s", stage, stdout)
+			}
+		}
+		assertShare("before pruning")
+		if err := os.RemoveAll(filepath.Join(estimateRoot, ".ai-team", "runs")); err != nil {
+			t.Fatal(err)
+		}
+		assertShare("after pruning run evidence")
 	})
 
 	t.Run("controller usage missing does not fall back to worker-visible evidence", func(t *testing.T) {

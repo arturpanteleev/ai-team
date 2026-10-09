@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/ciimport"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
-	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/dsse"
 	"github.com/arturpanteleev/ai-team/pkg/eval"
@@ -128,7 +128,7 @@ func printUsage() {
   ai-team scheduler-worker         Claim и выполнить job из persistent queue
   ai-team list [--target <path>]   Список доступных агентов
   ai-team ci-import                Импортировать объяснимый набор checks из project CI
-  ai-team usage <run_id>           Usage-сводка завершённого run (этапы, попытки, время)
+  ai-team usage <run_id>           Токены и приблизительная доля подписки завершённого run
   ai-team redact verify|scan|redact   P1-6 redaction-контракт: сеcrets-скан evidence,
                                    verify (fail-closed для экспорта) или detached-копия
                                    с заменой секретов на [REDACTED:...]
@@ -1541,6 +1541,15 @@ func cmdUsage() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
+	for _, components := range [][]string{
+		{".ai-team", "state", "usage"},
+		{".ai-team", "runs"},
+		{".ai-team", "runs", runID},
+	} {
+		if err := checkExistingDirectoryChainNoSymlink(absolute, components...); err != nil {
+			fatal("Небезопасный usage path: %v", err)
+		}
+	}
 	envelope, err := metrics.ReadUsageEnvelope(absolute, runID)
 	if errors.Is(err, os.ErrNotExist) {
 		controllerStorePresent, stateErr := metrics.UsageEnvelopeReservation(absolute, runID)
@@ -1551,55 +1560,254 @@ func cmdUsage() {
 			fatal("Не удалось прочитать controller usage envelope для run %s: %v", runID, err)
 		}
 		// Local CLI compatibility: older/local runs keep usage beside run.json.
-		path := filepath.Join(absolute, ".ai-team", "runs", runID, "usage.json")
-		data, readErr := safeio.ReadRegularFile(path, 8<<20)
-		if readErr != nil {
-			fatal("Не удалось прочитать usage: %v", readErr)
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if decodeErr := decoder.Decode(&envelope); decodeErr != nil {
-			fatal("Повреждённый usage.json: %v", decodeErr)
-		}
-		if validateErr := metrics.ValidateUsageEnvelope(runID, envelope); validateErr != nil {
-			fatal("Повреждённый usage.json: %v", validateErr)
+		envelope, err = readLocalUsageEnvelope(absolute, runID)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fatal("Не удалось прочитать usage: %v", err)
+			}
+			fatal("Повреждённый usage.json: %v", err)
 		}
 	} else if err != nil {
 		fatal("Не удалось прочитать usage: %v", err)
 	}
-	logging.Printf("Run:      %s\n", envelope.RunID)
-	logging.Printf("Feature:  %s\n", envelope.Feature)
-	logging.Printf("Outcome:  %s\n", envelope.Outcome)
-	logging.Printf("Период:   %s → %s\n",
-		envelope.StartedAt.Format(time.RFC3339), envelope.FinishedAt.Format(time.RFC3339))
-	logging.Printf("Loopback: %d\n", envelope.LoopbackCycles)
-	tokens := "unknown"
-	if !envelope.TokensUnknown {
-		tokens = "known"
+	lines := make([]string, 0, 4)
+	if !envelope.HasCompleteTokenUsage() {
+		lines = append(lines, "Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных")
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("Входные токены: %d", envelope.TokensInput),
+			fmt.Sprintf("Выходные токены: %d", envelope.TokensOutput),
+			fmt.Sprintf("Всего токенов: %d", envelope.TokensInput+envelope.TokensOutput),
+		)
 	}
-	logging.Printf("Токены:   %s\n\n", tokens)
-	// Containment receipt (V0-P1-4) — если присутствует.
-	receipt, receiptErr := containment.ControllerReceiptStore{TargetDir: absolute}.Read(runID)
-	if errors.Is(receiptErr, os.ErrNotExist) {
-		cdata, cerr := safeio.ReadRegularFile(filepath.Join(absolute, ".ai-team", "runs", runID, "containment.json"), 1<<20)
-		if cerr == nil {
-			receiptErr = json.Unmarshal(cdata, &receipt)
-		} else {
-			receiptErr = cerr
-		}
-	}
-	if receiptErr == nil {
-		logging.Printf("Containment (%s):\n", receipt.Profile)
-		for _, axis := range []containment.Axis{containment.AxisFS, containment.AxisNet, containment.AxisProc, containment.AxisEnv} {
-			logging.Printf("  %-5s %s\n", axis, receipt.Axes[axis])
-		}
-		fmt.Println()
-	} else if !errors.Is(receiptErr, os.ErrNotExist) {
-		fatal("Повреждённый containment receipt: %v", receiptErr)
-	}
-	if err := envelope.Format(os.Stdout); err != nil {
+	lines = append(lines, fmt.Sprintf("Доля подписки (приблизительно): %s", approximateSubscriptionShare(absolute, envelope)))
+	if _, err := io.WriteString(os.Stdout, strings.Join(lines, "\n")+"\n"); err != nil {
 		fatal("Ошибка вывода usage: %v", err)
 	}
+}
+
+func approximateSubscriptionShare(target string, run metrics.UsageEnvelope) string {
+	cfg, err := config.Load(filepath.Join(target, ".ai-team", "config.yaml"))
+	if err != nil || cfg.Usage == nil || cfg.Usage.Validate() != nil || cfg.Usage.MonthlySubscriptionAmount <= 0 {
+		return "оценка недоступна"
+	}
+	recorded, complete := recordedUsageEnvelopes(target)
+	if !complete {
+		return "оценка недоступна"
+	}
+	share, ok := metrics.EstimateSubscriptionShare(cfg.Usage.MonthlySubscriptionAmount, run, recorded)
+	if !ok {
+		return "оценка недоступна"
+	}
+	currency := cfg.Usage.MonthlySubscriptionCurrency
+	if currency == "" {
+		currency = "USD"
+	}
+	return fmt.Sprintf("≈ %.2f %s", share, currency)
+}
+
+func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
+	byRunID := make(map[string]metrics.UsageEnvelope)
+	var envelopes []metrics.UsageEnvelope
+
+	// Controller summaries outlive immutable run evidence. Enumerate them from
+	// their durable store first so pruning .ai-team/runs does not erase known
+	// usage from the subscription denominator.
+	usageDir := filepath.Join(target, ".ai-team", "state", "usage")
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "state", "usage"); err != nil {
+		return nil, false
+	}
+	usageEntries, err := os.ReadDir(usageDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	reservedIDs := make(map[string]bool)
+	envelopeIDs := make(map[string]bool)
+	for _, entry := range usageEntries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".usage-") && strings.HasSuffix(name, ".tmp") {
+			// Atomic writes can leave a temporary file after a process crash.
+			// The reservation/envelope pair checks below still detect any
+			// incomplete controller record.
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil, false
+		}
+		if !strings.HasSuffix(name, ".json") {
+			return nil, false
+		}
+		// A valid run ID may itself end in ".reserved". In that case its
+		// envelope filename also has the reservation suffix, so the filename
+		// alone cannot distinguish the two records. The controller reservation
+		// schema has a target_dir field that usage envelopes never have.
+		data, readErr := safeio.ReadRegularFile(filepath.Join(usageDir, name), 8<<20)
+		if readErr != nil {
+			return nil, false
+		}
+		reservationRecord, classifyErr := isUsageReservationRecord(data)
+		if classifyErr != nil {
+			return nil, false
+		}
+		if reservationRecord {
+			if !strings.HasSuffix(name, ".reserved.json") {
+				return nil, false
+			}
+			runID := strings.TrimSuffix(name, ".reserved.json")
+			if runID == "" || reservedIDs[runID] {
+				return nil, false
+			}
+			reservedIDs[runID] = true
+		} else {
+			runID := strings.TrimSuffix(name, ".json")
+			if runID == "" || envelopeIDs[runID] {
+				return nil, false
+			}
+			envelopeIDs[runID] = true
+		}
+	}
+	for runID := range reservedIDs {
+		if !envelopeIDs[runID] {
+			return nil, false
+		}
+	}
+	for runID := range envelopeIDs {
+		if !reservedIDs[runID] {
+			return nil, false
+		}
+	}
+	for runID := range reservedIDs {
+		envelope, readErr := metrics.ReadUsageEnvelope(target, runID)
+		if readErr != nil {
+			return nil, false
+		}
+		byRunID[runID] = envelope
+		envelopes = append(envelopes, envelope)
+	}
+
+	runsDir := filepath.Join(target, ".ai-team", "runs")
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs"); err != nil {
+		return nil, false
+	}
+	entries, err := os.ReadDir(runsDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	for _, entry := range entries {
+		// Runs are expected to be real directories. In particular, don't let a
+		// symlinked run disappear from the monthly denominator just because
+		// DirEntry.IsDir reports false for symlinks. Check this before the
+		// controller-ID dedup below so duplicate evidence cannot hide it either.
+		runID := entry.Name()
+		if runID == "." || runID == ".." {
+			return nil, false
+		}
+		if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs", runID); err != nil {
+			return nil, false
+		}
+		info, infoErr := os.Lstat(filepath.Join(runsDir, runID))
+		if infoErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, false
+		}
+		if _, alreadyRecorded := byRunID[runID]; alreadyRecorded {
+			continue
+		}
+		reserved, reserveErr := metrics.UsageEnvelopeReservation(target, runID)
+		if reserveErr != nil {
+			return nil, false
+		}
+		var envelope metrics.UsageEnvelope
+		if reserved {
+			envelope, err = metrics.ReadUsageEnvelope(target, runID)
+		} else {
+			envelope, err = readLocalUsageEnvelope(target, runID)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			// Without an envelope we cannot know whether this run belongs in
+			// the current monthly denominator, so never publish a partial-share
+			// estimate from the remaining recorded runs.
+			return nil, false
+		}
+		if err != nil {
+			return nil, false
+		}
+		byRunID[runID] = envelope
+		envelopes = append(envelopes, envelope)
+	}
+	return envelopes, true
+}
+
+func isUsageReservationRecord(data []byte) (bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil {
+		return false, err
+	}
+	if fields == nil {
+		return false, errors.New("usage record must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return false, errors.New("usage record has trailing data")
+		}
+		return false, err
+	}
+	_, hasTargetDir := fields["target_dir"]
+	return hasTargetDir, nil
+}
+
+func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error) {
+	if err := checkExistingDirectoryChainNoSymlink(target, ".ai-team", "runs", runID); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	path := filepath.Join(target, ".ai-team", "runs", runID, "usage.json")
+	data, err := safeio.ReadRegularFile(path, 8<<20)
+	if err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var envelope metrics.UsageEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return metrics.UsageEnvelope{}, errors.New("trailing data")
+		}
+		return metrics.UsageEnvelope{}, err
+	}
+	if err := metrics.ValidateUsageEnvelope(runID, envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+// checkExistingDirectoryChainNoSymlink rejects symlinks and non-directory
+// components while allowing a missing suffix. It keeps usage readers from
+// following off-tree state even when the subscription estimate is disabled.
+func checkExistingDirectoryChainNoSymlink(root string, components ...string) error {
+	current := root
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component || strings.ContainsAny(component, `/\\`) {
+			return fmt.Errorf("unsafe directory component %q", component)
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("%s must be a directory without symlink", current)
+		}
+	}
+	return nil
 }
 
 func cmdList() {

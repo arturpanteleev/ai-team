@@ -104,6 +104,7 @@ type AttemptManifest struct {
 	AttemptID       string                    `json:"attempt_id"`
 	Stage           string                    `json:"stage"`
 	StageIndex      int                       `json:"stage_index"`
+	TotalStages     int                       `json:"total_stages,omitempty"`
 	StartedAt       time.Time                 `json:"started_at"`
 	FinishedAt      time.Time                 `json:"finished_at"`
 	Status          string                    `json:"status"`
@@ -119,6 +120,7 @@ type AttemptManifest struct {
 	Mutations       []string                  `json:"mutations,omitempty"`
 	MutationChanges []workflow.MutationChange `json:"mutation_changes,omitempty"`
 	Delivery        *delivery.Result          `json:"delivery,omitempty"`
+	Usage           *workflow.AttemptUsage    `json:"usage,omitempty"`
 }
 
 // ArtifactDigest exposes the same bounded evidence identity used by attempt

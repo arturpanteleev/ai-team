@@ -40,6 +40,14 @@ func (s *WorkerStore) List(runID string) ([]PendingApproval, error) {
 	return s.store.List(runID)
 }
 
+func (s *WorkerStore) HasAuthenticatedControllerDecision(value PendingApproval) bool {
+	if s == nil {
+		return false
+	}
+	trusted, ok := s.store.(TrustedDecisionAuthority)
+	return ok && trusted.HasAuthenticatedControllerDecision(value)
+}
+
 func (*WorkerStore) Decide(string, string, Decision) (PendingApproval, error) {
 	return PendingApproval{}, ErrWorkerDecisionWrite
 }
@@ -55,3 +63,5 @@ var _ interface {
 	Decide(string, string, Decision) (PendingApproval, error)
 	ResolveDeferred(string, string, Decision) (PendingApproval, error)
 } = (*WorkerStore)(nil)
+
+var _ TrustedDecisionAuthority = (*WorkerStore)(nil)

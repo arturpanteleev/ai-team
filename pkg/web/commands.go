@@ -499,8 +499,9 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		approval.Decision{
 			ActorID: actorID, ActorRole: command.ActorRole,
 			Action: command.Action, Comment: command.Comment,
-			SubjectHash:       command.SubjectHash,
-			ArtifactRevisions: selectedRevisions,
+			SubjectHash:             command.SubjectHash,
+			ArtifactRevisions:       selectedRevisions,
+			ControllerAuthenticated: s.authenticator != nil,
 		},
 	)
 	if err != nil {

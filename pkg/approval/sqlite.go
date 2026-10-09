@@ -22,6 +22,22 @@ import (
 // write atomic across processes. The caller owns the database lifecycle.
 type SQLiteStore struct{ db *sql.DB }
 
+// HasAuthenticatedControllerDecision reports whether this approval carries
+// provenance set by the authenticated controller decision endpoint. Merely
+// storing a record in SQLite (including a legacy import) is not sufficient.
+func (s *SQLiteStore) HasAuthenticatedControllerDecision(value PendingApproval) bool {
+	if s == nil || s.db == nil || value.Status != StatusResolved || len(value.Decisions) == 0 {
+		return false
+	}
+	for _, decision := range value.Decisions {
+		if !decision.ControllerAuthenticated || decision.ApprovalID != value.ID ||
+			decision.SubjectHash != value.SubjectHash || decision.Action != value.ResolvedAction {
+			return false
+		}
+	}
+	return true
+}
+
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -145,6 +161,11 @@ func (s *SQLiteStore) importLegacy(root string, acquireRunLock func(string) (fun
 			}
 			if value.RunID != runID || value.ID != id {
 				return fmt.Errorf("legacy approval identity mismatch: %s/%s", runID, id)
+			}
+			// Legacy JSON decisions predate authenticated-controller provenance.
+			// Never let an imported file claim to have passed the web auth path.
+			for i := range value.Decisions {
+				value.Decisions[i].ControllerAuthenticated = false
 			}
 			legacy = append(legacy, value)
 		}
@@ -367,3 +388,5 @@ var _ interface {
 	Decide(string, string, Decision) (PendingApproval, error)
 	ResolveDeferred(string, string, Decision) (PendingApproval, error)
 } = (*SQLiteStore)(nil)
+
+var _ TrustedDecisionAuthority = (*SQLiteStore)(nil)

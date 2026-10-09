@@ -463,12 +463,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				// A resolved JSON file is not an approval authority: it can be
 				// edited outside this process. Continue only when this invocation
 				// explicitly reasserted the exact plan hash or when the decision
-				// came from the controller's authenticated SQLite approval store.
+				// came from a trusted controller decision store/API.
 				if runCfg.ApprovePlanHash != "" {
 					if normalized := strings.ToLower(strings.TrimSpace(runCfg.ApprovePlanHash)); normalized != value.SubjectHash {
 						return RunResult{}, fmt.Errorf("resume run: --approve-plan %s не совпадает с subject approval %s", normalized, value.SubjectHash)
 					}
-				} else if _, trustedControllerStore := approvalStore.(*approval.SQLiteStore); !trustedControllerStore {
+				} else if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); !trusted || !trustedStore.HasAuthenticatedControllerDecision(value) {
 					return RunResult{}, &ApprovalRequiredError{
 						Checkpoint: "delivery требует явного --approve-plan в текущем процессе",
 						RunID:      value.RunID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
@@ -484,7 +484,8 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					return RunResult{}, fmt.Errorf("%w: delivery отклонён человеком", ErrUserStopped)
 				}
 				runCfg.ApprovePlanHash = value.SubjectHash
-				if _, trustedControllerStore := approvalStore.(*approval.SQLiteStore); trustedControllerStore && !approvePlanExplicit {
+				if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); trusted &&
+					trustedStore.HasAuthenticatedControllerDecision(value) && !approvePlanExplicit {
 					resumedApproval = &value
 				} else {
 					// Local approvals are not authority after process restart. The

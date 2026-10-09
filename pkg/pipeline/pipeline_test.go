@@ -2345,12 +2345,20 @@ func TestRun_DeliveryApprovalPersistedAndResumable(t *testing.T) {
 
 func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) {
 	for _, test := range []struct {
-		name          string
-		trustedStore  bool
-		wantExecution bool
+		name               string
+		storeKind          string
+		controllerDecision bool
+		resumeHash         bool
+		wrongHash          bool
+		wantExecution      bool
 	}{
-		{name: "resolved filesystem record is not authority"},
-		{name: "authenticated controller database decision", trustedStore: true, wantExecution: true},
+		{name: "resolved filesystem record is not authority", storeKind: "filesystem"},
+		{name: "exact current hash authorizes filesystem record", storeKind: "filesystem", resumeHash: true, wantExecution: true},
+		{name: "mismatched current hash is rejected", storeKind: "filesystem", wrongHash: true},
+		{name: "direct SQLite decision is not authenticated", storeKind: "sqlite"},
+		{name: "legacy file cannot claim authenticated provenance when imported into SQLite", storeKind: "legacy-import", controllerDecision: true},
+		{name: "authenticated controller SQLite decision", storeKind: "sqlite", controllerDecision: true, wantExecution: true},
+		{name: "authenticated controller decision survives worker store wrapper", storeKind: "worker-wrapper", controllerDecision: true, wantExecution: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := env(t)
@@ -2359,7 +2367,12 @@ func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) 
 			rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 			service := &fakeDeliveryService{}
 			var store ApprovalStore
-			if test.trustedStore {
+			var decisionStore interface {
+				Decide(string, string, approval.Decision) (approval.PendingApproval, error)
+			}
+			var fileStore *approval.Store
+			var workerReadStore ApprovalStore
+			if test.storeKind == "sqlite" || test.storeKind == "worker-wrapper" {
 				if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -2368,13 +2381,21 @@ func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) 
 					t.Fatal(err)
 				}
 				defer func() { _ = db.Close() }()
-				store = db
+				decisionStore = db
+				if test.storeKind == "worker-wrapper" {
+					store = db
+					workerReadStore = approval.NewWorkerStore(db)
+				} else {
+					store = db
+				}
 			} else {
-				fileStore, err := approval.NewStore(dir)
+				var err error
+				fileStore, err = approval.NewStore(dir)
 				if err != nil {
 					t.Fatal(err)
 				}
 				store = fileStore
+				decisionStore = fileStore
 			}
 			p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
 				WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(store))
@@ -2388,14 +2409,44 @@ func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.Decide(value.RunID, value.ID, approval.Decision{
+			decision := approval.Decision{
 				ActorID: "release-manager-1", ActorRole: deliveryApprovalRole,
 				Action: "approve", SubjectHash: value.SubjectHash,
-			}); err != nil {
+			}
+			if test.controllerDecision {
+				decision.ControllerAuthenticated = true
+			}
+			if _, err := decisionStore.Decide(value.RunID, value.ID, decision); err != nil {
 				t.Fatal(err)
 			}
+			if test.storeKind == "legacy-import" {
+				if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				db, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				if err := db.ImportLegacy(filepath.Join(dir, ".ai-team", "state", "approvals")); err != nil {
+					t.Fatal(err)
+				}
+				store = db
+				p = New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+					WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(store))
+			}
+			if workerReadStore != nil {
+				p = New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+					WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(workerReadStore))
+			}
 
-			err = p.Run(context.Background(), RunConfig{ResumeRunID: required.RunID, TargetDir: dir})
+			resumeHash := ""
+			if test.resumeHash {
+				resumeHash = value.SubjectHash
+			} else if test.wrongHash {
+				resumeHash = strings.Repeat("f", 64)
+			}
+			err = p.Run(context.Background(), RunConfig{ResumeRunID: required.RunID, TargetDir: dir, ApprovePlanHash: resumeHash})
 			if test.wantExecution {
 				if err != nil {
 					t.Fatalf("authenticated controller decision should resume delivery: %v", err)
@@ -2403,12 +2454,19 @@ func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) 
 				if service.calls != 1 {
 					t.Fatalf("trusted database approval should execute once, got %d", service.calls)
 				}
-			} else {
-				if !errors.As(err, &required) {
-					t.Fatalf("resolved JSON approval must still require current --approve-plan, got: %v", err)
+			} else if test.wrongHash {
+				if err == nil || !strings.Contains(err.Error(), "не совпадает с subject") {
+					t.Fatalf("mismatched current hash must be rejected, got: %v", err)
 				}
 				if service.calls != 0 {
-					t.Fatalf("filesystem approval must not execute delivery, calls=%d", service.calls)
+					t.Fatalf("mismatched hash must not execute delivery, calls=%d", service.calls)
+				}
+			} else {
+				if !errors.As(err, &required) {
+					t.Fatalf("untrusted resolved approval must still require current --approve-plan, got: %v", err)
+				}
+				if service.calls != 0 {
+					t.Fatalf("untrusted approval must not execute delivery, calls=%d", service.calls)
 				}
 			}
 		})

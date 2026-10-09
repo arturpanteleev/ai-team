@@ -1724,12 +1724,30 @@ func (a *workerAPIApprovals) List(_ string) ([]approval.PendingApproval, error) 
 	err := a.port.call("approval.list", workerAPICall{}, &out)
 	return out, err
 }
+func (a *workerAPIApprovals) HasAuthenticatedControllerDecision(value approval.PendingApproval) bool {
+	return a != nil && a.port != nil && controllerDecisionMarkedAuthenticated(value)
+}
+
+func controllerDecisionMarkedAuthenticated(value approval.PendingApproval) bool {
+	if value.Status != approval.StatusResolved || len(value.Decisions) == 0 {
+		return false
+	}
+	for _, decision := range value.Decisions {
+		if !decision.ControllerAuthenticated || decision.ApprovalID != value.ID ||
+			decision.SubjectHash != value.SubjectHash || decision.Action != value.ResolvedAction {
+			return false
+		}
+	}
+	return true
+}
 func (*workerAPIApprovals) Decide(string, string, approval.Decision) (approval.PendingApproval, error) {
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
 }
 func (*workerAPIApprovals) ResolveDeferred(string, string, approval.Decision) (approval.PendingApproval, error) {
 	return approval.PendingApproval{}, approval.ErrWorkerDecisionWrite
 }
+
+var _ approval.TrustedDecisionAuthority = (*workerAPIApprovals)(nil)
 
 type workerAPIBriefs struct{ port *workerAPIPort }
 type WorkerAPIBriefs = workerAPIBriefs

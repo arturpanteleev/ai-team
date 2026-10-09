@@ -38,14 +38,23 @@ const (
 )
 
 type Decision struct {
-	ApprovalID        string            `json:"approval_id"`
-	ActorID           string            `json:"actor_id"`
-	ActorRole         string            `json:"actor_role"`
-	Action            string            `json:"action"`
-	Comment           string            `json:"comment,omitempty"`
-	SubjectHash       string            `json:"subject_hash"`
-	ArtifactRevisions map[string]string `json:"artifact_revisions,omitempty"`
-	DecidedAt         time.Time         `json:"decided_at"`
+	ApprovalID              string            `json:"approval_id"`
+	ActorID                 string            `json:"actor_id"`
+	ActorRole               string            `json:"actor_role"`
+	Action                  string            `json:"action"`
+	Comment                 string            `json:"comment,omitempty"`
+	SubjectHash             string            `json:"subject_hash"`
+	ArtifactRevisions       map[string]string `json:"artifact_revisions,omitempty"`
+	DecidedAt               time.Time         `json:"decided_at"`
+	ControllerAuthenticated bool              `json:"controller_authenticated,omitempty"`
+}
+
+// TrustedDecisionAuthority marks an approval store whose reads are backed by
+// decisions accepted by the authenticated controller. The local filesystem
+// Store deliberately does not implement this capability; WorkerStore forwards
+// it only when its backing store has it.
+type TrustedDecisionAuthority interface {
+	HasAuthenticatedControllerDecision(PendingApproval) bool
 }
 
 type PendingApproval struct {

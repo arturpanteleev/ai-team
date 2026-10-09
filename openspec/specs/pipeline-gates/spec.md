@@ -43,7 +43,9 @@ MUST требовать approval точного SHA-256 canonical plan.
 - **ТОГДА** controller MUST остановиться до commit, push или PR и потребовать
   явное подтверждение точного плана
 - **И** только совпадающий `--approve-plan` текущего процесса или решение
-  аутентифицированного controller из SQLite store MAY продолжить delivery
+  с provenance аутентифицированного controller decision endpoint MAY продолжить
+  delivery; само хранение в SQLite или импорт из legacy-файла не является
+  подтверждением
 
 ### Requirement: Edge approval gate
 

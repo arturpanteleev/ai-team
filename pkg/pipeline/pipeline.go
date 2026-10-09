@@ -326,6 +326,7 @@ type runState struct {
 	names                     []string
 	results                   []notifier.StageResult
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
+	selectedInputOverrides    map[string]map[string]runtime.Artifact
 	questionAnswerTargetStage string
 	questionAnswerDeniedPaths []string
 	ps                        *ui.PipelineStatus
@@ -796,6 +797,19 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}
 			}
 		}
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			resumedApproval.Kind == approval.KindInput && resumedApproval.Trigger == humanInputTrigger &&
+			resumedApproval.FromStage == runCfg.retryFrom {
+			// A resolved human submission is the authority for the result written
+			// by this stage. The graph approval that handed off into the stage is a
+			// separate authority for pinned revisions and extra inputs, and remains
+			// live until the target attempt completes. Recover both slots even when
+			// lifecycle is still Waiting on the human input.
+			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("resume human graph handoff: %w", err)
+			}
+		}
 		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
@@ -1126,9 +1140,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			LogDir:       evidenceStore.LogDir(),
 			Interactive:  p.prompter.Interactive(),
 		},
-		reportsDir:  reportsDir,
-		names:       pipelineStageNames(p.cfg),
-		extraInputs: make(map[string][]runtime.Artifact),
+		reportsDir:             reportsDir,
+		names:                  pipelineStageNames(p.cfg),
+		extraInputs:            make(map[string][]runtime.Artifact),
+		selectedInputOverrides: make(map[string]map[string]runtime.Artifact),
 		selectedArtifactRevisions: func() map[string]string {
 			// A recovered graph handoff is the authority for pinned artifact
 			// revisions even when its target's human input was recovered too.
@@ -1314,6 +1329,55 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					return RunResult{RunID: runID, Outcome: outcome}, finalErr
 				}
 				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], feedback)
+			}
+		}
+	}
+	graphInputApproval := recoveredGraphApproval
+	if graphInputApproval == nil && resumedApproval != nil && strings.HasPrefix(resumedApproval.Trigger, "graph_outcome:") {
+		graphInputApproval = resumedApproval
+	}
+	if graphInputApproval != nil && len(graphInputApproval.ArtifactRevisions) > 0 &&
+		graphInputApproval.Targets[graphInputApproval.ResolvedAction] == runCfg.retryFrom &&
+		!isBackwardTransition(rs.graph, graphInputApproval) {
+		// A forward graph handoff normally leaves source artifacts at their
+		// configured workspace paths. Explicitly selected immutable revisions
+		// must also be exposed to the target stage, especially when the target is
+		// human and its result approval is resumed separately from this graph
+		// authority. Keep only selected artifacts here; backward handoffs already
+		// materialize their complete source attempt above.
+		outputs, inputErr := rs.stageOutputs(graphInputApproval.FromStage, graphInputApproval.AttemptID)
+		if inputErr != nil {
+			outcome, finalErr := rs.finalize(inputErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		targetDefinition, inputErr := p.loadStageDefinition(runCfg.retryFrom)
+		if inputErr != nil {
+			outcome, finalErr := rs.finalize(inputErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		for _, output := range outputs {
+			selected, selectErr := selectedHumanRevision(runCfg.TargetDir, runID, output, graphInputApproval.ArtifactRevisions)
+			if selectErr != nil {
+				outcome, finalErr := rs.finalize(selectErr)
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+			if selected.Path != output.Path {
+				matchesConfiguredInput := false
+				if targetDefinition != nil {
+					_, matchesConfiguredInput = targetDefinition.Inputs[output.Name]
+				}
+				if matchesConfiguredInput {
+					if rs.selectedInputOverrides[runCfg.retryFrom] == nil {
+						rs.selectedInputOverrides[runCfg.retryFrom] = make(map[string]runtime.Artifact)
+					}
+					rs.selectedInputOverrides[runCfg.retryFrom][output.Name] = selected
+				} else {
+					// Preserve an explicitly selected artifact that has no matching
+					// configured input under a distinct name, so it cannot shadow or
+					// duplicate another logical input for the target stage.
+					selected.Name = "graph-selected-" + output.Name
+					rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], selected)
+				}
 			}
 		}
 	}

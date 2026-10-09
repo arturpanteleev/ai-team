@@ -607,8 +607,12 @@ func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifa
 		inPath := a.Inputs[inName]
 		replaced := runtime.ReplaceVars(inPath, rs.runCfg.Feature)
 		fullPath := filepath.Join(rs.task.ArtifactRoot, replaced)
-
-		if err := validateExistingArtifactPath(rs.task.ArtifactRoot, fullPath); err != nil {
+		validationRoot := rs.task.ArtifactRoot
+		if selected, ok := rs.selectedInputOverrides[name][inName]; ok {
+			fullPath = selected.Path
+			validationRoot = filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID)
+		}
+		if err := validateExistingArtifactPath(validationRoot, fullPath); err != nil {
 			return nil, all, fmt.Errorf("агент %s: вход %s (%s) небезопасен: %w", name, inName, fullPath, err)
 		}
 		info, err := os.Stat(fullPath)

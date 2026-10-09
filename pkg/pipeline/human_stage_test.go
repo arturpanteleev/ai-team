@@ -496,7 +496,7 @@ outputs: {}
 		Stages: []config.TemplateStage{
 			{ID: "spec", Title: "Specification", Function: "product_owner", Result: "md", Executor: "human", Agent: "spec", Confirm: "required"},
 			{ID: "review", Title: "Review", Function: "reviewer", Result: "md", Executor: "human", Agent: "review", Confirm: "required"},
-			{ID: "delivery", Title: "Delivery", Function: "operator", Result: "md", Executor: "human", Agent: "delivery", Confirm: "auto"},
+			{ID: "delivery", Title: "Delivery", Function: "operator", Result: "md", Executor: "human", Confirm: "auto"},
 		},
 	}
 	p := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
@@ -651,5 +651,241 @@ outputs: {}
 	content, err := os.ReadFile(filepath.Join(dir, ".ai-team", "artifacts", "feat", "review.md"))
 	if err != nil || string(content) != submittedReview {
 		t.Fatalf("recovered stage did not use immutable submitted bytes: content=%q err=%v", content, err)
+	}
+}
+
+func TestHumanInputResumeFromWaitingKeepsForwardGraphSelection(t *testing.T) {
+	dir := env(t)
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := agent.NewFS(fstest.MapFS{
+		"spec/def.yaml": def(`name: spec
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs:
+  spec: '{feature}/spec.md'
+`),
+		"review/def.yaml": def(`name: review
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  spec: '{feature}/spec.md'
+outputs:
+  review: '{feature}/review.md'
+`),
+		"delivery/def.yaml": def(`name: delivery
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs: {}
+`),
+		"spec/prompt.md":     def("spec"),
+		"review/prompt.md":   def("review"),
+		"delivery/prompt.md": def("delivery"),
+	})
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "human-waiting-forward-handoff-test",
+		Title:         "Human waiting forward handoff test",
+		Stages: []config.TemplateStage{
+			{ID: "spec", Title: "Specification", Function: "product_owner", Result: "md", Executor: "human", Agent: "spec", Confirm: "required"},
+			{ID: "review", Title: "Review", Function: "reviewer", Result: "md", Executor: "human", Agent: "review", Confirm: "required"},
+			{ID: "delivery", Title: "Delivery", Function: "operator", Result: "md", Executor: "human", Agent: "delivery", Confirm: "auto"},
+		},
+	}
+	p := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "Create and review a specification", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("first human stage should request its typed result: result=%+v err=%v", first, err)
+	}
+	specInput, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || specInput.Kind != approval.KindInput {
+		t.Fatalf("missing specification input approval: %+v err=%v", specInput, err)
+	}
+	if _, err := store.Decide(first.RunID, specInput.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: "submit", Comment: "# Original approved specification\n",
+		SubjectHash: specInput.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if !errors.As(err, &required) {
+		t.Fatalf("required graph gate should follow specification submission: %v", err)
+	}
+	graphApproval, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || graphApproval.Kind != approval.KindApprove || graphApproval.FromStage != "spec" {
+		t.Fatalf("missing required forward graph approval: %+v err=%v", graphApproval, err)
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(),
+		filepath.Join(dir, ".ai-team", "runs", first.RunID), first.RunID, graphApproval.AttemptID)
+	if err != nil || len(manifest.Outputs) != 1 {
+		t.Fatalf("read specification attempt output: manifest=%+v err=%v", manifest, err)
+	}
+	output := manifest.Outputs[0]
+	_, _, digest, err := evidence.ArtifactDigest(filepath.Join(dir, ".ai-team", "runs", first.RunID, filepath.FromSlash(output.EvidencePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := humanartifact.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := revisions.Append(first.RunID, output.EvidencePath, "", digest,
+		"# Pinned specification revision\n", "Use this exact handoff", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(first.RunID, graphApproval.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: "approve", Comment: "Continue to review",
+		SubjectHash: graphApproval.SubjectHash, ArtifactRevisions: map[string]string{output.EvidencePath: revision.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if !errors.As(err, &required) {
+		t.Fatalf("second human stage should request its typed result: %v", err)
+	}
+	reviewInput, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || reviewInput.Kind != approval.KindInput || reviewInput.FromStage != "review" {
+		t.Fatalf("missing review input approval: %+v err=%v", reviewInput, err)
+	}
+	if _, err := store.Decide(first.RunID, reviewInput.ID, approval.Decision{
+		ActorID: "reviewer", ActorRole: "reviewer", Action: "submit", Comment: "# Exact human review result\n",
+		SubjectHash: reviewInput.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// This ordinary resume starts from PhaseWaiting with the resolved human
+	// input as PendingApprovalID. The graph approval must still supply the
+	// selected source revision to the first review attempt and its next gate.
+	_, err = p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if !errors.As(err, &required) {
+		t.Fatalf("review should finish and stop at its required graph gate: %v", err)
+	}
+	reviewGate, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || reviewGate.Kind != approval.KindApprove || reviewGate.FromStage != "review" {
+		t.Fatalf("review graph gate missing after waiting resume: %+v err=%v", reviewGate, err)
+	}
+	replayed, err := evidence.ReplayEventLog(filepath.Join(dir, ".ai-team", "runs", first.RunID, "events.jsonl"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewAttempt *evidence.ReplayedAttempt
+	for index := range replayed.Attempts {
+		if replayed.Attempts[index].Stage == "review" && replayed.Attempts[index].Executor == "human" {
+			reviewAttempt = &replayed.Attempts[index]
+			break
+		}
+	}
+	if reviewAttempt == nil || reviewAttempt.HumanInputApprovalID != reviewInput.ID {
+		t.Fatalf("review submission was not used for the human attempt: %+v", reviewAttempt)
+	}
+	_, reviewManifest, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(),
+		filepath.Join(dir, ".ai-team", "runs", first.RunID), first.RunID, reviewAttempt.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawPinnedRevision bool
+	var specInputCount int
+	for _, input := range reviewManifest.Inputs {
+		if input.Name != "spec" {
+			continue
+		}
+		specInputCount++
+		data, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", first.RunID, filepath.FromSlash(input.EvidencePath)))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(data) == "# Pinned specification revision\n" {
+			sawPinnedRevision = true
+		}
+	}
+	if specInputCount != 1 || !sawPinnedRevision {
+		t.Fatalf("review attempt must receive exactly one graph-pinned spec input without an unpinned duplicate: count=%d pinned=%t inputs=%+v",
+			specInputCount, sawPinnedRevision, reviewManifest.Inputs)
+	}
+	results, _, _, err := replayedStageResults(replayed, filepath.Join(dir, ".ai-team", "runs", first.RunID),
+		evidence.FilesystemAttemptManifestSource(), registry, cfg, len(cfg.Stages))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedSubject, err := (&runState{
+		runID: first.RunID, results: results,
+		selectedArtifactRevisions: map[string]string{output.EvidencePath: revision.ID},
+	}).checkpointSubjectHash("переход review → delivery", "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutGraphSelection, err := (&runState{runID: first.RunID, results: results}).checkpointSubjectHash("переход review → delivery", "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewGate.SubjectHash != expectedSubject || reviewGate.SubjectHash == withoutGraphSelection {
+		t.Fatalf("next gate lost the graph revision selection: subject=%s want pinned=%s unpinned=%s",
+			reviewGate.SubjectHash, expectedSubject, withoutGraphSelection)
+	}
+	if len(reviewManifest.Outputs) != 1 {
+		t.Fatalf("review attempt should have one output for the agentless delivery handoff: %+v", reviewManifest.Outputs)
+	}
+	deliveryOutput := reviewManifest.Outputs[0]
+	_, _, deliveryDigest, err := evidence.ArtifactDigest(filepath.Join(dir, ".ai-team", "runs", first.RunID, filepath.FromSlash(deliveryOutput.EvidencePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryRevision, err := revisions.Append(first.RunID, deliveryOutput.EvidencePath, "", deliveryDigest,
+		"# Pinned review for delivery\n", "Use the pinned review", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(first.RunID, reviewGate.ID, approval.Decision{
+		ActorID: "reviewer", ActorRole: "reviewer", Action: "approve", Comment: "Continue to agentless delivery",
+		SubjectHash: reviewGate.SubjectHash, ArtifactRevisions: map[string]string{deliveryOutput.EvidencePath: deliveryRevision.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if !errors.As(err, &required) {
+		t.Fatalf("agentless human delivery should request its typed result: %v", err)
+	}
+	deliveryInput, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || deliveryInput.Kind != approval.KindInput || deliveryInput.FromStage != "delivery" {
+		t.Fatalf("agentless delivery input missing after selected graph handoff: %+v err=%v", deliveryInput, err)
+	}
+	if _, err := store.Decide(first.RunID, deliveryInput.ID, approval.Decision{
+		ActorID: "operator", ActorRole: "operator", Action: "submit", Comment: "# Delivery complete\n",
+		SubjectHash: deliveryInput.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil || completed.Outcome != workflow.RunCompleted {
+		t.Fatalf("agentless delivery did not complete with its human result: result=%+v err=%v", completed, err)
+	}
+	_, deliveryManifest, err := evidence.ReadAttemptManifest(evidence.FilesystemAttemptManifestSource(),
+		filepath.Join(dir, ".ai-team", "runs", first.RunID), first.RunID, deliveryInput.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selectedDeliveryInputCount int
+	for _, input := range deliveryManifest.Inputs {
+		if input.Name != "graph-selected-review" {
+			continue
+		}
+		selectedDeliveryInputCount++
+		data, readErr := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", first.RunID, filepath.FromSlash(input.EvidencePath)))
+		if readErr != nil || string(data) != "# Pinned review for delivery\n" {
+			t.Fatalf("agentless human stage lost its distinctly named selected input: content=%q err=%v", data, readErr)
+		}
+	}
+	if selectedDeliveryInputCount != 1 {
+		t.Fatalf("agentless human stage should receive exactly one selected graph input, got %d: %+v",
+			selectedDeliveryInputCount, deliveryManifest.Inputs)
 	}
 }

@@ -63,7 +63,8 @@ var referencePages = map[string][]string{
 		"# Конфигурация",
 		"## Профили init",
 		"## Runtime и ключи",
-		"## Переходы workflow",
+		"## Этапы шаблона",
+		"### Переход с v4",
 	},
 	"reference/pipeline.md": {
 		"# Агенты и этапы",

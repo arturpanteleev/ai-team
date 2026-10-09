@@ -31,6 +31,10 @@ func (c *Config) ApplyDetectedChecks(target string) (profile string, warning str
 	default:
 		return "", ""
 	}
+	if c.Template != "" {
+		c.Checks = append([]checks.Definition(nil), definitions...)
+		return profile, ""
+	}
 	tester := c.findAgent("tester")
 	if tester == nil {
 		return profile, fmt.Sprintf(

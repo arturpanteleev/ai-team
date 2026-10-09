@@ -58,17 +58,18 @@
 локально, через `.git/info/exclude`, поэтому рабочее дерево остаётся чистым.
 
 ```text
-ai-team init [--target <путь>] [--profile fast|standard|regulated] [--write-gitignore]
+ai-team init [--target <путь>] [--profile fast|standard|regulated] [--force] [--write-gitignore]
 ```
 
 | Флаг | По умолчанию | Что делает |
 |---|---|---|
 | `--target` | `.` | каталог проекта |
 | `--profile` | `standard` | сколько подтверждений спрашивать; см. [профили](config.md#профили-init) |
+| `--force` | выключен | заменить существующий `.ai-team/config.yaml` выбранным шаблоном |
 | `--write-gitignore` | выключен | записать правило в `.gitignore` вместо локального exclude |
 
 Если в проекте есть `go.mod`, `init` сам добавляет проверки `go test` и
-`go vet` к этапу `tester`. Для других стеков он печатает предупреждение:
+`go vet` в верхнеуровневую секцию `checks`. Для других стеков он печатает предупреждение:
 delivery будет запрещена, пока вы не настроите обязательную проверку сами
 (см. [Настроить проверки проекта](../guides/project-checks.md)).
 

@@ -21,8 +21,19 @@ type ApprovalPolicy struct {
 }
 
 type Node struct {
-	Name      string `json:"name"`
+	// ID is the stable template stage key. Name remains for in-memory
+	// compatibility with earlier workflow snapshots.
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Agent     string `json:"agent,omitempty"`
 	MaxVisits int    `json:"max_visits,omitempty"`
+}
+
+func (n Node) Key() string {
+	if n.ID != "" {
+		return n.ID
+	}
+	return n.Name
 }
 
 type Edge struct {
@@ -59,7 +70,7 @@ func (g Graph) Edge(from string, outcome Outcome) (Edge, bool) {
 
 func (g Graph) Node(name string) (Node, bool) {
 	for _, node := range g.Nodes {
-		if node.Name == name {
+		if node.Key() == name {
 			return node, true
 		}
 	}
@@ -68,7 +79,7 @@ func (g Graph) Node(name string) (Node, bool) {
 
 func (g Graph) Index(name string) int {
 	for index, node := range g.Nodes {
-		if node.Name == name {
+		if node.Key() == name {
 			return index
 		}
 	}
@@ -81,16 +92,20 @@ func (g Graph) Validate(requireApprovals, requireCycleLimits bool) error {
 	}
 	nodes := make(map[string]Node, len(g.Nodes))
 	for _, node := range g.Nodes {
-		if node.Name == "" {
+		key := node.Key()
+		if key == "" {
 			return fmt.Errorf("workflow graph: имя node обязательно")
 		}
-		if _, exists := nodes[node.Name]; exists {
-			return fmt.Errorf("workflow graph: node %q повторяется", node.Name)
+		if node.ID != "" && node.Name != "" && node.ID != node.Name {
+			return fmt.Errorf("workflow graph: node id %q конфликтует с legacy name %q", node.ID, node.Name)
+		}
+		if _, exists := nodes[key]; exists {
+			return fmt.Errorf("workflow graph: node %q повторяется", key)
 		}
 		if node.MaxVisits < 0 {
-			return fmt.Errorf("workflow graph: max_visits %s не может быть отрицательным", node.Name)
+			return fmt.Errorf("workflow graph: max_visits %s не может быть отрицательным", key)
 		}
-		nodes[node.Name] = node
+		nodes[key] = node
 	}
 	if _, exists := nodes[g.Entry]; !exists {
 		return fmt.Errorf("workflow graph: entry %q не существует", g.Entry)

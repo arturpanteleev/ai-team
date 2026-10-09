@@ -14,10 +14,8 @@ import (
 
 // Допустимые значения полей (валидируются в Validate).
 const (
-	// CurrentSchemaVersion — единственная поддерживаемая схема. Легаси
-	// схемы 1–3 удалены: маршрут, retries и approvals живут только в
-	// workflow edges/max_visits.
-	CurrentSchemaVersion = 4
+	// CurrentSchemaVersion — единственная поддерживаемая конфигурационная схема.
+	CurrentSchemaVersion = 5
 )
 
 type AgentConfig struct {
@@ -30,9 +28,20 @@ type AgentConfig struct {
 }
 
 type Config struct {
-	SchemaVersion  int             `yaml:"schema_version,omitempty"`
-	PipelineAgents []AgentConfig   `yaml:"pipeline"`
-	Workflow       *WorkflowConfig `yaml:"workflow,omitempty"`
+	SchemaVersion int                 `yaml:"schema_version"`
+	Template      string              `yaml:"template"`
+	Title         string              `yaml:"title"`
+	StallAfter    string              `yaml:"stall_after,omitempty"`
+	Stages        []TemplateStage     `yaml:"stages"`
+	Returns       []TemplateReturn    `yaml:"returns,omitempty"`
+	MaxVisits     map[string]int      `yaml:"max_visits,omitempty"`
+	Checks        []checks.Definition `yaml:"checks,omitempty"`
+
+	// PipelineAgents and Workflow are runtime compatibility projections. They
+	// are never serialized; schema v5 stores stage IDs, agent references and
+	// return routes in the template fields above.
+	PipelineAgents []AgentConfig   `yaml:"-"`
+	Workflow       *WorkflowConfig `yaml:"-"`
 	CLI            string          `yaml:"cli,omitempty"`
 	Model          string          `yaml:"model,omitempty"`
 	Effort         string          `yaml:"effort,omitempty"`
@@ -337,29 +346,57 @@ type WorkflowApprovalConfig struct {
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("config: expected mapping")
+	}
+	version := 0
+	for index := 0; index < len(value.Content); index += 2 {
+		if value.Content[index].Value == "schema_version" {
+			if err := value.Content[index+1].Decode(&version); err != nil {
+				return fmt.Errorf("config: schema_version должен быть целым числом: %w", err)
+			}
+			break
+		}
+	}
+	if version == 4 {
+		return fmt.Errorf("config: схема v4 больше не поддерживается; выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md")
+	}
+	if version != CurrentSchemaVersion {
+		if version == 0 {
+			return fmt.Errorf("config: schema_version обязателен (поддерживается только %d)", CurrentSchemaVersion)
+		}
+		return fmt.Errorf("config: schema_version %d не поддерживается (поддерживается только %d); выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md", version, CurrentSchemaVersion)
+	}
 	if err := validateMappingKeys(value, map[string]bool{
-		"schema_version": true, "pipeline": true, "cli": true, "model": true,
+		"schema_version": true, "template": true, "title": true,
+		"stall_after": true, "stages": true, "returns": true,
+		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
-		"delivery_timeout": true,
-		"workflow":         true, "containment": true,
-		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
+		"delivery_timeout": true, "containment": true, "tree_hash": true,
+		"budget": true, "redaction": true, "retention": true,
 	}, "config"); err != nil {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion    int              `yaml:"schema_version"`
-		Pipeline         yaml.Node        `yaml:"pipeline"`
-		CLI              string           `yaml:"cli"`
-		Model            string           `yaml:"model"`
-		Effort           string           `yaml:"effort"`
-		StageTimeout     string           `yaml:"stage_timeout"`
-		PreflightTimeout string           `yaml:"preflight_timeout"`
-		DeliveryTimeout  string           `yaml:"delivery_timeout"`
-		Workflow         *WorkflowConfig  `yaml:"workflow"`
-		TreeHash         *TreeHashConfig  `yaml:"tree_hash"`
-		Budget           *BudgetConfig    `yaml:"budget"`
-		Redaction        *RedactionConfig `yaml:"redaction"`
-		Retention        *RetentionConfig `yaml:"retention"`
+		SchemaVersion    int                 `yaml:"schema_version"`
+		Template         string              `yaml:"template"`
+		Title            string              `yaml:"title"`
+		StallAfter       string              `yaml:"stall_after"`
+		Stages           []TemplateStage     `yaml:"stages"`
+		Returns          []TemplateReturn    `yaml:"returns"`
+		MaxVisits        map[string]int      `yaml:"max_visits"`
+		Checks           []checks.Definition `yaml:"checks"`
+		CLI              string              `yaml:"cli"`
+		Model            string              `yaml:"model"`
+		Effort           string              `yaml:"effort"`
+		StageTimeout     string              `yaml:"stage_timeout"`
+		PreflightTimeout string              `yaml:"preflight_timeout"`
+		DeliveryTimeout  string              `yaml:"delivery_timeout"`
+		Containment      *ContainmentConfig  `yaml:"containment"`
+		TreeHash         *TreeHashConfig     `yaml:"tree_hash"`
+		Budget           *BudgetConfig       `yaml:"budget"`
+		Redaction        *RedactionConfig    `yaml:"redaction"`
+		Retention        *RetentionConfig    `yaml:"retention"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -367,53 +404,30 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	c.SchemaVersion = raw.SchemaVersion
-	if c.SchemaVersion == 0 {
-		return fmt.Errorf("config: schema_version обязателен (поддерживается только %d)", CurrentSchemaVersion)
-	}
+	c.Template = raw.Template
+	c.Title = raw.Title
+	c.StallAfter = raw.StallAfter
+	c.Stages = raw.Stages
+	c.Returns = raw.Returns
+	c.MaxVisits = raw.MaxVisits
+	c.Checks = raw.Checks
 	c.CLI = raw.CLI
 	c.Model = raw.Model
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
 	c.PreflightTimeout = raw.PreflightTimeout
 	c.DeliveryTimeout = raw.DeliveryTimeout
-	c.Workflow = raw.Workflow
+	c.Containment = raw.Containment
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
 	c.Redaction = raw.Redaction
 	c.Retention = raw.Retention
 
-	if raw.Pipeline.Kind == 0 {
-		return fmt.Errorf("config: pipeline is required")
-	}
-	if raw.Pipeline.Kind != yaml.SequenceNode {
-		return fmt.Errorf("config: pipeline must be a list")
-	}
-	allowedAgentFields := map[string]bool{
-		"name": true, "model": true, "effort": true, "cli": true,
-		"timeout": true, "checks": true,
-	}
-	for i, item := range raw.Pipeline.Content {
-		switch item.Kind {
-		case yaml.ScalarNode:
-			if item.Tag != "!!str" || item.Value == "" {
-				return fmt.Errorf("config: pipeline[%d] invalid scalar", i)
-			}
-			c.PipelineAgents = append(c.PipelineAgents, AgentConfig{Name: item.Value})
-		case yaml.MappingNode:
-			if err := validateMappingKeys(item, allowedAgentFields, fmt.Sprintf("config: pipeline[%d]", i)); err != nil {
-				return err
-			}
-			var ac AgentConfig
-			if err := item.Decode(&ac); err != nil {
-				return fmt.Errorf("config: pipeline[%d] unmarshal: %w", i, err)
-			}
-			if ac.Name == "" {
-				return fmt.Errorf("config: pipeline[%d] missing 'name'", i)
-			}
-			c.PipelineAgents = append(c.PipelineAgents, ac)
-		default:
-			return fmt.Errorf("config: pipeline[%d] invalid type", i)
-		}
+	// Internal compatibility view used by the current execution API. Stage IDs
+	// remain keys; the referenced registry agent is carried by the workflow node.
+	c.PipelineAgents = make([]AgentConfig, 0, len(c.Stages))
+	for _, stage := range c.Stages {
+		c.PipelineAgents = append(c.PipelineAgents, AgentConfig{Name: stage.ID})
 	}
 
 	return nil
@@ -512,6 +526,9 @@ func validateMappingKeys(node *yaml.Node, allowed map[string]bool, context strin
 }
 
 func (c *Config) AgentNames() []string {
+	if c.Template != "" {
+		return c.templateAgentNames()
+	}
 	names := make([]string, len(c.PipelineAgents))
 	for i, a := range c.PipelineAgents {
 		names[i] = a.Name
@@ -519,8 +536,12 @@ func (c *Config) AgentNames() []string {
 	return names
 }
 
-// CompiledGraph компилирует schema v4 workflow в immutable runtime contract.
+// CompiledGraph compiles a v5 template or an in-memory legacy workflow into
+// the immutable graph contract used by the current runtime.
 func (c *Config) CompiledGraph() (workflow.Graph, error) {
+	if c.Template != "" || len(c.Stages) > 0 {
+		return c.TemplateGraph()
+	}
 	graph := workflow.Graph{SchemaVersion: CurrentSchemaVersion}
 	for _, stage := range c.PipelineAgents {
 		graph.Nodes = append(graph.Nodes, workflow.Node{Name: stage.Name})
@@ -529,7 +550,7 @@ func (c *Config) CompiledGraph() (workflow.Graph, error) {
 		return graph, fmt.Errorf("workflow graph: pipeline пуст")
 	}
 	if c.Workflow == nil {
-		return graph, fmt.Errorf("schema_version %d требует workflow", CurrentSchemaVersion)
+		return graph, fmt.Errorf("config: in-memory legacy graph requires workflow")
 	}
 	graph.Entry = c.Workflow.Entry
 	knownNodes := make(map[string]bool, len(graph.Nodes))
@@ -636,7 +657,7 @@ type productSpecContractLookup interface {
 
 // Validate проверяет конфиг до запуска пайплайна (fail fast).
 func (c *Config) Validate(reg AgentLookup) error {
-	if len(c.PipelineAgents) == 0 {
+	if c.Template == "" && len(c.PipelineAgents) == 0 {
 		return fmt.Errorf("config: pipeline пуст")
 	}
 	var errs []string
@@ -645,9 +666,16 @@ func (c *Config) Validate(reg AgentLookup) error {
 			errs = append(errs, fmt.Sprintf(format, args...))
 		}
 	}
-	validate(c.SchemaVersion == CurrentSchemaVersion,
-		"schema_version %d не поддерживается (поддерживается только %d; легаси схемы 1–3 удалены)",
-		c.SchemaVersion, CurrentSchemaVersion)
+	if c.SchemaVersion != CurrentSchemaVersion {
+		if c.SchemaVersion == 4 {
+			addMigration := "схема v4 больше не поддерживается; выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md"
+			errs = append(errs, addMigration)
+		} else {
+			validate(false,
+				"schema_version %d не поддерживается (поддерживается только %d)",
+				c.SchemaVersion, CurrentSchemaVersion)
+		}
+	}
 
 	if c.StageTimeout != "" {
 		if duration, err := time.ParseDuration(c.StageTimeout); err != nil || duration <= 0 {
@@ -674,7 +702,7 @@ func (c *Config) Validate(reg AgentLookup) error {
 		validate(a.Name != "", "имя агента обязательно")
 		validate(!seenNames[a.Name], "агент %q повторяется в pipeline", a.Name)
 		seenNames[a.Name] = true
-		if reg != nil {
+		if reg != nil && c.Template == "" {
 			validate(reg.Exists(a.Name), "агент %q не найден в registry", a.Name)
 		}
 		validate(isOneOf(a.Effort, "", "low", "medium", "high"),
@@ -700,7 +728,11 @@ func (c *Config) Validate(reg AgentLookup) error {
 			errs = append(errs, err.Error())
 		}
 	}
-	if c.Workflow != nil {
+	if c.Template != "" {
+		if err := c.validateTemplate(reg); err != nil {
+			errs = append(errs, strings.TrimPrefix(err.Error(), "невалидный config.yaml:\n  - "))
+		}
+	} else if c.Workflow != nil {
 		for _, edge := range c.Workflow.Edges {
 			if edge.Approval == nil {
 				continue

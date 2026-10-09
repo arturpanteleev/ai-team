@@ -81,7 +81,7 @@
 ## Go: проверки находятся сами
 
 Если в корне проекта есть `go.mod`, команда `ai-team init` добавит две
-обязательные проверки к этапу `tester`:
+обязательные проверки проекта:
 
 ```text
 ✓ Обнаружен verification profile: go
@@ -89,24 +89,21 @@
 ✓ .ai-team/ инициализирован в …
 ```
 
-В `.ai-team/config.yaml` появится:
+В верхнеуровневой секции `checks` файла `.ai-team/config.yaml` появится:
 
 ```yaml
-pipeline:
-    # …
-    - name: tester
-      checks:
-        - name: go-test
-          class: unit
-          adapter: go-test-json
-          command: [go, test, -json, -count=1, ./...]
-          policy: required
-          timeout: 20m
-        - name: go-vet
-          class: lint
-          command: [go, vet, ./...]
-          policy: required
-          timeout: 10m
+checks:
+  - name: go-test
+    class: unit
+    adapter: go-test-json
+    command: [go, test, -json, -count=1, ./...]
+    policy: required
+    timeout: 20m
+  - name: go-vet
+    class: lint
+    command: [go, vet, ./...]
+    policy: required
+    timeout: 10m
 ```
 
 Это обычный YAML: команды можно поменять, например добавить `-race` или
@@ -114,9 +111,8 @@ pipeline:
 уровня.
 
 > [!NOTE]
-> Если вы переименовали или убрали этап `tester`, `init` предупредит:
-> `обнаружен go-профиль, но в pipeline нет стадии "tester" — required checks
-> не присвоены`. Тогда добавьте проверки вручную к нужному этапу.
+> В schema v5 checks принадлежат проекту, поэтому их не нужно прикреплять к
+> этапу `tester`. PR delivery ссылается на обязательные проверки по имени.
 
 ## Python: pytest через JUnit-отчёт
 
@@ -138,25 +134,22 @@ pipeline:
    .pytest_cache/
    ```
 
-2. Добавьте проверки к этапу `tester` в `.ai-team/config.yaml`:
+2. Добавьте проверки в верхнеуровневую секцию `checks` в `.ai-team/config.yaml`:
 
    ```yaml
-   pipeline:
-       # …
-       - name: tester
-         checks:
-           - name: pytest
-             class: unit
-             adapter: junit-xml
-             report_file: report.xml
-             command: ["python", "-m", "pytest", "-p", "no:cacheprovider",
-                       "--junitxml=report.xml", "-o", "junit_family=xunit2"]
-             policy: required
-             timeout: 15m
-           - name: ruff
-             class: lint
-             command: ["ruff", "check", "."]
-             policy: optional
+checks:
+  - name: pytest
+    class: unit
+    adapter: junit-xml
+    report_file: report.xml
+    command: ["python", "-m", "pytest", "-p", "no:cacheprovider",
+              "--junitxml=report.xml", "-o", "junit_family=xunit2"]
+    policy: required
+    timeout: 15m
+  - name: ruff
+    class: lint
+    command: ["ruff", "check", "."]
+    policy: optional
    ```
 
 3. Для CI положите те же проверки в `gate.yaml`:

@@ -8,11 +8,22 @@
 #### Scenario: Структура конфига
 - **КОГДА** `ai-team init` запускается
 - **ТОГДА** config.yaml MUST содержать:
-  - `schema_version: 3`
-  - `pipeline: <list of agents>`
+  - `schema_version: 5`
+  - one `template` ID and `title`
+  - ordered `stages` with unique `id` values and human-readable `title`
+  - `returns` that reference existing stages and point only backward
   - `cli: opencode`
   - `effort: medium`
-  - explicit checkpoint policies
+  - generated template `idea-to-prod` when no profile override is requested
+
+#### Scenario: Legacy schema v4
+- **КОГДА** config loader встречает `schema_version: 4`
+- **ТОГДА** config MUST быть отклонён с подсказкой запустить `ai-team init --force` или перенести его вручную по документации
+
+#### Scenario: Явная перезапись конфига
+- **КОГДА** пользователь запускает `ai-team init --force` в уже инициализированном проекте
+- **ТОГДА** init MUST заменить существующий regular `.ai-team/config.yaml` шаблоном выбранного профиля
+- **И** без `--force` пользовательский конфиг MUST сохраниться
 
 ### Requirement: Кастомный путь конфига
 Система MUST поддерживать флаг `--target` для указания директории целевого проекта.
@@ -59,12 +70,12 @@
 - **И** `.ai-team/` MUST быть исключён выбранной Git ignore policy
 
 ### Requirement: Обновлённый конфиг по умолчанию
-Конфиг по умолчанию MUST включать `effort`, stage timeout и стек-специфичные deterministic checks.
+Конфиг по умолчанию MUST включать schema v5, один процессный шаблон, `effort`, stage timeout и стек-специфичные deterministic checks.
 
 #### Scenario: Структура конфига
 - **КОГДА** `ai-team init` запускается
 - **ТОГДА** config.yaml MUST содержать:
-  - `pipeline:` с именами агентов
+  - `template: idea-to-prod` и список `stages`
   - `cli: opencode`
   - `effort: medium`
   - `stage_timeout: 30m`
@@ -84,7 +95,7 @@
 - **ТОГДА** он MUST вывести warning
 - **И** delivery MUST оставаться запрещённым до настройки required unit/integration/e2e check
 
-#### Scenario: Стек определён, но нет подходящей стадии
-- **WHEN** init распознаёт известный стек (например, Go), но в pipeline нет стадии `tester`, к которой можно присвоить checks
-- **THEN** init MUST вывести warning, отдельный от warning для нераспознанного стека, явно называющий обнаруженный профиль и отсутствие стадии `tester`
-- **AND** delivery MUST оставаться запрещённым до ручной настройки checks
+#### Scenario: Профили materialized as templates
+- **КОГДА** пользователь запускает `init --profile fast`, `standard` или `regulated`
+- **ТОГДА** config MUST содержать ровно один шаблон, выбранный из обычных `stages`, `returns` и `checks`
+- **И** профиль MUST иметь собственный template ID, а не runtime-переключатель

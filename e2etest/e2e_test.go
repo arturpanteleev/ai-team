@@ -958,16 +958,28 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		return status == http.StatusAccepted
 	}, func() string { return fmt.Sprintf("status=%d body=%v\n%s", status, resumed, serverOutput.String()) })
 	statePath := filepath.Join(dir, ".ai-team", "state", "runs", runID+".json")
+	eventPath := filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl")
+	// Lifecycle state and transition_selected are persisted before the next
+	// stage starts. Wait for the actual second-stage result event so this test
+	// cannot mistake an accepted resume for completed execution under -race.
 	waitUntil(t, 30*time.Second, func() bool {
-		stateData, err := os.ReadFile(statePath)
+		eventsData, err := os.ReadFile(eventPath)
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(stateData), `"phase": "terminal"`) ||
-			(readPending().ID != "" && readPending().ID != first.ID)
+		for _, line := range strings.Split(string(eventsData), "\n") {
+			var event struct {
+				Type  string `json:"type"`
+				Stage string `json:"stage"`
+			}
+			if json.Unmarshal([]byte(line), &event) == nil && event.Type == "attempt_finished" && event.Stage == "architect" {
+				return true
+			}
+		}
+		return false
 	}, func() string { return serverOutput.String() })
 
-	events, err := os.ReadFile(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"))
+	events, err := os.ReadFile(eventPath)
 	if err != nil {
 		t.Fatal(err)
 	}

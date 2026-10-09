@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,74 @@ func testAttemptManifest(runID, attemptID string) AttemptManifest {
 	return AttemptManifest{SchemaVersion: SchemaVersion, RunID: runID, AttemptID: attemptID,
 		Stage: "analyst", StageIndex: 1, StartedAt: now.Add(-time.Minute), FinishedAt: now,
 		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success"}
+}
+
+func TestCleanupUnfinishedAttemptArtifactsValidatesIdentityAndDoesNotFollowLinks(t *testing.T) {
+	root := t.TempDir()
+	runID, attemptID := "orphan-cleanup-run", "orphan-cleanup-run-001-analyst"
+	runDir := filepath.Join(root, "runs", runID)
+	attemptDir := filepath.Join(runDir, "attempts", attemptID)
+	inputDir := filepath.Join(attemptDir, "inputs", "001-clarification-answer")
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := testAttemptManifest(runID, attemptID)
+	manifest.Inputs = []ArtifactRecord{{Name: "clarification-answer", EvidencePath: filepath.ToSlash(filepath.Join("attempts", attemptID, "inputs", "001-clarification-answer", "answer.md"))}}
+	manifestPath := filepath.Join(attemptDir, "manifest.json")
+	writeManifest := func(value AttemptManifest) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManifest(manifest)
+	answerPath := filepath.Join(inputDir, "answer.md")
+	if err := os.WriteFile(answerPath, []byte("approved answer"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside-sentinel")
+	if err := os.WriteFile(outside, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(inputDir, "outside-link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	attempt := ReplayedAttempt{AttemptID: attemptID, Stage: manifest.Stage, StageIndex: manifest.StageIndex, StartedAt: manifest.StartedAt}
+	if err := CleanupUnfinishedAttemptArtifacts(runDir, runID, attempt); err != nil {
+		t.Fatalf("valid orphan attempt cleanup failed: %v", err)
+	}
+	if _, err := os.Lstat(attemptDir); !os.IsNotExist(err) {
+		t.Fatalf("orphan attempt directory remains: err=%v", err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("cleanup followed an internal symlink: data=%q err=%v", data, err)
+	}
+
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(manifest)
+	wrongIdentity := attempt
+	wrongIdentity.Stage = "coder"
+	if err := CleanupUnfinishedAttemptArtifacts(runDir, runID, wrongIdentity); err == nil {
+		t.Fatal("attempt/manifest identity mismatch was accepted")
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("mismatched orphan must fail closed without deleting evidence: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, []byte(`{"schema_version":7,"unexpected":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupUnfinishedAttemptArtifacts(runDir, runID, attempt); err == nil {
+		t.Fatal("malformed orphan manifest was accepted")
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("malformed orphan must fail closed without deleting evidence: %v", err)
+	}
 }
 
 func TestReservedAttemptManifestStoreReadsCanonicalAndPreservesLegacyFallback(t *testing.T) {

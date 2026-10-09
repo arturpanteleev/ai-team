@@ -1262,6 +1262,196 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	}
 }
 
+func TestRun_AnalystClarificationRemovesPublishedOrphanBeforeLaterStage(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["analyst"] = "нужны сведения о целевой аудитории"
+	rt.content["analyst"] = map[string]string{"proposal": "готовая спецификация"}
+	var orphanAnswerPath string
+	laterStageChecked := false
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		switch name {
+		case "analyst":
+			if rt.calls[name] == 1 {
+				path := filepath.Join(dir, ".ai-team", "artifacts", "tasks", "feat", "questions.md")
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("Кто целевой клиент?\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			delete(rt.blocked, name)
+			foundAnswer := false
+			for _, input := range inputs {
+				if input.Name != "clarification-answer" {
+					continue
+				}
+				foundAnswer = true
+				data, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(data), "B2B-клиенты") {
+					t.Errorf("resumed analyst must receive the approved answer: %q err=%v", data, err)
+				}
+			}
+			if !foundAnswer {
+				t.Error("resumed analyst did not receive the approved clarification answer")
+			}
+			if _, err := os.Lstat(orphanAnswerPath); !os.IsNotExist(err) {
+				t.Errorf("published orphan answer must be removed before resumed stage: path=%q err=%v", orphanAnswerPath, err)
+			}
+		case "questioner":
+			laterStageChecked = true
+			if data, err := os.ReadFile(orphanAnswerPath); err == nil {
+				t.Errorf("later stage could still read the answer from the crashed attempt: %q", data)
+			} else if !os.IsNotExist(err) {
+				t.Errorf("checking the crashed attempt answer: %v", err)
+			}
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["analyst"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "analyst", Outcome: "blocked", To: "analyst",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"product_owner"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "questioner"})
+	canonicalTarget, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerStore := ControllerQuestionAnswerStore{TargetDir: canonicalTarget}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}),
+		WithQuestionAnswerInputProvider(canonicalQuestionAnswerTestProvider{store: answerStore}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "уточнить целевую аудиторию", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("ожидалось ожидание ответа: result=%+v err=%v", first, err)
+	}
+	approvals, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Load(first.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := approvals.Decide(first.RunID, pending.ID, approval.Decision{
+		ActorID: "product-1", ActorRole: "product_owner", Action: "answer_questions",
+		Comment: "B2B-клиенты среднего бизнеса", SubjectHash: pending.SubjectHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := answerStore.Prepare(decided); err != nil {
+		t.Fatal(err)
+	}
+
+	evidenceStore, _, replayed, err := evidence.Resume(filepath.Join(dir, ".ai-team", "runs"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "approval_decided", AttemptID: decided.AttemptID, Data: approvalEventData(decided)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "transition_selected", AttemptID: decided.AttemptID, Stage: decided.FromStage, Data: map[string]any{
+		"from": decided.FromStage, "outcome": "blocked", "edge_target": decided.ToStage,
+		"action": decided.ResolvedAction, "target": decided.Targets[decided.ResolvedAction],
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "attempts_invalidated", Data: map[string]any{
+		"attempt_ids": []string{replayed.Attempts[0].AttemptID}, "reason": "approved_loopback",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanAttemptID := evidenceStore.NewAttemptID("analyst", 2)
+	attemptStarted := time.Now().UTC()
+	if err := evidenceStore.Append(evidence.Event{Type: "attempt_started", AttemptID: orphanAttemptID, Stage: "analyst", Timestamp: attemptStarted, Data: map[string]any{
+		"stage_index": graph.Index("analyst") + 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	answerInput, err := (canonicalQuestionAnswerTestProvider{store: answerStore}).MaterializeQuestionAnswer(first.RunID, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The temp target may be spelled through /var while the provider returns
+	// its canonical /private/var path. Use the run store's own spelling for
+	// evidence provenance, as a worker does when collecting its scoped input.
+	answerInput.Path = filepath.Join(evidenceStore.RunDir(), "inputs", pending.ID+"-answer.md")
+	orphanInputs, cleanup, err := evidenceStore.SnapshotInputs(orphanAttemptID, toEvidenceArtifacts([]runtime.Artifact{answerInput}))
+	if err != nil || len(orphanInputs) != 1 {
+		t.Fatalf("snapshot answer before publishing orphan attempt: inputs=%+v err=%v", orphanInputs, err)
+	}
+	finishedAt := attemptStarted.Add(time.Second)
+	if err := evidenceStore.PublishAttempt(evidence.AttemptManifest{
+		AttemptID: orphanAttemptID, Stage: "analyst", StageIndex: graph.Index("analyst") + 1,
+		StartedAt: attemptStarted, FinishedAt: finishedAt,
+		Status: "passed", Execution: string(workflow.ExecutionSucceeded),
+		Decision: string(workflow.DecisionNotApplicable), Outcome: string(workflow.OutcomePassed),
+	}, filepath.Join(dir, ".ai-team", "artifacts"), orphanInputs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	_, orphanManifest, err := evidence.ReadAttemptManifest(nil, evidenceStore.RunDir(), first.RunID, orphanAttemptID)
+	if err != nil || len(orphanManifest.Inputs) != 1 {
+		t.Fatalf("read the published crash-boundary manifest: manifest=%+v err=%v", orphanManifest, err)
+	}
+	orphanAnswerPath = filepath.Join(evidenceStore.RunDir(), filepath.FromSlash(orphanManifest.Inputs[0].EvidencePath))
+	if data, err := os.ReadFile(orphanAnswerPath); err != nil || !strings.Contains(string(data), "B2B-клиенты") {
+		t.Fatalf("fixture must contain the answer under attempts/<id>/inputs before crash: %q err=%v", data, err)
+	}
+
+	lifecycles, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := lifecycles.Load(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := waiting
+	running.Phase, running.NextStage, running.PendingApprovalID = lifecycle.PhaseRunning, "analyst", ""
+	if err := lifecycles.Save(waiting, running); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	var followup *ApprovalRequiredError
+	if !errors.As(err, &followup) || second.RunID != first.RunID || rt.calls["analyst"] != 2 {
+		t.Fatalf("resume must abandon the orphan and retry analyst: result=%+v calls=%v err=%v", second, rt.calls, err)
+	}
+	if _, err := os.Lstat(orphanAnswerPath); !os.IsNotExist(err) {
+		t.Fatalf("resume left the published orphan answer in place: path=%q err=%v", orphanAnswerPath, err)
+	}
+	followupApproval, err := approvals.Load(first.RunID, followup.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := approvals.Decide(first.RunID, followupApproval.ID, approval.Decision{
+		ActorID: "operator-1", ActorRole: "operator", Action: "approve", SubjectHash: followupApproval.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil || third.RunID != first.RunID || third.Outcome != "completed" || rt.calls["questioner"] != 1 || !laterStageChecked {
+		t.Fatalf("later stage must run without access to the crashed answer copy: result=%+v calls=%v checked=%v err=%v", third, rt.calls, laterStageChecked, err)
+	}
+}
+
 func TestRun_AnalystClarificationFailsClosedAfterCompletedTargetBeforeTransition(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()

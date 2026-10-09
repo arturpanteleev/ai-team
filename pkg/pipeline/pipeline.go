@@ -796,6 +796,14 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				resumeMutations = append(resumeMutations, attemptManifest.Mutations...)
 			}
 			if attempt.FinishedAt.IsZero() {
+				// A crash can occur after PublishAttempt atomically renames its
+				// manifest and copied inputs, but before attempt_finished binds
+				// that manifest into the event stream. Such a directory is not
+				// replay authority and may contain a clarification answer, so
+				// validate its identity and remove it before any resumed stage.
+				if err := evidence.CleanupUnfinishedAttemptArtifacts(evidenceStore.RunDir(), runID, *attempt); err != nil {
+					return RunResult{}, fmt.Errorf("cleanup unfinished attempt %s artifacts: %w", attempt.AttemptID, err)
+				}
 				if err := evidenceStore.Append(evidence.Event{
 					Type: "attempt_abandoned", AttemptID: attempt.AttemptID, Stage: attempt.Stage,
 					Timestamp: runStartedAt, Data: map[string]any{"reason": "controller restarted"},

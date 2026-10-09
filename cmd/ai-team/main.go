@@ -1271,7 +1271,22 @@ func cmdRun() {
 	if err != nil {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
-	cfg := loadValidatedConfig(*target, reg)
+	var cfg *config.Config
+	if *resumeRunID != "" {
+		pinned, found, pinErr := loadPinnedResumeConfig(*target, *resumeRunID, reg)
+		if pinErr != nil {
+			fatal("Не удалось загрузить закреплённый шаблон run: %v", pinErr)
+		}
+		if found {
+			cfg = pinned
+		} else {
+			// Legacy runs created before task pins keep their historical config
+			// resolution and evidence-digest checks.
+			cfg = loadValidatedConfig(*target, reg)
+		}
+	} else {
+		cfg = loadValidatedConfig(*target, reg)
+	}
 	if *templateID != "" && *templateID != cfg.Template {
 		fatal("шаблон %q не является активным шаблоном проекта %q", *templateID, cfg.Template)
 	}

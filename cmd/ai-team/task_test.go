@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
 )
 
 func TestTaskAutoConfigChangesRunCopyOnly(t *testing.T) {
@@ -116,6 +118,109 @@ func TestLoadTaskRunViewVerifiesEvidenceAndShowsResumeAction(t *testing.T) {
 	}
 	if view.TokenUsage.Known || view.TokenUsage.SubscriptionShare != "нет данных" {
 		t.Fatalf("missing usage must remain unknown: %+v", view.TokenUsage)
+	}
+}
+
+func TestLoadTaskRunViewShowsUnknownUsageForNonterminalReservedRun(t *testing.T) {
+	target := newControlRoot(t)
+	const runID = "run-reserved-usage"
+	createTaskRunFixture(t, target, runID, lifecycle.PhaseRunning, "analyst", "")
+	eventAuthority := evidence.ControllerEventStore{TargetDir: target}
+	if err := eventAuthority.MigrateLegacy(runID, filepath.Join(target, ".ai-team", "runs", runID)); err != nil {
+		t.Fatalf("prepare controller-backed running event log: %v", err)
+	}
+	if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := loadTaskRunView(target, runID)
+	if err != nil {
+		t.Fatalf("running run should remain inspectable while controller usage is pending: %v", err)
+	}
+	if view.RunID != runID || view.Phase != lifecycle.PhaseRunning || view.NextStage != "analyst" {
+		t.Fatalf("show lost nonterminal run details: %+v", view)
+	}
+	if view.TokenUsage.Known || view.TokenUsage.SubscriptionShare != "нет данных" {
+		t.Fatalf("missing usage must remain unknown until controller publishes its envelope: %+v", view.TokenUsage)
+	}
+	stdout, code, stderr := runCLI(t, "show", runID, "--json", "--target", target)
+	if code != 0 {
+		t.Fatalf("show should return the running task while usage is pending: code=%d stderr=%s", code, stderr)
+	}
+	records := parseJSONL(t, stdout)
+	if len(records) != 1 || records[0].Command != "show" {
+		t.Fatalf("show JSON record missing: %+v", records)
+	}
+	runView, ok := records[0].Data["run"].(map[string]any)
+	if !ok || runView["phase"] != string(lifecycle.PhaseRunning) || runView["next_stage"] != "analyst" {
+		t.Fatalf("show JSON lost the active run details: %#v", records[0].Data)
+	}
+	usage, ok := runView["token_usage"].(map[string]any)
+	if !ok || usage["known"] != false || usage["approximate_subscription_share"] != "нет данных" {
+		t.Fatalf("show JSON should keep pending usage unknown: %#v", runView["token_usage"])
+	}
+}
+
+func TestRunResumeUsesPinnedTemplatePreflightAfterActiveTemplateChanges(t *testing.T) {
+	target := newControlRoot(t)
+	pinnedConfig, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinnedConfig.Title = "Pinned template"
+	pinnedConfig.CLI = "opencode"
+	pinnedYAML, err := pinnedConfig.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".ai-team", "config.yaml"), pinnedYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID = "run-resume-pinned-config"
+	if _, err := templateStore.PinCurrentForRun(runID, runID); err != nil {
+		t.Fatal(err)
+	}
+	activeConfig := *pinnedConfig
+	activeConfig.Title = "Changed active template"
+	activeConfig.CLI = "claude"
+	activeYAML, err := activeConfig.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.Publish(activeYAML, config.TemplateVersionID(pinnedYAML)); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newAgentRegistry(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedPin, found, err := loadPinnedResumeConfig(target, runID, registry)
+	if err != nil || !found || loadedPin.Title != "Pinned template" {
+		t.Fatalf("resume config did not come from the immutable task pin: found=%v title=%q err=%v", found, loadedPin.Title, err)
+	}
+
+	createTaskRunFixture(t, target, runID, lifecycle.PhaseResumable, "analyst", "")
+	taskPath := filepath.Join(target, ".ai-team", "artifacts", "tasks", "feature", "task.md")
+	if err := os.MkdirAll(filepath.Dir(taskPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(taskPath, []byte("resume fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	opencode := filepath.Join(binDir, "opencode")
+	if err := os.WriteFile(opencode, []byte("#!/bin/sh\nprintf 'opencode test\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, code, stderr := runCLI(t, "run", "--target", target, "--resume", runID)
+	if code != exitFailed || !strings.Contains(stderr, "Пайплайн остановлен") || strings.Contains(stderr, "Preflight") {
+		t.Fatalf("resume should use pinned CLI preflight and reach pipeline recovery, got code=%d stderr=%q", code, stderr)
 	}
 }
 

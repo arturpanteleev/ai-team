@@ -183,6 +183,25 @@ func cmdTaskShow() {
 	printTaskRunView(view)
 }
 
+func loadPinnedResumeConfig(target, runID string, registry *agent.Registry) (*config.Config, bool, error) {
+	store, err := config.NewTemplateStore(target)
+	if err != nil {
+		return nil, false, fmt.Errorf("open pinned template store: %w", err)
+	}
+	data, _, found, err := store.ReadPinnedRun(runID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	pinned, err := config.ParseYAML(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("pinned template YAML: %w", err)
+	}
+	if err := pinned.Validate(registry); err != nil {
+		return nil, false, fmt.Errorf("pinned template validation: %w", err)
+	}
+	return pinned, true, nil
+}
+
 func loadTaskRunView(target, runID string) (taskRunView, error) {
 	stateStore, err := lifecycle.NewStore(target)
 	if err != nil {
@@ -255,10 +274,12 @@ func loadTaskRunView(target, runID string) (taskRunView, error) {
 		if reservationErr != nil {
 			return taskRunView{}, fmt.Errorf("usage reservation: %w", reservationErr)
 		}
-		if reserved {
+		if reserved && state.Phase == lifecycle.PhaseTerminal {
 			return taskRunView{}, fmt.Errorf("controller usage envelope is missing for run %s", runID)
 		}
-		envelope, usageErr = readLocalUsageEnvelope(target, runID)
+		if !reserved {
+			envelope, usageErr = readLocalUsageEnvelope(target, runID)
+		}
 	}
 	if usageErr == nil {
 		if envelope.HasCompleteTokenUsage() {

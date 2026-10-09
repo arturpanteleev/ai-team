@@ -97,11 +97,14 @@ func cmdTaskStageTake(args []string) {
 	if !result.Changed {
 		message = fmt.Sprintf("Этап %s задачи %s уже закреплён за участником %s (%s)", result.Owner.StageID, runID, result.Owner.ActorID, result.Owner.ActorRole)
 	}
-	if logging.GetMode() != logging.ModeJSON && logging.GetMode() != logging.ModeQuiet {
-		logging.Printf("%s\n", message)
+	record := logging.Record{Level: "ok", Command: "stage take", Type: "stage_owner", Message: message,
+		Data: map[string]any{"run_id": runID, "stage_id": stageName, "owner": result.Owner, "changed": result.Changed}, Exit: exitOK}
+	if logging.GetMode() == logging.ModeJSON || logging.GetMode() == logging.ModeQuiet {
+		logging.Printf("✓ %s\n", message)
+		logging.Emit(record)
+		return
 	}
-	logging.Emit(logging.Record{Level: "ok", Command: "stage take", Type: "stage_owner", Message: message,
-		Data: map[string]any{"run_id": runID, "stage_id": stageName, "owner": result.Owner, "changed": result.Changed}, Exit: exitOK})
+	logging.Printf("✓ %s\n", message)
 }
 
 func safeStageCLIIdentity(value string) bool {

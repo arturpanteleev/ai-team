@@ -41,7 +41,14 @@ func TestStageActionCLIHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Args = append([]string{"ai-team", "stage", os.Getenv("AI_TEAM_STAGE_ACTION")}, args...)
-	logging.SetMode(logging.ModeJSON)
+	switch os.Getenv("AI_TEAM_STAGE_ACTION_MODE") {
+	case "json":
+		logging.SetMode(logging.ModeJSON)
+	case "quiet":
+		logging.SetMode(logging.ModeQuiet)
+	default:
+		logging.SetMode(logging.ModeDefault)
+	}
 	cmdStage()
 }
 
@@ -147,7 +154,7 @@ func TestStageTakeCLIUsesAuthenticatedWebSessionAndServerIdentity(t *testing.T) 
 
 	command := exec.Command(executable, "-test.run=^TestStageActionCLIHelper$")
 	command.Env = append(os.Environ(), "AI_TEAM_STAGE_ACTION_HELPER=1", "AI_TEAM_STAGE_ACTION=take",
-		"AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
+		"AI_TEAM_STAGE_ACTION_MODE=json", "AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stage take CLI failed: %v\n%s", err, output)
@@ -155,6 +162,18 @@ func TestStageTakeCLIUsesAuthenticatedWebSessionAndServerIdentity(t *testing.T) 
 	if !bytes.Contains(output, []byte(`"type":"stage_owner"`)) || !bytes.Contains(output, []byte(`"actor_id":"alice@example.test"`)) ||
 		!bytes.Contains(output, []byte(`"changed":true`)) || bytes.Contains(output, []byte("cli-cloud-token")) {
 		t.Fatalf("stage take did not report the server-derived owner safely: %s", output)
+	}
+
+	command = exec.Command(executable, "-test.run=^TestStageActionCLIHelper$")
+	command.Env = append(os.Environ(), "AI_TEAM_STAGE_ACTION_HELPER=1", "AI_TEAM_STAGE_ACTION=take",
+		"AI_TEAM_STAGE_ACTION_MODE=default", "AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
+	output, err = command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage take CLI in human mode failed: %v\n%s", err, output)
+	}
+	const successLine = "✓ Этап product_spec задачи run-cli-take взят участником alice@example.test (product_owner)"
+	if strings.Count(string(output), successLine) != 1 {
+		t.Fatalf("human mode should print exactly one success line %q, got: %s", successLine, output)
 	}
 }
 

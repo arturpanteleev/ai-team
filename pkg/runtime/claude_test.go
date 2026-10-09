@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,6 +235,74 @@ func TestClaudeEnvironmentAllowsSubscriptionTokenWithoutOptIn(t *testing.T) {
 	}
 	if containsEnvironmentKey(env, "ANTHROPIC_API_KEY") {
 		t.Fatal("an API key must remain opt-in even when subscription auth is available")
+	}
+}
+
+func TestClaudeStageReadDenyBlocksKnownAnswerPathAfterPromptInjection(t *testing.T) {
+	answerPath := filepath.Join(t.TempDir(), ".ai-team", "runs", "run-1", "inputs", "approval-1-answer.md")
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(answerPath)))))
+	approvalJSONPath := filepath.Join(targetDir, ".ai-team", "state", "approvals", "run-1", "approval-1.json")
+	if err := os.MkdirAll(filepath.Dir(answerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(answerPath, []byte("durable clarification answer"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(approvalJSONPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(approvalJSONPath, []byte(`{"decisions":[{"comment":"durable clarification answer"}]}`), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{TargetDir: targetDir, DeniedReadPaths: []string{answerPath, approvalJSONPath}}
+	input := Artifact{Name: "clarification-answer", Path: answerPath}
+	prompt, err := (&AgentCLIRuntime{}).buildPrompt(&Agent{Name: "target", Prompt: "continue"}, task, []Artifact{input})
+	if err != nil || !strings.Contains(prompt, "durable clarification answer") {
+		t.Fatalf("target stage must still receive the answer in its prompt: prompt=%q err=%v", prompt, err)
+	}
+	settings, err := claudeSessionSettings(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(settings, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	wants := []string{
+		"Read(//" + filepath.ToSlash(answerPath)[1:] + ")",
+		"Read(//" + filepath.ToSlash(approvalJSONPath)[1:] + ")",
+	}
+	hasRead := false
+	denied := make(map[string]bool)
+	for _, rule := range parsed.Permissions.Allow {
+		hasRead = hasRead || rule == "Read"
+	}
+	for _, rule := range parsed.Permissions.Deny {
+		denied[rule] = true
+	}
+	if !hasRead {
+		t.Fatalf("Claude must keep ordinary prompt-input reads: allow=%v deny=%v", parsed.Permissions.Allow, parsed.Permissions.Deny)
+	}
+	for _, want := range wants {
+		if !denied[want] {
+			t.Fatalf("Claude must deny answer materialization and its durable approval JSON: allow=%v deny=%v missing=%q", parsed.Permissions.Allow, parsed.Permissions.Deny, want)
+		}
+	}
+	// Every subsequent runtime gets the same per-run protected path list, so
+	// knowledge of the exact path cannot restore tool-level Read access.
+	followUpSettings, err := claudeSessionSettings(&Task{TargetDir: task.TargetDir, DeniedReadPaths: []string{answerPath, approvalJSONPath}})
+	if err != nil {
+		t.Fatalf("follow-up stage lost the exact deny: policy=%s err=%v", followUpSettings, err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(string(followUpSettings), want) {
+			t.Fatalf("follow-up stage lost the exact deny %q: policy=%s", want, followUpSettings)
+		}
 	}
 }
 

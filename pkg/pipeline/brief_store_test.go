@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+func briefTestProvenance() ClarificationProvenance {
+	return ClarificationProvenance{Stage: "analyst", ActorID: "owner@example.com", ActorRole: "product_owner"}
+}
+
 func TestMaterializeBriefDocumentRejectsInvalidControllerData(t *testing.T) {
 	validContent := []byte("# intention\n")
 	initial, err := NewFileBriefStore(t.TempDir()).CreateInitial("source-run", "intention")
@@ -85,14 +89,14 @@ func TestFileBriefStoreRejectsInvalidAndConflictingBriefs(t *testing.T) {
 func TestFileBriefStoreAppendClarificationRejectsMissingAndOversizedHistory(t *testing.T) {
 	target := t.TempDir()
 	store := NewFileBriefStore(target)
-	if _, err := store.AppendClarification("missing-run", "approval", "question", "answer"); err == nil {
+	if _, err := store.AppendClarification("missing-run", "approval", briefTestProvenance(), "question", "answer"); err == nil {
 		t.Fatal("clarification appended before an initial brief existed")
 	}
 	if _, err := store.CreateInitial("run-answer-limits", "intention"); err != nil {
 		t.Fatal(err)
 	}
 	for _, answer := range []string{"", " \n ", strings.Repeat("a", maxAnswerBytes+1)} {
-		if _, err := store.AppendClarification("run-answer-limits", "approval", "question", answer); err == nil {
+		if _, err := store.AppendClarification("run-answer-limits", "approval", briefTestProvenance(), "question", answer); err == nil {
 			t.Fatal("AppendClarification accepted an empty or oversized answer")
 		}
 	}
@@ -106,8 +110,33 @@ func TestFileBriefStoreAppendClarificationRejectsMissingAndOversizedHistory(t *t
 	if _, err := store.CreateInitial("run-history-limit", large); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendClarification("run-history-limit", "approval", "question", "answer"); err == nil {
+	if _, err := store.AppendClarification("run-history-limit", "approval", briefTestProvenance(), "question", "answer"); err == nil {
 		t.Fatal("AppendClarification exceeded the maximum version size")
+	}
+}
+
+func TestBriefClarificationPersistsActualStageAndAnswerActor(t *testing.T) {
+	store := NewFileBriefStore(t.TempDir())
+	const runID = "generic-questions-provenance"
+	if _, err := store.CreateInitial(runID, "triage an incident"); err != nil {
+		t.Fatal(err)
+	}
+	provenance := ClarificationProvenance{Stage: "incident_triage", ActorID: "commander-17", ActorRole: "incident_commander"}
+	document, err := store.AppendClarification(runID, "approval-custom-role", provenance, "Which service is affected?", "billing-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(document.Content)
+	for _, required := range []string{"Вопросы этапа \"incident_triage\"", "Ответ от роли \"incident_commander\"", "участник \"commander-17\""} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("durable clarification omitted factual provenance %q: %s", required, text)
+		}
+	}
+	if strings.Contains(text, "аналитик") || strings.Contains(text, "Product Owner") {
+		t.Fatalf("generic AskQuestions brief claimed a role not present in its approval: %s", text)
+	}
+	if _, err := store.AppendClarification(runID, "approval-missing-provenance", ClarificationProvenance{}, "q", "a"); err == nil {
+		t.Fatal("clarification without stage and resolving-actor provenance was accepted")
 	}
 }
 
@@ -149,7 +178,7 @@ func TestControllerBriefStoreMigratesLegacyVersionsWithoutChangingIdentity(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	clarified, err := legacy.AppendClarification(runID, "approval-legacy", "question", "answer")
+	clarified, err := legacy.AppendClarification(runID, "approval-legacy", briefTestProvenance(), "question", "answer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +382,7 @@ func TestControllerBriefStoreCleansLegacySubsetAfterInterruptedCleanup(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.AppendClarification(runID, "approval-one", "question", "answer"); err != nil {
+	if _, err := controller.AppendClarification(runID, "approval-one", briefTestProvenance(), "question", "answer"); err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.Close(); err != nil {
@@ -421,7 +450,7 @@ func TestControllerBriefStoreCRUDStaysOnPinnedDirectoryAfterAncestorReplacement(
 	if err := os.WriteFile(redirectedSentinel, []byte("redirected"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	clarified, err := store.AppendClarification(runID, "approval-pinned", "where?", "here")
+	clarified, err := store.AppendClarification(runID, "approval-pinned", briefTestProvenance(), "where?", "here")
 	if err != nil {
 		t.Fatal(err)
 	}

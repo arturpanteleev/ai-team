@@ -116,6 +116,9 @@ func TestOpenAIEgressControllerRequiresCapabilityAndExactTarget(t *testing.T) {
 }
 
 func TestPublicUnicastIPRejectsSpecialAndReservedRanges(t *testing.T) {
+	if publicUnicastIP(nil) {
+		t.Fatal("nil DNS result was classified as a public unicast address")
+	}
 	for _, test := range []struct {
 		address string
 		want    bool

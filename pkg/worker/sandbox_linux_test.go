@@ -1781,7 +1781,9 @@ func runBriefAncestorReplacementProbe(target, runID, task string, briefs pipelin
 		}
 		result := make(chan appendResult, 1)
 		go func() {
-			document, err := briefs.AppendClarification(runID, sandboxBriefAncestorProbeApprovalID, sandboxBriefAncestorProbeQuestions, sandboxBriefAncestorProbeAnswer)
+			document, err := briefs.AppendClarification(runID, sandboxBriefAncestorProbeApprovalID,
+				pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "qa@example.com", ActorRole: "qa"},
+				sandboxBriefAncestorProbeQuestions, sandboxBriefAncestorProbeAnswer)
 			result <- appendResult{document: document, err: err}
 		}()
 		var appended appendResult

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -23,9 +26,9 @@ import (
 // Политика изоляции: sandbox=workspace-write (записи только внутри workspace),
 // headless without approvals, CODEX_HOME перенаправлен во временный каталог
 // (проектный/user config и MCP-серверы не загружаются), env заменён
-// allow-листом. Ограничение: tool-level deny (webfetch/websearch), который у
-// OpenCode выражается permission-JSON, у Codex требует стабильного execpolicy
-// grammar; пока он в preview — полагаемся на sandbox и zero-approval режим.
+// allow-листом. Для stage-specific read-deny используется Codex filesystem
+// permission profile (CLI >= 0.138.0), поскольку legacy workspace-write
+// sandbox разрешает чтение всего workspace.
 type CodexAdapter struct{}
 
 func (a *CodexAdapter) Name() string { return "codex" }
@@ -57,17 +60,13 @@ func (a *CodexAdapter) Command(cli string, launch Launch, promptFile string) ([]
 	if filepath.Base(cli) != a.Name() {
 		return nil, fmt.Errorf("CLI %q не поддерживается адаптером codex: требуется явный adapter вместо guessed arguments", cli)
 	}
-	args := []string{
-		"exec",
-		"--json",
-		"--sandbox", "workspace-write",
-		// Субпроцесс всегда ограничен sandbox workspace-write: безопаснее
-		// гарантировать границу записей и для eval-каталогов вне git, чем
-		// полагаться на требование git-репозитория (preflight проверил его
-		// для agent-стадий отдельно).
-		"--skip-git-repo-check",
-		"--ephemeral",
+	args := []string{"exec", "--json"}
+	if len(launch.DeniedReadPaths) == 0 {
+		args = append(args, "--sandbox", "workspace-write")
 	}
+	// The temp CODEX_HOME selects the exact-path profile for protected stages.
+	// Do not pass the legacy --sandbox flag in that case: it takes precedence.
+	args = append(args, "--skip-git-repo-check", "--ephemeral")
 	if launch.Model != "" && launch.Model != "auto" {
 		args = append(args, "-m", launch.Model)
 	}
@@ -112,11 +111,28 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 	}
 	cleanup := func() { _ = os.RemoveAll(codexHome) }
 
-	// Defense-in-depth: те же policy, что и в argv-флагах; инициализирует
-	// изолированный config, если harness станет читать его (а не только флаги).
-	configContent := "approval_policy = \"never\"\nsandbox_mode = \"workspace-write\"\n"
+	deniedReadPaths, err := exactDeniedReadPaths(task)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if len(deniedReadPaths) > 0 {
+		cli := agent.CLI
+		if cli == "" {
+			cli = "codex"
+		}
+		if err := requireCodexPermissionProfiles(cli); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+	}
+	configContent, err := codexSessionConfig(deniedReadPaths)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
 	configPath := filepath.Join(codexHome, "config.toml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+	if err := os.WriteFile(configPath, configContent, 0600); err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}
@@ -147,6 +163,48 @@ func (a *CodexAdapter) Environment(agent *Agent, task *Task, inputs ...Artifact)
 	env = append(env, "CODEX_HOME="+codexHome)
 	sort.Strings(env)
 	return env, cleanup, nil
+}
+
+const codexReadDenyProfileMinimum = "0.138.0"
+
+var codexVersionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][A-Za-z0-9.-]+)?`)
+
+func requireCodexPermissionProfiles(cli string) error {
+	output, err := exec.Command(cli, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("codex per-stage read isolation requires a verifiable CLI version with permission profiles (>= %s): %w", codexReadDenyProfileMinimum, err)
+	}
+	match := codexVersionPattern.FindStringSubmatch(strings.TrimSpace(string(output)))
+	if len(match) != 4 {
+		return fmt.Errorf("codex per-stage read isolation requires a verifiable CLI version with permission profiles (>= %s)", codexReadDenyProfileMinimum)
+	}
+	major, _ := strconv.Atoi(match[1])
+	minor, _ := strconv.Atoi(match[2])
+	if major == 0 && minor < 138 {
+		return fmt.Errorf("codex %s does not support enforced per-stage read-deny permission profiles (requires >= %s)", strings.Join(match[1:], "."), codexReadDenyProfileMinimum)
+	}
+	return nil
+}
+
+func codexSessionConfig(deniedReadPaths []string) ([]byte, error) {
+	paths, err := validateExactDeniedReadPaths(deniedReadPaths)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return []byte("approval_policy = \"never\"\nsandbox_mode = \"workspace-write\"\n"), nil
+	}
+	var config strings.Builder
+	config.WriteString("approval_policy = \"never\"\n")
+	config.WriteString("default_permissions = \"ai_team_workspace\"\n\n")
+	config.WriteString("[permissions.ai_team_workspace]\nextends = \":workspace\"\n\n")
+	config.WriteString("[permissions.ai_team_workspace.filesystem]\n")
+	for _, path := range paths {
+		config.WriteString(strconv.Quote(path))
+		config.WriteString(" = \"deny\"\n")
+	}
+	config.WriteString("\n[permissions.ai_team_workspace.network]\nenabled = false\n")
+	return []byte(config.String()), nil
 }
 
 // ParseUsage — типизированный разбор usage из JSONL-событий `codex exec

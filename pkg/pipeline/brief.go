@@ -39,6 +39,26 @@ type BriefDocument struct {
 	Content []byte       `json:"content"`
 }
 
+// ClarificationProvenance is derived from the durable approval and records
+// which stage asked and which durable decision supplied the answer.
+type ClarificationProvenance struct {
+	Stage     string `json:"stage"`
+	ActorID   string `json:"actor_id"`
+	ActorRole string `json:"actor_role"`
+}
+
+func validateClarificationProvenance(provenance ClarificationProvenance) error {
+	if strings.TrimSpace(provenance.Stage) == "" || strings.TrimSpace(provenance.ActorID) == "" || strings.TrimSpace(provenance.ActorRole) == "" {
+		return errors.New("clarification stage and answer actor provenance are required")
+	}
+	return nil
+}
+
+func clarificationAddition(index int, provenance ClarificationProvenance, questions, answer string) []byte {
+	return []byte(fmt.Sprintf("\n## Уточнение %d\n\n### Вопросы этапа %q\n\n%s\n\n### Ответ от роли %q (участник %q)\n\n%s\n",
+		index, provenance.Stage, strings.TrimSpace(questions), provenance.ActorRole, provenance.ActorID, answer))
+}
+
 func materializeBriefDocument(workspace string, document BriefDocument) (briefVersion, error) {
 	version := document.Version
 	name := filepath.Base(filepath.FromSlash(version.Path))
@@ -69,7 +89,7 @@ func materializeBriefDocument(workspace string, document BriefDocument) (briefVe
 // It deliberately accepts no filesystem paths from callers.
 type BriefStore interface {
 	CreateInitial(runID, intention string) (BriefDocument, error)
-	AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error)
+	AppendClarification(runID, approvalID string, provenance ClarificationProvenance, questions, answer string) (BriefDocument, error)
 	List(runID string) ([]BriefVersion, error)
 	Read(runID, versionID string) (BriefDocument, error)
 }
@@ -174,13 +194,13 @@ func (s *ControllerBriefStore) CreateInitial(runID, intention string) (BriefDocu
 	return createInitialBriefAt(s.rootFD, runID, intention)
 }
 
-func (s *ControllerBriefStore) AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error) {
+func (s *ControllerBriefStore) AppendClarification(runID, approvalID string, provenance ClarificationProvenance, questions, answer string) (BriefDocument, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.requirePreparedLocked(runID); err != nil {
 		return BriefDocument{}, err
 	}
-	return appendBriefClarificationAt(s.rootFD, runID, approvalID, questions, answer)
+	return appendBriefClarificationAt(s.rootFD, runID, approvalID, provenance, questions, answer)
 }
 
 func (s *ControllerBriefStore) List(runID string) ([]BriefVersion, error) {
@@ -238,11 +258,14 @@ func createInitialBrief(runRoot func(string) (string, error), runID, intention s
 	return BriefDocument{Version: version, Content: content}, nil
 }
 
-func (s *FileBriefStore) AppendClarification(runID, approvalID, questions, answer string) (BriefDocument, error) {
-	return appendBriefClarification(s.runRoot, runID, approvalID, questions, answer)
+func (s *FileBriefStore) AppendClarification(runID, approvalID string, provenance ClarificationProvenance, questions, answer string) (BriefDocument, error) {
+	return appendBriefClarification(s.runRoot, runID, approvalID, provenance, questions, answer)
 }
 
-func appendBriefClarification(runRoot func(string) (string, error), runID, approvalID, questions, answer string) (BriefDocument, error) {
+func appendBriefClarification(runRoot func(string) (string, error), runID, approvalID string, provenance ClarificationProvenance, questions, answer string) (BriefDocument, error) {
+	if err := validateClarificationProvenance(provenance); err != nil {
+		return BriefDocument{}, err
+	}
 	answer = strings.TrimSpace(answer)
 	if answer == "" || len(answer) > maxAnswerBytes {
 		return BriefDocument{}, errors.New("answer must contain 1..16384 bytes")
@@ -273,7 +296,7 @@ func appendBriefClarification(runRoot func(string) (string, error), runID, appro
 	}
 	name := fmt.Sprintf("%04d-answer-%s.md", len(versions)+1, filepath.Base(approvalID))
 	path := filepath.Join(root, name)
-	addition := []byte(fmt.Sprintf("\n## Уточнение %d\n\n### Вопросы аналитика\n\n%s\n\n### Ответ Product Owner\n\n%s\n", len(versions), strings.TrimSpace(questions), answer))
+	addition := clarificationAddition(len(versions), provenance, questions, answer)
 	content := append(append([]byte(nil), parentData...), addition...)
 	if len(content) > maxBriefBytes {
 		return BriefDocument{}, errors.New("versioned business brief exceeds 262144 bytes")

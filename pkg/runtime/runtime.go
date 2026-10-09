@@ -69,4 +69,9 @@ type Task struct {
 	// Interactive — запуск в интерактивном TTY-режиме: агенту с
 	// ask_questions разрешается инструмент question.
 	Interactive bool
+	// DeniedReadPaths are trusted, exact file paths that this stage must not
+	// read. The clarification handoff uses these to keep its durable answer
+	// available to the requesting stage through prompt inputs while denying it
+	// to every later runtime invocation in the same worker process.
+	DeniedReadPaths []string
 }

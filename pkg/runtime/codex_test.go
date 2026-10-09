@@ -3,6 +3,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,102 @@ func TestCodexCommandNoModelNoEffort(t *testing.T) {
 	}
 	if args[len(args)-1] != "-" {
 		t.Errorf("промпт должен передаваться через stdin sentinel '-', got %v", args)
+	}
+}
+
+func TestCodexProtectedStageUsesExactReadDenyProfileAndPromptInput(t *testing.T) {
+	answerPath := filepath.Join(t.TempDir(), ".ai-team", "runs", "run-1", "inputs", "approval-1-answer.md")
+	targetDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(answerPath)))))
+	approvalJSONPath := filepath.Join(targetDir, ".ai-team", "state", "approvals", "run-1", "approval-1.json")
+	legacyEventPath := filepath.Join(targetDir, ".ai-team", "runs", "run-1", "events.jsonl")
+	reservedEventPath := filepath.Join(targetDir, ".ai-team", "state", "events", "run-1", "events.jsonl")
+	controllerDBPath := filepath.Join(targetDir, ".ai-team", "state", "controller.sqlite")
+	if err := os.MkdirAll(filepath.Dir(answerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(answerPath, []byte("durable clarification answer"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(approvalJSONPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(approvalJSONPath, []byte(`{"decisions":[{"comment":"durable clarification answer"}]}`), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	launch := Launch{DeniedReadPaths: []string{
+		answerPath, approvalJSONPath, legacyEventPath, reservedEventPath,
+		controllerDBPath, controllerDBPath + "-wal", controllerDBPath + "-shm", controllerDBPath + "-journal",
+	}}
+	args, err := (&CodexAdapter{}).Command("codex", launch, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(args, " "), "--sandbox") {
+		t.Fatalf("custom permission profile must not be shadowed by legacy --sandbox: %v", args)
+	}
+	config, err := codexSessionConfig(launch.DeniedReadPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(config)
+	for _, required := range []string{
+		`default_permissions = "ai_team_workspace"`,
+		`extends = ":workspace"`,
+		strconv.Quote(answerPath) + ` = "deny"`,
+		strconv.Quote(approvalJSONPath) + ` = "deny"`,
+		strconv.Quote(legacyEventPath) + ` = "deny"`,
+		strconv.Quote(reservedEventPath) + ` = "deny"`,
+		strconv.Quote(controllerDBPath) + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-wal") + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-shm") + ` = "deny"`,
+		strconv.Quote(controllerDBPath+"-journal") + ` = "deny"`,
+		`enabled = false`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Codex exact-path permission profile is missing %q: %s", required, text)
+		}
+	}
+	if strings.Contains(text, "sandbox_mode") {
+		t.Fatalf("profile mode must not be overridden by legacy sandbox_mode: %s", text)
+	}
+	prompt, err := (&AgentCLIRuntime{}).buildPrompt(&Agent{Name: "target", Prompt: "continue"}, &Task{TargetDir: t.TempDir()}, []Artifact{{Name: "clarification-answer", Path: answerPath}})
+	if err != nil || !strings.Contains(prompt, "durable clarification answer") {
+		t.Fatalf("target stage must still receive the answer in its prompt: prompt=%q err=%v", prompt, err)
+	}
+}
+
+func TestCodexProtectedEnvironmentRequiresPermissionProfileSupport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_API_KEY", "synthetic-key")
+	t.Setenv(HarnessEnvAllowVar, "CODEX_API_KEY")
+	t.Setenv(HarnessEnvAllowLegacyVar, "")
+	bin := t.TempDir()
+	mock := filepath.Join(bin, "codex")
+	if err := os.WriteFile(mock, []byte("#!/bin/sh\necho 'codex 0.138.0'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	answerPath := filepath.Join(target, ".ai-team", "runs", "run-1", "inputs", "approval-1-answer.md")
+	env, cleanup, err := (&CodexAdapter{}).Environment(&Agent{Name: "coder", CLI: mock}, &Task{
+		TargetDir: target, DeniedReadPaths: []string{answerPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	codexHome := environmentValue(env, "CODEX_HOME")
+	config, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil || !strings.Contains(string(config), strconv.Quote(answerPath)+` = "deny"`) {
+		t.Fatalf("runtime environment must carry exact denied path: config=%s err=%v", config, err)
+	}
+
+	if err := os.WriteFile(mock, []byte("#!/bin/sh\necho 'codex 0.137.9'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (&CodexAdapter{}).Environment(&Agent{Name: "coder", CLI: mock}, &Task{
+		TargetDir: target, DeniedReadPaths: []string{answerPath},
+	}); err == nil || !strings.Contains(err.Error(), "requires >= 0.138.0") {
+		t.Fatalf("old CLI must fail closed instead of dropping exact read denial: %v", err)
 	}
 }
 

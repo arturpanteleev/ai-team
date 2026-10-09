@@ -137,7 +137,9 @@ func WithAgentRegistryPaths(paths []string) ProcessOption {
 
 // WithControllerAPI moves worker recorder and approval traffic back to the
 // controller process. The worker receives a short-lived, run-scoped capability
-// and no controller database path; Linux bubblewrap launches use a Unix socket.
+// and no database access path; a deny-only database path may be passed to the
+// worker so Codex can exclude controller projections from its workspace view.
+// Linux bubblewrap launches use a Unix socket for the controller capability.
 func WithControllerAPI(recorderFactory func() pipeline.Recorder, approvals pipeline.ApprovalStore) ProcessOption {
 	return func(engine *ProcessEngine) error {
 		if recorderFactory == nil || approvals == nil {
@@ -253,6 +255,11 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		// Compatibility path for local scheduler CLI configurations that have
 		// not yet attached a controller-owned store API.
 		args = append(args, "--db", e.dbPath)
+	} else {
+		// This is policy metadata only. cmdWorker never opens the database in
+		// controller-API mode; it forwards the exact path to Codex's stage read
+		// deny profile in case a worker is launched without bubblewrap.
+		args = append(args, "--controller-read-deny-path", e.dbPath)
 	}
 	command := exec.CommandContext(ctx, e.argv[0], args...)
 	configureWorkerProcess(command)
@@ -263,6 +270,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 	defer cleanupEnvironment()
 	command.Env = environment
 	var api *workerAPIServer
+	var readOnlyInputMounts []workerReadOnlyInputMount
 	var openAIEgress *openAIEgressServer
 	var openAIEgressSocket, openAIEgressToken string
 	if e.apiRecorderFactory != nil {
@@ -328,6 +336,15 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 		api.candidateAbsenceAllowed = absenceAllowed
 		if e.bubblewrap {
+			questionAnswerMount, mountErr := api.prepareQuestionAnswerMount(ctx)
+			if mountErr != nil {
+				return pipeline.RunResult{}, fmt.Errorf("prepare worker clarification input: %w", mountErr)
+			}
+			if questionAnswerMount != nil {
+				readOnlyInputMounts = append(readOnlyInputMounts, *questionAnswerMount)
+			}
+		}
+		if e.bubblewrap {
 			openAIEgressSocket = filepath.Join(controlSocketDir, "openai-egress.sock")
 			dial := e.openAIEgressDial
 			if dial == nil {
@@ -343,7 +360,7 @@ func (e *ProcessEngine) execute(ctx context.Context, job Job) (pipeline.RunResul
 		}
 	}
 	if e.bubblewrap {
-		command, err = bubblewrapWorkerCommand(ctx, command, e.target, e.dbPath, job.RunID, e.agentPaths, command.Env)
+		command, err = bubblewrapWorkerCommandWithInputs(ctx, command, e.target, e.dbPath, job.RunID, e.agentPaths, command.Env, readOnlyInputMounts)
 		if err != nil {
 			return pipeline.RunResult{}, fmt.Errorf("worker bubblewrap isolation: %w", err)
 		}

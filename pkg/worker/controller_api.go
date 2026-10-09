@@ -156,34 +156,41 @@ type workerApprovalPort interface {
 	List(string) ([]approval.PendingApproval, error)
 }
 type workerAPIServer struct {
-	scope                   workerAPIScope
-	token                   string
-	listener                net.Listener
-	socketPath              string
-	server                  *http.Server
-	recorder                pipeline.Recorder
-	approvals               workerApprovalPort
-	lifecycle               lifecycle.StorePort
-	briefs                  pipeline.BriefStore
-	candidates              candidate.MetadataStore
-	absences                candidate.AbsenceMarkerStore
-	usage                   metrics.FileUsageEnvelopeStore
-	attestations            attest.ControllerStore
-	containmentReceipts     containment.ControllerReceiptStore
-	candidateEvidenceRoot   string
-	attemptManifests        evidence.ControllerAttemptManifestStore
-	eventLogs               evidence.EventLog
-	eventSnapshot           []byte
-	eventSnapshotToken      string
-	usageAllowed            bool
-	usageEnvelopeWritten    bool
-	candidateAbsenceAllowed bool
-	briefTask               string
-	approvedPlanHash        string
-	dispatchMu              sync.Mutex
-	requestSlots            chan struct{}
-	nonceMu                 sync.Mutex
-	nonces                  map[string]time.Time
+	scope                      workerAPIScope
+	token                      string
+	listener                   net.Listener
+	socketPath                 string
+	server                     *http.Server
+	recorder                   pipeline.Recorder
+	approvals                  workerApprovalPort
+	lifecycle                  lifecycle.StorePort
+	briefs                     pipeline.BriefStore
+	candidates                 candidate.MetadataStore
+	absences                   candidate.AbsenceMarkerStore
+	usage                      metrics.FileUsageEnvelopeStore
+	attestations               attest.ControllerStore
+	containmentReceipts        containment.ControllerReceiptStore
+	candidateEvidenceRoot      string
+	attemptManifests           evidence.ControllerAttemptManifestStore
+	questionAnswerStore        pipeline.ControllerQuestionAnswerStore
+	questionAnswerID           string
+	questionAnswerPath         string
+	questionAnswerMount        *workerReadOnlyInputMount
+	questionAnswerMountInfo    os.FileInfo
+	questionAnswerMountCreated bool
+	questionAnswerReplay       evidence.ReplayedRun
+	eventLogs                  evidence.EventLog
+	eventSnapshot              []byte
+	eventSnapshotToken         string
+	usageAllowed               bool
+	usageEnvelopeWritten       bool
+	candidateAbsenceAllowed    bool
+	briefTask                  string
+	approvedPlanHash           string
+	dispatchMu                 sync.Mutex
+	requestSlots               chan struct{}
+	nonceMu                    sync.Mutex
+	nonces                     map[string]time.Time
 }
 
 // startWorkerAPIServer creates a per-execution loopback capability for
@@ -398,6 +405,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 	api.attestations = attest.ControllerStore{TargetDir: canonicalTarget}
 	api.attemptManifests = evidence.ControllerAttemptManifestStore{TargetDir: canonicalTarget}
 	api.containmentReceipts = containment.ControllerReceiptStore{TargetDir: canonicalTarget}
+	api.questionAnswerStore = pipeline.ControllerQuestionAnswerStore{TargetDir: canonicalTarget}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/call", api.handle)
 	api.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -407,6 +415,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 func (s *workerAPIServer) close() {
 	if s != nil && s.server != nil {
 		_ = s.server.Close()
+		s.cleanupQuestionAnswerMountpoint()
 		if s.socketPath != "" {
 			_ = os.Remove(s.socketPath)
 		}
@@ -418,6 +427,187 @@ func (s *workerAPIServer) close() {
 		}
 	}
 }
+
+func (s *workerAPIServer) prepareQuestionAnswerMount(ctx context.Context) (*workerReadOnlyInputMount, error) {
+	if s == nil || !s.usageAllowed || s.eventLogs == nil || s.lifecycle == nil || s.approvals == nil {
+		return nil, nil
+	}
+	switch s.scope.Operation {
+	case OperationResume, OperationRecover:
+	default:
+		return nil, nil
+	}
+	state, err := s.lifecycle.Load(s.scope.RunID)
+	if errors.Is(err, os.ErrNotExist) && s.scope.Operation == OperationRecover {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load lifecycle before clarification materialization: %w", err)
+	}
+	if state.RunID != s.scope.RunID || state.TargetDir != s.scope.TargetDir {
+		return nil, errors.New("clarification materialization lifecycle identity mismatch")
+	}
+	if state.Phase != lifecycle.PhaseWaiting && state.Phase != lifecycle.PhaseRunning && state.Phase != lifecycle.PhaseResumable {
+		return nil, nil
+	}
+	runRoot := filepath.Join(s.questionAnswerStore.TargetDir, ".ai-team", "runs")
+	manifestSource := evidence.ReservedAttemptManifestSource{TargetDir: s.questionAnswerStore.TargetDir}
+	_, _, replayed, err := evidence.ResumeWithEventLog(runRoot, s.scope.RunID, s.eventLogs, manifestSource)
+	if err != nil {
+		return nil, fmt.Errorf("verify run before clarification materialization: %w", err)
+	}
+
+	var value *approval.PendingApproval
+	switch state.Phase {
+	case lifecycle.PhaseWaiting:
+		if state.NextStage == "" || state.PendingApprovalID == "" {
+			return nil, nil
+		}
+		loaded, loadErr := s.approvals.Load(s.scope.RunID, state.PendingApprovalID)
+		if loadErr != nil {
+			return nil, fmt.Errorf("load pending clarification approval: %w", loadErr)
+		}
+		if loaded.Status != approval.StatusResolved || loaded.ResolvedAction != "answer_questions" {
+			return nil, nil
+		}
+		if loaded.FromStage != state.NextStage || loaded.ToStage != state.NextStage || loaded.Targets[loaded.ResolvedAction] != state.NextStage {
+			return nil, errors.New("clarification approval stage does not match waiting lifecycle stage")
+		}
+		value = &loaded
+	case lifecycle.PhaseRunning, lifecycle.PhaseResumable:
+		value, err = pipeline.RecoveredQuestionApproval(s.approvals, s.scope.RunID, state.NextStage, replayed)
+		if err != nil {
+			// A stale clarification can coexist with a later, verified graph
+			// transition when the process crashed after transition_selected but
+			// before updating the lifecycle checkpoint. Let Pipeline reconcile
+			// that transition. It will still fail closed if no valid handoff is
+			// present. Only suppress this sentinel at the pre-spawn admission
+			// boundary; the worker dispatch path repeats approval validation.
+			if errors.Is(err, pipeline.ErrStaleQuestionApproval) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("select recovered clarification approval: %w", err)
+		}
+	}
+	if value == nil {
+		return nil, nil
+	}
+	if err := pipeline.ValidateQuestionAnswerApproval(*value, replayed); err != nil {
+		return nil, fmt.Errorf("validate clarification source attempt: %w", err)
+	}
+	if err := validateQuestionAnswerCandidate(ctx, s.questionAnswerStore.TargetDir, *value); err != nil {
+		return nil, err
+	}
+	if err := s.validateQuestionAnswerRequestEvent(*value); err != nil {
+		return nil, err
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(manifestSource, filepath.Join(runRoot, s.scope.RunID), s.scope.RunID, value.AttemptID)
+	if err != nil {
+		return nil, fmt.Errorf("read clarification source attempt manifest: %w", err)
+	}
+	if manifest.RunID != s.scope.RunID || manifest.AttemptID != value.AttemptID || manifest.Stage != value.FromStage {
+		return nil, errors.New("clarification source manifest identity mismatch")
+	}
+	hasQuestions := false
+	for _, output := range manifest.Outputs {
+		if output.Name == "questions" {
+			hasQuestions = true
+			break
+		}
+	}
+	if !hasQuestions {
+		return nil, errors.New("clarification source manifest has no questions output")
+	}
+	source, err := s.questionAnswerStore.Prepare(*value)
+	if err != nil {
+		return nil, fmt.Errorf("prepare canonical clarification answer: %w", err)
+	}
+	expectedAnswer, err := pipeline.CanonicalQuestionAnswerContent(*value)
+	if err != nil {
+		return nil, fmt.Errorf("derive canonical clarification answer: %w", err)
+	}
+	destination, err := pipeline.QuestionAnswerMaterializationPath(s.questionAnswerStore.TargetDir, s.scope.RunID, value.ID)
+	if err != nil {
+		return nil, err
+	}
+	created, mountInfo, err := prepareQuestionAnswerMountpoint(destination, expectedAnswer)
+	if err != nil {
+		return nil, err
+	}
+	s.questionAnswerID = value.ID
+	s.questionAnswerPath = destination
+	s.questionAnswerReplay = replayed
+	s.questionAnswerMountInfo = mountInfo
+	s.questionAnswerMountCreated = created
+	s.questionAnswerMount = &workerReadOnlyInputMount{SourcePath: source, TargetPath: destination, TargetInfo: mountInfo}
+	return s.questionAnswerMount, nil
+}
+
+func prepareQuestionAnswerMountpoint(path string, expected []byte) (bool, os.FileInfo, error) {
+	if err := safeio.EnsureDirPath(filepath.Dir(path)); err != nil {
+		return false, nil, err
+	}
+	if data, info, err := readQuestionAnswerMountFile(path, maxQuestionAnswerMountBytes); err == nil {
+		if len(data) == 0 {
+			return false, info, nil
+		}
+		if len(expected) == 0 || !bytes.Equal(data, expected) || info.Mode().Perm()&0o222 != 0 {
+			return false, nil, errors.New("existing clarification input is not an exact read-only durable-answer projection")
+		}
+		// A previous invocation may have crashed after writing this exact
+		// projection. Keep it as the target of the production read-only bind
+		// mount; after unmount it still contains only the canonical answer.
+		return false, info, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false, nil, err
+	}
+	if err := errors.Join(file.Sync(), file.Close()); err != nil {
+		return false, nil, err
+	}
+	_, info, err := readQuestionAnswerMountFile(path, maxQuestionAnswerMountBytes)
+	if err != nil {
+		return false, nil, err
+	}
+	return true, info, nil
+}
+
+func (s *workerAPIServer) cleanupQuestionAnswerMountpoint() {
+	if s == nil || s.questionAnswerPath == "" || s.questionAnswerMountInfo == nil || !s.questionAnswerMountCreated {
+		return
+	}
+	current, err := os.Lstat(s.questionAnswerPath)
+	if err == nil && current.Mode().IsRegular() && current.Mode()&os.ModeSymlink == 0 &&
+		current.Size() == 0 && os.SameFile(current, s.questionAnswerMountInfo) {
+		if data, verified, readErr := readQuestionAnswerMountFile(s.questionAnswerPath, maxQuestionAnswerMountBytes); readErr == nil &&
+			len(data) == 0 && os.SameFile(current, verified) {
+			_ = os.Remove(s.questionAnswerPath)
+		}
+	}
+}
+
+func (s *workerAPIServer) validateQuestionAnswerRequestEvent(value approval.PendingApproval) error {
+	events, err := s.eventLogs.Read(s.scope.RunID)
+	if err != nil {
+		return fmt.Errorf("read clarification approval event authority: %w", err)
+	}
+	for _, event := range events {
+		if event.Type != "approval_requested" || event.AttemptID != value.AttemptID {
+			continue
+		}
+		id, _ := event.Data["approval_id"].(string)
+		subject, _ := event.Data["subject_hash"].(string)
+		status, _ := event.Data["status"].(string)
+		if id == value.ID && subject == value.SubjectHash && status == string(approval.StatusPending) {
+			return nil
+		}
+	}
+	return errors.New("clarification approval has no matching controller event request")
+}
+
 func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != "/v1/call" {
 		http.NotFound(w, r)
@@ -580,27 +770,35 @@ func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, sub
 	if questions != payload.Markdown {
 		return nil, errors.New("clarification questions do not match the durable approval")
 	}
-	var answer string
-	for _, decision := range value.Decisions {
+	var resolvingDecision *approval.Decision
+	for index := range value.Decisions {
+		decision := &value.Decisions[index]
 		if decision.Action != "answer_questions" || !containsWorkerString(value.RequiredRoles, decision.ActorRole) {
-			continue
+			return nil, errors.New("clarification decision is invalid")
 		}
 		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
 			decision.SubjectHash != value.SubjectHash || decision.DecidedAt.IsZero() || strings.TrimSpace(decision.Comment) == "" {
 			return nil, errors.New("clarification decision is invalid")
 		}
-		if answer != "" {
-			return nil, errors.New("clarification approval has multiple answers")
+		if decision.DecidedAt.Equal(value.ResolvedAt) {
+			if resolvingDecision != nil {
+				return nil, errors.New("clarification approval has ambiguous resolving decisions")
+			}
+			resolvingDecision = decision
 		}
-		answer = strings.TrimSpace(decision.Comment)
 	}
-	if answer == "" {
-		return nil, errors.New("clarification approval has no durable human answer")
+	if resolvingDecision == nil {
+		return nil, errors.New("clarification approval has no resolving durable decision")
 	}
+	answer := strings.TrimSpace(resolvingDecision.Comment)
 	if strings.TrimSpace(submittedAnswer) != answer {
 		return nil, errors.New("clarification answer does not match the durable decision")
 	}
-	return s.briefs.AppendClarification(s.scope.RunID, value.ID, payload.Markdown, answer)
+	provenance, err := pipeline.QuestionAnswerProvenance(value)
+	if err != nil {
+		return nil, fmt.Errorf("clarification durable provenance: %w", err)
+	}
+	return s.briefs.AppendClarification(s.scope.RunID, value.ID, provenance, payload.Markdown, answer)
 }
 
 func containsWorkerString(values []string, expected string) bool {
@@ -947,6 +1145,42 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		return s.approvals.List(s.scope.RunID)
 	case "approval.decide", "approval.resolve_deferred":
 		return nil, errors.New("worker API cannot make human approval decisions")
+	case "handoff.question_answer.path":
+		if !s.usageAllowed || s.questionAnswerID == "" || s.questionAnswerPath == "" {
+			return nil, errors.New("controller has no prepared clarification answer for this invocation")
+		}
+		if c.RunID != s.scope.RunID || c.A != s.questionAnswerID {
+			return nil, errors.New("clarification answer approval identity mismatch")
+		}
+		if s.questionAnswerMount == nil || s.questionAnswerMountInfo == nil {
+			return nil, errors.New("controller clarification input mount identity is unavailable")
+		}
+		if err := validateQuestionAnswerMount(s.scope.TargetDir, s.scope.RunID, *s.questionAnswerMount); err != nil {
+			return nil, fmt.Errorf("validate admitted clarification input mount: %w", err)
+		}
+		switch s.scope.Operation {
+		case OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API clarification input is not allowed for operation %q", s.scope.Operation)
+		}
+		value, err := s.approvals.Load(s.scope.RunID, s.questionAnswerID)
+		if err != nil {
+			return nil, fmt.Errorf("reload durable clarification approval: %w", err)
+		}
+		if err := pipeline.ValidateQuestionAnswerApproval(value, s.questionAnswerReplay); err != nil {
+			return nil, fmt.Errorf("validate durable clarification approval: %w", err)
+		}
+		if err := validateQuestionAnswerCandidate(context.Background(), s.questionAnswerStore.TargetDir, value); err != nil {
+			return nil, err
+		}
+		path, err := s.questionAnswerStore.ValidateCanonicalQuestionAnswer(value)
+		if err != nil {
+			return nil, err
+		}
+		if path != s.questionAnswerMount.SourcePath {
+			return nil, errors.New("canonical clarification source changed after worker admission")
+		}
+		return s.questionAnswerPath, nil
 	case "lifecycle.create":
 		if s.lifecycle == nil {
 			return nil, errors.New("worker lifecycle API unavailable")
@@ -1880,9 +2114,12 @@ func (b *workerAPIBriefs) CreateInitial(runID, intention string) (pipeline.Brief
 	return result, err
 }
 
-func (b *workerAPIBriefs) AppendClarification(runID, approvalID, questions, answer string) (pipeline.BriefDocument, error) {
+func (b *workerAPIBriefs) AppendClarification(runID, approvalID string, provenance pipeline.ClarificationProvenance, questions, answer string) (pipeline.BriefDocument, error) {
 	if err := b.checkRun(runID); err != nil {
 		return pipeline.BriefDocument{}, err
+	}
+	if strings.TrimSpace(provenance.Stage) == "" || strings.TrimSpace(provenance.ActorID) == "" || strings.TrimSpace(provenance.ActorRole) == "" {
+		return pipeline.BriefDocument{}, errors.New("clarification provenance is required")
 	}
 	var result pipeline.BriefDocument
 	err := b.port.call("brief.append_clarification", workerAPICall{A: approvalID, B: questions, C: answer}, &result)

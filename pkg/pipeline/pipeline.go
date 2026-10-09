@@ -107,28 +107,30 @@ type AttemptManifestWriter interface {
 }
 
 type Pipeline struct {
-	cfg                   *config.Config
-	reg                   *agent.Registry
-	notifier              notifier.Notifier
-	prompter              Prompter
-	newRuntime            runtime.Factory
-	recorder              Recorder
-	delivery              delivery.Service
-	approvals             ApprovalStore
-	lifecycle             lifecycle.StorePort
-	evidence              EvidenceStoreFactory
-	briefs                BriefStore
-	candidateMetadata     candidate.MetadataStore
-	usageEnvelopeWriter   UsageEnvelopeWriter
-	terminalRecordWriter  TerminalRecordWriter
-	attestationWriter     AttestationWriter
-	containmentWriter     ContainmentReceiptWriter
-	candidateEvidence     CandidateEvidenceStore
-	attemptManifestSource evidence.AttemptManifestSource
-	attemptManifestWriter AttemptManifestWriter
-	eventLogSource        evidence.EventLog
-	deliveryApprovalHash  string
-	reportsDir            string
+	cfg                     *config.Config
+	reg                     *agent.Registry
+	notifier                notifier.Notifier
+	prompter                Prompter
+	newRuntime              runtime.Factory
+	recorder                Recorder
+	delivery                delivery.Service
+	approvals               ApprovalStore
+	lifecycle               lifecycle.StorePort
+	evidence                EvidenceStoreFactory
+	briefs                  BriefStore
+	candidateMetadata       candidate.MetadataStore
+	usageEnvelopeWriter     UsageEnvelopeWriter
+	terminalRecordWriter    TerminalRecordWriter
+	attestationWriter       AttestationWriter
+	containmentWriter       ContainmentReceiptWriter
+	candidateEvidence       CandidateEvidenceStore
+	attemptManifestSource   evidence.AttemptManifestSource
+	attemptManifestWriter   AttemptManifestWriter
+	eventLogSource          evidence.EventLog
+	deliveryApprovalHash    string
+	questionAnswerInputs    QuestionAnswerInputProvider
+	controllerReadDenyPaths []string
+	reportsDir              string
 }
 
 type Option func(*Pipeline)
@@ -193,6 +195,20 @@ func WithEventLogSource(source evidence.EventLog) Option {
 	return func(p *Pipeline) { p.eventLogSource = source }
 }
 
+// WithControllerReadDenyPaths adds exact controller-owned projection paths
+// that can contain approval comments. SQLite-backed web stores pass their
+// database path here; the clarification boundary also protects the standard
+// run-local and reserved event journals.
+func WithControllerReadDenyPaths(paths ...string) Option {
+	return func(p *Pipeline) {
+		for _, path := range paths {
+			if path != "" {
+				p.controllerReadDenyPaths = append(p.controllerReadDenyPaths, filepath.Clean(path))
+			}
+		}
+	}
+}
+
 // WithBusinessBriefStore routes durable business-brief persistence through a
 // controller-owned typed store. The default remains the local filesystem store.
 func WithBusinessBriefStore(store BriefStore) Option {
@@ -224,6 +240,13 @@ func WithContainmentReceiptWriter(writer ContainmentReceiptWriter) Option {
 
 func WithCandidateEvidenceStore(store CandidateEvidenceStore) Option {
 	return func(p *Pipeline) { p.candidateEvidence = store }
+}
+
+// WithQuestionAnswerInputProvider routes resolved clarification answers
+// through a typed controller API. Local CLI pipelines retain the filesystem
+// materialization path.
+func WithQuestionAnswerInputProvider(provider QuestionAnswerInputProvider) Option {
+	return func(p *Pipeline) { p.questionAnswerInputs = provider }
 }
 
 // WithAttemptManifestStore routes canonical manifest reads and writes through
@@ -303,6 +326,8 @@ type runState struct {
 	names                     []string
 	results                   []notifier.StageResult
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
+	questionAnswerTargetStage string
+	questionAnswerDeniedPaths []string
 	ps                        *ui.PipelineStatus
 	startTime                 time.Time
 	approvedPlanHash          string
@@ -329,6 +354,132 @@ type runState struct {
 	usageTotal                runtime.Usage
 	usageUnknown              bool
 	attestationDigest         string
+}
+
+// restoreClarificationReadBoundary rebuilds exclusions from durable approval
+// decisions and verified evidence manifests on every invocation. A resume can
+// target an ordinary graph approval after the answer stage has already run, so
+// its current input approval alone is not sufficient authority for this policy.
+func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedRun, briefs BriefStore, current *approval.PendingApproval) error {
+	values, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return fmt.Errorf("list durable approvals: %w", err)
+	}
+	if current != nil && current.RunID == rs.runID && current.Kind == approval.KindQuestions &&
+		current.Status == approval.StatusResolved && current.ResolvedAction == "answer_questions" {
+		found := false
+		for _, value := range values {
+			if value.ID == current.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, *current)
+		}
+	}
+
+	answerIDs := make(map[string]bool)
+	for _, value := range values {
+		if value.RunID != rs.runID || value.Status != approval.StatusResolved ||
+			value.Kind != approval.KindQuestions || value.ResolvedAction != "answer_questions" {
+			continue
+		}
+		if _, err := CanonicalQuestionAnswerContent(value); err != nil {
+			return fmt.Errorf("resolved clarification %s is invalid: %w", value.ID, err)
+		}
+		canonical, err := QuestionAnswerCanonicalPath(rs.runCfg.TargetDir, rs.runID, value.ID)
+		if err != nil {
+			return err
+		}
+		projection, err := QuestionAnswerMaterializationPath(rs.runCfg.TargetDir, rs.runID, value.ID)
+		if err != nil {
+			return err
+		}
+		// The durable approval JSON contains the complete decision comments,
+		// including the answer. Protect it alongside the derived answer files so
+		// a later stage cannot recover the answer by opening controller state.
+		approvalJSON := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "state", "approvals", rs.runID, value.ID+".json")
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonical, projection, approvalJSON)
+		answerIDs[value.ID] = true
+	}
+	if len(answerIDs) == 0 {
+		return nil
+	}
+
+	// Approval decisions are copied into the lifecycle journal, including the
+	// human answer in Decision.Comment. Protect both the worker-visible legacy
+	// journal and the reserved controller journal: either may be readable from
+	// the Codex workspace even though the other runtime adapters deny .ai-team
+	// wholesale. Also protect SQLite projections (and their sidecars), where
+	// web/worker approval and recorder events are stored.
+	controllerProjectionPaths := []string{
+		filepath.Join(rs.evidence.RunDir(), "events.jsonl"),
+		filepath.Join(rs.runCfg.TargetDir, ".ai-team", "state", "events", rs.runID, "events.jsonl"),
+	}
+	if source, ok := rs.p.eventLogSource.(interface{ Path(string) (string, error) }); ok {
+		path, pathErr := source.Path(rs.runID)
+		if pathErr != nil {
+			return fmt.Errorf("resolve controller event log path: %w", pathErr)
+		}
+		controllerProjectionPaths = append(controllerProjectionPaths, path)
+	}
+	controllerDBPaths := append([]string{
+		filepath.Join(rs.runCfg.TargetDir, ".ai-team", "web.db"),
+	}, rs.p.controllerReadDenyPaths...)
+	for _, dbPath := range controllerDBPaths {
+		if dbPath == "" {
+			continue
+		}
+		controllerProjectionPaths = append(controllerProjectionPaths, dbPath, dbPath+"-wal", dbPath+"-shm", dbPath+"-journal")
+	}
+	rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, controllerProjectionPaths...)
+
+	// Clarification versions contain the answer as cumulative brief text. Keep
+	// their durable files in the same exact-path deny set; Go has already loaded
+	// any input content into the stage prompt before the CLI starts.
+	versions, err := briefs.List(rs.runID)
+	if err != nil {
+		return fmt.Errorf("list durable brief versions: %w", err)
+	}
+	for _, version := range versions {
+		if version.Kind != "clarification" {
+			continue
+		}
+		relative := filepath.Clean(filepath.FromSlash(version.Path))
+		if filepath.IsAbs(relative) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.ToSlash(relative) != version.Path {
+			return fmt.Errorf("clarification brief path is invalid: %q", version.Path)
+		}
+		path := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID, relative)
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, path)
+	}
+	if rs.brief.Kind == "clarification" && rs.brief.Path != "" {
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, rs.brief.Path)
+	}
+
+	// Published attempt inputs survive process boundaries. Rehydrate the exact
+	// answer and cumulative-brief copies from verified manifests after resume.
+	runDir := rs.evidence.RunDir()
+	for _, attempt := range replayed.Attempts {
+		if attempt.ManifestSHA256 == "" {
+			continue
+		}
+		_, manifest, readErr := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, runDir, rs.runID, attempt.AttemptID)
+		if readErr != nil {
+			return fmt.Errorf("read attempt %s for clarification boundary: %w", attempt.AttemptID, readErr)
+		}
+		for _, input := range manifest.Inputs {
+			if input.Name != "clarification-answer" && input.Name != "business-brief" {
+				continue
+			}
+			path := filepath.Join(runDir, filepath.FromSlash(input.EvidencePath))
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+				return fmt.Errorf("attempt %s has invalid clarification-bearing input path %q", attempt.AttemptID, input.EvidencePath)
+			}
+			rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, path)
+		}
+	}
+	return nil
 }
 
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
@@ -521,13 +672,6 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 	}
-	if runCfg.ResumeRunID != "" && resumedState.Phase == lifecycle.PhaseRunning {
-		recoveredClarification, err = recoveredQuestionApproval(approvalStore, resumedState.RunID, resumedState.NextStage)
-		if err != nil {
-			return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
-		}
-	}
-
 	// task.md is a workflow input and therefore must be created/read while the
 	// workspace lock is held. Otherwise a rejected concurrent run could overwrite
 	// the task consumed by the active run before failing to acquire the lock.
@@ -619,10 +763,42 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
-		if resumedState.Phase == lifecycle.PhaseRunning {
+		// An input snapshot exists only to bridge SnapshotInputs to
+		// PublishAttempt. After a process crash that bridge is gone; published
+		// inputs already live in the verified attempt manifest, so every
+		// remaining inflight directory is an unowned orphan and must be removed
+		// before any resumed stage can inspect the workspace.
+		if err := evidence.CleanupInflightInputSnapshots(runCfg.TargetDir, runID); err != nil {
+			return RunResult{}, fmt.Errorf("cleanup orphaned inflight inputs: %w", err)
+		}
+		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
 				return RunResult{}, fmt.Errorf("resume graph handoff input: %w", err)
+			}
+			if recoveredGraphApproval == nil {
+				// A resolved graph return into the current stage is newer than an
+				// older clarification targeting that same stage. Only reconcile a
+				// stale checkpoint after checking for that exact handoff first.
+				var reconciledTo string
+				var reconciled bool
+				reconciledTo, reconciled, err = ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume graph checkpoint: %w", err)
+				}
+				if reconciled {
+					runCfg.retryFrom = reconciledTo
+				}
+				recoveredClarification, err = RecoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
+				}
+			}
+		}
+		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions &&
+			resumedApproval.ResolvedAction == "answer_questions" {
+			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
+				return RunResult{}, fmt.Errorf("resume clarification approval: %w", err)
 			}
 		}
 		configDigest := sha256.Sum256(configSnapshot)
@@ -652,7 +828,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					fmt.Errorf("resume run: %w", err)
 			}
 		}
-		for _, attempt := range replayedRun.Attempts {
+		var abandonedAttemptIDs []string
+		for index := range replayedRun.Attempts {
+			attempt := &replayedRun.Attempts[index]
 			if attempt.ManifestSHA256 != "" {
 				_, attemptManifest, readErr := evidence.ReadAttemptManifest(p.attemptManifestSource, evidenceStore.RunDir(), runID, attempt.AttemptID)
 				if readErr != nil {
@@ -661,12 +839,49 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				resumeMutations = append(resumeMutations, attemptManifest.Mutations...)
 			}
 			if attempt.FinishedAt.IsZero() {
+				// A crash can occur after PublishAttempt atomically renames its
+				// manifest and copied inputs, but before attempt_finished binds
+				// that manifest into the event stream. Such a directory is not
+				// replay authority and may contain a clarification answer, so
+				// validate its identity and remove it before any resumed stage.
+				if err := evidence.CleanupUnfinishedAttemptArtifacts(evidenceStore.RunDir(), runID, *attempt); err != nil {
+					return RunResult{}, fmt.Errorf("cleanup unfinished attempt %s artifacts: %w", attempt.AttemptID, err)
+				}
 				if err := evidenceStore.Append(evidence.Event{
 					Type: "attempt_abandoned", AttemptID: attempt.AttemptID, Stage: attempt.Stage,
 					Timestamp: runStartedAt, Data: map[string]any{"reason": "controller restarted"},
 				}); err != nil {
 					return RunResult{}, err
 				}
+				attempt.FinishedAt = runStartedAt
+				attempt.Status = string(workflow.OutcomeCanceled)
+				attempt.State = workflow.AttemptState{
+					Execution: workflow.ExecutionCanceled,
+					Decision:  workflow.DecisionNotApplicable,
+					Outcome:   workflow.OutcomeCanceled,
+				}
+				attempt.Error = "controller restarted"
+				abandonedAttemptIDs = append(abandonedAttemptIDs, attempt.AttemptID)
+			}
+		}
+		if len(abandonedAttemptIDs) > 0 {
+			// These executions never published an attempt manifest. Their outputs
+			// are not authoritative and will be retried from the lifecycle
+			// checkpoint, so make the abandonment neutral to the final run status.
+			if err := evidenceStore.Append(evidence.Event{
+				Type: "attempts_invalidated", Timestamp: runStartedAt,
+				Data: map[string]any{"attempt_ids": abandonedAttemptIDs, "reason": "controller_restart_retry"},
+			}); err != nil {
+				return RunResult{}, err
+			}
+			for index := range replayedRun.Attempts {
+				attempt := &replayedRun.Attempts[index]
+				if !containsString(abandonedAttemptIDs, attempt.AttemptID) {
+					continue
+				}
+				attempt.Superseded = true
+				attempt.State = workflow.Invalidate(attempt.State)
+				attempt.Status = attempt.State.LegacyStatus()
 			}
 		}
 		if resumedApproval != nil {
@@ -813,8 +1028,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if json.Unmarshal(answerApproval.Payload, &payload) != nil || payload.Kind != "questions" {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification payload")
 			}
+			provenance, provenanceErr := QuestionAnswerProvenance(*answerApproval)
+			if provenanceErr != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification provenance: %w", provenanceErr)
+			}
 			var document BriefDocument
-			document, err = briefStore.AppendClarification(runID, answerApproval.ID, payload.Markdown, questionAnswer(answerApproval.Decisions))
+			document, err = briefStore.AppendClarification(runID, answerApproval.ID, provenance, payload.Markdown, questionAnswer(answerApproval.Decisions))
 			if err == nil {
 				currentBrief, err = materializeBriefDocument(briefWorkspace, document)
 			}
@@ -963,8 +1182,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if inputApproval == nil {
 		inputApproval = recoveredClarification
 	}
+	if err := rs.restoreClarificationReadBoundary(replayedRun, briefStore, inputApproval); err != nil {
+		outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", err))
+		return RunResult{RunID: runID, Outcome: outcome}, finalErr
+	}
 	if inputApproval == nil && !rs.resumed {
 		rs.extraInputs[rs.graph.Entry] = briefInputs(rs.brief)
+	}
+	if inputApproval != nil && inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
+		rs.questionAnswerTargetStage = inputApproval.FromStage
 	}
 	if inputApproval != nil && (inputApproval.Kind == approval.KindQuestions || isApprovedSpecPayload(inputApproval.Payload) || isBackwardTransition(rs.graph, inputApproval)) {
 		inputs, inputErr := rs.stageOutputs(inputApproval.FromStage, inputApproval.AttemptID)
@@ -979,7 +1205,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					filtered = append(filtered, input)
 				}
 			}
-			answer, answerErr := writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
+			var answer runtime.Artifact
+			var answerErr error
+			if p.questionAnswerInputs != nil {
+				answer, answerErr = p.questionAnswerInputs.MaterializeQuestionAnswer(runID, inputApproval.ID)
+			} else {
+				answer, answerErr = writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
+			}
 			if answerErr != nil {
 				outcome, finalErr := rs.finalize(answerErr)
 				return RunResult{RunID: runID, Outcome: outcome}, finalErr

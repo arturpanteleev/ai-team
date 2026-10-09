@@ -42,6 +42,7 @@ type apiApprovalStore struct {
 	values      map[string]approval.PendingApproval
 	createErr   error
 	loadErr     error
+	listErr     error
 	createCalls int
 }
 
@@ -1300,6 +1301,9 @@ func (s *apiApprovalStore) Load(run, id string) (approval.PendingApproval, error
 	return v, nil
 }
 func (s *apiApprovalStore) List(run string) ([]approval.PendingApproval, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	var out []approval.PendingApproval
 	for _, v := range s.values {
 		if v.RunID == run {
@@ -1327,7 +1331,7 @@ func workerQuestionApproval(runID, approvalID, questions, answer string, status 
 		RequiredRoles: []string{"qa"}, Quorum: approval.QuorumAny,
 		Actions: []string{"answer_questions", "stop"},
 		Targets: map[string]string{"answer_questions": "questioner", "stop": "$stop"},
-		Status:  status, Payload: payload,
+		Status:  status, Payload: payload, CreatedAt: time.Now().UTC().Add(-time.Minute),
 	}
 	if status == approval.StatusResolved {
 		now := time.Now().UTC()
@@ -1338,6 +1342,15 @@ func workerQuestionApproval(runID, approvalID, questions, answer string, status 
 			Action: "answer_questions", Comment: answer, SubjectHash: value.SubjectHash, DecidedAt: now,
 		}}
 	}
+	return value
+}
+
+func workerAnalystQuestionApproval(runID, approvalID, questions, answer string, status approval.Status) approval.PendingApproval {
+	value := workerQuestionApproval(runID, approvalID, questions, answer, status)
+	value.AttemptID = "attempt-analyst"
+	value.FromStage = "analyst"
+	value.ToStage = "analyst"
+	value.Targets["answer_questions"] = "analyst"
 	return value
 }
 
@@ -3226,6 +3239,38 @@ func TestProcessEngineCandidateAbsenceRequiresBubblewrapMask(t *testing.T) {
 	}
 }
 
+func TestProcessEnginePersistsGitAdmissionBeforeIsolatedStart(t *testing.T) {
+	target := t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", target).CombinedOutput(); err != nil {
+		t.Fatalf("initialize candidate Git repository: %v: %s", err, output)
+	}
+	job := Job{Operation: OperationStart, RunID: "git-admission-run"}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err != nil || allowed {
+		t.Fatalf("isolated Git start must be admitted without a non-Git absence marker: allowed=%v err=%v", allowed, err)
+	}
+	if err := (candidate.FileMetadataStore{}).ReadGitAdmission(target, job.RunID); err != nil {
+		t.Fatalf("isolated Git start must persist positive admission metadata: %v", err)
+	}
+}
+
+func TestProcessEngineRejectsInvalidGitAdmissionIdentity(t *testing.T) {
+	target := t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", target).CombinedOutput(); err != nil {
+		t.Fatalf("initialize candidate Git repository: %v: %s", err, output)
+	}
+	job := Job{Operation: OperationStart, RunID: "../escape"}
+	engine := &ProcessEngine{target: target, bubblewrap: true}
+	allowed, err := engine.prepareCandidateAbsence(context.Background(), job, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid run id") || allowed {
+		t.Fatalf("invalid run identity must fail before candidate admission: allowed=%v err=%v", allowed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".ai-team")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid run identity must not create controller admission state: %v", err)
+	}
+}
+
 type candidateMetadataStoreStub struct {
 	metadata  candidate.Metadata
 	createErr error
@@ -3854,7 +3899,7 @@ func TestWorkerAPIClientAndDispatchRejectBadPeerResponsesAndScope(t *testing.T) 
 	}
 }
 
-func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
+func TestProcessEngineControllerAPILaunchPassesDatabaseOnlyAsReadDenyMetadata(t *testing.T) {
 	target := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "argv.txt")
 	environmentMarker := filepath.Join(t.TempDir(), "environment.json")
@@ -3864,7 +3909,8 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_ARGS_MARKER", "AI_TEAM_WORKER_TEST_ENV_MARKER", "AI_TEAM_WORKER_TEST_MODE")
 	store := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
 	var factoryCalls int
-	engine, err := NewProcessEngine([]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"}, target, filepath.Join(target, "controller-secret.db"), WithControllerAPI(func() pipeline.Recorder {
+	controllerDBPath := filepath.Join(target, "controller-projection.db")
+	engine, err := NewProcessEngine([]string{os.Args[0], "-test.run=^TestWorkerProtocolHelper$", "--"}, target, controllerDBPath, WithControllerAPI(func() pipeline.Recorder {
 		factoryCalls++
 		return &apiRecorderSpy{}
 	}, store))
@@ -3885,8 +3931,11 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(args), "--db") || strings.Contains(string(args), "controller-secret.db") {
-		t.Fatalf("worker launch exposed controller DB arguments: %s", args)
+	if strings.Contains(string(args), "--db") {
+		t.Fatalf("worker launch exposed controller DB access arguments: %s", args)
+	}
+	if !strings.Contains(string(args), "--controller-read-deny-path") || !strings.Contains(string(args), controllerDBPath) {
+		t.Fatalf("worker launch omitted deny-only controller DB path metadata: %s", args)
 	}
 	childEnvironment, err := os.ReadFile(environmentMarker)
 	if err != nil {
@@ -3900,6 +3949,19 @@ func TestProcessEngineControllerAPILaunchOmitsDatabasePath(t *testing.T) {
 		if _, exists := environment[name]; exists {
 			t.Fatalf("unsandboxed controller-API worker received egress setting %s", name)
 		}
+	}
+}
+
+func TestProcessEngineRejectsResumeWithoutPersistedControllerTask(t *testing.T) {
+	target := t.TempDir()
+	engine, err := NewProcessEngine([]string{"worker-must-not-start"}, target, filepath.Join(target, "controller.db"),
+		WithControllerAPI(func() pipeline.Recorder { return &apiRecorderSpy{} }, &apiApprovalStore{values: map[string]approval.PendingApproval{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Resume(context.Background(), pipeline.ResumeConfig{RunID: "missing-controller-task", TargetDir: target})
+	if err == nil || !strings.Contains(err.Error(), "worker controller API task") {
+		t.Fatalf("resume without controller-persisted task must fail before worker spawn, got %v", err)
 	}
 }
 
@@ -3960,9 +4022,20 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-run", TargetDir: target, Task: intention, ExecutionID: strings.Repeat("7", ExecutionIDBytes*2)}
 	const approvalID = "approval-1"
 	const questions = "Какая аудитория?"
-	const answer = "B2B"
+	const answer = "B2B customers"
+	const earlierAnswer = "Start with enterprise accounts"
+	approvalValue := workerQuestionApproval(job.RunID, approvalID, questions, answer, approval.StatusResolved)
+	approvalValue.Quorum = approval.QuorumAll
+	approvalValue.RequiredRoles = []string{"qa", "product"}
+	approvalValue.Decisions[0].Comment = earlierAnswer
+	approvalValue.Decisions[0].DecidedAt = approvalValue.ResolvedAt.Add(-time.Second)
+	approvalValue.Decisions = append(approvalValue.Decisions, approval.Decision{
+		ApprovalID: approvalID, ActorID: "product-owner@example.com", ActorRole: "product",
+		Action: "answer_questions", Comment: answer, SubjectHash: approvalValue.SubjectHash,
+		DecidedAt: approvalValue.ResolvedAt,
+	})
 	approvalStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
-		job.RunID + "/" + approvalID: workerQuestionApproval(job.RunID, approvalID, questions, answer, approval.StatusResolved),
+		job.RunID + "/" + approvalID: approvalValue,
 	}}
 	api, err := startWorkerAPIServer(job, &apiRecorderSpy{}, approvalStore)
 	if err != nil {
@@ -3998,9 +4071,24 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if err != nil || len(versions) != 1 || versions[0].ID != created.Version.ID {
 		t.Fatalf("brief list=%+v err=%v", versions, err)
 	}
-	clarified, err := briefs.AppendClarification(job.RunID, approvalID, questions, answer)
+	// The worker's provenance fields only signal that it has a clarification
+	// request; the controller derives the recorded actor from the resolving
+	// durable decision below.
+	provenance := pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "worker@example.com", ActorRole: "worker"}
+	clarified, err := briefs.AppendClarification(job.RunID, approvalID, provenance, questions, answer)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, expected := range []string{"Вопросы этапа \"questioner\"", "Ответ от роли \"product\"", "участник \"product-owner@example.com\"", answer} {
+		if !strings.Contains(string(clarified.Content), expected) {
+			t.Fatalf("controller brief omitted approval provenance %q: %s", expected, clarified.Content)
+		}
+	}
+	if strings.Contains(string(clarified.Content), earlierAnswer) || strings.Contains(string(clarified.Content), "worker@example.com") {
+		t.Fatalf("controller brief used a non-resolving answer or worker-supplied provenance: %s", clarified.Content)
+	}
+	if strings.Contains(string(clarified.Content), "Product Owner") || strings.Contains(string(clarified.Content), "аналитик") {
+		t.Fatalf("generic AskQuestions brief hard-coded a role label: %s", clarified.Content)
 	}
 	if clarified.Version.ParentID != created.Version.ID || clarified.Version.ID == created.Version.ID {
 		t.Fatalf("clarification is not a new immutable child version: initial=%+v clarified=%+v", created.Version, clarified.Version)
@@ -4049,7 +4137,7 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 		loaded.Version.ApprovalID != approvalID || string(loaded.Content) != string(clarified.Content) {
 		t.Fatalf("persisted brief read=%+v err=%v", loaded, err)
 	}
-	retry, err := briefs.AppendClarification(resumeJob.RunID, approvalID, questions, answer)
+	retry, err := briefs.AppendClarification(resumeJob.RunID, approvalID, provenance, questions, answer)
 	if err != nil || retry.Version.ID != clarified.Version.ID {
 		t.Fatalf("retry of the same durable answer should be idempotent: version=%+v err=%v", retry.Version, err)
 	}
@@ -4134,7 +4222,7 @@ func TestWorkerControllerBriefAppendRequiresDurableQuestionsApproval(t *testing.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := briefs.AppendClarification(job.RunID, tc.approvalID, tc.questions, tc.answer); err == nil {
+			if _, err := briefs.AppendClarification(job.RunID, tc.approvalID, pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "qa@example.com", ActorRole: "qa"}, tc.questions, tc.answer); err == nil {
 				t.Fatal("unverified clarification input was accepted")
 			}
 		})

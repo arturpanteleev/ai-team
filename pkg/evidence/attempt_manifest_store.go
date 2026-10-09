@@ -202,6 +202,76 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 	return nil
 }
 
+// CleanupUnfinishedAttemptArtifacts removes a manifest and input/output copies
+// published by an attempt that never reached attempt_finished. The event log
+// is the authority for whether the attempt completed; a local manifest is
+// inspected only to bind the directory being removed to that exact unfinished
+// attempt. RemoveAll unlinks symlinks inside the tree without following them.
+func CleanupUnfinishedAttemptArtifacts(runDir, runID string, attempt ReplayedAttempt) error {
+	if err := validateAttemptManifestIdentity(runID, attempt.AttemptID); err != nil {
+		return fmt.Errorf("unfinished attempt identity: %w", err)
+	}
+	if !attempt.FinishedAt.IsZero() || attempt.ManifestSHA256 != "" || strings.TrimSpace(attempt.Stage) == "" || attempt.StartedAt.IsZero() || attempt.StageIndex < 1 {
+		return fmt.Errorf("attempt %s is not an identifiable unfinished attempt", attempt.AttemptID)
+	}
+	runInfo, err := os.Lstat(runDir)
+	if err != nil {
+		return err
+	}
+	if runInfo.Mode()&os.ModeSymlink != 0 || !runInfo.IsDir() {
+		return fmt.Errorf("run directory %s must be a directory without symlink", runDir)
+	}
+	attemptsDir := filepath.Join(runDir, "attempts")
+	attemptsInfo, err := os.Lstat(attemptsDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attemptsInfo.Mode()&os.ModeSymlink != 0 || !attemptsInfo.IsDir() {
+		return fmt.Errorf("attempts directory %s must be a directory without symlink", attemptsDir)
+	}
+	attemptDir := filepath.Join(attemptsDir, attempt.AttemptID)
+	attemptInfo, err := os.Lstat(attemptDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attemptInfo.Mode()&os.ModeSymlink != 0 || !attemptInfo.IsDir() {
+		return fmt.Errorf("orphan attempt %s must be a directory without symlink", attempt.AttemptID)
+	}
+	manifestPath := filepath.Join(attemptDir, "manifest.json")
+	manifestData, err := safeio.ReadRegularFile(manifestPath, MaxAttemptManifestSize)
+	if err != nil {
+		return fmt.Errorf("read orphan attempt %s manifest: %w", attempt.AttemptID, err)
+	}
+	var manifest AttemptManifest
+	if err := strictjson.Unmarshal(manifestData, MaxAttemptManifestSize, &manifest); err != nil {
+		return fmt.Errorf("orphan attempt %s manifest is malformed: %w", attempt.AttemptID, err)
+	}
+	if err := validateControllerAttemptManifest(manifest); err != nil ||
+		manifest.RunID != runID || manifest.AttemptID != attempt.AttemptID || manifest.Stage != attempt.Stage ||
+		manifest.StageIndex != attempt.StageIndex || !manifest.StartedAt.Equal(attempt.StartedAt) || manifest.FinishedAt.Before(manifest.StartedAt) {
+		return fmt.Errorf("orphan attempt %s manifest identity mismatch", attempt.AttemptID)
+	}
+	// The attempt ID and parent directories were validated above. RemoveAll
+	// does not traverse symlink entries, so a malicious child cannot redirect
+	// cleanup outside this orphan attempt tree.
+	if err := os.RemoveAll(attemptDir); err != nil {
+		return fmt.Errorf("remove orphan attempt %s artifacts: %w", attempt.AttemptID, err)
+	}
+	if _, err := os.Lstat(attemptDir); !os.IsNotExist(err) {
+		if err == nil {
+			return fmt.Errorf("orphan attempt %s artifacts remain after cleanup", attempt.AttemptID)
+		}
+		return err
+	}
+	return nil
+}
+
 // ReservedAttemptManifestSource selects the controller store when a valid
 // reservation exists and preserves the filesystem layout for legacy runs.
 // A present but damaged marker returns an error and never falls back.

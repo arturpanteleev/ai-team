@@ -283,6 +283,7 @@ func cmdWorker() {
 	flags := flag.NewFlagSet("worker", flag.ExitOnError)
 	targetValue := flags.String("target", "", "Exact mounted repository target")
 	dbPath := flags.String("db", "", "SQLite projection path")
+	controllerReadDenyPath := flags.String("controller-read-deny-path", "", "Controller SQLite path passed only to stage read-deny policy")
 	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
 	_ = flags.Parse(os.Args[2:])
 	if *targetValue == "" {
@@ -315,6 +316,9 @@ func cmdWorker() {
 	if controllerAPI && *dbPath != "" {
 		fatal("worker controller API mode rejects --db")
 	}
+	if *controllerReadDenyPath != "" && (!filepath.IsAbs(*controllerReadDenyPath) || filepath.Clean(*controllerReadDenyPath) != *controllerReadDenyPath) {
+		fatal("worker --controller-read-deny-path must be absolute and clean")
+	}
 	var recorderStore *webstore.Store
 	var approvalStore pipeline.ApprovalStore
 	var businessBriefStore pipeline.BriefStore
@@ -327,6 +331,7 @@ func cmdWorker() {
 	var attemptManifestSource evidence.AttemptManifestSource
 	var attemptManifestWriter pipeline.AttemptManifestWriter
 	var eventLogSource evidence.EventLog
+	var questionAnswerInputProvider pipeline.QuestionAnswerInputProvider
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
 	if controllerAPI {
@@ -339,6 +344,7 @@ func cmdWorker() {
 		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
 		candidateMetadataStore = worker.NewWorkerAPICandidates(apiPort)
 		if apiPort.SupportsControllerUsageStore() {
+			questionAnswerInputProvider = worker.NewWorkerAPIQuestionAnswerInputs(apiPort)
 			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
 			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
@@ -414,6 +420,12 @@ func cmdWorker() {
 		pipeline.WithApprovalStore(approvalStore),
 		pipeline.WithLifecycleStore(lifecycleStore),
 	}
+	if *dbPath != "" {
+		engineOptions = append(engineOptions, pipeline.WithControllerReadDenyPaths(*dbPath))
+	}
+	if *controllerReadDenyPath != "" {
+		engineOptions = append(engineOptions, pipeline.WithControllerReadDenyPaths(*controllerReadDenyPath))
+	}
 	if businessBriefStore != nil {
 		engineOptions = append(engineOptions, pipeline.WithBusinessBriefStore(businessBriefStore))
 	}
@@ -431,6 +443,9 @@ func cmdWorker() {
 	}
 	if eventLogSource != nil {
 		engineOptions = append(engineOptions, pipeline.WithEventLogSource(eventLogSource))
+	}
+	if questionAnswerInputProvider != nil {
+		engineOptions = append(engineOptions, pipeline.WithQuestionAnswerInputProvider(questionAnswerInputProvider))
 	}
 	if attestationWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttestationWriter(attestationWriter))
@@ -1171,7 +1186,7 @@ func cmdRun() {
 		warnIfAlreadyDelivered(*target, *feature)
 	}
 
-	opts := []pipeline.Option{}
+	opts := []pipeline.Option{pipeline.WithControllerReadDenyPaths(filepath.Join(*target, ".ai-team", "web.db"))}
 	if recorder, closeStore := openRecorder(*target); recorder != nil {
 		opts = append(opts, pipeline.WithRecorder(recorder))
 		defer closeStore()
@@ -2023,7 +2038,8 @@ func cmdWeb() {
 	}
 	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
-		pipeline.WithApprovalStore(approvalStore)))
+		pipeline.WithApprovalStore(approvalStore),
+		pipeline.WithControllerReadDenyPaths(*dbPath)))
 	controllerOptions := []control.Option{control.WithApprovalStore(approvalStore)}
 	var runController *control.Controller
 	var schedulerQueue *scheduler.Queue

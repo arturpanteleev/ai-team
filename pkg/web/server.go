@@ -209,7 +209,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
-	if srv.authenticator == nil {
+	if srv.authenticator == nil || srv.localAuth {
 		srv.router.Use(sameOriginMiddleware)
 	} else {
 		srv.router.Use(authenticatedOriginMiddleware)

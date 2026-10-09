@@ -938,6 +938,29 @@ func TestLocalWebTokenIsRequiredAndApprovalRoleComesFromServer(t *testing.T) {
 	}
 }
 
+func TestLocalAuthenticationKeepsLoopbackOriginAllowlist(t *testing.T) {
+	const token = "local-web-token-origin-check-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	request := newLoopbackRequest(http.MethodGet, "/api/session", nil)
+	request.Host = "evil.example"
+	request.Header.Set("Origin", "http://evil.example")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("local auth must reject matching hostile Host/Origin to prevent DNS rebinding, got %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestLocalWebQuorumAllAssignsNextUnvotedRequiredRole(t *testing.T) {
 	const token = "local-web-token-for-quorum-0123456789abcdef"
 	verifier, err := NewLocalAuthenticator(token)

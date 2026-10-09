@@ -107,12 +107,8 @@ func matchingApprovalRole(principal cloudidentity.Principal, required []string) 
 }
 
 func canonicalStageRole(roleName string) cloudidentity.Role {
-	switch strings.ToLower(strings.TrimSpace(roleName)) {
-	case "bo", "business_owner", "po":
-		return cloudidentity.RoleProductOwner
-	case "deployer":
-		return cloudidentity.RoleReleaseManager
-	default:
-		return cloudidentity.Role(roleName)
+	if role, ok := cloudidentity.FunctionRole(roleName); ok {
+		return role
 	}
+	return cloudidentity.Role(strings.ToLower(strings.TrimSpace(roleName)))
 }

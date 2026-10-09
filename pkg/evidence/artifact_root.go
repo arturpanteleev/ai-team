@@ -43,6 +43,13 @@ type rootedArtifact struct {
 }
 
 func artifactAt(root, rel, destination string, copyOutput bool) (string, int64, string, error) {
+	return artifactAtWithOpenHook(root, rel, destination, copyOutput, nil)
+}
+
+// artifactAtWithOpenHook lets package tests trigger a path replacement after a
+// component has been lstat'ed but before it is opened. Production callers use
+// artifactAt, which passes no hook.
+func artifactAtWithOpenHook(root, rel, destination string, copyOutput bool, beforeOpen func(name string)) (string, int64, string, error) {
 	components, err := artifactPathComponents(rel)
 	if err != nil {
 		return "", 0, "", err
@@ -53,7 +60,7 @@ func artifactAt(root, rel, destination string, copyOutput bool) (string, int64, 
 	}
 	defer func() { _ = rootHandle.Close() }()
 
-	entry, err := openRootedArtifact(rootHandle, components)
+	entry, err := openRootedArtifactWithHook(rootHandle, components, beforeOpen)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -65,7 +72,7 @@ func artifactAt(root, rel, destination string, copyOutput bool) (string, int64, 
 			}
 		}
 		h := sha256.New()
-		size, err := digestRootedDirectory(entry.dir, "", destination, copyOutput, h)
+		size, err := digestRootedDirectoryWithHook(entry.dir, "", destination, copyOutput, h, beforeOpen)
 		if err != nil {
 			return "", 0, "", err
 		}
@@ -98,11 +105,15 @@ func artifactPathComponents(rel string) ([]string, error) {
 }
 
 func openRootedArtifact(root *os.Root, components []string) (rootedArtifact, error) {
+	return openRootedArtifactWithHook(root, components, nil)
+}
+
+func openRootedArtifactWithHook(root *os.Root, components []string, beforeOpen func(name string)) (rootedArtifact, error) {
 	current := root
 	ownedRoot := false
 	for index, component := range components {
 		last := index == len(components)-1
-		entry, err := openRootedChild(current, component, last)
+		entry, err := openRootedChildWithHook(current, component, last, beforeOpen)
 		if err != nil {
 			if ownedRoot {
 				_ = current.Close()
@@ -134,12 +145,19 @@ func openRootedArtifact(root *os.Root, components []string) (rootedArtifact, err
 }
 
 func openRootedChild(parent *os.Root, name string, final bool) (rootedArtifact, error) {
+	return openRootedChildWithHook(parent, name, final, nil)
+}
+
+func openRootedChildWithHook(parent *os.Root, name string, final bool, beforeOpen func(name string)) (rootedArtifact, error) {
 	before, err := parent.Lstat(name)
 	if err != nil {
 		return rootedArtifact{}, err
 	}
 	if before.Mode()&os.ModeSymlink != 0 {
 		return rootedArtifact{}, fmt.Errorf("symbolic link %s is not allowed in artifact path", name)
+	}
+	if beforeOpen != nil {
+		beforeOpen(name)
 	}
 	if before.IsDir() {
 		child, err := parent.OpenRoot(name)
@@ -202,6 +220,10 @@ func checkOpenedIdentity(name string, before, opened, after os.FileInfo, directo
 }
 
 func digestRootedDirectory(dir *os.Root, rel, destination string, copyOutput bool, h hash.Hash) (int64, error) {
+	return digestRootedDirectoryWithHook(dir, rel, destination, copyOutput, h, nil)
+}
+
+func digestRootedDirectoryWithHook(dir *os.Root, rel, destination string, copyOutput bool, h hash.Hash, beforeOpen func(name string)) (int64, error) {
 	names, err := rootedNames(dir)
 	if err != nil {
 		return 0, err
@@ -209,7 +231,7 @@ func digestRootedDirectory(dir *os.Root, rel, destination string, copyOutput boo
 	var size int64
 	observed := make(map[string]os.FileInfo, len(names))
 	for _, name := range names {
-		entry, err := openRootedChild(dir, name, true)
+		entry, err := openRootedChildWithHook(dir, name, true, beforeOpen)
 		if err != nil {
 			return 0, err
 		}
@@ -229,7 +251,7 @@ func digestRootedDirectory(dir *os.Root, rel, destination string, copyOutput boo
 					return 0, err
 				}
 			}
-			childSize, err := digestRootedDirectory(entry.dir, childRel, childDestination, copyOutput, h)
+			childSize, err := digestRootedDirectoryWithHook(entry.dir, childRel, childDestination, copyOutput, h, beforeOpen)
 			_ = entry.dir.Close()
 			if err != nil {
 				return 0, err

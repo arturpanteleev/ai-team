@@ -46,7 +46,7 @@ func TestRunSuccessOutputModes(t *testing.T) {
 			if err := command.Run(); err != nil {
 				t.Fatalf("run success output helper: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 			}
-			output := strings.TrimSuffix(stdout.String(), "PASS\n")
+			output := stripTestRunnerFooter(stdout.String())
 			switch mode {
 			case "default":
 				if got := strings.Count(output, "✓ Пайплайн выполнен"); got != 1 || stderr.Len() != 0 {
@@ -67,6 +67,18 @@ func TestRunSuccessOutputModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func stripTestRunnerFooter(output string) string {
+	lines := strings.Split(output, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "PASS" || strings.HasPrefix(line, "coverage:") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
 }
 
 func TestStageSubmitCommandHelper(t *testing.T) {

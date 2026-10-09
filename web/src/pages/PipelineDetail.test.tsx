@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
-import { decideApproval, getPipelineRun, resumeRun, retryDelivery } from '../api';
+import { decideApproval, getPipelineRun, resumeRun, retryDelivery, takeStage } from '../api';
 import { PipelineDetail } from './PipelineDetail';
 
 const session = vi.hoisted(() => ({ principal: null as null | { actor_id: string; roles: ('product_owner' | 'developer')[] } }));
@@ -70,6 +70,7 @@ vi.mock('../api', () => ({
   resumeRun: vi.fn(),
   cancelRun: vi.fn(),
   retryDelivery: vi.fn(),
+  takeStage: vi.fn().mockResolvedValue({ owner: { stage_id: 'product_spec', actor_id: 'bob@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T01:00:00Z' }, changed: true }),
 }));
 
 describe('PipelineDetail graph', () => {
@@ -95,6 +96,38 @@ describe('PipelineDetail graph', () => {
     expect(await screen.findByText('Маршрут workflow')).toBeInTheDocument();
     expect(screen.getByText('architect · max 2')).toHaveAttribute('data-current', 'true');
     expect(screen.getByText(/product_owner · quorum any/)).toHaveTextContent('approve→architect');
+  });
+
+  it('показывает ответственного и время владения human-этапом, позволяет перехватить и обновляет задачу', async () => {
+    session.principal = { actor_id: 'bob@example.test', roles: ['product_owner'] };
+    vi.mocked(getPipelineRun).mockClear();
+    vi.mocked(takeStage).mockClear();
+    const waitingHumanInput = {
+      run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'waiting_for_approval' as const, started_at: '2026-07-28T00:00:00Z' },
+      stages: [],
+      approvals: [{
+        id: 'approval-human-input', run_id: 'run-graph', attempt_id: 'attempt-human',
+        from_stage: 'product_spec', to_stage: 'product_spec', trigger: 'human_input',
+        subject_hash: 'a'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+        actions: ['submit', 'reject'], payload: { kind: 'input', stage_id: 'product_spec' }, status: 'pending' as const,
+        created_at: '2026-10-09T00:00:00Z',
+      }],
+      next_stage: 'product_spec',
+      stage_owners: { product_spec: { stage_id: 'product_spec', approval_id: 'approval-human-input', actor_id: 'alice@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T00:00:00Z' } },
+    };
+    vi.mocked(getPipelineRun).mockResolvedValueOnce(waitingHumanInput).mockResolvedValueOnce(waitingHumanInput);
+    vi.mocked(takeStage).mockResolvedValue({
+      owner: { stage_id: 'product_spec', approval_id: 'approval-human-input', actor_id: 'bob@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T01:00:00Z' },
+      changed: true,
+    });
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Ответственный за этап «product_spec»' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Ответственный за этап «product_spec»' }))
+      .toHaveTextContent(/alice@example.test держит этап/);
+    fireEvent.click(screen.getByRole('button', { name: 'Перехватить этап' }));
+    await waitFor(() => expect(takeStage).toHaveBeenCalledWith('run-graph', 'product_spec'));
+    await waitFor(() => expect(getPipelineRun).toHaveBeenCalledTimes(2));
   });
 
   it('показывает вопрос analyst как форму и передаёт текст ответа в durable decision API', async () => {

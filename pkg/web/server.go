@@ -264,6 +264,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/delivery/retry", srv.handleRetryDelivery)
 		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
+		router.Post("/api/runs/{runID}/stages/{stageID}/take", srv.handleTakeStage)
 		router.Post("/api/runs/{runID}/artifact-revisions", srv.handleCreateArtifactRevision)
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
@@ -512,11 +513,25 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 		response["delivery"] = s.deliveryProjection(run, stages, s.targetDir)
 	}
 	if run.RunID != "" {
+		currentStage, currentApproval := "", ""
 		if stateStore, stateErr := lifecycle.NewStore(s.targetDir); stateErr == nil {
 			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
 				response["next_stage"] = state.NextStage
+				if state.Phase == lifecycle.PhaseWaiting {
+					currentStage, currentApproval = state.NextStage, state.PendingApprovalID
+				}
 			}
 		}
+		owners, ownerErr := s.store.GetStageOwners(run.RunID)
+		if ownerErr != nil {
+			http.Error(w, "stage owners unavailable", http.StatusInternalServerError)
+			return
+		}
+		currentOwners := make(map[string]store.StageOwner)
+		if owner, ok := owners[currentStage]; ok && currentApproval != "" && owner.ApprovalID == currentApproval {
+			currentOwners[currentStage] = owner
+		}
+		response["stage_owners"] = currentOwners
 	}
 	if s.controller != nil && run.RunID != "" {
 		approvals, approvalErr := s.controller.Approvals(run.RunID)

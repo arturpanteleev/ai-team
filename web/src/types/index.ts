@@ -60,6 +60,14 @@ export interface Stage {
   delivery_json?: string;
 }
 
+export interface StageOwner {
+  stage_id: string;
+  approval_id: string;
+  actor_id: string;
+  actor_role: string;
+  taken_at: string;
+}
+
 export interface CheckEvidence {
   name: string;
   class: string;
@@ -240,7 +248,7 @@ export interface WsEvent {
   cursor: number;
   run_id: string;
   sequence: number;
-  type: 'run_started' | 'run_resumed' | 'run_paused' | 'run_canceled' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'run_finished';
+  type: 'run_started' | 'run_resumed' | 'run_paused' | 'run_canceled' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'stage_taken' | 'run_finished';
   attempt_id?: string;
   timestamp: string;
   data: Record<string, unknown>;

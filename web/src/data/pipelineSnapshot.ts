@@ -9,6 +9,7 @@ import type {
   DeliveryProjection,
   PipelineRun,
   Stage,
+  StageOwner,
   WorkflowGraph,
   WsEvent,
 } from '../types';
@@ -21,6 +22,7 @@ export interface PipelineSnapshot {
   delivery: DeliveryProjection;
   graph: WorkflowGraph | null;
   nextStage: string;
+  stageOwners: Record<string, StageOwner>;
 }
 
 export async function loadPipelineSnapshot(id: number): Promise<PipelineSnapshot> {
@@ -37,6 +39,7 @@ export async function loadPipelineSnapshot(id: number): Promise<PipelineSnapshot
     delivery: pipelineData.delivery ?? { status: 'not_requested' },
     graph: workflow?.graph ?? null,
     nextStage: pipelineData.next_stage ?? '',
+    stageOwners: pipelineData.stage_owners ?? {},
   };
 }
 
@@ -60,6 +63,7 @@ export async function refreshPipelineSnapshot(
     approvals: pipelineData.approvals ?? [],
     delivery: pipelineData.delivery ?? { status: 'not_requested' },
     nextStage: pipelineData.next_stage ?? '',
+    stageOwners: pipelineData.stage_owners ?? {},
     artifacts,
   };
 }

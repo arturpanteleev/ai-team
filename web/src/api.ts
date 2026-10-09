@@ -1,4 +1,4 @@
-import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 
 const API_BASE = '/api';
 
@@ -31,7 +31,7 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
   return fetchJson<PipelineRun[]>(`/pipelines?limit=${limit}&offset=${offset}`);
 }
 
-export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; delivery?: DeliveryProjection }> {
+export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection }> {
   return fetchJson(`/pipelines/${id}`);
 }
 
@@ -147,6 +147,10 @@ export function retryDelivery(runId: string): Promise<{ run_id: string; delivery
 
 export function cancelRun(runId: string): Promise<{ run_id: string }> {
   return command(`/runs/${encodeURIComponent(runId)}/cancel`);
+}
+
+export function takeStage(runId: string, stageId: string): Promise<{ owner: StageOwner; changed: boolean }> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/take`);
 }
 
 export function decideApproval(

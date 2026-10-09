@@ -8,6 +8,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
 import { StatusBadge } from '../components/StatusBadge';
 import { StageRow } from '../components/StageRow';
+import { StageOwnership } from '../components/StageOwnership';
 import { loadPipelineSnapshot, refreshPipelineSnapshot } from '../data/pipelineSnapshot';
 import type { PipelineSnapshot } from '../data/pipelineSnapshot';
 import styles from './PipelineDetail.module.css';
@@ -161,6 +162,11 @@ export function PipelineDetail() {
     (run?.status === 'completed' || run?.status === 'completed_with_warnings') &&
     (delivery.status === 'pending' || delivery.status === 'failed');
   const prURL = safePullRequestURL(delivery.record?.pr_url);
+  const hasPendingHumanInput = Boolean(nextStage && approvals.some((value) => {
+    if (value.status !== 'pending' || value.trigger !== 'human_input' || value.from_stage !== nextStage || value.to_stage !== nextStage) return false;
+    const payload = value.payload && typeof value.payload === 'object' ? value.payload as { kind?: unknown; stage_id?: unknown } : null;
+    return payload?.kind === 'input' && payload.stage_id === nextStage;
+  }));
 
   return (
     <div className={styles.container}>
@@ -176,6 +182,17 @@ export function PipelineDetail() {
           <StatusBadge status={run.status} />
         </div>
       </div>
+
+      {(hasPendingHumanInput || snapshot?.stageOwners[nextStage]) && (
+        <StageOwnership
+          runId={run.run_id}
+          stageId={nextStage}
+          actorId={principal?.actor_id ?? actor}
+          owner={snapshot?.stageOwners[nextStage]}
+          canTake={hasPendingHumanInput}
+          onChanged={fetchData}
+        />
+      )}
 
       {delivery.status !== 'not_requested' && (
         <section className={styles.workflow} aria-labelledby="git-delivery-heading">

@@ -251,6 +251,30 @@ ai-team stage submit <run_id> --stage implementation \
 ai-team stage submit <run_id> --stage intent --approve --note "Идея принята"
 ```
 
+### ai-team stage take
+
+Закрепляет текущий ожидающий human stage за участником, чей actor и роли
+определяет web controller. Сервер проверяет, что это текущий этап, что у
+участника есть роль из approval, и записывает владельца вместе с approval visit.
+Команда не принимает `--actor` или `--role`: эти значения нельзя подменить на
+клиенте.
+
+```text
+ai-team stage take <run_id> --stage <id> [--target <путь>] [--web-url <url>]
+```
+
+В локальном режиме URL по умолчанию — `http://127.0.0.1:8080`, а bearer token
+читается из закрытого файла `.ai-team/web.token`. Для облачного controller
+задайте `AI_TEAM_WEB_URL=https://…` и `AI_TEAM_WEB_TOKEN`; удалённый HTTP
+отклоняется до отправки токена. CLI получает web session и CSRF token через
+`/api/session`, затем вызывает защищённый endpoint `take`.
+
+```bash
+ai-team stage take <run_id> --stage product_spec
+AI_TEAM_WEB_URL=https://team.example.test AI_TEAM_WEB_TOKEN="$TOKEN" \
+  ai-team stage take <run_id> --stage product_spec
+```
+
 ### ai-team deliver
 
 Повторяет отложенную delivery завершённого прогона: коммит, push и PR с

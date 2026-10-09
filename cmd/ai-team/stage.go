@@ -26,10 +26,17 @@ func (c localStageApprovalController) Approvals(runID string) ([]approval.Pendin
 }
 
 func cmdStage() {
-	if len(os.Args) < 3 || os.Args[2] != "submit" {
-		fatal("Использование: ai-team stage submit <run_id> --stage <id> (--md <file> | --text <text> | --link <url> --kind <kind> | --approve) [--note <text>] [--description <text>]")
+	if len(os.Args) < 3 {
+		fatal("Использование: ai-team stage submit|take <run_id> --stage <id> [параметры]")
 	}
-	cmdStageSubmit(os.Args[3:])
+	switch os.Args[2] {
+	case "submit":
+		cmdStageSubmit(os.Args[3:])
+	case "take", "run-agent", "confirm", "skip", "return", "override":
+		cmdTaskStageAction(os.Args[2], os.Args[3:])
+	default:
+		fatal("Использование: ai-team stage submit|take <run_id> --stage <id> [параметры]")
+	}
 }
 
 func cmdStageSubmit(args []string) {

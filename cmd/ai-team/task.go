@@ -493,12 +493,14 @@ func interspersedTaskArgs(args []string, valueFlags map[string]bool) []string {
 	return append(options, positionals...)
 }
 
-// cmdTaskStageAction is the CLI integration seam for stage controls owned by
-// the stage-transition capabilities. stage submit is routed by B-31; the
-// remaining actions are intentionally connected only when their controller
-// APIs land, so the CLI cannot manufacture a lifecycle transition.
+// cmdTaskStageAction dispatches actions whose transitions are owned by the
+// stage controller. Only take is currently available through the B-33 API.
 func cmdTaskStageAction(action string, args []string) {
-	if action != "take" && action != "run-agent" && action != "confirm" && action != "skip" && action != "return" && action != "override" {
+	if action == "take" {
+		cmdTaskStageTake(args)
+		return
+	}
+	if action != "run-agent" && action != "confirm" && action != "skip" && action != "return" && action != "override" {
 		fatal("Неизвестное действие этапа %q", action)
 	}
 	logging.Fail(logging.Record{Level: "error", Command: "stage", Type: "stage_action", Message: fmt.Sprintf("действие %s пока не подключено к контроллеру задач", action), Exit: exitBlocked}, "Действие этапа %q пока не подключено к контроллеру задач", action)

@@ -48,6 +48,31 @@ CLI MUST предоставлять `init`, `run`, `runs`, `show`, `cancel`, `li
 - **ТОГДА** CLI MUST записать причину в verified event journal и перевести lifecycle в terminal
 - **И** уже terminal run MUST быть отклонён
 
+### Requirement: Human stage take command
+CLI MUST предоставлять `ai-team stage take <run_id> --stage <id>` для текущего
+ожидающего human input этапа через защищённый web controller. Actor и role MUST
+определяться серверной сессией и approval policy; CLI MUST NOT принимать их как
+параметры этой команды. Клиент MUST получить web session/CSRF token через
+`/api/session`, отправить их с запросом взятия этапа и отклонить удалённый HTTP
+URL до передачи bearer token.
+
+#### Scenario: Локальный участник берёт текущий этап
+- **КОГДА** пользователь вызывает `stage take` для текущего ожидающего human input
+- **ТОГДА** CLI MUST использовать `.ai-team/web.token`, получить сессию и вывести
+  server-derived владельца этапа
+- **И** повторное взятие MUST показать актуального владельца без локального
+  создания или подмены ownership записи
+
+#### Scenario: Облачный участник берёт этап
+- **КОГДА** CLI получает HTTPS URL и bearer token из окружения
+- **ТОГДА** CLI MUST отправить защищённый запрос с CSRF token и cookie сессии
+- **И** actor и role MUST быть получены только из ответа controller
+
+#### Scenario: Недоступный или неразрешённый этап
+- **КОГДА** web controller отклоняет аутентификацию, роль или состояние этапа
+- **ТОГДА** CLI MUST завершиться ненулевым кодом и MUST NOT сообщать об успешном
+  взятии
+
 ### Requirement: Init
 `ai-team init` MUST создать `.ai-team/config.yaml`, artifact tasks, reports и
 logs directories. В Git repository команда MUST обеспечить ignore

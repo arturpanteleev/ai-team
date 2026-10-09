@@ -140,6 +140,8 @@ func printUsage() {
                                    --link <url> --kind <pr|build|other> |
                                    --approve; optional --note, --description,
                                    --actor, --role, --target
+  ai-team stage take <run_id> --stage <id>
+                                   Закрепить текущий human stage за собой
   ai-team auth-token               Выпустить короткоживущий cloud access token
   ai-team worker                   Выполнить один disposable worker job из stdin
   ai-team scheduler-worker         Claim и выполнить job из persistent queue

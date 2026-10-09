@@ -215,12 +215,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return fail(fmt.Errorf("агент %s: immutable input snapshot: %w", name, err))
 	}
 	for index, input := range inputArtifacts {
-		if input.Name != "clarification-answer" {
+		if input.Name != "clarification-answer" && !(input.Name == "business-brief" && rs.brief.Kind == "clarification") {
 			continue
 		}
-		inputName := fmt.Sprintf("%03d-clarification-answer", index+1)
+		inputName := fmt.Sprintf("%03d-%s", index+1, input.Name)
 		if index >= len(evidenceInputs) {
-			return fail(fmt.Errorf("agent %s: clarification input snapshot is missing", name))
+			return fail(fmt.Errorf("agent %s: clarification-bearing input snapshot is missing", name))
 		}
 		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, evidenceInputs[index].Path)
 		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths,

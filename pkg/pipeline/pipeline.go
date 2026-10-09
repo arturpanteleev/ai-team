@@ -341,6 +341,100 @@ type runState struct {
 	attestationDigest         string
 }
 
+// restoreClarificationReadBoundary rebuilds exclusions from durable approval
+// decisions and verified evidence manifests on every invocation. A resume can
+// target an ordinary graph approval after the answer stage has already run, so
+// its current input approval alone is not sufficient authority for this policy.
+func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedRun, briefs BriefStore, current *approval.PendingApproval) error {
+	values, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return fmt.Errorf("list durable approvals: %w", err)
+	}
+	if current != nil && current.RunID == rs.runID && current.Kind == approval.KindQuestions &&
+		current.Status == approval.StatusResolved && current.ResolvedAction == "answer_questions" {
+		found := false
+		for _, value := range values {
+			if value.ID == current.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, *current)
+		}
+	}
+
+	answerIDs := make(map[string]bool)
+	for _, value := range values {
+		if value.RunID != rs.runID || value.Status != approval.StatusResolved ||
+			value.Kind != approval.KindQuestions || value.ResolvedAction != "answer_questions" {
+			continue
+		}
+		if _, err := CanonicalQuestionAnswerContent(value); err != nil {
+			return fmt.Errorf("resolved clarification %s is invalid: %w", value.ID, err)
+		}
+		canonical, err := QuestionAnswerCanonicalPath(rs.runCfg.TargetDir, rs.runID, value.ID)
+		if err != nil {
+			return err
+		}
+		projection, err := QuestionAnswerMaterializationPath(rs.runCfg.TargetDir, rs.runID, value.ID)
+		if err != nil {
+			return err
+		}
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonical, projection)
+		answerIDs[value.ID] = true
+	}
+	if len(answerIDs) == 0 {
+		return nil
+	}
+
+	// Clarification versions contain the answer as cumulative brief text. Keep
+	// their durable files in the same exact-path deny set; Go has already loaded
+	// any input content into the stage prompt before the CLI starts.
+	versions, err := briefs.List(rs.runID)
+	if err != nil {
+		return fmt.Errorf("list durable brief versions: %w", err)
+	}
+	for _, version := range versions {
+		if version.Kind != "clarification" {
+			continue
+		}
+		relative := filepath.Clean(filepath.FromSlash(version.Path))
+		if filepath.IsAbs(relative) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.ToSlash(relative) != version.Path {
+			return fmt.Errorf("clarification brief path is invalid: %q", version.Path)
+		}
+		path := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID, relative)
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, path)
+	}
+	if rs.brief.Kind == "clarification" && rs.brief.Path != "" {
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, rs.brief.Path)
+	}
+
+	// Published attempt inputs survive process boundaries. Rehydrate the exact
+	// answer and cumulative-brief copies from verified manifests after resume.
+	runDir := rs.evidence.RunDir()
+	for _, attempt := range replayed.Attempts {
+		if attempt.ManifestSHA256 == "" {
+			continue
+		}
+		_, manifest, readErr := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, runDir, rs.runID, attempt.AttemptID)
+		if readErr != nil {
+			return fmt.Errorf("read attempt %s for clarification boundary: %w", attempt.AttemptID, readErr)
+		}
+		for _, input := range manifest.Inputs {
+			if input.Name != "clarification-answer" && input.Name != "business-brief" {
+				continue
+			}
+			path := filepath.Join(runDir, filepath.FromSlash(input.EvidencePath))
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+				return fmt.Errorf("attempt %s has invalid clarification-bearing input path %q", attempt.AttemptID, input.EvidencePath)
+			}
+			rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, path)
+		}
+	}
+	return nil
+}
+
 // deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
 // отложен до terminal finalize, когда attestation digest уже детерминирован.
 // Инициализируется в delivery-стадии после успешной авторизации плана; реальный
@@ -994,25 +1088,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if inputApproval == nil {
 		inputApproval = recoveredClarification
 	}
+	if err := rs.restoreClarificationReadBoundary(replayedRun, briefStore, inputApproval); err != nil {
+		outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", err))
+		return RunResult{RunID: runID, Outcome: outcome}, finalErr
+	}
 	if inputApproval == nil && !rs.resumed {
 		rs.extraInputs[rs.graph.Entry] = briefInputs(rs.brief)
 	}
 	if inputApproval != nil && inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
 		rs.questionAnswerTargetStage = inputApproval.FromStage
-		canonicalPath, pathErr := QuestionAnswerCanonicalPath(runCfg.TargetDir, runID, inputApproval.ID)
-		if pathErr != nil {
-			outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", pathErr))
-			return RunResult{RunID: runID, Outcome: outcome}, finalErr
-		}
-		projectionPath, pathErr := QuestionAnswerMaterializationPath(runCfg.TargetDir, runID, inputApproval.ID)
-		if pathErr != nil {
-			outcome, finalErr := rs.finalize(fmt.Errorf("clarification read boundary: %w", pathErr))
-			return RunResult{RunID: runID, Outcome: outcome}, finalErr
-		}
-		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonicalPath, projectionPath)
-		if rs.brief.Kind == "clarification" && rs.brief.ApprovalID == inputApproval.ID && rs.brief.Path != "" {
-			rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, rs.brief.Path)
-		}
 	}
 	if inputApproval != nil && (inputApproval.Kind == approval.KindQuestions || isApprovedSpecPayload(inputApproval.Payload) || isBackwardTransition(rs.graph, inputApproval)) {
 		inputs, inputErr := rs.stageOutputs(inputApproval.FromStage, inputApproval.AttemptID)

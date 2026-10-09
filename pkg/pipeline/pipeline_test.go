@@ -874,30 +874,70 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
-	if err != nil {
-		t.Fatalf("resume должен продолжить тот же run: result=%+v err=%v", second, err)
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	var followupRequired *ApprovalRequiredError
+	if !errors.As(err, &followupRequired) {
+		t.Fatalf("после успешного этапа с ответом должен сохраниться обычный graph approval: result=%+v err=%v", second, err)
 	}
-	if second.RunID != first.RunID || rt.calls["analyst"] != 2 || rt.calls["questioner"] != 1 || second.Outcome != "completed" {
-		t.Fatalf("неверный resume: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	if second.RunID != first.RunID || rt.calls["analyst"] != 2 || rt.calls["questioner"] != 0 {
+		t.Fatalf("первый resume изменил identity или выполнил последующий этап до approval: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+	followup, err := store.Load(first.RunID, followupRequired.ApprovalID)
+	if err != nil || followup.FromStage != "analyst" || followup.ToStage != "questioner" {
+		t.Fatalf("не найден обычный graph approval после ответа: %+v err=%v", followup, err)
+	}
+	if _, err := store.Decide(first.RunID, followup.ID, approval.Decision{
+		ActorID: "operator-1", ActorRole: "operator", Action: "approve", SubjectHash: followup.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil {
+		t.Fatalf("resume после обычного graph approval должен продолжить тот же run: result=%+v err=%v", third, err)
+	}
+	if third.RunID != first.RunID || rt.calls["analyst"] != 2 || rt.calls["questioner"] != 1 || third.Outcome != "completed" {
+		t.Fatalf("неверный resume после graph approval: first=%+v second=%+v third=%+v calls=%+v", first, second, third, rt.calls)
 	}
 	if len(targetDenied) == 0 || len(laterDenied) == 0 {
 		t.Fatalf("both target and following stage must receive a per-stage answer deny policy: target=%v later=%v", targetDenied, laterDenied)
 	}
-	for _, path := range targetDenied {
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-			t.Fatalf("target stage received invalid denied path %q", path)
-		}
-		found := false
-		for _, later := range laterDenied {
-			if later == path {
-				found = true
-				break
+	resolvedTarget, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalPath, err := QuestionAnswerCanonicalPath(resolvedTarget, first.RunID, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionPath, err := QuestionAnswerMaterializationPath(resolvedTarget, first.RunID, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protected := range []string{canonicalPath, projectionPath} {
+		for label, paths := range map[string][]string{"target": targetDenied, "later resume": laterDenied} {
+			found := false
+			for _, path := range paths {
+				if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+					t.Fatalf("%s stage received invalid denied path %q", label, path)
+				}
+				if path == protected {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s stage lost durable protected path %q: target=%v later=%v", label, protected, targetDenied, laterDenied)
 			}
 		}
-		if !found {
-			t.Fatalf("later stage lost protected path %q: target=%v later=%v", path, targetDenied, laterDenied)
+	}
+	persistedAnswerSnapshotDenied := false
+	for _, path := range laterDenied {
+		if strings.Contains(path, filepath.Join(".ai-team", "runs", first.RunID, "attempts")) &&
+			strings.Contains(path, "clarification-answer") {
+			persistedAnswerSnapshotDenied = true
 		}
+	}
+	if !persistedAnswerSnapshotDenied {
+		t.Fatalf("later stage after graph-approval resume must deny the prior immutable answer snapshot: %v", laterDenied)
 	}
 	versions, err := listBriefVersions(filepath.Join(dir, ".ai-team", "runs", first.RunID, "brief"))
 	if err != nil || len(versions) != 2 {

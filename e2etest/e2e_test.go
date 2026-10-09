@@ -997,6 +997,10 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 		t.Fatalf("init failed (%d):\n%s", code, out)
 	}
+	// This flow exercises the scheduler against the pre-v5 runtime. Keep the
+	// public init/config path on v5, but use the test-only in-memory runtime
+	// projection in both the web server and the disposable worker processes.
+	runtimeFixtureEnv := e2eRuntimeFixtureEnv(t, dir, []string{"run"})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1009,6 +1013,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	command := exec.Command(bin, "web", "--port", port, "--dist=", "--scheduler-db", schedulerDB)
 	command.Dir = dir
 	command.Env = append(os.Environ(), pathEnv)
+	command.Env = append(command.Env, runtimeFixtureEnv...)
 	var serverOutput synchronizedOutput
 	command.Stdout, command.Stderr = &serverOutput, &serverOutput
 	if err := command.Start(); err != nil {
@@ -1063,6 +1068,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 		)
 		poller.Dir = dir
 		poller.Env = append(os.Environ(), pathEnv, worker.WorkerSandboxEnvVar+"=bubblewrap")
+		poller.Env = append(poller.Env, runtimeFixtureEnv...)
 		if output, pollErr := poller.CombinedOutput(); pollErr != nil {
 			t.Fatalf("scheduler worker: %v\n%s", pollErr, output)
 		}

@@ -376,7 +376,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
   let pipelineListReads = 0
 
   try {
-    run('go', ['build', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
+    run('go', ['build', '-tags=e2etest', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
     await mkdir(target, { recursive: true })
     run('git', ['init', '-b', 'main'], { cwd: target })
     run('git', ['config', 'user.name', 'AI Team Browser E2E'], { cwd: target })
@@ -394,7 +394,11 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     await mkdir(mockBin, { recursive: true })
     await symlink(path.join(repoDir, 'e2etest', 'mock-opencode.sh'), path.join(mockBin, 'opencode'))
     await writeFile(path.join(mockBin, 'gh'), '#!/bin/sh\nif [ "$1" = "auth" ] && [ "$2" = "status" ]; then echo authenticated; exit 0; fi\nexit 1\n', { mode: 0o755 })
-    const serverEnv = { ...process.env, PATH: `${mockBin}${path.delimiter}${process.env.PATH ?? ''}` }
+    const serverEnv = {
+      ...process.env,
+      PATH: `${mockBin}${path.delimiter}${process.env.PATH ?? ''}`,
+      AI_TEAM_E2E_IN_MEMORY_LEGACY_RUNTIME: '1',
+    }
     webServer = start(binary, ['web', '--target', target, '--port', String(port), '--dist', path.join(webDir, 'dist')], {
       cwd: target,
       env: serverEnv,

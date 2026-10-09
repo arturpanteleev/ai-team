@@ -770,23 +770,27 @@ func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, sub
 	if questions != payload.Markdown {
 		return nil, errors.New("clarification questions do not match the durable approval")
 	}
-	var answer string
-	for _, decision := range value.Decisions {
+	var resolvingDecision *approval.Decision
+	for index := range value.Decisions {
+		decision := &value.Decisions[index]
 		if decision.Action != "answer_questions" || !containsWorkerString(value.RequiredRoles, decision.ActorRole) {
-			continue
+			return nil, errors.New("clarification decision is invalid")
 		}
 		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
 			decision.SubjectHash != value.SubjectHash || decision.DecidedAt.IsZero() || strings.TrimSpace(decision.Comment) == "" {
 			return nil, errors.New("clarification decision is invalid")
 		}
-		if answer != "" {
-			return nil, errors.New("clarification approval has multiple answers")
+		if decision.DecidedAt.Equal(value.ResolvedAt) {
+			if resolvingDecision != nil {
+				return nil, errors.New("clarification approval has ambiguous resolving decisions")
+			}
+			resolvingDecision = decision
 		}
-		answer = strings.TrimSpace(decision.Comment)
 	}
-	if answer == "" {
-		return nil, errors.New("clarification approval has no durable human answer")
+	if resolvingDecision == nil {
+		return nil, errors.New("clarification approval has no resolving durable decision")
 	}
+	answer := strings.TrimSpace(resolvingDecision.Comment)
 	if strings.TrimSpace(submittedAnswer) != answer {
 		return nil, errors.New("clarification answer does not match the durable decision")
 	}

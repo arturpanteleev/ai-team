@@ -68,7 +68,12 @@ func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.
 		{name: "wrong subject", change: func(v *approval.PendingApproval) { v.Decisions[0].SubjectHash = "other" }},
 		{name: "missing timestamp", change: func(v *approval.PendingApproval) { v.Decisions[0].DecidedAt = time.Time{} }},
 		{name: "empty comment", change: func(v *approval.PendingApproval) { v.Decisions[0].Comment = " " }},
-		{name: "multiple answers", change: func(v *approval.PendingApproval) { v.Decisions = append(v.Decisions, v.Decisions[0]) }},
+		{name: "invalid later decision", change: func(v *approval.PendingApproval) {
+			later := v.Decisions[0]
+			later.DecidedAt = later.DecidedAt.Add(-time.Second)
+			later.ActorID = ""
+			v.Decisions = append(v.Decisions, later)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

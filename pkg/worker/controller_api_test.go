@@ -3973,9 +3973,20 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-run", TargetDir: target, Task: intention, ExecutionID: strings.Repeat("7", ExecutionIDBytes*2)}
 	const approvalID = "approval-1"
 	const questions = "Какая аудитория?"
-	const answer = "B2B"
+	const answer = "B2B customers"
+	const earlierAnswer = "Start with enterprise accounts"
+	approvalValue := workerQuestionApproval(job.RunID, approvalID, questions, answer, approval.StatusResolved)
+	approvalValue.Quorum = approval.QuorumAll
+	approvalValue.RequiredRoles = []string{"qa", "product"}
+	approvalValue.Decisions[0].Comment = earlierAnswer
+	approvalValue.Decisions[0].DecidedAt = approvalValue.ResolvedAt.Add(-time.Second)
+	approvalValue.Decisions = append(approvalValue.Decisions, approval.Decision{
+		ApprovalID: approvalID, ActorID: "product-owner@example.com", ActorRole: "product",
+		Action: "answer_questions", Comment: answer, SubjectHash: approvalValue.SubjectHash,
+		DecidedAt: approvalValue.ResolvedAt,
+	})
 	approvalStore := &apiApprovalStore{values: map[string]approval.PendingApproval{
-		job.RunID + "/" + approvalID: workerQuestionApproval(job.RunID, approvalID, questions, answer, approval.StatusResolved),
+		job.RunID + "/" + approvalID: approvalValue,
 	}}
 	api, err := startWorkerAPIServer(job, &apiRecorderSpy{}, approvalStore)
 	if err != nil {
@@ -4011,15 +4022,21 @@ func TestWorkerControllerBriefAPIIsRunScopedAndDurable(t *testing.T) {
 	if err != nil || len(versions) != 1 || versions[0].ID != created.Version.ID {
 		t.Fatalf("brief list=%+v err=%v", versions, err)
 	}
-	provenance := pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "qa@example.com", ActorRole: "qa"}
+	// The worker's provenance fields only signal that it has a clarification
+	// request; the controller derives the recorded actor from the resolving
+	// durable decision below.
+	provenance := pipeline.ClarificationProvenance{Stage: "questioner", ActorID: "worker@example.com", ActorRole: "worker"}
 	clarified, err := briefs.AppendClarification(job.RunID, approvalID, provenance, questions, answer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Вопросы этапа \"questioner\"", "Ответ от роли \"qa\"", "участник \"qa@example.com\""} {
+	for _, expected := range []string{"Вопросы этапа \"questioner\"", "Ответ от роли \"product\"", "участник \"product-owner@example.com\"", answer} {
 		if !strings.Contains(string(clarified.Content), expected) {
 			t.Fatalf("controller brief omitted approval provenance %q: %s", expected, clarified.Content)
 		}
+	}
+	if strings.Contains(string(clarified.Content), earlierAnswer) || strings.Contains(string(clarified.Content), "worker@example.com") {
+		t.Fatalf("controller brief used a non-resolving answer or worker-supplied provenance: %s", clarified.Content)
 	}
 	if strings.Contains(string(clarified.Content), "Product Owner") || strings.Contains(string(clarified.Content), "аналитик") {
 		t.Fatalf("generic AskQuestions brief hard-coded a role label: %s", clarified.Content)

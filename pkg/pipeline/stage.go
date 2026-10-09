@@ -580,15 +580,17 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 		verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", name+".md"),
 	}
-	if a.AskQuestions {
+	if a != nil && a.AskQuestions {
 		paths = append(paths, stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))
 	}
-	for _, outputPath := range a.Outputs {
-		fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
-		if err != nil {
-			return err
+	if a != nil {
+		for _, outputPath := range a.Outputs {
+			fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
+			if err != nil {
+				return err
+			}
+			paths = append(paths, fullPath)
 		}
-		paths = append(paths, fullPath)
 	}
 	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
 	for _, path := range paths {

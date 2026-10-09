@@ -785,6 +785,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if runCfg.ResumeRunID != "" {
 		var manifest evidence.RunManifest
 		runEvidenceDir := filepath.Join(runCfg.TargetDir, ".ai-team", "runs", runID)
+		if _, eventErr := evidence.VerifyEventLogWithSource(filepath.Join(runEvidenceDir, "events.jsonl"), runID, p.eventLogSource); eventErr == nil {
+			if err := evidence.RecoverMissingStageSkipEvents(runEvidenceDir, runID, p.eventLogSource, p.attemptManifestSource); err != nil {
+				return RunResult{}, fmt.Errorf("recover skipped-attempt warning: %w", err)
+			}
+		}
 		// OPS-3: fail-closed проверка применимой evidence chain/snapshots перед
 		// продолжением. Если цепочка/снимки повреждены — отклоняем resume и явно
 		// фиксируем причину в evidence (resume_blocked), пока лог аппендабелен.

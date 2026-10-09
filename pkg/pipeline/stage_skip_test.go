@@ -111,6 +111,87 @@ func TestRunEngineSkipSkippableAgentStageAndContinue(t *testing.T) {
 	}
 }
 
+func TestAgentSkipClearsStaleOutputsAndRecoversMissingWarning(t *testing.T) {
+	dir := env(t)
+	staleOutput := filepath.Join(dir, ".ai-team", "artifacts", "feat", "proposal.md")
+	staleSummary := filepath.Join(dir, ".ai-team", "artifacts", "feat", ".stage-summary", "optional.md")
+	for path, content := range map[string]string{
+		staleOutput:  "stale proposal from an earlier visit",
+		staleSummary: "stale summary from an earlier visit",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt := newScripted()
+	factory := &humanCrashEvidenceFactory{point: "after-skipped-attempt-finished"}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "agent-skip-crash-recovery-test",
+		Title:         "Agent skip crash recovery test",
+		Stages: []config.TemplateStage{
+			{ID: "optional", Title: "Optional", Function: "developer", Result: "md", Executor: "agent", Agent: "analyst", Confirm: "auto", Skippable: true},
+			{ID: "finish", Title: "Finish", Function: "developer", Result: "md", Executor: "agent", Agent: "coder", Confirm: "auto"},
+		},
+	}
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithEvidenceStoreFactory(factory),
+		WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	engine := NewRunEngine(p)
+	started, startErr := engine.Start(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "skip an optional stage", TargetDir: dir,
+		CancelRequested: func() bool { return true },
+	})
+	if !errors.Is(startErr, context.Canceled) || started.RunID == "" {
+		t.Fatalf("run should be resumable before its first stage: result=%+v err=%v", started, startErr)
+	}
+	const reason = "This optional proposal is outside the task scope."
+	expectHumanCrash(t, func() {
+		_, _ = engine.SkipStage(context.Background(), SkipStageConfig{
+			RunID: started.RunID, TargetDir: dir, StageID: "optional", Reason: reason,
+		})
+	})
+	if !factory.crashed {
+		t.Fatal("crash was not injected after durable skipped attempt_finished")
+	}
+	for _, path := range []string{staleOutput, staleSummary} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("skipping agent stage left stale artifact %s: %v", path, err)
+		}
+	}
+	eventsPath := filepath.Join(dir, ".ai-team", "runs", started.RunID, "events.jsonl")
+	if _, err := evidence.ReplayEventLog(eventsPath, started.RunID); err == nil || !strings.Contains(err.Error(), "no stage_skipped warning") {
+		t.Fatalf("strict replay must reject a finished skipped attempt without its warning: %v", err)
+	}
+	_, resumeErr := engine.SkipStage(context.Background(), SkipStageConfig{
+		RunID: started.RunID, TargetDir: dir, StageID: "optional", Reason: reason,
+	})
+	if resumeErr == nil || !strings.Contains(resumeErr.Error(), "proposal") {
+		t.Fatalf("downstream collection should fail after the stale proposal is removed: %v", resumeErr)
+	}
+	if rt.calls["analyst"] != 0 || rt.calls["coder"] != 0 {
+		t.Fatalf("recovery must reuse the skipped attempt and downstream must not consume stale bytes: calls=%+v", rt.calls)
+	}
+	replayed, err := evidence.ReplayEventLog(eventsPath, started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skippedAttempts int
+	for _, attempt := range replayed.Attempts {
+		if attempt.Stage == "optional" && attempt.State.Outcome == workflow.OutcomeSkipped {
+			skippedAttempts++
+			if attempt.SkipReason != reason {
+				t.Fatalf("finished agent skip lost its reason: %+v", attempt)
+			}
+		}
+	}
+	if skippedAttempts != 1 || len(replayed.StageSkips) != 1 || replayed.StageSkips[0].Reason != reason {
+		t.Fatalf("recovery should append one reason-bound warning without a new attempt: attempts=%+v skips=%+v", replayed.Attempts, replayed.StageSkips)
+	}
+}
+
 func TestRunEngineSkipPendingHumanStageRequiresReasonAndLeavesNoOutput(t *testing.T) {
 	dir := env(t)
 	cfg := &config.Config{

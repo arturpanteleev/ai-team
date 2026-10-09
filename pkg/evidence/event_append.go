@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // ValidateWorkerEventType is the API boundary allowlist. Unknown event types
@@ -94,8 +96,24 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 	}
 	candidate.SHA256 = digest
 	proposal := append(append([]Event(nil), events...), candidate)
-	if _, err := replayEventsWithAttemptManifestSource(proposal, runID, runDir, manifests); err != nil {
+	appendReplay, err := replayEventsForAppend(proposal, runID, runDir, manifests)
+	if err != nil {
 		return Event{}, false, fmt.Errorf("event append fails lifecycle replay: %w", err)
+	}
+	finishesExplicitSkip := false
+	if candidate.Type == "attempt_finished" {
+		for _, attempt := range appendReplay.Attempts {
+			if attempt.AttemptID == candidate.AttemptID && attempt.State.Outcome == workflow.OutcomeSkipped &&
+				(attempt.StageAction == "skip" || attempt.Executor == "human") {
+				finishesExplicitSkip = true
+				break
+			}
+		}
+	}
+	if !finishesExplicitSkip {
+		if _, err := replayEventsWithAttemptManifestSource(proposal, runID, runDir, manifests); err != nil {
+			return Event{}, false, fmt.Errorf("event append fails strict lifecycle replay: %w", err)
+		}
 	}
 	if candidate.Type == "run_finished" {
 		status, _ := candidate.Data["status"].(string)

@@ -27,6 +27,14 @@ hash-chained `attempt_started` and `attempt_finished` events MUST bind the same
 - **И** every declared input consumed by that human stage MUST be snapshotted
   with its digest so a later stage can prove which human output it consumed
 
+#### Scenario: Explicit skip warning survives a crash
+
+- **WHEN** an explicitly skipped agent or human attempt is durably finished
+- **THEN** its `attempt_finished` event MUST retain the skip reason, and strict
+  replay MUST require exactly one matching `stage_skipped` warning event
+- **И** resume MAY append a missing warning after a crash only from that
+  durable reason, reusing the finished attempt rather than creating another
+
 ### Requirement: Event log run binding
 Hash-chain событий MUST начинаться с корня, выведенного из `run_id` своего прогона, так что event log одного прогона MUST NOT проходить проверку целостности в каталоге другого — в том числе после перештамповки `run_id` в событиях и полного пересчёта дайджестов.
 

@@ -45,6 +45,11 @@ finished attempt and a warning event with its mandatory reason.
 - **КОГДА** an operator skips a stage whose template has `skippable: true`
 - **ТОГДА** the engine MUST record a synthetic or human `OutcomeSkipped`
   attempt and `stage_skipped` warning with the reason
+- **И** MUST clear the skipped stage's outputs and summary from earlier visits
+  before downstream stages can collect inputs
+- **И** if a crash happens after `attempt_finished` but before `stage_skipped`,
+  resume MUST restore the warning from the durable reason without creating a
+  second skipped attempt
 - **И** MUST continue through the stage's skipped edge without invoking the
   agent for a synthetic agent skip
 

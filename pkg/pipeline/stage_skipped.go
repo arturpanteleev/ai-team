@@ -61,6 +61,13 @@ func (rs *runState) runSkippedStage(ctx context.Context, index int, stageID, rea
 	if reason == "" {
 		return notifier.StageResult{}, fmt.Errorf("пропуск этапа требует причину")
 	}
+	definition, err := rs.p.loadStageDefinition(stageID)
+	if err != nil {
+		return notifier.StageResult{}, fmt.Errorf("load skipped stage outputs %s: %w", stageID, err)
+	}
+	if err := rs.clearStageEphemeral(stageID, definition); err != nil {
+		return notifier.StageResult{}, fmt.Errorf("clear stale outputs before skipping %s: %w", stageID, err)
+	}
 
 	rs.attemptOrdinal++
 	started := time.Now().UTC()
@@ -113,7 +120,7 @@ func (rs *runState) runSkippedStage(ctx context.Context, index int, stageID, rea
 		Data: map[string]any{
 			"status": result.Status, "execution": result.State.Execution, "decision": result.State.Decision,
 			"outcome": result.State.Outcome, "executor": result.Executor,
-			"manifest_sha256": digest,
+			"manifest_sha256": digest, "stage_skip_reason": reason,
 		},
 	}); err != nil {
 		return notifier.StageResult{}, fmt.Errorf("record skipped attempt finish: %w", err)

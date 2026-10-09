@@ -738,6 +738,9 @@ type requiredVerdictContractLookup interface {
 
 // Validate проверяет конфиг до запуска пайплайна (fail fast).
 func (c *Config) Validate(reg AgentLookup) error {
+	if c.Template == "" && len(c.Stages) > 0 {
+		return fmt.Errorf("config: template обязателен, если указаны stages")
+	}
 	if c.Template == "" && len(c.PipelineAgents) == 0 {
 		return fmt.Errorf("config: pipeline пуст")
 	}

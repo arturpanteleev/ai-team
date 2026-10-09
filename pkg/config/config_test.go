@@ -230,6 +230,40 @@ func TestV5RejectsUnknownDuplicateAndLegacyFields(t *testing.T) {
 	}
 }
 
+func TestV5StagesWithoutTemplateFailValidation(t *testing.T) {
+	for name, delivery := range map[string]string{
+		"unknown required check":         `require_checks: [not-configured]`,
+		"unknown required verdict stage": `require_verdicts: [not-a-stage]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := fmt.Sprintf(`schema_version: 5
+title: Missing template
+stages:
+  - id: implementation
+    title: Implementation
+    function: developer
+    result: link
+    link_kind: pr
+    executor: agent
+    agent: coder
+    delivery:
+      %s
+`, delivery)
+			var cfg Config
+			if err := yaml.Unmarshal([]byte(data), &cfg); err != nil {
+				t.Fatalf("malformed v5 YAML should parse before semantic validation: %v", err)
+			}
+			if len(cfg.PipelineAgents) != 1 || cfg.PipelineAgents[0].Name != "implementation" {
+				t.Fatalf("expected YAML compatibility projection from stages, got %+v", cfg.PipelineAgents)
+			}
+			err := cfg.Validate(nil)
+			if err == nil || !strings.Contains(err.Error(), "template обязателен") {
+				t.Fatalf("stage-list v5 config without template must fail validation before delivery/runtime: %v", err)
+			}
+		})
+	}
+}
+
 func TestTemplateValidationRules(t *testing.T) {
 	base, err := DefaultProfile(ProfileStandard)
 	if err != nil {

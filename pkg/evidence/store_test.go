@@ -79,6 +79,51 @@ func TestStoreUsesInternalEventLogSeamForAppendAndResume(t *testing.T) {
 	}
 }
 
+func TestCleanupInflightInputSnapshotsRemovesScratchWithoutFollowingLinks(t *testing.T) {
+	target := t.TempDir()
+	const runID = "run-inflight-cleanup"
+	runsRoot := filepath.Join(target, ".ai-team", "runs")
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Start(runsRoot, testRunManifest(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "answer.md")
+	if err := os.WriteFile(source, []byte("sensitive answer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, _, err := store.SnapshotInputs("crashed-attempt", []Artifact{{Name: "clarification-answer", Path: source}})
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("snapshot fixture: inputs=%+v err=%v", snapshots, err)
+	}
+	if _, err := os.Stat(snapshots[0].Path); err != nil {
+		t.Fatalf("crash snapshot should exist before recovery: %v", err)
+	}
+
+	external := filepath.Join(t.TempDir(), "external-answer.md")
+	if err := os.WriteFile(external, []byte("must not be followed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(store.RunDir(), "inflight-inputs", "orphan-link")
+	if err := os.Symlink(external, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupInflightInputSnapshots(target, runID); err != nil {
+		t.Fatalf("cleanup orphaned snapshots: %v", err)
+	}
+	if _, err := os.Lstat(snapshots[0].Path); !os.IsNotExist(err) {
+		t.Fatalf("orphan snapshot remains after cleanup: %q err=%v", snapshots[0].Path, err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("orphan symlink remains after cleanup: %q err=%v", link, err)
+	}
+	if data, err := os.ReadFile(external); err != nil || string(data) != "must not be followed" {
+		t.Fatalf("cleanup followed a symlink outside the scratch tree: %q err=%v", data, err)
+	}
+}
+
 func TestDeliveryDeferredAdmissionRejectsForeignOrTraversingStatePath(t *testing.T) {
 	target := t.TempDir()
 	runID := "run-delivery-state-admission"

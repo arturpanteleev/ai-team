@@ -913,7 +913,8 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, protected := range []string{canonicalPath, projectionPath} {
+	approvalJSONPath := filepath.Join(resolvedTarget, ".ai-team", "state", "approvals", first.RunID, pending.ID+".json")
+	for _, protected := range []string{canonicalPath, projectionPath, approvalJSONPath} {
 		for label, paths := range map[string][]string{"target": targetDenied, "later resume": laterDenied} {
 			found := false
 			for _, path := range paths {
@@ -938,6 +939,18 @@ func TestRun_AnalystQuestionsWaitAndResumeSameRunWithDurableAnswer(t *testing.T)
 	}
 	if !persistedAnswerSnapshotDenied {
 		t.Fatalf("later stage after graph-approval resume must deny the prior immutable answer snapshot: %v", laterDenied)
+	}
+	for label, paths := range map[string][]string{"target": targetDenied, "later resume": laterDenied} {
+		found := false
+		for _, path := range paths {
+			if path == approvalJSONPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s stage must deny the durable approval JSON containing the answer comment: %v", label, paths)
+		}
 	}
 	versions, err := listBriefVersions(filepath.Join(dir, ".ai-team", "runs", first.RunID, "brief"))
 	if err != nil || len(versions) != 2 {
@@ -1138,6 +1151,15 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 		t.Fatal(err)
 	}
 	answerStore := ControllerQuestionAnswerStore{TargetDir: canonicalTarget}
+	var orphanSnapshotPath string
+	rt.onExecute = func(name string, _ *runtime.Task, _ []runtime.Artifact) {
+		if name != "analyst" || rt.calls[name] != 2 {
+			return
+		}
+		if _, statErr := os.Lstat(orphanSnapshotPath); !os.IsNotExist(statErr) {
+			t.Errorf("resume must remove the unmanifested crash snapshot before starting a local stage: path=%q err=%v", orphanSnapshotPath, statErr)
+		}
+	}
 	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}),
 		WithQuestionAnswerInputProvider(canonicalQuestionAnswerTestProvider{store: answerStore}))
 	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "увеличить доход продаж", TargetDir: dir})
@@ -1160,7 +1182,8 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := answerStore.Prepare(decided); err != nil {
+	answerPath, err := answerStore.Prepare(decided)
+	if err != nil {
 		t.Fatalf("prepare controller-owned canonical answer: %v", err)
 	}
 	// Match the durable events written by the first resume attempt before its
@@ -1188,6 +1211,26 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	if err := evidenceStore.Append(evidence.Event{Type: "run_resumed"}); err != nil {
 		t.Fatal(err)
 	}
+	// Reproduce a hard crash after SnapshotInputs has copied the answer but
+	// before PublishAttempt could bind that copy to a durable manifest.
+	orphanAttemptID := evidenceStore.NewAttemptID("analyst", 2)
+	compiledGraph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidenceStore.Append(evidence.Event{Type: "attempt_started", AttemptID: orphanAttemptID, Stage: "analyst", Timestamp: time.Now().UTC(), Data: map[string]any{
+		"stage_index": compiledGraph.Index("analyst") + 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	orphanedInputs, _, err := evidenceStore.SnapshotInputs(orphanAttemptID, []evidence.Artifact{{Name: "clarification-answer", Path: answerPath}})
+	if err != nil || len(orphanedInputs) != 1 {
+		t.Fatalf("simulate pre-manifest input snapshot: inputs=%+v err=%v", orphanedInputs, err)
+	}
+	orphanSnapshotPath = orphanedInputs[0].Path
+	if data, readErr := os.ReadFile(orphanSnapshotPath); readErr != nil || !strings.Contains(string(data), "B2B-клиенты среднего бизнеса") {
+		t.Fatalf("crash fixture should contain the sensitive answer before resume: %q err=%v", data, readErr)
+	}
 
 	// Reproduce a crash after decision and the PhaseRunning/NextStage write, but
 	// before the analyst consumes its reconstructed extra inputs.
@@ -1213,6 +1256,9 @@ func TestRun_AnalystClarificationRecoversAfterRunningStatePersisted(t *testing.T
 	}
 	if second.RunID != first.RunID || second.Outcome != "completed" || rt.calls["analyst"] != 2 {
 		t.Fatalf("неверный resumed result: first=%+v second=%+v calls=%+v", first, second, rt.calls)
+	}
+	if _, err := os.Lstat(orphanSnapshotPath); !os.IsNotExist(err) {
+		t.Fatalf("resume must remove the orphaned input snapshot: path=%q err=%v", orphanSnapshotPath, err)
 	}
 }
 

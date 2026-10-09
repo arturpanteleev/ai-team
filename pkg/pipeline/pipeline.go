@@ -381,7 +381,11 @@ func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedR
 		if err != nil {
 			return err
 		}
-		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonical, projection)
+		// The durable approval JSON contains the complete decision comments,
+		// including the answer. Protect it alongside the derived answer files so
+		// a later stage cannot recover the answer by opening controller state.
+		approvalJSON := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "state", "approvals", rs.runID, value.ID+".json")
+		rs.questionAnswerDeniedPaths = append(rs.questionAnswerDeniedPaths, canonical, projection, approvalJSON)
 		answerIDs[value.ID] = true
 	}
 	if len(answerIDs) == 0 {
@@ -716,6 +720,14 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
+		// An input snapshot exists only to bridge SnapshotInputs to
+		// PublishAttempt. After a process crash that bridge is gone; published
+		// inputs already live in the verified attempt manifest, so every
+		// remaining inflight directory is an unowned orphan and must be removed
+		// before any resumed stage can inspect the workspace.
+		if err := evidence.CleanupInflightInputSnapshots(runCfg.TargetDir, runID); err != nil {
+			return RunResult{}, fmt.Errorf("cleanup orphaned inflight inputs: %w", err)
+		}
 		if resumedState.Phase == lifecycle.PhaseRunning || resumedState.Phase == lifecycle.PhaseResumable {
 			recoveredGraphApproval, err = recoveredGraphInputApproval(approvalStore, runID, resumedState.NextStage, compiledGraph, replayedRun)
 			if err != nil {
@@ -773,7 +785,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					fmt.Errorf("resume run: %w", err)
 			}
 		}
-		for _, attempt := range replayedRun.Attempts {
+		var abandonedAttemptIDs []string
+		for index := range replayedRun.Attempts {
+			attempt := &replayedRun.Attempts[index]
 			if attempt.ManifestSHA256 != "" {
 				_, attemptManifest, readErr := evidence.ReadAttemptManifest(p.attemptManifestSource, evidenceStore.RunDir(), runID, attempt.AttemptID)
 				if readErr != nil {
@@ -788,6 +802,35 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}); err != nil {
 					return RunResult{}, err
 				}
+				attempt.FinishedAt = runStartedAt
+				attempt.Status = string(workflow.OutcomeCanceled)
+				attempt.State = workflow.AttemptState{
+					Execution: workflow.ExecutionCanceled,
+					Decision:  workflow.DecisionNotApplicable,
+					Outcome:   workflow.OutcomeCanceled,
+				}
+				attempt.Error = "controller restarted"
+				abandonedAttemptIDs = append(abandonedAttemptIDs, attempt.AttemptID)
+			}
+		}
+		if len(abandonedAttemptIDs) > 0 {
+			// These executions never published an attempt manifest. Their outputs
+			// are not authoritative and will be retried from the lifecycle
+			// checkpoint, so make the abandonment neutral to the final run status.
+			if err := evidenceStore.Append(evidence.Event{
+				Type: "attempts_invalidated", Timestamp: runStartedAt,
+				Data: map[string]any{"attempt_ids": abandonedAttemptIDs, "reason": "controller_restart_retry"},
+			}); err != nil {
+				return RunResult{}, err
+			}
+			for index := range replayedRun.Attempts {
+				attempt := &replayedRun.Attempts[index]
+				if !containsString(abandonedAttemptIDs, attempt.AttemptID) {
+					continue
+				}
+				attempt.Superseded = true
+				attempt.State = workflow.Invalidate(attempt.State)
+				attempt.Status = attempt.State.LegacyStatus()
 			}
 		}
 		if resumedApproval != nil {

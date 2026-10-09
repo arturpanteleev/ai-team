@@ -651,6 +651,41 @@ func (s *Store) SnapshotInputs(attemptID string, inputs []Artifact) ([]Artifact,
 	return result, cleanup, nil
 }
 
+// CleanupInflightInputSnapshots discards scratch input copies left by a
+// process that stopped before publishing its attempt manifest. A resumed run
+// has already verified its event log and published manifests, so those
+// manifests are the only durable authority for prior stage inputs.
+func CleanupInflightInputSnapshots(targetDir, runID string) error {
+	runDir, err := safeio.ExistingDir(targetDir, ".ai-team", "runs", runID)
+	if err != nil {
+		return fmt.Errorf("inflight input run directory: %w", err)
+	}
+	root := filepath.Join(runDir, "inflight-inputs")
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("inflight input root %s must be a directory without symlink", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		// RemoveAll unlinks a symlink entry itself and does not follow it.
+		// Individual entries are scratch; verified attempt inputs are stored
+		// separately under attempts/<attempt>/inputs.
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return fmt.Errorf("remove orphaned inflight input %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
 // VerifyCheckEvidence confirms that a delivery provenance reference points to
 // a controller-published attempt in the named immutable run.
 func VerifyCheckEvidence(runsRoot, runID, checkDigest, workspaceDigest string) error {

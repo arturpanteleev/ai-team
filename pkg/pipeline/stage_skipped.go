@@ -85,7 +85,10 @@ func (rs *runState) runSkippedStage(ctx context.Context, index int, stageID, rea
 	}
 	if err := rs.evidence.Append(evidence.Event{
 		Type: "attempt_started", Stage: stageID, AttemptID: attemptID, Timestamp: started,
-		Data: map[string]any{"stage_index": index + 1, "executor": "agent", "stage_action": "skip"},
+		Data: map[string]any{
+			"stage_index": index + 1, "executor": "agent", "stage_action": "skip",
+			"stage_skip_version": evidence.StageSkipProtocolVersion,
+		},
 	}); err != nil {
 		return notifier.StageResult{}, fmt.Errorf("record skipped attempt start: %w", err)
 	}

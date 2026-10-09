@@ -1988,6 +1988,11 @@ func NewWorkerAPIEventLog(port *WorkerAPIPort) evidence.EventLog {
 
 func (*workerAPIEventLog) ExternalEventAuthority() {}
 
+// WorkerAppendBoundary marks an event log whose Append operation is exposed to
+// an untrusted worker API. Controller recovery must not try to repair durable
+// skip evidence through that worker-facing append route.
+func (*workerAPIEventLog) WorkerAppendBoundary() {}
+
 func (s *workerAPIEventLog) Read(runID string) ([]evidence.Event, error) {
 	data, err := s.ReadBytes(runID)
 	if err != nil {

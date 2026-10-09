@@ -30,10 +30,22 @@ hash-chained `attempt_started` and `attempt_finished` events MUST bind the same
 #### Scenario: Explicit skip warning survives a crash
 
 - **WHEN** an explicitly skipped agent or human attempt is durably finished
-- **THEN** its `attempt_finished` event MUST retain the skip reason, and strict
-  replay MUST require exactly one matching `stage_skipped` warning event
+- **THEN** a current-protocol `stage_action: skip` attempt MUST retain its
+  non-empty skip reason in `attempt_finished`, and strict replay MUST require
+  exactly one `stage_skipped` warning with the exact same reason
 - **И** resume MAY append a missing warning after a crash only from that
   durable reason, reusing the finished attempt rather than creating another
+- **И** a verified pre-version B-34 agent skip (`stage_action: skip`) or human
+  skip MAY replay when its `stage_skipped` warning contains the reason, even
+  though the old `attempt_finished` event does not retain that reason
+
+#### Scenario: Worker cannot authorize a stage skip
+
+- **КОГДА** a worker uses `event_log.append` to claim `stage_action: skip` or
+  a stage skip reason
+- **ТОГДА** the controller MUST reject the append without changing the event
+  chain; only controller-owned recovery may add a missing warning for an
+  already authorized and durably finished skip
 
 ### Requirement: Event log run binding
 Hash-chain событий MUST начинаться с корня, выведенного из `run_id` своего прогона, так что event log одного прогона MUST NOT проходить проверку целостности в каталоге другого — в том числе после перештамповки `run_id` в событиях и полного пересчёта дайджестов.

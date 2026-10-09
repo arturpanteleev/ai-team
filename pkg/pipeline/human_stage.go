@@ -229,6 +229,7 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	}
 	if decision.Action == "skip" {
 		startedData["stage_action"] = "skip"
+		startedData["stage_skip_version"] = evidence.StageSkipProtocolVersion
 	}
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_started", Stage: stageID, AttemptID: attemptID,
 		Timestamp: started, Data: startedData}); err != nil {

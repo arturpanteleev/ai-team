@@ -785,9 +785,14 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if runCfg.ResumeRunID != "" {
 		var manifest evidence.RunManifest
 		runEvidenceDir := filepath.Join(runCfg.TargetDir, ".ai-team", "runs", runID)
-		if _, eventErr := evidence.VerifyEventLogWithSource(filepath.Join(runEvidenceDir, "events.jsonl"), runID, p.eventLogSource); eventErr == nil {
-			if err := evidence.RecoverMissingStageSkipEvents(runEvidenceDir, runID, p.eventLogSource, p.attemptManifestSource); err != nil {
-				return RunResult{}, fmt.Errorf("recover skipped-attempt warning: %w", err)
+		// Local and controller-owned stores may repair their durable crash
+		// window. A worker-facing append API cannot add controller-only warning
+		// evidence, so the owning controller must repair it before resumption.
+		if _, workerAppendBoundary := p.eventLogSource.(interface{ WorkerAppendBoundary() }); !workerAppendBoundary {
+			if _, eventErr := evidence.VerifyEventLogWithSource(filepath.Join(runEvidenceDir, "events.jsonl"), runID, p.eventLogSource); eventErr == nil {
+				if err := evidence.RecoverMissingStageSkipEvents(runEvidenceDir, runID, p.eventLogSource, p.attemptManifestSource); err != nil {
+					return RunResult{}, fmt.Errorf("recover skipped-attempt warning: %w", err)
+				}
 			}
 		}
 		// OPS-3: fail-closed проверка применимой evidence chain/snapshots перед

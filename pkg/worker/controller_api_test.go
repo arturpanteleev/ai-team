@@ -1163,6 +1163,19 @@ func TestWorkerAPIEventAppendRejectsForgedTerminalApprovalAndDeliveryClaims(t *t
 			event: evidence.Event{Type: "run_canceled", Timestamp: time.Now().UTC(), Data: map[string]any{"reason": "forged"}},
 		},
 		{
+			name: "worker cannot self-assert a stage skip",
+			event: evidence.Event{Type: "attempt_started", Stage: "coder", AttemptID: "attempt-worker-skip",
+				Timestamp: time.Now().UTC(), Data: map[string]any{
+					"stage_index": 1, "executor": "agent", "stage_action": "skip",
+					"stage_skip_version": evidence.StageSkipProtocolVersion,
+				}},
+		},
+		{
+			name: "worker cannot persist a skip reason",
+			event: evidence.Event{Type: "attempt_finished", Stage: "coder", AttemptID: "attempt-worker-skip",
+				Timestamp: time.Now().UTC(), Data: map[string]any{"stage_skip_reason": "skip without controller authorization"}},
+		},
+		{
 			name:  "unknown event type",
 			event: evidence.Event{Type: "worker_extension", Timestamp: time.Now().UTC()},
 		},

@@ -57,6 +57,19 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 	} else if err := ValidateWorkerEventType(candidate.Type); err != nil {
 		return Event{}, false, err
 	}
+	if candidate.Type == "attempt_started" {
+		if _, claimed := candidate.Data["stage_action"]; claimed {
+			return Event{}, false, errors.New("worker cannot claim controller-authorized stage actions")
+		}
+		if _, claimed := candidate.Data["stage_skip_version"]; claimed {
+			return Event{}, false, errors.New("worker cannot claim controller-owned skip evidence")
+		}
+	}
+	if candidate.Type == "attempt_finished" {
+		if _, claimed := candidate.Data["stage_skip_reason"]; claimed {
+			return Event{}, false, errors.New("worker cannot claim controller-owned stage skip reason")
+		}
+	}
 	if uint64(len(events)) == expectedSequence+1 && len(events) > 0 &&
 		candidate.Sequence == 0 && candidate.RunID == "" && candidate.SHA256 == "" && candidate.PreviousSHA256 == "" &&
 		sameRetryEvent(events[len(events)-1], candidate, runID, expectedSequence+1, expectedPreviousSHA256) {

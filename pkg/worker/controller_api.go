@@ -1058,8 +1058,8 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			// used for legacy recovery/resume.
 			return nil, nil
 		}
-		if c.AttemptManifest.HumanSubmissionVersion > 0 {
-			if err := s.validateHumanSubmissionManifest(c.AttemptManifest); err != nil {
+		if isHumanAttemptManifest(c.AttemptManifest) {
+			if err := s.validateReservedHumanSubmissionManifest(c.AttemptManifest); err != nil {
 				return nil, err
 			}
 		}
@@ -1356,26 +1356,69 @@ func (s *workerAPIServer) validateControllerDescriptionMissing(event evidence.Ev
 	return nil
 }
 
-func (s *workerAPIServer) validateHumanSubmissionManifest(manifest evidence.AttemptManifest) error {
-	if s.approvals == nil || manifest.Executor != "human" || manifest.HumanSubmissionVersion < 1 || manifest.HumanInputApprovalID == "" {
-		return errors.New("human submission manifest requires its controller approval")
+func isHumanAttemptManifest(manifest evidence.AttemptManifest) bool {
+	return manifest.Executor == "human" || manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
+		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
+}
+
+func (s *workerAPIServer) loadHumanSubmissionApproval(manifest evidence.AttemptManifest) (approval.PendingApproval, approval.InputPayload, approval.Decision, error) {
+	if s.approvals == nil || manifest.Executor != "human" || manifest.HumanInputApprovalID == "" {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest requires its controller approval")
 	}
 	value, err := s.approvals.Load(s.scope.RunID, manifest.HumanInputApprovalID)
 	if err != nil {
-		return fmt.Errorf("load human submission manifest approval: %w", err)
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, fmt.Errorf("load human submission manifest approval: %w", err)
 	}
 	if value.RunID != s.scope.RunID || value.ID != manifest.HumanInputApprovalID || value.Kind != approval.KindInput ||
 		value.Trigger != "human_input" || value.FromStage != manifest.Stage || value.ToStage != manifest.Stage ||
 		value.Status != approval.StatusResolved || len(value.Decisions) == 0 {
-		return errors.New("human submission manifest does not match a resolved stage input")
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest does not match a resolved stage input")
 	}
 	var payload approval.InputPayload
-	if json.Unmarshal(value.Payload, &payload) != nil || payload.StageID != manifest.Stage || payload.Result != manifest.HumanSubmissionResult ||
-		payload.LinkKind != manifest.HumanSubmissionLinkKind {
-		return errors.New("human submission manifest result does not match the configured input")
+	if json.Unmarshal(value.Payload, &payload) != nil || payload.StageID != manifest.Stage ||
+		(payload.Result != "md" && payload.Result != "link" && payload.Result != "approve") {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest result does not match the configured input")
 	}
 	decision := value.Decisions[len(value.Decisions)-1]
-	if decision.ActorID != manifest.ActorID || decision.ActorRole != manifest.ActorRole || decision.Action == "reject" ||
+	if decision.ActorID != manifest.ActorID || decision.ActorRole != manifest.ActorRole || decision.Action == "reject" {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest actor does not match its resolved decision")
+	}
+	if payload.Result == "approve" && decision.Action != "approve" || payload.Result != "approve" && decision.Action != "submit" {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest action does not match its configured result")
+	}
+	return value, payload, decision, nil
+}
+
+func (s *workerAPIServer) validateReservedHumanSubmissionManifest(manifest evidence.AttemptManifest) error {
+	_, _, decision, err := s.loadHumanSubmissionApproval(manifest)
+	if err != nil {
+		return err
+	}
+	decisionIsVersioned := decision.SubmissionVersion != 0 || decision.ContentSHA256 != ""
+	manifestHasTypedSubmission := manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
+		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
+	if decisionIsVersioned {
+		if manifest.HumanSubmissionVersion < 1 || !manifestHasTypedSubmission {
+			return errors.New("versioned human input decision requires a typed attempt manifest binding")
+		}
+		return s.validateHumanSubmissionManifest(manifest)
+	}
+	if manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" || manifest.HumanSubmissionResult != "" ||
+		manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != "" {
+		return errors.New("legacy human input decision cannot carry typed submission metadata")
+	}
+	return nil
+}
+
+func (s *workerAPIServer) validateHumanSubmissionManifest(manifest evidence.AttemptManifest) error {
+	if manifest.HumanSubmissionVersion < 1 {
+		return errors.New("human submission manifest requires its controller approval")
+	}
+	_, payload, decision, err := s.loadHumanSubmissionApproval(manifest)
+	if err != nil {
+		return err
+	}
+	if payload.Result != manifest.HumanSubmissionResult || payload.LinkKind != manifest.HumanSubmissionLinkKind ||
 		decision.SubmissionVersion != manifest.HumanSubmissionVersion || decision.ContentSHA256 != manifest.HumanSubmissionSHA256 ||
 		decision.Description != manifest.HumanSubmissionDescription {
 		return errors.New("human submission manifest version/hash does not match its approval decision")

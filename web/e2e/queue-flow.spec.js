@@ -169,6 +169,9 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     })
     await page.setViewportSize({ width: 360, height: 800 })
     await page.goto(baseURL)
+    const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
+    await page.getByLabel('Токен доступа').fill(localToken)
+    await page.getByRole('button', { name: 'Войти' }).click()
     await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
     for (const width of [360, 390, 430]) {

@@ -2,11 +2,13 @@ package web
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
@@ -54,10 +57,6 @@ type StageReturnController interface {
 type StageGrillController interface {
 	AnswerStageGrill(context.Context, string, string, string, string, string) error
 	CompleteStageGrill(context.Context, string, string, string, string) error
-}
-
-type DeliveryPlanApprovalController interface {
-	ApproveDeliveryPlan(context.Context, string, string, string, string) error
 }
 
 type taskStageActionCommand struct {
@@ -661,8 +660,14 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	decision := approval.Decision{ActorID: actorID, ActorRole: actorRole, Action: "approve", SubjectHash: pending.SubjectHash, ControllerAuthenticated: true}
-	if _, err := s.controller.Decide(runID, pending.ID, decision); err != nil {
+	resolved, err := s.controller.Decide(runID, pending.ID, decision)
+	if err != nil {
 		s.taskConflict(w, runID, stageID, err.Error())
+		return
+	}
+	if resolved.Status != approval.StatusResolved {
+		writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID,
+			"approval": resolved, "actor_id": actorID})
 		return
 	}
 	if err := s.controller.Resume(runID); err != nil {
@@ -818,8 +823,12 @@ func (s *Server) handleTaskGrillDone(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTaskPlanApprove(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
-	if !safeIdentity(runID) || s.controller == nil {
-		writeJSONAPIError(w, http.StatusBadRequest, "invalid run id or controller unavailable", "bad_identity")
+	if !safeIdentity(runID) {
+		writeJSONAPIError(w, http.StatusBadRequest, "invalid run id", "bad_identity")
+		return
+	}
+	if s.controller == nil {
+		writeJSONAPIError(w, http.StatusServiceUnavailable, "task controller unavailable", "controller_unavailable")
 		return
 	}
 	var command taskStageActionCommand
@@ -828,6 +837,10 @@ func (s *Server) handleTaskPlanApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(command.PlanHash) != 64 {
+		writeJSONAPIError(w, http.StatusBadRequest, "plan_hash must be a SHA-256 digest", "bad_plan_hash")
+		return
+	}
+	if decoded, err := hex.DecodeString(command.PlanHash); err != nil || len(decoded) != 32 {
 		writeJSONAPIError(w, http.StatusBadRequest, "plan_hash must be a SHA-256 digest", "bad_plan_hash")
 		return
 	}
@@ -847,36 +860,52 @@ func (s *Server) handleTaskPlanApprove(w http.ResponseWriter, r *http.Request) {
 		s.taskConflict(w, runID, "", "delivery plan is not awaiting this approval")
 		return
 	}
-	roleName := taskFirstRequiredRole(pending.RequiredRoles)
-	role := taskStageRole(config.TemplateStage{Function: roleName})
-	if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
-		writeJSONAPIError(w, http.StatusForbidden, err.Error(), "forbidden")
-		return
-	}
 	session, ok := s.requestSession(r)
 	if !ok || session.Principal.ActorID == "" {
 		writeJSONAPIError(w, http.StatusUnauthorized, "web session unavailable", "unauthorized")
 		return
 	}
-	controller, ok := s.controller.(DeliveryPlanApprovalController)
-	if !ok {
-		// The existing approval + resume path is already available; a typed
-		// controller action is required before this can safely start delivery.
-		writeJSONAPIError(w, http.StatusServiceUnavailable, "delivery plan approval is not connected to the task controller", "controller_action_unavailable")
+	votedRoles := map[string]bool{}
+	for _, prior := range pending.Decisions {
+		if prior.ActorID == session.Principal.ActorID {
+			votedRoles[prior.ActorRole] = true
+		}
+	}
+	roleName := ""
+	var role cloudidentity.Role
+	for _, requiredRole := range pending.RequiredRoles {
+		candidate := canonicalStageRole(requiredRole)
+		if votedRoles[requiredRole] || !session.Principal.Has(candidate) {
+			continue
+		}
+		roleName, role = requiredRole, candidate
+		break
+	}
+	if roleName == "" {
+		writeJSONAPIError(w, http.StatusForbidden, "no unvoted delivery-plan role is assigned to this actor", "forbidden")
 		return
 	}
-	if err := controller.ApproveDeliveryPlan(r.Context(), runID, pending.SubjectHash, session.Principal.ActorID, roleName); err != nil {
+	if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
+		writeJSONAPIError(w, http.StatusForbidden, err.Error(), "forbidden")
+		return
+	}
+	decision := approval.Decision{ActorID: session.Principal.ActorID, ActorRole: roleName, Action: "approve",
+		SubjectHash: pending.SubjectHash, ControllerAuthenticated: true}
+	resolved, err := s.controller.Decide(runID, pending.ID, decision)
+	if err != nil {
 		s.taskConflict(w, runID, "", err.Error())
 		return
 	}
-	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "plan_hash": pending.SubjectHash, "actor_id": session.Principal.ActorID})
-}
-
-func taskFirstRequiredRole(roles []string) string {
-	if len(roles) == 0 {
-		return ""
+	if resolved.Status != approval.StatusResolved {
+		writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "approval": resolved,
+			"plan_hash": pending.SubjectHash, "actor_id": session.Principal.ActorID})
+		return
 	}
-	return roles[0]
+	if err := s.controller.Resume(runID); err != nil {
+		writeJSONAPIError(w, http.StatusConflict, "plan approval was recorded but run could not resume", "resume_failed")
+		return
+	}
+	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "plan_hash": pending.SubjectHash, "actor_id": session.Principal.ActorID})
 }
 
 func (s *Server) handleGetRunEvents(w http.ResponseWriter, r *http.Request) {
@@ -983,24 +1012,31 @@ type flowDurationStats struct {
 }
 
 type flowStageStats struct {
-	Stage      string `json:"stage"`
-	Attempts   int    `json:"attempts"`
-	DurationMS int64  `json:"duration_ms"`
-	Human      int    `json:"human_attempts"`
-	Agent      int    `json:"agent_attempts"`
+	Stage                string  `json:"stage"`
+	Attempts             int     `json:"attempts"`
+	DurationMS           int64   `json:"duration_ms"`
+	Human                int     `json:"human_attempts"`
+	Agent                int     `json:"agent_attempts"`
+	TokensInput          int64   `json:"tokens_input,omitempty"`
+	TokensOutput         int64   `json:"tokens_output,omitempty"`
+	CostUSD              float64 `json:"cost_usd,omitempty"`
+	UsageKnownAttempts   int     `json:"usage_known_attempts,omitempty"`
+	UsageUnknownAttempts int     `json:"usage_unknown_attempts,omitempty"`
 }
 
 type flowMetricsResponse struct {
-	From                     time.Time         `json:"from"`
-	To                       time.Time         `json:"to"`
-	LeadTime                 flowDurationStats `json:"lead_time"`
-	CycleTime                flowDurationStats `json:"cycle_time"`
-	ByStage                  []flowStageStats  `json:"by_stage"`
-	Overrides                map[string]int    `json:"overrides_by_stage"`
-	Skips                    map[string]int    `json:"skips_by_stage"`
-	Returns                  map[string]int    `json:"returns_by_stage"`
-	Usage                    flowUsageStats    `json:"usage"`
-	AgentAcceptedWithoutEdit *float64          `json:"agent_accepted_without_edit_rate,omitempty"`
+	From                         time.Time         `json:"from"`
+	To                           time.Time         `json:"to"`
+	LeadTime                     flowDurationStats `json:"lead_time"`
+	CycleTime                    flowDurationStats `json:"cycle_time"`
+	ByStage                      []flowStageStats  `json:"by_stage"`
+	Overrides                    map[string]int    `json:"overrides_by_stage"`
+	Skips                        map[string]int    `json:"skips_by_stage"`
+	Returns                      map[string]int    `json:"returns_by_stage"`
+	Usage                        flowUsageStats    `json:"usage"`
+	AgentResults                 int               `json:"agent_results"`
+	AgentAcceptedWithoutEdit     int               `json:"agent_accepted_without_edit"`
+	AgentAcceptedWithoutEditRate *float64          `json:"agent_accepted_without_edit_rate,omitempty"`
 }
 
 type flowUsageStats struct {
@@ -1060,6 +1096,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	response := flowMetricsResponse{From: from, To: to, ByStage: []flowStageStats{}, Overrides: map[string]int{}, Skips: map[string]int{}, Returns: map[string]int{}}
 	leadTimes, cycleTimes := make([]int64, 0), make([]int64, 0)
 	stageIndex := map[string]int{}
+	agentResults, agentAcceptedWithoutEdit := 0, 0
 	runs := make([]store.PipelineRun, 0)
 	for offset := 0; ; offset += 100 {
 		page, err := s.store.GetPipelineRunsPage(100, offset)
@@ -1080,7 +1117,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			return response, err
 		}
 		acceptanceAt := time.Time{}
-		for _, stage := range stages {
+		for stagePosition, stage := range stages {
 			if stage.Status == "invalidated" || stage.Outcome == "invalidated" {
 				continue
 			}
@@ -1106,6 +1143,21 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 				stat.Human++
 			} else if strings.EqualFold(stage.Execution, "agent") {
 				stat.Agent++
+				manifest, manifestErr := readTaskAttemptManifest(s, run.RunID, stage.AttemptID)
+				if manifestErr == nil && manifest.Usage != nil && manifest.Usage.Attested {
+					stat.UsageKnownAttempts++
+					stat.TokensInput += manifest.Usage.TokensInput
+					stat.TokensOutput += manifest.Usage.TokensOutput
+					stat.CostUSD += manifest.Usage.CostUSD
+				} else {
+					stat.UsageUnknownAttempts++
+				}
+				if taskStageSucceeded(stage) {
+					agentResults++
+					if !taskStageWasHumanEdited(stages, stagePosition, stage) {
+						agentAcceptedWithoutEdit++
+					}
+				}
 			}
 		}
 		if !acceptanceAt.IsZero() && !acceptanceAt.Before(run.StartedAt) {
@@ -1143,8 +1195,46 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	}
 	response.LeadTime = summarizeDurations(leadTimes)
 	response.CycleTime = summarizeDurations(cycleTimes)
+	response.AgentResults, response.AgentAcceptedWithoutEdit = agentResults, agentAcceptedWithoutEdit
+	if agentResults > 0 {
+		rate := float64(agentAcceptedWithoutEdit) / float64(agentResults)
+		response.AgentAcceptedWithoutEditRate = &rate
+	}
 	sort.Slice(response.ByStage, func(i, j int) bool { return response.ByStage[i].Stage < response.ByStage[j].Stage })
 	return response, nil
+}
+
+func readTaskAttemptManifest(s *Server, runID, attemptID string) (evidence.AttemptManifest, error) {
+	if !safeIdentity(runID) || !safeIdentity(attemptID) {
+		return evidence.AttemptManifest{}, errors.New("invalid attempt identity")
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(nil, filepath.Join(s.runRoot, runID), runID, attemptID)
+	if err != nil {
+		return evidence.AttemptManifest{}, err
+	}
+	if manifest.RunID != runID || manifest.AttemptID != attemptID {
+		return evidence.AttemptManifest{}, errors.New("attempt manifest identity mismatch")
+	}
+	return manifest, nil
+}
+
+func taskStageSucceeded(stage store.Stage) bool {
+	return strings.EqualFold(stage.Outcome, "passed") || strings.EqualFold(stage.Status, "passed") ||
+		strings.EqualFold(stage.Status, "success") || strings.EqualFold(stage.Status, "completed")
+}
+
+func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent store.Stage) bool {
+	if agent.CompletedAt == nil {
+		return true
+	}
+	for position := agentPosition + 1; position < len(stages); position++ {
+		candidate := stages[position]
+		if candidate.AgentName == agent.AgentName && strings.EqualFold(candidate.Execution, "human") &&
+			(candidate.StartedAt.After(*agent.CompletedAt) || candidate.StageIndex > agent.StageIndex) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstCycleStart(s *Server, runID string, before time.Time) time.Time {

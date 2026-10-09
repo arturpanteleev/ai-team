@@ -10,9 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
@@ -203,3 +207,122 @@ func TestTaskActionInvalidStateReturnsAllowedActions(t *testing.T) {
 		t.Fatalf("invalid-state response must carry a JSON allowed_actions array: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planHash := strings.Repeat("a", 64)
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "plan-approval", RunID: "run-plan", Status: approval.StatusPending,
+		Trigger: "delivery_plan", SubjectHash: planHash, RequiredRoles: []string{"release_manager"},
+		Actions: []string{"approve"},
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	malicious := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve",
+		`{"plan_hash":"`+planHash+`","actor_id":"spoofed"}`)
+	maliciousResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(maliciousResponse, malicious)
+	if maliciousResponse.Code != http.StatusBadRequest || controller.decisionCalls != 0 || controller.resumeCalls != 0 {
+		t.Fatalf("request body must not supply actor identity: status=%d decisions=%d resumes=%d body=%s",
+			maliciousResponse.Code, controller.decisionCalls, controller.resumeCalls, maliciousResponse.Body.String())
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve", `{"plan_hash":"`+planHash+`"}`)
+	request.Header.Set("Idempotency-Key", "approve-plan-once")
+	first := httptest.NewRecorder()
+	srv.router.ServeHTTP(first, request)
+	if first.Code != http.StatusAccepted || controller.decisionCalls != 1 || controller.resumeCalls != 1 ||
+		controller.decision.ActorID != "local-user" || controller.decision.ActorRole != "release_manager" {
+		t.Fatalf("plan approval did not use server identity and controller: status=%d decision=%+v decisions=%d resumes=%d body=%s",
+			first.Code, controller.decision, controller.decisionCalls, controller.resumeCalls, first.Body.String())
+	}
+
+	replayRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve", `{"plan_hash":"`+planHash+`"}`)
+	replayRequest.Header.Set("Idempotency-Key", "approve-plan-once")
+	replay := httptest.NewRecorder()
+	srv.router.ServeHTTP(replay, replayRequest)
+	if replay.Code != first.Code || replay.Body.String() != first.Body.String() || controller.decisionCalls != 1 || controller.resumeCalls != 1 {
+		t.Fatalf("plan approval retry repeated controller action: first=%d retry=%d decisions=%d resumes=%d",
+			first.Code, replay.Code, controller.decisionCalls, controller.resumeCalls)
+	}
+}
+
+func TestFlowMetricsReportsPerStageUsageAndAgentEdits(t *testing.T) {
+	target := t.TempDir()
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	run := &store.PipelineRun{RunID: "run-flow-metrics", Feature: "feature", Status: "completed", StartedAt: started}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	agentFinished, humanStarted := started.Add(10*time.Minute), started.Add(11*time.Minute)
+	completed := agentFinished.Add(time.Minute)
+	stages := []store.Stage{
+		{PipelineRunID: run.ID, AttemptID: "attempt-agent", StageIndex: 1, AgentName: "implementation", Status: "passed",
+			Execution: "agent", Outcome: "passed", StartedAt: started.Add(9 * time.Minute), CompletedAt: &agentFinished, DurationMs: 60_000},
+		{PipelineRunID: run.ID, AttemptID: "attempt-human", StageIndex: 2, AgentName: "implementation", Status: "passed",
+			Execution: "human", Outcome: "passed", StartedAt: humanStarted, CompletedAt: &completed, DurationMs: 60_000},
+		{PipelineRunID: run.ID, AttemptID: "attempt-review", StageIndex: 3, AgentName: "review", Status: "passed",
+			Execution: "agent", Outcome: "passed", StartedAt: completed.Add(time.Second), CompletedAt: timePointer(completed.Add(2 * time.Minute)), DurationMs: 120_000},
+	}
+	for index := range stages {
+		if err := srv.store.CreateStage(&stages[index]); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.store.UpdateStage(&stages[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestDir := filepath.Join(srv.runRoot, run.RunID, "attempts", "attempt-agent")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(evidence.AttemptManifest{RunID: run.RunID, AttemptID: "attempt-agent",
+		Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 12, TokensOutput: 8, CostUSD: 0.01}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := srv.buildFlowMetrics(started.Add(-time.Minute), started.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentResults != 2 || result.AgentAcceptedWithoutEdit != 1 || result.AgentAcceptedWithoutEditRate == nil || *result.AgentAcceptedWithoutEditRate != 0.5 {
+		t.Fatalf("agent acceptance metric=%+v", result)
+	}
+	var implementation, review *flowStageStats
+	for index := range result.ByStage {
+		switch result.ByStage[index].Stage {
+		case "implementation":
+			implementation = &result.ByStage[index]
+		case "review":
+			review = &result.ByStage[index]
+		}
+	}
+	if implementation == nil || implementation.TokensInput != 12 || implementation.TokensOutput != 8 ||
+		implementation.UsageKnownAttempts != 1 || implementation.UsageUnknownAttempts != 0 {
+		t.Fatalf("implementation usage=%+v", implementation)
+	}
+	if review == nil || review.UsageUnknownAttempts != 1 || result.Usage.UnknownRuns != 1 {
+		t.Fatalf("unknown usage was not explicit: review=%+v totals=%+v", review, result.Usage)
+	}
+}
+
+func timePointer(value time.Time) *time.Time { return &value }

@@ -35,9 +35,11 @@ type fakeRunController struct {
 	startTask      string
 	startCalls     int
 	resumeRunID    string
+	resumeCalls    int
 	cancelRunID    string
 	cancelErr      error
 	decision       approval.Decision
+	decisionCalls  int
 	approvalID     string
 	runID          string
 	approvals      []approval.PendingApproval
@@ -443,9 +445,14 @@ func (f *fakeRunController) StartWithAdmission(feature, task string, admit func(
 	}
 	return f.Start(feature, task)
 }
-func (f *fakeRunController) Resume(runID string) error { f.resumeRunID = runID; return nil }
+func (f *fakeRunController) Resume(runID string) error {
+	f.resumeRunID = runID
+	f.resumeCalls++
+	return nil
+}
 func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return f.cancelErr }
 func (f *fakeRunController) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	f.decisionCalls++
 	f.runID, f.approvalID, f.decision = runID, approvalID, decision
 	return approval.PendingApproval{ID: approvalID, RunID: runID, Status: approval.StatusResolved, ResolvedAction: decision.Action}, nil
 }

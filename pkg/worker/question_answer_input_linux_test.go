@@ -42,7 +42,7 @@ func TestBubblewrapQuestionAnswerInputBoundary(t *testing.T) {
 	runID, approvalID := "question-input-probe", "approval-question-probe"
 	job := Job{
 		SchemaVersion: SchemaVersion, Operation: OperationRecover, RunID: runID, TargetDir: target,
-		Feature: "probe", Task: "boundary probe", ExecutionID: strings.Repeat("c", 32),
+		Feature: "probe", Task: "boundary probe", ExecutionID: strings.Repeat("c", ExecutionIDBytes*2),
 	}
 	if err := (evidence.ControllerEventStore{TargetDir: target}).Reserve(runID); err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestBubblewrapQuestionAnswerInputBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolved, err := approvalStore.Decide(runID, approvalID, approval.Decision{
-		ActorID: "owner@example.com", ActorRole: "product_owner", Action: "answer_questions",
+		ActorID: "qa@example.com", ActorRole: "qa", Action: "answer_questions",
 		Comment: "B2B buyer", SubjectHash: created.SubjectHash,
 	})
 	if err != nil {

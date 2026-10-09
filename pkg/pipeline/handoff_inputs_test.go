@@ -135,7 +135,7 @@ func testResolvedQuestionApproval(id, answer string) approval.PendingApproval {
 	resolvedAt := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	payload, _ := json.Marshal(questionPayload{Kind: "questions", Markdown: "Who is the buyer?"})
 	return approval.PendingApproval{
-		SchemaVersion: approval.SchemaVersion, ID: id, RunID: "run-clarification-test",
+		SchemaVersion: approval.SchemaVersion, Kind: approval.KindQuestions, ID: id, RunID: "run-clarification-test",
 		AttemptID: "attempt-analyst-source", FromStage: "analyst", ToStage: "analyst",
 		Trigger: "graph_outcome:blocked", SubjectHash: strings.Repeat("a", 64),
 		RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,

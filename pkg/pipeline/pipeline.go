@@ -650,7 +650,8 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}
 			}
 		}
-		if resumedApproval != nil && resumedApproval.ResolvedAction == "answer_questions" {
+		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions && resumedApproval.FromStage == "analyst" &&
+			resumedApproval.ResolvedAction == "answer_questions" {
 			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
 				return RunResult{}, fmt.Errorf("resume clarification approval: %w", err)
 			}

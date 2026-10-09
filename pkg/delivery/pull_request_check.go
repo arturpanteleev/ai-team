@@ -48,9 +48,9 @@ func CheckPullRequest(ctx context.Context, runner CommandRunner, targetDir, refe
 	}
 	result := runner.Run(ctx, targetDir, "gh", "pr", "view", reference, "--json", "url,state,baseRefName,headRefName")
 	if result.Status != StepPassed {
-		if result.ExitCode == 1 {
+		if result.ExitCode == 1 && isPullRequestNotFoundError(result.Stderr) {
 			return PullRequestCheckReport{Rules: []PullRequestRuleResult{
-				{Rule: "pr_exists", Status: "failed", Reason: "pull request was not found"},
+				{Rule: "pr_exists", Status: "failed", Reason: "pull request was not found or is inaccessible"},
 				{Rule: "pr_open", Status: "skipped", Reason: "requires an existing pull request"},
 				{Rule: "pr_base_branch", Status: "skipped", Reason: "requires an existing pull request"},
 			}}, nil
@@ -69,6 +69,13 @@ func CheckPullRequest(ctx context.Context, runner CommandRunner, targetDir, refe
 		return PullRequestCheckReport{}, err
 	}
 	return pullRequestRuleReport(view, expectedBaseBranch), nil
+}
+
+func isPullRequestNotFoundError(stderr string) bool {
+	diagnostic := strings.ToLower(strings.TrimSpace(stderr))
+	return strings.Contains(diagnostic, "no pull requests found") ||
+		strings.Contains(diagnostic, "could not resolve to a pullrequest") ||
+		strings.Contains(diagnostic, "could not find pull request")
 }
 
 // ValidatePullRequest checks the same generic PR properties without tying the

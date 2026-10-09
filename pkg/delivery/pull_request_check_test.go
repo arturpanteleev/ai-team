@@ -66,12 +66,15 @@ func TestCheckPullRequestWithGHStub(t *testing.T) {
 		name        string
 		exitCode    string
 		response    string
+		stderr      string
 		wantStatus  []string
 		wantFailure string
+		wantError   string
 	}{
 		{
 			name:        "missing PR",
 			exitCode:    "1",
+			stderr:      "GraphQL: Could not resolve to a PullRequest with the number of 12.",
 			wantStatus:  []string{"failed", "skipped", "skipped"},
 			wantFailure: "pr_exists",
 		},
@@ -95,11 +98,23 @@ func TestCheckPullRequestWithGHStub(t *testing.T) {
 			response:   `{"url":"https://github.test/team/repo/pull/12","state":"OPEN","baseRefName":"main","headRefName":"feature"}`,
 			wantStatus: []string{"passed", "passed", "passed"},
 		},
+		{
+			name:      "API failure is not misreported as missing PR",
+			exitCode:  "1",
+			stderr:    "failed to reach GitHub API: connection timeout",
+			wantError: "gh pr view failed",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			installPullRequestGHStub(t, test.exitCode, test.response)
+			installPullRequestGHStub(t, test.exitCode, test.response, test.stderr)
 			report, err := CheckPullRequest(context.Background(), ExecRunner{}, t.TempDir(), "https://github.test/team/repo/pull/12", "main")
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("CheckPullRequest error = %v, want containing %q", err, test.wantError)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,11 +139,12 @@ func TestCheckPullRequestWithGHStub(t *testing.T) {
 	}
 }
 
-func installPullRequestGHStub(t *testing.T, exitCode, response string) {
+func installPullRequestGHStub(t *testing.T, exitCode, response, stderr string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/bin/sh
 if [ "$AI_TEAM_GH_EXIT" != "0" ]; then
+  printf '%s\n' "$AI_TEAM_GH_STDERR" >&2
   exit "$AI_TEAM_GH_EXIT"
 fi
 printf '%s\n' "$AI_TEAM_GH_RESPONSE"
@@ -140,6 +156,7 @@ printf '%s\n' "$AI_TEAM_GH_RESPONSE"
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AI_TEAM_GH_EXIT", exitCode)
 	t.Setenv("AI_TEAM_GH_RESPONSE", response)
+	t.Setenv("AI_TEAM_GH_STDERR", stderr)
 }
 
 func ruleIndex(rules []PullRequestRuleResult, name string) int {

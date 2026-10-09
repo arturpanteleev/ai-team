@@ -2115,7 +2115,10 @@ func cmdWeb() {
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
 		pipeline.WithApprovalStore(approvalStore),
 		pipeline.WithControllerReadDenyPaths(*dbPath)))
-	controllerOptions := []control.Option{control.WithApprovalStore(approvalStore)}
+	controllerOptions := []control.Option{
+		control.WithApprovalStore(approvalStore),
+		control.WithDeferredDelivery(localEngine.DeliverDeferred),
+	}
 	var runController *control.Controller
 	var schedulerQueue *scheduler.Queue
 	if *schedulerDB != "" {

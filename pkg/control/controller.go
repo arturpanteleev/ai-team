@@ -40,6 +40,8 @@ type PreflightChecker interface {
 
 type Option func(*Controller)
 
+type DeferredDeliveryFunc func(context.Context, string, string) (delivery.TerminalRecord, error)
+
 func WithPreflight(checker PreflightChecker) Option {
 	return func(controller *Controller) { controller.preflight = checker }
 }
@@ -55,13 +57,25 @@ func WithApprovalStore(store pipeline.ApprovalStore) Option {
 	}
 }
 
+// WithDeferredDelivery installs the trusted retry path for terminal delivery.
+// The run engine can resolve the immutable task template before selecting its
+// delivery timeout; scheduler and process engines do not own that project config.
+func WithDeferredDelivery(deliver DeferredDeliveryFunc) Option {
+	return func(controller *Controller) {
+		if deliver != nil {
+			controller.deferredDelivery = deliver
+		}
+	}
+}
+
 type Controller struct {
-	engine        runEngine
-	target        string
-	approvals     pipeline.ApprovalStore
-	preflight     PreflightChecker
-	failureSink   FailureSink
-	admissionSink func(string, int64) error
+	engine           runEngine
+	target           string
+	approvals        pipeline.ApprovalStore
+	deferredDelivery DeferredDeliveryFunc
+	preflight        PreflightChecker
+	failureSink      FailureSink
+	admissionSink    func(string, int64) error
 
 	mu     sync.Mutex
 	active map[string]*worker
@@ -228,6 +242,14 @@ func (c *Controller) DeliverDeferred(ctx context.Context, runID string) (deliver
 	c.mu.Unlock()
 	if active {
 		return delivery.TerminalRecord{}, ErrActive
+	}
+	if c.deferredDelivery != nil {
+		return c.deferredDelivery(ctx, runID, c.target)
+	}
+	if engine, ok := c.engine.(interface {
+		DeliverDeferred(context.Context, string, string) (delivery.TerminalRecord, error)
+	}); ok {
+		return engine.DeliverDeferred(ctx, runID, c.target)
 	}
 	runDir := filepath.Join(c.target, ".ai-team", "runs", runID)
 	return pipeline.New(nil, nil, pipeline.WithApprovalStore(c.approvals)).DeliverDeferred(ctx, runDir, "", c.target)

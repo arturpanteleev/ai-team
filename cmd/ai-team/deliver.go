@@ -12,9 +12,15 @@ import (
 	"syscall"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 )
+
+func deliverDeferredCLI(ctx context.Context, runID, feature, targetDir string, options ...pipeline.Option) (delivery.TerminalRecord, error) {
+	engine := pipeline.NewRunEngine(pipeline.New(nil, nil, options...))
+	return engine.DeliverDeferredForFeature(ctx, runID, feature, targetDir)
+}
 
 // deliver.go (V0-9): ручной повтор отложенной (deferred) доставки. Post-terminal
 // хук исполняет delivery в той же инвокации run; если он упал (сетевой сбой
@@ -40,8 +46,6 @@ func cmdDeliver() {
 		fatal("Ошибка target: %v", err)
 	}
 	requireControlRoot(absolute)
-	runDir := filepath.Join(absolute, ".ai-team", "runs", *runID)
-
 	var pipelineOptions []pipeline.Option
 	if strings.TrimSpace(*approvePlan) != "" {
 		pipelineOptions = append(pipelineOptions, pipeline.WithDeliveryApprovalHash(*approvePlan))
@@ -73,7 +77,7 @@ func cmdDeliver() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	record, err := pipeline.New(nil, nil, pipelineOptions...).DeliverDeferred(ctx, runDir, *feature, absolute)
+	record, err := deliverDeferredCLI(ctx, *runID, *feature, absolute, pipelineOptions...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Deliver run %s: %v\n", *runID, ui.Colorize(err.Error(), ui.ColorRed))
 		os.Exit(exitFailed)

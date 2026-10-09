@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -74,7 +75,20 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 }
 
 func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*Pipeline, error) {
-	if targetDir == "" || runID == "" || e.pipeline.cfg.Template == "" {
+	if targetDir == "" || runID == "" || e == nil || e.pipeline == nil {
+		if e == nil || e.pipeline == nil {
+			return nil, errors.New("RunEngine pipeline is unavailable")
+		}
+		return e.pipeline, nil
+	}
+	cfg := e.pipeline.cfg
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	// Preserve legacy in-memory starts: they have no published process template
+	// to pin. Recovery still checks for an existing task pin so deferred actions
+	// can use the exact template that created the run.
+	if createPin && cfg.Template == "" {
 		// Legacy in-memory workflow configs have no project process template to
 		// version. Keep their established execution behavior; the editor only
 		// publishes schema v5 project templates.
@@ -91,7 +105,7 @@ func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*P
 	if !found && createPin {
 		data, _, err = store.ReadCurrent()
 		if errors.Is(err, os.ErrNotExist) {
-			data, err = e.pipeline.cfg.Marshal()
+			data, err = cfg.Marshal()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("resolve template for new task: %w", err)
@@ -116,7 +130,11 @@ func (e *RunEngine) pipelineForTask(runID, targetDir string, createPin bool) (*P
 	if err != nil {
 		return nil, fmt.Errorf("pinned task template YAML: %w", err)
 	}
-	if err := pinned.Validate(e.pipeline.reg); err != nil {
+	var registry config.AgentLookup
+	if e.pipeline.reg != nil {
+		registry = e.pipeline.reg
+	}
+	if err := pinned.Validate(registry); err != nil {
 		return nil, fmt.Errorf("pinned task template validation: %w", err)
 	}
 	runPipeline := *e.pipeline
@@ -136,7 +154,32 @@ func (e *RunEngine) RecoverInitialLifecycle(runID, targetDir, feature, task stri
 // delivery reached its durable terminal record. If delivery was interrupted,
 // it resumes through the same validated delivery state machine.
 func (e *RunEngine) ReconcileTerminalDelivery(ctx context.Context, runID, targetDir string) error {
-	return e.pipeline.ReconcileTerminalDelivery(ctx, runID, targetDir)
+	runPipeline, err := e.pipelineForTask(runID, targetDir, false)
+	if err != nil {
+		return fmt.Errorf("resolve template for delivery recovery: %w", err)
+	}
+	return runPipeline.ReconcileTerminalDelivery(ctx, runID, targetDir)
+}
+
+// DeliverDeferred retries terminal delivery using the run's immutable task
+// template when one exists. Legacy runs without a task pin keep the engine's
+// configured delivery timeout.
+func (e *RunEngine) DeliverDeferred(ctx context.Context, runID, targetDir string) (delivery.TerminalRecord, error) {
+	return e.DeliverDeferredForFeature(ctx, runID, "", targetDir)
+}
+
+// DeliverDeferredForFeature preserves the legacy feature override accepted by
+// the CLI while resolving the immutable template pin in the same way.
+func (e *RunEngine) DeliverDeferredForFeature(ctx context.Context, runID, feature, targetDir string) (delivery.TerminalRecord, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: invalid run id: %w", err)
+	}
+	runPipeline, err := e.pipelineForTask(runID, targetDir, false)
+	if err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("resolve template for deferred delivery: %w", err)
+	}
+	runDir := filepath.Join(targetDir, ".ai-team", "runs", runID)
+	return runPipeline.DeliverDeferred(ctx, runDir, feature, targetDir)
 }
 
 func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {

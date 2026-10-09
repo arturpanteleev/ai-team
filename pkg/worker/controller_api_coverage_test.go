@@ -270,6 +270,9 @@ func TestWorkerBriefClientRejectsMismatchedRunForEveryOperation(t *testing.T) {
 	if _, err := briefs.AppendClarification("other-run", "approval", pipeline.ClarificationProvenance{Stage: "stage", ActorID: "actor", ActorRole: "role"}, "question", "answer"); err == nil {
 		t.Fatal("append accepted another run")
 	}
+	if _, err := briefs.AppendClarification("scoped-run", "approval", pipeline.ClarificationProvenance{}, "question", "answer"); err == nil {
+		t.Fatal("append accepted missing durable clarification provenance")
+	}
 	if _, err := briefs.List("other-run"); err == nil {
 		t.Fatal("list accepted another run")
 	}

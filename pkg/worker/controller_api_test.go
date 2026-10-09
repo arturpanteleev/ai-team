@@ -743,6 +743,116 @@ func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testi
 	}
 }
 
+func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T) {
+	tests := []struct {
+		name            string
+		withOutput      bool
+		withTypedFields bool
+		wantWriteError  bool
+	}{
+		{name: "resolved reject finishes without submission output"},
+		{name: "reject with output is rejected", withOutput: true, wantWriteError: true},
+		{name: "reject with typed submission metadata is rejected", withTypedFields: true, wantWriteError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const approvalID, attemptID = "approval-human-reject", "attempt-writer-1"
+			runID := "human-reject-" + strings.ReplaceAll(test.name, " ", "-")
+			target := t.TempDir()
+			eventLog := evidence.ControllerEventStore{TargetDir: target}
+			if err := eventLog.Reserve(runID); err != nil {
+				t.Fatal(err)
+			}
+			manifestStore := evidence.ControllerAttemptManifestStore{TargetDir: target}
+			if err := manifestStore.Reserve(runID); err != nil {
+				t.Fatal(err)
+			}
+			startedAt := time.Date(2026, 10, 9, 13, 0, 0, 0, time.UTC)
+			finishedAt := startedAt.Add(time.Minute)
+			runStore, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+				RunID: runID, Feature: "human-reject-manifest", TargetDir: target, StartedAt: startedAt,
+				ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+			}, eventLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+				t.Fatal(err)
+			}
+			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: attemptID, Timestamp: startedAt.Add(time.Second),
+				Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+				t.Fatal(err)
+			}
+			events, err := eventLog.Read(runID)
+			if err != nil || len(events) != 2 {
+				t.Fatalf("read setup events: count=%d err=%v", len(events), err)
+			}
+
+			payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := approval.Decision{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "reject", Comment: "Please revise.", SubjectHash: strings.Repeat("b", 64)}
+			approvalValue := approval.PendingApproval{Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-writer-1",
+				FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: decision.SubjectHash,
+				RequiredRoles: []string{"writer"}, Actions: []string{"submit", "reject"}, Quorum: approval.QuorumAny,
+				Status: approval.StatusResolved, ResolvedAction: "reject", Payload: payload, Decisions: []approval.Decision{decision}}
+			approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: approvalValue}}
+			server := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target},
+				usageAllowed: true, approvals: approvals, eventLogs: eventLog, attemptManifests: manifestStore}
+
+			manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "writer",
+				Executor: "human", ActorID: "writer-1", ActorRole: "writer", HumanInputApprovalID: approvalID,
+				StageIndex: 1, StartedAt: startedAt.Add(time.Second), FinishedAt: finishedAt, Status: "rejected", Execution: "succeeded",
+				Decision: "rejected", Outcome: "rejected"}
+			if test.withOutput {
+				artifactRel := "attempts/" + attemptID + "/artifacts/feature/result.md"
+				artifactPath := filepath.Join(target, ".ai-team", "runs", runID, filepath.FromSlash(artifactRel))
+				if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(artifactPath, []byte("rejected output\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				manifest.Outputs = []evidence.ArtifactRecord{{Name: "result", Type: "file", EvidencePath: artifactRel, Size: int64(len("rejected output\n")), SHA256: humanartifact.Digest([]byte("rejected output\n"))}}
+			}
+			if test.withTypedFields {
+				manifest.HumanSubmissionResult = "md"
+			}
+
+			_, writeErr := server.dispatch("attempt_manifest.write", workerAPICall{AttemptManifest: manifest})
+			if test.wantWriteError && writeErr == nil {
+				t.Fatal("malformed reject manifest was accepted")
+			}
+			if !test.wantWriteError && writeErr != nil {
+				t.Fatalf("legitimate reject manifest write failed: %v", writeErr)
+			}
+			manifestDigest, _, digestErr := evidence.AttemptManifestDigest(evidence.ReservedAttemptManifestSource{TargetDir: target},
+				filepath.Join(target, ".ai-team", "runs", runID), runID, attemptID)
+			if test.wantWriteError {
+				if digestErr == nil {
+					t.Fatal("malformed reject manifest was unexpectedly persisted")
+				}
+				manifestDigest = strings.Repeat("f", 64)
+			} else if digestErr != nil {
+				t.Fatalf("read stored reject manifest digest: %v", digestErr)
+			}
+			finishedEvent := evidence.Event{Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt, Data: map[string]any{
+				"status": "rejected", "execution": "succeeded", "decision": "rejected", "outcome": "rejected", "manifest_sha256": manifestDigest,
+				"executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID,
+			}}
+			_, finishErr := server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: finishedEvent,
+				ExpectedSequence: 2, ExpectedPreviousSHA256: events[1].SHA256})
+			if test.wantWriteError && finishErr == nil {
+				t.Fatal("attempt_finished accepted after a malformed reject manifest")
+			}
+			if !test.wantWriteError && finishErr != nil {
+				t.Fatalf("legitimate reject attempt did not finish: %v", finishErr)
+			}
+		})
+	}
+}
+
 func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 	const runID, approvalID = "human-validator-branches", "approval-human-validator"
 	makeApproval := func() approval.PendingApproval {

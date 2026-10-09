@@ -1380,10 +1380,13 @@ func (s *workerAPIServer) loadHumanSubmissionApproval(manifest evidence.AttemptM
 		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest result does not match the configured input")
 	}
 	decision := value.Decisions[len(value.Decisions)-1]
-	if decision.ActorID != manifest.ActorID || decision.ActorRole != manifest.ActorRole || decision.Action == "reject" {
+	if decision.ActorID != manifest.ActorID || decision.ActorRole != manifest.ActorRole {
 		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest actor does not match its resolved decision")
 	}
-	if payload.Result == "approve" && decision.Action != "approve" || payload.Result != "approve" && decision.Action != "submit" {
+	if value.ResolvedAction != decision.Action || !containsWorkerString(value.Actions, decision.Action) {
+		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest decision is not the resolved allowed action")
+	}
+	if decision.Action != "reject" && (payload.Result == "approve" && decision.Action != "approve" || payload.Result != "approve" && decision.Action != "submit") {
 		return approval.PendingApproval{}, approval.InputPayload{}, approval.Decision{}, errors.New("human submission manifest action does not match its configured result")
 	}
 	return value, payload, decision, nil
@@ -1393,6 +1396,14 @@ func (s *workerAPIServer) validateReservedHumanSubmissionManifest(manifest evide
 	_, _, decision, err := s.loadHumanSubmissionApproval(manifest)
 	if err != nil {
 		return err
+	}
+	if decision.Action == "reject" {
+		if decision.SubmissionVersion != 0 || decision.ContentSHA256 != "" || manifest.HumanSubmissionVersion != 0 ||
+			manifest.HumanSubmissionSHA256 != "" || manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" ||
+			manifest.HumanSubmissionDescription != "" || len(manifest.Outputs) != 0 {
+			return errors.New("rejected human input manifest cannot contain submission metadata or outputs")
+		}
+		return nil
 	}
 	decisionIsVersioned := decision.SubmissionVersion != 0 || decision.ContentSHA256 != ""
 	manifestHasTypedSubmission := manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||

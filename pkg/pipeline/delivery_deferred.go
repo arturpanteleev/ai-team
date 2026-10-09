@@ -241,7 +241,7 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	}
 	approvalAttempts := evidence.ReservedAttemptManifestSource{TargetDir: targetDir}
 	if err := requireResolvedDeliveryOperationApproval(approvalStore, approvalAttempts, runDir,
-		runID, marker.Stage, planHash, canonical, candidateSHA); err != nil {
+		runID, marker.Stage, planHash, canonical, candidateSHA, p.deliveryApprovalHash); err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: %w", err)
 	}
 	// A successful retry is idempotent. Do this after the exact current plan,
@@ -374,6 +374,11 @@ func (p *Pipeline) validateControllerBackedLegacyDelivery(targetDir, runDir, run
 		return nil
 	}
 	if p.approvals == nil {
+		if p.deliveryApprovalHash != "" {
+			// The later deferred-plan check binds this current confirmation to
+			// the exact canonical plan before any delivery service is invoked.
+			return nil
+		}
 		return errors.New("controller approval authority is unavailable for legacy cloud delivery")
 	}
 	legacyPath := filepath.Join(runDir, "events.jsonl")
@@ -396,8 +401,8 @@ func (p *Pipeline) validateControllerBackedLegacyDelivery(targetDir, runDir, run
 			switch mode {
 			case "hash_flag":
 				// The old journal does not preserve a controller-verifiable copy of
-				// the one-shot job flag, so it cannot authorize manual delivery.
-				approved[claimKey(event.AttemptID, planHash)] = false
+				// the one-shot job flag. A current exact --approve-plan can reassert it.
+				approved[claimKey(event.AttemptID, planHash)] = p.deliveryApprovalHash == planHash
 			case "resolved_approval":
 				if !approvalsLoaded {
 					approvals, err = p.approvals.List(runID)
@@ -410,7 +415,8 @@ func (p *Pipeline) validateControllerBackedLegacyDelivery(targetDir, runDir, run
 				for _, value := range approvals {
 					if value.RunID == runID && value.Trigger == "delivery_plan" && value.SubjectHash == planHash &&
 						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" {
-						matched = true
+						trustedStore, trusted := p.approvals.(approval.TrustedDecisionAuthority)
+						matched = trusted && trustedStore.HasAuthenticatedControllerDecision(value) || p.deliveryApprovalHash == planHash
 						break
 					}
 				}
@@ -497,7 +503,7 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 		return fmt.Errorf("recover delivery candidate identity: %w", err)
 	}
 	if err := requireResolvedDeliveryOperationApproval(p.approvals, attemptStore, runDir,
-		runID, marker.Stage, planHash, canonical, candidateSHA); err != nil {
+		runID, marker.Stage, planHash, canonical, candidateSHA, p.deliveryApprovalHash); err != nil {
 		return fmt.Errorf("recover delivery: %w", err)
 	}
 	if found {

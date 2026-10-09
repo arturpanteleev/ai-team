@@ -1679,7 +1679,7 @@ func TestDeliverDaemonRejectsAlreadyDeliveredRun(t *testing.T) {
 	runID := filepath.Base(runDir)
 
 	// Exact retry returns the recorded result and does not invoke delivery again.
-	retry, err := New(nil, nil).DeliverDeferred(context.Background(), runDir, "", dir)
+	retry, err := New(nil, nil, WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || retry.CommitSHA == "" || retry.PlanHash != approvedPlanHash || service.calls != 1 {
 		t.Fatalf("exact retry should be idempotent: record=%+v calls=%d err=%v", retry, service.calls, err)
 	}
@@ -1729,7 +1729,7 @@ func TestDeliverDeferredDoesNotTrustWorkerOrLegacyTerminalRecordForRetry(t *test
 		t.Fatalf("seed legacy run-local record: %v", err)
 	}
 	service := &fakeDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(service)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(service), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("retry must execute despite self-consistent worker/legacy records: %v", err)
 	}
@@ -1740,7 +1740,7 @@ func TestDeliverDeferredDoesNotTrustWorkerOrLegacyTerminalRecordForRetry(t *test
 	if err != nil || !found || trusted.CommitSHA != record.CommitSHA {
 		t.Fatalf("trusted retry receipt missing: record=%+v found=%v err=%v", trusted, found, err)
 	}
-	retried, err := New(nil, nil, WithDeliveryService(service)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(service), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || service.calls != 1 || retried.CommitSHA != record.CommitSHA {
 		t.Fatalf("receipt-backed exact retry must not execute twice: record=%+v calls=%d err=%v", retried, service.calls, err)
 	}
@@ -1915,7 +1915,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	// Retry-путь CLI: DeliverDeferred разрешает evidence через Resume с
 	// корректным корнем (filepath.Dir(runDir), runID) и доставляет.
 	okService := &fakeDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred позитивный путь: %v", err)
 	}
@@ -1943,7 +1943,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	}
 	// Exact retry returns the validated controller record without executing a
 	// second push or pull request creation.
-	retried, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || okService.calls != 1 || retried.CommitSHA != record.CommitSHA || retried.PRURL != record.PRURL {
 		t.Fatalf("exact retry must return the original delivery: record=%+v calls=%d err=%v", retried, okService.calls, err)
 	}
@@ -1983,7 +1983,7 @@ func TestDeliverDeferredRetriesFailedHook(t *testing.T) {
 	if err := os.WriteFile(statePath, stateBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil || !strings.Contains(err.Error(), "plan hash mismatch") {
+	if _, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir); err == nil || !strings.Contains(err.Error(), "plan hash mismatch") {
 		t.Fatalf("changed plan must require new approval, got: %v", err)
 	}
 	if okService.calls != 1 {
@@ -2163,7 +2163,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	}
 
 	okService := &capturingDeliveryService{}
-	record, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(marker.PlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred из control target: %v", err)
 	}
@@ -2203,7 +2203,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 		t.Fatalf("prepared plan в worktree обязан существовать: found=%v err=%v", found, loadErr)
 	}
 	// Exact retry returns the original result without another controller call.
-	retried, err := New(nil, nil, WithDeliveryService(okService)).DeliverDeferred(context.Background(), runDir, "", dir)
+	retried, err := New(nil, nil, WithDeliveryService(okService), WithDeliveryApprovalHash(marker.PlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil || okService.calls != 1 || retried.CommitSHA != record.CommitSHA || retried.PRURL != record.PRURL {
 		t.Fatalf("exact retry must be idempotent: record=%+v calls=%d err=%v", retried, okService.calls, err)
 	}

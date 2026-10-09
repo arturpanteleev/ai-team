@@ -203,7 +203,7 @@ func TestDeferredDeliveryResolvesRealPreparedState(t *testing.T) {
 		t.Fatalf("чужим target должен быть fail-closed, got: %v", err)
 	}
 
-	record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir)
+	record, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{}), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir)
 	if err != nil {
 		t.Fatalf("DeliverDeferred по реальному state: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	// First write a valid delivery record for this run. Change only the plan hash,
 	// then rewrite it through the canonical record writer so this remains a
 	// structurally valid, self-checksummed record copied from a different plan.
-	if _, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{})).DeliverDeferred(context.Background(), runDir, "", dir); err != nil {
+	if _, err := New(nil, nil, WithDeliveryService(&fakeDeliveryService{}), WithDeliveryApprovalHash(approvedPlanHash)).DeliverDeferred(context.Background(), runDir, "", dir); err != nil {
 		t.Fatalf("write initial terminal record: %v", err)
 	}
 	record, found, err := delivery.ReadTerminalRecord(runDir)
@@ -252,7 +252,7 @@ func TestReconcileTerminalDeliveryRejectsValidRecordWithWrongPlanIdentity(t *tes
 	if err := eventSource.MigrateLegacy(runID, runDir); err != nil {
 		t.Fatal(err)
 	}
-	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventSource))
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventSource), WithDeliveryApprovalHash(approvedPlanHash))
 	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("reconcile should accept a valid controller-owned record: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestReconcileTerminalDeliveryResealsExistingRecordAndRejectsTamperedAnchor(
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventStore))
+	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore), WithEventLogSource(eventStore), WithDeliveryApprovalHash(approvedPlanHash))
 
 	attestationDigest, err := attestationDigestOfRun(runDir)
 	if err != nil {
@@ -485,13 +485,15 @@ func TestManualDeliveryUsesFinalCancellationStatus(t *testing.T) {
 
 func TestLegacyCloudDeliveryRequiresExactControllerApproval(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		approvalID string
-		attemptID  string
-		wantError  bool
+		name          string
+		approvalID    string
+		attemptID     string
+		authenticated bool
+		wantError     bool
 	}{
-		{name: "different attempt", approvalID: "approval-wrong-attempt", attemptID: "other-attempt", wantError: true},
-		{name: "exact approval", approvalID: "approval-exact-attempt", attemptID: "attempt-delivery"},
+		{name: "different attempt", approvalID: "approval-wrong-attempt", attemptID: "other-attempt", authenticated: true, wantError: true},
+		{name: "exact approval without provenance", approvalID: "approval-untrusted-attempt", attemptID: "attempt-delivery", wantError: true},
+		{name: "exact authenticated approval", approvalID: "approval-exact-attempt", attemptID: "attempt-delivery", authenticated: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			target := t.TempDir()
@@ -501,10 +503,11 @@ func TestLegacyCloudDeliveryRequiresExactControllerApproval(t *testing.T) {
 			if err := (metrics.FileUsageEnvelopeStore{}).Reserve(target, runID); err != nil {
 				t.Fatal(err)
 			}
-			approvals, err := approval.NewStore(target)
+			approvals, err := approval.NewSQLiteStore(filepath.Join(target, ".ai-team", "web.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = approvals.Close() }()
 			value, err := approvals.Create(approval.PendingApproval{
 				RunID: runID, ID: test.approvalID, AttemptID: test.attemptID, FromStage: "deployer", ToStage: "deployer",
 				Trigger: "delivery_plan", SubjectHash: planHash, RequiredRoles: []string{"release_manager"},
@@ -514,7 +517,7 @@ func TestLegacyCloudDeliveryRequiresExactControllerApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := approvals.Decide(runID, value.ID, approval.Decision{
-				ActorID: "release-manager", ActorRole: "release_manager", Action: "approve", SubjectHash: planHash,
+				ActorID: "release-manager", ActorRole: "release_manager", Action: "approve", SubjectHash: planHash, ControllerAuthenticated: test.authenticated,
 			}); err != nil {
 				t.Fatal(err)
 			}

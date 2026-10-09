@@ -367,7 +367,7 @@ func validateResolvedDeliveryApproval(value approval.PendingApproval, runID, sta
 // attempt must still have a matching manifest from the selected source, which
 // is controller-owned for cloud runs.
 func requireResolvedDeliveryOperationApproval(store ApprovalStore, source evidence.AttemptManifestSource,
-	runDir, runID, stage, planHash string, canonical []byte, candidateSHA string) error {
+	runDir, runID, stage, planHash string, canonical []byte, candidateSHA, explicitPlanHash string) error {
 	if store == nil {
 		return errors.New("deferred delivery requires controller approval storage")
 	}
@@ -381,6 +381,12 @@ func requireResolvedDeliveryOperationApproval(store ApprovalStore, source eviden
 			continue
 		}
 		if err := validateResolvedDeliveryApproval(value, runID, stage, value.AttemptID, planHash, canonical, candidateSHA); err != nil {
+			continue
+		}
+		explicitMatch := explicitPlanHash != "" && strings.ToLower(strings.TrimSpace(explicitPlanHash)) == planHash
+		trustedStore, trusted := store.(approval.TrustedDecisionAuthority)
+		if !explicitMatch && (!trusted || !trustedStore.HasAuthenticatedControllerDecision(value)) {
+			lastErr = errors.New("deferred delivery requires an authenticated controller decision or the exact current --approve-plan hash")
 			continue
 		}
 		if err := approvalAttemptMatchesStage(source, runDir, runID, value.AttemptID, stage); err != nil {

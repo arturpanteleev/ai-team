@@ -1041,7 +1041,8 @@ func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prio
 		}
 		for _, value := range values {
 			if value.Trigger == "delivery_plan" && value.SubjectHash == planHash && value.Status == approval.StatusResolved &&
-				value.ResolvedAction == "approve" && value.AttemptID == event.AttemptID {
+				value.ResolvedAction == "approve" && value.RunID == s.scope.RunID && value.AttemptID == event.AttemptID &&
+				hasAuthenticatedControllerDecision(s.approvals, value) {
 				return nil
 			}
 		}
@@ -1086,7 +1087,8 @@ func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prio
 		}
 		for _, value := range values {
 			if value.Trigger == "delivery_plan" && value.SubjectHash == planHash && value.Status == approval.StatusResolved &&
-				value.ResolvedAction == "approve" && value.AttemptID == event.AttemptID {
+				value.ResolvedAction == "approve" && value.RunID == s.scope.RunID && value.AttemptID == event.AttemptID &&
+				hasAuthenticatedControllerDecision(s.approvals, value) {
 				return nil
 			}
 		}
@@ -1121,6 +1123,11 @@ func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prio
 		}
 	}
 	return nil
+}
+
+func hasAuthenticatedControllerDecision(store any, value approval.PendingApproval) bool {
+	trusted, ok := store.(approval.TrustedDecisionAuthority)
+	return ok && trusted.HasAuthenticatedControllerDecision(value)
 }
 
 // validateControllerDeliveryClaims keeps event journals from gaining delivery
@@ -1164,7 +1171,8 @@ func validateControllerDeliveryClaims(job Job, events []evidence.Event, approval
 				matched := false
 				for _, value := range values {
 					if value.RunID == job.RunID && value.Trigger == "delivery_plan" && value.SubjectHash == planHash &&
-						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" {
+						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" &&
+						hasAuthenticatedControllerDecision(approvals, value) {
 						matched = true
 						break
 					}

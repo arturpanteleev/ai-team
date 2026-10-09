@@ -125,6 +125,7 @@ type Pipeline struct {
 	attemptManifestSource evidence.AttemptManifestSource
 	attemptManifestWriter AttemptManifestWriter
 	eventLogSource        evidence.EventLog
+	deliveryApprovalHash  string
 	reportsDir            string
 }
 
@@ -136,6 +137,12 @@ func WithNotifier(n notifier.Notifier) Option {
 
 func WithReportsDir(dir string) Option {
 	return func(p *Pipeline) { p.reportsDir = dir }
+}
+
+// WithDeliveryApprovalHash carries a plan hash explicitly confirmed by the
+// current controller invocation into deferred delivery and recovery checks.
+func WithDeliveryApprovalHash(hash string) Option {
+	return func(p *Pipeline) { p.deliveryApprovalHash = strings.ToLower(strings.TrimSpace(hash)) }
 }
 
 // WithPrompter подменяет интерактив (тесты, будущий web-режим).

@@ -135,10 +135,11 @@ func TestRequireResolvedDeliveryOperationApprovalReusesOnlySavedDecisionForSameP
 			t.Fatal(err)
 		}
 	}
-	store, err := approval.NewStore(target)
+	store, err := approval.NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = store.Close() }()
 	value, err := store.Create(approval.PendingApproval{
 		RunID: runID, AttemptID: approvedAttempt, FromStage: stage, ToStage: stage, Trigger: "delivery_plan",
 		SubjectHash: planHash, RequiredRoles: []string{deliveryApprovalRole}, Quorum: approval.QuorumAny,
@@ -148,12 +149,12 @@ func TestRequireResolvedDeliveryOperationApprovalReusesOnlySavedDecisionForSameP
 		t.Fatal(err)
 	}
 	if _, err := store.Decide(runID, value.ID, approval.Decision{
-		ActorID: "release-manager-1", ActorRole: deliveryApprovalRole, Action: "approve", SubjectHash: planHash,
+		ActorID: "release-manager-1", ActorRole: deliveryApprovalRole, Action: "approve", SubjectHash: planHash, ControllerAuthenticated: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	source := evidence.ReservedAttemptManifestSource{TargetDir: target}
-	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, planHash, canonical, ""); err != nil {
+	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, planHash, canonical, "", ""); err != nil {
 		t.Fatalf("same approved plan should survive delivery-stage retry: %v", err)
 	}
 
@@ -163,14 +164,38 @@ func TestRequireResolvedDeliveryOperationApprovalReusesOnlySavedDecisionForSameP
 		t.Fatal("failed to construct mismatched delivery plan")
 	}
 	wrongPlanHash := strings.Repeat("0", 64)
-	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, wrongPlanHash, wrongPlan, ""); err == nil {
+	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, wrongPlanHash, wrongPlan, "", ""); err == nil {
 		t.Fatal("saved approval for a different plan must not authorize a retry")
 	}
-	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, strings.Repeat("1", 64), canonical, ""); err == nil {
+	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, strings.Repeat("1", 64), canonical, "", ""); err == nil {
 		t.Fatal("saved approval with a different subject hash must not authorize a retry")
 	}
-	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, "another-run", stage, planHash, canonical, ""); err == nil {
+	if err := requireResolvedDeliveryOperationApproval(store, source, runDir, "another-run", stage, planHash, canonical, "", ""); err == nil {
 		t.Fatal("saved approval for another run must not authorize a retry")
+	}
+
+	legacyStore, err := approval.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyValue, err := legacyStore.Create(approval.PendingApproval{
+		RunID: runID, AttemptID: approvedAttempt, FromStage: stage, ToStage: stage, Trigger: "delivery_plan",
+		SubjectHash: planHash, RequiredRoles: []string{deliveryApprovalRole}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "reject"}, Targets: map[string]string{"approve": stage, "reject": stage}, Payload: canonical,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyStore.Decide(runID, legacyValue.ID, approval.Decision{
+		ActorID: "release-manager-1", ActorRole: deliveryApprovalRole, Action: "approve", SubjectHash: planHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireResolvedDeliveryOperationApproval(legacyStore, source, runDir, runID, stage, planHash, canonical, "", ""); err == nil {
+		t.Fatal("untrusted legacy decision authorized delivery recovery without current confirmation")
+	}
+	if err := requireResolvedDeliveryOperationApproval(legacyStore, source, runDir, runID, stage, planHash, canonical, "", planHash); err != nil {
+		t.Fatalf("exact current plan hash should authorize recovery: %v", err)
 	}
 }
 
@@ -204,7 +229,7 @@ func TestReconcileTerminalDeliveryRequiresControllerApprovalAndAttempt(t *testin
 		t.Fatal(err)
 	}
 	controllerPipeline := New(nil, nil, WithApprovalStore(approvalStore),
-		WithEventLogSource(eventSource), WithDeliveryService(&fakeDeliveryService{}))
+		WithEventLogSource(eventSource), WithDeliveryService(&fakeDeliveryService{}), WithDeliveryApprovalHash(planHash))
 	if err := controllerPipeline.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
 		t.Fatalf("reconcile from matching controller approvals and attempt should pass: %v", err)
 	}

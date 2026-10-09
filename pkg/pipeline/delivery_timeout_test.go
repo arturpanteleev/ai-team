@@ -172,7 +172,7 @@ func TestDeliverDeferredAbortsOnDeliveryTimeout(t *testing.T) {
 	}
 	runDir := onlyRunDir(t, dir)
 
-	retry := New(deliveryRunCfg("300ms"), nil, WithDeliveryService(newHangingDeliveryService()))
+	retry := New(deliveryRunCfg("300ms"), nil, WithDeliveryService(newHangingDeliveryService()), WithDeliveryApprovalHash(approvedPlanHash))
 	done := make(chan error, 1)
 	go func() {
 		_, err := retry.DeliverDeferred(context.Background(), runDir, "", dir)

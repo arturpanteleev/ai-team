@@ -82,11 +82,11 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				return err
 			}
 		}
-		if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
-			rs.resumedApproval.FromStage == current &&
-			(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
-			decision := lastApprovalDecision(rs.resumedApproval)
-			if err := rs.recordExecutorChanged(current, "human", "agent", decision.ActorID, rs.resumedApproval.ID, decision.DecidedAt); err != nil {
+		stageApproval := rs.activeResolvedApproval(current)
+		if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+			(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+			decision := lastApprovalDecision(stageApproval)
+			if err := rs.recordExecutorChanged(current, "human", "agent", decision.ActorID, stageApproval.ID, decision.DecidedAt); err != nil {
 				return err
 			}
 		}
@@ -100,10 +100,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			}
 		} else {
 			var cleanup func()
-			if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
-				rs.resumedApproval.FromStage == current && rs.resumedApproval.ResolvedAction == "refine_agent" {
+			if stageApproval != nil && stageApproval.Kind == approval.KindInput && stageApproval.ResolvedAction == "refine_agent" {
 				var refineErr error
-				cleanup, refineErr = rs.addRefinementInput(current, lastApprovalDecision(rs.resumedApproval).Comment)
+				cleanup, refineErr = rs.addRefinementInput(current, lastApprovalDecision(stageApproval).Comment)
 				if refineErr != nil {
 					return refineErr
 				}
@@ -236,6 +235,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 		if rs.p.recorder != nil {
 			rs.p.recorder.TransitionSelected(rs.runID, result.AttemptID, transitionAt, transitionData)
+		}
+		// The incoming approval authorized this dispatch only. Clear it before
+		// advancing so a same-stage loop cannot inherit the previous visit.
+		rs.lifecycleState.ActiveApprovalID = ""
+		if activeStageApprovalID(rs.resumedApproval, current) != "" {
+			rs.resumedApproval = nil
 		}
 		rs.ps.DoneAgent(current)
 		if workflow.IsTerminal(target) {
@@ -399,6 +404,13 @@ func (rs *runState) saveLifecycle(phase lifecycle.Phase, nextStage string) error
 	next.Phase = phase
 	next.NextStage = nextStage
 	next.PendingApprovalID = ""
+	next.ActiveApprovalID = ""
+	if phase == lifecycle.PhaseRunning || phase == lifecycle.PhaseResumable {
+		// Keep the exact resolved handoff across the running checkpoint. A crash
+		// after this save but before dispatch must not turn a human agent action
+		// into an ordinary human submission or lose an executor override's visit.
+		next.ActiveApprovalID = activeStageApprovalID(rs.resumedApproval, nextStage)
+	}
 	next.AttemptOrdinal = rs.attemptOrdinal
 	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
 	if err != nil {
@@ -413,6 +425,7 @@ func (rs *runState) saveWaiting(nextStage, approvalID string) error {
 	next.Phase = lifecycle.PhaseWaiting
 	next.NextStage = nextStage
 	next.PendingApprovalID = approvalID
+	next.ActiveApprovalID = ""
 	next.AttemptOrdinal = rs.attemptOrdinal
 	if override, ok := next.ExecutorOverrides[nextStage]; ok && override.Executor == "human" {
 		// Once the human executor has opened its typed input form, bind that

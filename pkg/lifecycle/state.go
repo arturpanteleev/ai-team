@@ -35,6 +35,7 @@ type State struct {
 	Phase             Phase                       `json:"phase"`
 	NextStage         string                      `json:"next_stage,omitempty"`
 	PendingApprovalID string                      `json:"pending_approval_id,omitempty"`
+	ActiveApprovalID  string                      `json:"active_approval_id,omitempty"`
 	AttemptOrdinal    int                         `json:"attempt_ordinal"`
 	ConfigSHA256      string                      `json:"config_sha256"`
 	WorkflowSHA256    string                      `json:"workflow_sha256"`
@@ -177,6 +178,9 @@ func validate(state State) error {
 			return fmt.Errorf("lifecycle state содержит недопустимый executor override для %q", stageID)
 		}
 	}
+	if state.ActiveApprovalID != "" && filepath.Base(state.ActiveApprovalID) != state.ActiveApprovalID {
+		return errors.New("lifecycle state содержит недопустимый active_approval_id")
+	}
 	switch state.Phase {
 	case PhaseRunning, PhaseResumable:
 		if state.NextStage == "" {
@@ -187,12 +191,12 @@ func validate(state State) error {
 		}
 	case PhaseWaiting:
 		if state.NextStage == "" || state.PendingApprovalID == "" ||
-			filepath.Base(state.PendingApprovalID) != state.PendingApprovalID {
-			return errors.New("waiting lifecycle state требует next_stage и pending_approval_id")
+			filepath.Base(state.PendingApprovalID) != state.PendingApprovalID || state.ActiveApprovalID != "" {
+			return errors.New("waiting lifecycle state требует только pending_approval_id")
 		}
 	case PhaseTerminal:
-		if state.NextStage != "" || state.PendingApprovalID != "" {
-			return errors.New("terminal lifecycle state не может иметь next_stage или pending approval")
+		if state.NextStage != "" || state.PendingApprovalID != "" || state.ActiveApprovalID != "" {
+			return errors.New("terminal lifecycle state не может иметь next_stage или approval")
 		}
 	default:
 		return fmt.Errorf("неизвестная lifecycle phase %q", state.Phase)

@@ -28,18 +28,18 @@ func (p *Pipeline) stageExecutor(stageID string) string {
 // that made this stage ready. A new approval/loop visit cannot inherit a
 // previous executor choice for the same stage ID.
 func (rs *runState) stageExecutorForRun(stageID string) string {
-	if rs.resumedApproval != nil && rs.resumedApproval.Status == approval.StatusResolved &&
-		rs.resumedApproval.Kind == approval.KindInput && rs.resumedApproval.FromStage == stageID &&
-		(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
+	activeApproval := rs.activeResolvedApproval(stageID)
+	if activeApproval != nil && activeApproval.Kind == approval.KindInput && activeApproval.FromStage == stageID &&
+		(activeApproval.ResolvedAction == "run_agent" || activeApproval.ResolvedAction == "refine_agent") {
 		return "agent"
 	}
 	override, ok := rs.lifecycleState.ExecutorOverrides[stageID]
 	if !ok {
 		return rs.p.stageExecutor(stageID)
 	}
-	approvalID := rs.lifecycleState.PendingApprovalID
-	if approvalID == "" && rs.resumedApproval != nil {
-		approvalID = rs.resumedApproval.ID
+	approvalID := rs.lifecycleState.ActiveApprovalID
+	if approvalID == "" {
+		approvalID = rs.lifecycleState.PendingApprovalID
 	}
 	if approvalID == "" || override.ApprovalID != approvalID {
 		return rs.p.stageExecutor(stageID)

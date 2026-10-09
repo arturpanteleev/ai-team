@@ -43,6 +43,21 @@ an input artifact included in the immutable attempt input snapshot.
 - **THEN** the exact text is supplied as the `current-result` input artifact
 - **AND** the attempt manifest snapshots its bytes
 
+### Requirement: Running checkpoints retain the resolved stage approval
+
+The lifecycle state MUST retain the resolved approval identity when a run
+moves from a waiting checkpoint into a stage, until dispatch has consumed that
+visit. Resume MUST verify and restore the associated action or executor
+override before dispatch.
+
+#### Scenario: Process stops after checkpoint and before dispatch
+
+- **WHEN** a resolved `run_agent` or `refine_agent` approval is checkpointed as
+  running and the process stops before the stage starts
+- **THEN** resume restores the same resolved approval and dispatches the pinned
+  agent with the correct current-result input
+- **AND** a visit-bound executor override remains attached only to that approval
+
 ### Requirement: Human edits of agent results are identified
 
 The pipeline MUST record a human edit of a prior agent result for the same
@@ -55,3 +70,5 @@ stage with the source agent attempt ID in its evidence manifest and emit
 - **THEN** the human attempt identifies that agent attempt as its edited source
 - **AND** the configured output is replaced atomically only after validating
   the regular-file path
+- **AND** the prior result is read from the exact output path in the human
+  stage's configured output contract, even when the agent emitted multiple files

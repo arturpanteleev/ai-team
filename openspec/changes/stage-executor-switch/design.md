@@ -1,5 +1,10 @@
 # Design: stage executor switching
 
+`lifecycle.State.ActiveApprovalID` carries the resolved handoff across the
+waiting-to-running checkpoint. Resume verifies that approval against the
+hash-chained decision/transition evidence before dispatch, so a process stop
+after the checkpoint cannot drop a human action or executor override.
+
 `lifecycle.State.ExecutorOverrides[stageID]` carries the selected executor,
 the prior default/selection, actor, timestamp, active approval ID, and the
 originating visit ID. The API only updates the `NextStage` of a waiting
@@ -21,7 +26,8 @@ input snapshot mechanism bind its exact bytes to the agent attempt. The
 temporary is removed after the invocation has snapshotted it.
 
 When a human submission replaces a previous agent output at its configured
-path, the writer permits atomic replacement only when the typed approval
+path, the pipeline selects the prior agent artifact by that exact configured
+path, even if the attempt emitted other files. The writer permits atomic replacement only when the typed approval
 binds a prior agent attempt. The human attempt event and manifest record that
 attempt ID. Normal human submissions remain immutable/idempotent.
 

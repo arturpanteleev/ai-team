@@ -237,6 +237,7 @@ func (e *RunEngine) Cancel(config CancelConfig) (RunResult, error) {
 	terminal.Phase = lifecycle.PhaseTerminal
 	terminal.NextStage = ""
 	terminal.PendingApprovalID = ""
+	terminal.ActiveApprovalID = ""
 	terminal.AttemptOrdinal = len(replayed.Attempts)
 	if err := stateStore.Save(state, terminal); err != nil {
 		return RunResult{}, err

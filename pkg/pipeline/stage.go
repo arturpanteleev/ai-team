@@ -100,6 +100,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}); err != nil {
 		return fail(fmt.Errorf("агент %s: запись attempt_started: %w", name, err))
 	}
+	stageApproval := rs.activeResolvedApproval(name)
 	defer func() {
 		r.FinishedAt = time.Now().UTC()
 		r.Duration = r.FinishedAt.Sub(r.StartedAt)
@@ -174,11 +175,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		}
 		if agentEventStarted {
 			agentData := map[string]any{"status": r.Status}
-			if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
-				rs.resumedApproval.FromStage == name &&
-				(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
-				agentData["action"] = rs.resumedApproval.ResolvedAction
-				agentData["approval_id"] = rs.resumedApproval.ID
+			if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+				(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+				agentData["action"] = stageApproval.ResolvedAction
+				agentData["approval_id"] = stageApproval.ID
 			}
 			if r.Err != nil {
 				agentData["error"] = r.Err.Error()
@@ -189,12 +189,11 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		}
 	}()
 	agentStartData := map[string]any{"stage_index": i + 1}
-	if rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindInput &&
-		rs.resumedApproval.FromStage == name &&
-		(rs.resumedApproval.ResolvedAction == "run_agent" || rs.resumedApproval.ResolvedAction == "refine_agent") {
-		agentStartData["action"] = rs.resumedApproval.ResolvedAction
-		agentStartData["approval_id"] = rs.resumedApproval.ID
-		if decision := lastApprovalDecision(rs.resumedApproval); decision.ActorID != "" {
+	if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+		(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+		agentStartData["action"] = stageApproval.ResolvedAction
+		agentStartData["approval_id"] = stageApproval.ID
+		if decision := lastApprovalDecision(stageApproval); decision.ActorID != "" {
 			agentStartData["started_by"] = decision.ActorID
 		}
 	}

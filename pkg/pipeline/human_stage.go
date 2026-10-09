@@ -70,7 +70,7 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if err != nil {
 		return notifier.StageResult{}, err
 	}
-	initialResult, editedAgentAttemptID, initialResultPath, err := rs.latestAgentStageResult(stageID)
+	initialResult, editedAgentAttemptID, initialResultPath, err := rs.latestAgentStageResult(stageID, outputPath)
 	if err != nil {
 		return notifier.StageResult{}, err
 	}

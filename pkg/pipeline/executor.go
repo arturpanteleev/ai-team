@@ -22,11 +22,39 @@ func (rs *runState) activeExecutorOverride(stageID string) (lifecycle.ExecutorOv
 	if !ok {
 		return lifecycle.ExecutorOverride{}, false
 	}
-	approvalID := rs.lifecycleState.PendingApprovalID
-	if approvalID == "" && rs.resumedApproval != nil {
-		approvalID = rs.resumedApproval.ID
+	approvalID := rs.lifecycleState.ActiveApprovalID
+	if approvalID == "" {
+		approvalID = rs.lifecycleState.PendingApprovalID
 	}
 	return override, approvalID != "" && override.ApprovalID == approvalID
+}
+
+func activeStageApprovalID(value *approval.PendingApproval, stageID string) string {
+	if value == nil || value.Status != approval.StatusResolved || stageID == "" ||
+		value.Targets[value.ResolvedAction] != stageID {
+		return ""
+	}
+	if (value.Kind == approval.KindInput && value.Trigger == humanInputTrigger) ||
+		(value.Kind != approval.KindQuestions && strings.HasPrefix(value.Trigger, "graph_outcome:")) {
+		return value.ID
+	}
+	return ""
+}
+
+func (rs *runState) activeResolvedApproval(stageID string) *approval.PendingApproval {
+	value := rs.resumedApproval
+	if value == nil || value.Status != approval.StatusResolved || stageID == "" ||
+		value.Targets[value.ResolvedAction] != stageID {
+		return nil
+	}
+	approvalID := rs.lifecycleState.ActiveApprovalID
+	if approvalID == "" {
+		approvalID = rs.lifecycleState.PendingApprovalID
+	}
+	if approvalID == "" || approvalID != value.ID {
+		return nil
+	}
+	return value
 }
 
 func (rs *runState) clearExecutorOverride(stageID string) {
@@ -100,15 +128,24 @@ func sameStageTargets(actions []string, stageID string) map[string]string {
 	return targets
 }
 
-func (rs *runState) latestAgentStageResult(stageID string) (string, string, string, error) {
+func (rs *runState) latestAgentStageResult(stageID, outputPath string) (string, string, string, error) {
+	expectedPath, err := confinedArtifactPath(rs.task.ArtifactRoot, filepath.FromSlash(outputPath))
+	if err != nil {
+		return "", "", "", fmt.Errorf("human result path for %s is unsafe: %w", stageID, err)
+	}
 	for index := len(rs.results) - 1; index >= 0; index-- {
 		previous := rs.results[index]
 		if previous.Name != stageID || previous.Executor != "agent" || previous.Superseded || previous.FinishedAt.IsZero() {
 			continue
 		}
-		for reverseIndex := range previous.Outputs {
-			outputIndex := len(previous.Outputs) - reverseIndex - 1
-			path := previous.Outputs[outputIndex].Path
+		for _, output := range previous.Outputs {
+			path, absErr := filepath.Abs(output.Path)
+			if absErr != nil {
+				return "", "", "", fmt.Errorf("prior agent result for %s: %w", stageID, absErr)
+			}
+			if path != expectedPath {
+				continue
+			}
 			if err := validateExistingArtifactPath(rs.task.ArtifactRoot, path); err != nil {
 				return "", "", "", fmt.Errorf("prior agent result for %s is unsafe: %w", stageID, err)
 			}

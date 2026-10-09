@@ -97,6 +97,17 @@ func TestExecutorOverrideRequiresReadyApprovalVisitIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	running := loaded
+	running.Phase = PhaseRunning
+	running.PendingApprovalID = ""
+	running.ActiveApprovalID = "approval-a"
+	if err := store.Save(loaded, running); err != nil {
+		t.Fatalf("running stage should retain its resolved dispatch approval: %v", err)
+	}
+	loaded, err = store.Load(state.RunID)
+	if err != nil || loaded.ActiveApprovalID != "approval-a" {
+		t.Fatalf("active stage approval was not preserved: state=%+v err=%v", loaded, err)
+	}
 	loaded.ExecutorOverrides["analyst"] = ExecutorOverride{Executor: "agent", PreviousExecutor: "human", ActorID: "alice", ChangedAt: time.Now().UTC()}
 	if err := store.Save(loaded, loaded); err == nil {
 		t.Fatal("override without approval visit identity must be rejected")

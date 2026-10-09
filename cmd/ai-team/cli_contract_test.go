@@ -636,8 +636,8 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
-	t.Run("controller allocation survives pruned run evidence", func(t *testing.T) {
-		const selectedRunID = "cloud-known"
+	t.Run("controller allocation with reserved-suffix run ID survives pruned run evidence", func(t *testing.T) {
+		const selectedRunID = "cloud.reserved"
 		const peerRunID = "cloud-peer"
 		estimateRoot := newControlRoot(t)
 		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)

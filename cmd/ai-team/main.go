@@ -1623,21 +1623,36 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 		if infoErr != nil || !info.Mode().IsRegular() {
 			return nil, false
 		}
-		switch {
-		case strings.HasSuffix(name, ".reserved.json"):
+		if !strings.HasSuffix(name, ".json") {
+			return nil, false
+		}
+		// A valid run ID may itself end in ".reserved". In that case its
+		// envelope filename also has the reservation suffix, so the filename
+		// alone cannot distinguish the two records. The controller reservation
+		// schema has a target_dir field that usage envelopes never have.
+		data, readErr := safeio.ReadRegularFile(filepath.Join(usageDir, name), 8<<20)
+		if readErr != nil {
+			return nil, false
+		}
+		reservationRecord, classifyErr := isUsageReservationRecord(data)
+		if classifyErr != nil {
+			return nil, false
+		}
+		if reservationRecord {
+			if !strings.HasSuffix(name, ".reserved.json") {
+				return nil, false
+			}
 			runID := strings.TrimSuffix(name, ".reserved.json")
 			if runID == "" || reservedIDs[runID] {
 				return nil, false
 			}
 			reservedIDs[runID] = true
-		case strings.HasSuffix(name, ".json"):
+		} else {
 			runID := strings.TrimSuffix(name, ".json")
 			if runID == "" || envelopeIDs[runID] {
 				return nil, false
 			}
 			envelopeIDs[runID] = true
-		default:
-			return nil, false
 		}
 	}
 	for runID := range reservedIDs {
@@ -1703,6 +1718,26 @@ func recordedUsageEnvelopes(target string) ([]metrics.UsageEnvelope, bool) {
 		envelopes = append(envelopes, envelope)
 	}
 	return envelopes, true
+}
+
+func isUsageReservationRecord(data []byte) (bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil {
+		return false, err
+	}
+	if fields == nil {
+		return false, errors.New("usage record must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return false, errors.New("usage record has trailing data")
+		}
+		return false, err
+	}
+	_, hasTargetDir := fields["target_dir"]
+	return hasTargetDir, nil
 }
 
 func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error) {

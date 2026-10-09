@@ -702,7 +702,7 @@ func (c *Config) Validate(reg AgentLookup) error {
 	}
 	if c.Workflow != nil {
 		for _, edge := range c.Workflow.Edges {
-			if edge.From != "analyst" || edge.Approval == nil {
+			if edge.Approval == nil {
 				continue
 			}
 			if _, exists := edge.Approval.Actions["approve_spec"]; !exists {
@@ -713,14 +713,14 @@ func (c *Config) Validate(reg AgentLookup) error {
 			}
 			lookup, ok := reg.(productSpecContractLookup)
 			if !ok {
-				errs = append(errs, "workflow: действие analyst.approve_spec требует registry с проверкой outputs proposal и spec; настройте контракт Product Owner approval")
+				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует registry с проверкой outputs proposal и spec; настройте контракт Product Owner approval", edge.From))
 				continue
 			}
-			hasContract, err := lookup.HasProductSpecContract("analyst")
+			hasContract, err := lookup.HasProductSpecContract(edge.From)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("workflow: проверить contract analyst для approve_spec: %v", err))
+				errs = append(errs, fmt.Sprintf("workflow: проверить contract %s для approve_spec: %v", edge.From, err))
 			} else if !hasContract {
-				errs = append(errs, "workflow: действие analyst.approve_spec требует outputs proposal и spec в .ai-team/agents/analyst/def.yaml; используйте обычное действие approve для analyst без этого контракта")
+				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует outputs proposal и spec в .ai-team/agents/%s/def.yaml; используйте обычное действие approve без этого контракта", edge.From, edge.From))
 			}
 		}
 	}

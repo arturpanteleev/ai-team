@@ -139,6 +139,7 @@ func (s *SQLiteStore) importLegacy(root string, acquireRunLock func(string) (fun
 			if decodeErr := strictjson.Unmarshal(data, 1<<20, &value); decodeErr != nil {
 				return fmt.Errorf("legacy approval %s: %w", id, decodeErr)
 			}
+			normalize(&value)
 			if validateErr := validate(value); validateErr != nil {
 				return fmt.Errorf("legacy approval %s: %w", id, validateErr)
 			}
@@ -269,6 +270,7 @@ func (s *SQLiteStore) List(runID string) ([]PendingApproval, error) {
 		if err := strictjson.Unmarshal([]byte(data), 1<<20, &value); err != nil {
 			return nil, fmt.Errorf("approval record: %w", err)
 		}
+		normalize(&value)
 		if err := validate(value); err != nil {
 			return nil, err
 		}
@@ -346,6 +348,7 @@ func loadApproval(q interface {
 	if err := strictjson.Unmarshal([]byte(data), 1<<20, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", id, err)
 	}
+	normalize(&value)
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
 	}

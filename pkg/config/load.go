@@ -58,6 +58,7 @@ type stageSpec struct {
 	name              string
 	roles             []string
 	maxVisits         int
+	askQuestions      bool
 	productSpecOutput bool
 }
 
@@ -76,7 +77,7 @@ func DefaultProfile(profile string) (*Config, error) {
 	switch profile {
 	case ProfileStandard:
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
+			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
 			{name: "architect", roles: []string{"architect"}},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 3},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 3},
@@ -86,7 +87,7 @@ func DefaultProfile(profile string) (*Config, error) {
 		}
 	case ProfileFast:
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
+			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
 			{name: "tester", roles: []string{"qa"}, maxVisits: 2},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
@@ -97,7 +98,7 @@ func DefaultProfile(profile string) (*Config, error) {
 		loopbackQuorum = QuorumAll()
 		maxVisits = 2
 		stages = []stageSpec{
-			{name: "analyst", roles: []string{"product_owner"}, productSpecOutput: true},
+			{name: "analyst", roles: []string{"product_owner"}, askQuestions: true, productSpecOutput: true},
 			{name: "architect", roles: []string{"architect"}},
 			{name: "coder", roles: []string{"developer"}, maxVisits: 2},
 			{name: "reviewer", roles: []string{"reviewer"}, maxVisits: 2},
@@ -164,7 +165,7 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 				Roles: roles, Quorum: quorum, Deferred: deferredGates,
 				Actions: map[string]string{"approve": target, "reject": "$stop"},
 			}
-			if name == "analyst" && specByName[name].productSpecOutput {
+			if specByName[name].productSpecOutput {
 				// Product discovery must be explicitly agreed before technical
 				// planning starts, even in profiles that consolidate later gates.
 				edge.Approval.Deferred = false
@@ -173,16 +174,20 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 		}
 		workflowConfig.Edges = append(workflowConfig.Edges, edge)
 	}
-	if _, exists := index["analyst"]; exists {
-		roles := append([]string(nil), specByName["analyst"].roles...)
+	for _, name := range names {
+		stage := specByName[name]
+		if !stage.askQuestions {
+			continue
+		}
+		roles := append([]string(nil), stage.roles...)
 		if len(roles) == 0 {
-			roles = []string{"product_owner"}
+			roles = []string{"operator"}
 		}
 		workflowConfig.Edges = append(workflowConfig.Edges, WorkflowEdgeConfig{
-			From: "analyst", Outcome: "blocked", To: "analyst",
+			From: name, Outcome: "blocked", To: name,
 			Approval: &WorkflowApprovalConfig{
 				Roles: roles, Quorum: quorum,
-				Actions: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+				Actions: map[string]string{"answer_questions": name, "stop": "$stop"},
 			},
 		})
 	}
@@ -220,15 +225,15 @@ func buildWorkflow(profile string, names []string, stages []stageSpec, quorum, l
 		})
 	}
 	for _, name := range names {
-		if name == "analyst" {
-			// Intake may ask up to three clarification rounds and must be able
-			// to report the final unresolved question as a normal blocked result.
+		if specByName[name].askQuestions {
+			// Question-enabled stages may ask up to three clarification rounds
+			// and still report the final unresolved question as blocked.
 			workflowConfig.MaxVisits[name] = 4
 		} else if name == "architect" {
 			workflowConfig.MaxVisits[name] = 3
 		} else if mv := specByName[name].maxVisits; mv > 0 {
 			workflowConfig.MaxVisits[name] = mv
-		} else if name != "deployer" && name != "analyst" && name != "architect" {
+		} else if name != "deployer" && name != "architect" {
 			workflowConfig.MaxVisits[name] = defaultMaxVisits
 		}
 	}

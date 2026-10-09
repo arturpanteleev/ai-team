@@ -37,8 +37,12 @@ func (rs *runState) authorizeTransition(
 	actions []string,
 	targets map[string]string,
 	deferred bool,
+	kind approval.Kind,
 	payload json.RawMessage,
 ) (string, error) {
+	if kind == "" {
+		kind = approval.KindApprove
+	}
 	if quorum == "" {
 		quorum = approval.QuorumAny
 	}
@@ -89,7 +93,7 @@ func (rs *runState) authorizeTransition(
 	}
 
 	value, err := rs.approvalStore.Create(approval.PendingApproval{
-		RunID: rs.runID, AttemptID: result.AttemptID,
+		Kind: kind, RunID: rs.runID, AttemptID: result.AttemptID,
 		FromStage: fromStage, ToStage: toStage, Trigger: trigger,
 		SubjectHash: subjectHash, CandidateSHA256: candidateSHA,
 		RequiredRoles: append([]string(nil), roles...),
@@ -119,15 +123,13 @@ func (rs *runState) authorizeTransition(
 	}
 
 	action := ""
-	// Analyst clarification is a human-input boundary, not an approval-only
-	// gate. Auto-approving it would route back to the analyst without the answer
-	// that makes the loop useful. The web decision path supplies that answer in
-	// the durable approval comment, so leave this approval pending here.
-	requiresHumanAnswer := fromStage == "analyst" && containsString(actions, "answer_questions")
-	// Product Owner agreement on the analyst's spec is also an explicit
-	// boundary: --approve-gates may shortcut routine local gates, but must not
-	// manufacture agreement on business scope.
-	requiresExplicitSpecApproval := fromStage == "analyst" && containsString(actions, "approve_spec")
+	// A questions request needs the human's answer as durable decision content;
+	// auto-approving it would immediately repeat the stage without that input.
+	requiresHumanAnswer := kind == approval.KindQuestions
+	// A product-spec request remains an explicit human boundary even when
+	// --approve-gates is enabled. Identify it by its attested payload, not by the
+	// name of the stage that produced it.
+	requiresExplicitSpecApproval := isApprovedSpecPayload(payload)
 	if rs.runCfg.ApproveGates && !requiresHumanAnswer && !requiresExplicitSpecApproval {
 		action = actions[0]
 	} else if rs.p.prompter.Interactive() && !requiresHumanAnswer {
@@ -232,7 +234,7 @@ func priorApprovalIn(list []approval.PendingApproval, from, to, trigger, subject
 
 func approvalEventData(value approval.PendingApproval) map[string]any {
 	data := map[string]any{
-		"approval_id": value.ID, "subject_hash": value.SubjectHash,
+		"approval_id": value.ID, "kind": value.Kind, "subject_hash": value.SubjectHash,
 		"candidate_sha256": value.CandidateSHA256,
 		"from_stage":       value.FromStage, "to_stage": value.ToStage,
 		"trigger": value.Trigger, "required_roles": value.RequiredRoles,
@@ -258,6 +260,13 @@ func approvalEventData(value approval.PendingApproval) map[string]any {
 		return data
 	}
 	return normalized
+}
+
+func isApprovedSpecPayload(payload json.RawMessage) bool {
+	var value struct {
+		Kind string `json:"kind"`
+	}
+	return len(payload) > 0 && json.Unmarshal(payload, &value) == nil && value.Kind == "agreed_spec"
 }
 
 func containsString(values []string, expected string) bool {

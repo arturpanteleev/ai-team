@@ -429,12 +429,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = json.Unmarshal(matched.Payload, &payload)
 			if command.Action == "answer_questions" {
-				if payload.Kind != "questions" || !containsApprovalRole(matched.RequiredRoles, "product_owner") {
-					http.Error(w, "answer_questions разрешён только для Product Owner вопроса analyst", http.StatusConflict)
-					return
-				}
-				if command.ActorRole != "product_owner" {
-					http.Error(w, "на вопрос analyst может ответить только Product Owner", http.StatusForbidden)
+				if matched.Kind != approval.KindQuestions || payload.Kind != "questions" {
+					http.Error(w, "answer_questions разрешён только для запроса kind questions", http.StatusConflict)
 					return
 				}
 				if strings.TrimSpace(command.Comment) == "" || len(command.Comment) > 16<<10 {

@@ -96,7 +96,7 @@ func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative strin
 		filepath.ToSlash(filepath.Join(rs.runCfg.Feature, "status", name+".md")),
 		filepath.ToSlash(filepath.Join(rs.runCfg.Feature, ".stage-summary", name+".md")),
 	}
-	if name == "analyst" {
+	if a.AskQuestions {
 		allowedFiles = append(allowedFiles, filepath.ToSlash(filepath.Join("tasks", rs.runCfg.Feature, "questions.md")))
 	}
 	for _, allowed := range allowedFiles {

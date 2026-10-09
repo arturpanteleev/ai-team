@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -105,25 +106,34 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 
 		edge, found := rs.graph.Edge(current, result.State.Outcome)
 		var transitionPayload json.RawMessage
-		if current == "analyst" && result.Status == notifier.StatusBlocked {
-			var hasQuestions bool
-			var questionErr error
-			transitionPayload, hasQuestions, questionErr = questionsPayload(result.Outputs)
-			if questionErr != nil {
-				return questionErr
+		requestKind := approval.KindApprove
+		if result.Status == notifier.StatusBlocked {
+			stage, stageErr := rs.p.reg.Load(current)
+			if stageErr != nil {
+				return fmt.Errorf("load stage %s: %w", current, stageErr)
 			}
-			if !hasQuestions {
-				return &BlockedError{Agent: current, Reason: result.Blocker}
-			}
-			questionRounds, roundsErr := countQuestionApprovals(rs.approvalStore, rs.runID)
-			if roundsErr != nil {
-				return fmt.Errorf("count analyst clarification rounds: %w", roundsErr)
-			}
-			if questionRounds >= maxQuestionRounds {
-				return &BlockedError{Agent: current, Reason: fmt.Sprintf("после %d циклов уточнений аналитик всё ещё запрашивает информацию: %s", maxQuestionRounds, result.Blocker)}
+			if stage.AskQuestions {
+				var hasQuestions bool
+				var questionErr error
+				transitionPayload, hasQuestions, questionErr = questionsPayload(result.Outputs)
+				if questionErr != nil {
+					return questionErr
+				}
+				if !hasQuestions {
+					return &BlockedError{Agent: current, Reason: result.Blocker}
+				}
+				questionRounds, roundsErr := countQuestionApprovals(rs.approvalStore, rs.runID, current)
+				if roundsErr != nil {
+					return fmt.Errorf("count %s clarification rounds: %w", current, roundsErr)
+				}
+				if questionRounds >= maxQuestionRounds {
+					return &BlockedError{Agent: current, Reason: fmt.Sprintf("после %d циклов уточнений этап %s всё ещё запрашивает информацию: %s", maxQuestionRounds, current, result.Blocker)}
+				}
+				requestKind = approval.KindQuestions
 			}
 		}
-		if current == "analyst" && result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed {
+		if result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed &&
+			found && edge.Approval != nil && containsString(orderedGraphActions(edge), "approve_spec") {
 			var payloadErr error
 			transitionPayload, payloadErr = encodeApprovedSpec(rs.brief, result.AttemptID, result.Outputs)
 			if payloadErr != nil {
@@ -150,7 +160,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			selected, err := rs.authorizeTransition(
 				current, edge.To, "graph_outcome:"+string(edge.Outcome), result,
 				edge.Approval.Roles, edge.Approval.Quorum, actions, edge.Approval.Actions,
-				edge.Approval.Deferred, transitionPayload,
+				edge.Approval.Deferred, requestKind, transitionPayload,
 			)
 			if err != nil {
 				return err

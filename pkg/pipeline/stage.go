@@ -284,11 +284,11 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		if statusInfo, statErr := os.Stat(statusPath); statErr == nil {
 			r.Outputs = []runtime.Artifact{{Name: "blocked-status", Path: statusPath, Size: statusInfo.Size(), ModTime: statusInfo.ModTime()}}
 		}
-		if name == "analyst" {
-			questionsPath := analystQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature)
+		if a.AskQuestions {
+			questionsPath := stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature)
 			if questionData, questionErr := safeio.ReadRegularFile(questionsPath, maxQuestionBytes); questionErr == nil {
 				if strings.TrimSpace(string(questionData)) == "" {
-					return fail(errors.New("analyst questions artifact is empty"))
+					return fail(errors.New("stage questions artifact is empty"))
 				}
 				info, statErr := os.Stat(questionsPath)
 				if statErr != nil {
@@ -296,7 +296,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 				}
 				r.Outputs = append(r.Outputs, runtime.Artifact{Name: "questions", Path: questionsPath, Size: info.Size(), ModTime: info.ModTime()})
 			} else if !os.IsNotExist(questionErr) {
-				return fail(fmt.Errorf("analyst questions artifact: %w", questionErr))
+				return fail(fmt.Errorf("stage questions artifact: %w", questionErr))
 			}
 		}
 		r.Status = notifier.StatusBlocked
@@ -486,8 +486,8 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 		verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", name+".md"),
 	}
-	if name == "analyst" {
-		paths = append(paths, analystQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))
+	if a.AskQuestions {
+		paths = append(paths, stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))
 	}
 	for _, outputPath := range a.Outputs {
 		fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))

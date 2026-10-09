@@ -651,7 +651,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				for index := range replayedRun.Attempts {
 					attempt := &replayedRun.Attempts[index]
 					invalidate := targetIndex >= 0 && attempt.StageIndex > targetIndex+1
-					if resumedApproval.ResolvedAction == "answer_questions" && attempt.AttemptID == resumedApproval.AttemptID {
+					if resumedApproval.Kind == approval.KindQuestions && attempt.AttemptID == resumedApproval.AttemptID {
 						invalidate = true
 					}
 					if invalidate && !attempt.Superseded {
@@ -770,7 +770,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if answerApproval == nil {
 			answerApproval = recoveredClarification
 		}
-		if answerApproval != nil && answerApproval.FromStage == "analyst" && answerApproval.ResolvedAction == "answer_questions" {
+		if answerApproval != nil && answerApproval.Kind == approval.KindQuestions && answerApproval.ResolvedAction == "answer_questions" {
 			var payload questionPayload
 			if json.Unmarshal(answerApproval.Payload, &payload) != nil || payload.Kind != "questions" {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: invalid clarification payload")
@@ -901,15 +901,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		inputApproval = recoveredClarification
 	}
 	if inputApproval == nil && !rs.resumed {
-		rs.extraInputs["analyst"] = briefInputs(rs.brief)
+		rs.extraInputs[rs.graph.Entry] = briefInputs(rs.brief)
 	}
-	if inputApproval != nil && (inputApproval.ResolvedAction == "answer_questions" || inputApproval.ResolvedAction == "approve_spec" || isBackwardTransition(rs.graph, inputApproval)) {
+	if inputApproval != nil && (inputApproval.Kind == approval.KindQuestions || isApprovedSpecPayload(inputApproval.Payload) || isBackwardTransition(rs.graph, inputApproval)) {
 		inputs, inputErr := rs.stageOutputs(inputApproval.FromStage, inputApproval.AttemptID)
 		if inputErr != nil {
 			outcome, finalErr := rs.finalize(inputErr)
 			return RunResult{RunID: runID, Outcome: outcome}, finalErr
 		}
-		if inputApproval.FromStage == "analyst" && inputApproval.ResolvedAction == "answer_questions" {
+		if inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
 			filtered := make([]runtime.Artifact, 0, len(inputs)+1)
 			for _, input := range inputs {
 				if input.Name == "questions" {
@@ -924,7 +924,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			filtered = append(filtered, answer)
 			filtered = append(filtered, briefInputs(rs.brief)...)
 			rs.extraInputs[runCfg.retryFrom] = filtered
-		} else if inputApproval.FromStage == "analyst" && inputApproval.ResolvedAction == "approve_spec" {
+		} else if isApprovedSpecPayload(inputApproval.Payload) {
 			var payload approvedSpecPayload
 			if err := json.Unmarshal(inputApproval.Payload, &payload); err != nil || payload.Kind != "agreed_spec" ||
 				payload.BriefVersion.ID != rs.brief.ID || payload.BriefVersion.SHA256 != rs.brief.SHA256 {
@@ -938,12 +938,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			for _, name := range []string{"proposal", "spec"} {
 				input, ok := byName[name]
 				if !ok {
-					outcome, finalErr := rs.finalize(fmt.Errorf("approved analyst artifact %s missing", name))
+					outcome, finalErr := rs.finalize(fmt.Errorf("approved stage artifact %s missing", name))
 					return RunResult{RunID: runID, Outcome: outcome}, finalErr
 				}
 				_, _, digest, digestErr := evidence.ArtifactDigest(input.Path)
 				if digestErr != nil || payload.Artifacts[name] != digest {
-					outcome, finalErr := rs.finalize(fmt.Errorf("approved analyst artifact %s digest mismatch", name))
+					outcome, finalErr := rs.finalize(fmt.Errorf("approved stage artifact %s digest mismatch", name))
 					return RunResult{RunID: runID, Outcome: outcome}, finalErr
 				}
 				input, inputErr = selectedHumanRevision(runCfg.TargetDir, runID, input, inputApproval.ArtifactRevisions)

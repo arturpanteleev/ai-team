@@ -46,10 +46,20 @@ func testRegistry() *agent.Registry {
 runtime: agentcli
 prompt_file: prompt.md
 mutation: none
+ask_questions: true
 inputs:
   task: tasks/{feature}/task.md
 outputs:
   proposal: '{feature}/proposal.md'
+`),
+		"questioner/def.yaml": def(`name: questioner
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+ask_questions: true
+inputs:
+  task: tasks/{feature}/task.md
+outputs: {}
 `),
 		"coder/def.yaml": def(`name: coder
 runtime: agentcli
@@ -111,12 +121,13 @@ inputs:
 outputs:
   verification: '{feature}/verification.md'
 `),
-		"analyst/prompt.md":  def("test"),
-		"coder/prompt.md":    def("test"),
-		"tester/prompt.md":   def("test"),
-		"reviewer/prompt.md": def("test"),
-		"deployer/prompt.md": def("test"),
-		"verifier/prompt.md": def("test"),
+		"analyst/prompt.md":    def("test"),
+		"questioner/prompt.md": def("test"),
+		"coder/prompt.md":      def("test"),
+		"tester/prompt.md":     def("test"),
+		"reviewer/prompt.md":   def("test"),
+		"deployer/prompt.md":   def("test"),
+		"verifier/prompt.md":   def("test"),
 	})
 }
 
@@ -4011,5 +4022,79 @@ func TestDigestCaptureHashesCompleteBoundedStream(t *testing.T) {
 	}
 	if capture.Digest() != fmt.Sprintf("%x", want[:]) {
 		t.Fatalf("digest = %s, want %x", capture.Digest(), want)
+	}
+}
+
+func TestRun_QuestionsApprovalWorksForDifferentStage(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.blocked["questioner"] = "нужны уточнения"
+	gotQuestions, gotAnswer, gotBrief := false, false, false
+	rt.onExec = func(name string, inputs []runtime.Artifact) {
+		if name != "questioner" {
+			return
+		}
+		if rt.calls[name] == 1 {
+			path := stageQuestionsPath(filepath.Join(dir, ".ai-team", "artifacts"), "feat")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("Какой формат результата нужен?\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		delete(rt.blocked, name)
+		for _, input := range inputs {
+			switch input.Name {
+			case "questions":
+				gotQuestions = true
+			case "clarification-answer":
+				gotAnswer = true
+				answer, err := os.ReadFile(input.Path)
+				if err != nil || !strings.Contains(string(answer), "сводный отчёт") {
+					t.Errorf("questioner не получил durable answer: %q err=%v", answer, err)
+				}
+			case "business-brief":
+				gotBrief = true
+			}
+		}
+	}
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["questioner"] = 4
+		wf.Edges = append(wf.Edges, config.WorkflowEdgeConfig{
+			From: "questioner", Outcome: "blocked", To: "questioner",
+			Approval: &config.WorkflowApprovalConfig{
+				Roles: []string{"qa"}, Quorum: "any",
+				Actions: map[string]string{"answer_questions": "questioner", "stop": "$stop"},
+			},
+		})
+	}, config.AgentConfig{Name: "questioner"})
+	p := New(cfg, testRegistry(), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "создать отчёт", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("questioner должен запросить решение человека: result=%+v err=%v", first, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || pending.Kind != approval.KindQuestions || pending.FromStage != "questioner" {
+		t.Fatalf("request kind/stage: approval=%+v err=%v", pending, err)
+	}
+	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "qa-1", ActorRole: "qa", Action: "answer_questions",
+		Comment: "Нужен сводный отчёт в Markdown.", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir})
+	if err != nil || second.RunID != first.RunID || second.Outcome != "completed" || rt.calls["questioner"] != 2 {
+		t.Fatalf("question loop должен продолжить тот же другой этап: first=%+v second=%+v calls=%v err=%v", first, second, rt.calls, err)
+	}
+	if !gotQuestions || !gotAnswer || !gotBrief {
+		t.Fatalf("questioner inputs: questions=%v answer=%v brief=%v", gotQuestions, gotAnswer, gotBrief)
 	}
 }

@@ -238,11 +238,19 @@ tree_hash:
 | `check` | проверка результата: `{kind: hard, rules: [...]}` или `{kind: agent, agent: ...}` |
 | `confirm` | `required` или `auto`; по умолчанию `auto` для `approve`, иначе `required` |
 | `skippable` | можно ли пропустить этап с причиной; по умолчанию `false` |
-| `delivery` | требования delivery для PR-этапа с указанным `agent`, например `require_checks: [go-test]` |
+| `delivery` | требования delivery для PR-этапа с указанным `agent`: `require_checks` выбирает controller checks проекта, `require_verdicts` — дополнительные verdict stages |
 
 Если указан `executor: agent`, поле `agent` обязательно. Все agent-ссылки,
 включая `check.agent`, проверяются по registry. `required_sections` нельзя
 задавать для `link` или `approve`.
+
+Named `delivery.require_checks` запускаются контроллером на указанном PR-этапе
+реализации и должны иметь `policy: required`. Delivery принимает их только
+после успешного результата с immutable evidence для текущего workspace digest.
+`delivery.require_verdicts` ссылается на более ранние этапы шаблона; их
+required verdict contract и immutable output snapshot входят в предусловия
+плана. Review, QA и verification artifacts не нужны, если эти этапы явно не
+перечислены в `require_verdicts`.
 
 Шаблон содержит возвраты между этапами. `to` должен быть раньше `from` в
 списке `stages`; для каждого этапа, в который ведёт возврат, действует лимит

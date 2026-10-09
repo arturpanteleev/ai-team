@@ -179,7 +179,7 @@ func TestReplayedStageResultRestoresManifestReportFields(t *testing.T) {
 		AttemptID: manifest.AttemptID, Stage: manifest.Stage, StageIndex: manifest.StageIndex,
 		StartedAt: started, FinishedAt: finished, Status: manifest.Status, ManifestSHA256: "manifest-digest",
 	}}}
-	results, usage, unknown, err := replayedStageResults(run, t.TempDir(), fixedAttemptManifestSource(data), testRegistry(), 5)
+	results, usage, unknown, err := replayedStageResults(run, t.TempDir(), fixedAttemptManifestSource(data), testRegistry(), nil, 5)
 	if err != nil {
 		t.Fatalf("replay attempt: %v", err)
 	}

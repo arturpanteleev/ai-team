@@ -15,6 +15,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -110,7 +111,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		var transitionPayload json.RawMessage
 		requestKind := approval.KindApprove
 		if result.Status == notifier.StatusBlocked {
-			stage, stageErr := rs.p.reg.Load(current)
+			stage, stageErr := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(current))
 			if stageErr != nil {
 				return fmt.Errorf("load stage %s: %w", current, stageErr)
 			}
@@ -245,7 +246,7 @@ func graphTerminalError(target, stage string, cause error) error {
 	}
 }
 
-func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry, totalStages int) ([]notifier.StageResult, runtime.Usage, bool, error) {
+func replayedStageResults(run evidence.ReplayedRun, runDir string, source evidence.AttemptManifestSource, registry *agent.Registry, cfg *config.Config, totalStages int) ([]notifier.StageResult, runtime.Usage, bool, error) {
 	results := make([]notifier.StageResult, 0, len(run.Attempts))
 	var usage runtime.Usage
 	usageUnknown := false
@@ -302,7 +303,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		if !usageRecordPresent && attempt.State.Execution != workflow.ExecutionPending && attempt.State.Execution != workflow.ExecutionRunning {
 			// Pre-B-51 manifests have no usage field. A completed model attempt
 			// from that format cannot be treated as a zero-token invocation.
-			definition, err := registry.Load(attempt.Stage)
+			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load historical stage %s: %w", attempt.Stage, err)
 			}
@@ -311,7 +312,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			}
 		}
 		if attempt.FinishedAt.IsZero() {
-			definition, err := registry.Load(attempt.Stage)
+			definition, err := registry.Load(cfg.RegistryAgentName(attempt.Stage))
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load interrupted stage %s: %w", attempt.Stage, err)
 			}
@@ -427,7 +428,7 @@ func (rs *runState) stageOutputs(stage, attemptID string) ([]runtime.Artifact, e
 		}
 		return outputs, nil
 	}
-	definition, err := rs.p.reg.Load(stage)
+	definition, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(stage))
 	if err != nil {
 		return nil, fmt.Errorf("approval source stage %s: %w", stage, err)
 	}

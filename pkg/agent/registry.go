@@ -200,9 +200,6 @@ func validateDefinition(dirName string, a *Agent) error {
 	if a.Verdict != nil && !hasMarkdownOutput {
 		return fmt.Errorf("агент %s: verdict contract требует хотя бы один markdown output", dirName)
 	}
-	if a.Kind == "delivery" && len(a.Preconditions) == 0 {
-		return fmt.Errorf("агент %s: kind delivery требует declarative preconditions", dirName)
-	}
 	if a.Kind == "delivery" {
 		planPath, exists := a.Outputs["plan"]
 		if !exists || !strings.EqualFold(path.Ext(planPath), ".json") {
@@ -288,6 +285,16 @@ func (r *Registry) HasProductSpecContract(name string) (bool, error) {
 		return false, err
 	}
 	return a.Outputs["proposal"] != "" && a.Outputs["spec"] != "", nil
+}
+
+// HasRequiredVerdictContract reports whether an agent declares a required
+// verdict contract that can be read from its immutable output snapshot.
+func (r *Registry) HasRequiredVerdictContract(name string) (bool, error) {
+	a, err := r.Load(name)
+	if err != nil {
+		return false, err
+	}
+	return a.Verdict != nil && a.Verdict.Required, nil
 }
 
 // LoadFailure сообщает, что каталог агента обнаружен в одном из registry

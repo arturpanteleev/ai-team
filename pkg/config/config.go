@@ -577,6 +577,20 @@ func (c *Config) AgentNames() []string {
 	return names
 }
 
+// RegistryAgentName resolves a stable v5 stage ID to the agent definition that
+// executes it. Legacy graph nodes are already registry names, so they fall
+// through unchanged.
+func (c *Config) RegistryAgentName(stageID string) string {
+	if c != nil && c.Template != "" {
+		for _, stage := range c.Stages {
+			if stage.ID == stageID && stage.Agent != "" {
+				return stage.Agent
+			}
+		}
+	}
+	return stageID
+}
+
 // CompiledGraph compiles a v5 template or an in-memory legacy workflow into
 // the immutable graph contract used by the current runtime.
 func (c *Config) CompiledGraph() (workflow.Graph, error) {
@@ -637,6 +651,7 @@ func copyTargets(source map[string]string) map[string]string {
 // AgentConfig возвращает конфигурацию агента с подставленными глобальными
 // значениями и дефолтами.
 func (c *Config) AgentConfig(name string) *AgentConfig {
+	var resolved *AgentConfig
 	for _, a := range c.PipelineAgents {
 		if a.Name == name {
 			cfg := a
@@ -652,10 +667,29 @@ func (c *Config) AgentConfig(name string) *AgentConfig {
 			if cfg.Timeout == "" {
 				cfg.Timeout = c.StageTimeout
 			}
-			return &cfg
+			resolved = &cfg
+			break
 		}
 	}
-	return nil
+	if c.Template != "" {
+		for _, stage := range c.Stages {
+			if stage.Delivery == nil || (stage.ID != name && stage.Agent != name) {
+				continue
+			}
+			if resolved == nil {
+				resolved = &AgentConfig{Name: name}
+			}
+			for _, requiredName := range stage.Delivery.RequireChecks {
+				for _, definition := range c.Checks {
+					if definition.Name == requiredName {
+						resolved.Checks = append(resolved.Checks, definition)
+						break
+					}
+				}
+			}
+		}
+	}
+	return resolved
 }
 
 // StageTimeoutFor возвращает таймаут этапа: явный (per-agent `timeout` или
@@ -696,8 +730,17 @@ type productSpecContractLookup interface {
 	HasProductSpecContract(name string) (bool, error)
 }
 
+// requiredVerdictContractLookup lets template validation verify that an
+// explicitly required earlier stage has an immutable verdict contract.
+type requiredVerdictContractLookup interface {
+	HasRequiredVerdictContract(name string) (bool, error)
+}
+
 // Validate проверяет конфиг до запуска пайплайна (fail fast).
 func (c *Config) Validate(reg AgentLookup) error {
+	if c.Template == "" && len(c.Stages) > 0 {
+		return fmt.Errorf("config: template обязателен, если указаны stages")
+	}
 	if c.Template == "" && len(c.PipelineAgents) == 0 {
 		return fmt.Errorf("config: pipeline пуст")
 	}

@@ -179,7 +179,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		ui.Colorize("▶", ui.ColorCyan),
 		ui.Colorize(name, ui.ColorBold+ui.ColorYellow))
 
-	a, err := rs.p.reg.Load(name)
+	a, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(name))
 	if err != nil {
 		return fail(fmt.Errorf("ошибка загрузки агента %s: %w", name, err))
 	}
@@ -696,7 +696,7 @@ func sortedStringMapKeys(values map[string]string) []string {
 
 // authorizeStage validates controller-owned prerequisites before planning.
 func (rs *runState) authorizeStage(name string) error {
-	_, err := rs.p.reg.Load(name)
+	_, err := rs.p.reg.Load(rs.p.cfg.RegistryAgentName(name))
 	if err != nil {
 		return fmt.Errorf("ошибка загрузки агента %s: %w", name, err)
 	}

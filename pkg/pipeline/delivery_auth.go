@@ -17,6 +17,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -59,7 +60,28 @@ func toRuntimeArtifacts(artifacts []evidence.Artifact) []runtime.Artifact {
 }
 
 func (rs *runState) validateDeliveryChecks() error {
-	_, err := rs.currentDeliveryVerification()
+	requirements, configured, err := rs.templateDeliveryRequirements()
+	if err != nil {
+		return err
+	}
+	if configured {
+		if len(requirements.Delivery.RequireChecks) == 0 {
+			return fmt.Errorf("delivery запрещён: в delivery.require_checks не задано ни одной обязательной проверки")
+		}
+		workspaceDigest, digestErr := checks.WorkspaceDigest(rs.sourceDir())
+		if digestErr != nil {
+			return fmt.Errorf("delivery workspace digest: %w", digestErr)
+		}
+		for _, checkName := range requirements.Delivery.RequireChecks {
+			if _, _, checkErr := rs.requiredControllerCheck(*requirements, checkName, workspaceDigest); checkErr != nil {
+				return checkErr
+			}
+		}
+		if _, evidenceErr := rs.requiredDeliveryVerdictEvidence(*requirements); evidenceErr != nil {
+			return evidenceErr
+		}
+	}
+	_, err = rs.currentDeliveryVerification()
 	return err
 }
 
@@ -67,6 +89,23 @@ func (rs *runState) currentDeliveryVerification() (delivery.Verification, error)
 	workspaceDigest, err := checks.WorkspaceDigest(rs.sourceDir())
 	if err != nil {
 		return delivery.Verification{}, fmt.Errorf("delivery workspace digest: %w", err)
+	}
+	requirements, configured, err := rs.templateDeliveryRequirements()
+	if err != nil {
+		return delivery.Verification{}, err
+	}
+	if configured {
+		if len(requirements.Delivery.RequireChecks) == 0 {
+			return delivery.Verification{}, fmt.Errorf("delivery запрещён: в delivery.require_checks не задано ни одной обязательной проверки")
+		}
+		checkName := requirements.Delivery.RequireChecks[0]
+		_, check, checkErr := rs.requiredControllerCheck(*requirements, checkName, workspaceDigest)
+		if checkErr != nil {
+			return delivery.Verification{}, checkErr
+		}
+		return delivery.Verification{
+			SourceRunID: rs.runID, WorkspaceDigest: workspaceDigest, CheckEvidenceDigest: check.EvidenceDigest,
+		}, nil
 	}
 	for resultIndex := len(rs.results) - 1; resultIndex >= 0; resultIndex-- {
 		result := rs.results[resultIndex]
@@ -77,6 +116,9 @@ func (rs *runState) currentDeliveryVerification() (delivery.Verification, error)
 			check := result.Checks[checkIndex]
 			if checks.IsTestEvidence(check) &&
 				check.WorkspaceDigestBefore == workspaceDigest && check.WorkspaceDigestAfter == workspaceDigest && check.EvidenceDigest != "" {
+				if _, manifestErr := rs.verifiedCheckManifest(result, check); manifestErr != nil {
+					continue
+				}
 				return delivery.Verification{
 					SourceRunID: rs.runID, WorkspaceDigest: workspaceDigest, CheckEvidenceDigest: check.EvidenceDigest,
 				}, nil
@@ -97,6 +139,173 @@ func (rs *runState) currentDeliveryVerification() (delivery.Verification, error)
 		}, nil
 	}
 	return delivery.Verification{}, fmt.Errorf("delivery запрещён: нет успешно выполненного required check класса unit/integration/e2e для точного текущего workspace digest %s", workspaceDigest)
+}
+
+func (rs *runState) templateDeliveryRequirements() (*config.TemplateStage, bool, error) {
+	if rs == nil || rs.p == nil || rs.p.cfg == nil || rs.p.cfg.Template == "" {
+		return nil, false, nil
+	}
+	var selected *config.TemplateStage
+	for i := range rs.p.cfg.Stages {
+		stage := &rs.p.cfg.Stages[i]
+		if stage.Delivery == nil {
+			continue
+		}
+		if selected != nil {
+			return nil, false, fmt.Errorf("delivery запрещён: несколько stages задают delivery.require_checks")
+		}
+		selected = stage
+	}
+	return selected, selected != nil, nil
+}
+
+func (rs *runState) stageResult(stage config.TemplateStage) (notifier.StageResult, bool) {
+	for i := len(rs.results) - 1; i >= 0; i-- {
+		result := rs.results[i]
+		if !result.Superseded && result.Name == stage.ID {
+			return result, true
+		}
+	}
+	if stage.Agent != "" && stage.Agent != stage.ID {
+		for i := len(rs.results) - 1; i >= 0; i-- {
+			result := rs.results[i]
+			if !result.Superseded && result.Name == stage.Agent {
+				return result, true
+			}
+		}
+	}
+	return notifier.StageResult{}, false
+}
+
+func (rs *runState) verifiedAttemptManifest(result notifier.StageResult) (evidence.AttemptManifest, error) {
+	if result.AttemptID == "" || result.RunID != "" && result.RunID != rs.runID {
+		return evidence.AttemptManifest{}, fmt.Errorf("delivery evidence: attempt identity отсутствует или относится к другому run")
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, result.AttemptID)
+	if err != nil {
+		return evidence.AttemptManifest{}, fmt.Errorf("delivery evidence: attempt %s manifest: %w", result.AttemptID, err)
+	}
+	if manifest.RunID != rs.runID || manifest.AttemptID != result.AttemptID || manifest.Stage != result.Name ||
+		manifest.Status != result.Status || manifest.Verdict != string(result.Verdict) {
+		return evidence.AttemptManifest{}, fmt.Errorf("delivery evidence: attempt %s result does not match its immutable manifest", result.AttemptID)
+	}
+	return manifest, nil
+}
+
+func (rs *runState) verifiedCheckManifest(result notifier.StageResult, check checks.Result) (checks.Result, error) {
+	if !checks.VerifyResultDigest(check) {
+		return checks.Result{}, fmt.Errorf("delivery запрещён: controller check %s имеет невалидный evidence digest", check.Name)
+	}
+	manifest, err := rs.verifiedAttemptManifest(result)
+	if err != nil {
+		return checks.Result{}, err
+	}
+	for _, saved := range manifest.Checks {
+		if saved.Name == check.Name && saved.EvidenceDigest == check.EvidenceDigest && checks.VerifyResultDigest(saved) {
+			return saved, nil
+		}
+	}
+	return checks.Result{}, fmt.Errorf("delivery запрещён: controller check %s отсутствует в immutable attempt manifest", check.Name)
+}
+
+func (rs *runState) requiredControllerCheck(stage config.TemplateStage, checkName, workspaceDigest string) (notifier.StageResult, checks.Result, error) {
+	result, exists := rs.stageResult(stage)
+	if !exists {
+		return notifier.StageResult{}, checks.Result{}, fmt.Errorf("delivery запрещён: требуемая проверка %s не запускалась на этапе %s", checkName, stage.ID)
+	}
+	if result.Status != notifier.StatusPassed || result.Err != nil {
+		return result, checks.Result{}, fmt.Errorf("delivery запрещён: этап %s с required check %s не завершился успешно", stage.ID, checkName)
+	}
+	manifest, err := rs.verifiedAttemptManifest(result)
+	if err != nil {
+		return result, checks.Result{}, err
+	}
+	for _, check := range manifest.Checks {
+		if check.Name != checkName {
+			continue
+		}
+		if check.Policy != checks.PolicyRequired || check.Status != checks.StatusPassed {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: required check %s должен иметь controller status passed и policy required", checkName)
+		}
+		if check.WorkspaceDigestBefore != workspaceDigest || check.WorkspaceDigestAfter != workspaceDigest {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: required check %s проверил другой workspace digest", checkName)
+		}
+		saved, checkErr := rs.verifiedCheckManifest(result, check)
+		if checkErr != nil {
+			return result, checks.Result{}, checkErr
+		}
+		return result, saved, nil
+	}
+	return result, checks.Result{}, fmt.Errorf("delivery запрещён: controller evidence required check %s отсутствует в immutable manifest этапа %s", checkName, stage.ID)
+}
+
+func (rs *runState) requiredDeliveryVerdictEvidence(deliveryStage config.TemplateStage) (map[string]delivery.PreconditionEvidence, error) {
+	if deliveryStage.Delivery == nil {
+		return nil, fmt.Errorf("delivery verdict evidence: template stage %s has no delivery configuration", deliveryStage.ID)
+	}
+	evidenceSet := make(map[string]delivery.PreconditionEvidence, len(deliveryStage.Delivery.RequireVerdicts))
+	for _, requiredStageID := range deliveryStage.Delivery.RequireVerdicts {
+		var requiredStage *config.TemplateStage
+		for i := range rs.p.cfg.Stages {
+			if rs.p.cfg.Stages[i].ID == requiredStageID {
+				requiredStage = &rs.p.cfg.Stages[i]
+				break
+			}
+		}
+		if requiredStage == nil {
+			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s не найден", requiredStageID)
+		}
+		result, exists := rs.stageResult(*requiredStage)
+		if !exists || result.Status != notifier.StatusPassed || result.Err != nil {
+			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s отсутствует или не прошёл", requiredStageID)
+		}
+		definitionName := rs.p.cfg.RegistryAgentName(requiredStage.ID)
+		definition, loadErr := rs.p.reg.Load(definitionName)
+		if loadErr != nil {
+			return nil, fmt.Errorf("delivery required verdict %s: definition: %w", requiredStageID, loadErr)
+		}
+		if definition.Verdict == nil || !definition.Verdict.Required {
+			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s не имеет required verdict contract", requiredStageID)
+		}
+		manifest, manifestErr := rs.verifiedAttemptManifest(result)
+		if manifestErr != nil {
+			return nil, manifestErr
+		}
+		var outputPaths []string
+		var outputRecords []evidence.ArtifactRecord
+		for _, output := range manifest.Outputs {
+			if output.Type != "file" {
+				continue
+			}
+			if output.ProducerRunID != rs.runID || output.ProducerAttemptID != result.AttemptID || output.ProducerStage != result.Name ||
+				output.EvidencePath == "" || output.Size <= 0 || output.SHA256 == "" {
+				return nil, fmt.Errorf("delivery запрещён: required verdict stage %s output identity не подтверждена", requiredStageID)
+			}
+			outputPath := filepath.Join(rs.evidence.RunDir(), filepath.FromSlash(output.EvidencePath))
+			artifactType, size, digest, digestErr := evidence.ArtifactDigest(outputPath)
+			if digestErr != nil || artifactType != output.Type || size != output.Size || digest != output.SHA256 {
+				return nil, fmt.Errorf("delivery запрещён: immutable output %s этапа %s не совпадает с manifest", output.Name, requiredStageID)
+			}
+			outputPaths = append(outputPaths, outputPath)
+			outputRecords = append(outputRecords, output)
+		}
+		if len(outputPaths) == 0 {
+			return nil, fmt.Errorf("delivery запрещён: immutable output required verdict stage %s отсутствует", requiredStageID)
+		}
+		actual, verdictErr := verdict.FromOutputsContract(outputPaths, definition.Verdict)
+		if verdictErr != nil || actual != verdict.Verdict(manifest.Verdict) || actual != result.Verdict {
+			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s не совпадает с immutable output contract", requiredStageID)
+		}
+		if actual != verdict.Approved && actual != verdict.Pass {
+			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s имеет отрицательный verdict %s", requiredStageID, actual)
+		}
+		for _, output := range outputRecords {
+			evidenceSet["verdict:"+requiredStageID+":"+output.Name] = delivery.PreconditionEvidence{
+				Type: output.Type, Size: output.Size, SHA256: output.SHA256, Verdict: string(actual),
+			}
+		}
+	}
+	return evidenceSet, nil
 }
 
 // deliveryApprovalRole — роль, санкционирующая delivery plan. В cloud-режиме
@@ -485,6 +694,28 @@ func (rs *runState) ratifyDeferredGates(actorID, action string) error {
 }
 
 func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preconditions map[string]delivery.PreconditionEvidence) error {
+	requirements, configured, requirementErr := rs.templateDeliveryRequirements()
+	if requirementErr != nil {
+		return requirementErr
+	}
+	if configured {
+		verdictEvidence, evidenceErr := rs.requiredDeliveryVerdictEvidence(*requirements)
+		if evidenceErr != nil {
+			return evidenceErr
+		}
+		if preconditions == nil {
+			preconditions = make(map[string]delivery.PreconditionEvidence, len(verdictEvidence))
+		} else {
+			copy := make(map[string]delivery.PreconditionEvidence, len(preconditions)+len(verdictEvidence))
+			for name, value := range preconditions {
+				copy[name] = value
+			}
+			preconditions = copy
+		}
+		for name, value := range verdictEvidence {
+			preconditions[name] = value
+		}
+	}
 	files := rs.attributedDeliveryFiles()
 	var plan delivery.Plan
 	var err error

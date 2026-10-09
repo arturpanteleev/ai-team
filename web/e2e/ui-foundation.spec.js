@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -105,6 +105,9 @@ test('Russian UI supports both accessible themes and fits a 390px viewport', asy
     await waitForServer(baseURL, webServer)
 
     await page.goto(baseURL)
+    const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
+    await page.getByLabel('Токен доступа').fill(localToken)
+    await page.getByRole('button', { name: 'Войти' }).click()
     await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await expect(page.locator('html')).toHaveAttribute('lang', 'ru')
     await expect(page).toHaveTitle('Задачи — ai-team')

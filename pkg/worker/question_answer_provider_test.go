@@ -211,7 +211,7 @@ func TestValidateQuestionAnswerCandidateUsesCurrentWorkspaceIdentity(t *testing.
 		t.Fatal(err)
 	}
 	value := approval.PendingApproval{RunID: runID, CandidateSHA256: identity.WorkspaceSHA256}
-	if err := validateQuestionAnswerCandidate(nil, target, value); err != nil {
+	if err := validateQuestionAnswerCandidate(context.TODO(), target, value); err != nil {
 		t.Fatalf("matching controller candidate identity should be admitted: %v", err)
 	}
 	if err := validateQuestionAnswerCandidate(context.Background(), target, approval.PendingApproval{RunID: runID}); err != nil {

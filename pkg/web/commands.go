@@ -251,13 +251,13 @@ func (s *Server) authorize(r *http.Request, permission cloudidentity.Permission,
 	return cloudidentity.Authorize(session.Principal, permission, role)
 }
 
-func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (cloudidentity.Role, error) {
+func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (string, cloudidentity.Role, error) {
 	if s.controller == nil {
-		return cloudidentity.RoleProductOwner, nil
+		return string(cloudidentity.RoleProductOwner), cloudidentity.RoleProductOwner, nil
 	}
 	values, err := s.controller.Approvals(runID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, pending := range values {
 		if pending.ID != approvalID {
@@ -268,7 +268,7 @@ func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (c
 		}
 		_ = json.Unmarshal(pending.Payload, &payload)
 		if action == "approve_spec" || payload.Kind == "agreed_spec" {
-			return cloudidentity.RoleProductOwner, nil
+			return string(cloudidentity.RoleProductOwner), cloudidentity.RoleProductOwner, nil
 		}
 		votedRoles := make(map[string]bool)
 		for _, decision := range pending.Decisions {
@@ -277,21 +277,30 @@ func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (c
 			}
 		}
 		for _, roleName := range pending.RequiredRoles {
-			role := cloudidentity.Role(roleName)
-			if role == cloudidentity.RoleProductOwner || role == cloudidentity.RoleArchitect ||
-				role == cloudidentity.RoleDeveloper || role == cloudidentity.RoleReviewer ||
-				role == cloudidentity.RoleQA || role == cloudidentity.RoleReleaseManager {
-				if votedRoles[roleName] {
-					continue
-				}
-				return role, nil
+			authorizationRole := canonicalStageRole(roleName)
+			if !knownCloudRole(authorizationRole) {
+				continue
 			}
+			if votedRoles[roleName] {
+				continue
+			}
+			return roleName, authorizationRole, nil
 		}
 		break
 	}
 	// If no pending approval was found, the controller will reject the command;
 	// use the local default only so authorization remains server-derived.
-	return cloudidentity.RoleProductOwner, nil
+	return string(cloudidentity.RoleProductOwner), cloudidentity.RoleProductOwner, nil
+}
+
+func knownCloudRole(role cloudidentity.Role) bool {
+	switch role {
+	case cloudidentity.RoleProductOwner, cloudidentity.RoleArchitect, cloudidentity.RoleDeveloper,
+		cloudidentity.RoleReviewer, cloudidentity.RoleQA, cloudidentity.RoleReleaseManager:
+		return true
+	default:
+		return false
+	}
 }
 
 func constantTimeEqual(actual, expected string) bool {
@@ -461,7 +470,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actorID := command.ActorID
-	actorRole := cloudidentity.Role(command.ActorRole)
+	actorRole := strings.TrimSpace(command.ActorRole)
+	authorizationRole := canonicalStageRole(actorRole)
 	if s.authenticator != nil {
 		if s.localAuth {
 			session, ok := s.requestSession(r)
@@ -471,13 +481,13 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			}
 			actorID = session.Principal.ActorID
 			var err error
-			actorRole, err = s.localApprovalRole(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"), command.Action, actorID)
+			actorRole, authorizationRole, err = s.localApprovalRole(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"), command.Action, actorID)
 			if err != nil {
 				http.Error(w, "не удалось определить назначенную роль approval", http.StatusInternalServerError)
 				return
 			}
 		}
-		if err := s.authorize(r, cloudidentity.PermissionDecision, actorRole); err != nil {
+		if err := s.authorize(r, cloudidentity.PermissionDecision, authorizationRole); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
@@ -522,7 +532,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "согласование ТЗ требует действия approve_spec", http.StatusConflict)
 					return
 				}
-				if actorRole != cloudidentity.RoleProductOwner {
+				if authorizationRole != cloudidentity.RoleProductOwner {
 					http.Error(w, "согласовать ТЗ может только Product Owner", http.StatusForbidden)
 					return
 				}
@@ -576,7 +586,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	value, err := s.controller.Decide(
 		chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"),
 		approval.Decision{
-			ActorID: actorID, ActorRole: string(actorRole),
+			ActorID: actorID, ActorRole: actorRole,
 			Action: command.Action, Comment: command.Comment,
 			SubjectHash:             command.SubjectHash,
 			ArtifactRevisions:       selectedRevisions,

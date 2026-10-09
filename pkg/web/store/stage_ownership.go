@@ -13,14 +13,16 @@ import (
 // from the append-only stage_taken events, so the takeover history remains
 // available in the same event stream.
 type StageOwner struct {
-	StageID   string    `json:"stage_id"`
-	ActorID   string    `json:"actor_id"`
-	ActorRole string    `json:"actor_role"`
-	TakenAt   time.Time `json:"taken_at"`
+	StageID    string    `json:"stage_id"`
+	ApprovalID string    `json:"approval_id"`
+	ActorID    string    `json:"actor_id"`
+	ActorRole  string    `json:"actor_role"`
+	TakenAt    time.Time `json:"taken_at"`
 }
 
 type stageTakenData struct {
 	StageID           string `json:"stage_id"`
+	ApprovalID        string `json:"approval_id"`
 	ActorID           string `json:"actor_id"`
 	ActorRole         string `json:"actor_role"`
 	ActorName         string `json:"actor_name"`
@@ -33,9 +35,9 @@ type stageTakenData struct {
 // previous owner is read and the new event is appended within one SQLite
 // transaction, so concurrent requests through this store form one takeover
 // sequence. Repeating a claim by the current owner is idempotent.
-func (s *Store) TakeStage(runID, stageID, actorID, actorRole string, at time.Time) (StageOwner, bool, error) {
-	runID, stageID, actorID, actorRole = strings.TrimSpace(runID), strings.TrimSpace(stageID), strings.TrimSpace(actorID), strings.TrimSpace(actorRole)
-	if runID == "" || stageID == "" || actorID == "" || actorRole == "" || strings.ContainsAny(runID+stageID+actorID+actorRole, "\r\n\x00") {
+func (s *Store) TakeStage(runID, stageID, approvalID, actorID, actorRole string, at time.Time) (StageOwner, bool, error) {
+	runID, stageID, approvalID, actorID, actorRole = strings.TrimSpace(runID), strings.TrimSpace(stageID), strings.TrimSpace(approvalID), strings.TrimSpace(actorID), strings.TrimSpace(actorRole)
+	if runID == "" || stageID == "" || approvalID == "" || actorID == "" || actorRole == "" || strings.ContainsAny(runID+stageID+approvalID+actorID+actorRole, "\r\n\x00") {
 		return StageOwner{}, false, errors.New("stage ownership identity is incomplete")
 	}
 	if at.IsZero() {
@@ -76,8 +78,8 @@ func (s *Store) TakeStage(runID, stageID, actorID, actorRole string, at time.Tim
 			_ = rows.Close()
 			return StageOwner{}, false, fmt.Errorf("decode stage_taken event: %w", err)
 		}
-		if data.StageID == stageID {
-			previous = &StageOwner{StageID: stageID, ActorID: data.ActorID, ActorRole: data.ActorRole, TakenAt: timestamp.UTC()}
+		if data.StageID == stageID && data.ApprovalID == approvalID {
+			previous = &StageOwner{StageID: stageID, ApprovalID: approvalID, ActorID: data.ActorID, ActorRole: data.ActorRole, TakenAt: timestamp.UTC()}
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -90,7 +92,7 @@ func (s *Store) TakeStage(runID, stageID, actorID, actorRole string, at time.Tim
 		return *previous, false, nil
 	}
 
-	data := stageTakenData{StageID: stageID, ActorID: actorID, ActorRole: actorRole, ActorName: actorID}
+	data := stageTakenData{StageID: stageID, ApprovalID: approvalID, ActorID: actorID, ActorRole: actorRole, ActorName: actorID}
 	if previous != nil {
 		data.PreviousActorID = previous.ActorID
 		data.PreviousActorRole = previous.ActorRole
@@ -109,7 +111,7 @@ func (s *Store) TakeStage(runID, stageID, actorID, actorRole string, at time.Tim
 	if err := tx.Commit(); err != nil {
 		return StageOwner{}, false, err
 	}
-	return StageOwner{StageID: stageID, ActorID: actorID, ActorRole: actorRole, TakenAt: at}, true, nil
+	return StageOwner{StageID: stageID, ApprovalID: approvalID, ActorID: actorID, ActorRole: actorRole, TakenAt: at}, true, nil
 }
 
 // GetStageOwners folds stage_taken events into the latest owner per stage.
@@ -134,7 +136,12 @@ func (s *Store) GetStageOwners(runID string) (map[string]StageOwner, error) {
 		if data.StageID == "" || data.ActorID == "" || data.ActorRole == "" {
 			return nil, errors.New("stage_taken event has incomplete owner")
 		}
-		owners[data.StageID] = StageOwner{StageID: data.StageID, ActorID: data.ActorID, ActorRole: data.ActorRole, TakenAt: timestamp.UTC()}
+		// Earlier stage_taken records predate visit identity. Their owner cannot
+		// safely be attached to a current approval, so leave them out of the view.
+		if data.ApprovalID == "" {
+			continue
+		}
+		owners[data.StageID] = StageOwner{StageID: data.StageID, ApprovalID: data.ApprovalID, ActorID: data.ActorID, ActorRole: data.ActorRole, TakenAt: timestamp.UTC()}
 	}
 	return owners, rows.Err()
 }

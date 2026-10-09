@@ -513,9 +513,13 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 		response["delivery"] = s.deliveryProjection(run, stages, s.targetDir)
 	}
 	if run.RunID != "" {
+		currentStage, currentApproval := "", ""
 		if stateStore, stateErr := lifecycle.NewStore(s.targetDir); stateErr == nil {
 			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
 				response["next_stage"] = state.NextStage
+				if state.Phase == lifecycle.PhaseWaiting {
+					currentStage, currentApproval = state.NextStage, state.PendingApprovalID
+				}
 			}
 		}
 		owners, ownerErr := s.store.GetStageOwners(run.RunID)
@@ -523,7 +527,11 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "stage owners unavailable", http.StatusInternalServerError)
 			return
 		}
-		response["stage_owners"] = owners
+		currentOwners := make(map[string]store.StageOwner)
+		if owner, ok := owners[currentStage]; ok && currentApproval != "" && owner.ApprovalID == currentApproval {
+			currentOwners[currentStage] = owner
+		}
+		response["stage_owners"] = currentOwners
 	}
 	if s.controller != nil && run.RunID != "" {
 		approvals, approvalErr := s.controller.Approvals(run.RunID)

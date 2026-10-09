@@ -3,19 +3,21 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/go-chi/chi/v5"
 )
 
 const humanInputTrigger = "human_input"
 
 type takeStageResponse struct {
-	Owner   any  `json:"owner"`
-	Changed bool `json:"changed"`
+	Owner   store.StageOwner `json:"owner"`
+	Changed bool             `json:"changed"`
 }
 
 func (s *Server) handleTakeStage(w http.ResponseWriter, r *http.Request) {
@@ -61,16 +63,16 @@ func (s *Server) handleTakeStage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web session unavailable", http.StatusUnauthorized)
 		return
 	}
-	role, ok := matchingApprovalRole(session.Principal, pending.RequiredRoles)
+	rawRole, authorizationRole, ok := matchingApprovalRole(session.Principal, pending.RequiredRoles)
 	if !ok {
 		http.Error(w, "участник не имеет назначенной роли этапа", http.StatusForbidden)
 		return
 	}
-	if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
+	if err := s.authorize(r, cloudidentity.PermissionDecision, authorizationRole); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	owner, changed, err := s.store.TakeStage(runID, stageID, session.Principal.ActorID, string(role), time.Now().UTC())
+	owner, changed, err := s.store.TakeStage(runID, stageID, state.PendingApprovalID, session.Principal.ActorID, rawRole, time.Now().UTC())
 	if err != nil {
 		http.Error(w, "stage ownership could not be recorded", http.StatusInternalServerError)
 		return
@@ -94,12 +96,23 @@ func pendingHumanInputForStage(values []approval.PendingApproval, stageID, appro
 	return nil
 }
 
-func matchingApprovalRole(principal cloudidentity.Principal, required []string) (cloudidentity.Role, bool) {
+func matchingApprovalRole(principal cloudidentity.Principal, required []string) (string, cloudidentity.Role, bool) {
 	for _, roleName := range required {
-		role := cloudidentity.Role(roleName)
+		role := canonicalStageRole(roleName)
 		if principal.Has(role) {
-			return role, true
+			return roleName, role, true
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func canonicalStageRole(roleName string) cloudidentity.Role {
+	switch strings.ToLower(strings.TrimSpace(roleName)) {
+	case "bo", "business_owner", "po":
+		return cloudidentity.RoleProductOwner
+	case "deployer":
+		return cloudidentity.RoleReleaseManager
+	default:
+		return cloudidentity.Role(roleName)
+	}
 }

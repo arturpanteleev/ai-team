@@ -62,6 +62,7 @@ export interface Stage {
 
 export interface StageOwner {
   stage_id: string;
+  approval_id: string;
   actor_id: string;
   actor_role: string;
   taken_at: string;

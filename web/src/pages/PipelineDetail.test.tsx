@@ -113,11 +113,11 @@ describe('PipelineDetail graph', () => {
         created_at: '2026-10-09T00:00:00Z',
       }],
       next_stage: 'product_spec',
-      stage_owners: { product_spec: { stage_id: 'product_spec', actor_id: 'alice@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T00:00:00Z' } },
+      stage_owners: { product_spec: { stage_id: 'product_spec', approval_id: 'approval-human-input', actor_id: 'alice@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T00:00:00Z' } },
     };
     vi.mocked(getPipelineRun).mockResolvedValueOnce(waitingHumanInput).mockResolvedValueOnce(waitingHumanInput);
     vi.mocked(takeStage).mockResolvedValue({
-      owner: { stage_id: 'product_spec', actor_id: 'bob@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T01:00:00Z' },
+      owner: { stage_id: 'product_spec', approval_id: 'approval-human-input', actor_id: 'bob@example.test', actor_role: 'product_owner', taken_at: '2026-10-09T01:00:00Z' },
       changed: true,
     });
     renderDetail();

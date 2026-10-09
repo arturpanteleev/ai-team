@@ -12,7 +12,10 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
-const SchemaVersion = 1
+const (
+	LegacySchemaVersion = 1
+	SchemaVersion       = 2
+)
 
 // StageMetrics — агрегат по одному этапу за весь run (без superseded попыток).
 type StageMetrics struct {
@@ -42,7 +45,7 @@ type UsageEnvelope struct {
 	TotalDurationMS int64          `json:"total_duration_ms"`
 	Stages          []StageMetrics `json:"stages"`
 	LoopbackCycles  int            `json:"loopback_cycles"`
-	// TokensUnknown — true, пока харнесс/адаптер не отдаёт attested usage.
+	// TokensUnknown — true, если отсутствует хотя бы одна обязательная аттестация.
 	TokensUnknown bool `json:"tokens_unknown"`
 	// UsageReported — true, когда хотя бы один адаптер аттестовал usage.
 	UsageReported bool `json:"usage_reported,omitempty"`
@@ -53,10 +56,18 @@ type UsageEnvelope struct {
 	Outcome      string  `json:"outcome"`
 }
 
+// HasCompleteTokenUsage reports whether this envelope uses the accounting
+// semantics that prove all model attempts were represented. Schema v1 only
+// recorded whether any adapter reported usage, so a non-unknown token total
+// from that format may still be partial.
+func (e UsageEnvelope) HasCompleteTokenUsage() bool {
+	return e.SchemaVersion == SchemaVersion && e.UsageReported && !e.TokensUnknown
+}
+
 // Build агрегирует фиксированные результаты этапов в usage envelope.
 // Superseded попытки исключаются; этапы упорядочены по первому появлению.
-// usage — суммарный attested usage (P1-7); если Attested=false — usage
-// остаётся unknown.
+// usage — per-run attested usage (P1-7); if any invoked model attempt is
+// missing complete usage, the token totals remain unknown.
 func Build(runID, feature string, startedAt, finishedAt time.Time, results []workflow.StageResult, loopbackCycles int, outcome string, usage Usage) UsageEnvelope {
 	index := make(map[string]int)
 	stages := make([]StageMetrics, 0)
@@ -117,7 +128,7 @@ func (e UsageEnvelope) TotalAttempts() int {
 // when any required usage input is unknown or the recorded token denominator
 // is empty. The result is an estimate, never an API price.
 func EstimateSubscriptionShare(monthlyAmount float64, run UsageEnvelope, recorded []UsageEnvelope) (float64, bool) {
-	if monthlyAmount <= 0 || math.IsNaN(monthlyAmount) || math.IsInf(monthlyAmount, 0) || run.TokensUnknown || !run.UsageReported {
+	if monthlyAmount <= 0 || math.IsNaN(monthlyAmount) || math.IsInf(monthlyAmount, 0) || !run.HasCompleteTokenUsage() {
 		return 0, false
 	}
 	month := run.FinishedAt.UTC().Format("2006-01")
@@ -128,7 +139,7 @@ func EstimateSubscriptionShare(monthlyAmount float64, run UsageEnvelope, recorde
 		if envelope.FinishedAt.IsZero() || envelope.FinishedAt.UTC().Format("2006-01") != month {
 			continue
 		}
-		if envelope.TokensUnknown || !envelope.UsageReported {
+		if !envelope.HasCompleteTokenUsage() {
 			return 0, false
 		}
 		if envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {

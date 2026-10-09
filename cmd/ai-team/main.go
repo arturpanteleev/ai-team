@@ -1551,24 +1551,18 @@ func cmdUsage() {
 			fatal("Не удалось прочитать controller usage envelope для run %s: %v", runID, err)
 		}
 		// Local CLI compatibility: older/local runs keep usage beside run.json.
-		path := filepath.Join(absolute, ".ai-team", "runs", runID, "usage.json")
-		data, readErr := safeio.ReadRegularFile(path, 8<<20)
-		if readErr != nil {
-			fatal("Не удалось прочитать usage: %v", readErr)
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if decodeErr := decoder.Decode(&envelope); decodeErr != nil {
-			fatal("Повреждённый usage.json: %v", decodeErr)
-		}
-		if validateErr := metrics.ValidateUsageEnvelope(runID, envelope); validateErr != nil {
-			fatal("Повреждённый usage.json: %v", validateErr)
+		envelope, err = readLocalUsageEnvelope(absolute, runID)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fatal("Не удалось прочитать usage: %v", err)
+			}
+			fatal("Повреждённый usage.json: %v", err)
 		}
 	} else if err != nil {
 		fatal("Не удалось прочитать usage: %v", err)
 	}
 	lines := make([]string, 0, 4)
-	if envelope.TokensUnknown {
+	if !envelope.HasCompleteTokenUsage() {
 		lines = append(lines, "Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных")
 	} else {
 		lines = append(lines,
@@ -1652,6 +1646,13 @@ func readLocalUsageEnvelope(target, runID string) (metrics.UsageEnvelope, error)
 	decoder.DisallowUnknownFields()
 	var envelope metrics.UsageEnvelope
 	if err := decoder.Decode(&envelope); err != nil {
+		return metrics.UsageEnvelope{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return metrics.UsageEnvelope{}, errors.New("trailing data")
+		}
 		return metrics.UsageEnvelope{}, err
 	}
 	if err := metrics.ValidateUsageEnvelope(runID, envelope); err != nil {

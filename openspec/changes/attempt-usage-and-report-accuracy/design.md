@@ -16,6 +16,11 @@ new `max_execution_time` context. Human approval events use the latest
 `Decision.DecidedAt`, which ends the operator wait independently of when the
 worker resumes.
 
+Usage envelope schema v2 records the complete-accounting semantics. V1
+envelopes remain structurally readable, but CLI totals and subscription
+allocation treat their token counts as unknown because v1 could mark a partial
+sum known after only one adapter reported usage.
+
 ## Report and CLI projection
 
 Replay hydrates attempt checks and artifact records from their manifest before

@@ -60,3 +60,10 @@ inputs MUST produce `оценка недоступна`.
 - **WHEN** subscription cost is not configured or a required monthly usage
   total is unknown
 - **THEN** the usage CLI displays `оценка недоступна`
+
+#### Scenario: Legacy usage totals may be partial
+
+- **WHEN** the CLI reads a schema v1 usage envelope or uses one in the monthly
+  subscription denominator
+- **THEN** its input, output, and total tokens are treated as unknown
+- **AND** the legacy token sum cannot produce a subscription estimate

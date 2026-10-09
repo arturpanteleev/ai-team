@@ -457,6 +457,29 @@ func TestUsageCommandContract(t *testing.T) {
 		}
 	})
 
+	t.Run("локальный usage отвергает данные после JSON envelope", func(t *testing.T) {
+		const runID = "trailing-usage"
+		runDir := filepath.Join(root, ".ai-team", "runs", runID)
+		if err := os.MkdirAll(runDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		envelope := metrics.Build(runID, "fixture", started, started.Add(time.Second), nil, 0, "completed",
+			metrics.Usage{Attested: true, TokensInput: 12, TokensOutput: 3})
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, []byte("\n{}")...)
+		if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, code, stderr := runCLI(t, "usage", "--target", root, runID)
+		if code != 1 || !strings.Contains(stderr, "Повреждённый usage.json") {
+			t.Fatalf("trailing JSON must fail closed: code=%d stderr=%s", code, stderr)
+		}
+	})
+
 	t.Run("валидный usage", func(t *testing.T) {
 		runDir := filepath.Join(root, ".ai-team", "runs", "good")
 		if err := os.MkdirAll(runDir, 0755); err != nil {
@@ -504,13 +527,13 @@ func TestUsageCommandContract(t *testing.T) {
 	t.Run("known token totals and approximate subscription allocation", func(t *testing.T) {
 		estimateRoot := newControlRoot(t)
 		started := time.Date(2026, 2, 5, 3, 4, 5, 0, time.UTC)
-		writeEnvelope := func(runID string, input, output int64) {
+		writeEnvelope := func(runID string, schemaVersion int, input, output int64) {
 			runDir := filepath.Join(estimateRoot, ".ai-team", "runs", runID)
 			if err := os.MkdirAll(runDir, 0755); err != nil {
 				t.Fatal(err)
 			}
 			envelope := metrics.UsageEnvelope{
-				SchemaVersion: metrics.SchemaVersion, RunID: runID, Feature: "fixture-feature",
+				SchemaVersion: schemaVersion, RunID: runID, Feature: "fixture-feature",
 				StartedAt: started, FinishedAt: started.Add(time.Minute), TokensInput: input,
 				TokensOutput: output, UsageReported: true, Outcome: "completed",
 			}
@@ -522,8 +545,8 @@ func TestUsageCommandContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		writeEnvelope("known", 40, 60)
-		writeEnvelope("peer", 200, 300)
+		writeEnvelope("known", metrics.SchemaVersion, 40, 60)
+		writeEnvelope("peer", metrics.SchemaVersion, 200, 300)
 		if err := os.WriteFile(filepath.Join(estimateRoot, ".ai-team", "config.yaml"), []byte("schema_version: 5\ntemplate: usage-test\ntitle: Usage test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\nusage:\n  monthly_subscription_amount: 50\n  monthly_subscription_currency: USD\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -538,6 +561,26 @@ func TestUsageCommandContract(t *testing.T) {
 			if !strings.Contains(stdout, expected) {
 				t.Fatalf("usage output missing %q:\n%s", expected, stdout)
 			}
+		}
+		writeEnvelope("legacy", metrics.LegacySchemaVersion, 900, 100)
+		legacyOut, legacyCode, legacyErr := runCLI(t, "usage", "--target", estimateRoot, "legacy")
+		if legacyCode != 0 {
+			t.Fatalf("legacy usage should remain readable: code=%d stderr=%s", legacyCode, legacyErr)
+		}
+		for _, unavailable := range []string{
+			"Входные токены: нет данных", "Выходные токены: нет данных", "Всего токенов: нет данных",
+			"Доля подписки (приблизительно): оценка недоступна",
+		} {
+			if !strings.Contains(legacyOut, unavailable) {
+				t.Fatalf("legacy v1 usage must fail closed for %q:\n%s", unavailable, legacyOut)
+			}
+		}
+		knownOutWithLegacy, knownCode, knownErr := runCLI(t, "usage", "--target", estimateRoot, "known")
+		if knownCode != 0 {
+			t.Fatalf("known run with legacy monthly input failed: code=%d stderr=%s", knownCode, knownErr)
+		}
+		if !strings.Contains(knownOutWithLegacy, "Доля подписки (приблизительно): оценка недоступна") {
+			t.Fatalf("legacy partial totals must not enter the estimate denominator:\n%s", knownOutWithLegacy)
 		}
 		if err := os.MkdirAll(filepath.Join(estimateRoot, ".ai-team", "runs", "missing-usage"), 0755); err != nil {
 			t.Fatal(err)

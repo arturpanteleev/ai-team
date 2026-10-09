@@ -928,10 +928,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		snapshot, _ := yaml.Marshal(p.cfg)
 		p.recorder.ReconcileInterrupted(runStartedAt)
 		if rs.resumed {
-			p.recorder.RunResumed(runID, runStartedAt)
 			if resumedApproval != nil {
+				// Attach first so the recorder can append the decision at its
+				// actual timestamp, then append the later resume event. Event
+				// sequence and timestamps must describe the same chronology.
+				p.recorder.RunAttached(runID)
 				p.recorder.ApprovalDecided(runID, resumedApproval.ID, resumedApproval.AttemptID,
 					approvalDecisionTimestamp(*resumedApproval), approvalEventData(*resumedApproval))
+			}
+			p.recorder.RunResumed(runID, runStartedAt)
+			if resumedApproval != nil {
 				if resumedTransitionData != nil {
 					p.recorder.TransitionSelected(runID, resumedApproval.AttemptID, runStartedAt, resumedTransitionData)
 				}

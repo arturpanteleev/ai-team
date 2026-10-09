@@ -17,6 +17,10 @@ creation time for elapsed duration, use the human decision timestamp for
 approval events, and expose `budget.max_execution_time` while retaining
 `budget.max_wall_time` as a legacy alias.
 
+Usage envelope schema v2 makes the completeness semantics explicit. Legacy v1
+envelopes remain readable, but their run totals are unknown because they only
+record whether any adapter reported usage and may contain partial sums.
+
 Restore report counts and attempt pages from manifests, render report times in
 UTC, and narrow `ai-team usage` to input/output/total tokens plus an optional
 approximate subscription allocation. Do not show API price estimates; show

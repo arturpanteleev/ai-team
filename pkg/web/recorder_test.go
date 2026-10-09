@@ -124,10 +124,13 @@ func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
 
 	resumed := NewStoreRecorder(s)
 	resumed.ReconcileInterrupted(started.Add(2 * time.Second))
-	resumed.RunResumed("run-resume", started.Add(2*time.Second))
-	resumed.ApprovalDecided("run-resume", "approval-1", "001-analyst", started.Add(2*time.Second),
+	decisionAt := started.Add(1500 * time.Millisecond)
+	resumeAt := started.Add(2 * time.Second)
+	resumed.RunAttached("run-resume")
+	resumed.ApprovalDecided("run-resume", "approval-1", "001-analyst", decisionAt,
 		map[string]any{"approval_id": "approval-1", "resolved_action": "approve"})
-	resumed.TransitionSelected("run-resume", "001-analyst", started.Add(2*time.Second),
+	resumed.RunResumed("run-resume", resumeAt)
+	resumed.TransitionSelected("run-resume", "001-analyst", resumeAt,
 		map[string]any{"from": "analyst", "outcome": "passed", "target": "architect"})
 	runs, err := s.GetPipelineRuns()
 	if err != nil || len(runs) != 1 || runs[0].Status != "running" || runs[0].CompletedAt != nil {
@@ -137,9 +140,10 @@ func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
 	if err != nil || len(events) != 6 {
 		t.Fatalf("events=%+v err=%v", events, err)
 	}
-	if events[1].Type != "approval_requested" || events[3].Type != "run_resumed" ||
-		events[4].Type != "approval_decided" || events[4].Sequence != 5 ||
+	if events[1].Type != "approval_requested" || events[3].Type != "approval_decided" ||
+		!events[3].Timestamp.Equal(decisionAt) || events[3].Sequence != 4 ||
+		events[4].Type != "run_resumed" || !events[4].Timestamp.Equal(resumeAt) || events[4].Sequence != 5 ||
 		events[5].Type != "transition_selected" || events[5].Sequence != 6 {
-		t.Fatalf("approval/resume sequence не продолжена: %+v", events)
+		t.Fatalf("approval/resume sequence or timestamps disagree: %+v", events)
 	}
 }

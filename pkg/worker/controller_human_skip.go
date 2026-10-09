@@ -1,11 +1,11 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"time"
 
@@ -175,20 +175,16 @@ func (s *workerAPIServer) appendControllerHumanEvent(events []evidence.Event, ca
 	runDir := filepath.Join(s.scope.TargetDir, ".ai-team", "runs", s.scope.RunID)
 	manifestSource := evidence.ReservedAttemptManifestSource{TargetDir: s.scope.TargetDir}
 	var validated evidence.Event
-	var exact bool
 	var err error
 	if stageSkip {
-		validated, exact, err = evidence.ValidateControllerStageSkipAppend(events, s.scope.RunID, runDir, candidate,
+		validated, _, err = evidence.ValidateControllerStageSkipAppend(events, s.scope.RunID, runDir, candidate,
 			uint64(len(events)), previous, manifestSource)
 	} else {
-		validated, exact, err = evidence.ValidateControllerHumanAttemptAppend(events, s.scope.RunID, runDir, candidate,
+		validated, _, err = evidence.ValidateControllerHumanAttemptAppend(events, s.scope.RunID, runDir, candidate,
 			uint64(len(events)), previous, manifestSource)
 	}
 	if err != nil {
 		return evidence.Event{}, err
-	}
-	if exact {
-		return validated, nil
 	}
 	appended, err := s.eventLogs.Append(s.scope.RunID, validated, uint64(len(events)), previous)
 	if err != nil {
@@ -205,11 +201,7 @@ func controllerEventDataEqual(left, right map[string]any) bool {
 	if leftErr != nil || rightErr != nil {
 		return false
 	}
-	var normalizedLeft, normalizedRight any
-	if json.Unmarshal(leftBytes, &normalizedLeft) != nil || json.Unmarshal(rightBytes, &normalizedRight) != nil {
-		return false
-	}
-	return reflect.DeepEqual(normalizedLeft, normalizedRight)
+	return bytes.Equal(leftBytes, rightBytes)
 }
 
 func controllerEventForAttempt(events []evidence.Event, eventType, stage, attemptID string) (evidence.Event, bool) {

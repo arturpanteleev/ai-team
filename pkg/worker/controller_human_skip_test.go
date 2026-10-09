@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -80,9 +82,11 @@ func TestWorkerAPIRepairsOnlyApprovalBackedHumanSkipBeforeResume(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		finishText string
+		legacy     bool
 		wantError  bool
 	}{
 		{name: "approved reason", finishText: "No document is needed."},
+		{name: "legacy human skip shape", finishText: "No document is needed.", legacy: true},
 		{name: "forged reason", finishText: "worker supplied a different reason", wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,12 +103,16 @@ func TestWorkerAPIRepairsOnlyApprovalBackedHumanSkipBeforeResume(t *testing.T) {
 			appendWorkerHumanApprovalEvents(t, runStore, value)
 			startedAt := time.Now().UTC().Add(time.Second)
 			finishedAt := startedAt.Add(time.Second)
+			startData := map[string]any{
+				"stage_index": 1, "executor": "human", "actor_id": "alice", "actor_role": "product_owner",
+				"human_input_approval_id": approvalID,
+			}
+			if !tc.legacy {
+				startData["stage_action"] = "skip"
+				startData["stage_skip_version"] = evidence.StageSkipProtocolVersion
+			}
 			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
-				Timestamp: startedAt, Data: map[string]any{
-					"stage_index": 1, "executor": "human", "actor_id": "alice", "actor_role": "product_owner",
-					"human_input_approval_id": approvalID, "stage_action": "skip",
-					"stage_skip_version": evidence.StageSkipProtocolVersion,
-				}}); err != nil {
+				Timestamp: startedAt, Data: startData}); err != nil {
 				t.Fatalf("append controller human start: %v", err)
 			}
 			manifest := workerHumanSkipManifest(runID, attemptID, startedAt, finishedAt, approvalID, "alice", "product_owner")
@@ -193,6 +201,13 @@ func TestWorkerAPIHumanSkipAppendUsesApprovedDecisionAndControllerManifest(t *te
 		t.Fatal(err)
 	}
 	workerEvents := NewWorkerAPIEventLog(port)
+	preApprovalStart := evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: "attempt-before-approval",
+		Timestamp: value.Decisions[0].DecidedAt.Add(-time.Second), Data: map[string]any{
+			"stage_index": 1, "executor": "human", "human_input_approval_id": approvalID,
+		}}
+	if _, err := workerEvents.Append(runID, preApprovalStart, 0, "ignored"); err == nil {
+		t.Fatal("controller accepted a human attempt predating its approved decision")
+	}
 	startedAt := time.Now().UTC().Add(time.Second)
 	started, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
 		Timestamp: startedAt, Data: map[string]any{
@@ -206,6 +221,10 @@ func TestWorkerAPIHumanSkipAppendUsesApprovedDecisionAndControllerManifest(t *te
 		t.Fatalf("worker received unexpected event payload from append response: %+v", started)
 	}
 	finishedAt := startedAt.Add(time.Second)
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_finished", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finishedAt, Data: map[string]any{"executor": "human", "outcome": string(workflow.OutcomeSkipped)}}, 0, "ignored"); err == nil || !strings.Contains(err.Error(), "read controller human attempt manifest") {
+		t.Fatalf("controller finished a human attempt without a published manifest: %v", err)
+	}
 	manifest := workerHumanSkipManifest(runID, attemptID, startedAt, finishedAt, approvalID, "alice", "product_owner")
 	if err := server.attemptManifests.Write(runID, manifest); err != nil {
 		t.Fatalf("write controller human manifest: %v", err)
@@ -220,6 +239,16 @@ func TestWorkerAPIHumanSkipAppendUsesApprovedDecisionAndControllerManifest(t *te
 			"decision": "blocked", "outcome": "failed", "stage_skip_reason": "fake",
 		}}, 0, "ignored"); err != nil {
 		t.Fatalf("controller rejected valid approved human finish: %v", err)
+	}
+	canonicalEventLog := server.eventLogs
+	server.eventLogs = failingHumanSkipAppendLog{EventLog: canonicalEventLog, appendErr: errors.New("durable append unavailable")}
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "stage_skipped", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finishedAt, Data: map[string]any{"reason": "forged warning", "warning": true}}, 0, "ignored"); err == nil || !strings.Contains(err.Error(), "durable append unavailable") {
+		t.Fatalf("controller hid a failed durable warning append: %v", err)
+	}
+	server.eventLogs = canonicalEventLog
+	if events, err := server.eventLogs.Read(runID); err != nil || hasWorkerHumanSkipWarning(events, attemptID) {
+		t.Fatalf("failed warning append changed the durable journal: events=%+v err=%v", events, err)
 	}
 	if _, err := workerEvents.Append(runID, evidence.Event{Type: "stage_skipped", Stage: "optional", AttemptID: attemptID,
 		Timestamp: finishedAt, Data: map[string]any{"reason": "forged warning", "warning": true}}, 0, "ignored"); err != nil {
@@ -251,6 +280,129 @@ func TestWorkerAPIHumanSkipAppendUsesApprovedDecisionAndControllerManifest(t *te
 		server.eventLogs, evidence.ReservedAttemptManifestSource{TargetDir: target}, target); err != nil {
 		t.Fatalf("genuine controller human skip does not replay strictly: %v", err)
 	}
+}
+
+func TestWorkerAPIHumanSubmitDoesNotGainSkipAuthority(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	const runID, attemptID, approvalID = "worker-human-submit", "attempt-human-submit", "input-human-submit"
+	value := workerHumanSubmitApproval(runID, approvalID)
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}
+	job := workerHumanSkipJob(OperationStart, runID, target)
+	socket := workerHumanSkipSocket("submit")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	runStore := workerHumanSkipEvidence(t, target, runID, server.eventLogs)
+	appendWorkerHumanApprovalEvents(t, runStore, value)
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEvents := NewWorkerAPIEventLog(port)
+	startedAt := time.Now().UTC().Add(time.Second)
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
+		Timestamp: startedAt, Data: map[string]any{
+			"stage_index": 1, "executor": "human", "human_input_approval_id": approvalID,
+			"stage_action": "skip", "stage_skip_version": evidence.StageSkipProtocolVersion,
+		}}, 0, "ignored"); err != nil {
+		t.Fatalf("approved human submit did not start: %v", err)
+	}
+	finishedAt := startedAt.Add(time.Second)
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "optional",
+		Executor: "human", ActorID: "alice", ActorRole: "product_owner", HumanInputApprovalID: approvalID,
+		StageIndex: 1, TotalStages: 1, StartedAt: startedAt, FinishedAt: finishedAt,
+		Status: string(workflow.OutcomePassed), Execution: string(workflow.ExecutionSucceeded),
+		Decision: string(workflow.DecisionApproved), Outcome: string(workflow.OutcomePassed), Verdict: string(verdict.Approved),
+	}
+	if err := server.attemptManifests.Write(runID, manifest); err != nil {
+		t.Fatalf("write controller human submit manifest: %v", err)
+	}
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_finished", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finishedAt, Data: map[string]any{
+			"executor": "human", "outcome": string(workflow.OutcomeSkipped), "stage_skip_reason": "fake reason",
+		}}, 0, "ignored"); err != nil {
+		t.Fatalf("approved human submit did not finish from manifest: %v", err)
+	}
+	events, err := server.eventLogs.Read(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.AttemptID != attemptID {
+			continue
+		}
+		if event.Type == "attempt_started" && (event.Data["stage_action"] != nil || event.Data["stage_skip_version"] != nil) {
+			t.Fatalf("non-skip approval gained skip authority: %+v", event.Data)
+		}
+		if event.Type == "attempt_finished" && (event.Data["outcome"] != string(workflow.OutcomePassed) || event.Data["stage_skip_reason"] != nil) {
+			t.Fatalf("non-skip result was influenced by worker payload: %+v", event.Data)
+		}
+	}
+}
+
+func TestWorkerAPIHumanFailureFinishUsesControllerManifestDetails(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	const runID, attemptID, approvalID = "worker-human-failed-submit", "attempt-human-failed", "input-human-failed"
+	value := workerHumanSubmitApproval(runID, approvalID)
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}
+	job := workerHumanSkipJob(OperationStart, runID, target)
+	socket := workerHumanSkipSocket("failed-submit")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	runStore := workerHumanSkipEvidence(t, target, runID, server.eventLogs)
+	appendWorkerHumanApprovalEvents(t, runStore, value)
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEvents := NewWorkerAPIEventLog(port)
+	startedAt := time.Now().UTC().Add(time.Second)
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
+		Timestamp: startedAt, Data: map[string]any{"stage_index": 1, "executor": "human", "human_input_approval_id": approvalID}}, 0, "ignored"); err != nil {
+		t.Fatalf("approved human submit did not start: %v", err)
+	}
+	finishedAt := startedAt.Add(time.Second)
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "optional",
+		Executor: "human", ActorID: "alice", ActorRole: "product_owner", HumanInputApprovalID: approvalID,
+		StageIndex: 1, TotalStages: 1, StartedAt: startedAt, FinishedAt: finishedAt,
+		Status: string(workflow.OutcomeFailed), Execution: string(workflow.ExecutionInfraFailed),
+		Decision: string(workflow.DecisionNotApplicable), Outcome: string(workflow.OutcomeFailed),
+		Blocker: "review needed", Error: "worker reported a failed attempt",
+	}
+	if err := server.attemptManifests.Write(runID, manifest); err != nil {
+		t.Fatalf("write controller human failure manifest: %v", err)
+	}
+	if _, err := workerEvents.Append(runID, evidence.Event{Type: "attempt_finished", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finishedAt, Data: map[string]any{"executor": "human", "outcome": string(workflow.OutcomeSkipped), "stage_skip_reason": "fake reason"}}, 0, "ignored"); err != nil {
+		t.Fatalf("controller did not finish from its failure manifest: %v", err)
+	}
+	events, err := server.eventLogs.Read(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type != "attempt_finished" || event.AttemptID != attemptID {
+			continue
+		}
+		if event.Data["outcome"] != string(workflow.OutcomeFailed) || event.Data["blocker"] != "review needed" || event.Data["error"] != "worker reported a failed attempt" || event.Data["stage_skip_reason"] != nil {
+			t.Fatalf("finish event did not preserve controller-owned failure details: %+v", event.Data)
+		}
+		return
+	}
+	t.Fatal("controller did not append a human attempt finish event")
 }
 
 func workerHumanSkipJob(operation Operation, runID, target string) Job {
@@ -295,6 +447,16 @@ func workerHumanSkipApproval(runID, approvalID string) approval.PendingApproval 
 		Status: approval.StatusResolved, Decisions: []approval.Decision{decision}, ResolvedAction: "skip",
 		CreatedAt: decisionAt.Add(-time.Minute), ResolvedAt: decisionAt, Payload: payload,
 	}
+}
+
+func workerHumanSubmitApproval(runID, approvalID string) approval.PendingApproval {
+	value := workerHumanSkipApproval(runID, approvalID)
+	value.ResolvedAction = "submit"
+	value.Actions = []string{"submit", "reject"}
+	value.Targets = map[string]string{"submit": "optional", "reject": "optional"}
+	value.Decisions[0].Action = "submit"
+	value.Decisions[0].Comment = "The input was submitted."
+	return value
 }
 
 func workerHumanSkipManifest(runID, attemptID string, startedAt, finishedAt time.Time, approvalID, actorID, actorRole string) evidence.AttemptManifest {

@@ -254,7 +254,7 @@ func (s *Server) authorize(r *http.Request, permission cloudidentity.Permission,
 	return cloudidentity.Authorize(session.Principal, permission, role)
 }
 
-func (s *Server) localApprovalRole(runID, approvalID, action string) (cloudidentity.Role, error) {
+func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (cloudidentity.Role, error) {
 	if s.controller == nil {
 		return cloudidentity.RoleProductOwner, nil
 	}
@@ -273,11 +273,20 @@ func (s *Server) localApprovalRole(runID, approvalID, action string) (cloudident
 		if action == "approve_spec" || payload.Kind == "agreed_spec" {
 			return cloudidentity.RoleProductOwner, nil
 		}
+		votedRoles := make(map[string]bool)
+		for _, decision := range pending.Decisions {
+			if decision.ActorID == actorID {
+				votedRoles[decision.ActorRole] = true
+			}
+		}
 		for _, roleName := range pending.RequiredRoles {
 			role := cloudidentity.Role(roleName)
 			if role == cloudidentity.RoleProductOwner || role == cloudidentity.RoleArchitect ||
 				role == cloudidentity.RoleDeveloper || role == cloudidentity.RoleReviewer ||
 				role == cloudidentity.RoleQA || role == cloudidentity.RoleReleaseManager {
+				if votedRoles[roleName] {
+					continue
+				}
 				return role, nil
 			}
 		}
@@ -445,8 +454,14 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	actorRole := cloudidentity.Role(command.ActorRole)
 	if s.authenticator != nil {
 		if s.localAuth {
+			session, ok := s.requestSession(r)
+			if !ok {
+				http.Error(w, "требуется web session", http.StatusUnauthorized)
+				return
+			}
+			actorID = session.Principal.ActorID
 			var err error
-			actorRole, err = s.localApprovalRole(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"), command.Action)
+			actorRole, err = s.localApprovalRole(chi.URLParam(r, "runID"), chi.URLParam(r, "approvalID"), command.Action, actorID)
 			if err != nil {
 				http.Error(w, "не удалось определить назначенную роль approval", http.StatusInternalServerError)
 				return

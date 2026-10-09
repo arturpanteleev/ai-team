@@ -938,6 +938,39 @@ func TestLocalWebTokenIsRequiredAndApprovalRoleComesFromServer(t *testing.T) {
 	}
 }
 
+func TestLocalWebQuorumAllAssignsNextUnvotedRequiredRole(t *testing.T) {
+	const token = "local-web-token-for-quorum-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-quorum", RunID: "run-quorum", Status: approval.StatusPending,
+		Quorum: approval.QuorumAll, RequiredRoles: []string{"architect", "reviewer"},
+		Actions: []string{"approve"}, SubjectHash: testSubjectHash,
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	endpoint := "/api/runs/run-quorum/approvals/approval-quorum/decisions"
+	body := `{"actor_id":"spoofed","actor_role":"product_owner","action":"approve","subject_hash":"` + testSubjectHash + `"}`
+	first := authenticatedRequest(t, srv, token, http.MethodPost, endpoint, body)
+	firstWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstWriter, first)
+	if firstWriter.Code != http.StatusOK || controller.decision.ActorRole != "architect" {
+		t.Fatalf("first local vote should use first unvoted required role: code=%d decision=%+v body=%s", firstWriter.Code, controller.decision, firstWriter.Body.String())
+	}
+	controller.approvals[0].Decisions = []approval.Decision{{ActorID: controller.decision.ActorID, ActorRole: controller.decision.ActorRole}}
+	second := authenticatedRequest(t, srv, token, http.MethodPost, endpoint, body)
+	secondWriter := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondWriter, second)
+	if secondWriter.Code != http.StatusOK || controller.decision.ActorRole != "reviewer" {
+		t.Fatalf("second local vote should use the next unvoted required role: code=%d decision=%+v body=%s", secondWriter.Code, controller.decision, secondWriter.Body.String())
+	}
+}
+
 func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSession(t *testing.T) {
 	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
 	if err != nil {

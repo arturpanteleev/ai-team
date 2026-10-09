@@ -32,6 +32,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -532,6 +533,175 @@ func TestWorkerAPIValidatesHumanSubmissionManifestAgainstApproval(t *testing.T) 
 	manifest.HumanSubmissionVersion++
 	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
 		t.Fatal("attempt manifest with a version different from its approval was accepted")
+	}
+}
+
+func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
+	const runID, approvalID = "human-validator-branches", "approval-human-validator"
+	makeApproval := func() approval.PendingApproval {
+		payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "result.md"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return approval.PendingApproval{
+			Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-human-validator",
+			FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: strings.Repeat("e", 64),
+			RequiredRoles: []string{"developer"}, Actions: []string{"submit"}, Quorum: approval.QuorumAny,
+			Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload,
+			Decisions: []approval.Decision{{ApprovalID: approvalID, ActorID: "dev-1", ActorRole: "developer", Action: "submit",
+				Comment: "# Result\n", Description: "  ", SubmissionVersion: 2,
+				ContentSHA256: humanartifact.Digest([]byte("# Result\n")), SubjectHash: strings.Repeat("e", 64)}},
+		}
+	}
+	makeStore := func(value approval.PendingApproval) *apiApprovalStore {
+		return &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}
+	}
+
+	t.Run("description warning rejects invalid authorities", func(t *testing.T) {
+		baseEvent := evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1",
+			Data: map[string]any{"field": "description", "approval_id": approvalID}}
+		baseEvents := []evidence.Event{{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1",
+			Data: map[string]any{"executor": "human", "actor_id": "dev-1", "actor_role": "developer", "human_input_approval_id": approvalID}}}
+		cases := []struct {
+			name      string
+			noStore   bool
+			loadError error
+			mutate    func(*approval.PendingApproval, *evidence.Event, *[]evidence.Event)
+		}{
+			{name: "wrong event type", mutate: func(_ *approval.PendingApproval, event *evidence.Event, _ *[]evidence.Event) {
+				event.Type = "attempt_finished"
+			}},
+			{name: "approval store unavailable", noStore: true},
+			{name: "approval load error", loadError: errors.New("storage unavailable")},
+			{name: "approval not resolved", mutate: func(value *approval.PendingApproval, _ *evidence.Event, _ *[]evidence.Event) {
+				value.Status = approval.StatusPending
+			}},
+			{name: "approval has wrong stage", mutate: func(value *approval.PendingApproval, _ *evidence.Event, _ *[]evidence.Event) { value.ToStage = "other" }},
+			{name: "malformed result payload", mutate: func(value *approval.PendingApproval, _ *evidence.Event, _ *[]evidence.Event) {
+				value.Payload = json.RawMessage(`{`)
+			}},
+			{name: "unsupported result payload", mutate: func(value *approval.PendingApproval, _ *evidence.Event, _ *[]evidence.Event) {
+				value.Payload, _ = json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "binary"})
+			}},
+			{name: "attempt missing", mutate: func(_ *approval.PendingApproval, _ *evidence.Event, events *[]evidence.Event) { *events = nil }},
+			{name: "agent attempt", mutate: func(_ *approval.PendingApproval, _ *evidence.Event, events *[]evidence.Event) {
+				(*events)[0].Data["executor"] = "agent"
+			}},
+			{name: "attempt approval mismatch", mutate: func(_ *approval.PendingApproval, _ *evidence.Event, events *[]evidence.Event) {
+				(*events)[0].Data["human_input_approval_id"] = "other-approval"
+			}},
+			{name: "decision actor missing", mutate: func(_ *approval.PendingApproval, _ *evidence.Event, events *[]evidence.Event) {
+				(*events)[0].Data["actor_id"] = ""
+			}},
+			{name: "decision description present", mutate: func(value *approval.PendingApproval, _ *evidence.Event, _ *[]evidence.Event) {
+				value.Decisions[0].Description = "done"
+			}},
+		}
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				value, event, events := makeApproval(), baseEvent, append([]evidence.Event(nil), baseEvents...)
+				if test.mutate != nil {
+					test.mutate(&value, &event, &events)
+				}
+				var store *apiApprovalStore
+				if !test.noStore {
+					store = makeStore(value)
+					store.loadErr = test.loadError
+				}
+				server := &workerAPIServer{scope: workerAPIScope{RunID: runID}}
+				if store != nil {
+					server.approvals = store
+				}
+				if err := server.validateControllerDescriptionMissing(event, events); err == nil {
+					t.Fatal("invalid description_missing authority was accepted")
+				}
+			})
+		}
+	})
+
+	t.Run("attempt manifest rejects invalid approval bindings", func(t *testing.T) {
+		baseManifest := evidence.AttemptManifest{RunID: runID, AttemptID: "attempt-writer-1", Stage: "writer", Executor: "human",
+			ActorID: "dev-1", ActorRole: "developer", HumanInputApprovalID: approvalID, HumanSubmissionVersion: 2,
+			HumanSubmissionSHA256: humanartifact.Digest([]byte("# Result\n")), HumanSubmissionResult: "md", HumanSubmissionDescription: "  "}
+		cases := []struct {
+			name      string
+			noStore   bool
+			loadError error
+			mutate    func(*approval.PendingApproval, *evidence.AttemptManifest)
+		}{
+			{name: "approval store unavailable", noStore: true},
+			{name: "non-human executor", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) { manifest.Executor = "agent" }},
+			{name: "missing version", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.HumanSubmissionVersion = 0
+			}},
+			{name: "missing approval id", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.HumanInputApprovalID = ""
+			}},
+			{name: "approval load error", loadError: errors.New("storage unavailable")},
+			{name: "approval unresolved", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Status = approval.StatusPending
+			}},
+			{name: "stage mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) { manifest.Stage = "other" }},
+			{name: "malformed input payload", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Payload = json.RawMessage(`{`)
+			}},
+			{name: "result mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.HumanSubmissionResult = "link"
+			}},
+			{name: "decision actor mismatch", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Decisions[0].ActorID = "other"
+			}},
+			{name: "rejected decision", mutate: func(value *approval.PendingApproval, _ *evidence.AttemptManifest) {
+				value.Decisions[0].Action = "reject"
+			}},
+			{name: "hash mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.HumanSubmissionSHA256 = strings.Repeat("f", 64)
+			}},
+			{name: "description mismatch", mutate: func(_ *approval.PendingApproval, manifest *evidence.AttemptManifest) {
+				manifest.HumanSubmissionDescription = "different"
+			}},
+		}
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				value, manifest := makeApproval(), baseManifest
+				if test.mutate != nil {
+					test.mutate(&value, &manifest)
+				}
+				var store *apiApprovalStore
+				if !test.noStore {
+					store = makeStore(value)
+					store.loadErr = test.loadError
+				}
+				server := &workerAPIServer{scope: workerAPIScope{RunID: runID}}
+				if store != nil {
+					server.approvals = store
+				}
+				if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+					t.Fatal("invalid human submission manifest binding was accepted")
+				}
+			})
+		}
+	})
+}
+
+func TestWorkerAPIControllerEventLogRejectsUnavailableAndMismatchedAppend(t *testing.T) {
+	var nilLog *workerAPIEventLog
+	if _, err := nilLog.AppendControllerEvent("run-1", evidence.Event{Type: "description_missing"}, 0, ""); err == nil {
+		t.Fatal("nil event log accepted controller event")
+	}
+	if _, err := (&workerAPIEventLog{}).AppendControllerEvent("run-1", evidence.Event{Type: "description_missing"}, 0, ""); err == nil {
+		t.Fatal("event log without controller port accepted controller event")
+	}
+	if _, err := (&workerAPIEventLog{port: &workerAPIPort{address: "http://127.0.0.1"}}).AppendControllerEvent(
+		"run-1", evidence.Event{Type: "description_missing"}, 0, ""); err == nil {
+		t.Fatal("event log without controller-owned Unix transport accepted controller event")
+	}
+	port := &workerAPIPort{address: "http://unix", socketPath: "/tmp/controller.sock", scope: workerAPIScope{RunID: "expected-run"}}
+	if _, err := (&workerAPIEventLog{port: port}).AppendControllerEvent("other-run", evidence.Event{Type: "description_missing"}, 0, ""); err == nil {
+		t.Fatal("event log accepted a different run identity")
+	}
+	if _, err := (&workerAPIEventLog{port: port}).AppendControllerEvent("expected-run", evidence.Event{Type: "attempt_started"}, 0, ""); err == nil {
+		t.Fatal("controller-only path accepted a worker-owned event type")
 	}
 }
 

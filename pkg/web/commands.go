@@ -80,7 +80,10 @@ func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudi
 }
 
 func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSONResponse(w, http.StatusOK, map[string]bool{"authentication_required": s.authenticator != nil})
+	writeJSONResponse(w, http.StatusOK, map[string]bool{
+		"authentication_required": s.authenticator != nil,
+		"team_management_enabled": s.authenticator != nil && !s.localAuth,
+	})
 }
 
 func (s *Server) handleCurrentIdentity(w http.ResponseWriter, r *http.Request) {

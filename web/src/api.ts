@@ -38,7 +38,7 @@ export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; st
 let csrfToken: string | null = null;
 let activePrincipal: Principal | null = null;
 
-export async function getAuthConfig(): Promise<{ authentication_required: boolean }> {
+export async function getAuthConfig(): Promise<{ authentication_required: boolean; team_management_enabled: boolean }> {
   const response = await fetch(`${API_BASE}/auth/config`, { credentials: 'same-origin' });
   if (!response.ok) throw new Error(`Auth config error: ${response.status}`);
   return response.json();

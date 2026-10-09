@@ -4,7 +4,7 @@ import { getActivePrincipal } from '../api';
 import { useTheme } from '../theme';
 import styles from './Layout.module.css';
 
-export function Layout({ children }: { children: ReactNode }) {
+export function Layout({ children, teamManagementEnabled }: { children: ReactNode; teamManagementEnabled: boolean }) {
   const principal = getActivePrincipal();
   const { theme, toggleTheme } = useTheme();
   return (
@@ -24,7 +24,7 @@ export function Layout({ children }: { children: ReactNode }) {
           >
             Задачи
           </NavLink>
-          {principal?.roles.includes('product_owner') && <NavLink to="/team" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>Команда</NavLink>}
+          {teamManagementEnabled && principal?.roles.includes('product_owner') && <NavLink to="/team" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>Команда</NavLink>}
         </nav>
         {principal && <small>{principal.actor_id}<br />{principal.roles.map((role) => roleNames[role] ?? role).join(', ')}</small>}
       </aside>

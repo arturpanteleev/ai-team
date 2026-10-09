@@ -45,6 +45,61 @@ func teamRequest(s *Server, cookie *http.Cookie, csrf, method, target, body stri
 	return w
 }
 
+func TestLocalAuthenticationCannotManageTeamOrCreateInvitations(t *testing.T) {
+	const token = "local-team-mode-token-0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	config := httptest.NewRecorder()
+	srv.router.ServeHTTP(config, newLoopbackRequest(http.MethodGet, "/api/auth/config", nil))
+	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), `"team_management_enabled":false`) {
+		t.Fatalf("local auth config must disable team management: %d %s", config.Code, config.Body.String())
+	}
+
+	invite := authenticatedRequest(t, srv, token, http.MethodPost, "/api/team/invitations",
+		`{"email":"new-member@example.com","roles":["reviewer"]}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, invite)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("local auth must reject team invitations before creation: %d %s", response.Code, response.Body.String())
+	}
+	member, err := srv.store.TeamMember("new-member@example.com")
+	if err != nil || member != nil {
+		t.Fatalf("rejected local invitation must not create a team member: member=%+v err=%v", member, err)
+	}
+
+	for _, endpoint := range []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/api/team/members", ""},
+		{http.MethodGet, "/api/team/audit", ""},
+		{http.MethodPatch, "/api/team/members/member@example.com/roles", `{"roles":["qa"]}`},
+		{http.MethodDelete, "/api/team/members/member@example.com", ""},
+	} {
+		request := authenticatedRequest(t, srv, token, endpoint.method, endpoint.path, endpoint.body)
+		writer := httptest.NewRecorder()
+		srv.router.ServeHTTP(writer, request)
+		if writer.Code != http.StatusForbidden {
+			t.Errorf("local auth must reject %s %s: %d %s", endpoint.method, endpoint.path, writer.Code, writer.Body.String())
+		}
+	}
+
+	activation := newLoopbackRequest(http.MethodPost, "/api/team/activate", strings.NewReader(`{"token":"`+strings.Repeat("x", 32)+`"}`))
+	activation.Header.Set("Content-Type", "application/json")
+	activationResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(activationResponse, activation)
+	if activationResponse.Code != http.StatusForbidden {
+		t.Fatalf("local auth must reject team activation: %d %s", activationResponse.Code, activationResponse.Body.String())
+	}
+}
+
 func TestTeamInviteCanonicalRolesAndImmediateSessionRevocation(t *testing.T) {
 	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("m", 32)))
 	if err != nil {
@@ -55,6 +110,11 @@ func TestTeamInviteCanonicalRolesAndImmediateSessionRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
+	config := httptest.NewRecorder()
+	srv.router.ServeHTTP(config, newLoopbackRequest(http.MethodGet, "/api/auth/config", nil))
+	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), `"team_management_enabled":true`) {
+		t.Fatalf("cloud auth config must enable team management: %d %s", config.Code, config.Body.String())
+	}
 	uninvitedPrincipal, _ := cloudidentity.NewPrincipal("uninvited@example.com", []cloudidentity.Role{cloudidentity.RoleDeveloper})
 	uninvitedToken, _ := manager.Issue(uninvitedPrincipal, time.Hour)
 	uninvitedRequest := newLoopbackRequest(http.MethodGet, "/api/session", nil)

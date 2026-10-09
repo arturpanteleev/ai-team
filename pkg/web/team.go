@@ -20,6 +20,10 @@ type identityIssuer interface {
 
 func (s *Server) teamReadSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.localAuth {
+			http.Error(w, "управление командой недоступно в локальном режиме", http.StatusForbidden)
+			return
+		}
 		session, ok := s.requestSession(r)
 		if !ok {
 			http.Error(w, "требуется активная web session", http.StatusUnauthorized)
@@ -123,6 +127,10 @@ type activateTeamCommand struct {
 }
 
 func (s *Server) handleTeamActivation(w http.ResponseWriter, r *http.Request) {
+	if s.localAuth {
+		http.Error(w, "управление командой недоступно в локальном режиме", http.StatusForbidden)
+		return
+	}
 	if s.authenticator == nil {
 		http.Error(w, "требуется cloud authentication", http.StatusUnauthorized)
 		return

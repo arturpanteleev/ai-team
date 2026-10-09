@@ -494,7 +494,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if command.Action != "approve_spec" {
-					http.Error(w, "согласование ТЗ требует действия approve_spec", http.StatusForbidden)
+					http.Error(w, "согласование ТЗ требует действия approve_spec", http.StatusConflict)
 					return
 				}
 				if actorRole != cloudidentity.RoleProductOwner {

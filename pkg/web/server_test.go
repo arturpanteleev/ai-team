@@ -1232,7 +1232,7 @@ func TestSpecificationApprovalRequiresProductOwnerRoleAndPayload(t *testing.T) {
 		`{"actor_id":"user-1","actor_role":"qa","action":"approve","subject_hash":"`+testSubjectHash+`"}`)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, legacyAction)
-	if writer.Code != http.StatusForbidden {
+	if writer.Code != http.StatusConflict {
 		t.Fatalf("Product Owner role check нельзя обойти общим approve action: code=%d controller=%+v", writer.Code, controller)
 	}
 	productOwner := authorizedRequest(t, srv, "POST", endpoint,

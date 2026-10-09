@@ -848,7 +848,16 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
 	var csrf string
 	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
+		tokenData, tokenErr := os.ReadFile(filepath.Join(dir, ".ai-team", "web.token"))
+		if tokenErr != nil {
+			return false
+		}
+		request, requestErr := http.NewRequest(http.MethodGet, baseURL+"/api/session", nil)
+		if requestErr != nil {
+			return false
+		}
+		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenData)))
+		response, requestErr := client.Do(request)
 		if requestErr != nil {
 			return false
 		}
@@ -1032,7 +1041,16 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
 	var csrf string
 	waitUntil(t, 10*time.Second, func() bool {
-		response, requestErr := client.Get(baseURL + "/api/session")
+		tokenData, tokenErr := os.ReadFile(filepath.Join(dir, ".ai-team", "web.token"))
+		if tokenErr != nil {
+			return false
+		}
+		request, requestErr := http.NewRequest(http.MethodGet, baseURL+"/api/session", nil)
+		if requestErr != nil {
+			return false
+		}
+		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenData)))
+		response, requestErr := client.Do(request)
 		if requestErr != nil {
 			return false
 		}

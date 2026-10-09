@@ -28,7 +28,7 @@ type Agent struct {
 	TestModifyPolicy string `yaml:"test_modify_policy,omitempty"`
 	// AskQuestions разрешает агенту инструмент question в интерактивном
 	// TTY-режиме. В non-TTY инструмент всегда запрещён: вопрос повис бы до
-	// таймаута. Предназначено для analyst-этапа (grill-me discovery).
+	// таймаута. На уровне pipeline также включает durable вопрос-ответ цикл.
 	AskQuestions bool                `yaml:"ask_questions,omitempty"`
 	Checks       []checks.Definition `yaml:"checks,omitempty"`
 }

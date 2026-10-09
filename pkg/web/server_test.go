@@ -1039,8 +1039,8 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 
 func TestQuestionApprovalRequiresNonEmptyAnswer(t *testing.T) {
 	controller := &fakeRunController{approvals: []approval.PendingApproval{{
-		ID: "approval-1", RunID: "run-1", Status: approval.StatusPending,
-		RequiredRoles: []string{"product_owner"},
+		ID: "approval-1", RunID: "run-1", Kind: approval.KindQuestions, Status: approval.StatusPending,
+		RequiredRoles: []string{"qa"},
 		Payload:       []byte(`{"kind":"questions","markdown":"Какова целевая аудитория?"}`),
 	}}}
 	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
@@ -1050,14 +1050,14 @@ func TestQuestionApprovalRequiresNonEmptyAnswer(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 	endpoint := "/api/runs/run-1/approvals/approval-1/decisions"
 	empty := authorizedRequest(t, srv, "POST", endpoint,
-		`{"actor_id":"user-1","actor_role":"product_owner","action":"answer_questions","subject_hash":"`+testSubjectHash+`"}`)
+		`{"actor_id":"user-1","actor_role":"qa","action":"answer_questions","subject_hash":"`+testSubjectHash+`"}`)
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, empty)
 	if writer.Code != http.StatusBadRequest || controller.approvalID != "" {
 		t.Fatalf("пустой ответ должен отклоняться: code=%d controller=%+v body=%s", writer.Code, controller, writer.Body.String())
 	}
 	answered := authorizedRequest(t, srv, "POST", endpoint,
-		`{"actor_id":"user-1","actor_role":"product_owner","action":"answer_questions","comment":"B2B-клиенты среднего бизнеса","subject_hash":"`+testSubjectHash+`"}`)
+		`{"actor_id":"user-1","actor_role":"qa","action":"answer_questions","comment":"B2B-клиенты среднего бизнеса","subject_hash":"`+testSubjectHash+`"}`)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, answered)
 	if writer.Code != http.StatusOK || controller.decision.Comment != "B2B-клиенты среднего бизнеса" {

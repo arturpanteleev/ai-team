@@ -55,7 +55,7 @@ func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.
 		change func(*approval.PendingApproval)
 	}{
 		{name: "identity", change: func(v *approval.PendingApproval) { v.ID = "other-id" }},
-		{name: "not product owner stage", change: func(v *approval.PendingApproval) { v.FromStage = "reviewer" }},
+		{name: "wrong stage target", change: func(v *approval.PendingApproval) { v.FromStage = "reviewer" }},
 		{name: "wrong trigger", change: func(v *approval.PendingApproval) { v.Trigger = "manual" }},
 		{name: "missing target", change: func(v *approval.PendingApproval) { delete(v.Targets, "answer_questions") }},
 		{name: "missing action", change: func(v *approval.PendingApproval) { v.Actions = []string{"stop"} }},
@@ -68,7 +68,7 @@ func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.
 		{name: "wrong subject", change: func(v *approval.PendingApproval) { v.Decisions[0].SubjectHash = "other" }},
 		{name: "missing timestamp", change: func(v *approval.PendingApproval) { v.Decisions[0].DecidedAt = time.Time{} }},
 		{name: "empty comment", change: func(v *approval.PendingApproval) { v.Decisions[0].Comment = " " }},
-		{name: "multiple owner answers", change: func(v *approval.PendingApproval) { v.Decisions = append(v.Decisions, v.Decisions[0]) }},
+		{name: "multiple answers", change: func(v *approval.PendingApproval) { v.Decisions = append(v.Decisions, v.Decisions[0]) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,7 +76,7 @@ func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.
 			value.Decisions = append([]approval.Decision(nil), valid.Decisions...)
 			value.Actions = append([]string(nil), valid.Actions...)
 			value.RequiredRoles = append([]string(nil), valid.RequiredRoles...)
-			value.Targets = map[string]string{"answer_questions": "analyst", "stop": "$stop"}
+			value.Targets = map[string]string{"answer_questions": "questioner", "stop": "$stop"}
 			tc.change(&value)
 			store := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}
 			server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: store}

@@ -450,10 +450,6 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		requestMethod = largeRequest.Method
 		requestLimit = workerAPIRequestBodyLimit(largeRequest.Method, len(data))
-		if requestLimit == 0 {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 	}
 	if requestLimit == 0 || len(data) > requestLimit || !workerAPIRequestWithinLimit(requestMethod, len(data)) {
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
@@ -572,22 +568,21 @@ func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, sub
 	if value.Status != approval.StatusResolved || value.ResolvedAction != "answer_questions" || value.ResolvedAt.IsZero() {
 		return nil, errors.New("clarification requires a resolved answer_questions approval")
 	}
-	if value.FromStage != "analyst" || value.Trigger != "graph_outcome:blocked" ||
-		value.Targets["answer_questions"] != "analyst" || !containsWorkerString(value.Actions, "answer_questions") ||
-		!containsWorkerString(value.RequiredRoles, "product_owner") {
-		return nil, errors.New("approval is not a Product Owner analyst clarification")
+	if value.Kind != approval.KindQuestions || value.Trigger != "graph_outcome:blocked" ||
+		value.Targets["answer_questions"] != value.FromStage || !containsWorkerString(value.Actions, "answer_questions") {
+		return nil, errors.New("approval is not a stage questions request")
 	}
 	var payload workerQuestionPayload
 	if len(value.Payload) == 0 || json.Unmarshal(value.Payload, &payload) != nil ||
 		payload.Kind != "questions" || strings.TrimSpace(payload.Markdown) == "" {
-		return nil, errors.New("clarification approval has no durable analyst questions")
+		return nil, errors.New("clarification approval has no durable questions")
 	}
 	if questions != payload.Markdown {
 		return nil, errors.New("clarification questions do not match the durable approval")
 	}
 	var answer string
 	for _, decision := range value.Decisions {
-		if decision.Action != "answer_questions" || decision.ActorRole != "product_owner" {
+		if decision.Action != "answer_questions" || !containsWorkerString(value.RequiredRoles, decision.ActorRole) {
 			continue
 		}
 		if decision.ApprovalID != value.ID || decision.ActorID == "" ||
@@ -595,12 +590,12 @@ func (s *workerAPIServer) appendVerifiedClarification(approvalID, questions, sub
 			return nil, errors.New("clarification decision is invalid")
 		}
 		if answer != "" {
-			return nil, errors.New("clarification approval has multiple Product Owner answers")
+			return nil, errors.New("clarification approval has multiple answers")
 		}
 		answer = strings.TrimSpace(decision.Comment)
 	}
 	if answer == "" {
-		return nil, errors.New("clarification approval has no durable Product Owner answer")
+		return nil, errors.New("clarification approval has no durable human answer")
 	}
 	if strings.TrimSpace(submittedAnswer) != answer {
 		return nil, errors.New("clarification answer does not match the durable decision")

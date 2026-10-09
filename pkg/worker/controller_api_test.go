@@ -172,6 +172,45 @@ func TestWorkerAPIRejectsOversizedAttemptManifestEnvelope(t *testing.T) {
 	}
 }
 
+func TestWorkerAPIRejectsOversizedGenericAndQuestionsRequests(t *testing.T) {
+	scope := workerAPIScope{
+		RunID: "large-question-run", Operation: OperationStart,
+		ExecutionID: strings.Repeat("b", ExecutionIDBytes*2), TargetDir: t.TempDir(),
+	}
+	api := &workerAPIServer{token: "test-token", scope: scope}
+	cases := []struct {
+		name   string
+		method string
+		call   workerAPICall
+	}{
+		{name: "generic API", method: "approval.list", call: workerAPICall{A: strings.Repeat("x", workerAPIMaxBody)}},
+		{name: "questions API", method: "brief.append_clarification", call: workerAPICall{
+			A: "approval-1", B: strings.Repeat("?", workerAPIMaxBody), C: "answer",
+		}},
+	}
+	var genericErrorBody string
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := workerAPIRequestBody(t, scope, tc.method, tc.call, "random", time.Now().UTC())
+			request := httptest.NewRequest(http.MethodPost, "/v1/call", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer test-token")
+			response := httptest.NewRecorder()
+			api.handle(response, request)
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("oversized request status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+			}
+			if response.Body.String() != "request too large\n" {
+				t.Fatalf("oversized request body = %q, want request too large response", response.Body.String())
+			}
+			if tc.method == "approval.list" {
+				genericErrorBody = response.Body.String()
+			} else if response.Body.String() != genericErrorBody {
+				t.Fatalf("generic error body %q differs from questions error body %q", genericErrorBody, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestWorkerAPIServerFailsClosedWhenAttemptManifestReservationCannotBeCreated(t *testing.T) {
 	target := t.TempDir()
 	manifestRoot := filepath.Join(target, ".ai-team", "state", "attempt-manifests")
@@ -1269,12 +1308,12 @@ func (s *apiApprovalStore) ResolveDeferred(string, string, approval.Decision) (a
 func workerQuestionApproval(runID, approvalID, questions, answer string, status approval.Status) approval.PendingApproval {
 	payload, _ := json.Marshal(workerQuestionPayload{Kind: "questions", Markdown: questions})
 	value := approval.PendingApproval{
-		SchemaVersion: approval.SchemaVersion, ID: approvalID, RunID: runID,
-		AttemptID: "attempt-analyst", FromStage: "analyst", ToStage: "analyst",
+		SchemaVersion: approval.SchemaVersion, Kind: approval.KindQuestions, ID: approvalID, RunID: runID,
+		AttemptID: "attempt-questioner", FromStage: "questioner", ToStage: "questioner",
 		Trigger: "graph_outcome:blocked", SubjectHash: strings.Repeat("a", 64),
-		RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+		RequiredRoles: []string{"qa"}, Quorum: approval.QuorumAny,
 		Actions: []string{"answer_questions", "stop"},
-		Targets: map[string]string{"answer_questions": "analyst", "stop": "$stop"},
+		Targets: map[string]string{"answer_questions": "questioner", "stop": "$stop"},
 		Status:  status, Payload: payload,
 	}
 	if status == approval.StatusResolved {
@@ -1282,7 +1321,7 @@ func workerQuestionApproval(runID, approvalID, questions, answer string, status 
 		value.ResolvedAction = "answer_questions"
 		value.ResolvedAt = now
 		value.Decisions = []approval.Decision{{
-			ApprovalID: approvalID, ActorID: "owner@example.com", ActorRole: "product_owner",
+			ApprovalID: approvalID, ActorID: "qa@example.com", ActorRole: "qa",
 			Action: "answer_questions", Comment: answer, SubjectHash: value.SubjectHash, DecidedAt: now,
 		}}
 	}
@@ -1342,9 +1381,25 @@ func TestWorkerControllerAPIIsInvocationScopedAndCannotDecide(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerApprovals := NewWorkerAPIApprovals(port).(*workerAPIApprovals)
-	created, err := workerApprovals.Create(approval.PendingApproval{ID: "approval-1", Status: approval.StatusPending})
-	if err != nil || created.RunID != "run-active" {
+	questionPayload, _ := json.Marshal(workerQuestionPayload{Kind: "questions", Markdown: "Какой формат нужен?"})
+	created, err := workerApprovals.Create(approval.PendingApproval{
+		ID: "approval-1", Kind: approval.KindQuestions, AttemptID: "attempt-1",
+		FromStage: "questioner", ToStage: "questioner", Trigger: "graph_outcome:blocked",
+		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"qa"}, Quorum: approval.QuorumAny,
+		Actions: []string{"answer_questions", "stop"},
+		Targets: map[string]string{"answer_questions": "questioner", "stop": "$stop"},
+		Payload: questionPayload, Status: approval.StatusPending,
+	})
+	if err != nil || created.RunID != "run-active" || created.Kind != approval.KindQuestions {
 		t.Fatalf("scoped approval create: %+v, %v", created, err)
+	}
+	loaded, err := workerApprovals.Load("run-active", created.ID)
+	if err != nil || loaded.Kind != approval.KindQuestions {
+		t.Fatalf("question request kind was lost by controller load: %+v err=%v", loaded, err)
+	}
+	listed, err := workerApprovals.List("run-active")
+	if err != nil || len(listed) != 1 || listed[0].Kind != approval.KindQuestions {
+		t.Fatalf("question request kind was lost by controller list: %+v err=%v", listed, err)
 	}
 	workerRecorder := NewWorkerAPIRecorder(port).(*workerAPIRecorder)
 	at := time.Now()
@@ -3954,7 +4009,7 @@ func TestTaskBoundBriefStoreCloseHandlesOptionalUnderlyingCloser(t *testing.T) {
 	}
 }
 
-func TestWorkerControllerBriefAppendRequiresDurableProductOwnerClarification(t *testing.T) {
+func TestWorkerControllerBriefAppendRequiresDurableQuestionsApproval(t *testing.T) {
 	target := t.TempDir()
 	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "brief-auth-run", TargetDir: target, Task: "Grow B2B revenue", ExecutionID: strings.Repeat("8", ExecutionIDBytes*2)}
 	const questions = "Какая аудитория?"

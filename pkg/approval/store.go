@@ -24,11 +24,17 @@ const SchemaVersion = 1
 
 type Status string
 
+// Kind describes what the human request expects. Empty values in records
+// written before this field existed are normalized from their payload/actions.
+type Kind string
+
 const (
 	StatusPending  Status = "pending"
 	StatusResolved Status = "resolved"
 	QuorumAny             = "any"
 	QuorumAll             = "all"
+	KindApprove    Kind   = "approve"
+	KindQuestions  Kind   = "questions"
 )
 
 type Decision struct {
@@ -44,6 +50,7 @@ type Decision struct {
 
 type PendingApproval struct {
 	SchemaVersion   int               `json:"schema_version"`
+	Kind            Kind              `json:"kind,omitempty"`
 	ID              string            `json:"id"`
 	RunID           string            `json:"run_id"`
 	AttemptID       string            `json:"attempt_id"`
@@ -157,6 +164,7 @@ func (s *Store) Load(runID, approvalID string) (PendingApproval, error) {
 	if err := strictjson.Unmarshal(data, 1<<20, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", approvalID, err)
 	}
+	normalize(&value)
 	if err := validate(value); err != nil {
 		return PendingApproval{}, err
 	}
@@ -355,6 +363,9 @@ func normalizeDecision(approvalID string, decision Decision) Decision {
 }
 
 func normalize(value *PendingApproval) {
+	if value.Kind == "" {
+		value.Kind = inferKind(value.Payload, value.Actions)
+	}
 	value.SubjectHash = strings.ToLower(strings.TrimSpace(value.SubjectHash))
 	for index := range value.RequiredRoles {
 		value.RequiredRoles[index] = strings.TrimSpace(value.RequiredRoles[index])
@@ -366,11 +377,36 @@ func normalize(value *PendingApproval) {
 	sort.Strings(value.Actions)
 }
 
+func inferKind(payload json.RawMessage, actions []string) Kind {
+	var request struct {
+		Kind string `json:"kind"`
+	}
+	if len(payload) > 0 && json.Unmarshal(payload, &request) == nil &&
+		request.Kind == string(KindQuestions) && contains(actions, "answer_questions") {
+		return KindQuestions
+	}
+	return KindApprove
+}
+
 func validate(value PendingApproval) error {
 	if value.SchemaVersion != SchemaVersion || !safeName(value.ID) || !safeName(value.RunID) ||
 		value.AttemptID == "" || value.FromStage == "" || value.ToStage == "" || value.Trigger == "" ||
 		!validSHA256(value.SubjectHash) || value.CreatedAt.IsZero() {
 		return errors.New("approval содержит недопустимые обязательные поля")
+	}
+	if value.Kind != KindApprove && value.Kind != KindQuestions {
+		return fmt.Errorf("неподдерживаемый approval kind %q", value.Kind)
+	}
+	if value.Kind == KindQuestions {
+		var payload struct {
+			Kind     string `json:"kind"`
+			Markdown string `json:"markdown"`
+		}
+		if json.Unmarshal(value.Payload, &payload) != nil || payload.Kind != string(KindQuestions) ||
+			strings.TrimSpace(payload.Markdown) == "" || !contains(value.Actions, "answer_questions") ||
+			value.Targets["answer_questions"] != value.FromStage {
+			return errors.New("questions approval должен содержать вопросы и маршрут answer_questions на исходный этап")
+		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {
 		return errors.New("approval содержит недопустимый candidate hash")
@@ -431,6 +467,7 @@ func validate(value PendingApproval) error {
 func sameRequest(left, right PendingApproval) bool {
 	left.CreatedAt, right.CreatedAt = time.Time{}, time.Time{}
 	return left.ID == right.ID && left.RunID == right.RunID && left.AttemptID == right.AttemptID &&
+		left.Kind == right.Kind &&
 		left.FromStage == right.FromStage && left.ToStage == right.ToStage &&
 		left.Trigger == right.Trigger && left.SubjectHash == right.SubjectHash &&
 		left.CandidateSHA256 == right.CandidateSHA256 &&

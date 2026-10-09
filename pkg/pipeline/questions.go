@@ -26,7 +26,7 @@ type questionPayload struct {
 	Markdown string `json:"markdown"`
 }
 
-func analystQuestionsPath(artifactRoot, feature string) string {
+func stageQuestionsPath(artifactRoot, feature string) string {
 	return filepath.Join(artifactRoot, "tasks", feature, "questions.md")
 }
 
@@ -37,10 +37,10 @@ func questionsPayload(resultOutputs []runtime.Artifact) (json.RawMessage, bool, 
 		}
 		data, err := safeio.ReadRegularFile(output.Path, maxQuestionBytes)
 		if err != nil {
-			return nil, false, fmt.Errorf("read analyst questions: %w", err)
+			return nil, false, fmt.Errorf("read stage questions: %w", err)
 		}
 		if strings.TrimSpace(string(data)) == "" {
-			return nil, false, errors.New("analyst questions artifact is empty")
+			return nil, false, errors.New("stage questions artifact is empty")
 		}
 		encoded, err := json.Marshal(questionPayload{Kind: "questions", Markdown: string(data)})
 		return encoded, true, err
@@ -58,12 +58,12 @@ func questionAnswer(decisions []approval.Decision) string {
 }
 
 // recoveredQuestionApproval finds the durable clarification decision that
-// selected the analyst as the next stage. A process can stop after the resume
+// selected a questions-enabled stage as the next stage. A process can stop after the resume
 // decision and running lifecycle state have been persisted, before the stage
 // consumes its extra inputs. On the next resume, the lifecycle no longer has a
 // pending approval ID, so reconstruct these inputs from the approval store.
 func recoveredQuestionApproval(store ApprovalStore, runID, nextStage string) (*approval.PendingApproval, error) {
-	if nextStage != "analyst" {
+	if nextStage == "" {
 		return nil, nil
 	}
 	values, err := store.List(runID)
@@ -72,7 +72,7 @@ func recoveredQuestionApproval(store ApprovalStore, runID, nextStage string) (*a
 	}
 	for index := len(values) - 1; index >= 0; index-- {
 		value := &values[index]
-		if value.Status != approval.StatusResolved || value.FromStage != "analyst" ||
+		if value.Status != approval.StatusResolved || value.Kind != approval.KindQuestions ||
 			value.ResolvedAction != "answer_questions" || value.Targets[value.ResolvedAction] != nextStage ||
 			value.Trigger != "graph_outcome:blocked" {
 			continue
@@ -109,7 +109,7 @@ func recoveredGraphInputApproval(store ApprovalStore, runID, nextStage string, g
 	for index := len(values) - 1; index >= 0; index-- {
 		value := &values[index]
 		if value.Status != approval.StatusResolved || value.Targets[value.ResolvedAction] != nextStage ||
-			!strings.HasPrefix(value.Trigger, "graph_outcome:") || value.ResolvedAction == "answer_questions" {
+			!strings.HasPrefix(value.Trigger, "graph_outcome:") || value.Kind == approval.KindQuestions {
 			continue
 		}
 		outcome := workflow.Outcome(strings.TrimPrefix(value.Trigger, "graph_outcome:"))
@@ -143,14 +143,14 @@ func recoveredGraphInputApproval(store ApprovalStore, runID, nextStage string, g
 	return nil, nil
 }
 
-func countQuestionApprovals(store ApprovalStore, runID string) (int, error) {
+func countQuestionApprovals(store ApprovalStore, runID, stage string) (int, error) {
 	values, err := store.List(runID)
 	if err != nil {
 		return 0, err
 	}
 	count := 0
 	for _, value := range values {
-		if value.Trigger == "graph_outcome:blocked" && value.FromStage == "analyst" && value.Payload != nil {
+		if value.Trigger == "graph_outcome:blocked" && value.FromStage == stage && value.Kind == approval.KindQuestions && value.Payload != nil {
 			var payload questionPayload
 			if json.Unmarshal(value.Payload, &payload) == nil && payload.Kind == "questions" {
 				count++
@@ -169,7 +169,7 @@ func writeQuestionAnswerInput(targetDir, runID, approvalID, answer string) (runt
 		return runtime.Artifact{}, errors.New("answer must contain 1..16384 bytes")
 	}
 	path := filepath.Join(targetDir, ".ai-team", "runs", runID, "inputs", approvalID+"-answer.md")
-	content := []byte("# Ответ Product Owner\n\n" + answer + "\n")
+	content := []byte("# Ответ на вопросы\n\n" + answer + "\n")
 	if err := safeio.WriteRegularFileNoFollow(path, content, 0o444); err != nil {
 		if info, statErr := os.Lstat(path); statErr != nil || info.Mode()&os.ModeSymlink != 0 {
 			return runtime.Artifact{}, err

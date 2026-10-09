@@ -268,8 +268,8 @@ func (r *Registry) Exists(name string) bool {
 	return err == nil
 }
 
-// HasProductSpecContract reports whether an agent declares both artifacts
-// required by the Product Owner specification approval action.
+// HasProductSpecContract reports whether a stage's agent declares both
+// artifacts required by the Product Owner specification approval action.
 func (r *Registry) HasProductSpecContract(name string) (bool, error) {
 	a, err := r.Load(name)
 	if err != nil {

@@ -450,11 +450,11 @@ func encodeApprovedSpec(version briefVersion, attemptID string, outputs []runtim
 	}
 	if artifacts["proposal"] == "" && artifacts["spec"] == "" {
 		// Compatibility for small/custom workflows that do not declare a
-		// product-spec contract. The bundled analyst declares both artifacts.
+		// product-spec contract. The bundled first stage declares both artifacts.
 		return nil, nil
 	}
 	if artifacts["proposal"] == "" || artifacts["spec"] == "" {
-		// Workflows without the bundled two-artifact analyst contract retain
+		// Workflows without the two-artifact product-spec contract retain
 		// their custom approval payloads.
 		return nil, nil
 	}

@@ -624,13 +624,16 @@ func TestWorkerAPIApproveManifestBindsCanonicalDecisionOutput(t *testing.T) {
 
 func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testing.T) {
 	tests := []struct {
-		name            string
-		versioned       bool
-		partialMetadata bool
-		wantWriteError  bool
+		name              string
+		versioned         bool
+		submissionVersion int
+		partialMetadata   bool
+		wantWriteError    bool
 	}{
 		{name: "versioned approval rejects omitted v0 binding", versioned: true, wantWriteError: true},
 		{name: "versioned approval rejects partial v0 binding", versioned: true, partialMetadata: true, wantWriteError: true},
+		{name: "versioned approval rejects partial v1 binding", versioned: true, submissionVersion: 1, partialMetadata: true, wantWriteError: true},
+		{name: "legacy approval rejects partial typed binding", partialMetadata: true, wantWriteError: true},
 		{name: "legacy approval accepts v0 manifest and finishes", wantWriteError: false},
 	}
 	for _, test := range tests {
@@ -701,6 +704,7 @@ func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testi
 				StageIndex: 1, StartedAt: startedAt.Add(time.Second), FinishedAt: finishedAt, Status: "passed", Execution: "succeeded",
 				Decision: "approved", Outcome: "passed", Outputs: []evidence.ArtifactRecord{{Name: "result", Type: "file", EvidencePath: artifactRel,
 					Size: int64(len(artifactContent)), SHA256: artifactDigest}}}
+			manifest.HumanSubmissionVersion = test.submissionVersion
 			if test.partialMetadata {
 				manifest.HumanSubmissionDescription = "partially typed"
 			}

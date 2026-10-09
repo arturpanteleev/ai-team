@@ -76,6 +76,35 @@ func TestQuestionAnswerApprovalRecoveryRequiresOriginalIncompleteTarget(t *testi
 	}
 }
 
+func TestRecoveredQuestionApprovalRestoresGenericStageAnswer(t *testing.T) {
+	value := testResolvedQuestionApproval("approval-questioner-recovery", "resume answer")
+	value.FromStage = "questioner"
+	value.ToStage = "questioner"
+	value.Targets["answer_questions"] = "questioner"
+
+	invalidPayload := value
+	invalidPayload.ID = "approval-invalid-question-payload"
+	invalidPayload.Payload = []byte(`{"kind":"other"}`)
+	wrongKind := value
+	wrongKind.ID = "approval-wrong-kind"
+	wrongKind.Kind = approval.KindApprove
+
+	store := questionApprovalList{values: []approval.PendingApproval{value, wrongKind, invalidPayload}}
+	if selected, err := recoveredQuestionApproval(store, value.RunID, ""); err != nil || selected != nil {
+		t.Fatalf("empty stage should not recover an answer: selected=%+v err=%v", selected, err)
+	}
+	selected, err := recoveredQuestionApproval(store, value.RunID, "questioner")
+	if err != nil || selected == nil || selected.ID != value.ID || questionAnswer(selected.Decisions) != "resume answer" {
+		t.Fatalf("generic questioner answer was not recovered: selected=%+v err=%v", selected, err)
+	}
+
+	withoutAnswer := value
+	withoutAnswer.Decisions = nil
+	if selected, err := recoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{withoutAnswer}}, value.RunID, "questioner"); err == nil || selected != nil {
+		t.Fatalf("resolved generic approval without a durable answer was accepted: selected=%+v err=%v", selected, err)
+	}
+}
+
 func TestQuestionAnswerApprovalRejectsForeignAndCompletedRuns(t *testing.T) {
 	value := testResolvedQuestionApproval("approval-run-binding", "answer")
 	source := evidence.ReplayedAttempt{

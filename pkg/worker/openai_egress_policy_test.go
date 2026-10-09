@@ -183,6 +183,85 @@ func TestOpenAIEgressBridgeSetupErrors(t *testing.T) {
 	closeFn()
 }
 
+func TestOpenAIEgressBridgeRejectsInvalidRequestsAndUnavailableSocket(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		request    string
+		socketPath string
+		wantStatus int
+	}{
+		{
+			name: "non-CONNECT request", request: "GET / HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "missing controller socket",
+			request:    "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n",
+			socketPath: filepath.Join(t.TempDir(), "missing.sock"), wantStatus: http.StatusBadGateway,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, peer := net.Pipe()
+			defer func() { _ = peer.Close() }()
+			go bridgeOpenAIClient(client, test.socketPath, "scoped-token", make(chan struct{}))
+			if _, err := io.WriteString(peer, test.request); err != nil {
+				t.Fatalf("write bridge request: %v", err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(peer), &http.Request{Method: http.MethodConnect})
+			if err != nil {
+				t.Fatalf("read bridge response: %v", err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("bridge status = %d, want %d", response.StatusCode, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestOpenAIEgressBridgeClosesUpstreamWhenClientLeavesDuringHandshake(t *testing.T) {
+	shortDir, err := os.MkdirTemp("/tmp", "ai-egr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shortDir) })
+	socketPath := filepath.Join(shortDir, "proxy.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	upstreamClosed := make(chan struct{})
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			close(upstreamClosed)
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		if _, err := http.ReadRequest(bufio.NewReader(connection)); err != nil {
+			close(upstreamClosed)
+			return
+		}
+		_, _ = io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		_, _ = io.Copy(io.Discard, connection)
+		close(upstreamClosed)
+	}()
+
+	client, peer := net.Pipe()
+	go bridgeOpenAIClient(client, socketPath, "scoped-token", make(chan struct{}))
+	if _, err := io.WriteString(peer, "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n"); err != nil {
+		_ = peer.Close()
+		t.Fatalf("write bridge request: %v", err)
+	}
+	_ = peer.Close()
+	select {
+	case <-upstreamClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridge left the controller-side connection open after the client disconnected")
+	}
+}
+
 type delayedOpenAIEgressListener struct {
 	started chan struct{}
 	release chan struct{}

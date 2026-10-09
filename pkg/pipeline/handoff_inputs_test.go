@@ -131,6 +131,35 @@ func TestControllerQuestionAnswerStoreReadRejectsSymlinkParents(t *testing.T) {
 	}
 }
 
+func TestControllerQuestionAnswerStoreValidatesCanonicalBytesAgainstApproval(t *testing.T) {
+	target := t.TempDir()
+	store := ControllerQuestionAnswerStore{TargetDir: target}
+	value := testResolvedQuestionApproval("approval-validate-canonical", "durable answer")
+	path, err := store.Prepare(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validatedPath, err := store.ValidateCanonicalQuestionAnswer(value)
+	if err != nil || validatedPath != path {
+		t.Fatalf("exact canonical record should validate: path=%q want=%q err=%v", validatedPath, path, err)
+	}
+
+	changed := value
+	changed.Decisions = append([]approval.Decision(nil), value.Decisions...)
+	changed.Decisions[0].Comment = "answer changed after approval"
+	if _, err := store.ValidateCanonicalQuestionAnswer(changed); err == nil || !strings.Contains(err.Error(), "disagrees with durable approval") {
+		t.Fatalf("canonical record must be rebound to the current approval: %v", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateCanonicalQuestionAnswer(value); err == nil {
+		t.Fatal("missing canonical record was accepted")
+	}
+}
+
 func testResolvedQuestionApproval(id, answer string) approval.PendingApproval {
 	resolvedAt := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	payload, _ := json.Marshal(questionPayload{Kind: "questions", Markdown: "Who is the buyer?"})

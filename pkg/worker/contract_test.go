@@ -728,6 +728,12 @@ func TestWorkerProcessEnvironmentCleansHomeAfterTempDirectoryFailure(t *testing.
 	}
 }
 
+func TestTerminalDeliveryReconcilerOptionRejectsNilCallback(t *testing.T) {
+	if err := WithTerminalDeliveryReconciler(nil)(&ProcessEngine{}); err == nil {
+		t.Fatal("terminal reconciliation option accepted a nil callback")
+	}
+}
+
 // TestProcessEngineResumeAndCancelBuildTypedJobs — Resume/Cancel обязаны
 // отправлять именно свою операцию и не протаскивать execution-параметры,
 // которые Validate запрещает для cancel.

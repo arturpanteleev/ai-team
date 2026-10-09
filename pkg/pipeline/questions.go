@@ -61,7 +61,7 @@ func questionAnswer(decisions []approval.Decision) string {
 // durable answer after a crash between lifecycle persistence and input
 // materialization. Analyst clarification answers use the stricter recovery
 // path below because they have controller-owned worker inputs.
-func recoveredQuestionApproval(store ApprovalStore, runID, nextStage string) (*approval.PendingApproval, error) {
+func recoveredQuestionApproval(store questionApprovalLookup, runID, nextStage string) (*approval.PendingApproval, error) {
 	if nextStage == "" {
 		return nil, nil
 	}

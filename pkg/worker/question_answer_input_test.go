@@ -206,3 +206,33 @@ func TestPrepareQuestionAnswerMountpointRecoversOnlyExactSingleLinkProjection(t 
 		})
 	}
 }
+
+func TestPrepareQuestionAnswerMountpointReusesExistingEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "answer.md")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, info, err := prepareQuestionAnswerMountpoint(path, []byte("answer"))
+	if err != nil || created || !os.SameFile(before, info) {
+		t.Fatalf("existing empty mountpoint should be reused without claiming ownership: created=%v info=%v err=%v", created, info, err)
+	}
+}
+
+func TestPrepareQuestionAnswerMountpointRejectsSymlinkedParent(t *testing.T) {
+	outside := t.TempDir()
+	parent := filepath.Join(t.TempDir(), "inputs")
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := filepath.Join(parent, "answer.md")
+	if _, _, err := prepareQuestionAnswerMountpoint(path, []byte("answer")); err == nil {
+		t.Fatal("mountpoint preparation followed a symlinked parent directory")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "answer.md")); !os.IsNotExist(err) {
+		t.Fatalf("failed preparation wrote through the symlinked parent: %v", err)
+	}
+}

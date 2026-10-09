@@ -706,6 +706,28 @@ func TestWriteControllerCandidateEvidenceRejectsUnsafeStoredState(t *testing.T) 
 	})
 }
 
+func TestWriteControllerCandidateEvidenceEnforcesPrettyPrintedStorageLimit(t *testing.T) {
+	const runID = "candidate-evidence-size-limit"
+	files := make([]pipeline.CandidateFile, 150_000)
+	for index := range files {
+		files[index] = pipeline.CandidateFile{Path: "a", Fingerprint: "x", Mode: "100644"}
+	}
+	document := pipeline.CandidateEvidence{
+		SchemaVersion: 1, RunID: runID, Purpose: "semantic_code_review",
+		WorkspaceSHA256: strings.Repeat("a", 64), ChangedFiles: files,
+		Checks: []pipeline.CandidateCheck{}, Attempts: []pipeline.CandidateAttempt{},
+	}
+	root := t.TempDir()
+	err := writeControllerCandidateEvidence(root, runID, "review-candidate.json", document)
+	if err == nil || !strings.Contains(err.Error(), "candidate evidence exceeds controller storage limit") {
+		t.Fatalf("oversized pretty-printed authority record was not rejected at the storage boundary: %v", err)
+	}
+	path := filepath.Join(root, runID, "review-candidate.json")
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("rejected candidate evidence left a partial authority record: %v", err)
+	}
+}
+
 type validationEventLog struct {
 	events    []evidence.Event
 	readErr   error
@@ -782,6 +804,43 @@ func TestWorkerAPIDispatchEventAndManifestFailures(t *testing.T) {
 			t.Fatal("attempt manifest read accepted an unresolvable target")
 		}
 	})
+}
+
+func TestWorkerAPIDispatchReturnsControllerAppendFailureForExactRetry(t *testing.T) {
+	target := t.TempDir()
+	const runID = "dispatch-exact-retry-run"
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC()
+	local, err := evidence.Start(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "event-append-retry", TargetDir: target, StartedAt: startedAt,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := evidence.VerifyEventLog(filepath.Join(local.RunDir(), "events.jsonl"), runID)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("read exact retry fixture: events=%d err=%v", len(events), err)
+	}
+	retry := events[0]
+	retry.Sequence, retry.RunID, retry.SHA256, retry.PreviousSHA256 = 0, "", "", ""
+	appendErr := errors.New("controller journal commit failed")
+	server := &workerAPIServer{
+		scope:        workerAPIScope{RunID: runID, Operation: OperationStart, TargetDir: target},
+		usageAllowed: true,
+		eventLogs:    &validationEventLog{events: events, appendErr: appendErr},
+	}
+	_, err = server.dispatch("event_log.append", workerAPICall{
+		RunID: runID, Event: retry, ExpectedSequence: 0, ExpectedPreviousSHA256: events[0].PreviousSHA256,
+	})
+	if !errors.Is(err, appendErr) {
+		t.Fatalf("valid idempotent retry did not reach the durable append boundary: %v", err)
+	}
 }
 
 func TestWorkerAPIHandleRejectsMalformedAndCanceledRequests(t *testing.T) {

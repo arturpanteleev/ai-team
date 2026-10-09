@@ -94,12 +94,12 @@ func CanonicalQuestionAnswerContent(value approval.PendingApproval) ([]byte, err
 		return nil, err
 	}
 	if value.SchemaVersion != approval.SchemaVersion || value.Status != approval.StatusResolved || value.ResolvedAt.IsZero() ||
-		value.CreatedAt.IsZero() || value.ResolvedAt.Before(value.CreatedAt) || value.Deferred || value.AttemptID == "" || value.SubjectHash == "" || value.FromStage != "analyst" ||
+		value.CreatedAt.IsZero() || value.ResolvedAt.Before(value.CreatedAt) || value.Deferred || value.AttemptID == "" || value.SubjectHash == "" || value.FromStage == "" ||
 		value.Trigger != "graph_outcome:blocked" || value.ResolvedAction != "answer_questions" ||
-		value.ToStage != "analyst" || !containsApprovalRole(value.Actions, value.ResolvedAction) || value.Targets[value.ResolvedAction] != "analyst" ||
+		value.ToStage != value.FromStage || !containsApprovalRole(value.Actions, value.ResolvedAction) || value.Targets[value.ResolvedAction] != value.FromStage ||
 		(value.Quorum != approval.QuorumAny && value.Quorum != approval.QuorumAll) || len(value.RequiredRoles) == 0 ||
 		len(value.ArtifactRevisions) != 0 || value.ArtifactRevisionBindingSHA256 != "" {
-		return nil, errors.New("approval is not a resolved analyst clarification")
+		return nil, errors.New("approval is not a resolved stage clarification")
 	}
 	if len(value.SubjectHash) != hex.EncodedLen(32) {
 		return nil, errors.New("clarification approval subject hash is invalid")

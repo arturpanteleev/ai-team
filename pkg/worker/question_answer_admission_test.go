@@ -68,8 +68,8 @@ func TestPrepareQuestionAnswerMountSkipsWaitingStateWithoutRequestableAnswer(t *
 		if err := store.Save(state, next); err != nil {
 			t.Fatal(err)
 		}
-		if mount, err := api.prepareQuestionAnswerMount(context.Background()); mount != nil || err != nil {
-			t.Fatalf("waiting for a different stage should not admit a clarification input: mount=%+v err=%v", mount, err)
+		if mount, err := api.prepareQuestionAnswerMount(context.Background()); mount != nil || err == nil || !strings.Contains(err.Error(), "stage does not match") {
+			t.Fatalf("waiting approval bound to another stage must fail closed: mount=%+v err=%v", mount, err)
 		}
 	})
 
@@ -143,6 +143,31 @@ func TestPrepareQuestionAnswerMountAdmitsVerifiedIncompleteClarification(t *test
 	canonical, err := api.questionAnswerStore.Read(api.scope.RunID, api.questionAnswerID)
 	if err != nil || !strings.Contains(string(canonical), "B2B buyers") {
 		t.Fatalf("admission should expose only the durable controller answer: %q err=%v", canonical, err)
+	}
+}
+
+func TestPrepareQuestionAnswerMountAdmitsNonAnalystQuestionCycle(t *testing.T) {
+	for _, phase := range []lifecycle.Phase{lifecycle.PhaseWaiting, lifecycle.PhaseRunning, lifecycle.PhaseResumable} {
+		t.Run(string(phase), func(t *testing.T) {
+			api, _, replayed := newQuestionAnswerAdmissionFixtureForStage(t, phase, false, true, "questioner")
+			if phase != lifecycle.PhaseWaiting {
+				selected, err := pipeline.RecoveredQuestionApproval(api.approvals, api.scope.RunID, "questioner", replayed)
+				if err != nil || selected == nil || selected.FromStage != "questioner" || selected.ToStage != "questioner" {
+					t.Fatalf("strict recovery did not select the stage-bound answer: approval=%+v err=%v", selected, err)
+				}
+			}
+			mount, err := api.prepareQuestionAnswerMount(context.Background())
+			if err != nil || mount == nil {
+				t.Fatalf("verified questioner clarification should be admitted: mount=%+v err=%v", mount, err)
+			}
+			if err := validateQuestionAnswerMount(api.scope.TargetDir, api.scope.RunID, *mount); err != nil {
+				t.Fatalf("questioner answer projection failed mount validation: %v", err)
+			}
+			canonical, err := api.questionAnswerStore.Read(api.scope.RunID, api.questionAnswerID)
+			if err != nil || !strings.Contains(string(canonical), "B2B buyers") {
+				t.Fatalf("questioner mount did not expose the durable controller answer: %q err=%v", canonical, err)
+			}
+		})
 	}
 }
 
@@ -254,6 +279,10 @@ func newQuestionAnswerAdmissionFixture(t *testing.T, targetAttemptCompleted, sou
 }
 
 func newQuestionAnswerAdmissionFixtureForPhase(t *testing.T, phase lifecycle.Phase, targetAttemptCompleted, sourceHasQuestions bool) (*workerAPIServer, *lifecycle.Store, evidence.ReplayedRun) {
+	return newQuestionAnswerAdmissionFixtureForStage(t, phase, targetAttemptCompleted, sourceHasQuestions, "analyst")
+}
+
+func newQuestionAnswerAdmissionFixtureForStage(t *testing.T, phase lifecycle.Phase, targetAttemptCompleted, sourceHasQuestions bool, stage string) (*workerAPIServer, *lifecycle.Store, evidence.ReplayedRun) {
 	t.Helper()
 	target, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -341,10 +370,13 @@ func newQuestionAnswerAdmissionFixtureForPhase(t *testing.T, phase lifecycle.Pha
 			t.Fatal(err)
 		}
 	}
-	appendAttempt(sourceAttempt, "analyst", 1, startedAt.Add(time.Millisecond), questionFinished,
+	appendAttempt(sourceAttempt, stage, 1, startedAt.Add(time.Millisecond), questionFinished,
 		"blocked", "succeeded", "blocked", "blocked", sourceHasQuestions)
 	approvalValue := workerAnalystQuestionApproval(runID, approvalID, "Which buyer?", "B2B buyers", approval.StatusResolved)
 	approvalValue.AttemptID = sourceAttempt
+	approvalValue.FromStage = stage
+	approvalValue.ToStage = stage
+	approvalValue.Targets["answer_questions"] = stage
 	approvalValue.CreatedAt = questionFinished
 	approvalValue.ResolvedAt = answerResolvedAt
 	approvalValue.Decisions[0].DecidedAt = answerResolvedAt
@@ -366,8 +398,8 @@ func newQuestionAnswerAdmissionFixtureForPhase(t *testing.T, phase lifecycle.Pha
 		t.Fatal(err)
 	}
 	if err := runEvidence.Append(evidence.Event{
-		Type: "transition_selected", Stage: "analyst", AttemptID: sourceAttempt, Timestamp: answerResolvedAt.Add(time.Millisecond),
-		Data: map[string]any{"from": "analyst", "outcome": "blocked", "edge_target": "analyst", "action": "answer_questions", "target": "analyst"},
+		Type: "transition_selected", Stage: stage, AttemptID: sourceAttempt, Timestamp: answerResolvedAt.Add(time.Millisecond),
+		Data: map[string]any{"from": stage, "outcome": "blocked", "edge_target": stage, "action": "answer_questions", "target": stage},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -377,19 +409,21 @@ func newQuestionAnswerAdmissionFixtureForPhase(t *testing.T, phase lifecycle.Pha
 		t.Fatal(err)
 	}
 	if targetAttemptCompleted {
-		appendAttempt(targetAttempt, "analyst", 1, targetStartedAt, targetFinishedAt,
+		appendAttempt(targetAttempt, stage, 1, targetStartedAt, targetFinishedAt,
 			"passed", "succeeded", "not_applicable", "passed", false)
 		if err := runEvidence.Append(evidence.Event{
-			Type: "transition_selected", Stage: "analyst", AttemptID: targetAttempt, Timestamp: targetFinishedAt.Add(time.Millisecond),
-			Data: map[string]any{"from": "analyst", "outcome": "passed", "edge_target": "coder", "target": "coder"},
+			Type: "transition_selected", Stage: stage, AttemptID: targetAttempt, Timestamp: targetFinishedAt.Add(time.Millisecond),
+			Data: map[string]any{"from": stage, "outcome": "passed", "edge_target": "coder", "target": "coder"},
 		}); err != nil {
 			t.Fatal(err)
 		}
-	} else if err := runEvidence.Append(evidence.Event{
-		Type: "attempt_started", Stage: "analyst", AttemptID: targetAttempt, Timestamp: targetStartedAt,
-		Data: map[string]any{"stage_index": 1},
-	}); err != nil {
-		t.Fatal(err)
+	} else if phase != lifecycle.PhaseWaiting {
+		if err := runEvidence.Append(evidence.Event{
+			Type: "attempt_started", Stage: stage, AttemptID: targetAttempt, Timestamp: targetStartedAt,
+			Data: map[string]any{"stage_index": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	lifecycleStore, err := lifecycle.NewStore(target)
@@ -398,7 +432,7 @@ func newQuestionAnswerAdmissionFixtureForPhase(t *testing.T, phase lifecycle.Pha
 	}
 	state := lifecycle.State{
 		RunID: runID, Feature: "stale-question-admission", TargetDir: target, Task: "test stale clarification recovery",
-		Phase: phase, NextStage: "analyst", ConfigSHA256: strings.Repeat("a", 64),
+		Phase: phase, NextStage: stage, ConfigSHA256: strings.Repeat("a", 64),
 		WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: startedAt,
 	}
 	if phase == lifecycle.PhaseWaiting {

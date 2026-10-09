@@ -57,49 +57,18 @@ func questionAnswer(decisions []approval.Decision) string {
 	return ""
 }
 
-// recoveredQuestionApproval restores a generic questions-enabled stage's
-// durable answer after a crash between lifecycle persistence and input
-// materialization. Analyst clarification answers use the stricter recovery
-// path below because they have controller-owned worker inputs.
-func recoveredQuestionApproval(store questionApprovalLookup, runID, nextStage string) (*approval.PendingApproval, error) {
-	if nextStage == "" {
-		return nil, nil
-	}
-	values, err := store.List(runID)
-	if err != nil {
-		return nil, err
-	}
-	for index := len(values) - 1; index >= 0; index-- {
-		value := &values[index]
-		if value.Status != approval.StatusResolved || value.Kind != approval.KindQuestions ||
-			value.ResolvedAction != "answer_questions" || value.Targets[value.ResolvedAction] != nextStage ||
-			value.Trigger != "graph_outcome:blocked" {
-			continue
-		}
-		var payload questionPayload
-		if json.Unmarshal(value.Payload, &payload) != nil || payload.Kind != "questions" || strings.TrimSpace(payload.Markdown) == "" {
-			continue
-		}
-		if questionAnswer(value.Decisions) == "" {
-			return nil, fmt.Errorf("resolved clarification approval %s has no durable answer", value.ID)
-		}
-		return value, nil
-	}
-	return nil, nil
-}
-
 type questionApprovalLookup interface {
 	Load(string, string) (approval.PendingApproval, error)
 	List(string) ([]approval.PendingApproval, error)
 }
 
-// ErrStaleQuestionApproval means a clarification answer's target analyst
+// ErrStaleQuestionApproval means a clarification answer's target stage
 // attempt has already completed. Resume callers must reconcile a verified
 // graph transition before deciding whether this stale answer blocks recovery.
 var ErrStaleQuestionApproval = errors.New("clarification approval is stale after its target attempt completed")
 
 // ValidateQuestionAnswerApproval binds the selected approval to its durable
-// source attempt and rejects reuse after a later analyst attempt completed.
+// source attempt and rejects reuse after a later target-stage attempt completed.
 // A source attempt invalidated by its own approved answer loopback remains a
 // valid source; that is the expected state during crash recovery.
 func ValidateQuestionAnswerApproval(value approval.PendingApproval, replayed evidence.ReplayedRun) error {
@@ -114,7 +83,7 @@ func ValidateQuestionAnswerApproval(value approval.PendingApproval, replayed evi
 	}
 	sourceIndex := -1
 	for index, attempt := range replayed.Attempts {
-		if attempt.AttemptID == value.AttemptID && attempt.Stage == "analyst" {
+		if attempt.AttemptID == value.AttemptID && attempt.Stage == value.FromStage {
 			if sourceIndex >= 0 {
 				return errors.New("clarification source attempt is ambiguous")
 			}
@@ -122,16 +91,16 @@ func ValidateQuestionAnswerApproval(value approval.PendingApproval, replayed evi
 		}
 	}
 	if sourceIndex < 0 {
-		return fmt.Errorf("clarification approval %s has no matching analyst attempt in evidence", value.ID)
+		return fmt.Errorf("clarification approval %s has no matching %s attempt in evidence", value.ID, value.FromStage)
 	}
 	source := replayed.Attempts[sourceIndex]
 	if source.FinishedAt.IsZero() ||
 		(source.State.Outcome != workflow.OutcomeBlocked && !(source.Superseded && source.State.Outcome == workflow.OutcomeInvalidated)) {
-		return errors.New("clarification approval source attempt was not a completed blocked analyst attempt")
+		return errors.New("clarification approval source attempt was not a completed blocked target-stage attempt")
 	}
 	activeTargets := 0
 	for _, attempt := range replayed.Attempts[sourceIndex+1:] {
-		if attempt.Stage != "analyst" {
+		if attempt.Stage != value.FromStage {
 			continue
 		}
 		if !attempt.FinishedAt.IsZero() && attempt.State.Execution == workflow.ExecutionSucceeded {
@@ -142,7 +111,7 @@ func ValidateQuestionAnswerApproval(value approval.PendingApproval, replayed evi
 		}
 	}
 	if activeTargets > 1 {
-		return errors.New("clarification recovery has multiple incomplete analyst target attempts")
+		return errors.New("clarification recovery has multiple incomplete target-stage attempts")
 	}
 	return nil
 }
@@ -176,12 +145,12 @@ func recoveredApprovalEventsMatch(value approval.PendingApproval, replayed evide
 }
 
 // RecoveredQuestionApproval finds the latest durable clarification that still
-// targets the current analyst stage. An absent or incomplete target attempt can
+// targets the current stage. An absent or incomplete target attempt can
 // be retried after a crash with the same immutable answer. A completed target
-// attempt is stale; if lifecycle still points at analyst, fail closed instead
+// attempt is stale; if lifecycle still points at the target stage, fail closed instead
 // of starting that stage again without its answer.
 func RecoveredQuestionApproval(store questionApprovalLookup, runID, nextStage string, replayed evidence.ReplayedRun) (*approval.PendingApproval, error) {
-	if nextStage != "analyst" {
+	if nextStage == "" {
 		return nil, nil
 	}
 	values, err := store.List(runID)
@@ -190,7 +159,7 @@ func RecoveredQuestionApproval(store questionApprovalLookup, runID, nextStage st
 	}
 	for index := len(values) - 1; index >= 0; index-- {
 		value := &values[index]
-		if value.RunID != runID || value.Status != approval.StatusResolved || value.Kind != approval.KindQuestions || value.FromStage != "analyst" ||
+		if value.RunID != runID || value.Status != approval.StatusResolved || value.Kind != approval.KindQuestions || value.FromStage != nextStage || value.ToStage != nextStage ||
 			value.ResolvedAction != "answer_questions" || value.Targets[value.ResolvedAction] != nextStage ||
 			value.Trigger != "graph_outcome:blocked" {
 			continue

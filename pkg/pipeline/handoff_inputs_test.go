@@ -106,6 +106,37 @@ func TestControllerQuestionAnswerStoreRejectsInvalidApprovals(t *testing.T) {
 	}
 }
 
+func TestControllerQuestionAnswerStoreSupportsAnyBoundStage(t *testing.T) {
+	value := testResolvedQuestionApproval("approval-questioner", "answer for questioner")
+	value.FromStage = "questioner"
+	value.ToStage = "questioner"
+	value.Targets["answer_questions"] = "questioner"
+	store := ControllerQuestionAnswerStore{TargetDir: t.TempDir()}
+	path, err := store.Prepare(value)
+	if err != nil {
+		t.Fatalf("valid non-analyst clarification should be materialized: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stage-bound canonical answer was not created: %v", err)
+	}
+	data, err := store.Read(value.RunID, value.ID)
+	if err != nil || !strings.Contains(string(data), "answer for questioner") {
+		t.Fatalf("stage-bound canonical answer was not readable: data=%q err=%v", data, err)
+	}
+
+	for _, mutate := range []func(*approval.PendingApproval){
+		func(value *approval.PendingApproval) { value.ToStage = "analyst" },
+		func(value *approval.PendingApproval) { value.Targets["answer_questions"] = "analyst" },
+	} {
+		mismatched := value
+		mismatched.Targets = map[string]string{"answer_questions": value.Targets["answer_questions"], "stop": "$stop"}
+		mutate(&mismatched)
+		if _, err := CanonicalQuestionAnswerContent(mismatched); err == nil {
+			t.Fatalf("stage-mismatched clarification was accepted: %+v", mismatched)
+		}
+	}
+}
+
 func TestControllerQuestionAnswerStoreReadRejectsSymlinkParents(t *testing.T) {
 	target := t.TempDir()
 	store := ControllerQuestionAnswerStore{TargetDir: target}

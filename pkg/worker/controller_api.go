@@ -460,7 +460,7 @@ func (s *workerAPIServer) prepareQuestionAnswerMount(ctx context.Context) (*work
 	var value *approval.PendingApproval
 	switch state.Phase {
 	case lifecycle.PhaseWaiting:
-		if state.NextStage != "analyst" || state.PendingApprovalID == "" {
+		if state.NextStage == "" || state.PendingApprovalID == "" {
 			return nil, nil
 		}
 		loaded, loadErr := s.approvals.Load(s.scope.RunID, state.PendingApprovalID)
@@ -469,6 +469,9 @@ func (s *workerAPIServer) prepareQuestionAnswerMount(ctx context.Context) (*work
 		}
 		if loaded.Status != approval.StatusResolved || loaded.ResolvedAction != "answer_questions" {
 			return nil, nil
+		}
+		if loaded.FromStage != state.NextStage || loaded.ToStage != state.NextStage || loaded.Targets[loaded.ResolvedAction] != state.NextStage {
+			return nil, errors.New("clarification approval stage does not match waiting lifecycle stage")
 		}
 		value = &loaded
 	case lifecycle.PhaseRunning, lifecycle.PhaseResumable:
@@ -502,7 +505,7 @@ func (s *workerAPIServer) prepareQuestionAnswerMount(ctx context.Context) (*work
 	if err != nil {
 		return nil, fmt.Errorf("read clarification source attempt manifest: %w", err)
 	}
-	if manifest.RunID != s.scope.RunID || manifest.AttemptID != value.AttemptID || manifest.Stage != "analyst" {
+	if manifest.RunID != s.scope.RunID || manifest.AttemptID != value.AttemptID || manifest.Stage != value.FromStage {
 		return nil, errors.New("clarification source manifest identity mismatch")
 	}
 	hasQuestions := false

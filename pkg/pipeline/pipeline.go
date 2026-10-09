@@ -642,15 +642,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				if err != nil {
 					return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
 				}
-				if recoveredClarification == nil && runCfg.retryFrom != "analyst" {
-					recoveredClarification, err = recoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom)
-					if err != nil {
-						return RunResult{}, fmt.Errorf("resume clarification input: %w", err)
-					}
-				}
 			}
 		}
-		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions && resumedApproval.FromStage == "analyst" &&
+		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions &&
 			resumedApproval.ResolvedAction == "answer_questions" {
 			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
 				return RunResult{}, fmt.Errorf("resume clarification approval: %w", err)

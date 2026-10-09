@@ -81,27 +81,57 @@ func TestRecoveredQuestionApprovalRestoresGenericStageAnswer(t *testing.T) {
 	value.FromStage = "questioner"
 	value.ToStage = "questioner"
 	value.Targets["answer_questions"] = "questioner"
+	source := evidence.ReplayedAttempt{
+		AttemptID: value.AttemptID, Stage: "questioner", StageIndex: 1,
+		StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now(),
+		State: workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Decision: workflow.DecisionBlocked, Outcome: workflow.OutcomeBlocked},
+	}
+	replayed := evidence.ReplayedRun{
+		RunID: value.RunID, Attempts: []evidence.ReplayedAttempt{source},
+		ApprovalDecisions: []evidence.ReplayedApprovalDecision{{
+			Sequence: 1, ID: value.ID, SubjectHash: value.SubjectHash, AttemptID: value.AttemptID,
+			FromStage: "questioner", ToStage: "questioner", Trigger: value.Trigger, Action: value.ResolvedAction,
+		}},
+		Transitions: []evidence.ReplayedTransition{{
+			Sequence: 2, AttemptID: value.AttemptID, From: "questioner", Outcome: "blocked", EdgeTarget: "questioner",
+			Action: "answer_questions", Target: "questioner",
+		}},
+	}
+	if err := ValidateQuestionAnswerApproval(value, replayed); err != nil {
+		t.Fatalf("non-analyst question loop should validate against its source stage: %v", err)
+	}
+	completedTarget := evidence.ReplayedAttempt{
+		AttemptID: "attempt-questioner-target", Stage: "questioner", StageIndex: 1,
+		StartedAt: time.Now(), FinishedAt: time.Now().Add(time.Second),
+		State: workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Decision: workflow.DecisionNotApplicable, Outcome: workflow.OutcomePassed},
+	}
+	replayed.Attempts = append(replayed.Attempts, completedTarget)
+	if err := ValidateQuestionAnswerApproval(value, replayed); !errors.Is(err, ErrStaleQuestionApproval) {
+		t.Fatalf("completed non-analyst target should make the old answer stale, got %v", err)
+	}
+	if selected, err := RecoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{value}}, value.RunID, "questioner", replayed); selected != nil || !errors.Is(err, ErrStaleQuestionApproval) {
+		t.Fatalf("strict recovery must reject a completed non-analyst target: selected=%+v err=%v", selected, err)
+	}
+	replayed.Attempts = replayed.Attempts[:1]
+	selectedStrict, err := RecoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{value}}, value.RunID, "questioner", replayed)
+	if err != nil || selectedStrict == nil || selectedStrict.ID != value.ID {
+		t.Fatalf("strict recovery did not restore the questioner answer: selected=%+v err=%v", selectedStrict, err)
+	}
 
+	if selected, err := RecoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{value}}, value.RunID, "", replayed); err != nil || selected != nil {
+		t.Fatalf("empty stage should not recover an answer: selected=%+v err=%v", selected, err)
+	}
+	wrongKind := value
+	wrongKind.Kind = approval.KindApprove
 	invalidPayload := value
 	invalidPayload.ID = "approval-invalid-question-payload"
 	invalidPayload.Payload = []byte(`{"kind":"other"}`)
-	wrongKind := value
-	wrongKind.ID = "approval-wrong-kind"
-	wrongKind.Kind = approval.KindApprove
-
-	store := questionApprovalList{values: []approval.PendingApproval{value, wrongKind, invalidPayload}}
-	if selected, err := recoveredQuestionApproval(store, value.RunID, ""); err != nil || selected != nil {
-		t.Fatalf("empty stage should not recover an answer: selected=%+v err=%v", selected, err)
-	}
-	selected, err := recoveredQuestionApproval(store, value.RunID, "questioner")
+	selected, err := RecoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{invalidPayload, wrongKind, value}}, value.RunID, "questioner", replayed)
 	if err != nil || selected == nil || selected.ID != value.ID || questionAnswer(selected.Decisions) != "resume answer" {
 		t.Fatalf("generic questioner answer was not recovered: selected=%+v err=%v", selected, err)
 	}
-
-	withoutAnswer := value
-	withoutAnswer.Decisions = nil
-	if selected, err := recoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{withoutAnswer}}, value.RunID, "questioner"); err == nil || selected != nil {
-		t.Fatalf("resolved generic approval without a durable answer was accepted: selected=%+v err=%v", selected, err)
+	if selected, err := RecoveredQuestionApproval(questionApprovalList{values: []approval.PendingApproval{value}}, value.RunID, "analyst", replayed); err != nil || selected != nil {
+		t.Fatalf("questioner answer was recovered into a different stage: selected=%+v err=%v", selected, err)
 	}
 }
 

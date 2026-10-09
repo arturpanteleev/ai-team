@@ -48,6 +48,20 @@ type apiApprovalStore struct {
 	createCalls int
 }
 
+type humanArtifactApprovalController struct{ *approval.Store }
+
+func (c humanArtifactApprovalController) Approvals(runID string) ([]approval.PendingApproval, error) {
+	return c.List(runID)
+}
+
+func workerAPIApprovalListCall(port *workerAPIPort, runID string, out *[]approval.PendingApproval) error {
+	values, err := (&workerAPIApprovals{port: port}).List(runID)
+	if err == nil && out != nil {
+		*out = values
+	}
+	return err
+}
+
 func TestWorkerAPIStoresAttemptManifestThroughScopedControllerPort(t *testing.T) {
 	target := t.TempDir()
 	socket := filepath.Join(string(filepath.Separator)+"tmp", fmt.Sprintf("ai-team-attempt-api-%d.sock", os.Getpid()))
@@ -522,10 +536,20 @@ func TestWorkerAPIValidatesHumanSubmissionManifestAgainstApproval(t *testing.T) 
 		Decisions: []approval.Decision{{ApprovalID: approvalID, ActorID: "dev-1", ActorRole: "developer", Action: "submit",
 			Comment: content, Description: "done", SubmissionVersion: 2, ContentSHA256: digestText, SubjectHash: strings.Repeat("d", 64)}},
 	}
-	server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
+	target := t.TempDir()
+	rel := "attempts/attempt-writer-1/artifacts/feature/result.md"
+	outputPath := filepath.Join(target, ".ai-team", "runs", runID, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
 	manifest := evidence.AttemptManifest{RunID: runID, AttemptID: "attempt-writer-1", Stage: "writer", Executor: "human",
 		ActorID: "dev-1", ActorRole: "developer", HumanInputApprovalID: approvalID, HumanSubmissionVersion: 2,
 		HumanSubmissionSHA256: digestText, HumanSubmissionResult: "md", HumanSubmissionDescription: "done",
+		Outputs: []evidence.ArtifactRecord{{Name: "result", Type: "file", EvidencePath: rel, Size: int64(len(content)), SHA256: digestText}},
 	}
 	if err := server.validateHumanSubmissionManifest(manifest); err != nil {
 		t.Fatalf("matching attempt manifest was rejected: %v", err)
@@ -533,6 +557,68 @@ func TestWorkerAPIValidatesHumanSubmissionManifestAgainstApproval(t *testing.T) 
 	manifest.HumanSubmissionVersion++
 	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
 		t.Fatal("attempt manifest with a version different from its approval was accepted")
+	}
+	manifest.HumanSubmissionVersion--
+	manifest.Outputs[0].SHA256 = strings.Repeat("f", 64)
+	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+		t.Fatal("forged attempt output digest was accepted")
+	}
+	manifest.Outputs[0].SHA256 = digestText
+	if err := os.WriteFile(outputPath, []byte("forged output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+		t.Fatal("forged attempt artifact bytes were accepted")
+	}
+}
+
+func TestWorkerAPIApproveManifestBindsCanonicalDecisionOutput(t *testing.T) {
+	const runID, approvalID, attemptID = "approve-output-binding", "approval-approve-output", "attempt-intent-1"
+	decidedAt := time.Date(2026, 10, 8, 12, 30, 0, 0, time.UTC)
+	comment := "Approved with the requested changes."
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "intent", Result: "approve", OutputName: "approval", OutputPath: "feature/human/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := approval.Decision{ApprovalID: approvalID, ActorID: "owner@example.com", ActorRole: "bo", Action: "approve",
+		Comment: comment, Description: "  shipped  ", SubmissionVersion: 1, ContentSHA256: humanartifact.Digest([]byte(comment)),
+		SubjectHash: strings.Repeat("b", 64), DecidedAt: decidedAt}
+	value := approval.PendingApproval{Kind: approval.KindInput, RunID: runID, ID: approvalID, FromStage: "intent", ToStage: "intent",
+		Trigger: "human_input", SubjectHash: decision.SubjectHash, RequiredRoles: []string{"bo"}, Actions: []string{"approve"},
+		Status: approval.StatusResolved, ResolvedAction: "approve", Payload: payload, Decisions: []approval.Decision{decision}}
+	expected, err := humanartifact.ApprovalResultContent("intent", decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	rel := "attempts/" + attemptID + "/artifacts/feature/human/intent.json"
+	artifact := filepath.Join(target, ".ai-team", "runs", runID, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, expected, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := humanartifact.Digest(expected)
+	manifest := evidence.AttemptManifest{RunID: runID, AttemptID: attemptID, Stage: "intent", Executor: "human", ActorID: decision.ActorID,
+		ActorRole: decision.ActorRole, HumanInputApprovalID: approvalID, HumanSubmissionVersion: 1, HumanSubmissionSHA256: decision.ContentSHA256,
+		HumanSubmissionResult: "approve", HumanSubmissionDescription: decision.Description,
+		Outputs: []evidence.ArtifactRecord{{Name: "approval", Type: "file", EvidencePath: rel, Size: int64(len(expected)), SHA256: digest}}}
+	server := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target},
+		approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
+	if err := server.validateHumanSubmissionManifest(manifest); err != nil {
+		t.Fatalf("matching approved decision output was rejected: %v", err)
+	}
+	manifest.Outputs[0].SHA256 = strings.Repeat("f", 64)
+	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+		t.Fatal("forged approve output digest was accepted")
+	}
+	manifest.Outputs[0].SHA256 = digest
+	if err := os.WriteFile(artifact, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+		t.Fatal("approve artifact bytes that differ from the durable decision were accepted")
 	}
 }
 
@@ -620,9 +706,19 @@ func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 	})
 
 	t.Run("attempt manifest rejects invalid approval bindings", func(t *testing.T) {
+		target := t.TempDir()
+		artifactRel := "attempts/attempt-writer-1/artifacts/result.md"
+		artifactPath := filepath.Join(target, ".ai-team", "runs", runID, filepath.FromSlash(artifactRel))
+		if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(artifactPath, []byte("# Result\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		baseManifest := evidence.AttemptManifest{RunID: runID, AttemptID: "attempt-writer-1", Stage: "writer", Executor: "human",
 			ActorID: "dev-1", ActorRole: "developer", HumanInputApprovalID: approvalID, HumanSubmissionVersion: 2,
-			HumanSubmissionSHA256: humanartifact.Digest([]byte("# Result\n")), HumanSubmissionResult: "md", HumanSubmissionDescription: "  "}
+			HumanSubmissionSHA256: humanartifact.Digest([]byte("# Result\n")), HumanSubmissionResult: "md", HumanSubmissionDescription: "  ",
+			Outputs: []evidence.ArtifactRecord{{Name: "result", Type: "file", EvidencePath: artifactRel, Size: int64(len("# Result\n")), SHA256: humanartifact.Digest([]byte("# Result\n"))}}}
 		cases := []struct {
 			name      string
 			noStore   bool
@@ -672,7 +768,7 @@ func TestWorkerAPIHumanSubmissionValidatorsRejectInvalidBindings(t *testing.T) {
 					store = makeStore(value)
 					store.loadErr = test.loadError
 				}
-				server := &workerAPIServer{scope: workerAPIScope{RunID: runID}}
+				server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}}
 				if store != nil {
 					server.approvals = store
 				}
@@ -4055,8 +4151,8 @@ func TestWorkerControllerAPIUsesPrivateUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var approvals []approval.PendingApproval
-	if err := port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals); err != nil {
+	approvals, err := (&workerAPIApprovals{port: port}).List(job.RunID)
+	if err != nil {
 		t.Fatalf("scoped API call over unix socket failed: %v", err)
 	}
 	if len(approvals) != 0 {
@@ -4065,6 +4161,120 @@ func TestWorkerControllerAPIUsesPrivateUnixSocket(t *testing.T) {
 	server.close()
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("API socket remained after server close: %v", err)
+	}
+}
+
+func TestWorkerAPIResumeLoadsLargeHumanSubmissionOverUnixSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain worker API transport is used only by Linux bubblewrap")
+	}
+	const runID = "large-human-submission-resume"
+	target := t.TempDir()
+	approvals, err := approval.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := evidence.ControllerEventStore{TargetDir: target}
+	if err := eventLog.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	runEvidence, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "large-human-submission", TargetDir: target, StartedAt: time.Now().UTC(),
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runEvidence.Append(evidence.Event{Type: "run_started", Timestamp: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	largeContent := strings.Repeat("# submitted markdown\n", (workerAPIMaxBody/(len("# submitted markdown\n")))+16)
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Create(approval.PendingApproval{Kind: approval.KindInput, RunID: runID, AttemptID: "attempt-request", FromStage: "writer", ToStage: "writer",
+		Trigger: "human_input", SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"submit", "reject"}, Targets: map[string]string{"submit": "writer", "reject": "writer"}, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted, err := artifactStore.Submit(humanArtifactApprovalController{Store: approvals}, runID, humanartifact.SubmissionCommand{
+		StageID: "writer", Result: "md", Content: largeContent, Description: "complete", ActorID: "writer@example.com", ActorRole: "developer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitted.Approval.ID != pending.ID || len(submitted.Approval.Decisions[0].Comment) <= workerAPIMaxBody {
+		t.Fatalf("fixture did not persist markdown larger than the generic RPC cap: approval=%s bytes=%d", submitted.Approval.ID, len(submitted.Approval.Decisions[0].Comment))
+	}
+
+	// Additional large comments force approval.list to return multiple bounded
+	// pages rather than serializing the complete run history in one response.
+	for index := 0; index < 3; index++ {
+		stageID := fmt.Sprintf("reviewer-%d", index)
+		comment := strings.Repeat(string(rune('a'+index)), 400<<10)
+		input, marshalErr := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: stageID, Result: "md", OutputName: "result", OutputPath: stageID + ".md"})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		value, createErr := approvals.Create(approval.PendingApproval{Kind: approval.KindInput, RunID: runID, AttemptID: "request-" + stageID, FromStage: stageID, ToStage: stageID,
+			Trigger: "human_input", SubjectHash: strings.Repeat(string(rune('b'+index)), 64), RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny,
+			Actions: []string{"submit", "reject"}, Targets: map[string]string{"submit": stageID, "reject": stageID}, Payload: input})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		_, decideErr := approvals.Decide(runID, value.ID, approval.Decision{ActorID: "reviewer@example.com", ActorRole: "developer", Action: "submit",
+			Comment: comment, SubmissionVersion: 1, ContentSHA256: humanartifact.Digest([]byte(comment)), SubjectHash: value.SubjectHash})
+		if decideErr != nil {
+			t.Fatal(decideErr)
+		}
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "ai-team-large-approval-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("d", ExecutionIDBytes*2)}
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteApprovals := &workerAPIApprovals{port: port}
+	resumed, err := remoteApprovals.Load(runID, submitted.Approval.ID)
+	if err != nil {
+		t.Fatalf("resume load of >1MiB human input failed: %v", err)
+	}
+	if got := resumed.Decisions[0].Comment; got != largeContent {
+		t.Fatalf("resume load changed large input bytes: got %d bytes, want %d", len(got), len(largeContent))
+	}
+	listed, err := remoteApprovals.List(runID)
+	if err != nil {
+		t.Fatalf("paged approval.list failed: %v", err)
+	}
+	if len(listed) != 4 {
+		t.Fatalf("approval list returned %d values, want 4", len(listed))
+	}
+	for _, value := range listed {
+		if value.ID == submitted.Approval.ID && value.Decisions[0].Comment != largeContent {
+			t.Fatal("paged approval list changed submitted markdown bytes")
+		}
+	}
+	if workerAPIRequestBodyLimit("approval.list", workerAPIMaxBody+1) > 0 || workerAPIRequestBodyLimit("generic", workerAPIMaxBody+1) > 0 {
+		t.Fatal("scoped read caps accidentally increased a request or generic API limit")
 	}
 }
 
@@ -4205,7 +4415,7 @@ func TestWorkerAPIClientAndDispatchRejectBadPeerResponsesAndScope(t *testing.T) 
 		})
 	}
 	large := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, strings.Repeat("x", workerAPIMaxBody+1))
+		_, _ = io.WriteString(w, strings.Repeat("x", workerAPIMaxApprovalReadResponse+1))
 	}))
 	defer large.Close()
 	largePort := &workerAPIPort{address: large.URL, token: "token", scope: api.scope, client: large.Client()}

@@ -48,17 +48,6 @@ type humanInputArtifactDigest struct {
 	SHA256 string `json:"sha256"`
 }
 
-type humanApprovalResult struct {
-	Kind        string    `json:"kind"`
-	StageID     string    `json:"stage_id"`
-	Action      string    `json:"action"`
-	ActorID     string    `json:"actor_id"`
-	ActorRole   string    `json:"actor_role"`
-	Comment     string    `json:"comment,omitempty"`
-	Description string    `json:"description,omitempty"`
-	At          time.Time `json:"at"`
-}
-
 func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string) (notifier.StageResult, error) {
 	select {
 	case <-ctx.Done():
@@ -554,15 +543,7 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 		if decision.Action != "approve" {
 			return nil, errors.New("approve stage requires approve action")
 		}
-		data, err := json.Marshal(humanApprovalResult{
-			Kind: "human_stage_result", StageID: stage.ID, Action: decision.Action,
-			ActorID: decision.ActorID, ActorRole: decision.ActorRole, Comment: decision.Comment,
-			Description: decision.Description, At: decision.DecidedAt,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return append(data, '\n'), nil
+		return humanartifact.ApprovalResultContent(stage.ID, decision)
 	default:
 		return nil, fmt.Errorf("unsupported human result type %q", stage.Result)
 	}

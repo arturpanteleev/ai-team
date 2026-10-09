@@ -327,7 +327,10 @@ outputs:
 				t.Fatalf("%s attempt output does not preserve exact submitted bytes: got=%q want=%q output_sha=%s submission_sha=%s", stageID, outputBytes, decision.Comment, outputSHA, decision.ContentSHA256)
 			}
 		} else {
-			var result humanApprovalResult
+			var result struct {
+				Comment     string `json:"comment"`
+				Description string `json:"description"`
+			}
 			if json.Unmarshal(outputBytes, &result) != nil || result.Comment != decision.Comment || result.Description != decision.Description {
 				t.Fatalf("approve attempt output lost submitted text/description: %s", outputBytes)
 			}

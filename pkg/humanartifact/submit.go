@@ -5,9 +5,36 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 )
+
+type approvalResultRecord struct {
+	Kind        string    `json:"kind"`
+	StageID     string    `json:"stage_id"`
+	Action      string    `json:"action"`
+	ActorID     string    `json:"actor_id"`
+	ActorRole   string    `json:"actor_role"`
+	Comment     string    `json:"comment,omitempty"`
+	Description string    `json:"description,omitempty"`
+	At          time.Time `json:"at"`
+}
+
+// ApprovalResultContent returns the exact immutable output for a human approve
+// result. Controller manifest validation uses the same canonical encoding as
+// the pipeline writer so the resolved decision and artifact cannot diverge.
+func ApprovalResultContent(stageID string, decision approval.Decision) ([]byte, error) {
+	data, err := json.Marshal(approvalResultRecord{
+		Kind: "human_stage_result", StageID: stageID, Action: decision.Action,
+		ActorID: decision.ActorID, ActorRole: decision.ActorRole, Comment: decision.Comment,
+		Description: decision.Description, At: decision.DecidedAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
 
 type InputApprovalController interface {
 	Approvals(runID string) ([]approval.PendingApproval, error)

@@ -1517,7 +1517,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 	workspaceAfterEventProbe := false
 	apiSocketStillUsable := false
 	if port, portErr := NewWorkerAPIPort(job); portErr == nil {
-		apiSocketStillUsable = port.call("approval.list", workerAPICall{RunID: job.RunID}, new([]approval.PendingApproval)) == nil
+		apiSocketStillUsable = workerAPIApprovalListCall(port, job.RunID, nil) == nil
 		eventLog := NewWorkerAPIEventLog(port)
 		var evidenceStore *evidence.Store
 		if runDirectoryAbsentBeforeEvidenceStart {
@@ -1546,7 +1546,7 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		eventLogDirectReadable = directReadErr == nil
 		eventLogDirectWriteSucceeded = os.WriteFile(eventPath, []byte("worker-event-forgery"), 0600) == nil
 		var approvals []approval.PendingApproval
-		apiReachable = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvals) == nil && len(approvals) == 1 && approvals[0].ID == sandboxBriefAncestorProbeApprovalID
+		apiReachable = workerAPIApprovalListCall(port, job.RunID, &approvals) == nil && len(approvals) == 1 && approvals[0].ID == sandboxBriefAncestorProbeApprovalID
 		adminControlPlaneCallRejected = isExpectedAdminControlPlaneRejection(port.call("admin.control_plane", workerAPICall{RunID: job.RunID}, nil))
 		started := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
 		usageEnvelope := metrics.Build(job.RunID, "probe", started, started.Add(time.Second), nil, 0, "completed", metrics.Usage{})
@@ -1584,20 +1584,20 @@ func TestBubblewrapWorkerProbeHelper(t *testing.T) {
 		}
 		briefAncestorRenameSucceeded, briefAPIPinnedWriteSucceeded, briefRedirectedWriteSucceeded = runBriefAncestorReplacementProbe(job.TargetDir, job.RunID, job.Task, briefs)
 		var approvalsAfterProbe []approval.PendingApproval
-		workerAPIAfterBriefAncestorProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+		workerAPIAfterBriefAncestorProbe = workerAPIApprovalListCall(port, job.RunID, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
 		visibleAfterProbe, visibleErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 		writeAfterProbeErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-brief-ancestor-probe.txt"), []byte("workspace-remains-available"), 0600)
 		workspaceAfterBriefAncestorProbe = visibleErr == nil && string(visibleAfterProbe) == "target-visible" && writeAfterProbeErr == nil
 		var eventsAfterProbe []evidence.Event
 		workspaceAfterEventReplacementProbe := true
-		workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+		workerAPIAfterEventProbe = workerAPIApprovalListCall(port, job.RunID, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
 		if eventLogAPIReadAppendSucceeded {
 			eventsAfterProbe, _ = eventLog.Read(job.RunID)
 			eventLogStateReplacementAPIPinned, eventLogTeamReplacementAPIPinned = runEventAncestorReplacementProbe(job.TargetDir, job.RunID, eventLog)
 			verifiedAfterReplacement, verifyErr := eventLog.Read(job.RunID)
 			eventLogAPIReadAppendSucceeded = verifyErr == nil && len(verifiedAfterReplacement) == 4 && len(eventsAfterProbe) == 2 &&
 				verifiedAfterReplacement[0].SHA256 == eventsAfterProbe[0].SHA256 && verifiedAfterReplacement[1].SHA256 == eventsAfterProbe[1].SHA256
-			workerAPIAfterEventProbe = port.call("approval.list", workerAPICall{RunID: job.RunID}, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
+			workerAPIAfterEventProbe = workerAPIApprovalListCall(port, job.RunID, &approvalsAfterProbe) == nil && len(approvalsAfterProbe) == 1 && approvalsAfterProbe[0].ID == sandboxBriefAncestorProbeApprovalID
 			visibleAfterEventReplacement, visibleReplacementErr := os.ReadFile(filepath.Join(job.TargetDir, "visible.txt"))
 			writeAfterEventReplacementErr := os.WriteFile(filepath.Join(job.TargetDir, "worker-after-event-replacement.txt"), []byte("workspace-remains-available"), 0600)
 			workspaceAfterEventReplacementProbe = visibleReplacementErr == nil && string(visibleAfterEventReplacement) == "target-visible" && writeAfterEventReplacementErr == nil

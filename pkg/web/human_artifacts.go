@@ -97,17 +97,17 @@ func (s *Server) handleSubmitHumanStage(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		actorID = session.Principal.ActorID
+		var authRole cloudidentity.Role
+		requestedRole := actorRole
 		if s.localAuth {
-			actorRole = firstRequiredRole(pending.RequiredRoles)
-		} else if actorRole == "" {
-			for _, required := range pending.RequiredRoles {
-				if session.Principal.Has(cloudidentity.Role(required)) {
-					actorRole = required
-					break
-				}
-			}
+			requestedRole = ""
 		}
-		if err := s.authorize(r, cloudidentity.PermissionDecision, cloudidentity.Role(actorRole)); err != nil {
+		actorRole, authRole, err = requiredHumanActorRole(pending.RequiredRoles, requestedRole, session.Principal)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if err := s.authorize(r, cloudidentity.PermissionDecision, authRole); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
@@ -135,6 +135,23 @@ func (s *Server) handleSubmitHumanStage(w http.ResponseWriter, r *http.Request) 
 		"submission": map[string]any{"version": result.Revision.Revision, "sha256": result.Revision.SHA256,
 			"id": result.Revision.ID, "artifact_path": result.Revision.ArtifactPath},
 	})
+}
+
+// requiredHumanActorRole keeps the stage's configured function as the durable
+// approval actor role while resolving its canonical cloud role for RBAC.
+func requiredHumanActorRole(required []string, requested string, principal cloudidentity.Principal) (string, cloudidentity.Role, error) {
+	requested = strings.TrimSpace(requested)
+	for _, raw := range required {
+		functionRole, ok := cloudidentity.FunctionRole(raw)
+		if !ok || !principal.Has(functionRole) {
+			continue
+		}
+		if requested != "" && requested != raw && requested != string(functionRole) {
+			continue
+		}
+		return raw, functionRole, nil
+	}
+	return "", "", errors.New("authenticated principal has no assigned role for this stage")
 }
 
 func stageSubmissionContent(command stageSubmissionCommand) (string, error) {

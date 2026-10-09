@@ -1,4 +1,4 @@
-import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal } from './types';
+import type { PipelineRun, Stage, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 
 const API_BASE = '/api';
 
@@ -174,6 +174,26 @@ export function getRunLog(runId: string, attemptId: string): Promise<LogTail> {
 
 export function getRunWorkflow(runId: string): Promise<WorkflowSnapshot> {
   return fetchJson(`/runs/${encodeURIComponent(runId)}/workflow`);
+}
+
+export function getProjectTemplate(): Promise<ProjectTemplateResponse> {
+  return fetchJson('/template');
+}
+
+export function getTemplateVersions(): Promise<{ versions: TemplateVersion[] }> {
+  return fetchJson('/template/versions');
+}
+
+export function validateProjectTemplate(yaml: string): Promise<TemplateValidation> {
+  return command('/template/validate', { yaml });
+}
+
+export function publishProjectTemplate(yaml: string, expectedVersion: string): Promise<{ version: string }> {
+  return command('/template/publish', { yaml, expected_version: expectedVersion });
+}
+
+export function getRunTemplateVersion(runId: string): Promise<{ version: string }> {
+  return fetchJson(`/runs/${encodeURIComponent(runId)}/template-version`);
 }
 
 // Содержимое артефакта: сервер отдаёт raw text/markdown (не JSON).

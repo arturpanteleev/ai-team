@@ -22,6 +22,7 @@ import (
 	agentdata "github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -56,6 +57,13 @@ func WithRunController(controller RunController) ServerOption {
 // artifact storage may be relocated with --artifacts.
 func WithTargetDir(target string) ServerOption {
 	return func(server *Server) { server.targetDir = target }
+}
+
+// WithTemplateAgentLookup supplies the same project-aware agent registry used
+// by execution, so editor validation cannot publish references workers cannot
+// resolve.
+func WithTemplateAgentLookup(lookup config.AgentLookup) ServerOption {
+	return func(server *Server) { server.templateAgentLookup = lookup }
 }
 
 type IdentityVerifier interface {
@@ -113,23 +121,25 @@ type browserSession struct {
 }
 
 type Server struct {
-	store          *store.Store
-	humanArtifacts *humanartifact.Store
-	hub            *Hub
-	router         *chi.Mux
-	frontend       http.Handler
-	artifactRoot   string // абсолютный корень артефактов; всё вне него не отдаётся
-	targetDir      string // canonical project/control root; independent of artifactRoot
-	runRoot        string // immutable .ai-team/runs root
-	httpServer     *http.Server
-	cancelEvents   context.CancelFunc
-	eventWorkers   sync.WaitGroup
-	controller     RunController
-	authenticator  IdentityVerifier
-	localAuth      bool
-	sessions       map[string]browserSession
-	sessionMu      sync.Mutex
-	streamID       string
+	store               *store.Store
+	humanArtifacts      *humanartifact.Store
+	hub                 *Hub
+	router              *chi.Mux
+	frontend            http.Handler
+	artifactRoot        string // абсолютный корень артефактов; всё вне него не отдаётся
+	targetDir           string // canonical project/control root; independent of artifactRoot
+	runRoot             string // immutable .ai-team/runs root
+	httpServer          *http.Server
+	cancelEvents        context.CancelFunc
+	eventWorkers        sync.WaitGroup
+	controller          RunController
+	templateAgentLookup config.AgentLookup
+	templateMu          sync.Mutex
+	authenticator       IdentityVerifier
+	localAuth           bool
+	sessions            map[string]browserSession
+	sessionMu           sync.Mutex
+	streamID            string
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -239,12 +249,17 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/runs/{runID}/artifact-revisions", srv.handleListArtifactRevisions)
 		router.Get("/api/runs/{runID}/logs/{attemptID}", srv.handleGetRunLog)
 		router.Get("/api/runs/{runID}/workflow", srv.handleGetRunWorkflow)
+		router.Get("/api/runs/{runID}/template-version", srv.handleGetRunTemplateVersion)
+		router.Get("/api/template", srv.handleGetTemplate)
+		router.Get("/api/template/versions", srv.handleGetTemplateVersions)
 		router.Get("/api/preflight", srv.handlePreflight)
 		router.Get("/api/auth/me", srv.handleCurrentIdentity)
 	})
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.writeSecurity)
 		router.Post("/api/runs", srv.handleStartRun)
+		router.Post("/api/template/validate", srv.handleValidateTemplate)
+		router.Post("/api/template/publish", srv.handlePublishTemplate)
 		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)
 		router.Post("/api/runs/{runID}/delivery/retry", srv.handleRetryDelivery)
 		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)

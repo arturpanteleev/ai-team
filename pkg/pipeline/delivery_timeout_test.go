@@ -2,12 +2,16 @@ package pipeline
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 )
 
 // hangingDeliveryService имитирует зависший `gh pr create`: команда не
@@ -59,6 +63,67 @@ func deliveryRunCfg(timeout string) *config.Config {
 	cfg := cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"})
 	cfg.DeliveryTimeout = timeout
 	return cfg
+}
+
+func pinnedDeliveryTemplate(timeout string) *config.Config {
+	return &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		Template:        "pinned-delivery-timeout-test",
+		Title:           "Pinned delivery timeout test",
+		DeliveryTimeout: timeout,
+		Stages: []config.TemplateStage{
+			{ID: "approver", Title: "Approve", Function: "operator", Result: "approve", Executor: "agent", Agent: "approver", Confirm: "auto"},
+			{ID: "deployer", Title: "Deliver", Function: "deployer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "deployer", Confirm: "auto"},
+		},
+	}
+}
+
+func startPinnedDeliveryWithFailedHook(t *testing.T, dir, runID string) (string, *config.TemplateStore, []byte) {
+	t.Helper()
+	planHash := prepareDelivery(t, dir)
+	cfg := pinnedDeliveryTemplate("4m")
+	initialYAML, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ai-team", "config.yaml"), initialYAML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	rt := newScripted()
+	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	engine := NewRunEngine(New(cfg, deliveryRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(&gracefulDeliveryService{})))
+	if _, err := engine.Start(context.Background(), RunConfig{
+		RunID: runID, Feature: "feat", TaskDesc: "pinned delivery timeout", TargetDir: dir,
+		ApproveGates: true, ApprovePlanHash: planHash,
+	}); err == nil {
+		t.Fatal("failed post-terminal hook must leave a deferred delivery obligation")
+	}
+	store, err := config.NewTemplateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := store.ReadPinnedRun(runID); err != nil || !found {
+		t.Fatalf("run did not retain its immutable template pin: found=%t err=%v", found, err)
+	}
+	updated := *cfg
+	updated.DeliveryTimeout = "30m"
+	updatedYAML, err := updated.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish(updatedYAML, config.TemplateVersionID(initialYAML)); err != nil {
+		t.Fatalf("publish changed active template: %v", err)
+	}
+	return planHash, store, initialYAML
+}
+
+func assertPinnedFourMinuteDeadline(t *testing.T, probe *deadlineProbeDeliveryService) {
+	t.Helper()
+	if !probe.hasDeadline || probe.ctxErr != nil || probe.remaining <= 3*time.Minute || probe.remaining > 4*time.Minute {
+		t.Fatalf("deferred delivery used deadline %v (has=%t err=%v), want original pinned 4m rather than newly published 30m",
+			probe.remaining, probe.hasDeadline, probe.ctxErr)
+	}
 }
 
 // QS-06. Post-terminal доставка обязана иметь СОБСТВЕННЫЙ дедлайн, а не
@@ -186,6 +251,43 @@ func TestDeliverDeferredAbortsOnDeliveryTimeout(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("QS-06: DeliverDeferred не ограничен по времени")
 	}
+}
+
+func TestRunEngineManualRetryUsesPinnedDeliveryTimeoutAfterPublish(t *testing.T) {
+	dir := env(t)
+	planHash, _, _ := startPinnedDeliveryWithFailedHook(t, dir, "manual-pinned-timeout")
+	probe := &deadlineProbeDeliveryService{}
+	// This is the CLI configuration: the command starts with a default config
+	// and no registry, so it must resolve and validate the published run pin.
+	cliEngine := NewRunEngine(New(nil, nil, WithDeliveryService(probe), WithDeliveryApprovalHash(planHash)))
+	if _, err := cliEngine.DeliverDeferredForFeature(context.Background(), "manual-pinned-timeout", "", dir); err != nil {
+		t.Fatalf("manual deferred retry through default CLI engine: %v", err)
+	}
+	assertPinnedFourMinuteDeadline(t, probe)
+}
+
+func TestRunEngineReconcileUsesPinnedDeliveryTimeoutAfterPublish(t *testing.T) {
+	dir := env(t)
+	runID := "reconcile-pinned-timeout"
+	planHash, _, _ := startPinnedDeliveryWithFailedHook(t, dir, runID)
+	runDir := filepath.Join(dir, ".ai-team", "runs", runID)
+	copyRunAttemptManifestsToControllerStore(t, dir, runDir, runID)
+	approvalStore, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventSource := evidence.ControllerEventStore{TargetDir: dir}
+	if err := eventSource.MigrateLegacy(runID, runDir); err != nil {
+		t.Fatal(err)
+	}
+	probe := &deadlineProbeDeliveryService{}
+	recoveryEngine := NewRunEngine(New(nil, nil,
+		WithApprovalStore(approvalStore), WithEventLogSource(eventSource),
+		WithDeliveryService(probe), WithDeliveryApprovalHash(planHash)))
+	if err := recoveryEngine.ReconcileTerminalDelivery(context.Background(), runID, dir); err != nil {
+		t.Fatalf("reconcile deferred delivery through pinned run engine: %v", err)
+	}
+	assertPinnedFourMinuteDeadline(t, probe)
 }
 
 // Дефолт delivery_timeout должен быть щедрым: доставка до живого remote

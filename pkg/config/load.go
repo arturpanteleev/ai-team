@@ -14,6 +14,15 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseYAML(data)
+}
+
+// ParseYAML strictly decodes one project config from bytes, using the same
+// field and document checks as Load. Web validation uses this before publish.
+func ParseYAML(data []byte) (*Config, error) {
+	if len(data) == 0 || len(data) > MaxTemplateYAMLBytes {
+		return nil, fmt.Errorf("config YAML должен занимать от 1 до %d bytes", MaxTemplateYAMLBytes)
+	}
 	var cfg Config
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)

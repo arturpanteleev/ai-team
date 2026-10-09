@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -71,6 +72,22 @@ func TestDeliverDeferredUsesEvidenceRunIDValidationBeforePaths(t *testing.T) {
 		if _, err := controller.DeliverDeferred(context.Background(), runID); err == nil || !strings.Contains(err.Error(), "invalid run id") {
 			t.Errorf("DeliverDeferred(%q) = %v, want shared run ID rejection", runID, err)
 		}
+	}
+}
+
+func TestDeliverDeferredUsesInjectedPinnedAwareRunner(t *testing.T) {
+	target := t.TempDir()
+	var gotRunID, gotTarget string
+	controller, err := New(&fakeEngine{}, target, WithDeferredDelivery(func(_ context.Context, runID, targetDir string) (delivery.TerminalRecord, error) {
+		gotRunID, gotTarget = runID, targetDir
+		return delivery.TerminalRecord{RunID: runID, CommitSHA: strings.Repeat("c", 40)}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := controller.DeliverDeferred(context.Background(), "pinned-run")
+	if err != nil || record.RunID != "pinned-run" || gotRunID != "pinned-run" || gotTarget != target {
+		t.Fatalf("deferred delivery bypassed pinned-aware runner: record=%+v run=%q target=%q err=%v", record, gotRunID, gotTarget, err)
 	}
 }
 

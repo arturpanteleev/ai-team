@@ -84,6 +84,7 @@ const (
 	PermissionDeliver      Permission = "run:deliver"
 	PermissionDecision     Permission = "approval:decide"
 	PermissionArtifactEdit Permission = "artifact:edit"
+	PermissionTemplateEdit Permission = "template:edit"
 	PermissionTeamManage   Permission = "team:manage"
 )
 
@@ -104,6 +105,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 	case PermissionArtifactEdit:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect) ||
 			principal.Has(RoleReviewer) || principal.Has(RoleQA)
+	case PermissionTemplateEdit:
+		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect)
 	case PermissionTeamManage:
 		allowed = principal.Has(RoleProductOwner)
 	default:

@@ -400,7 +400,7 @@ func cmdWorker() {
 		}
 		fatal("Worker agent registry: %v", err)
 	}
-	cfg := loadValidatedConfig(target, reg)
+	cfg := loadWorkerTemplateConfig(target, job, reg)
 	if job.Operation != worker.OperationCancel {
 		report := preflight.New(cfg, reg, target).Check(context.Background())
 		if !report.Ready {
@@ -1127,6 +1127,81 @@ func loadValidatedConfig(target string, reg *agent.Registry) *config.Config {
 		fatal("%v", err)
 	}
 	return cfg
+}
+
+func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry) *config.Config {
+	if job.Operation == worker.OperationCancel {
+		return loadValidatedConfig(target, reg)
+	}
+	if _, overridden := e2eInMemoryLegacyConfig(target); overridden {
+		// The E2E fixture deliberately supplies an in-memory legacy workflow; it
+		// must remain aligned with the matching test registry/runtime override.
+		return loadValidatedConfig(target, reg)
+	}
+	store, err := config.NewTemplateStore(target)
+	if err != nil {
+		fatal("Template pin store: %v", err)
+	}
+	data, _, found, err := store.ReadPinnedRun(job.RunID)
+	if err != nil {
+		fatal("Template task pin: %v", err)
+	}
+	if !found && (job.Operation == worker.OperationStart || job.Operation == worker.OperationRecover) {
+		if _, pinErr := store.PinCurrentForRun(job.RunID, job.RunID); pinErr == nil {
+			data, _, found, err = store.ReadPinnedRun(job.RunID)
+			if err != nil || !found {
+				fatal("Template task pin could not be read: %v", err)
+			}
+		} else if !errors.Is(pinErr, os.ErrNotExist) {
+			fatal("Template task pin: %v", pinErr)
+		}
+	}
+	if !found {
+		// Compatibility for legacy workspaces and in-memory E2E configurations.
+		return loadValidatedConfig(target, reg)
+	}
+	cfg, err := config.ParseYAML(data)
+	if err != nil {
+		fatal("Pinned template YAML: %v", err)
+	}
+	if err := cfg.Validate(reg); err != nil {
+		fatal("Pinned template validation: %v", err)
+	}
+	return cfg
+}
+
+type projectTemplatePreflight struct {
+	target string
+	reg    *agent.Registry
+}
+
+func (p projectTemplatePreflight) Check(ctx context.Context) preflight.Report {
+	store, err := config.NewTemplateStore(p.target)
+	if err != nil {
+		return templatePreflightFailure(err)
+	}
+	data, _, err := store.ReadCurrent()
+	if err != nil {
+		return templatePreflightFailure(err)
+	}
+	cfg, err := config.ParseYAML(data)
+	if err == nil {
+		err = cfg.Validate(p.reg)
+	}
+	if err != nil {
+		return templatePreflightFailure(err)
+	}
+	return preflight.New(cfg, p.reg, p.target).Check(ctx)
+}
+
+func templatePreflightFailure(err error) preflight.Report {
+	report := preflight.Report{
+		Ready: false, CheckedAt: time.Now().UTC(), Checks: []preflight.Check{{
+			ID: "template", Status: preflight.StatusFailed, Required: true, Message: err.Error(),
+		}},
+	}
+	report.Readiness = preflight.ReadinessOf(report)
+	return report
 }
 
 func cmdRun() {
@@ -2040,7 +2115,10 @@ func cmdWeb() {
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
 		pipeline.WithApprovalStore(approvalStore),
 		pipeline.WithControllerReadDenyPaths(*dbPath)))
-	controllerOptions := []control.Option{control.WithApprovalStore(approvalStore)}
+	controllerOptions := []control.Option{
+		control.WithApprovalStore(approvalStore),
+		control.WithDeferredDelivery(localEngine.DeliverDeferred),
+	}
 	var runController *control.Controller
 	var schedulerQueue *scheduler.Queue
 	if *schedulerDB != "" {
@@ -2075,16 +2153,18 @@ func cmdWeb() {
 		if processErr != nil {
 			fatal("Ошибка worker launcher: %v", processErr)
 		}
-		controllerOptions = append(controllerOptions, control.WithPreflight(preflight.New(cfg, reg, target)))
+		controllerOptions = append(controllerOptions, control.WithPreflight(projectTemplatePreflight{target: target, reg: reg}))
 		runController, err = control.New(processEngine, target, controllerOptions...)
 	} else {
-		controllerOptions = append(controllerOptions, control.WithPreflight(preflight.New(cfg, reg, target)))
+		controllerOptions = append(controllerOptions, control.WithPreflight(projectTemplatePreflight{target: target, reg: reg}))
 		runController, err = control.New(localEngine, target, controllerOptions...)
 	}
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)
 	}
-	serverOptions := []web.ServerOption{web.WithRunController(runController), web.WithTargetDir(target)}
+	serverOptions := []web.ServerOption{
+		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
+	}
 	cloudAuthEnabled := false
 	var localWebToken, localWebTokenPath string
 	if secret := os.Getenv(*authSecretEnv); secret != "" {

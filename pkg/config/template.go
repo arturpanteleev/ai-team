@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -440,11 +441,26 @@ func generatedApproval(function, primary string, actions map[string]string) *wor
 	if actions == nil {
 		actions = map[string]string{"approve": primary, "reject": workflow.TerminalStop}
 	}
-	role := function
+	role := cloudRoleForFunction(function)
 	if role == "" {
 		role = "operator"
 	}
 	return &workflow.ApprovalPolicy{Roles: []string{role}, Quorum: "any", Actions: actions}
+}
+
+func cloudRoleForFunction(function string) string {
+	switch strings.TrimSpace(strings.ToLower(function)) {
+	case "bo", "po":
+		return string(cloudidentity.RoleProductOwner)
+	case "deployer":
+		return string(cloudidentity.RoleReleaseManager)
+	default:
+		roles, err := cloudidentity.ParseRoles([]string{function})
+		if err != nil {
+			return function
+		}
+		return string(roles[0])
+	}
 }
 
 func stageFunction(stages []TemplateStage, id string) string {

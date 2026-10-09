@@ -49,6 +49,16 @@ func TestPrincipalRolesAndRBAC(t *testing.T) {
 	if err := Authorize(principal, PermissionStart, ""); err == nil {
 		t.Fatal("release manager не должен создавать run")
 	}
+	if err := Authorize(principal, PermissionTemplateEdit, ""); err == nil {
+		t.Fatal("release manager не должен менять шаблон")
+	}
+	architect, err := NewPrincipal("architect-1", []Role{RoleArchitect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Authorize(architect, PermissionTemplateEdit, ""); err != nil {
+		t.Fatalf("architect должен менять шаблон: %v", err)
+	}
 	if err := Authorize(principal, PermissionDecision, RoleQA); err == nil {
 		t.Fatal("нельзя принимать решение от чужой роли")
 	}

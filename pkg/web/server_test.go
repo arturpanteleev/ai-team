@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1993,6 +1994,67 @@ func TestSameOriginMiddlewareAllowsLoopbackRequests(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("loopback host %q must not be rejected, got 403", host)
 		}
+	}
+}
+
+func TestSameOriginMiddlewareRequiresMatchingSchemeHostAndEffectivePort(t *testing.T) {
+	handler := sameOriginMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	tests := []struct {
+		name   string
+		host   string
+		origin string
+		tls    bool
+		want   int
+	}{
+		{name: "rejects another local port", host: "localhost:8080", origin: "http://localhost:3000", want: http.StatusForbidden},
+		{name: "accepts exact origin", host: "localhost:8080", origin: "http://localhost:8080", want: http.StatusNoContent},
+		{name: "accepts implicit HTTP default port", host: "localhost", origin: "http://localhost:80", want: http.StatusNoContent},
+		{name: "accepts explicit HTTP default port", host: "localhost:80", origin: "http://localhost", want: http.StatusNoContent},
+		{name: "rejects wrong scheme", host: "localhost:443", origin: "https://localhost:443", want: http.StatusForbidden},
+		{name: "accepts implicit HTTPS default port", host: "localhost:443", origin: "https://localhost", tls: true, want: http.StatusNoContent},
+		{name: "rejects HTTP origin on HTTPS request", host: "localhost:443", origin: "http://localhost:443", tls: true, want: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+			req.Host = tt.host
+			if tt.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			req.Header.Set("Origin", tt.origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status = %d, want %d", w.Code, tt.want)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedOriginMiddlewareStillRequiresSameOrigin(t *testing.T) {
+	handler := authenticatedOriginMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tt := range []struct {
+		name   string
+		origin string
+		want   int
+	}{
+		{name: "different port rejected", origin: "http://app.example:3000", want: http.StatusForbidden},
+		{name: "same origin accepted", origin: "http://app.example:8080", want: http.StatusNoContent},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://app.example:8080/", nil)
+			req.Header.Set("Origin", tt.origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status = %d, want %d", w.Code, tt.want)
+			}
+		})
 	}
 }
 

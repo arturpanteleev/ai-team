@@ -2343,69 +2343,75 @@ func TestRun_DeliveryApprovalPersistedAndResumable(t *testing.T) {
 	}
 }
 
-func TestRun_DeliveryApprovalSurvivesSamePlanResumeAttempt(t *testing.T) {
-	dir := env(t)
-	prepareDelivery(t, dir)
-	rt := newScripted()
-	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
-	service := &fakeDeliveryService{}
-	p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
-		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service))
+func TestRun_DeliveryApprovalAfterRestartRequiresCurrentAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		trustedStore  bool
+		wantExecution bool
+	}{
+		{name: "resolved filesystem record is not authority"},
+		{name: "authenticated controller database decision", trustedStore: true, wantExecution: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := env(t)
+			prepareDelivery(t, dir)
+			rt := newScripted()
+			rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+			service := &fakeDeliveryService{}
+			var store ApprovalStore
+			if test.trustedStore {
+				if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				db, err := approval.NewSQLiteStore(filepath.Join(dir, ".ai-team", "web.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				store = db
+			} else {
+				fileStore, err := approval.NewStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = fileStore
+			}
+			p := New(cfgFor(config.AgentConfig{Name: "approver"}, config.AgentConfig{Name: "deployer"}), deliveryRegistry(),
+				WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithDeliveryService(service), WithApprovalStore(store))
 
-	err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
-	var approvalErr *ApprovalRequiredError
-	if !errors.As(err, &approvalErr) || approvalErr.ApprovalID == "" {
-		t.Fatalf("first delivery attempt must wait for a persisted human decision, got: %v", err)
-	}
-	store, err := approval.NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := store.Load(approvalErr.RunID, approvalErr.ApprovalID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Decide(value.RunID, value.ID, approval.Decision{
-		ActorID: "release-manager-1", ActorRole: deliveryApprovalRole,
-		Action: "approve", SubjectHash: value.SubjectHash,
-	}); err != nil {
-		t.Fatal(err)
-	}
+			err := p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "t", TargetDir: dir, ApproveGates: true})
+			var required *ApprovalRequiredError
+			if !errors.As(err, &required) || required.ApprovalID == "" {
+				t.Fatalf("first delivery attempt must wait for a decision, got: %v", err)
+			}
+			value, err := store.Load(required.RunID, required.ApprovalID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Decide(value.RunID, value.ID, approval.Decision{
+				ActorID: "release-manager-1", ActorRole: deliveryApprovalRole,
+				Action: "approve", SubjectHash: value.SubjectHash,
+			}); err != nil {
+				t.Fatal(err)
+			}
 
-	// The resume reruns the delivery planner under a fresh stage AttemptID.
-	// Its exact persisted decision must survive that retry without asking the
-	// release manager to approve the same plan again.
-	err = p.Run(context.Background(), RunConfig{ResumeRunID: approvalErr.RunID, TargetDir: dir})
-	if err != nil {
-		t.Fatalf("resume of the same approved delivery plan must finish without another approval loop: %v", err)
-	}
-	if service.calls != 1 {
-		t.Fatalf("same approved plan should execute exactly once after resume, got %d executions", service.calls)
-	}
-	runDir := onlyRunDir(t, dir)
-	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), approvalErr.RunID)
-	if err != nil {
-		t.Fatalf("same-plan approval replay must leave a valid event chain: %v", err)
-	}
-	foundReuse := false
-	for _, event := range events {
-		if event.Type == "delivery_plan_approved" && event.Data["reused"] == true &&
-			event.Data["mode"] == "resolved_approval" {
-			foundReuse = true
-			break
-		}
-	}
-	if !foundReuse {
-		t.Fatalf("same-plan resume must record the canonical approval mode and reuse fact: events=%+v", events)
-	}
-	resolved, err := store.Load(value.RunID, value.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.Status != approval.StatusResolved || resolved.ResolvedAction != "approve" ||
-		len(resolved.Decisions) != 1 || resolved.Decisions[0].ActorID != "release-manager-1" ||
-		resolved.Decisions[0].ActorRole != deliveryApprovalRole {
-		t.Fatalf("resume must retain the exact saved release-manager decision: %+v", resolved)
+			err = p.Run(context.Background(), RunConfig{ResumeRunID: required.RunID, TargetDir: dir})
+			if test.wantExecution {
+				if err != nil {
+					t.Fatalf("authenticated controller decision should resume delivery: %v", err)
+				}
+				if service.calls != 1 {
+					t.Fatalf("trusted database approval should execute once, got %d", service.calls)
+				}
+			} else {
+				if !errors.As(err, &required) {
+					t.Fatalf("resolved JSON approval must still require current --approve-plan, got: %v", err)
+				}
+				if service.calls != 0 {
+					t.Fatalf("filesystem approval must not execute delivery, calls=%d", service.calls)
+				}
+			}
+		})
 	}
 }
 

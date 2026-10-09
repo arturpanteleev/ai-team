@@ -33,8 +33,17 @@ MUST требовать approval точного SHA-256 canonical plan.
 - **ТОГДА** controller MUST создать persisted approval с `trigger: delivery_plan`,
   subject = SHA-256 canonical plan и ролью release_manager
 - **И** canonical JSON плана MUST быть доступен в payload approval для web-решения
-- **И** решение MUST приниматься через decision transport, либо `--resume` с
-  совпадающим `--approve-plan`, который записывает exact-subject decision
+- **И** решение MUST приниматься через аутентифицированный controller decision
+  transport, либо `--resume` с совпадающим `--approve-plan`, который записывает
+  exact-subject decision
+
+#### Scenario: Файловое решение не авторизует delivery после перезапуска
+- **КОГДА** local CLI возобновляет run с `resolved` delivery approval из
+  filesystem store без `--approve-plan` в текущем процессе
+- **ТОГДА** controller MUST остановиться до commit, push или PR и потребовать
+  явное подтверждение точного плана
+- **И** только совпадающий `--approve-plan` текущего процесса или решение
+  аутентифицированного controller из SQLite store MAY продолжить delivery
 
 ### Requirement: Edge approval gate
 

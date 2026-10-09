@@ -343,7 +343,7 @@ func (s ControllerEventStore) OpenReserved(runID string) (*PinnedControllerEvent
 		return nil, errors.Join(fmt.Errorf("reserved event log is unavailable: %w", err), closeControllerEventFD(runFD),
 			closeControllerEventFD(reservationFD), closeControllerEventFD(reservationRootFD))
 	}
-	log := &PinnedControllerEventLog{runID: runID, eventFD: eventFD, runDirFD: runFD, reservationFD: reservationFD, reservationRootFD: reservationRootFD}
+	log := &PinnedControllerEventLog{runID: runID, targetDir: s.TargetDir, eventFD: eventFD, runDirFD: runFD, reservationFD: reservationFD, reservationRootFD: reservationRootFD}
 	if _, err := log.Read(runID); err != nil {
 		_ = log.Close()
 		return nil, err
@@ -439,11 +439,21 @@ func (s ControllerEventStore) Append(runID string, event Event, expectedSequence
 	return log.Append(runID, event, expectedSequence, expectedPreviousSHA256)
 }
 
+func (s ControllerEventStore) AppendControllerEvent(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error) {
+	log, err := s.OpenReserved(runID)
+	if err != nil {
+		return Event{}, err
+	}
+	defer closePinnedEventLogQuietly(log)
+	return log.AppendControllerEvent(runID, event, expectedSequence, expectedPreviousSHA256)
+}
+
 // PinnedControllerEventLog holds the event and reservation authority by open
 // descriptors. It remains bound to the original inodes if a worker replaces
 // any workspace pathname ancestor or leaf in its mount namespace.
 type PinnedControllerEventLog struct {
 	runID             string
+	targetDir         string
 	eventFD           int
 	runDirFD          int
 	reservationFD     int
@@ -571,6 +581,26 @@ func (l *PinnedControllerEventLog) Append(runID string, event Event, expectedSeq
 		return Event{}, err
 	}
 	return event, nil
+}
+
+func (l *PinnedControllerEventLog) AppendControllerEvent(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error) {
+	if l == nil || l.runID != runID || l.reservationFD < 0 {
+		return Event{}, errors.New("controller event append identity mismatch")
+	}
+	events, err := l.Read(runID)
+	if err != nil {
+		return Event{}, err
+	}
+	runDir := filepath.Join(l.targetDir, ".ai-team", "runs", runID)
+	validated, exactRetry, err := ValidateControllerEventAppend(events, runID, runDir, event,
+		expectedSequence, expectedPreviousSHA256, ReservedAttemptManifestSource{TargetDir: l.targetDir})
+	if err != nil {
+		return Event{}, err
+	}
+	if exactRetry {
+		return validated, nil
+	}
+	return l.Append(runID, validated, expectedSequence, expectedPreviousSHA256)
 }
 
 func (l *PinnedControllerEventLog) checkRun(runID string) error {

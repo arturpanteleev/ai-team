@@ -34,6 +34,15 @@ func (l *countingEventLog) Append(runID string, event Event, expectedSequence ui
 	return l.delegate.Append(runID, event, expectedSequence, expectedPreviousSHA256)
 }
 
+func (l *countingEventLog) AppendControllerEvent(runID string, event Event, expectedSequence uint64, expectedPreviousSHA256 string) (Event, error) {
+	controllerAppender, ok := l.delegate.(controllerOnlyEventAppender)
+	if !ok {
+		return Event{}, errors.New("test event log delegate has no controller append")
+	}
+	l.appends++
+	return controllerAppender.AppendControllerEvent(runID, event, expectedSequence, expectedPreviousSHA256)
+}
+
 func TestStoreUsesInternalEventLogSeamForAppendAndResume(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
 	manifest := testRunManifest("run-event-log-port")
@@ -77,6 +86,68 @@ func TestStoreUsesInternalEventLogSeamForAppendAndResume(t *testing.T) {
 	if err != nil || replayed.StartedAt != startedAt || replayed.RunID != manifest.RunID {
 		t.Fatalf("filesystem replay=%+v err=%v", replayed, err)
 	}
+}
+
+func TestControllerOnlyDescriptionMissingUsesValidatedLocalAppend(t *testing.T) {
+	newRun := func(runID string) (*Store, time.Time) {
+		store, err := Start(filepath.Join(t.TempDir(), "runs"), testRunManifest(runID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		startedAt := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+		if err := store.Append(Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+			t.Fatal(err)
+		}
+		return store, startedAt
+	}
+	appendAttempt := func(t *testing.T, store *Store, startedAt time.Time, executor string) {
+		t.Helper()
+		data := map[string]any{"stage_index": 1, "executor": executor}
+		if executor == "human" {
+			data["actor_id"] = "writer-1"
+			data["actor_role"] = "writer"
+			data["human_input_approval_id"] = "approval-writer-1"
+		}
+		if err := store.Append(Event{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(time.Second),
+			Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	warning := func(at time.Time) Event {
+		return Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: at,
+			Data: map[string]any{"field": "description", "approval_id": "approval-writer-1"}}
+	}
+
+	t.Run("human attempt accepted, generic append rejected", func(t *testing.T) {
+		store, startedAt := newRun("run-description-human")
+		appendAttempt(t, store, startedAt, "human")
+		if err := store.Append(warning(startedAt.Add(2 * time.Second))); err == nil {
+			t.Fatal("generic event append accepted controller-only description_missing")
+		}
+		if err := store.AppendControllerEvent(warning(startedAt.Add(2 * time.Second))); err != nil {
+			t.Fatalf("controller-only event append: %v", err)
+		}
+		events, err := VerifyEventLog(filepath.Join(store.RunDir(), "events.jsonl"), store.RunID())
+		if err != nil || len(events) != 3 {
+			t.Fatalf("read controller event: events=%d err=%v", len(events), err)
+		}
+		retried, err := newFileEventLog(filepath.Join(store.RunDir(), "events.jsonl")).AppendControllerEvent(
+			store.RunID(), warning(startedAt.Add(2*time.Second)), 2, events[1].SHA256)
+		if err != nil || retried.Sequence != events[2].Sequence || retried.SHA256 != events[2].SHA256 {
+			t.Fatalf("controller append exact retry=%+v err=%v want %+v", retried, err, events[2])
+		}
+		if _, _, replayed, err := Resume(filepath.Dir(store.RunDir()), store.RunID()); err != nil || len(replayed.Attempts) != 1 || replayed.Attempts[0].Executor != "human" {
+			t.Fatalf("resume after controller event: attempts=%+v err=%v", replayed.Attempts, err)
+		}
+	})
+
+	t.Run("agent attempt rejected", func(t *testing.T) {
+		store, startedAt := newRun("run-description-agent")
+		appendAttempt(t, store, startedAt, "agent")
+		if err := store.AppendControllerEvent(warning(startedAt.Add(2 * time.Second))); err == nil {
+			t.Fatal("controller-only event accepted an agent attempt")
+		}
+	})
 }
 
 func TestCleanupInflightInputSnapshotsRemovesScratchWithoutFollowingLinks(t *testing.T) {

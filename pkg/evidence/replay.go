@@ -484,6 +484,15 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			if reasonErr != nil || strings.TrimSpace(reason) == "" {
 				return ReplayedRun{}, errors.New("resume_blocked содержит недопустимую причину")
 			}
+		case "description_missing":
+			index, exists := byID[event.AttemptID]
+			field, fieldErr := eventString(event.Data, "field", true)
+			approvalID, approvalErr := eventString(event.Data, "approval_id", true)
+			if !exists || result.Attempts[index].Stage != event.Stage || !result.Attempts[index].FinishedAt.IsZero() ||
+				result.Attempts[index].Executor != "human" || result.Attempts[index].HumanInputApprovalID != approvalID ||
+				fieldErr != nil || field != "description" || approvalErr != nil || event.Timestamp.Before(result.Attempts[index].StartedAt) {
+				return ReplayedRun{}, errors.New("description_missing does not match an active human stage attempt")
+			}
 		default:
 			// Preserve historical replay compatibility for old extension events.
 			// The worker API boundary has a separate strict allowlist, so new

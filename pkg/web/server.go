@@ -33,6 +33,7 @@ import (
 const maxArtifactSize = 10 << 20 // 10 MiB: web viewer не предназначен для больших бинарных файлов.
 const maxLogTailSize = 64 << 10
 const maxCommandBody = 64 << 10
+const maxSubmissionBody = 64 << 20 // escaped JSON for a maximum-size markdown submission plus metadata.
 const sessionCookieName = "ai_team_session"
 
 type RunController interface {
@@ -266,6 +267,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
 		router.Post("/api/runs/{runID}/stages/{stageID}/take", srv.handleTakeStage)
 		router.Post("/api/runs/{runID}/artifact-revisions", srv.handleCreateArtifactRevision)
+		router.Post("/api/runs/{runID}/stages/{stageID}/submit", srv.handleSubmitHumanStage)
 	})
 	srv.router.With(srv.readSecurity).Get("/ws", srv.handleWebSocket)
 

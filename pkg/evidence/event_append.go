@@ -30,10 +30,29 @@ func ValidateWorkerEventType(eventType string) error {
 // the controller so workers cannot validate a forged attempt_finished event
 // against a worker-visible manifest mirror.
 func ValidateEventAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource) (Event, bool, error) {
+	return validateEventAppend(events, runID, runDir, candidate, expectedSequence, expectedPreviousSHA256, manifests, false)
+}
+
+// ValidateControllerEventAppend is the controller-only lifecycle append path.
+// It permits the narrowly typed description_missing event while the ordinary
+// worker event boundary continues to reject that controller-owned event.
+func ValidateControllerEventAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource) (Event, bool, error) {
+	return validateEventAppend(events, runID, runDir, candidate, expectedSequence, expectedPreviousSHA256, manifests, true)
+}
+
+func validateEventAppend(events []Event, runID, runDir string, candidate Event, expectedSequence uint64, expectedPreviousSHA256 string, manifests AttemptManifestSource, controllerOnly bool) (Event, bool, error) {
 	if err := ValidateRunID(runID); err != nil {
 		return Event{}, false, err
 	}
-	if err := ValidateWorkerEventType(candidate.Type); err != nil {
+	if controllerOnly && candidate.Type == "description_missing" {
+		// Only this known controller-owned type is admitted by this path.
+		if candidate.Stage == "" || candidate.AttemptID == "" || len(candidate.Data) != 2 || candidate.Data["field"] != "description" {
+			return Event{}, false, errors.New("description_missing must bind one stage attempt and description field")
+		}
+		if _, ok := candidate.Data["approval_id"].(string); !ok || candidate.Data["approval_id"] == "" {
+			return Event{}, false, errors.New("description_missing must bind its input approval")
+		}
+	} else if err := ValidateWorkerEventType(candidate.Type); err != nil {
 		return Event{}, false, err
 	}
 	if uint64(len(events)) == expectedSequence+1 && len(events) > 0 &&

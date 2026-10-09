@@ -147,12 +147,12 @@ func (s *SQLiteStore) importLegacy(root string, acquireRunLock func(string) (fun
 			if !safeName(id) || entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
 				return fmt.Errorf("legacy approval must be a regular JSON file: %s", filepath.Join(root, runID, entry.Name()))
 			}
-			data, readErr := safeio.ReadRegularFile(filepath.Join(root, runID, entry.Name()), 1<<20)
+			data, readErr := safeio.ReadRegularFile(filepath.Join(root, runID, entry.Name()), MaxApprovalRecordBytes)
 			if readErr != nil {
 				return readErr
 			}
 			var value PendingApproval
-			if decodeErr := strictjson.Unmarshal(data, 1<<20, &value); decodeErr != nil {
+			if decodeErr := strictjson.Unmarshal(data, MaxApprovalRecordBytes, &value); decodeErr != nil {
 				return fmt.Errorf("legacy approval %s: %w", id, decodeErr)
 			}
 			normalize(&value)
@@ -193,7 +193,7 @@ func (s *SQLiteStore) importLegacy(root string, acquireRunLock func(string) (fun
 			rollback()
 			return loadErr
 		}
-		data, marshalErr := json.Marshal(old)
+		data, marshalErr := marshalApprovalRecord(old)
 		if marshalErr != nil {
 			rollback()
 			return marshalErr
@@ -256,7 +256,7 @@ func (s *SQLiteStore) Create(value PendingApproval) (PendingApproval, error) {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return PendingApproval{}, err
 		}
-		data, err := json.Marshal(value)
+		data, err := marshalApprovalRecord(value)
 		if err != nil {
 			return PendingApproval{}, err
 		}
@@ -288,7 +288,7 @@ func (s *SQLiteStore) List(runID string) ([]PendingApproval, error) {
 			return nil, err
 		}
 		var value PendingApproval
-		if err := strictjson.Unmarshal([]byte(data), 1<<20, &value); err != nil {
+		if err := strictjson.Unmarshal([]byte(data), MaxApprovalRecordBytes, &value); err != nil {
 			return nil, fmt.Errorf("approval record: %w", err)
 		}
 		normalize(&value)
@@ -328,13 +328,24 @@ func (s *SQLiteStore) mutate(runID, approvalID string, fn func(PendingApproval) 
 		if updated.ID == value.ID && updated.Status == value.Status && len(updated.Decisions) == len(value.Decisions) {
 			return updated, nil
 		}
-		data, err := json.Marshal(updated)
+		data, err := marshalApprovalRecord(updated)
 		if err != nil {
 			return PendingApproval{}, err
 		}
 		_, err = conn.ExecContext(context.Background(), `UPDATE approval_records SET record_json=?, updated_at=? WHERE run_id=? AND approval_id=?`, string(data), time.Now().UTC().Format(time.RFC3339Nano), runID, approvalID)
 		return updated, err
 	})
+}
+
+func marshalApprovalRecord(value PendingApproval) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxApprovalRecordBytes {
+		return nil, fmt.Errorf("approval record exceeds maximum size of %d bytes", MaxApprovalRecordBytes)
+	}
+	return data, nil
 }
 
 func (s *SQLiteStore) withWrite(fn func(*sql.Conn) (PendingApproval, error)) (PendingApproval, error) {
@@ -366,7 +377,7 @@ func loadApproval(q interface {
 		return PendingApproval{}, err
 	}
 	var value PendingApproval
-	if err := strictjson.Unmarshal([]byte(data), 1<<20, &value); err != nil {
+	if err := strictjson.Unmarshal([]byte(data), MaxApprovalRecordBytes, &value); err != nil {
 		return PendingApproval{}, fmt.Errorf("approval %s: %w", id, err)
 	}
 	normalize(&value)

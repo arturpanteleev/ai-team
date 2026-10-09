@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -371,6 +372,166 @@ func TestWorkerAPIEventLogUsesReservedControllerStoreAndScopedChain(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(target, ".ai-team", "runs", job.RunID, "events.jsonl")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("external event source created a run-local mirror: %v", err)
+	}
+}
+
+func TestWorkerAPIControllerDescriptionEventRequiresHumanInputAuthority(t *testing.T) {
+	const runID, approvalID = "controller-description-event", "approval-description-event"
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	log := evidence.ControllerEventStore{TargetDir: target}
+	if err := log.Reserve(runID); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	runStore, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "description-event", TargetDir: target, StartedAt: startedAt,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(time.Second),
+		Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := log.Read(runID)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("read fixture event chain: events=%d err=%v", len(events), err)
+	}
+	payload, _ := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "result.md"})
+	resolved := approval.PendingApproval{
+		Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-attempt", FromStage: "writer", ToStage: "writer",
+		Trigger: "human_input", SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"writer"}, Actions: []string{"submit"},
+		Quorum: approval.QuorumAny, Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload,
+		Decisions: []approval.Decision{{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "submit", Description: "  ", SubjectHash: strings.Repeat("a", 64)}},
+	}
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: resolved}}
+	server := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target},
+		usageAllowed: true, eventLogs: log, approvals: approvals}
+	candidate := evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
+		Data: map[string]any{"field": "description", "approval_id": approvalID}}
+	result, err := server.dispatch("event_log.description_missing", workerAPICall{RunID: runID, Event: candidate,
+		ExpectedSequence: 2, ExpectedPreviousSHA256: events[1].SHA256})
+	if err != nil {
+		t.Fatalf("controller event append: %v", err)
+	}
+	if got := result.(workerAPIEventAppendResult); got.Type != "description_missing" || got.Sequence != 3 {
+		t.Fatalf("controller event append receipt=%+v", got)
+	}
+
+	if _, err := server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: candidate,
+		ExpectedSequence: 3, ExpectedPreviousSHA256: candidate.SHA256}); err == nil {
+		t.Fatal("worker event endpoint accepted controller-only description_missing")
+	}
+	resolved.Decisions[len(resolved.Decisions)-1].Description = "filled"
+	approvals.values[runID+"/"+approvalID] = resolved
+	if _, err := server.dispatch("event_log.description_missing", workerAPICall{RunID: runID, Event: candidate,
+		ExpectedSequence: 3, ExpectedPreviousSHA256: result.(workerAPIEventAppendResult).SHA256}); err == nil {
+		t.Fatal("controller event endpoint accepted a non-empty description")
+	}
+}
+
+func TestWorkerAPIEventLogControllerOnlyAppendUsesDedicatedRPC(t *testing.T) {
+	const runID, approvalID = "controller-description-rpc", "approval-description-rpc"
+	target := t.TempDir()
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "result.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: {
+		Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-attempt", FromStage: "writer", ToStage: "writer",
+		Trigger: "human_input", SubjectHash: strings.Repeat("b", 64), RequiredRoles: []string{"writer"}, Actions: []string{"submit"},
+		Quorum: approval.QuorumAny, Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload,
+		Decisions: []approval.Decision{{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "submit", SubjectHash: strings.Repeat("b", 64)}},
+	}}}
+	socketDir, err := os.MkdirTemp("/tmp", "ai-team-description-rpc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: runID, TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, filepath.Join(socketDir, "controller.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, server.socketPath)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventLog := NewWorkerAPIEventLog(port)
+	startedAt := time.Date(2026, 10, 9, 13, 0, 0, 0, time.UTC)
+	runStore, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
+		RunID: runID, Feature: "description-event-rpc", TargetDir: target, StartedAt: startedAt,
+		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+	}, eventLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(time.Second),
+		Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore.AppendControllerEvent(evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
+		Data: map[string]any{"field": "description", "approval_id": approvalID}}); err != nil {
+		t.Fatalf("remote controller-only append: %v", err)
+	}
+	stored, err := eventLog.Read(runID)
+	if err != nil || len(stored) != 3 || stored[2].Type != "description_missing" || stored[2].Sequence != 3 {
+		t.Fatalf("remote controller-only event chain: events=%+v err=%v", stored, err)
+	}
+	controllerAppender, ok := eventLog.(interface {
+		AppendControllerEvent(string, evidence.Event, uint64, string) (evidence.Event, error)
+	})
+	if !ok {
+		t.Fatal("worker event log does not expose the scoped controller-only capability")
+	}
+	retried, err := controllerAppender.AppendControllerEvent(runID, evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
+		Data: map[string]any{"field": "description", "approval_id": approvalID}}, 2, stored[1].SHA256)
+	if err != nil || retried.Sequence != stored[2].Sequence || retried.SHA256 != stored[2].SHA256 {
+		t.Fatalf("remote controller-only exact retry=%+v err=%v want %+v", retried, err, stored[2])
+	}
+}
+
+func TestWorkerAPIValidatesHumanSubmissionManifestAgainstApproval(t *testing.T) {
+	const runID, approvalID = "human-manifest-binding", "approval-human-manifest"
+	content := "# Exact result\n"
+	digest := sha256.Sum256([]byte(content))
+	digestText := hex.EncodeToString(digest[:])
+	payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := approval.PendingApproval{Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-human-manifest",
+		FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: strings.Repeat("d", 64),
+		RequiredRoles: []string{"developer"}, Actions: []string{"submit"}, Quorum: approval.QuorumAny,
+		Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload,
+		Decisions: []approval.Decision{{ApprovalID: approvalID, ActorID: "dev-1", ActorRole: "developer", Action: "submit",
+			Comment: content, Description: "done", SubmissionVersion: 2, ContentSHA256: digestText, SubjectHash: strings.Repeat("d", 64)}},
+	}
+	server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
+	manifest := evidence.AttemptManifest{RunID: runID, AttemptID: "attempt-writer-1", Stage: "writer", Executor: "human",
+		ActorID: "dev-1", ActorRole: "developer", HumanInputApprovalID: approvalID, HumanSubmissionVersion: 2,
+		HumanSubmissionSHA256: digestText, HumanSubmissionResult: "md", HumanSubmissionDescription: "done",
+	}
+	if err := server.validateHumanSubmissionManifest(manifest); err != nil {
+		t.Fatalf("matching attempt manifest was rejected: %v", err)
+	}
+	manifest.HumanSubmissionVersion++
+	if err := server.validateHumanSubmissionManifest(manifest); err == nil {
+		t.Fatal("attempt manifest with a version different from its approval was accepted")
 	}
 }
 

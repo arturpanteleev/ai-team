@@ -74,6 +74,8 @@ func main() {
 		cmdRun()
 	case "decision":
 		cmdDecision()
+	case "stage":
+		cmdStage()
 	case "auth-token":
 		cmdAuthToken()
 	case "worker":
@@ -123,6 +125,11 @@ func printUsage() {
                                      Инициализировать .ai-team/ в проекте
   ai-team run                      Запустить пайплайн агентов
   ai-team decision                 Записать решение человека по pending approval
+  ai-team stage submit <run_id> --stage <id>
+                                   --md <file> | --text <markdown> |
+                                   --link <url> --kind <pr|build|other> |
+                                   --approve; optional --note, --description,
+                                   --actor, --role, --target
   ai-team auth-token               Выпустить короткоживущий cloud access token
   ai-team worker                   Выполнить один disposable worker job из stdin
   ai-team scheduler-worker         Claim и выполнить job из persistent queue

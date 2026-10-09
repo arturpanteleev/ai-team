@@ -157,6 +157,119 @@ func TestHub_MultipleClients(t *testing.T) {
 	}
 }
 
+func TestHubSlowClientDoesNotBlockBroadcast(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+
+	slow := &Client{hub: hub, send: make(chan []byte, websocketSendQueueSize)}
+	fast := &Client{hub: hub, send: make(chan []byte, websocketSendQueueSize)}
+	hub.register <- registration{client: slow}
+	hub.register <- registration{client: fast}
+	waitForHubClientCount(t, hub, 2)
+
+	// Model a writer that has stopped consuming its bounded send queue.
+	for i := 0; i < cap(slow.send); i++ {
+		slow.send <- []byte("pending")
+	}
+
+	event := Event{Version: 1, Cursor: 7, Type: "healthy-client-event", Data: map[string]any{}}
+	if !hub.BroadcastEventContext(context.Background(), event) {
+		t.Fatal("broadcast was rejected")
+	}
+
+	select {
+	case message := <-fast.send:
+		var received Event
+		if err := json.Unmarshal(message, &received); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		if received.Type != event.Type || received.Cursor != event.Cursor {
+			t.Fatalf("unexpected event: %+v", received)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy client did not receive event while slow client was full")
+	}
+
+	waitForHubClientCount(t, hub, 1)
+	for i := 0; i < cap(slow.send); i++ {
+		if _, ok := <-slow.send; !ok {
+			t.Fatal("slow client's queued messages were unexpectedly discarded")
+		}
+	}
+	if _, ok := <-slow.send; ok {
+		t.Fatal("slow client's send queue was not closed after overflow")
+	}
+}
+
+func TestHubReplayQueueOverflowDoesNotBlockHub(t *testing.T) {
+	hub := NewHub()
+	hub.SetReplay(func(cursor int64) ([]Event, error) {
+		if cursor != 9 {
+			return nil, nil
+		}
+		events := make([]Event, websocketSendQueueSize+1)
+		for i := range events {
+			events[i] = Event{Version: 1, Cursor: int64(i + 1), Type: "replay", Data: map[string]any{}}
+		}
+		return events, nil
+	})
+	go hub.Run()
+
+	slow := &Client{hub: hub, send: make(chan []byte, websocketSendQueueSize)}
+	hub.register <- registration{client: slow, cursor: 9}
+
+	// A later registration can only be processed after replay overflow has
+	// disconnected the slow client instead of blocking the hub's Run loop.
+	fast := &Client{hub: hub, send: make(chan []byte, websocketSendQueueSize)}
+	registered := make(chan struct{})
+	go func() {
+		hub.register <- registration{client: fast}
+		close(registered)
+	}()
+	select {
+	case <-registered:
+	case <-time.After(time.Second):
+		t.Fatal("replay overflow blocked subsequent client registration")
+	}
+	waitForHubClientCount(t, hub, 1)
+
+	if !hub.BroadcastEventContext(context.Background(), Event{
+		Version: 1, Cursor: 10, Type: "after-replay", Data: map[string]any{},
+	}) {
+		t.Fatal("broadcast after replay overflow was rejected")
+	}
+	select {
+	case message := <-fast.send:
+		var received Event
+		if err := json.Unmarshal(message, &received); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		if received.Type != "after-replay" {
+			t.Fatalf("unexpected event type %q", received.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy client did not receive event after replay overflow")
+	}
+}
+
+func waitForHubClientCount(t *testing.T, hub *Hub, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.RLock()
+		got := len(hub.clients)
+		hub.mu.RUnlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	hub.mu.RLock()
+	got := len(hub.clients)
+	hub.mu.RUnlock()
+	t.Fatalf("hub client count = %d, want %d", got, want)
+}
+
 func TestHub_Unregister(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()

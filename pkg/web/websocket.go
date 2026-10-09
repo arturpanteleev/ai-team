@@ -36,6 +36,8 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const websocketSendQueueSize = 256
+
 type Event struct {
 	Version int `json:"version"`
 	// Stream — identity конкретного event stream (случайный ID на время
@@ -95,13 +97,22 @@ func (h *Hub) Run() {
 					close(request.client.send)
 					continue
 				}
+				dropped := false
 				for _, event := range events {
 					data, err := json.Marshal(event)
 					if err != nil {
 						log.Printf("websocket: failed to marshal replay event: %v", err)
 						continue
 					}
-					request.client.send <- data
+					if !tryQueueClientMessage(request.client, data) {
+						log.Printf("websocket: replay queue full; disconnecting slow client")
+						close(request.client.send)
+						dropped = true
+						break
+					}
+				}
+				if dropped {
+					continue
 				}
 			}
 			h.mu.Lock()
@@ -124,15 +135,24 @@ func (h *Hub) Run() {
 			}
 			h.mu.Lock()
 			for client := range h.clients {
-				select {
-				case client.send <- message:
-				default:
+				if !tryQueueClientMessage(client, message) {
 					close(client.send)
 					delete(h.clients, client)
 				}
 			}
 			h.mu.Unlock()
 		}
+	}
+}
+
+// tryQueueClientMessage keeps the hub independent from each client's network
+// writer. A full per-client queue is handled by dropping that client.
+func tryQueueClientMessage(client *Client, message []byte) bool {
+	select {
+	case client.send <- message:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -164,7 +184,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client := &Client{
 		hub:  hub,
 		conn: conn,
-		send: make(chan []byte, 256),
+		send: make(chan []byte, websocketSendQueueSize),
 	}
 
 	go client.writePump()

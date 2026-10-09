@@ -1,0 +1,33 @@
+.panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.panel h2 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.panel p {
+  margin: 0;
+}
+
+.panel button {
+  min-height: 40px;
+  padding: 8px 12px;
+}
+
+.error {
+  flex-basis: 100%;
+  color: var(--danger-fg);
+}

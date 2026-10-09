@@ -1,49 +1,64 @@
 .page {
-  min-height: 100vh;
   display: flex;
+  min-height: 100vh;
   align-items: center;
   flex-direction: column;
   justify-content: center;
   gap: 18px;
   padding: 24px;
-  background: #0b1020;
+  background: var(--canvas);
 }
 
 .card {
-  width: min(520px, 100%);
-  box-sizing: border-box;
   display: grid;
+  width: min(520px, 100%);
   gap: 16px;
   padding: 28px;
-  border: 1px solid #28334f;
-  border-radius: 16px;
-  background: #121a2e;
-  color: #eef2ff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text-primary);
 }
 
 .card h1,
+.card h2,
 .card p {
   margin: 0;
 }
 
+.card p {
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .card textarea {
   min-height: 120px;
-  resize: vertical;
   padding: 12px;
-  border: 1px solid #3c496b;
-  border-radius: 8px;
-  background: #090e1b;
-  color: inherit;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
 }
 
 .card button {
-  padding: 11px 16px;
-  border: 0;
-  border-radius: 8px;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
   font-weight: 700;
-  cursor: pointer;
 }
 
 .error {
-  color: #ff9a9a;
+  color: var(--danger-fg);
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding: 16px;
+  }
+
+  .card {
+    padding: 18px;
+  }
 }

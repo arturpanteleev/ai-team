@@ -1,47 +1,54 @@
 .container {
+  width: min(100%, 900px);
   padding: 24px;
-  max-width: 800px;
   margin: 0 auto;
 }
 
 .header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  gap: 14px;
   margin-bottom: 24px;
 }
 
 .title {
-  font-size: 24px;
-  font-weight: 600;
-  color: #f1f5f9;
   margin: 0;
+  color: var(--text-primary);
+  font-size: 24px;
+  font-weight: 650;
 }
 
 .filters {
   display: flex;
   gap: 8px;
+  max-width: 100%;
+  padding: 2px 2px 8px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 .filterBtn {
-  padding: 4px 12px;
-  border: 1px solid #334155;
-  border-radius: 4px;
-  background: transparent;
-  color: #94a3b8;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .filterBtn:hover {
-  border-color: #3b82f6;
-  color: #e2e8f0;
+  border-color: var(--link);
+  color: var(--text-primary);
 }
 
 .filterBtn.active {
-  background: #3b82f6;
-  border-color: #3b82f6;
-  color: white;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .pipelines {
@@ -50,52 +57,64 @@
   gap: 12px;
 }
 
-.empty {
-  text-align: center;
-  padding: 48px;
-  color: #64748b;
-}
-
+.empty,
 .loading {
+  padding: 40px 16px;
+  color: var(--text-muted);
   text-align: center;
-  padding: 48px;
-  color: #94a3b8;
 }
 
 .runForm {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   margin-bottom: 24px;
   padding: 16px;
-  border: 1px solid #334155;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .runForm label {
-  color: #cbd5e1;
+  color: var(--text-secondary);
   font-size: 13px;
+  font-weight: 600;
 }
 
 .runForm input,
-.runForm textarea,
-.runForm button {
-  border: 1px solid #334155;
+.runForm textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   padding: 9px 12px;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--surface);
+}
+
+.runForm input::placeholder,
+.runForm textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 .runForm textarea {
   resize: vertical;
-  font: inherit;
   line-height: 1.5;
+}
+
+.runForm button {
+  justify-self: start;
+  max-width: 100%;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 650;
 }
 
 .runForm small,
 .intakeNotice span {
-  color: #94a3b8;
+  color: var(--text-muted);
   line-height: 1.5;
 }
 
@@ -104,44 +123,73 @@
   gap: 8px;
   margin-bottom: 24px;
   padding: 16px;
-  border: 1px solid #334155;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #cbd5e1;
+  background: var(--surface);
+  color: var(--text-secondary);
 }
 
 .runForm span {
   grid-column: 1 / -1;
-  color: #94a3b8;
+  color: var(--text-secondary);
   font-size: 12px;
-}
-
-.runForm button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  overflow-wrap: anywhere;
 }
 
 .preflight {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   margin: -12px 0 24px;
   padding: 12px;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  color: #cbd5e1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .preflight div {
   display: grid;
-  grid-template-columns: 130px 150px 1fr;
+  grid-template-columns: minmax(100px, 0.6fr) minmax(90px, 0.5fr) minmax(0, 2fr);
   gap: 8px;
+  overflow-wrap: anywhere;
 }
 
 .preflight div[data-status='failed'] {
-  color: #f87171;
+  color: var(--danger-fg);
 }
 
 .preflight div[data-status='warning'] {
-  color: #fbbf24;
+  color: var(--warning-fg);
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 18px 14px 28px;
+  }
+
+  .header {
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .title {
+    font-size: 22px;
+  }
+
+  .runForm {
+    padding: 12px;
+  }
+
+  .runForm button {
+    width: 100%;
+  }
+
+  .preflight div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+  }
 }

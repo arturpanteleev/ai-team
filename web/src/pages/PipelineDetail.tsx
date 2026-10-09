@@ -1,11 +1,15 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useParams, Link } from '../router';
-import type { PipelineRun, Stage, Artifact, Approval, CloudRole, DeliveryProjection, WorkflowGraph, WorkflowSnapshot } from '../types';
-import { getPipelineRun, getPipelineArtifacts, getRunWorkflow, decideApproval, resumeRun, retryDelivery, cancelRun, getActivePrincipal } from '../api';
+import type { Stage, Approval, CloudRole, DeliveryProjection } from '../types';
+import { decideApproval, resumeRun, cancelRun, getActivePrincipal, retryDelivery } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { CopyableHash } from '../components/CopyableHash';
 import { StatusBadge } from '../components/StatusBadge';
 import { StageRow } from '../components/StageRow';
+import { loadPipelineSnapshot, refreshPipelineSnapshot } from '../data/pipelineSnapshot';
+import type { PipelineSnapshot } from '../data/pipelineSnapshot';
 import styles from './PipelineDetail.module.css';
 
 function safePullRequestURL(value?: string): string | null {
@@ -21,39 +25,36 @@ function safePullRequestURL(value?: string): string | null {
 export function PipelineDetail() {
   const principal = getActivePrincipal();
   const { id } = useParams<{ id: string }>();
-  const [run, setRun] = useState<PipelineRun | null>(null);
-  const [stages, setStages] = useState<Stage[]>([]);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [delivery, setDelivery] = useState<DeliveryProjection>({ status: 'not_requested' });
-  const [deliveryRetryError, setDeliveryRetryError] = useState('');
-  const [deliveryRetrying, setDeliveryRetrying] = useState(false);
-  const [graph, setGraph] = useState<WorkflowGraph | null>(null);
-  const [nextStage, setNextStage] = useState('');
+  const [snapshot, setSnapshot] = useState<PipelineSnapshot | null>(null);
+  const snapshotRef = useRef<PipelineSnapshot | null>(null);
+  const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const [actor, setActor] = useState(principal?.actor_id ?? 'local-user');
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [controlError, setControlError] = useState('');
+  const [deliveryRetryError, setDeliveryRetryError] = useState('');
+  const [deliveryRetrying, setDeliveryRetrying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const run = snapshot?.run ?? null;
+  const stages = snapshot?.stages ?? [];
+  const artifacts = snapshot?.artifacts ?? [];
+  const approvals = snapshot?.approvals ?? [];
+  const graph = snapshot?.graph ?? null;
+  const nextStage = snapshot?.nextStage ?? '';
+  const delivery: DeliveryProjection = snapshot?.delivery ?? { status: 'not_requested' };
+
+  usePageTitle(run ? run.feature : 'Задача');
 
   const fetchData = useCallback(async () => {
     if (!id) return;
     try {
-      const pipelineData = await getPipelineRun(Number(id));
-      const [artifactsData, workflowData] = await Promise.all([
-        getPipelineArtifacts(Number(id)),
-        getRunWorkflow(pipelineData.run.run_id).catch((): WorkflowSnapshot => ({ schema_version: 1 })),
-      ]);
-      setRun(pipelineData.run);
-      setStages(pipelineData.stages);
-      setArtifacts(artifactsData);
-      setApprovals(pipelineData.approvals ?? []);
-      setDelivery(pipelineData.delivery ?? { status: 'not_requested' });
-      setGraph(workflowData.graph ?? null);
-      setNextStage(pipelineData.next_stage ?? '');
+      const fresh = await loadPipelineSnapshot(Number(id));
+      snapshotRef.current = fresh;
+      setSnapshot(fresh);
+      setError(null);
     } catch {
-      setError('Failed to load pipeline');
+      setError('Не удалось загрузить задачу. Попробуйте обновить страницу.');
     } finally {
       setLoading(false);
     }
@@ -65,9 +66,14 @@ export function PipelineDetail() {
 
   useWebSocket({
     onEvent: (event) => {
-      if (event.run_id === run?.run_id) {
-        fetchData();
-      }
+      if (event.run_id !== snapshotRef.current?.run.run_id) return;
+      eventQueue.current = eventQueue.current.then(async () => {
+        const current = snapshotRef.current;
+        if (!current || current.run.run_id !== event.run_id) return;
+        const fresh = await refreshPipelineSnapshot(current, event);
+        snapshotRef.current = fresh;
+        setSnapshot(fresh);
+      }).catch(() => setError('Не удалось получить обновление задачи.'));
     },
   });
 
@@ -78,11 +84,11 @@ export function PipelineDetail() {
     return () => window.clearInterval(t);
   }, [run?.status, fetchData]);
 
-  if (loading) return <div className={styles.loading}>Loading...</div>;
-  if (error || !run) return <div className={styles.error}>{error || 'Not found'}</div>;
+  if (loading) return <div className={styles.loading}>Загружаем задачу…</div>;
+  if (error || !run) return <div className={styles.error}>{error || 'Задача не найдена.'}</div>;
 
   const duration = run.completed_at
-    ? ((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000).toFixed(1) + 's'
+          ? ((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000).toFixed(1) + ' с'
     : '—';
 
   const getArtifactsForStage = (stage: Stage) =>
@@ -119,60 +125,59 @@ export function PipelineDetail() {
   };
 
   const sendDeliveryRetry = async () => {
+    if (!run) return;
     setDeliveryRetryError('');
     setDeliveryRetrying(true);
     try {
       await retryDelivery(run.run_id);
       await fetchData();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Git delivery retry failed';
-      // The controller may have completed the POST before the connection was
-      // lost. Re-read its durable receipt/event projection before reporting the
-      // outcome so the UI does not offer a duplicate delivery blindly.
+      const message = err instanceof Error ? err.message : 'Не удалось повторить Git-доставку';
+      // The POST may have committed before the connection dropped. Refresh the
+      // controller's durable delivery projection before exposing a retry.
       await fetchData();
-      setDeliveryRetryError(`${message}. Delivery status was refreshed from the controller.`);
+      setDeliveryRetryError(`${message}. Статус доставки обновлён.`);
     } finally {
       setDeliveryRetrying(false);
     }
   };
 
   const canRetryDelivery = (!principal || principal.roles.includes('product_owner') || principal.roles.includes('release_manager')) &&
-    (run.status === 'completed' || run.status === 'completed_with_warnings') &&
+    (run?.status === 'completed' || run?.status === 'completed_with_warnings') &&
     (delivery.status === 'pending' || delivery.status === 'failed');
-  const deliveryStatus = delivery.status;
   const prURL = safePullRequestURL(delivery.record?.pr_url);
 
   return (
     <div className={styles.container}>
-      <Link to="/" className={styles.back}>← Назад</Link>
+      <Link to="/" className={styles.back}>← К задачам</Link>
 
       <div className={styles.header}>
         <h1 className={styles.title}>{run.feature}</h1>
         <div className={styles.meta}>
-          <span className={styles.identifier}>Run: {run.run_id}</span>
-          <span>Started: {new Date(run.started_at).toLocaleString('ru-RU')}</span>
-          <span>Duration: {duration}</span>
+          <span className={styles.identifier}>Задача: {run.run_id}</span>
+          <span>Создана: {new Date(run.started_at).toLocaleString('ru-RU')}</span>
+          <span>Длительность: {duration}</span>
           <StatusBadge status={run.status} />
         </div>
       </div>
 
-      {deliveryStatus !== 'not_requested' && (
+      {delivery.status !== 'not_requested' && (
         <section className={styles.workflow} aria-labelledby="git-delivery-heading">
-          <h2 id="git-delivery-heading">Git delivery</h2>
-          <p aria-live="polite">Status: {deliveryStatus}</p>
+          <h2 id="git-delivery-heading">Git-доставка</h2>
+          <p aria-live="polite">Статус: {delivery.status}</p>
           {delivery.record && (
             <div>
-              {delivery.record.commit_sha && <p>Commit: <code>{delivery.record.commit_sha}</code></p>}
+              {delivery.record.commit_sha && <p>Коммит: <code>{delivery.record.commit_sha}</code></p>}
               {delivery.record.pr_url && <p>Pull request: {prURL
                 ? <a href={prURL} target="_blank" rel="noreferrer">{delivery.record.pr_url}</a>
                 : <code>{delivery.record.pr_url}</code>}</p>}
             </div>
           )}
-          {delivery.error && <p role="status">Delivery failed: {delivery.error}</p>}
-          {deliveryRetryError && <p role="alert">Delivery retry response was unclear: {deliveryRetryError}</p>}
+          {delivery.error && <p role="status">Ошибка доставки: {delivery.error}</p>}
+          {deliveryRetryError && <p role="alert">Неясный результат повтора: {deliveryRetryError}</p>}
           {canRetryDelivery && (
             <button onClick={sendDeliveryRetry} disabled={deliveryRetrying}>
-              {deliveryRetrying ? 'Retrying delivery…' : 'Retry approved Git delivery'}
+              {deliveryRetrying ? 'Повторяем доставку…' : 'Повторить одобренную Git-доставку'}
             </button>
           )}
         </section>
@@ -200,12 +205,14 @@ export function PipelineDetail() {
           {principal
             ? <span>{principal.actor_id}</span>
             : <input value={actor} onChange={(event) => setActor(event.target.value)}
-              aria-label="Actor identity" placeholder="actor identity" />}
-          <button onClick={() => sendRunCommand('resume')}>Resume</button>
-          <button onClick={() => sendRunCommand('cancel')}>Cancel</button>
+              aria-label="Идентификатор участника" placeholder="Идентификатор участника" />}
+          {['waiting_for_approval', 'interrupted', 'blocked'].includes(run.status) &&
+            <button onClick={() => sendRunCommand('resume')}>Продолжить задачу</button>}
+          {['queued', 'running', 'waiting_for_approval'].includes(run.status) &&
+            <button onClick={() => sendRunCommand('cancel')}>Отменить задачу</button>}
         </div>
         {controlError && <div className={styles.controlError}>{controlError}</div>}
-        {approvals.length === 0 ? <p>Approvals пока нет.</p> : approvals.map((value) => {
+        {approvals.length === 0 ? <p>Запросов на решение пока нет.</p> : approvals.map((value) => {
           const question = value.payload && typeof value.payload === 'object' &&
             (value.payload as { kind?: unknown }).kind === 'questions'
             ? value.payload as { kind: 'questions'; markdown?: string }
@@ -217,9 +224,9 @@ export function PipelineDetail() {
           return (
           <article key={value.id} className={styles.approval}>
             <strong>{value.from_stage} → {value.to_stage}</strong>
-            <span>{value.status} · trigger {value.trigger} · quorum {value.quorum}</span>
-            <code>subject {value.subject_hash}</code>
-            {value.candidate_sha256 && <code>candidate {value.candidate_sha256}</code>}
+            <span>{value.status === 'pending' ? 'ожидает решения' : 'решён'} · условие: {value.trigger} · правило голосования: {value.quorum === 'all' ? 'все участники' : 'достаточно одного'}</span>
+            <div className={styles.hashes}><span>Хеш решения</span><CopyableHash value={value.subject_hash} label="хеш решения" /></div>
+            {value.candidate_sha256 && <div className={styles.hashes}><span>Хеш кандидата</span><CopyableHash value={value.candidate_sha256} label="хеш кандидата" /></div>}
             {question && (
               <div className={styles.question}>
                 <h3>Вопрос аналитика</h3>
@@ -238,9 +245,9 @@ export function PipelineDetail() {
               <div className={styles.question}>
                 <h3>Product Owner согласует требования перед архитектором</h3>
                 <p>Версия намерения: {agreedSpec.brief_version?.id ?? 'не указана'}</p>
-                <code>brief SHA-256: {agreedSpec.brief_version?.sha256 ?? 'не указан'}</code>
+                {agreedSpec.brief_version?.sha256 && <div className={styles.hashes}><span>Хеш бизнес-намерения</span><CopyableHash value={agreedSpec.brief_version.sha256} label="хеш бизнес-намерения" /></div>}
                 {Object.entries(agreedSpec.artifacts ?? {}).map(([name, digest]) => (
-                  <code key={name}>{name} SHA-256: {digest}</code>
+                  <div className={styles.hashes} key={name}><span>{name}</span><CopyableHash value={digest} label={`хеш артефакта ${name}`} /></div>
                 ))}
                 <div className={styles.questionText}>
                   {artifacts.filter((artifact) => artifact.run_id === run.run_id &&
@@ -249,7 +256,7 @@ export function PipelineDetail() {
                     .map((artifact) => (
                       <Link key={artifact.path}
                         to={`/artifacts/${encodeURIComponent(run.run_id)}/${artifact.path.split('/').map(encodeURIComponent).join('/')}`}>
-                        Открыть {artifact.path.endsWith('/proposal.md') ? 'обоснование' : 'product spec'}
+                        Открыть {artifact.path.endsWith('/proposal.md') ? 'обоснование' : 'спецификацию продукта'}
                       </Link>
                     ))}
                 </div>
@@ -270,21 +277,21 @@ export function PipelineDetail() {
                 {Object.entries(value.artifact_revisions).map(([path, revision]) => (
                   <code key={path}>{path} · {revision}</code>
                 ))}
-                {value.artifact_revision_binding_sha256 && <code>binding SHA-256: {value.artifact_revision_binding_sha256}</code>}
+                {value.artifact_revision_binding_sha256 && <div className={styles.hashes}><span>Хеш привязки версий</span><CopyableHash value={value.artifact_revision_binding_sha256} label="хеш привязки версий" /></div>}
               </details>
             )}
             {value.status === 'pending' && (value.feedback_actions
               ? value.feedback_actions.length > 0
               : value.actions.some((action) => action.startsWith('return_to_'))) && (
               <label className={styles.question}>
-                Причина возврата и feedback для следующей роли
+                Причина возврата и комментарий для следующей роли
                 <textarea value={returnReasons[value.id] ?? ''} maxLength={16 * 1024} rows={4}
                   onChange={(event) => setReturnReasons((current) => ({ ...current, [value.id]: event.target.value }))} />
               </label>
             )}
             {value.payload != null && !question && (
               <details>
-                <summary>Payload (canonical JSON)</summary>
+              <summary>Данные запроса (canonical JSON)</summary>
                 <pre><code>{JSON.stringify(value.payload, null, 2)}</code></pre>
               </details>
             )}
@@ -318,8 +325,8 @@ export function PipelineDetail() {
         <section className={styles.workflow}>
           <div className={styles.workflowHeader}>
             <h2>Маршрут workflow</h2>
-            <span>entry <code>{graph.entry}</code></span>
-            {nextStage && <span>next <code>{nextStage}</code></span>}
+            <span>Начало: <code>{graph.entry}</code></span>
+            {nextStage && <span>Следующий этап: <code>{nextStage}</code></span>}
           </div>
           <div className={styles.nodes}>
             {graph.nodes.map((node) => (

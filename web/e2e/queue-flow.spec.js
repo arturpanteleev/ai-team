@@ -82,14 +82,14 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
       if (message.type() === 'error') browserErrors.push(`console: ${message.text()}`)
     })
     await page.goto(baseURL)
-    await expect(page.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await page.getByLabel('Название инициативы').fill('browser-queued-work')
     await page.getByLabel('Какого результата хотите достичь?').fill('Wait for a real scheduler worker')
     await page.getByRole('button', { name: 'Создать инициативу и передать аналитику' }).click()
 
     const firstRun = page.locator('[class*="card"]').filter({ hasText: 'browser-queued-work' })
-    await expect(firstRun.getByText('queued', { exact: true })).toBeVisible({ timeout: 10_000 })
-    await expect(firstRun.getByText(/Queue #\d+/)).toBeVisible()
+    await expect(firstRun.getByText('в очереди', { exact: true })).toBeVisible({ timeout: 10_000 })
+    await expect(firstRun.getByText(/Очередь №\d+/)).toBeVisible()
 
     // Hold the claimed run in running until the browser has observed it. A
     // fixed sleep can expire between dashboard polls, making this transient
@@ -109,27 +109,27 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
       env: { ...process.env, PATH: tempRoot, AI_TEAM_WORKER_SANDBOX: 'bubblewrap' },
     })
 
-    await expect(firstRun.getByText('running', { exact: true })).toBeVisible({ timeout: 10_000 })
+    await expect(firstRun.getByText('в работе', { exact: true })).toBeVisible({ timeout: 10_000 })
     await writeFile(releaseWorker, 'continue')
-    await expect(firstRun.getByText('failed', { exact: true })).toBeVisible({ timeout: 20_000 })
+    await expect(firstRun.getByText('ошибка', { exact: true })).toBeVisible({ timeout: 20_000 })
     await expect(firstRun.getByRole('alert')).toContainText(/preflight|opencode/i)
     await page.reload()
     const recoveredFirstRun = page.locator('[class*="card"]').filter({ hasText: 'browser-queued-work' })
-    await expect(recoveredFirstRun.getByText('failed', { exact: true })).toBeVisible()
+    await expect(recoveredFirstRun.getByText('ошибка', { exact: true })).toBeVisible()
     await expect(recoveredFirstRun.getByRole('alert')).toContainText(/preflight|opencode/i)
 
     await page.getByLabel('Название инициативы').fill('browser-cancel-after-reload')
     await page.getByLabel('Какого результата хотите достичь?').fill('Remain queued until cancellation')
     await page.getByRole('button', { name: 'Создать инициативу и передать аналитику' }).click()
     const queuedRun = page.locator('[class*="card"]').filter({ hasText: 'browser-cancel-after-reload' })
-    await expect(queuedRun.getByText('queued', { exact: true })).toBeVisible()
-    await expect(queuedRun.getByText(/Queue #\d+/)).toBeVisible()
+    await expect(queuedRun.getByText('в очереди', { exact: true })).toBeVisible()
+    await expect(queuedRun.getByText(/Очередь №\d+/)).toBeVisible()
 
     await page.reload()
     const recoveredQueuedRun = page.locator('[class*="card"]').filter({ hasText: 'browser-cancel-after-reload' })
-    await expect(recoveredQueuedRun.getByText('queued', { exact: true })).toBeVisible()
+    await expect(recoveredQueuedRun.getByText('в очереди', { exact: true })).toBeVisible()
     await recoveredQueuedRun.getByRole('button', { name: 'Отменить' }).click()
-    await expect(recoveredQueuedRun.getByText('canceled', { exact: true })).toBeVisible()
+    await expect(recoveredQueuedRun.getByText('отменена', { exact: true })).toBeVisible()
     expect(browserErrors).toEqual([])
   } finally {
     await stop(worker)
@@ -164,22 +164,22 @@ test('authenticated cookie session survives reload and a second window for write
     const context = await browser.newContext()
     const first = await context.newPage()
     await first.goto(baseURL)
-    await first.getByLabel('Access token').fill(token)
+    await first.getByLabel('Токен доступа').fill(token)
     await first.getByRole('button', { name: 'Войти' }).click()
-    await expect(first.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await expect(first.getByRole('heading', { name: 'Задачи' })).toBeVisible()
 
     // A new JS context has no in-memory CSRF token; the HttpOnly cookie must
     // recover it before the command is sent.
     await first.reload()
-    await expect(first.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await expect(first.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     const second = await context.newPage()
     await second.goto(baseURL)
-    await expect(second.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await expect(second.getByRole('heading', { name: 'Задачи' })).toBeVisible()
 
     // Team read APIs use the authenticated same-origin session without a
     // write CSRF header. The owner can load members/audit and the UI refuses
     // an empty role edit before sending a PATCH.
-    await second.getByRole('link', { name: 'Team' }).click()
+    await second.getByRole('link', { name: 'Команда' }).click()
     await expect(second.getByRole('heading', { name: 'Команда' })).toBeVisible()
     await expect(second.getByRole('heading', { name: 'Участники' })).toBeVisible()
     await expect(second.getByRole('heading', { name: 'Журнал действий' })).toBeVisible()
@@ -192,13 +192,13 @@ test('authenticated cookie session survives reload and a second window for write
     await expect(second.getByRole('alert')).toHaveText('Укажите хотя бы одну роль.')
     expect(emptyRolePatchSent).toBe(false)
 
-    await second.getByRole('link', { name: 'Pipelines' }).click()
-    await expect(second.getByRole('heading', { name: 'Pipeline Runs' })).toBeVisible()
+    await second.getByRole('link', { name: 'Задачи' }).click()
+    await expect(second.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await second.getByLabel('Название инициативы').fill('authenticated-after-reconnect')
     await second.getByLabel('Какого результата хотите достичь?').fill('Submit with a recovered CSRF token')
     await second.getByRole('button', { name: 'Создать инициативу и передать аналитику' }).click()
     const runCard = second.locator('[class*="card"]').filter({ hasText: 'authenticated-after-reconnect' })
-    await expect(runCard.getByText('queued', { exact: true })).toBeVisible({ timeout: 10_000 })
+    await expect(runCard.getByText('в очереди', { exact: true })).toBeVisible({ timeout: 10_000 })
 
     // Browser sessions are intentionally process-local. Restarting the server
     // revokes that session while retaining the browser's HttpOnly cookie.
@@ -209,7 +209,7 @@ test('authenticated cookie session survives reload and a second window for write
     })
     await waitForServer(baseURL, webServer)
     await second.reload()
-    await expect(second.getByLabel('Access token')).toBeVisible()
+    await expect(second.getByLabel('Токен доступа')).toBeVisible()
     await expect(second.getByText(/Сессия истекла или отсутствует/)).toBeVisible()
     await context.close()
   } finally {

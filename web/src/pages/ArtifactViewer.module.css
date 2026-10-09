@@ -1,114 +1,158 @@
 .container {
+  width: min(100%, 900px);
   padding: 24px;
-  max-width: 800px;
   margin: 0 auto;
 }
 
 .back {
   display: inline-block;
   padding: 4px 0;
-  color: #3b82f6;
-  text-decoration: none;
-  font-size: 14px;
   margin-bottom: 16px;
-  border: none;
-  background: none;
+  border: 0;
+  background: transparent;
+  color: var(--link);
   font-family: inherit;
   cursor: pointer;
-}
-
-.back:hover {
-  text-decoration: underline;
 }
 
 .header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 16px;
 }
 
-.toolbar { display: flex; gap: 8px; }
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 
 .history {
   margin: 16px 0;
   padding: 12px 16px;
-  border: 1px solid #334155;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #cbd5e1;
+  background: var(--surface);
+  color: var(--text-secondary);
 }
 
-.history h2 { margin: 0 0 8px; font-size: 16px; }
-.history article { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid #334155; }
-.history code { overflow-wrap: anywhere; color: #94a3b8; }
-.history p { margin: 0; white-space: pre-wrap; }
+.history h2 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 16px;
+}
 
-.editor { display: grid; gap: 12px; }
-.editor label { display: grid; gap: 6px; color: #cbd5e1; }
-.editor textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #475569; border-radius: 6px; background: #020617; color: #e2e8f0; font: inherit; }
-.editor button { justify-self: start; padding: 8px 14px; }
+.history article {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.history p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.editor {
+  display: grid;
+  gap: 12px;
+}
+
+.editor label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.editor textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.editor button {
+  justify-self: start;
+}
 
 .path {
+  min-width: 0;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 14px;
-  color: #94a3b8;
-  font-family: monospace;
+  overflow-wrap: anywhere;
 }
 
 .toggle {
-  padding: 4px 12px;
-  border: 1px solid #334155;
-  border-radius: 4px;
-  background: transparent;
-  color: #94a3b8;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
 }
 
 .toggle:hover {
-  border-color: #3b82f6;
-  color: #e2e8f0;
+  border-color: var(--link);
+  color: var(--text-primary);
 }
 
 .content {
-  background: #0f172a;
-  border: 1px solid #334155;
-  border-radius: 8px;
-  padding: 24px;
+  min-width: 0;
   min-height: 200px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-primary);
 }
 
 .raw {
-  font-family: monospace;
+  margin: 0;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 14px;
-  color: #e2e8f0;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .markdown {
-  color: #e2e8f0;
+  color: var(--text-primary);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .markdown h1,
 .markdown h2,
 .markdown h3 {
-  color: #f1f5f9;
-  margin-top: 16px;
-  margin-bottom: 8px;
+  margin: 16px 0 8px;
+  color: var(--text-primary);
 }
 
 .markdown code {
-  background: #1e293b;
   padding: 2px 4px;
   border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text-primary);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .markdown pre {
-  background: #1e293b;
+  max-width: 100%;
   padding: 12px;
-  border-radius: 4px;
+  border-radius: 5px;
+  background: var(--surface-raised);
   overflow-x: auto;
 }
 
@@ -121,17 +165,35 @@
 }
 
 .markdown strong {
-  color: #f1f5f9;
+  color: var(--text-primary);
 }
 
 .loading {
-  text-align: center;
   padding: 48px;
-  color: #94a3b8;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .error {
-  color: #ef4444;
   padding: 24px;
+  color: var(--danger-fg);
   text-align: center;
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 18px 14px 28px;
+  }
+
+  .content {
+    padding: 14px;
+  }
+
+  .toolbar {
+    width: 100%;
+  }
+
+  .toolbar button {
+    flex: 1 1 auto;
+  }
 }

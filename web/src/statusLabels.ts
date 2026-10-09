@@ -1,0 +1,17 @@
+export const statusLabels: Record<string, string> = {
+  queued: 'в очереди',
+  running: 'в работе',
+  waiting_for_approval: 'ждёт решения',
+  completed: 'завершена',
+  completed_with_warnings: 'завершена с замечаниями',
+  failed: 'ошибка',
+  blocked: 'заблокирована',
+  stopped: 'остановлена',
+  canceled: 'отменена',
+  interrupted: 'прервана',
+  passed: 'пройдена',
+  rejected: 'отклонена',
+  warning: 'предупреждение',
+  skipped: 'пропущена',
+  invalidated: 'устарела',
+};

@@ -4,6 +4,7 @@ import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
 import { cancelRun, getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
+import { usePageTitle } from '../hooks/usePageTitle';
 import styles from './Dashboard.module.css';
 
 type Filter = 'all' | PipelineStatus;
@@ -22,7 +23,22 @@ const filters: Filter[] = [
   'interrupted',
 ];
 
+const filterLabels: Record<Filter, string> = {
+  all: 'Все',
+  queued: 'В очереди',
+  running: 'Выполняется',
+  waiting_for_approval: 'Ждёт решения',
+  completed: 'Завершена',
+  completed_with_warnings: 'Есть замечания',
+  failed: 'Ошибка',
+  blocked: 'Заблокирована',
+  stopped: 'Остановлена',
+  canceled: 'Отменена',
+  interrupted: 'Прервана',
+};
+
 export function Dashboard() {
+  usePageTitle('Задачи');
   const principal = getActivePrincipal();
   const canSubmitIntention = !principal || principal.roles.includes('product_owner');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
@@ -81,15 +97,16 @@ export function Dashboard() {
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <h1 className={styles.title}>Pipeline Runs</h1>
+        <h1 className={styles.title}>Задачи</h1>
         <div className={styles.filters}>
           {filters.map((f) => (
             <button
               key={f}
               className={`${styles.filterBtn} ${filter === f ? styles.active : ''}`}
+              aria-pressed={filter === f}
               onClick={() => setFilter(f)}
             >
-              {f}
+              {filterLabels[f]}
             </button>
           ))}
         </div>
@@ -127,9 +144,9 @@ export function Dashboard() {
       </section>
 
       {loading ? (
-        <div className={styles.loading}>Loading...</div>
+        <div className={styles.loading}>Загружаем задачи…</div>
       ) : filtered.length === 0 ? (
-        <div className={styles.empty}>No pipeline runs found</div>
+        <div className={styles.empty}>Задач с таким статусом пока нет.</div>
       ) : (
         <div className={styles.pipelines}>
           {filtered.map((run) => (

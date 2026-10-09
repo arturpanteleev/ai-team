@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   Link,
   MemoryRouter,
+  Routes,
   useLocation,
   useParams,
   useSearchParams,
@@ -32,7 +33,10 @@ describe('local router', () => {
   it('обрабатывает path params, wildcard, query и client-side navigation', () => {
     render(
       <MemoryRouter initialEntries={['/pipelines/42']}>
-        <RouteProbe />
+        <Routes routes={[
+          { path: '/pipelines/:id', element: <RouteProbe /> },
+          { path: '/artifacts/*', element: <RouteProbe /> },
+        ]} />
       </MemoryRouter>,
     );
 

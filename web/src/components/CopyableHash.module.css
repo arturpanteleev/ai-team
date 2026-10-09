@@ -1,0 +1,23 @@
+.container {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.hash {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.copy {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.copied {
+  color: var(--success-fg);
+  font-size: 12px;
+}

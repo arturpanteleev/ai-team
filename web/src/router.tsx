@@ -27,6 +27,12 @@ interface RouterContextValue {
 }
 
 const RouterContext = createContext<RouterContextValue | null>(null);
+const RouteParamsContext = createContext<Record<string, string> | null>(null);
+
+export interface RouteDefinition {
+  path: string;
+  element: ReactNode;
+}
 
 function currentBrowserLocation(): RouterLocation {
   return { pathname: window.location.pathname, search: window.location.search };
@@ -127,6 +133,60 @@ export function NavLink({ to, end = false, className, ...props }: NavLinkProps) 
   return <Link {...props} to={to} className={resolvedClassName} />;
 }
 
+function decodeSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function matchRoute(pathname: string, pattern: string): Record<string, string> | null {
+  const pathParts = pathname.split('/').filter(Boolean);
+  const patternParts = pattern.split('/').filter(Boolean);
+  const params: Record<string, string> = {};
+
+  for (let index = 0; index < patternParts.length; index += 1) {
+    const patternPart = patternParts[index];
+    if (patternPart === '*') {
+      if (pathParts.length <= index) return null;
+      params['*'] = pathParts.slice(index).map(decodeSegment).join('/');
+      return params;
+    }
+
+    const pathPart = pathParts[index];
+    if (pathPart === undefined) return null;
+    if (patternPart.startsWith(':')) {
+      params[patternPart.slice(1)] = decodeSegment(pathPart);
+    } else if (patternPart !== pathPart) {
+      return null;
+    }
+  }
+
+  return pathParts.length === patternParts.length ? params : null;
+}
+
+export function Routes({
+  routes,
+  fallback = null,
+}: {
+  routes: RouteDefinition[];
+  fallback?: ReactNode;
+}) {
+  const { pathname } = useLocation();
+  for (const route of routes) {
+    const params = matchRoute(pathname, route.path);
+    if (params) {
+      return (
+        <RouteParamsContext.Provider value={params}>
+          {route.element}
+        </RouteParamsContext.Provider>
+      );
+    }
+  }
+  return fallback;
+}
+
 export function useNavigate(): Navigate {
   return useRouterContext().navigate;
 }
@@ -136,16 +196,8 @@ export function useLocation(): RouterLocation {
 }
 
 export function useParams<T extends Record<string, string | undefined>>(): T {
-  const { pathname } = useRouterContext().location;
-  const values: Record<string, string> = {};
-  const pipeline = pathname.match(/^\/pipelines\/([^/]+)$/);
-  const artifact = pathname.match(/^\/artifacts\/(.+)$/);
-  if (pipeline) {
-    values.id = decodeURIComponent(pipeline[1]);
-  }
-  if (artifact) {
-    values['*'] = artifact[1].split('/').map(decodeURIComponent).join('/');
-  }
+  const values = useContext(RouteParamsContext);
+  if (!values) throw new Error('useParams must be used inside a matched Routes entry');
   return values as T;
 }
 

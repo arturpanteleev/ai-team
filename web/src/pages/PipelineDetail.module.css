@@ -1,20 +1,15 @@
 .container {
+  width: min(100%, 900px);
   padding: 24px;
-  max-width: 800px;
   margin: 0 auto;
 }
 
 .back {
   display: inline-block;
   padding: 4px 0;
-  color: #3b82f6;
-  text-decoration: none;
-  font-size: 14px;
   margin-bottom: 16px;
-}
-
-.back:hover {
-  text-decoration: underline;
+  color: var(--link);
+  font-size: 14px;
 }
 
 .header {
@@ -22,22 +17,25 @@
 }
 
 .title {
+  margin: 0 0 8px;
+  color: var(--text-primary);
   font-size: 24px;
-  font-weight: 600;
-  color: #f1f5f9;
-  margin: 0 0 8px 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  align-items: center;
+  gap: 8px 16px;
+  color: var(--text-muted);
   font-size: 14px;
-  color: #94a3b8;
 }
 
 .identifier {
-  font-family: monospace;
+  max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
 }
 
@@ -48,145 +46,192 @@
 }
 
 .loading {
-  text-align: center;
   padding: 48px;
-  color: #94a3b8;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .error {
-  color: #ef4444;
   padding: 24px;
+  color: var(--danger-fg);
   text-align: center;
 }
 
-.controls {
+.controls,
+.workflow {
   margin: 20px 0;
   padding: 16px;
-  border: 1px solid #334155;
-  border-radius: 8px;
-  color: #cbd5e1;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-secondary);
 }
 
-.controlHeader {
+.controlHeader,
+.workflowHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
-.controlHeader h2 {
+.controlHeader h2,
+.workflowHeader h2 {
   margin: 0 auto 0 0;
+  color: var(--text-primary);
   font-size: 18px;
 }
 
-.controlHeader input,
-.controlHeader button,
-.actions button {
-  border: 1px solid #475569;
-  border-radius: 5px;
+.controlHeader input {
+  width: min(100%, 240px);
+  min-width: 0;
   padding: 7px 10px;
-  background: #0f172a;
-  color: #e2e8f0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
 }
 
 .approval {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 7px;
+  gap: 9px;
   margin-top: 12px;
-  padding: 12px;
-  background: #0f172a;
-  border-radius: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.approval > span,
+.approval small {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.hashes {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--text-secondary);
+}
+
+.hashes > span:first-child {
+  min-width: 130px;
 }
 
 .question {
   display: grid;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  border-left: 3px solid var(--accent, #5266d8);
-  background: var(--surface-muted, #f5f6fa);
+  min-width: 0;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }
 
 .question h3 {
   margin: 0;
+  color: var(--text-primary);
   font-size: 1rem;
 }
 
-.questionText > :first-child {
+.question p {
   margin: 0;
 }
 
 .questionText {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.questionText p:last-child {
+.questionText > :first-child {
+  margin-top: 0;
+}
+
+.questionText > :last-child {
   margin-bottom: 0;
+}
+
+.questionText a {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  overflow-wrap: anywhere;
 }
 
 .question label {
   display: grid;
-  gap: 0.35rem;
+  gap: 6px;
+  color: var(--text-primary);
 }
 
 .question textarea {
   width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-primary);
   resize: vertical;
 }
 
-.approval code {
+.approval code,
+.approval pre {
+  max-width: 100%;
+  color: var(--text-secondary);
   overflow-wrap: anywhere;
-  color: #93c5fd;
+  white-space: pre-wrap;
+}
+
+.approval details {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 7px;
+}
+
+.actions button {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
 }
 
 .controlError {
   margin-top: 8px;
-  color: #f87171;
-}
-
-.workflow {
-  margin: 20px 0;
-  padding: 16px;
-  border: 1px solid #334155;
-  border-radius: 8px;
-  color: #cbd5e1;
-}
-
-.workflowHeader {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-
-.workflowHeader h2 {
-  margin: 0 auto 0 0;
-  font-size: 18px;
+  color: var(--danger-fg);
 }
 
 .nodes {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px;
   margin: 12px 0;
 }
 
 .nodes span {
-  padding: 5px 8px;
-  border: 1px solid #475569;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
+  color: var(--text-secondary);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .nodes span[data-current='true'] {
-  border-color: #3b82f6;
-  color: #93c5fd;
+  border-color: var(--link);
+  color: var(--link);
 }
 
 .edges {
@@ -195,17 +240,54 @@
   gap: 6px;
 }
 
+.edges a {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .edges article {
   display: grid;
-  grid-template-columns: minmax(90px, auto) minmax(70px, auto) minmax(100px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
-  padding: 7px;
-  background: #0f172a;
-  border-radius: 5px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface-raised);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .edges small {
   grid-column: 1 / -1;
-  color: #94a3b8;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 18px 14px 28px;
+  }
+
+  .title {
+    font-size: 21px;
+  }
+
+  .controls,
+  .workflow {
+    padding: 12px;
+  }
+
+  .approval {
+    padding: 10px;
+  }
+
+  .hashes > span:first-child {
+    min-width: 100%;
+  }
+
+  .edges article {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
 }

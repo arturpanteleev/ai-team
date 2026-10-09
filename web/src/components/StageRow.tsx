@@ -54,7 +54,7 @@ export function StageRow({ stage, artifacts, runId }: StageRowProps) {
   }, [expanded, runId, stage.attempt_id, stage.status]);
 
   const duration = stage.duration_ms
-    ? (stage.duration_ms / 1000).toFixed(1) + 's'
+    ? (stage.duration_ms / 1000).toFixed(1) + ' с'
     : '—';
 
   return (
@@ -62,6 +62,16 @@ export function StageRow({ stage, artifacts, runId }: StageRowProps) {
       <div
         className={`${styles.row} ${expanded ? styles.expanded : ''}`}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setExpanded((current) => !current);
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-label={`Этап ${stage.agent_name}: ${expanded ? 'свернуть детали' : 'показать детали'}`}
       >
         <span className={styles.agent}>{stage.agent_name}</span>
         <StatusBadge status={stage.status} />
@@ -73,11 +83,11 @@ export function StageRow({ stage, artifacts, runId }: StageRowProps) {
       {expanded && (
         <div className={styles.artifacts}>
           <div className={styles.stateGrid}>
-            <span>Attempt</span><code>{stage.attempt_id}</code>
-            <span>Stage index</span><code>{stage.stage_index}</code>
-            <span>Execution</span><code>{stage.execution || '—'}</code>
-            <span>Decision</span><code>{stage.decision || '—'}</code>
-            <span>Outcome</span><code>{stage.outcome || '—'}</code>
+            <span>Попытка</span><code>{stage.attempt_id}</code>
+            <span>Номер этапа</span><code>{stage.stage_index}</code>
+            <span>Исполнение</span><code>{stage.execution || '—'}</code>
+            <span>Решение</span><code>{stage.decision || '—'}</code>
+            <span>Результат</span><code>{stage.outcome || '—'}</code>
           </div>
           {checks.length > 0 && (
             <section className={styles.evidence}>
@@ -100,20 +110,20 @@ export function StageRow({ stage, artifacts, runId }: StageRowProps) {
           )}
           {delivery && (
             <section className={styles.evidence}>
-              <h4>Delivery</h4>
+              <h4>Выкладка</h4>
               {delivery.pr_url && <a href={delivery.pr_url}>{delivery.pr_url}</a>}
               {delivery.steps?.map((step) => (
                 <div key={step.step} className={styles.evidenceRow}>
                   <strong>{step.step}</strong>
                   <code>{step.command?.join(' ') || '—'}</code>
-                  <span>{step.status} · exit {step.exit_code}{step.reason ? ` · ${step.reason}` : ''}</span>
+                  <span>{step.status} · код завершения {step.exit_code}{step.reason ? ` · ${step.reason}` : ''}</span>
                 </div>
               ))}
             </section>
           )}
           {runId && (
             <section className={styles.evidence}>
-              <h4>Лог attempt</h4>
+              <h4>Лог попытки</h4>
               {logTruncated && <span className={styles.empty}>Показан хвост последних 64 KiB.</span>}
               {logError ? <span className={styles.empty}>{logError}</span> :
                 <pre className={styles.log}>{log || 'Лог пока пуст.'}</pre>}

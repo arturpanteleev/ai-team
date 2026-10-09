@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BrowserRouter, useLocation } from './router';
+import { BrowserRouter, Routes } from './router';
 import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
 import { PipelineDetail } from './pages/PipelineDetail';
@@ -9,19 +9,16 @@ import { Team } from './pages/Team';
 import { activateTeamInvitation, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp() {
-  const { pathname } = useLocation();
-  let page = null;
-  if (pathname === '/') {
-    page = <Dashboard />;
-  } else if (pathname === '/team') {
-    page = <Team />;
-  } else if (/^\/pipelines\/[^/]+$/.test(pathname)) {
-    page = <PipelineDetail />;
-  } else if (pathname.startsWith('/artifacts/')) {
-    page = <ArtifactViewer />;
-  }
-
-  return <Layout>{page}</Layout>;
+  return (
+    <Layout>
+      <Routes routes={[
+        { path: '/', element: <Dashboard /> },
+        { path: '/team', element: <Team /> },
+        { path: '/pipelines/:id', element: <PipelineDetail /> },
+        { path: '/artifacts/*', element: <ArtifactViewer /> },
+      ]} fallback={<main role="status">Страница не найдена.</main>} />
+    </Layout>
+  );
 }
 
 function App() {

@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { StatusBadge } from './StatusBadge';
+import { statusLabels } from '../statusLabels';
 import styles from './StatusBadge.module.css';
 import type { PipelineStatus, StageStatus } from '../types';
 
@@ -9,6 +10,7 @@ import type { PipelineStatus, StageStatus } from '../types';
 // делить класс с другим статусом или проваливаться в pending.
 const ALL_STATUSES: Array<PipelineStatus | StageStatus> = [
   'running',
+  'queued',
   'completed',
   'completed_with_warnings',
   'failed',
@@ -26,7 +28,7 @@ const ALL_STATUSES: Array<PipelineStatus | StageStatus> = [
 describe('StatusBadge', () => {
   it.each(ALL_STATUSES)('renders the %s state with its own class', (status) => {
     render(<StatusBadge status={status} />);
-    expect(screen.getByText(status)).toHaveClass(styles[status]);
+    expect(screen.getByText(statusLabels[status])).toHaveClass(styles[status]);
   });
 
   // Компонент подстраховывается для статусов вне известного union

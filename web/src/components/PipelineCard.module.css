@@ -1,43 +1,66 @@
 .card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 8px;
+  min-width: 0;
   padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
   cursor: pointer;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, transform 0.2s;
 }
 
 .card:hover {
-  border-color: #3b82f6;
+  border-color: var(--link);
+  transform: translateY(-1px);
 }
 
 .header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .feature {
+  min-width: 0;
+  color: var(--text-primary);
   font-size: 16px;
-  font-weight: 600;
-  color: #f1f5f9;
+  font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .task {
-  font-size: 14px;
-  color: #94a3b8;
   margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 
 .footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--text-muted);
   font-size: 12px;
-  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
+.footer button {
+  color: var(--text-primary);
 }
 
 .duration {
-  font-family: monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (max-width: 640px) {
+  .card {
+    padding: 12px;
+  }
+
+  .header {
+    flex-wrap: wrap;
+  }
 }

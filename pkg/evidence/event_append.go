@@ -95,7 +95,16 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 	}
 	candidate.SHA256 = digest
 	proposal := append(append([]Event(nil), events...), candidate)
-	if _, err := replayEventsWithAttemptManifestSource(proposal, runID, runDir, manifests); err != nil {
+	// A worker records attempt_finished immediately before the matching
+	// agent_finished event. The candidate append is therefore allowed to leave
+	// that one attempt's completion event pending, but only while it is the last
+	// durable event: any later append of another type must either close the gap
+	// or fail fast, and strict replay still rejects a genuinely missing event.
+	pendingAgentFinishedAttemptID := ""
+	if candidate.Type == "attempt_finished" {
+		pendingAgentFinishedAttemptID = candidate.AttemptID
+	}
+	if _, err := replayEventsWithPendingAgentFinished(proposal, runID, runDir, manifests, "", pendingAgentFinishedAttemptID); err != nil {
 		return Event{}, false, fmt.Errorf("event append fails lifecycle replay: %w", err)
 	}
 	if candidate.Type == "run_finished" {

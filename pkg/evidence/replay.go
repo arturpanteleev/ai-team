@@ -154,6 +154,16 @@ func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string,
 }
 
 func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDir string, source AttemptManifestSource, deliveryTargetDir string) (ReplayedRun, error) {
+	return replayEventsWithPendingAgentFinished(events, runID, runDir, source, deliveryTargetDir, "")
+}
+
+// replayEventsWithPendingAgentFinished replays a verified chain and, when
+// pendingAgentFinishedAttemptID is set, tolerates the single transition window
+// where that agent attempt's attempt_finished is the last durable event and its
+// matching agent_finished append is still in flight. Every other gap between a
+// finished agent attempt and its agent_finished remains a hard failure, so
+// strict replay (empty id) still fails closed on a genuinely missing event.
+func replayEventsWithPendingAgentFinished(events []Event, runID, runDir string, source AttemptManifestSource, deliveryTargetDir, pendingAgentFinishedAttemptID string) (ReplayedRun, error) {
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	var err error
 	byID := make(map[string]int)
@@ -567,7 +577,8 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 		if attempt.FinishedAt.IsZero() && terminal {
 			return ReplayedRun{}, fmt.Errorf("terminal run contains active attempt %q", attempt.AttemptID)
 		}
-		if attemptFinishedEvents[attempt.AttemptID] && agentStartedEvents[attempt.AttemptID] && !agentFinishedEvents[attempt.AttemptID] {
+		if attemptFinishedEvents[attempt.AttemptID] && agentStartedEvents[attempt.AttemptID] && !agentFinishedEvents[attempt.AttemptID] &&
+			attempt.AttemptID != pendingAgentFinishedAttemptID {
 			return ReplayedRun{}, fmt.Errorf("finished agent attempt %q is missing agent_finished", attempt.AttemptID)
 		}
 	}

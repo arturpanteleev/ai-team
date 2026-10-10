@@ -286,6 +286,7 @@ func TestTemplateValidationRules(t *testing.T) {
 		{"invalid link kind", func(c *Config) { c.Stages[4].LinkKind = "issue" }, "link_kind"},
 		{"link kind on md", func(c *Config) { c.Stages[5].LinkKind = "pr" }, "link_kind допустим только"},
 		{"sections on approve", func(c *Config) { c.Stages[0].RequiredSections = []string{"Decision"} }, "required_sections допустим только"},
+		{"confirm none unsupported", func(c *Config) { c.Stages[2].Confirm = "none" }, "confirm"},
 		{"forward return", func(c *Config) { c.Returns[0].To = "acceptance" }, "должен вести только назад"},
 		{"unknown return stage", func(c *Config) { c.Returns[0].From = "ghost" }, "существующие stages"},
 		{"unknown max visits stage", func(c *Config) { c.MaxVisits["ghost"] = 2 }, "неизвестный stage"},
@@ -316,6 +317,14 @@ func TestTemplateGraphUsesOrderAndBackwardReturns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Stages[2].Skippable = true
+	for _, route := range cfg.Returns {
+		for index := range cfg.Stages {
+			if cfg.Stages[index].ID == route.From {
+				cfg.Stages[index].Confirm = "auto"
+			}
+		}
+	}
 	graph, err := cfg.CompiledGraph()
 	if err != nil {
 		t.Fatal(err)
@@ -335,6 +344,14 @@ func TestTemplateGraphUsesOrderAndBackwardReturns(t *testing.T) {
 		if !ok || edge.To != want {
 			t.Fatalf("stage-order edge %s → %s missing: %+v", stage.ID, want, edge)
 		}
+		if stage.Skippable {
+			skipped, found := graph.Edge(stage.ID, workflow.OutcomeSkipped)
+			if !found || skipped.To != want || skipped.Approval != nil {
+				t.Fatalf("skippable stage %s must route skipped to %s without another approval: %+v", stage.ID, want, skipped)
+			}
+		} else if _, found := graph.Edge(stage.ID, workflow.OutcomeSkipped); found {
+			t.Fatalf("non-skippable stage %s must not expose a skipped edge", stage.ID)
+		}
 	}
 	for _, route := range cfg.Returns {
 		node, ok := graph.Node(route.To)
@@ -344,6 +361,10 @@ func TestTemplateGraphUsesOrderAndBackwardReturns(t *testing.T) {
 		edge, ok := graph.Edge(route.From, "rejected")
 		if !ok || edge.Approval == nil || edge.Approval.Actions["return_to_"+route.To] != route.To {
 			t.Fatalf("return route %s → %s missing: %+v", route.From, route.To, edge)
+		}
+		passed, passedOK := graph.Edge(route.From, workflow.OutcomePassed)
+		if !passedOK || passed.Approval == nil || passed.Approval.Actions["return_to_"+route.To] != route.To {
+			t.Fatalf("configured return %s → %s must remain available on the passed stage action even with confirm:auto: %+v", route.From, route.To, passed)
 		}
 	}
 	cfg.Returns[0].MaxVisits = 4
@@ -368,12 +389,21 @@ func TestTemplateGraphRespectsStageConfirmation(t *testing.T) {
 
 	graph, err := cfg.CompiledGraph()
 	if err != nil {
-		t.Fatalf("all-auto template should compile without forward approvals: %v", err)
+		t.Fatalf("all-auto template with explicit returns should compile: %v", err)
 	}
 	for i, stage := range cfg.Stages {
 		edge, ok := graph.Edge(stage.ID, "passed")
-		if !ok || edge.Approval != nil {
-			t.Fatalf("confirm:auto stage %q should have an unguarded forward edge: %+v", stage.ID, edge)
+		hasReturns := false
+		for _, route := range cfg.Returns {
+			if route.From == stage.ID {
+				hasReturns = true
+				if !ok || edge.Approval == nil || edge.Approval.Actions["return_to_"+route.To] != route.To {
+					t.Fatalf("confirm:auto stage %q must expose configured return %s on its forward action gate: %+v", stage.ID, route.To, edge)
+				}
+			}
+		}
+		if !hasReturns && (!ok || edge.Approval != nil) {
+			t.Fatalf("confirm:auto stage %q without returns should have an unguarded forward edge: %+v", stage.ID, edge)
 		}
 		want := workflow.TerminalComplete
 		if i+1 < len(cfg.Stages) {

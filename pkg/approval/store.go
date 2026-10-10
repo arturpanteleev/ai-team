@@ -312,7 +312,7 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if strings.HasPrefix(decision.Action, "return_to_") && !contains(value.Actions, decision.Action) {
 		return PendingApproval{}, fmt.Errorf("запрещён возврат по маршруту %q: действие отсутствует в графе этого approval", decision.Action)
 	}
-	if contains(value.FeedbackActions, decision.Action) && decision.Comment == "" {
+	if contains(value.FeedbackActions, decision.Action) && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("для возврата требуется причина или feedback")
 	}
 	if value.Kind == KindInput {
@@ -333,6 +333,9 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 		}
 		if decision.Action == "submit" && strings.TrimSpace(decision.Comment) == "" {
 			return PendingApproval{}, errors.New("human input submit requires a non-empty comment")
+		}
+		if decision.Action == "skip" && strings.TrimSpace(decision.Comment) == "" {
+			return PendingApproval{}, errors.New("пропуск этапа требует причину")
 		}
 	}
 	if decision.ActorID == "" || !contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) {
@@ -490,6 +493,9 @@ func validate(value PendingApproval) error {
 		} else if !contains(value.Actions, "submit") || value.Targets["submit"] != value.FromStage || contains(value.Actions, "approve") {
 			return errors.New("md/link input must offer submit/reject on the human stage")
 		}
+		if contains(value.Actions, "skip") && value.Targets["skip"] != value.FromStage {
+			return errors.New("skip input must remain on the human stage")
+		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {
 		return errors.New("approval содержит недопустимый candidate hash")
@@ -534,6 +540,9 @@ func validate(value PendingApproval) error {
 				if !validSHA256(decision.ContentSHA256) || decision.ContentSHA256 != hex.EncodeToString(digest[:]) {
 					return errors.New("approval human submission hash does not match its comment")
 				}
+			}
+			if (decision.Action == "submit" || decision.Action == "skip") && strings.TrimSpace(decision.Comment) == "" {
+				return errors.New("human input decision requires non-empty content or skip reason")
 			}
 		}
 	}

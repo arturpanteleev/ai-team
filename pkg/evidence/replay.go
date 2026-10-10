@@ -14,6 +14,11 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
+// StageSkipProtocolVersion identifies current explicit skip events that bind
+// their reason in both attempt_finished and stage_skipped. Version zero is the
+// historical B-34 shape, whose durable reason exists only in stage_skipped.
+const StageSkipProtocolVersion = 1
+
 // ReplayedRun is the deterministic lifecycle projection reconstructed from a
 // verified event chain. Artifact contents remain in attempt manifests; the
 // event carries and verifies each manifest identity.
@@ -24,6 +29,7 @@ type ReplayedRun struct {
 	Status            workflow.RunOutcome        `json:"status,omitempty"`
 	Attempts          []ReplayedAttempt          `json:"attempts"`
 	Transitions       []ReplayedTransition       `json:"transitions,omitempty"`
+	StageSkips        []ReplayedStageSkip        `json:"stage_skips,omitempty"`
 	ApprovalDecisions []ReplayedApprovalDecision `json:"approval_decisions,omitempty"`
 	ApprovalReuses    []ReplayedApprovalReuse    `json:"approval_reuses,omitempty"`
 	LastEventSHA256   string                     `json:"last_event_sha256"`
@@ -40,6 +46,13 @@ type ReplayedTransition struct {
 	EdgeTarget string `json:"edge_target"`
 	Action     string `json:"action,omitempty"`
 	Target     string `json:"target"`
+}
+
+type ReplayedStageSkip struct {
+	Sequence  uint64 `json:"sequence"`
+	AttemptID string `json:"attempt_id"`
+	Stage     string `json:"stage"`
+	Reason    string `json:"reason"`
 }
 
 // ReplayedApprovalDecision retains the event identity needed to bind a
@@ -94,6 +107,8 @@ type ReplayedAttempt struct {
 	AttemptID            string                `json:"attempt_id"`
 	Stage                string                `json:"stage"`
 	Executor             string                `json:"executor,omitempty"`
+	StageAction          string                `json:"stage_action,omitempty"`
+	StageSkipVersion     int                   `json:"stage_skip_version,omitempty"`
 	ActorID              string                `json:"actor_id,omitempty"`
 	ActorRole            string                `json:"actor_role,omitempty"`
 	HumanInputApprovalID string                `json:"human_input_approval_id,omitempty"`
@@ -105,6 +120,7 @@ type ReplayedAttempt struct {
 	Verdict              string                `json:"verdict,omitempty"`
 	Blocker              string                `json:"blocker,omitempty"`
 	Error                string                `json:"error,omitempty"`
+	SkipReason           string                `json:"skip_reason,omitempty"`
 	ManifestSHA256       string                `json:"manifest_sha256,omitempty"`
 	Superseded           bool                  `json:"superseded,omitempty"`
 }
@@ -141,6 +157,78 @@ func ReplayEventLogWithEventSourcesAndTarget(path, runID string, eventsSource Ev
 	return replayEventsWithAttemptManifestSourceAndTarget(events, runID, filepath.Dir(path), manifestsSource, deliveryTargetDir)
 }
 
+// RecoverMissingStageSkipEvents repairs the single durable crash window where
+// a skipped attempt's manifest and attempt_finished event were committed but
+// its mandatory warning event was not. The skip reason is taken from the
+// finished attempt event, then strict replay validates the repaired journal.
+func RecoverMissingStageSkipEvents(runDir, runID string, eventsSource EventLog, manifestsSource AttemptManifestSource) error {
+	if err := ValidateRunID(runID); err != nil {
+		return err
+	}
+	eventsPath := filepath.Join(runDir, "events.jsonl")
+	writer := eventsSource
+	if writer == nil {
+		resolved, reserved, err := defaultEventLogSource(eventsPath, runID)
+		if err != nil {
+			return err
+		}
+		if reserved {
+			writer = resolved
+		} else {
+			writer = newFileEventLog(eventsPath)
+		}
+	}
+	events, err := VerifyEventLogWithSource(eventsPath, runID, eventsSource)
+	if err != nil {
+		return err
+	}
+	replayed, err := replayEventsForAppend(events, runID, runDir, manifestsSource)
+	if err != nil {
+		return err
+	}
+	if !replayed.FinishedAt.IsZero() {
+		_, strictErr := replayEventsWithAttemptManifestSourceAndTarget(events, runID, runDir, manifestsSource, "")
+		return strictErr
+	}
+	haveWarning := make(map[string]bool, len(replayed.StageSkips))
+	for _, skipped := range replayed.StageSkips {
+		haveWarning[skipped.AttemptID] = true
+	}
+	lastHash := chainGenesis(runID)
+	if len(events) > 0 {
+		lastHash = events[len(events)-1].SHA256
+	}
+	for _, attempt := range replayed.Attempts {
+		if attempt.State.Outcome != workflow.OutcomeSkipped ||
+			(attempt.StageAction != "skip" && attempt.Executor != "human") || haveWarning[attempt.AttemptID] {
+			continue
+		}
+		reason := attempt.SkipReason
+		if strings.TrimSpace(reason) == "" {
+			return fmt.Errorf("finished skipped attempt %q has no durable reason for recovery", attempt.AttemptID)
+		}
+		data := map[string]any{"reason": reason, "warning": true}
+		if attempt.Executor == "human" {
+			data["actor_id"], data["actor_role"] = attempt.ActorID, attempt.ActorRole
+		}
+		timestamp := time.Now().UTC()
+		if timestamp.Before(attempt.FinishedAt) {
+			timestamp = attempt.FinishedAt
+		}
+		appended, appendErr := writer.Append(runID, Event{
+			Type: "stage_skipped", Stage: attempt.Stage, AttemptID: attempt.AttemptID,
+			Timestamp: timestamp, Data: data,
+		}, uint64(len(events)), lastHash)
+		if appendErr != nil {
+			return fmt.Errorf("recover stage_skipped for %s: %w", attempt.AttemptID, appendErr)
+		}
+		events = append(events, appended)
+		lastHash = appended.SHA256
+	}
+	_, err = replayEventsWithAttemptManifestSourceAndTarget(events, runID, runDir, manifestsSource, "")
+	return err
+}
+
 // replayEvents rebuilds lifecycle state from an already verified event chain.
 // Keeping replay separate from filesystem access lets the package persistence
 // seam share the exact existing transition validation.
@@ -153,12 +241,24 @@ func replayEventsWithAttemptManifestSource(events []Event, runID, runDir string,
 }
 
 func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDir string, source AttemptManifestSource, deliveryTargetDir string) (ReplayedRun, error) {
+	return replayEventsWithAttemptManifestSourceAndTargetMode(events, runID, runDir, source, deliveryTargetDir, true)
+}
+
+// replayEventsForAppend allows the durable prefix between attempt_finished and
+// stage_skipped. The skip reason is persisted in attempt_finished so recovery
+// can append the warning event before normal strict replay resumes.
+func replayEventsForAppend(events []Event, runID, runDir string, source AttemptManifestSource) (ReplayedRun, error) {
+	return replayEventsWithAttemptManifestSourceAndTargetMode(events, runID, runDir, source, "", false)
+}
+
+func replayEventsWithAttemptManifestSourceAndTargetMode(events []Event, runID, runDir string, source AttemptManifestSource, deliveryTargetDir string, requireStageSkip bool) (ReplayedRun, error) {
 	result := ReplayedRun{RunID: runID, Attempts: make([]ReplayedAttempt, 0)}
 	var err error
 	byID := make(map[string]int)
 	approvalSubjects := make(map[string]string)
 	decidedApprovals := make(map[string]bool)
 	selectedTransitions := make(map[string]bool)
+	stageSkippedAttempts := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
 	canceled := false
@@ -194,6 +294,15 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			if executor == "" {
 				executor = "agent" // legacy attempt events predate executor metadata.
 			}
+			stageAction, stageActionErr := eventString(event.Data, "stage_action", false)
+			if stageActionErr != nil || (stageAction != "" && stageAction != "skip") {
+				return ReplayedRun{}, fmt.Errorf("attempt_started %q stage action is invalid", event.AttemptID)
+			}
+			stageSkipVersion, versionErr := optionalEventInt(event.Data, "stage_skip_version")
+			if versionErr != nil || (stageSkipVersion != 0 && stageSkipVersion != StageSkipProtocolVersion) ||
+				(stageSkipVersion != 0 && stageAction != "skip") {
+				return ReplayedRun{}, fmt.Errorf("attempt_started %q skip protocol version is invalid", event.AttemptID)
+			}
 			actorID, actorIDErr := eventString(event.Data, "actor_id", false)
 			actorRole, actorRoleErr := eventString(event.Data, "actor_role", false)
 			humanInputApprovalID, approvalIDErr := eventString(event.Data, "human_input_approval_id", false)
@@ -205,7 +314,8 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			}
 			result.Attempts = append(result.Attempts, ReplayedAttempt{
 				AttemptID: event.AttemptID, Stage: event.Stage, StageIndex: stageIndex,
-				Executor: executor, ActorID: actorID, ActorRole: actorRole, HumanInputApprovalID: humanInputApprovalID,
+				Executor: executor, StageAction: stageAction, StageSkipVersion: stageSkipVersion,
+				ActorID: actorID, ActorRole: actorRole, HumanInputApprovalID: humanInputApprovalID,
 				StartedAt: event.Timestamp, State: workflow.AttemptState{Execution: workflow.ExecutionRunning, Outcome: workflow.OutcomePending},
 			})
 		case "attempt_finished":
@@ -261,6 +371,17 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 			}
 			if attempt.Error, err = eventString(event.Data, "error", false); err != nil {
 				return ReplayedRun{}, err
+			}
+			if attempt.SkipReason, err = eventString(event.Data, "stage_skip_reason", false); err != nil {
+				return ReplayedRun{}, err
+			}
+			if attempt.SkipReason != "" {
+				if attempt.State.Outcome != workflow.OutcomeSkipped || strings.TrimSpace(attempt.SkipReason) == "" {
+					return ReplayedRun{}, fmt.Errorf("attempt_finished %q has invalid stage skip reason", event.AttemptID)
+				}
+			}
+			if attempt.StageAction == "skip" && attempt.StageSkipVersion > 0 && strings.TrimSpace(attempt.SkipReason) == "" {
+				return ReplayedRun{}, fmt.Errorf("attempt_finished %q has no durable reason for explicit skip", event.AttemptID)
 			}
 			if attempt.ManifestSHA256, err = eventString(event.Data, "manifest_sha256", false); err != nil {
 				return ReplayedRun{}, err
@@ -386,6 +507,38 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 				Sequence: event.Sequence, AttemptID: event.AttemptID, From: from,
 				Outcome: outcome, EdgeTarget: edgeTarget, Action: action, Target: target,
 			})
+		case "stage_skipped":
+			index, exists := byID[event.AttemptID]
+			reason, reasonErr := eventString(event.Data, "reason", true)
+			warning, warningOK := event.Data["warning"].(bool)
+			if !exists || stageSkippedAttempts[event.AttemptID] ||
+				result.Attempts[index].Stage != event.Stage || result.Attempts[index].FinishedAt.IsZero() ||
+				result.Attempts[index].State.Outcome != workflow.OutcomeSkipped ||
+				event.Timestamp.Before(result.Attempts[index].FinishedAt) || reasonErr != nil ||
+				strings.TrimSpace(reason) == "" || !warningOK || !warning {
+				return ReplayedRun{}, fmt.Errorf("stage_skipped %q has invalid attempt, warning, or reason", event.AttemptID)
+			}
+			attempt := result.Attempts[index]
+			// Pre-version B-34 skips bound the reason in this warning rather
+			// than in attempt_finished. Agent skips still require stage_action;
+			// old human skips are identified by their human executor metadata.
+			if attempt.StageAction != "skip" && attempt.Executor != "human" {
+				return ReplayedRun{}, fmt.Errorf("stage_skipped %q is not an explicit stage skip", event.AttemptID)
+			}
+			if attempt.SkipReason != "" && attempt.SkipReason != reason {
+				return ReplayedRun{}, fmt.Errorf("stage_skipped %q reason differs from finished attempt", event.AttemptID)
+			}
+			if attempt.Executor == "human" {
+				actorID, actorErr := eventString(event.Data, "actor_id", true)
+				actorRole, roleErr := eventString(event.Data, "actor_role", true)
+				if actorErr != nil || roleErr != nil || actorID != attempt.ActorID || actorRole != attempt.ActorRole {
+					return ReplayedRun{}, fmt.Errorf("stage_skipped %q has invalid human actor", event.AttemptID)
+				}
+			}
+			stageSkippedAttempts[event.AttemptID] = true
+			result.StageSkips = append(result.StageSkips, ReplayedStageSkip{
+				Sequence: event.Sequence, AttemptID: event.AttemptID, Stage: event.Stage, Reason: reason,
+			})
 		case "run_finished":
 			if result.StartedAt.IsZero() {
 				return ReplayedRun{}, fmt.Errorf("run_finished appears before run_started")
@@ -509,6 +662,10 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 		if attempt.FinishedAt.IsZero() && terminal {
 			return ReplayedRun{}, fmt.Errorf("terminal run contains active attempt %q", attempt.AttemptID)
 		}
+		if requireStageSkip && attempt.State.Outcome == workflow.OutcomeSkipped &&
+			(attempt.StageAction == "skip" || attempt.Executor == "human") && !stageSkippedAttempts[attempt.AttemptID] {
+			return ReplayedRun{}, fmt.Errorf("finished skipped attempt %q has no stage_skipped warning", attempt.AttemptID)
+		}
 	}
 	return result, nil
 }
@@ -560,6 +717,13 @@ func eventInt(data map[string]any, name string) (int, error) {
 		return 0, fmt.Errorf("event field %s must be a non-negative integer", name)
 	}
 	return int(number), nil
+}
+
+func optionalEventInt(data map[string]any, name string) (int, error) {
+	if _, exists := data[name]; !exists {
+		return 0, nil
+	}
+	return eventInt(data, name)
 }
 
 func safeEventIdentifier(value string) bool {

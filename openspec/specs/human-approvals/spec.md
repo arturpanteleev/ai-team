@@ -82,6 +82,26 @@ graph node.
 - **ТОГДА** the missing typed result MUST remain unresolved and the stage MUST
   remain waiting
 
+### Requirement: Skip and return actions require a reason
+
+Every human decision that skips a stage or selects a configured return MUST
+include a non-empty reason. Whitespace-only reasons MUST be rejected without
+resolving the approval. A skip decision MUST remain bound to the same human
+input stage; a return decision MUST remain bound to the exact configured graph
+route.
+
+#### Scenario: Human skips an optional input stage
+
+- **КОГДА** a waiting `kind: input` approval belongs to a `skippable` human
+  stage and an authorized actor chooses `skip` with a reason
+- **ТОГДА** the controller MUST resolve the input approval, record a skipped
+  attempt and warning event, and MUST NOT write a synthetic stage result
+
+#### Scenario: Skip or return has no reason
+
+- **КОГДА** a skip or return decision has an empty or whitespace-only reason
+- **ТОГДА** the store MUST reject it and leave the approval unresolved
+
 ### Requirement: Approval subject привязан к candidate
 
 Subject transition approval, относящегося к source workflow, MUST включать

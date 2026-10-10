@@ -316,7 +316,8 @@ func (p *scriptedPrompter) Ask(q string) string {
 }
 
 type captureNotifier struct {
-	calls []notifier.StageResult
+	calls  []notifier.StageResult
+	onCall func(notifier.StageResult)
 }
 
 type fakeDeliveryService struct {
@@ -399,6 +400,9 @@ func prepareDelivery(t *testing.T, dir string) string {
 
 func (m *captureNotifier) Notify(ctx context.Context, stage notifier.StageResult) error {
 	m.calls = append(m.calls, stage)
+	if m.onCall != nil {
+		m.onCall(stage)
+	}
 	return nil
 }
 

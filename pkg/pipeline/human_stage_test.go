@@ -386,6 +386,14 @@ type humanCrashEvidenceStore struct {
 }
 
 func (s *humanCrashEvidenceStore) Append(event evidence.Event) error {
+	if !s.factory.crashed && s.factory.point == "after-skipped-attempt-finished" &&
+		event.Type == "attempt_finished" && (event.Data["outcome"] == workflow.OutcomeSkipped || event.Data["outcome"] == string(workflow.OutcomeSkipped)) {
+		if err := s.EvidenceStore.Append(event); err != nil {
+			return err
+		}
+		s.factory.crashed = true
+		panic("simulated crash after durable skipped attempt_finished")
+	}
 	if !s.factory.crashed && s.factory.point == "after-attempt-started" && event.Type == "attempt_started" {
 		if err := s.EvidenceStore.Append(event); err != nil {
 			return err
@@ -545,6 +553,165 @@ func TestHumanInputResumeReusesFinishedAttemptBeforeTransition(t *testing.T) {
 	}
 	if stageAttempts != 1 {
 		t.Fatalf("finished attempt must be reused without a duplicate; attempts=%+v", replayed.Attempts)
+	}
+}
+
+func TestHumanSkipCrashAfterAttemptFinishedRecoversWarningWithoutDuplicate(t *testing.T) {
+	dir := env(t)
+	staleOutput := filepath.Join(dir, ".ai-team", "artifacts", "feat", "human", "optional.md")
+	staleSummary := filepath.Join(dir, ".ai-team", "artifacts", "feat", ".stage-summary", "optional.md")
+	for path, content := range map[string]string{
+		staleOutput:  "stale output from an earlier visit",
+		staleSummary: "stale summary from an earlier visit",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "human-skip-crash-recovery-test",
+		Title:         "Human skip crash recovery test",
+		Stages: []config.TemplateStage{{
+			ID: "optional", Title: "Optional input", Function: "product_owner", Result: "md",
+			Executor: "human", Confirm: "auto", Skippable: true,
+		}},
+	}
+	registry := agent.NewFS(fstest.MapFS{})
+	p := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	started, runErr := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "skip optional input", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(runErr, &required) {
+		t.Fatalf("human stage should wait for input: result=%+v err=%v", started, runErr)
+	}
+	pending, err := store.Load(started.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reason = "No document is needed for this task."
+	if _, err := store.Decide(started.RunID, pending.ID, approval.Decision{
+		ActorID: "alice", ActorRole: "product_owner", Action: "skip", Comment: reason, SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	factory := &humanCrashEvidenceFactory{point: "after-skipped-attempt-finished"}
+	crashing := New(cfg, registry, WithApprovalStore(store), WithEvidenceStoreFactory(factory),
+		WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	expectHumanCrash(t, func() {
+		_, _ = resumeHumanCrashRun(t, crashing, dir, started.RunID)
+	})
+	if !factory.crashed {
+		t.Fatal("crash was not injected after durable skipped attempt_finished")
+	}
+	for _, path := range []string{staleOutput, staleSummary} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("skipping human stage left stale artifact %s: %v", path, err)
+		}
+	}
+	eventsPath := filepath.Join(dir, ".ai-team", "runs", started.RunID, "events.jsonl")
+	if _, err := evidence.ReplayEventLog(eventsPath, started.RunID); err == nil || !strings.Contains(err.Error(), "no stage_skipped warning") {
+		t.Fatalf("strict replay must reject a finished skipped attempt without its warning: %v", err)
+	}
+	completed, err := resumeHumanCrashRun(t, New(cfg, registry, WithApprovalStore(store),
+		WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{})), dir, started.RunID)
+	if err != nil || completed.Outcome != workflow.RunCompleted {
+		t.Fatalf("resume should recover the missing warning and reuse the human attempt: result=%+v err=%v", completed, err)
+	}
+	replayed, err := evidence.ReplayEventLog(eventsPath, started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skippedAttempts int
+	for _, attempt := range replayed.Attempts {
+		if attempt.Stage == "optional" && attempt.Executor == "human" && attempt.State.Outcome == workflow.OutcomeSkipped {
+			skippedAttempts++
+			if attempt.SkipReason != reason {
+				t.Fatalf("finished human skip lost its reason: %+v", attempt)
+			}
+		}
+	}
+	if skippedAttempts != 1 || len(replayed.StageSkips) != 1 || replayed.StageSkips[0].Reason != reason {
+		t.Fatalf("recovery should append one reason-bound warning without a new attempt: attempts=%+v skips=%+v", replayed.Attempts, replayed.StageSkips)
+	}
+}
+
+func TestHumanSkipDoesNotExposeStaleOutputToDownstreamInputs(t *testing.T) {
+	dir := env(t)
+	staleOutput := filepath.Join(dir, ".ai-team", "artifacts", "feat", "proposal.md")
+	if err := os.MkdirAll(filepath.Dir(staleOutput), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleOutput, []byte("stale proposal from an earlier visit"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	registry := agent.NewFS(fstest.MapFS{
+		"human_writer/def.yaml": def(`name: human_writer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs:
+  spec: '{feature}/proposal.md'
+`),
+		"human_writer/prompt.md": def("Write the submitted human artifact."),
+		"coder/def.yaml": def(`name: coder
+runtime: agentcli
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+require_diff: true
+inputs:
+  proposal: '{feature}/proposal.md'
+outputs: {}
+`),
+		"coder/prompt.md": def("Consume the proposal input."),
+	})
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "human-skip-stale-output-test",
+		Title:         "Human skip stale output test",
+		Stages: []config.TemplateStage{
+			{ID: "optional", Title: "Optional", Function: "product_owner", Result: "md", Executor: "human", Agent: "human_writer", Confirm: "auto", Skippable: true},
+			{ID: "finish", Title: "Finish", Function: "developer", Result: "md", Executor: "agent", Agent: "coder", Confirm: "auto"},
+		},
+	}
+	rt := newScripted()
+	p := New(cfg, registry, WithApprovalStore(store), WithRuntimeFactory(rt.factory),
+		WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	started, runErr := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "skip optional input", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(runErr, &required) {
+		t.Fatalf("human stage should wait for input: result=%+v err=%v", started, runErr)
+	}
+	pending, err := store.Load(started.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(started.RunID, pending.ID, approval.Decision{
+		ActorID: "alice", ActorRole: "product_owner", Action: "skip", Comment: "The proposal is not needed.",
+		SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, resumeErr := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: started.RunID, TargetDir: dir})
+	if resumeErr == nil || !strings.Contains(resumeErr.Error(), "proposal") {
+		t.Fatalf("downstream collection should fail after stale output removal: %v", resumeErr)
+	}
+	if _, err := os.Stat(staleOutput); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("human skip left stale output readable by downstream: %v", err)
+	}
+	if rt.calls["coder"] != 0 {
+		t.Fatalf("downstream executor must not consume stale human output: calls=%+v", rt.calls)
 	}
 }
 

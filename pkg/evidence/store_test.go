@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 func testRunManifest(runID string) RunManifest {
@@ -146,6 +148,135 @@ func TestControllerOnlyDescriptionMissingUsesValidatedLocalAppend(t *testing.T) 
 		appendAttempt(t, store, startedAt, "agent")
 		if err := store.AppendControllerEvent(warning(startedAt.Add(2 * time.Second))); err == nil {
 			t.Fatal("controller-only event accepted an agent attempt")
+		}
+	})
+}
+
+func skippedAttemptJournal(t *testing.T, executor, stageAction string, protocolVersion int, finishedReason, warningReason string) string {
+	t.Helper()
+	root := t.TempDir()
+	if executor == "" {
+		executor = "agent"
+	}
+	runID := "run-skip-replay-compat"
+	artifactRoot := filepath.Join(root, ".ai-team", "artifacts")
+	if err := os.MkdirAll(artifactRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := testRunManifest(runID)
+	manifest.TargetDir = root
+	store, err := Start(filepath.Join(root, ".ai-team", "runs"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := store.Append(Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	const attemptID = "attempt-skipped"
+	startedData := map[string]any{"stage_index": 1, "executor": executor}
+	if executor == "human" {
+		startedData["actor_id"], startedData["actor_role"], startedData["human_input_approval_id"] = "reviewer", "reviewer", "approval-skip"
+	}
+	if stageAction != "" {
+		startedData["stage_action"] = stageAction
+	}
+	if protocolVersion != 0 {
+		startedData["stage_skip_version"] = protocolVersion
+	}
+	if err := store.Append(Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
+		Timestamp: started.Add(time.Second), Data: startedData}); err != nil {
+		t.Fatal(err)
+	}
+	finished := started.Add(2 * time.Second)
+	attemptManifest := AttemptManifest{
+		RunID: runID, AttemptID: attemptID, Stage: "optional", Executor: executor,
+		StageIndex: 1, TotalStages: 1, StartedAt: started.Add(time.Second), FinishedAt: finished,
+		Status: string(workflow.OutcomeSkipped), Execution: string(workflow.ExecutionSucceeded),
+		Decision: string(workflow.DecisionNotApplicable), Outcome: string(workflow.OutcomeSkipped),
+		Usage: &workflow.AttemptUsage{Attested: true},
+	}
+	if executor == "human" {
+		attemptManifest.ActorID, attemptManifest.ActorRole, attemptManifest.HumanInputApprovalID = "reviewer", "reviewer", "approval-skip"
+	}
+	if err := store.PublishAttempt(attemptManifest, artifactRoot, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	digest, _, err := AttemptManifestDigest(nil, store.RunDir(), runID, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedData := map[string]any{
+		"status": string(workflow.OutcomeSkipped), "execution": workflow.ExecutionSucceeded,
+		"decision": workflow.DecisionNotApplicable, "outcome": workflow.OutcomeSkipped,
+		"executor": executor, "manifest_sha256": digest,
+	}
+	if executor == "human" {
+		finishedData["actor_id"], finishedData["actor_role"], finishedData["human_input_approval_id"] = "reviewer", "reviewer", "approval-skip"
+	}
+	if finishedReason != "" {
+		finishedData["stage_skip_reason"] = finishedReason
+	}
+	if err := store.Append(Event{Type: "attempt_finished", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finished, Data: finishedData}); err != nil {
+		t.Fatal(err)
+	}
+	warningData := map[string]any{"reason": warningReason, "warning": true}
+	if executor == "human" {
+		warningData["actor_id"], warningData["actor_role"] = "reviewer", "reviewer"
+	}
+	if err := store.Append(Event{Type: "stage_skipped", Stage: "optional", AttemptID: attemptID,
+		Timestamp: finished, Data: warningData}); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(store.RunDir(), "events.jsonl")
+}
+
+func TestReplayRequiresVersionedSkipReasonAndExactWarningMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		finishedReason string
+		warningReason  string
+		wantErr        string
+	}{
+		{name: "missing durable reason", warningReason: "The optional stage is not needed.", wantErr: "no durable reason"},
+		{name: "warning reason differs", finishedReason: "The optional stage is not needed.", warningReason: "A different skip reason.", wantErr: "reason differs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := skippedAttemptJournal(t, "agent", "skip", StageSkipProtocolVersion, tc.finishedReason, tc.warningReason)
+			if _, err := ReplayEventLog(path, "run-skip-replay-compat"); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("strict replay err=%v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReplayAcceptsLegacyStageSkipWarningJournal(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		executor    string
+		stageAction string
+	}{
+		// c586db3's checked-in synthetic agent skip had stage_action but no
+		// durable attempt_finished reason; its stage_skipped event is authority.
+		{name: "c586db3 synthetic agent skip shape", executor: "agent", stageAction: "skip"},
+		// c586db3 human skips carried the executor and actor identity, but no
+		// stage_action or durable attempt_finished reason.
+		{name: "c586db3 human skip shape", executor: "human"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := skippedAttemptJournal(t, tc.executor, tc.stageAction, 0, "", "The optional stage is not needed.")
+			replayed, err := ReplayEventLog(path, "run-skip-replay-compat")
+			if err != nil || len(replayed.StageSkips) != 1 || replayed.StageSkips[0].Reason != "The optional stage is not needed." {
+				t.Fatalf("legacy skip should replay from its durable warning: replay=%+v err=%v", replayed, err)
+			}
+		})
+	}
+
+	t.Run("agent attempt without explicit skip action is rejected", func(t *testing.T) {
+		path := skippedAttemptJournal(t, "agent", "", 0, "", "The optional stage is not needed.")
+		if _, err := ReplayEventLog(path, "run-skip-replay-compat"); err == nil || !strings.Contains(err.Error(), "not an explicit stage skip") {
+			t.Fatalf("unmarked agent attempt must not be accepted as a legacy skip: err=%v", err)
 		}
 	})
 }

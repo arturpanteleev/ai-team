@@ -2,6 +2,8 @@ package worker
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +13,165 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
+
+type pinnedWorkerWorkflow struct {
+	SchemaVersion int            `json:"schema_version"`
+	Graph         workflow.Graph `json:"graph"`
+}
+
+type pinnedWorkerStage struct {
+	ID        string
+	Function  string
+	Result    string
+	LinkKind  string
+	Skippable bool
+}
+
+type pinnedWorkerConfig struct {
+	SchemaVersion int
+	Stages        []pinnedWorkerStage
+}
+
+type pinnedWorkerRunConfig struct {
+	Config   pinnedWorkerConfig
+	Workflow pinnedWorkerWorkflow
+}
+
+// validateHumanInputSkipOffer binds any offered or selected skip action to the
+// immutable graph recorded for this run. Approval payload fields are worker
+// input, so they cannot establish that a stage was configured as skippable.
+func (s *workerAPIServer) validateHumanInputSkipOffer(value approval.PendingApproval) error {
+	offersSkip := containsWorkerString(value.Actions, "skip") || value.Targets["skip"] != "" || value.ResolvedAction == "skip"
+	for _, decision := range value.Decisions {
+		offersSkip = offersSkip || decision.Action == "skip"
+	}
+	if !offersSkip {
+		return nil
+	}
+	if value.Kind != approval.KindInput || value.Trigger != workerHumanInputTrigger {
+		return errors.New("skip action is only allowed on a human input approval")
+	}
+	stageID := strings.TrimSpace(value.ToStage)
+	if stageID == "" || value.FromStage != stageID || !containsWorkerString(value.Actions, "skip") || value.Targets["skip"] != stageID {
+		return errors.New("human input skip action is not bound to its stage")
+	}
+	var payload approval.InputPayload
+	if err := json.Unmarshal(value.Payload, &payload); err != nil || payload.Kind != string(approval.KindInput) || payload.StageID != stageID {
+		return errors.New("human input skip payload does not match its stage")
+	}
+	runConfig, err := s.pinnedWorkflowConfig()
+	if err != nil {
+		return fmt.Errorf("validate human input skip against pinned workflow: %w", err)
+	}
+	var stage pinnedWorkerStage
+	for _, candidate := range runConfig.Config.Stages {
+		if candidate.ID == stageID {
+			stage = candidate
+			break
+		}
+	}
+	if !stage.Skippable {
+		return fmt.Errorf("stage %q is not configured as skippable in the pinned workflow", stageID)
+	}
+	if _, ok := runConfig.Workflow.Graph.Edge(stageID, workflow.OutcomeSkipped); !ok {
+		return fmt.Errorf("stage %q has no skipped route in the pinned workflow", stageID)
+	}
+	expectedActions := []string{"reject"}
+	if stage.Result == "approve" {
+		expectedActions = append(expectedActions, "approve")
+	} else {
+		expectedActions = append(expectedActions, "submit")
+	}
+	expectedActions = append(expectedActions, "skip")
+	if len(value.Actions) != len(expectedActions) || len(value.Targets) != len(expectedActions) {
+		return errors.New("human input skip actions do not match the pinned stage policy")
+	}
+	for _, action := range expectedActions {
+		if !containsWorkerString(value.Actions, action) || value.Targets[action] != stageID {
+			return errors.New("human input skip actions do not match the pinned stage policy")
+		}
+	}
+	if len(value.RequiredRoles) != 1 || value.RequiredRoles[0] != stage.Function || value.Quorum != approval.QuorumAny {
+		return errors.New("human input skip authority does not match the pinned stage role policy")
+	}
+	if payload.Result != stage.Result || payload.LinkKind != stage.LinkKind || payload.OutputName == "" || payload.OutputPath == "" {
+		return errors.New("human input skip payload does not match the pinned stage output policy")
+	}
+	if value.ResolvedAction == "skip" {
+		if len(value.Decisions) == 0 || value.Decisions[len(value.Decisions)-1].Action != "skip" ||
+			strings.TrimSpace(value.Decisions[len(value.Decisions)-1].Comment) == "" {
+			return errors.New("resolved human input skip requires an approved reason")
+		}
+	}
+	return nil
+}
+
+func (s *workerAPIServer) pinnedWorkflowConfig() (pinnedWorkerRunConfig, error) {
+	if s == nil || s.scope.RunID == "" || s.scope.TargetDir == "" {
+		return pinnedWorkerRunConfig{}, errors.New("pinned workflow evidence is unavailable")
+	}
+	runDir, err := safeio.ExistingDir(s.scope.TargetDir, ".ai-team", "runs", s.scope.RunID)
+	if err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("locate immutable run workflow: %w", err)
+	}
+	manifestData, err := safeio.ReadRegularFile(filepath.Join(runDir, "run.json"), 1<<20)
+	if err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("read immutable run manifest: %w", err)
+	}
+	var manifest evidence.RunManifest
+	if err := strictjson.Unmarshal(manifestData, 1<<20, &manifest); err != nil ||
+		manifest.SchemaVersion != evidence.SchemaVersion || manifest.RunID != s.scope.RunID {
+		return pinnedWorkerRunConfig{}, errors.New("immutable run manifest identity is invalid")
+	}
+	readSnapshot := func(name string, expected string) ([]byte, error) {
+		if name == "" || filepath.IsAbs(name) || filepath.Base(name) != name || name == "." || name == ".." {
+			return nil, errors.New("immutable snapshot path is invalid")
+		}
+		data, err := safeio.ReadRegularFile(filepath.Join(runDir, name), 8<<20)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(data)
+		if hex.EncodeToString(digest[:]) != expected {
+			return nil, errors.New("immutable snapshot digest mismatch")
+		}
+		return data, nil
+	}
+	configData, err := readSnapshot(manifest.ConfigEvidence, manifest.ConfigSHA256)
+	if err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("verify immutable run config: %w", err)
+	}
+	workflowData, err := readSnapshot(manifest.ResolvedWorkflow, manifest.ResolvedWorkflowSHA256)
+	if err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("verify immutable run workflow: %w", err)
+	}
+	var configSnapshot pinnedWorkerConfig
+	if err := json.Unmarshal(configData, &configSnapshot); err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("decode immutable run config: %w", err)
+	}
+	if configSnapshot.SchemaVersion == 0 || len(configSnapshot.Stages) == 0 {
+		return pinnedWorkerRunConfig{}, errors.New("immutable run config has no template stages")
+	}
+	var snapshot pinnedWorkerWorkflow
+	if err := json.Unmarshal(workflowData, &snapshot); err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("decode immutable run workflow: %w", err)
+	}
+	if snapshot.SchemaVersion < 2 || len(snapshot.Graph.Nodes) == 0 {
+		return pinnedWorkerRunConfig{}, errors.New("immutable run workflow has no compiled graph")
+	}
+	// Template graphs are compiled and validated with (false, false): forward
+	// confirm:auto edges and skipped edges legitimately carry no approval
+	// policy, and only return targets carry max_visits. Re-validating with
+	// approval/cycle requirements would reject every pinned run.
+	if err := snapshot.Graph.Validate(false, false); err != nil {
+		return pinnedWorkerRunConfig{}, fmt.Errorf("invalid immutable run graph: %w", err)
+	}
+	return pinnedWorkerRunConfig{Config: configSnapshot, Workflow: snapshot}, nil
+}
 
 // appendControllerHumanAttemptStarted converts a worker request into a
 // controller-owned event. The worker supplies only attempt/stage identity and
@@ -243,6 +402,11 @@ func (s *workerAPIServer) authorizedHumanInput(events []evidence.Event, stage, a
 	}
 	if !containsWorkerString(value.RequiredRoles, decision.ActorRole) {
 		return approval.PendingApproval{}, approval.Decision{}, errors.New("human input decision actor role is not authorized")
+	}
+	if value.ResolvedAction == "skip" {
+		if err := s.validateHumanInputSkipOffer(value); err != nil {
+			return approval.PendingApproval{}, approval.Decision{}, err
+		}
 	}
 	decisionDigest, err := evidence.DecisionSetDigest(value.Decisions)
 	if err != nil {

@@ -1266,6 +1266,9 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 			return nil, errors.New("approval run mismatch")
 		}
 		c.Approval.RunID = s.scope.RunID
+		if err := s.validateHumanInputSkipOffer(c.Approval); err != nil {
+			return nil, err
+		}
 		return s.approvals.Create(c.Approval)
 	case "approval.load":
 		value, err := s.approvals.Load(s.scope.RunID, c.A)

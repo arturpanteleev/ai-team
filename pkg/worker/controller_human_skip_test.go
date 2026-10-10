@@ -405,6 +405,108 @@ func TestWorkerAPIHumanFailureFinishUsesControllerManifestDetails(t *testing.T) 
 	t.Fatal("controller did not append a human attempt finish event")
 }
 
+func TestWorkerAPIHumanSkipApprovalCreationUsesPinnedSkippableConfig(t *testing.T) {
+	for _, skippable := range []bool{false, true} {
+		name := "non-skippable"
+		if skippable {
+			name = "skippable"
+		}
+		t.Run(name, func(t *testing.T) {
+			target := filepath.Clean(t.TempDir())
+			runID := "worker-skip-config-" + name
+			approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{}}
+			job := workerHumanSkipJob(OperationStart, runID, target)
+			socket := workerHumanSkipSocket("config-" + name)
+			server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, approvals, socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.close()
+			runEvidence := workerHumanSkipEvidenceWithSkipConfig(t, target, runID, server.eventLogs, skippable)
+			t.Setenv(WorkerAPIAddressEnv, "http://unix")
+			t.Setenv(WorkerAPISocketEnv, socket)
+			t.Setenv(WorkerAPITokenEnv, server.token)
+			port, err := NewWorkerAPIPort(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "optional",
+				Result: "md", OutputName: "optional", OutputPath: "tasks/human-skip/optional.md"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			value := approval.PendingApproval{
+				SchemaVersion: approval.SchemaVersion, ID: "skip-config-approval", Kind: approval.KindInput,
+				RunID: runID, AttemptID: "attempt-skip-config", FromStage: "optional", ToStage: "optional",
+				Trigger: workerHumanInputTrigger, SubjectHash: strings.Repeat("a", 64),
+				RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+				Actions: []string{"reject", "submit", "skip"},
+				Targets: map[string]string{"reject": "optional", "submit": "optional", "skip": "optional"},
+				Payload: payload, Status: approval.StatusPending,
+			}
+			created, createErr := NewWorkerAPIApprovals(port).Create(value)
+			if !skippable {
+				if createErr == nil || !strings.Contains(createErr.Error(), "not configured as skippable") {
+					t.Fatalf("worker created skip approval for non-skippable stage: %+v err=%v", created, createErr)
+				}
+				if approvals.createCalls != 0 {
+					t.Fatalf("rejected skip approval reached persistence: createCalls=%d", approvals.createCalls)
+				}
+				if _, err := approvals.Load(runID, value.ID); err == nil {
+					t.Fatal("rejected non-skippable input approval was persisted")
+				}
+				// Simulate a resolved record that predates admission validation or
+				// was written by another approval backend. Resolution/recovery must
+				// rebind the selected skip to the same pinned graph.
+				resolved := workerHumanSkipApproval(runID, value.ID)
+				approvals.values[runID+"/"+value.ID] = resolved
+				appendWorkerHumanApprovalEvents(t, runEvidence, resolved)
+				events, err := server.eventLogs.Read(runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := server.authorizedHumanInput(events, "optional", value.ID); err == nil || !strings.Contains(err.Error(), "not configured as skippable") {
+					t.Fatalf("controller authorized a resolved skip for non-skippable stage: %v", err)
+				}
+				if _, err := server.appendControllerHumanAttemptStarted(evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: "attempt-non-skippable",
+					Timestamp: time.Now().UTC(), Data: map[string]any{"stage_index": float64(1), "human_input_approval_id": value.ID}}); err == nil || !strings.Contains(err.Error(), "not configured as skippable") {
+					t.Fatalf("controller started a canonical human skip attempt for a non-skippable stage: %v", err)
+				}
+				events, err = server.eventLogs.Read(runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					if event.AttemptID == "attempt-non-skippable" && (event.Type == "attempt_started" || event.Type == "stage_skipped") {
+						t.Fatalf("rejected skip resolution wrote canonical event %q", event.Type)
+					}
+				}
+			} else if createErr != nil || created.ID != value.ID {
+				t.Fatalf("pinned skippable stage rejected its skip action: %+v err=%v", created, createErr)
+			} else {
+				badActions := value
+				badActions.ID = "skip-config-extra-action"
+				badActions.Actions = append(append([]string(nil), value.Actions...), "return_to_other")
+				badActions.Targets = map[string]string{"reject": "optional", "submit": "optional", "skip": "optional", "return_to_other": "other"}
+				if _, err := NewWorkerAPIApprovals(port).Create(badActions); err == nil || !strings.Contains(err.Error(), "actions do not match") {
+					t.Fatalf("worker extended the pinned stage's allowed actions: %v", err)
+				}
+				badRole := value
+				badRole.ID = "skip-config-wrong-role"
+				badRole.RequiredRoles = []string{"reviewer"}
+				if _, err := NewWorkerAPIApprovals(port).Create(badRole); err == nil || !strings.Contains(err.Error(), "role policy") {
+					t.Fatalf("worker changed the pinned stage's decision role: %v", err)
+				}
+			}
+			runDir := filepath.Join(target, ".ai-team", "runs", runID)
+			if _, err := evidence.ReplayEventLogWithEventSourcesAndTarget(filepath.Join(runDir, "events.jsonl"), runID,
+				server.eventLogs, evidence.ReservedAttemptManifestSource{TargetDir: target}, target); err != nil {
+				t.Fatalf("skip approval admission left a journal that fails strict replay: %v", err)
+			}
+		})
+	}
+}
+
 func workerHumanSkipJob(operation Operation, runID, target string) Job {
 	job := Job{SchemaVersion: SchemaVersion, Operation: operation, RunID: runID, TargetDir: target,
 		ExecutionID: strings.Repeat("a", ExecutionIDBytes*2)}
@@ -419,10 +521,51 @@ func workerHumanSkipSocket(label string) string {
 }
 
 func workerHumanSkipEvidence(t *testing.T, target, runID string, events evidence.EventLog) *evidence.Store {
+	return workerHumanSkipEvidenceWithSkipConfig(t, target, runID, events, true)
+}
+
+func workerHumanSkipEvidenceWithSkipConfig(t *testing.T, target, runID string, events evidence.EventLog, skippable bool) *evidence.Store {
 	t.Helper()
+	return workerHumanSkipEvidenceForStages(t, target, runID, events, []pinnedWorkerStage{
+		{ID: "optional", Function: "product_owner", Result: "md", Skippable: skippable},
+		{ID: "downstream", Function: "reviewer", Result: "md"},
+	}, workerHumanSkipGraph(skippable))
+}
+
+// workerHumanSkipGraph mirrors how TemplateGraph compiles a skippable stage:
+// the skipped edge targets the next stage, which is non-terminal and carries
+// no approval policy. Tests must keep this shape so pinned-graph validation
+// cannot pass only because every edge happens to be terminal.
+func workerHumanSkipGraph(skippable bool) workflow.Graph {
+	graph := workflow.Graph{SchemaVersion: 5, Entry: "optional",
+		Nodes: []workflow.Node{{ID: "optional"}, {ID: "downstream"}},
+		Edges: []workflow.Edge{
+			{From: "optional", Outcome: workflow.OutcomePassed, To: "downstream"},
+			{From: "downstream", Outcome: workflow.OutcomePassed, To: workflow.TerminalComplete},
+		}}
+	if skippable {
+		graph.Edges = append(graph.Edges, workflow.Edge{From: "optional", Outcome: workflow.OutcomeSkipped, To: "downstream"})
+	}
+	return graph
+}
+
+func workerHumanSkipEvidenceForStages(t *testing.T, target, runID string, events evidence.EventLog, stages []pinnedWorkerStage, graph workflow.Graph) *evidence.Store {
+	t.Helper()
+	configSnapshot, err := json.Marshal(pinnedWorkerConfig{SchemaVersion: 5, Stages: stages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowSnapshot, err := json.Marshal(struct {
+		SchemaVersion int            `json:"schema_version"`
+		Graph         workflow.Graph `json:"graph"`
+		Stages        []any          `json:"stages"`
+	}{SchemaVersion: 2, Graph: graph, Stages: []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := evidence.StartWithEventLog(filepath.Join(target, ".ai-team", "runs"), evidence.RunManifest{
 		RunID: runID, Feature: "human-skip", TargetDir: target, StartedAt: time.Now().UTC(),
-		ConfigSnapshot: json.RawMessage(`{}`), WorkflowSnapshot: json.RawMessage(`{"schema_version":1,"stages":[]}`),
+		ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot,
 	}, events)
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +586,7 @@ func workerHumanSkipApproval(runID, approvalID string) approval.PendingApproval 
 		SchemaVersion: approval.SchemaVersion, Kind: approval.KindInput, ID: approvalID, RunID: runID,
 		AttemptID: "attempt-input-pending", FromStage: "optional", ToStage: "optional", Trigger: workerHumanInputTrigger,
 		SubjectHash: decision.SubjectHash, RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
-		Actions: []string{"submit", "skip"}, Targets: map[string]string{"submit": "optional", "skip": "optional"},
+		Actions: []string{"reject", "submit", "skip"}, Targets: map[string]string{"reject": "optional", "submit": "optional", "skip": "optional"},
 		Status: approval.StatusResolved, Decisions: []approval.Decision{decision}, ResolvedAction: "skip",
 		CreatedAt: decisionAt.Add(-time.Minute), ResolvedAt: decisionAt, Payload: payload,
 	}

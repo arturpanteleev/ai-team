@@ -1,8 +1,12 @@
 package worker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +15,306 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
+
+func workerHumanSkipPinnedRun(t *testing.T, runID string, value *approval.PendingApproval) (string, evidence.ControllerEventStore, *evidence.Store, []evidence.Event) {
+	t.Helper()
+	target := filepath.Clean(t.TempDir())
+	eventLog := evidence.ControllerEventStore{TargetDir: target}
+	if err := eventLog.Reserve(runID); err != nil {
+		t.Fatalf("reserve pinned human skip event log: %v", err)
+	}
+	store := workerHumanSkipEvidence(t, target, runID, eventLog)
+	if value != nil {
+		appendWorkerHumanApprovalEvents(t, store, *value)
+	}
+	events, err := eventLog.Read(runID)
+	if err != nil {
+		t.Fatalf("read pinned human skip run events: %v", err)
+	}
+	return target, eventLog, store, events
+}
+
+// TestValidateHumanInputSkipOfferBindsPinnedStagePolicy is the regression for
+// the exact-SHA P2 finding: a skip offered or selected through a human-input
+// approval must be rejected unless the run's immutable pinned workflow marks
+// the stage skippable and the offer matches the pinned stage policy.
+func TestValidateHumanInputSkipOfferBindsPinnedStagePolicy(t *testing.T) {
+	const runID = "skip-offer-policy"
+	skippableStages := []pinnedWorkerStage{
+		{ID: "optional", Function: "product_owner", Result: "md", Skippable: true},
+		{ID: "downstream", Function: "reviewer", Result: "md"},
+	}
+	nonSkippableStages := []pinnedWorkerStage{
+		{ID: "optional", Function: "product_owner", Result: "md"},
+		{ID: "downstream", Function: "reviewer", Result: "md"},
+	}
+	withPayload := func(mutate func(*approval.InputPayload)) func(*approval.PendingApproval) {
+		return func(value *approval.PendingApproval) {
+			var payload approval.InputPayload
+			if err := json.Unmarshal(value.Payload, &payload); err != nil {
+				t.Fatalf("decode base payload: %v", err)
+			}
+			mutate(&payload)
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("encode mutated payload: %v", err)
+			}
+			value.Payload = encoded
+		}
+	}
+	tests := []struct {
+		name            string
+		stages          []pinnedWorkerStage
+		graph           workflow.Graph
+		missingEvidence bool
+		emptyTargetDir  bool
+		mutate          func(*approval.PendingApproval)
+		wantErr         string
+	}{
+		{name: "resolved skip on skippable stage", stages: skippableStages, graph: workerHumanSkipGraph(true)},
+		{name: "pending offer on skippable stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate: func(value *approval.PendingApproval) {
+				value.Status = approval.StatusPending
+				value.ResolvedAction = ""
+				value.ResolvedAt = time.Time{}
+				value.Decisions = nil
+			}},
+		{name: "stage not skippable in pinned config", stages: nonSkippableStages, graph: workerHumanSkipGraph(true),
+			wantErr: "not configured as skippable"},
+		{name: "skippable stage without skipped route", stages: skippableStages, graph: workerHumanSkipGraph(false),
+			wantErr: "no skipped route"},
+		{name: "stage absent from pinned config", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate: func(value *approval.PendingApproval) {
+				value.FromStage = "absent"
+				value.ToStage = "absent"
+				value.Targets = map[string]string{"reject": "absent", "submit": "absent", "skip": "absent"}
+				withPayload(func(payload *approval.InputPayload) { payload.StageID = "absent" })(value)
+			},
+			wantErr: "not configured as skippable"},
+		{name: "skip on non-input approval", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.Kind = approval.KindApprove },
+			wantErr: "only allowed on a human input approval"},
+		{name: "skip removed from actions", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.Actions = []string{"reject", "submit"} },
+			wantErr: "not bound to its stage"},
+		{name: "skip targets another stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.Targets["skip"] = "downstream" },
+			wantErr: "not bound to its stage"},
+		{name: "payload bound to another stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  withPayload(func(payload *approval.InputPayload) { payload.StageID = "downstream" }),
+			wantErr: "payload does not match its stage"},
+		{name: "action beyond pinned policy", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate: func(value *approval.PendingApproval) {
+				value.Actions = append(value.Actions, "return_to_downstream")
+				value.Targets["return_to_downstream"] = "downstream"
+			},
+			wantErr: "actions do not match"},
+		{name: "decision role differs from pinned stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.RequiredRoles = []string{"reviewer"} },
+			wantErr: "role policy"},
+		{name: "quorum differs from pinned stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.Quorum = approval.QuorumAll },
+			wantErr: "role policy"},
+		{name: "payload result differs from pinned stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  withPayload(func(payload *approval.InputPayload) { payload.Result = "approve" }),
+			wantErr: "output policy"},
+		{name: "approve-result stage offers approve action", stages: []pinnedWorkerStage{
+			{ID: "optional", Function: "product_owner", Result: "approve", Skippable: true},
+			{ID: "downstream", Function: "reviewer", Result: "md"},
+		}, graph: workerHumanSkipGraph(true),
+			mutate: func(value *approval.PendingApproval) {
+				value.Actions = []string{"reject", "approve", "skip"}
+				value.Targets = map[string]string{"reject": "optional", "approve": "optional", "skip": "optional"}
+				withPayload(func(payload *approval.InputPayload) { payload.Result = "approve" })(value)
+			}},
+		{name: "action target points at another stage", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate:  func(value *approval.PendingApproval) { value.Targets["reject"] = "downstream" },
+			wantErr: "actions do not match"},
+		{name: "resolved skip without a reason", stages: skippableStages, graph: workerHumanSkipGraph(true),
+			mutate: func(value *approval.PendingApproval) {
+				value.Decisions[len(value.Decisions)-1].Comment = "   "
+			},
+			wantErr: "requires an approved reason"},
+		{name: "pinned evidence unavailable", emptyTargetDir: true,
+			wantErr: "pinned workflow evidence is unavailable"},
+		{name: "pinned evidence directory missing", missingEvidence: true,
+			wantErr: "locate immutable run workflow"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Clean(t.TempDir())
+			if !tc.missingEvidence && !tc.emptyTargetDir {
+				eventLog := evidence.ControllerEventStore{TargetDir: target}
+				if err := eventLog.Reserve(runID); err != nil {
+					t.Fatalf("reserve pinned skip offer run: %v", err)
+				}
+				workerHumanSkipEvidenceForStages(t, target, runID, eventLog, tc.stages, tc.graph)
+			}
+			value := workerHumanSkipApproval(runID, "skip-offer")
+			if tc.mutate != nil {
+				tc.mutate(&value)
+			}
+			if tc.emptyTargetDir {
+				target = ""
+			}
+			server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}}
+			err := server.validateHumanInputSkipOffer(value)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("pinned skippable skip offer rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("skip offer error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestPinnedWorkflowConfigRejectsTamperedRunEvidence keeps the skip-offer
+// binding fail-closed: skip validation must only trust snapshots whose
+// identity and digests still match the immutable run manifest.
+func TestPinnedWorkflowConfigRejectsTamperedRunEvidence(t *testing.T) {
+	const runID = "skip-offer-tamper"
+	sha256Hex := func(data []byte) string {
+		digest := sha256.Sum256(data)
+		return hex.EncodeToString(digest[:])
+	}
+	patchManifest := func(t *testing.T, runDir string, mutate func(map[string]any)) {
+		t.Helper()
+		manifestPath := filepath.Join(runDir, "run.json")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatalf("read run manifest: %v", err)
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			t.Fatalf("decode run manifest: %v", err)
+		}
+		mutate(manifest)
+		encoded, err := json.MarshalIndent(&manifest, "", "  ")
+		if err != nil {
+			t.Fatalf("encode run manifest: %v", err)
+		}
+		if err := os.Chmod(manifestPath, 0o644); err != nil {
+			t.Fatalf("unlock run manifest: %v", err)
+		}
+		if err := os.WriteFile(manifestPath, encoded, 0o644); err != nil {
+			t.Fatalf("write run manifest: %v", err)
+		}
+	}
+	rewriteSnapshot := func(t *testing.T, runDir, name string, data []byte) string {
+		t.Helper()
+		path := filepath.Join(runDir, name)
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("unlock snapshot %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("write snapshot %s: %v", name, err)
+		}
+		return sha256Hex(data)
+	}
+	graphWithoutReachableNodes := func() workflow.Graph {
+		graph := workerHumanSkipGraph(true)
+		graph.Nodes = append(graph.Nodes, workflow.Node{ID: "orphan"})
+		return graph
+	}
+	workflowSnapshot := func(graph workflow.Graph) []byte {
+		data, err := json.Marshal(struct {
+			SchemaVersion int            `json:"schema_version"`
+			Graph         workflow.Graph `json:"graph"`
+			Stages        []any          `json:"stages"`
+		}{SchemaVersion: 2, Graph: graph, Stages: []any{}})
+		if err != nil {
+			t.Fatalf("encode workflow snapshot: %v", err)
+		}
+		return data
+	}
+	tests := []struct {
+		name    string
+		mutate  func(t *testing.T, runDir string)
+		wantErr string
+	}{
+		{name: "manifest run identity", wantErr: "identity is invalid",
+			mutate: func(t *testing.T, runDir string) {
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["run_id"] = "another-run" })
+			}},
+		{name: "missing run manifest", wantErr: "read immutable run manifest",
+			mutate: func(t *testing.T, runDir string) {
+				if err := os.Remove(filepath.Join(runDir, "run.json")); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "missing config snapshot", wantErr: "verify immutable run config",
+			mutate: func(t *testing.T, runDir string) {
+				if err := os.Remove(filepath.Join(runDir, "config.json")); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "missing workflow snapshot", wantErr: "verify immutable run workflow",
+			mutate: func(t *testing.T, runDir string) {
+				if err := os.Remove(filepath.Join(runDir, "workflow.json")); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "config digest mismatch", wantErr: "digest mismatch",
+			mutate: func(t *testing.T, runDir string) {
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["config_sha256"] = strings.Repeat("0", 64) })
+			}},
+		{name: "config snapshot path traversal", wantErr: "snapshot path is invalid",
+			mutate: func(t *testing.T, runDir string) {
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["config_evidence"] = "../run.json" })
+			}},
+		{name: "undecodable config snapshot", wantErr: "decode immutable run config",
+			mutate: func(t *testing.T, runDir string) {
+				digest := rewriteSnapshot(t, runDir, "config.json", []byte("{"))
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["config_sha256"] = digest })
+			}},
+		{name: "config snapshot without stages", wantErr: "no template stages",
+			mutate: func(t *testing.T, runDir string) {
+				data, err := json.Marshal(pinnedWorkerConfig{SchemaVersion: 5})
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest := rewriteSnapshot(t, runDir, "config.json", data)
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["config_sha256"] = digest })
+			}},
+		{name: "undecodable workflow snapshot", wantErr: "decode immutable run workflow",
+			mutate: func(t *testing.T, runDir string) {
+				digest := rewriteSnapshot(t, runDir, "workflow.json", []byte("{"))
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["resolved_workflow_sha256"] = digest })
+			}},
+		{name: "workflow snapshot without a graph", wantErr: "no compiled graph",
+			mutate: func(t *testing.T, runDir string) {
+				digest := rewriteSnapshot(t, runDir, "workflow.json", []byte(`{"schema_version":2}`))
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["resolved_workflow_sha256"] = digest })
+			}},
+		{name: "structurally invalid pinned graph", wantErr: "invalid immutable run graph",
+			mutate: func(t *testing.T, runDir string) {
+				digest := rewriteSnapshot(t, runDir, "workflow.json", workflowSnapshot(graphWithoutReachableNodes()))
+				patchManifest(t, runDir, func(manifest map[string]any) { manifest["resolved_workflow_sha256"] = digest })
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Clean(t.TempDir())
+			eventLog := evidence.ControllerEventStore{TargetDir: target}
+			if err := eventLog.Reserve(runID); err != nil {
+				t.Fatalf("reserve tampered run: %v", err)
+			}
+			workerHumanSkipEvidenceForStages(t, target, runID, eventLog,
+				[]pinnedWorkerStage{{ID: "optional", Function: "product_owner", Result: "md", Skippable: true}},
+				workerHumanSkipGraph(true))
+			tc.mutate(t, filepath.Join(target, ".ai-team", "runs", runID))
+			server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}}
+			err := server.validateHumanInputSkipOffer(workerHumanSkipApproval(runID, "skip-offer"))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("skip offer against tampered evidence error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 func TestControllerHumanInputAuthorizationRejectsMismatchedAuthority(t *testing.T) {
 	base := workerHumanSkipApproval("human-auth-run", "human-auth-approval")
@@ -77,7 +381,7 @@ func TestControllerHumanInputAuthorizationRejectsMismatchedAuthority(t *testing.
 			value.Decisions = append([]approval.Decision(nil), value.Decisions...)
 			value.Actions = append([]string(nil), value.Actions...)
 			value.RequiredRoles = append([]string(nil), value.RequiredRoles...)
-			value.Targets = map[string]string{"skip": "optional", "submit": "optional"}
+			value.Targets = map[string]string{"reject": "optional", "submit": "optional", "skip": "optional"}
 			if tc.approval != nil {
 				tc.approval(&value)
 			}
@@ -89,6 +393,24 @@ func TestControllerHumanInputAuthorizationRejectsMismatchedAuthority(t *testing.
 				store = nil
 			}
 			events := workerHumanAuthorizationEvents(value)
+			targetDir := filepath.Clean(t.TempDir())
+			// Every case runs against real pinned evidence so a rejection can
+			// never be explained by a missing TargetDir alone.
+			controllerEvents := evidence.ControllerEventStore{TargetDir: targetDir}
+			if err := controllerEvents.Reserve(base.RunID); err != nil {
+				t.Fatal(err)
+			}
+			runStore := workerHumanSkipEvidence(t, targetDir, base.RunID, controllerEvents)
+			var eventLog evidence.EventLog
+			var err error
+			if tc.wantValid {
+				appendWorkerHumanApprovalEvents(t, runStore, value)
+				events, err = controllerEvents.Read(base.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				eventLog = controllerEvents
+			}
 			if tc.events != nil {
 				events = tc.events(events)
 			}
@@ -103,8 +425,8 @@ func TestControllerHumanInputAuthorizationRejectsMismatchedAuthority(t *testing.
 			if store != nil {
 				authority = store
 			}
-			server := &workerAPIServer{scope: workerAPIScope{RunID: base.RunID}, approvals: authority}
-			_, _, err := server.authorizedHumanInput(events, stage, id)
+			server := &workerAPIServer{scope: workerAPIScope{RunID: base.RunID, TargetDir: targetDir}, approvals: authority, eventLogs: eventLog}
+			_, _, err = server.authorizedHumanInput(events, stage, id)
 			if tc.wantValid && err != nil {
 				t.Fatalf("valid controller approval rejected: %v", err)
 			}
@@ -134,8 +456,16 @@ func TestControllerHumanSkipRecoveryHasNoAgentAuthorityAndIgnoresCompletedRecord
 		t.Fatalf("existing warning should not require a recovery authority lookup: %v", err)
 	}
 
-	humanServer := &workerAPIServer{scope: workerAPIScope{RunID: "human-skip-scan", TargetDir: t.TempDir()},
-		approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{}}}
+	humanTarget := t.TempDir()
+	humanEventStore := evidence.ControllerEventStore{TargetDir: humanTarget}
+	if err := humanEventStore.Reserve("human-skip-scan"); err != nil {
+		t.Fatal(err)
+	}
+	humanRunStore := workerHumanSkipEvidence(t, humanTarget, "human-skip-scan", humanEventStore)
+	value := workerHumanSkipApproval("human-skip-scan", "recovery-approval")
+	appendWorkerHumanApprovalEvents(t, humanRunStore, value)
+	humanServer := &workerAPIServer{scope: workerAPIScope{RunID: "human-skip-scan", TargetDir: humanTarget},
+		approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{value.RunID + "/" + value.ID: value}}, eventLogs: humanEventStore}
 	humanStart := evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: "human-skip", Timestamp: time.Now().UTC(), Data: map[string]any{
 		"executor": "human", "stage_action": "skip", "stage_skip_version": float64(evidence.StageSkipProtocolVersion),
 		"stage_index": float64(1), "actor_id": "alice", "actor_role": "product_owner", "human_input_approval_id": "missing",
@@ -147,11 +477,14 @@ func TestControllerHumanSkipRecoveryHasNoAgentAuthorityAndIgnoresCompletedRecord
 	if err := humanServer.validateMissingHumanSkipAuthorities([]evidence.Event{humanStart, humanFinish}); err == nil || !strings.Contains(err.Error(), "authorize human skip recovery") {
 		t.Fatalf("recovery accepted a human skip without approval authority: %v", err)
 	}
-	value := workerHumanSkipApproval("human-skip-scan", "recovery-approval")
 	humanStart.Data["human_input_approval_id"] = value.ID
 	humanFinish.Data["human_input_approval_id"] = value.ID
 	humanServer.approvals = &apiApprovalStore{values: map[string]approval.PendingApproval{value.RunID + "/" + value.ID: value}}
-	events := append(workerHumanAuthorizationEvents(value), humanStart, humanFinish)
+	approvalEvents, err := humanEventStore.Read("human-skip-scan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := append(approvalEvents, humanStart, humanFinish)
 	if err := humanServer.validateMissingHumanSkipAuthorities(events); err == nil || !strings.Contains(err.Error(), "approval-matched empty-output manifest") {
 		t.Fatalf("recovery accepted a human skip without its controller manifest: %v", err)
 	}
@@ -266,8 +599,8 @@ func TestControllerHumanFinishAndSkipRequireTheirOwnEvidence(t *testing.T) {
 	const runID, attemptID, approvalID = "human-finish-evidence", "attempt-evidence", "approval-evidence"
 	value := workerHumanSkipApproval(runID, approvalID)
 	started := evidence.Event{Type: "attempt_started", Stage: "optional", AttemptID: attemptID,
-		Timestamp: time.Now().UTC(), Data: map[string]any{"executor": "human", "stage_index": float64(1), "human_input_approval_id": approvalID}}
-	authorized := workerHumanAuthorizationEvents(value)
+		Timestamp: time.Now().UTC(), Data: map[string]any{"executor": "human", "stage_index": float64(1), "human_input_approval_id": approvalID,
+			"stage_action": "skip", "stage_skip_version": float64(evidence.StageSkipProtocolVersion), "actor_id": "alice", "actor_role": "product_owner"}}
 
 	t.Run("finish requires event chain", func(t *testing.T) {
 		server := &workerAPIServer{scope: workerAPIScope{RunID: runID}}
@@ -294,14 +627,15 @@ func TestControllerHumanFinishAndSkipRequireTheirOwnEvidence(t *testing.T) {
 		}
 	})
 	t.Run("finish requires controller manifest", func(t *testing.T) {
-		server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: t.TempDir()}, eventLogs: &validationEventLog{events: append(authorized, started)},
+		target, _, _, authorized := workerHumanSkipPinnedRun(t, runID, &value)
+		server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}, eventLogs: &validationEventLog{events: append(authorized, started)},
 			approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
 		if _, err := server.appendControllerHumanAttemptFinished(evidence.Event{Type: "attempt_finished", Stage: "optional", AttemptID: attemptID}); err == nil || !strings.Contains(err.Error(), "read controller human attempt manifest") {
 			t.Fatalf("finish without a controller manifest: %v", err)
 		}
 	})
 	t.Run("finish rejects a manifest for another stage", func(t *testing.T) {
-		target := t.TempDir()
+		target, _, _, authorized := workerHumanSkipPinnedRun(t, runID, &value)
 		manifest := workerHumanSkipManifest(runID, attemptID, started.Timestamp, started.Timestamp.Add(time.Second), approvalID, "alice", "product_owner")
 		manifest.Stage = "elsewhere"
 		manifestStore := evidence.ControllerAttemptManifestStore{TargetDir: target}
@@ -318,7 +652,7 @@ func TestControllerHumanFinishAndSkipRequireTheirOwnEvidence(t *testing.T) {
 		}
 	})
 	t.Run("skip decision requires a skipped manifest", func(t *testing.T) {
-		target := t.TempDir()
+		target, _, _, authorized := workerHumanSkipPinnedRun(t, runID, &value)
 		finishedAt := started.Timestamp.Add(time.Second)
 		manifest := workerHumanSkipManifest(runID, attemptID, started.Timestamp, finishedAt, approvalID, "alice", "product_owner")
 		manifest.Outcome, manifest.Status, manifest.Decision = string(workflow.OutcomePassed), string(workflow.OutcomePassed), string(workflow.DecisionApproved)
@@ -362,7 +696,7 @@ func TestControllerHumanFinishAndSkipRequireTheirOwnEvidence(t *testing.T) {
 	})
 	t.Run("skip warning requires approved skip action", func(t *testing.T) {
 		submit := workerHumanSubmitApproval(runID, approvalID)
-		events := workerHumanAuthorizationEvents(submit)
+		_, _, _, events := workerHumanSkipPinnedRun(t, runID, &submit)
 		events = append(events, started)
 		server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: submit}}}
 		if _, err := server.appendControllerHumanStageSkip(evidence.Event{Type: "stage_skipped", Stage: "optional", AttemptID: attemptID}, events); err == nil || !strings.Contains(err.Error(), "not authorized") {
@@ -370,8 +704,9 @@ func TestControllerHumanFinishAndSkipRequireTheirOwnEvidence(t *testing.T) {
 		}
 	})
 	t.Run("skip warning requires matching finished attempt", func(t *testing.T) {
+		target, _, _, authorized := workerHumanSkipPinnedRun(t, runID, &value)
 		events := append(authorized, started)
-		server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
+		server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}, approvals: &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: value}}}
 		if _, err := server.appendControllerHumanStageSkip(evidence.Event{Type: "stage_skipped", Stage: "optional", AttemptID: attemptID}, events); err == nil || !strings.Contains(err.Error(), "no matching approved finished attempt") {
 			t.Fatalf("warning without an approved skipped finish: %v", err)
 		}
@@ -407,14 +742,15 @@ func TestControllerHumanStartReadsAuthorityBeforeCreatingAttempt(t *testing.T) {
 		}
 	})
 	t.Run("rejects a start without a matching durable approval event", func(t *testing.T) {
-		server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, eventLogs: &validationEventLog{}, approvals: authority}
+		target, _, _, events := workerHumanSkipPinnedRun(t, runID, nil)
+		server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}, eventLogs: &validationEventLog{events: events}, approvals: authority}
 		if _, err := server.appendControllerHumanAttemptStarted(request); err == nil || !strings.Contains(err.Error(), "matching durable approval_decided event") {
 			t.Fatalf("human start without a durable approval event was accepted: %v", err)
 		}
 	})
 	t.Run("zero timestamp is assigned only after authority is verified", func(t *testing.T) {
-		events := workerHumanAuthorizationEvents(value)
-		server := &workerAPIServer{scope: workerAPIScope{RunID: runID}, eventLogs: &validationEventLog{events: events}, approvals: authority}
+		target, _, _, events := workerHumanSkipPinnedRun(t, runID, &value)
+		server := &workerAPIServer{scope: workerAPIScope{RunID: runID, TargetDir: target}, eventLogs: &validationEventLog{events: events}, approvals: authority}
 		if _, err := server.appendControllerHumanAttemptStarted(request); err != nil && strings.Contains(err.Error(), "predates") {
 			t.Fatalf("server timestamp was checked before it was assigned: %v", err)
 		}

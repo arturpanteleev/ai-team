@@ -495,23 +495,31 @@ func TestWorkerAPIEventLogControllerOnlyAppendUsesDedicatedRPC(t *testing.T) {
 	if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(time.Second),
-		Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+	startEvents, err := eventLog.Read(runID)
+	if err != nil || len(startEvents) != 1 {
+		t.Fatalf("read run start: events=%d err=%v", len(startEvents), err)
+	}
+	// A human attempt is controller-owned under B-34, so seed it through the
+	// trusted controller store instead of the worker append boundary.
+	attemptStarted, err := server.eventLogs.Append(runID, evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(time.Second),
+		Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}},
+		1, startEvents[0].SHA256)
+	if err != nil {
 		t.Fatal(err)
-	}
-	if err := runStore.AppendControllerEvent(evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
-		Data: map[string]any{"field": "description", "approval_id": approvalID}}); err != nil {
-		t.Fatalf("remote controller-only append: %v", err)
-	}
-	stored, err := eventLog.Read(runID)
-	if err != nil || len(stored) != 3 || stored[2].Type != "description_missing" || stored[2].Sequence != 3 {
-		t.Fatalf("remote controller-only event chain: events=%+v err=%v", stored, err)
 	}
 	controllerAppender, ok := eventLog.(interface {
 		AppendControllerEvent(string, evidence.Event, uint64, string) (evidence.Event, error)
 	})
 	if !ok {
 		t.Fatal("worker event log does not expose the scoped controller-only capability")
+	}
+	if _, err := controllerAppender.AppendControllerEvent(runID, evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
+		Data: map[string]any{"field": "description", "approval_id": approvalID}}, attemptStarted.Sequence, attemptStarted.SHA256); err != nil {
+		t.Fatalf("remote controller-only append: %v", err)
+	}
+	stored, err := eventLog.Read(runID)
+	if err != nil || len(stored) != 3 || stored[2].Type != "description_missing" || stored[2].Sequence != 3 {
+		t.Fatalf("remote controller-only event chain: events=%+v err=%v", stored, err)
 	}
 	retried, err := controllerAppender.AppendControllerEvent(runID, evidence.Event{Type: "description_missing", Stage: "writer", AttemptID: "attempt-writer-1", Timestamp: startedAt.Add(2 * time.Second),
 		Data: map[string]any{"field": "description", "approval_id": approvalID}}, 2, stored[1].SHA256)
@@ -662,20 +670,12 @@ func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testi
 			if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
 				t.Fatal(err)
 			}
-			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: attemptID, Timestamp: startedAt.Add(time.Second),
-				Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
-				t.Fatal(err)
-			}
-			events, err := eventLog.Read(runID)
-			if err != nil || len(events) != 2 {
-				t.Fatalf("read setup events: count=%d err=%v", len(events), err)
-			}
 
 			payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			decision := approval.Decision{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "submit", Comment: "# Expected result\n", SubjectHash: strings.Repeat("a", 64)}
+			decision := approval.Decision{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "submit", Comment: "# Expected result\n", SubjectHash: strings.Repeat("a", 64), DecidedAt: startedAt.Add(time.Second)}
 			if test.versioned {
 				decision.SubmissionVersion = 1
 				decision.ContentSHA256 = humanartifact.Digest([]byte(decision.Comment))
@@ -683,11 +683,21 @@ func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testi
 			}
 			approvalValue := approval.PendingApproval{Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-writer-1",
 				FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: decision.SubjectHash,
-				RequiredRoles: []string{"writer"}, Actions: []string{"submit"}, Quorum: approval.QuorumAny,
-				Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload, Decisions: []approval.Decision{decision}}
+				RequiredRoles: []string{"writer"}, Actions: []string{"submit"}, Targets: map[string]string{"submit": "writer"}, Quorum: approval.QuorumAny,
+				Status: approval.StatusResolved, ResolvedAction: "submit", Payload: payload, Decisions: []approval.Decision{decision},
+				ResolvedAt: startedAt.Add(time.Second)}
 			approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: approvalValue}}
 			server := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target},
 				usageAllowed: true, approvals: approvals, eventLogs: eventLog, attemptManifests: manifestStore}
+			appendWorkerHumanApprovalEvents(t, runStore, approvalValue)
+			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: attemptID, Timestamp: startedAt.Add(time.Second),
+				Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+				t.Fatal(err)
+			}
+			events, err := eventLog.Read(runID)
+			if err != nil || len(events) != 4 {
+				t.Fatalf("read setup events: count=%d err=%v", len(events), err)
+			}
 
 			artifactContent := []byte("arbitrary but self-consistent output\n")
 			artifactRel := "attempts/" + attemptID + "/artifacts/feature/result.md"
@@ -717,22 +727,15 @@ func TestWorkerAPIDispatchBindsReservedHumanManifestToVersionedApproval(t *testi
 				t.Fatalf("legacy v0 manifest write failed: %v", writeErr)
 			}
 
-			manifestDigest, _, digestErr := evidence.AttemptManifestDigest(evidence.ReservedAttemptManifestSource{TargetDir: target},
+			_, _, digestErr := evidence.AttemptManifestDigest(evidence.ReservedAttemptManifestSource{TargetDir: target},
 				filepath.Join(target, ".ai-team", "runs", runID), runID, attemptID)
-			if test.wantWriteError {
-				if digestErr == nil {
-					t.Fatal("rejected manifest was unexpectedly persisted")
-				}
-				manifestDigest = strings.Repeat("f", 64)
-			} else if digestErr != nil {
-				t.Fatalf("read stored legacy manifest digest: %v", digestErr)
+			if test.wantWriteError != (digestErr != nil) {
+				t.Fatalf("stored manifest presence mismatch: wantWriteError=%v digestErr=%v", test.wantWriteError, digestErr)
 			}
-			finishedEvent := evidence.Event{Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt, Data: map[string]any{
-				"status": "passed", "execution": "succeeded", "decision": "approved", "outcome": "passed", "manifest_sha256": manifestDigest,
-				"executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID,
-			}}
-			_, finishErr := server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: finishedEvent,
-				ExpectedSequence: 2, ExpectedPreviousSHA256: events[1].SHA256})
+			// B-34 derives the terminal event from the published manifest and the
+			// resolved approval instead of accepting a raw human append.
+			_, finishErr := server.dispatch("human_attempt.finish", workerAPICall{RunID: runID, Event: evidence.Event{
+				Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt}})
 			if test.wantWriteError && finishErr == nil {
 				t.Fatal("attempt_finished accepted after a versioned approval bypassed typed manifest binding")
 			}
@@ -781,27 +784,29 @@ func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T)
 			if err := runStore.Append(evidence.Event{Type: "run_started", Timestamp: startedAt}); err != nil {
 				t.Fatal(err)
 			}
-			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: attemptID, Timestamp: startedAt.Add(time.Second),
-				Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
-				t.Fatal(err)
-			}
-			events, err := eventLog.Read(runID)
-			if err != nil || len(events) != 2 {
-				t.Fatalf("read setup events: count=%d err=%v", len(events), err)
-			}
 
 			payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "writer", Result: "md", OutputName: "result", OutputPath: "feature/result.md"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			decision := approval.Decision{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "reject", Comment: "Please revise.", SubjectHash: strings.Repeat("b", 64)}
+			decision := approval.Decision{ApprovalID: approvalID, ActorID: "writer-1", ActorRole: "writer", Action: "reject", Comment: "Please revise.", SubjectHash: strings.Repeat("b", 64), DecidedAt: startedAt.Add(time.Second)}
 			approvalValue := approval.PendingApproval{Kind: approval.KindInput, RunID: runID, ID: approvalID, AttemptID: "request-writer-1",
 				FromStage: "writer", ToStage: "writer", Trigger: "human_input", SubjectHash: decision.SubjectHash,
-				RequiredRoles: []string{"writer"}, Actions: []string{"submit", "reject"}, Quorum: approval.QuorumAny,
-				Status: approval.StatusResolved, ResolvedAction: "reject", Payload: payload, Decisions: []approval.Decision{decision}}
+				RequiredRoles: []string{"writer"}, Actions: []string{"submit", "reject"}, Targets: map[string]string{"submit": "writer", "reject": "writer"}, Quorum: approval.QuorumAny,
+				Status: approval.StatusResolved, ResolvedAction: "reject", Payload: payload, Decisions: []approval.Decision{decision},
+				ResolvedAt: startedAt.Add(time.Second)}
 			approvals := &apiApprovalStore{values: map[string]approval.PendingApproval{runID + "/" + approvalID: approvalValue}}
 			server := &workerAPIServer{scope: workerAPIScope{RunID: runID, Operation: OperationResume, TargetDir: target},
 				usageAllowed: true, approvals: approvals, eventLogs: eventLog, attemptManifests: manifestStore}
+			appendWorkerHumanApprovalEvents(t, runStore, approvalValue)
+			if err := runStore.Append(evidence.Event{Type: "attempt_started", Stage: "writer", AttemptID: attemptID, Timestamp: startedAt.Add(time.Second),
+				Data: map[string]any{"stage_index": 1, "executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID}}); err != nil {
+				t.Fatal(err)
+			}
+			events, err := eventLog.Read(runID)
+			if err != nil || len(events) != 4 {
+				t.Fatalf("read setup events: count=%d err=%v", len(events), err)
+			}
 
 			manifest := evidence.AttemptManifest{SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID, Stage: "writer",
 				Executor: "human", ActorID: "writer-1", ActorRole: "writer", HumanInputApprovalID: approvalID,
@@ -833,23 +838,15 @@ func TestWorkerAPIDispatchAcceptsOnlyOutputlessHumanRejectManifest(t *testing.T)
 			if !test.wantWriteError && writeErr != nil {
 				t.Fatalf("legitimate reject manifest write failed: %v", writeErr)
 			}
-			manifestDigest, _, digestErr := evidence.AttemptManifestDigest(evidence.ReservedAttemptManifestSource{TargetDir: target},
+			_, _, digestErr := evidence.AttemptManifestDigest(evidence.ReservedAttemptManifestSource{TargetDir: target},
 				filepath.Join(target, ".ai-team", "runs", runID), runID, attemptID)
-			if test.wantWriteError {
-				if digestErr == nil {
-					t.Fatal("malformed reject manifest was unexpectedly persisted")
-				}
-				manifestDigest = strings.Repeat("f", 64)
-			} else if digestErr != nil {
-				t.Fatalf("read stored reject manifest digest: %v", digestErr)
+			if test.wantWriteError != (digestErr != nil) {
+				t.Fatalf("stored reject manifest presence mismatch: wantWriteError=%v digestErr=%v", test.wantWriteError, digestErr)
 			}
-			finishedEvent := evidence.Event{Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt, Data: map[string]any{
-				"status": manifest.Status, "execution": manifest.Execution, "decision": manifest.Decision, "outcome": manifest.Outcome,
-				"verdict": manifest.Verdict, "manifest_sha256": manifestDigest,
-				"executor": "human", "actor_id": "writer-1", "actor_role": "writer", "human_input_approval_id": approvalID,
-			}}
-			_, finishErr := server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: finishedEvent,
-				ExpectedSequence: 2, ExpectedPreviousSHA256: events[1].SHA256})
+			// B-34 derives the terminal event from the published manifest and the
+			// resolved approval instead of accepting a raw human append.
+			_, finishErr := server.dispatch("human_attempt.finish", workerAPICall{RunID: runID, Event: evidence.Event{
+				Type: "attempt_finished", Stage: "writer", AttemptID: attemptID, Timestamp: finishedAt}})
 			if test.wantWriteError && finishErr == nil {
 				t.Fatal("attempt_finished accepted after a malformed reject manifest")
 			}

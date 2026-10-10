@@ -47,6 +47,10 @@ type Agent struct {
 	RequireDiff  bool
 	// AskQuestions — агенту разрешён инструмент question (см. Task.Interactive).
 	AskQuestions bool
+	// MCPServers are the exact stdio servers selected for this one agent
+	// invocation. Only Codex currently supports them; adapters fail closed if
+	// this list is non-empty and they cannot enforce session isolation.
+	MCPServers []MCPServerConfig
 	// ReadScope limits the files an adapter may expose to the agent. The
 	// inputs-only mode is fail-closed: adapters must advertise CapInputScopedRead.
 	ReadScope string

@@ -12,6 +12,20 @@ import (
 )
 
 func Run(ctx context.Context, command *exec.Cmd) error {
+	return run(ctx, command, 0)
+}
+
+// RunGraceful requests shutdown of the supervised process group before force
+// killing it. Codex owns MCP child lifecycles and needs a chance to close its
+// server processes when an agent stage reaches its deadline.
+func RunGraceful(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
+	if grace < 0 {
+		grace = 0
+	}
+	return run(ctx, command, grace)
+}
+
+func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	if command.SysProcAttr == nil {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -25,13 +39,43 @@ func Run(ctx context.Context, command *exec.Cmd) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		if errors.Is(killErr, syscall.ESRCH) {
-			killErr = nil
+		if grace > 0 {
+			termErr := syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+			if errors.Is(termErr, syscall.ESRCH) {
+				termErr = nil
+			}
+			timer := time.NewTimer(grace)
+			defer timer.Stop()
+			var waitErr, killErr error
+			select {
+			case waitErr = <-done:
+				// Codex may exit before an MCP child does. Force-kill the
+				// survivors now: waiting out the full grace window on an
+				// already reaped PID risks signalling a recycled PID later.
+				killErr = killProcessGroup(command.Process.Pid)
+				<-timer.C
+			case <-timer.C:
+				// Grace expired: force-kill BEFORE waiting so a leader that
+				// ignores SIGTERM cannot block <-done forever.
+				killErr = killProcessGroup(command.Process.Pid)
+				waitErr = <-done
+			}
+			return errors.Join(ctx.Err(), termErr, killErr, waitErr)
 		}
+		killErr := killProcessGroup(command.Process.Pid)
 		waitErr := <-done
 		return errors.Join(ctx.Err(), killErr, waitErr)
 	}
+}
+
+// killProcessGroup SIGKILLs the whole supervised process group. An already
+// finished group (ESRCH) is a success, not an error.
+func killProcessGroup(pgid int) error {
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
 }
 
 // CleanupReceipt фиксирует результат уничтожения process tree при отмене run

@@ -39,6 +39,24 @@ func TestAgentCLIExecutionClearsPreviousUsageOnFailedOpenCode(t *testing.T) {
 	}
 }
 
+func TestAgentCLIExecutionRejectsMCPServersForNonCodexAdapter(t *testing.T) {
+	r := &AgentCLIRuntime{}
+	agent := &Agent{
+		Name: "observer",
+		CLI:  "opencode",
+		MCPServers: []MCPServerConfig{{
+			Name: "monitoring", Command: "/usr/bin/monitoring-mcp",
+		}},
+	}
+	err := r.Execute(context.Background(), agent, &Task{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "только runtime codex") {
+		t.Fatalf("selected MCP servers must fail closed before a non-Codex execution, got %v", err)
+	}
+	if usage := r.Usage(); usage != nil {
+		t.Fatalf("rejected MCP launch must not report usage: %+v", usage)
+	}
+}
+
 func TestNewRuntime(t *testing.T) {
 	r, err := NewRuntime("agentcli")
 	if err != nil {

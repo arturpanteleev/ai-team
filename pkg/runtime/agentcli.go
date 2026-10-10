@@ -52,6 +52,9 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	if err != nil {
 		return err
 	}
+	if len(agent.MCPServers) > 0 && adapter.Name() != "codex" {
+		return fmt.Errorf("агент %s: MCP servers поддерживаются только runtime codex", agent.Name)
+	}
 
 	if _, err := exec.LookPath(cli); err != nil {
 		return fmt.Errorf("%s: команда не найдена в PATH", cli)
@@ -138,7 +141,15 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 	defer cleanupEnv()
 	cmd.Env = isolatedEnv
 
-	if err := process.Run(ctx, cmd); err != nil {
+	var runErr error
+	if adapter.Name() == "codex" {
+		// Give Codex a short bounded shutdown window to stop its own MCP child
+		// processes before the supervisor force-kills the process group.
+		runErr = process.RunGraceful(ctx, cmd, 2*time.Second)
+	} else {
+		runErr = process.Run(ctx, cmd)
+	}
+	if runErr != nil {
 		// Отмена/deadline не зависят от harness-вывода: пробрасываем их ДО
 		// классификатора, иначе context.Canceled/DeadlineExceeded маскируется
 		// под CodexErrorUnknown/ClaudeErrorUnknown.
@@ -152,7 +163,7 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 			}
 			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
 		}
-		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, err)
+		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, runErr)
 	}
 	if err := publishScopedOutputs(); err != nil {
 		return fmt.Errorf("агент %s: публикация результатов из ограниченной workspace: %w", agent.Name, err)

@@ -277,6 +277,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			RequireDiff:  a.RequireDiff,
 			AskQuestions: a.AskQuestions,
 			ReadScope:    a.ReadScope,
+			MCPServers:   append([]runtime.MCPServerConfig(nil), agentCfg.MCPServers...),
 		}
 		if agentCfg.CLI != "" {
 			runtimeAgent.CLI = agentCfg.CLI

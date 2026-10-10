@@ -143,7 +143,16 @@ func VerifyResumeEvidenceWithSources(runDir string, manifestSource AttemptManife
 		return resumeErr(ReasonWorkflowSnapshot, "resolved workflow snapshot identity mismatch")
 	}
 
-	replayed, err := ReplayEventLogWithEventSources(filepath.Join(runDir, "events.jsonl"), manifest.RunID, eventSource, manifestSource)
+	eventPath := filepath.Join(runDir, "events.jsonl")
+	events, err := VerifyEventLogWithSource(eventPath, manifest.RunID, eventSource)
+	if err != nil {
+		return resumeErr(ReasonEventChain, "event chain: %v", err)
+	}
+	events, err = reconcileMissingAgentFinishedEvent(runDir, manifest.RunID, eventSource, manifestSource, events)
+	if err != nil {
+		return resumeErr(ReasonEventChain, "agent completion recovery: %v", err)
+	}
+	replayed, err := replayEventsWithAttemptManifestSource(events, manifest.RunID, runDir, manifestSource)
 	if err != nil {
 		return resumeErr(ReasonEventChain, "event chain: %v", err)
 	}

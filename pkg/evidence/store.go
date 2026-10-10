@@ -112,6 +112,7 @@ type AttemptManifest struct {
 	HumanSubmissionResult      string                    `json:"human_submission_result,omitempty"`
 	HumanSubmissionLinkKind    string                    `json:"human_submission_link_kind,omitempty"`
 	HumanSubmissionDescription string                    `json:"human_submission_description,omitempty"`
+	HumanEditOfAgentAttemptID  string                    `json:"human_edit_of_agent_attempt_id,omitempty"`
 	StageIndex                 int                       `json:"stage_index"`
 	TotalStages                int                       `json:"total_stages,omitempty"`
 	StartedAt                  time.Time                 `json:"started_at"`
@@ -529,6 +530,10 @@ func resumeWithEventLogAndAttemptManifestSource(root, runID string, eventLog eve
 	if err != nil {
 		return nil, RunManifest{}, ReplayedRun{}, err
 	}
+	events, err = reconcileMissingAgentFinishedEvent(runDir, runID, eventLog, source, events)
+	if err != nil {
+		return nil, RunManifest{}, ReplayedRun{}, fmt.Errorf("recover agent completion event: %w", err)
+	}
 	var replayed ReplayedRun
 	if len(events) == 0 {
 		// Atomic evidence creation can complete before the first run_started
@@ -915,6 +920,16 @@ func (s *Store) append(event Event, controllerOnly bool) error {
 		}
 	}
 	return nil
+}
+
+// ReadEvents returns the verified event sequence for the run currently owned
+// by this store. It lets pipeline operations make idempotent, evidence-backed
+// decisions after a process restart.
+func (s *Store) ReadEvents() ([]Event, error) {
+	if s == nil || s.eventLog == nil || s.runID == "" {
+		return nil, errors.New("evidence event reader is unavailable")
+	}
+	return s.eventLog.Read(s.runID)
 }
 
 // VerifyEventLog validates strict JSON records, sequence and the complete hash

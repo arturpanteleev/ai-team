@@ -851,6 +851,45 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}
 			}
 		}
+		if resumedState.ActiveApprovalID != "" {
+			if resumedState.NextStage != runCfg.retryFrom {
+				// Evidence reconciliation moved past the stage that owned this
+				// checkpoint. Its approval no longer selects the current visit.
+				resumedState.ActiveApprovalID = ""
+			} else {
+				active, loadErr := approvalStore.Load(runID, resumedState.ActiveApprovalID)
+				if loadErr != nil {
+					return RunResult{}, fmt.Errorf("resume active stage approval: %w", loadErr)
+				}
+				if active.Status != approval.StatusResolved || active.Targets[active.ResolvedAction] != runCfg.retryFrom {
+					return RunResult{}, fmt.Errorf("resume active stage approval %s does not authorize %s", active.ID, runCfg.retryFrom)
+				}
+				switch {
+				case active.Kind == approval.KindInput && active.Trigger == humanInputTrigger && active.FromStage == runCfg.retryFrom:
+					if err := validateRecordedHumanInputDecision(replayedRun, active); err != nil {
+						return RunResult{}, fmt.Errorf("resume active human input approval: %w", err)
+					}
+					resumedApproval = &active
+					runCfg.resumeDecisionAction = active.ResolvedAction
+				case active.Kind != approval.KindQuestions && strings.HasPrefix(active.Trigger, "graph_outcome:"):
+					if recoveredGraphApproval == nil || recoveredGraphApproval.ID != active.ID {
+						return RunResult{}, fmt.Errorf("active graph approval %s is not the verified handoff to %s", active.ID, runCfg.retryFrom)
+					}
+					resumedApproval = recoveredGraphApproval
+				default:
+					return RunResult{}, fmt.Errorf("active approval %s is not a stage dispatch approval", active.ID)
+				}
+				if active.CandidateSHA256 != "" {
+					if candidateManager == nil {
+						return RunResult{}, fmt.Errorf("resume active approval: candidate worktree отсутствует")
+					}
+					identity, identityErr := candidateManager.Identity()
+					if identityErr != nil || identity.WorkspaceSHA256 != active.CandidateSHA256 {
+						return RunResult{}, fmt.Errorf("resume active approval: candidate identity changed after decision request")
+					}
+				}
+			}
+		}
 		if resumedApproval != nil && resumedApproval.Kind == approval.KindQuestions &&
 			resumedApproval.ResolvedAction == "answer_questions" {
 			if err := ValidateQuestionAnswerApproval(*resumedApproval, replayedRun); err != nil {
@@ -993,6 +1032,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		nextState.Phase = lifecycle.PhaseRunning
 		nextState.PendingApprovalID = ""
 		nextState.NextStage = runCfg.retryFrom
+		nextState.ActiveApprovalID = activeStageApprovalID(resumedApproval, runCfg.retryFrom)
+		if nextState.ActiveApprovalID == "" && resumedState.ActiveApprovalID != "" &&
+			resumedState.NextStage == runCfg.retryFrom {
+			// Resuming an already-running checkpoint keeps its in-flight approval
+			// until evidence recovery verifies it below.
+			nextState.ActiveApprovalID = resumedState.ActiveApprovalID
+		}
 		savedState, err := saveLifecycleCheckpoint(lifecycleStore, resumedState, nextState)
 		if err != nil {
 			return RunResult{}, err

@@ -11,6 +11,11 @@ import (
 // ErrUserStopped — пользователь остановил пайплайн на gate/confirm (exit-код 3).
 var ErrUserStopped = errors.New("пайплайн остановлен пользователем")
 
+// ErrAgentFinishedEvidence marks a stage whose completion event could not be
+// durably recorded. The run pauses at that stage so evidence can be repaired
+// before graph execution resumes.
+var ErrAgentFinishedEvidence = errors.New("agent completion evidence is not durable")
+
 type RunError struct {
 	Outcome workflow.RunOutcome
 	Err     error

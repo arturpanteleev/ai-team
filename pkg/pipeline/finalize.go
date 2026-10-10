@@ -53,7 +53,7 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		}
 		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
 	}
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) {
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) {
 		if err := report.GenerateFinalReport(
 			rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime,
 			rs.task.ArtifactRoot, status,
@@ -113,8 +113,8 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		rs.p.recorder.RunFinished(rs.runID, status, endTime.UTC())
 	}
 	terminal := rs.lifecycleState
-	terminal.Phase, terminal.NextStage, terminal.PendingApprovalID, terminal.AttemptOrdinal =
-		lifecycle.PhaseTerminal, "", "", rs.attemptOrdinal
+	terminal.Phase, terminal.NextStage, terminal.PendingApprovalID, terminal.ActiveApprovalID, terminal.AttemptOrdinal =
+		lifecycle.PhaseTerminal, "", "", "", rs.attemptOrdinal
 	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, terminal)
 	if err != nil {
 		finalizeErr = errors.Join(finalizeErr, fmt.Errorf("terminal lifecycle state: %w", err))
@@ -277,6 +277,8 @@ func runSignal(err error) workflow.RunSignal {
 		return workflow.SignalStopped
 	case errors.Is(err, context.Canceled):
 		return workflow.SignalCanceled
+	case errors.Is(err, ErrAgentFinishedEvidence):
+		return workflow.SignalStopped
 	default:
 		return workflow.SignalFailed
 	}

@@ -418,6 +418,46 @@ func TestCodexEnvironmentRequiresMCPEnvToBeExplicitlyAllowed(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeMCPServersFailsClosedOnStageMisuse(t *testing.T) {
+	serverCommand := filepath.Join(t.TempDir(), "knowledge-mcp")
+	if err := os.WriteFile(serverCommand, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	one := func(name string) MCPServerConfig {
+		return MCPServerConfig{Name: name, Command: serverCommand}
+	}
+	for _, test := range []struct {
+		name    string
+		servers []MCPServerConfig
+		want    string
+	}{
+		{
+			name: "per-stage server limit",
+			servers: []MCPServerConfig{
+				one("knowledge"), one("monitoring"), one("audit"), one("metrics"), one("tracing"),
+			},
+			want: "не более",
+		},
+		{
+			name:    "duplicate stage server id",
+			servers: []MCPServerConfig{one("knowledge"), one("knowledge")},
+			want:    "повторный",
+		},
+		{
+			name:    "empty stage server id",
+			servers: []MCPServerConfig{one("")},
+			want:    "server id",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateRuntimeMCPServers(test.servers)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("stage MCP misuse must fail closed with %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestCodexEnvironmentRejectsProjectConfigSurface(t *testing.T) {
 	a := &CodexAdapter{}
 	target := t.TempDir()

@@ -2,11 +2,28 @@ package runtime
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func repeatMCPArgs(count int) []string {
+	args := make([]string, count)
+	for i := range args {
+		args[i] = "--flag-" + strconv.Itoa(i)
+	}
+	return args
+}
+
+func repeatMCPEnv(count int) map[string]string {
+	env := make(map[string]string, count)
+	for i := 0; i < count; i++ {
+		env["VAR_"+strconv.Itoa(i)] = "value"
+	}
+	return env
+}
 
 func TestMCPServerConfigRejectsUnsafeCommandsAndInputs(t *testing.T) {
 	tests := []struct {
@@ -26,6 +43,9 @@ func TestMCPServerConfigRejectsUnsafeCommandsAndInputs(t *testing.T) {
 		{name: "reserved runtime env", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", EnvVars: []string{"CODEX_HOME"}}},
 		{name: "control char arg", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", Args: []string{"bad\narg"}}},
 		{name: "long tool timeout", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", ToolTimeoutSec: MaxMCPToolTimeoutSec + 1}},
+		{name: "too many args", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", Args: repeatMCPArgs(MaxMCPArgsPerServer + 1)}},
+		{name: "too many env entries", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", Env: repeatMCPEnv(MaxMCPEnvPerServer + 1)}},
+		{name: "oversized env value", server: MCPServerConfig{Name: "docs", Command: "/usr/bin/server", Env: map[string]string{"LOG_LEVEL": strings.Repeat("x", MaxMCPEnvValueBytes+1)}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

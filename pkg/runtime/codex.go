@@ -25,10 +25,10 @@ import (
 //
 // Политика изоляции: sandbox=workspace-write (записи только внутри workspace),
 // headless without approvals, CODEX_HOME перенаправлен во временный каталог
-// (проектный/user config и MCP-серверы не загружаются), env заменён
-// allow-листом. Для stage-specific read-deny используется Codex filesystem
-// permission profile (CLI >= 0.138.0), поскольку legacy workspace-write
-// sandbox разрешает чтение всего workspace.
+// (проектный/user config не загружаются; из MCP-серверов загружаются только
+// явно выбранные на этапе), env заменён allow-листом. Для stage-specific
+// read-deny используется Codex filesystem permission profile (CLI >= 0.138.0),
+// поскольку legacy workspace-write sandbox разрешает чтение всего workspace.
 type CodexAdapter struct{}
 
 func (a *CodexAdapter) Name() string { return "codex" }

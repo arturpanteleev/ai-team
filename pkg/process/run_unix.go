@@ -46,28 +46,36 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 			}
 			timer := time.NewTimer(grace)
 			defer timer.Stop()
-			var waitErr error
+			var waitErr, killErr error
 			select {
 			case waitErr = <-done:
-				// Codex may exit before an MCP child does. Keep the group under
-				// supervision for the full grace window, then kill any survivor.
+				// Codex may exit before an MCP child does. Force-kill the
+				// survivors now: waiting out the full grace window on an
+				// already reaped PID risks signalling a recycled PID later.
+				killErr = killProcessGroup(command.Process.Pid)
 				<-timer.C
 			case <-timer.C:
+				// Grace expired: force-kill BEFORE waiting so a leader that
+				// ignores SIGTERM cannot block <-done forever.
+				killErr = killProcessGroup(command.Process.Pid)
 				waitErr = <-done
-			}
-			killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-			if errors.Is(killErr, syscall.ESRCH) {
-				killErr = nil
 			}
 			return errors.Join(ctx.Err(), termErr, killErr, waitErr)
 		}
-		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		if errors.Is(killErr, syscall.ESRCH) {
-			killErr = nil
-		}
+		killErr := killProcessGroup(command.Process.Pid)
 		waitErr := <-done
 		return errors.Join(ctx.Err(), killErr, waitErr)
 	}
+}
+
+// killProcessGroup SIGKILLs the whole supervised process group. An already
+// finished group (ESRCH) is a success, not an error.
+func killProcessGroup(pgid int) error {
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
 }
 
 // CleanupReceipt фиксирует результат уничтожения process tree при отмене run

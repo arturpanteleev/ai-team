@@ -36,19 +36,26 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	case <-ctx.Done():
 		var signalErr error
 		if grace > 0 {
-			signalErr = command.Process.Signal(os.Interrupt)
+			// Graceful attempt: `taskkill /T` (no /F) asks the tree to stop on
+			// its own. Process.Signal(os.Interrupt) is unimplemented on
+			// Windows (EWINDOWS) and delivered nothing.
+			signalErr = stopTree(command.Process.Pid)
 			timer := time.NewTimer(grace)
 			defer timer.Stop()
-			var waitErr error
+			var waitErr, killErr error
 			select {
 			case waitErr = <-done:
-				// Keep the supervisor active through the grace window in case
-				// the command exits before a child process does.
+				// The command may exit before a descendant does. Force-kill
+				// the tree now instead of waiting out the full grace window
+				// on an already reaped PID, then observe the window.
+				killErr = killTree(command.Process.Pid)
 				<-timer.C
 			case <-timer.C:
+				// Grace expired: force-kill BEFORE waiting so a command that
+				// ignores the graceful attempt cannot block <-done forever.
+				killErr = killTree(command.Process.Pid)
 				waitErr = <-done
 			}
-			killErr := killTree(command.Process.Pid)
 			return errors.Join(ctx.Err(), signalErr, killErr, waitErr)
 		}
 		killErr := killTree(command.Process.Pid)
@@ -57,7 +64,15 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	}
 }
 
-// killTree best-effort terminates a process and its descendants on
+// stopTree requests a graceful stop of a process tree without force
+// (`taskkill /T`, no /F). Best-effort: the caller force-kills via killTree
+// when the grace window expires, and a command that cannot be stopped
+// gracefully is reported as part of the joined result.
+func stopTree(pid int) error {
+	return exec.Command("taskkill", "/T", "/PID", strconv.Itoa(pid)).Run()
+}
+
+// killTree best-effort force-terminates a process and its descendants on
 // cancellation/timeout. On Windows, `taskkill /T /F` terminates the whole
 // process tree — a plain Process.Kill only ever killed the direct child,
 // leaving any descendants (e.g. a spawned shell script's own children)
@@ -65,15 +80,20 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 // if taskkill isn't available (e.g. on non-Windows platforms that still
 // build this file, or if taskkill itself fails for any reason) — never
 // worse than the previous behavior, only better when taskkill succeeds.
+// An already finished tree is success (the ESRCH equivalent): taskkill
+// fails when the PID is gone and os.FindProcess reports a missing process.
 func killTree(pid int) error {
 	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run(); err == nil {
 		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
+		return nil
+	}
+	if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return process.Kill()
+	return nil
 }
 
 // CleanupReceipt фиксирует результат уничтожения process tree при отмене run.

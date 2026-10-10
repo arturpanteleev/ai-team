@@ -585,17 +585,41 @@ stages:
     mcp_servers: [knowledge]
 `
 	for _, test := range []struct {
-		name string
-		cli  string
-		want string
+		name   string
+		cli    string
+		want   string
+		mutate func(string) string
 	}{
 		{name: "non Codex", cli: "cli: opencode", want: "только при cli: codex"},
-		{name: "unknown selected server", cli: "cli: codex", want: "неизвестный сервер"},
+		{
+			name: "unknown selected server", cli: "cli: codex", want: "неизвестный сервер",
+			mutate: func(text string) string {
+				return strings.Replace(text, "mcp_servers: [knowledge]", "mcp_servers: [missing]", 1)
+			},
+		},
+		{
+			name: "too many stage servers", cli: "cli: codex", want: "не более",
+			mutate: func(text string) string {
+				return strings.Replace(text, "mcp_servers: [knowledge]", "mcp_servers: [knowledge, monitoring, audit, metrics, tracing]", 1)
+			},
+		},
+		{
+			name: "duplicate stage server id", cli: "cli: codex", want: "пустой или повторяющийся",
+			mutate: func(text string) string {
+				return strings.Replace(text, "mcp_servers: [knowledge]", "mcp_servers: [knowledge, knowledge]", 1)
+			},
+		},
+		{
+			name: "empty stage server id", cli: "cli: codex", want: "пустой или повторяющийся",
+			mutate: func(text string) string {
+				return strings.Replace(text, "mcp_servers: [knowledge]", `mcp_servers: [knowledge, ""]`, 1)
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			text := strings.Replace(base, "CLI_PLACEHOLDER", test.cli, 1)
-			if test.name == "unknown selected server" {
-				text = strings.Replace(text, "mcp_servers: [knowledge]", "mcp_servers: [missing]", 1)
+			if test.mutate != nil {
+				text = test.mutate(text)
 			}
 			cfg, err := ParseYAML([]byte(text))
 			if err != nil {

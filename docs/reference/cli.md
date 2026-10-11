@@ -14,6 +14,9 @@
 |---|---|
 | `ai-team init` | готовит проект: создаёт `.ai-team/config.yaml` и рабочие каталоги |
 | `ai-team run` | проводит задачу по конвейеру агентов или продолжает остановленный прогон |
+| `ai-team runs` | показывает задачи проекта, этап и состояние каждого прогона |
+| `ai-team show` | показывает этапы, попытки, ожидание, токены и следующую команду для прогона |
+| `ai-team cancel` | отменяет незавершённый прогон с указанной причиной |
 | `ai-team decision` | записывает решение человека по ожидающему подтверждению |
 | `ai-team stage` | сдаёт результат этапа человека: Markdown, ссылку или approve |
 | `ai-team deliver` | повторяет отложенную delivery (коммит, push, PR) завершённого прогона |
@@ -110,7 +113,7 @@ ai-team ci-import [--target <путь>] [--format github-actions]
 кода. Перед стартом печатает отчёт preflight (см. [ниже](#preflight-перед-запуском)).
 
 ```text
-ai-team run --feature <имя> --task "<описание>" [--target <путь>] [--approve-gates] [--approve-plan <sha256>]
+ai-team run --feature <имя> --task "<описание>" [--target <путь>] [--template <id>] [--mode auto] [--approve-gates] [--approve-plan <sha256>]
 ai-team run --resume <run_id> [--target <путь>] [--approve-gates] [--approve-plan <sha256>]
 ```
 
@@ -119,7 +122,9 @@ ai-team run --resume <run_id> [--target <путь>] [--approve-gates] [--approve
 | `--feature <имя>` | имя фичи: буквы, цифры, `-`, `_`, `.` |
 | `--task "<описание>"` | текст задачи для агентов |
 | `--target <путь>` | каталог проекта, по умолчанию `.` |
-| `--resume <run_id>` | продолжить незавершённый прогон с тем же `run_id`; нельзя сочетать с `--feature` и `--task` |
+| `--template <id>` | проверить, что выбран активный шаблон проекта. В проекте действует один шаблон; run закрепляет его версию |
+| `--mode auto` | включает автоматическое исполнение этапов с указанным агентом и auto-переходы подтверждения; исходный конфиг проекта не изменяется |
+| `--resume <run_id>` | продолжить незавершённый прогон с тем же `run_id` и его закреплённым шаблоном; preflight проверяет этот шаблон, а не текущую активную конфигурацию. Нельзя сочетать с `--feature` и `--task` |
 | `--approve-gates` | подтвердить обычные точки подтверждения в неинтерактивном режиме; это **не** подтверждение delivery. В профилях `standard` и `fast` переходы отложены до решения о delivery, поэтому там флаг обычно не нужен |
 | `--approve-plan <sha256>` | подтвердить ровно тот delivery-план, который показал контроллер; заодно подтверждает отложенные переходы прогона |
 
@@ -130,6 +135,44 @@ ai-team run --resume <run_id> [--target <путь>] [--approve-gates] [--approve
 ```bash
 ai-team run --feature add-jwt-auth --task "Реализовать JWT авторизацию"
 ai-team run --resume <run_id> --approve-plan <sha256-из-вывода>
+```
+
+При другой остановке команда печатает подходящее следующее действие, если оно
+известно: сдачу результата человеческого этапа или продолжение прогона. Список
+и подробности сохранённых задач доступны через `runs` и `show`.
+
+### ai-team runs
+
+Показывает сохранённые прогоны проекта в порядке последнего обновления.
+
+```text
+ai-team runs [--target <путь>]
+```
+
+В `--json` команда выдаёт один JSON record с `data.runs` и `data.count`.
+
+### ai-team show
+
+Показывает состояние lifecycle, историю попыток и текущее ожидание. Команда
+проверяет цепочку evidence перед показом. Для завершённых прогонов показываются
+токены, а приблизительная доля подписки выводится только при наличии полной
+токенной статистики, месячной цены подписки и достаточных данных по остальным
+прогонам месяца; тариф API не рассчитывается.
+
+```text
+ai-team show <run_id> [--target <путь>]
+```
+
+Если прогон ждёт результат human-этапа, вывод содержит готовую команду
+`ai-team stage submit`. Замените пример пути, URL или заметку фактическим
+значением. При запросе решения по gate команда подсказывает `ai-team decision`.
+
+### ai-team cancel
+
+Отменяет незавершённый прогон и сохраняет причину в evidence.
+
+```text
+ai-team cancel <run_id> --reason "<почему отменяем>" [--target <путь>]
 ```
 
 В интерактивном терминале контроллер печатает план и сам спрашивает
@@ -206,6 +249,30 @@ ai-team stage submit <run_id> --stage implementation \
   --link https://github.com/acme/app/pull/42 --kind pr \
   --description "Создан pull request"
 ai-team stage submit <run_id> --stage intent --approve --note "Идея принята"
+```
+
+### ai-team stage take
+
+Закрепляет текущий ожидающий human stage за участником, чей actor и роли
+определяет web controller. Сервер проверяет, что это текущий этап, что у
+участника есть роль из approval, и записывает владельца вместе с approval visit.
+Команда не принимает `--actor` или `--role`: эти значения нельзя подменить на
+клиенте.
+
+```text
+ai-team stage take <run_id> --stage <id> [--target <путь>] [--web-url <url>]
+```
+
+В локальном режиме URL по умолчанию — `http://127.0.0.1:8080`, а bearer token
+читается из закрытого файла `.ai-team/web.token`. Для облачного controller
+задайте `AI_TEAM_WEB_URL=https://…` и `AI_TEAM_WEB_TOKEN`; удалённый HTTP
+отклоняется до отправки токена. CLI получает web session и CSRF token через
+`/api/session`, затем вызывает защищённый endpoint `take`.
+
+```bash
+ai-team stage take <run_id> --stage product_spec
+AI_TEAM_WEB_URL=https://team.example.test AI_TEAM_WEB_TOKEN="$TOKEN" \
+  ai-team stage take <run_id> --stage product_spec
 ```
 
 ### ai-team deliver

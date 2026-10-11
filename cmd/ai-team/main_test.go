@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +16,70 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
+	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
+
+func TestRunSuccessOutputHelper(t *testing.T) {
+	if os.Getenv("AI_TEAM_RUN_SUCCESS_HELPER") != "1" {
+		return
+	}
+	switch os.Getenv("AI_TEAM_RUN_SUCCESS_MODE") {
+	case "json":
+		logging.SetMode(logging.ModeJSON)
+	case "quiet":
+		logging.SetMode(logging.ModeQuiet)
+	default:
+		logging.SetMode(logging.ModeDefault)
+	}
+	reportRunSuccess(pipeline.RunResult{RunID: "run-output-test", Outcome: "completed"}, "feature-output-test")
+}
+
+func TestRunSuccessOutputModes(t *testing.T) {
+	for _, mode := range []string{"default", "json", "quiet"} {
+		t.Run(mode, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestRunSuccessOutputHelper$")
+			command.Env = append(os.Environ(), "AI_TEAM_RUN_SUCCESS_HELPER=1", "AI_TEAM_RUN_SUCCESS_MODE="+mode)
+			var stdout, stderr bytes.Buffer
+			command.Stdout = &stdout
+			command.Stderr = &stderr
+			if err := command.Run(); err != nil {
+				t.Fatalf("run success output helper: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			output := stripTestRunnerFooter(stdout.String())
+			switch mode {
+			case "default":
+				if got := strings.Count(output, "✓ Пайплайн выполнен"); got != 1 || stderr.Len() != 0 {
+					t.Fatalf("default mode should print one human success line, got stdout=%q stderr=%q", output, stderr.String())
+				}
+			case "json":
+				records := parseJSONL(t, output)
+				if len(records) != 1 || records[0].Command != "run" || records[0].Data["run_id"] != "run-output-test" {
+					t.Fatalf("JSON mode should keep one structured run record, got %+v", records)
+				}
+				if got := strings.Count(stderr.String(), "✓ Пайплайн выполнен"); got != 1 {
+					t.Fatalf("JSON mode should retain one human progress line on stderr, got %q", stderr.String())
+				}
+			case "quiet":
+				if output != "" || stderr.Len() != 0 {
+					t.Fatalf("quiet mode should suppress successful output, got stdout=%q stderr=%q", output, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func stripTestRunnerFooter(output string) string {
+	lines := strings.Split(output, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "PASS" || strings.HasPrefix(line, "coverage:") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
+}
 
 func TestStageSubmitCommandHelper(t *testing.T) {
 	if os.Getenv("AI_TEAM_STAGE_SUBMIT_HELPER") != "1" {
@@ -26,6 +91,26 @@ func TestStageSubmitCommandHelper(t *testing.T) {
 	}
 	os.Args = append([]string{"ai-team", "stage", "submit"}, args...)
 	logging.SetMode(logging.ModeJSON)
+	cmdStage()
+}
+
+func TestStageActionCLIHelper(t *testing.T) {
+	if os.Getenv("AI_TEAM_STAGE_ACTION_HELPER") != "1" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv("AI_TEAM_STAGE_ACTION_ARGS")), &args); err != nil {
+		t.Fatal(err)
+	}
+	os.Args = append([]string{"ai-team", "stage", os.Getenv("AI_TEAM_STAGE_ACTION")}, args...)
+	switch os.Getenv("AI_TEAM_STAGE_ACTION_MODE") {
+	case "json":
+		logging.SetMode(logging.ModeJSON)
+	case "quiet":
+		logging.SetMode(logging.ModeQuiet)
+	default:
+		logging.SetMode(logging.ModeDefault)
+	}
 	cmdStage()
 }
 
@@ -82,6 +167,108 @@ func TestStageSubmitCLIStoresTypedMarkdownVersion(t *testing.T) {
 	history, err := artifacts.List(value.RunID, "stages/spec/result.md")
 	if err != nil || len(history) != 1 || history[0].Content != content || history[0].Description != "documented" || history[0].SHA256 != humanartifact.Digest([]byte(content)) {
 		t.Fatalf("CLI durable submission history mismatch: %+v err=%v", history, err)
+	}
+}
+
+func TestStageTakeCLIUsesAuthenticatedWebSessionAndServerIdentity(t *testing.T) {
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			if r.Header.Get("Authorization") != "Bearer cli-cloud-token" || r.Header.Get("Origin") != "http://"+r.Host {
+				t.Errorf("session request did not use the configured bearer and same-origin URL: auth=%q origin=%q host=%q", r.Header.Get("Authorization"), r.Header.Get("Origin"), r.Host)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "ai_team_session", Value: "session-from-server", Path: "/", HttpOnly: true})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"csrf_token":"csrf-from-server"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runs/run-cli-take/stages/product_spec/take":
+			cookie, cookieErr := r.Cookie("ai_team_session")
+			body, bodyErr := io.ReadAll(r.Body)
+			if cookieErr != nil || cookie.Value != "session-from-server" || r.Header.Get("X-CSRF-Token") != "csrf-from-server" ||
+				r.Header.Get("Origin") != "http://"+r.Host || bodyErr != nil || len(body) != 0 {
+				t.Errorf("take request did not use the web session/CSRF contract: cookie=%v csrf=%q origin=%q body=%q err=%v", cookie, r.Header.Get("X-CSRF-Token"), r.Header.Get("Origin"), body, bodyErr)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"owner":{"stage_id":"product_spec","approval_id":"input-1","actor_id":"alice@example.test","actor_role":"product_owner","taken_at":"2026-10-09T12:00:00Z"},"changed":true}`)
+		default:
+			http.Error(w, "unexpected endpoint", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	args := []string{"run-cli-take", "--target", target, "--stage", "product_spec", "--web-url", server.URL}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := os.Args[0]
+	t.Setenv(stageWebTokenEnv, "cli-cloud-token")
+	previousArgs := os.Args
+	os.Args = append([]string{"ai-team", "stage", "take"}, args...)
+	t.Cleanup(func() { os.Args = previousArgs })
+	previousMode := logging.GetMode()
+	logging.SetMode(logging.ModeQuiet)
+	t.Cleanup(func() { logging.SetMode(previousMode) })
+	cmdStage()
+
+	command := exec.Command(executable, "-test.run=^TestStageActionCLIHelper$")
+	command.Env = append(os.Environ(), "AI_TEAM_STAGE_ACTION_HELPER=1", "AI_TEAM_STAGE_ACTION=take",
+		"AI_TEAM_STAGE_ACTION_MODE=json", "AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage take CLI failed: %v\n%s", err, output)
+	}
+	if !bytes.Contains(output, []byte(`"type":"stage_owner"`)) || !bytes.Contains(output, []byte(`"actor_id":"alice@example.test"`)) ||
+		!bytes.Contains(output, []byte(`"changed":true`)) || bytes.Contains(output, []byte("cli-cloud-token")) {
+		t.Fatalf("stage take did not report the server-derived owner safely: %s", output)
+	}
+
+	command = exec.Command(executable, "-test.run=^TestStageActionCLIHelper$")
+	command.Env = append(os.Environ(), "AI_TEAM_STAGE_ACTION_HELPER=1", "AI_TEAM_STAGE_ACTION=take",
+		"AI_TEAM_STAGE_ACTION_MODE=default", "AI_TEAM_STAGE_ACTION_ARGS="+string(encoded), stageWebTokenEnv+"=cli-cloud-token")
+	output, err = command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage take CLI in human mode failed: %v\n%s", err, output)
+	}
+	const successLine = "✓ Этап product_spec задачи run-cli-take взят участником alice@example.test (product_owner)"
+	if strings.Count(string(output), successLine) != 1 {
+		t.Fatalf("human mode should print exactly one success line %q, got: %s", successLine, output)
+	}
+}
+
+func TestStageWebURLRejectsUnencryptedRemoteController(t *testing.T) {
+	if _, _, _, err := parseStageWebURL("http://controller.example.test:8080"); err == nil {
+		t.Fatal("remote HTTP controller should be rejected before bearer token is sent")
+	}
+	if _, _, loopback, err := parseStageWebURL("http://127.0.0.1:8080"); err != nil || !loopback {
+		t.Fatalf("loopback HTTP controller should be allowed: loopback=%v err=%v", loopback, err)
+	}
+	if _, _, loopback, err := parseStageWebURL("https://controller.example.test"); err != nil || loopback {
+		t.Fatalf("HTTPS remote controller should be allowed: loopback=%v err=%v", loopback, err)
+	}
+}
+
+func TestReadLocalWebTokenRequiresPrivateRegularFile(t *testing.T) {
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, ".ai-team"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	want, path, err := loadOrCreateLocalWebToken(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, gotPath, err := readLocalWebToken(target)
+	if err != nil || got != want || gotPath != path {
+		t.Fatalf("read local web token = (%q, %q, %v), want generated private token", got, gotPath, err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readLocalWebToken(target); err == nil || !strings.Contains(err.Error(), "expected 0600") {
+		t.Fatalf("insecure local token permissions should fail closed, got %v", err)
 	}
 }
 

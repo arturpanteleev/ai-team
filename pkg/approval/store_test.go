@@ -599,3 +599,110 @@ func TestStorePayloadRoundTripAndValidation(t *testing.T) {
 		t.Fatalf("битый payload должен быть отклонён, got %v", err)
 	}
 }
+
+func checkDecisionApproval() PendingApproval {
+	payload, _ := json.Marshal(CheckDecisionPayload{
+		Kind: string(KindCheckDecision), StageID: "tech", CheckKind: "hard", Status: "failed",
+		ReportPath: "feat/.stage-check/tech.md", ReportSHA256: testSubject, FailedRules: []string{"verdict_marker"},
+	})
+	return PendingApproval{
+		RunID: "run-check-decision", AttemptID: "attempt-1", FromStage: "tech", ToStage: "tech",
+		Trigger: StageCheckTrigger, Kind: KindCheckDecision, SubjectHash: testSubject,
+		RequiredRoles: []string{"architect"}, Actions: []string{"new_version", "override", "return"},
+		Targets: map[string]string{"new_version": "tech", "override": "tech", "return": "tech"},
+		Payload: payload,
+	}
+}
+
+func TestCheckDecisionApprovalLifecycle(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(checkDecisionApproval())
+	if err != nil {
+		t.Fatalf("валидный check_decision должен создаваться: %v", err)
+	}
+	if value.Kind != KindCheckDecision || value.Status != StatusPending ||
+		value.Trigger != StageCheckTrigger || value.Actions[0] != "new_version" {
+		t.Fatalf("check_decision не нормализован: %+v", value)
+	}
+	var payload CheckDecisionPayload
+	if json.Unmarshal(value.Payload, &payload) != nil || payload.StageID != "tech" || payload.FailedRules[0] != "verdict_marker" {
+		t.Fatalf("payload check_decision повреждён: %+v", payload)
+	}
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "local-user", ActorRole: "architect", Action: "new_version",
+		SubjectHash: value.SubjectHash, DecidedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("решение new_version не принято: %v", err)
+	}
+	reloaded, err := store.Load(value.RunID, value.ID)
+	if err != nil || reloaded.Status != StatusResolved || reloaded.ResolvedAction != "new_version" {
+		t.Fatalf("check_decision не разрешён: %+v err=%v", reloaded, err)
+	}
+}
+
+func TestCheckDecisionApprovalRequiresValidContract(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*PendingApproval)
+		want   string
+	}{
+		{"passed статус недопустим", func(v *PendingApproval) {
+			v.Payload, _ = json.Marshal(CheckDecisionPayload{Kind: string(KindCheckDecision), StageID: "tech", CheckKind: "hard", Status: "passed"})
+		}, "failed stage check"},
+		{"триггер вне stage_check", func(v *PendingApproval) { v.Trigger = "graph_outcome:passed" }, "failed stage check"},
+		{"маршрут вне этапа", func(v *PendingApproval) {
+			v.ToStage = "deployer"
+			v.Targets["new_version"] = "deployer"
+		}, "failed stage check"},
+		{"без new_version", func(v *PendingApproval) {
+			v.Actions = []string{"override", "return"}
+			delete(v.Targets, "new_version")
+		}, "failed stage check"},
+		{"неизвестное действие", func(v *PendingApproval) {
+			v.Actions = append(v.Actions, "skip")
+			v.Targets["skip"] = "tech"
+		}, "unsupported"},
+		{"битый report path", func(v *PendingApproval) {
+			v.Payload, _ = json.Marshal(CheckDecisionPayload{Kind: string(KindCheckDecision), StageID: "tech", CheckKind: "agent", Status: "error", ReportPath: "../outside.md"})
+		}, "report path"},
+		{"битый report hash", func(v *PendingApproval) {
+			v.Payload, _ = json.Marshal(CheckDecisionPayload{Kind: string(KindCheckDecision), StageID: "tech", CheckKind: "agent", Status: "error", ReportSHA256: "not-a-sha"})
+		}, "report hash"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			value := checkDecisionApproval()
+			tc.mutate(&value)
+			if _, err := store.Create(value); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ожидали ошибку %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestStoreInfersCheckDecisionKindWhenUnset(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := checkDecisionApproval()
+	value.Kind = ""
+	created, err := store.Create(value)
+	if err != nil {
+		t.Fatalf("check_decision без явного kind должен создаваться: %v", err)
+	}
+	reloaded, err := store.Load(created.RunID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Kind != KindCheckDecision {
+		t.Fatalf("kind не выведён из payload/actions: %q", reloaded.Kind)
+	}
+}

@@ -30,13 +30,14 @@ type Status string
 type Kind string
 
 const (
-	StatusPending  Status = "pending"
-	StatusResolved Status = "resolved"
-	QuorumAny             = "any"
-	QuorumAll             = "all"
-	KindApprove    Kind   = "approve"
-	KindQuestions  Kind   = "questions"
-	KindInput      Kind   = "input"
+	StatusPending     Status = "pending"
+	StatusResolved    Status = "resolved"
+	QuorumAny                = "any"
+	QuorumAll                = "all"
+	KindApprove       Kind   = "approve"
+	KindQuestions     Kind   = "questions"
+	KindInput         Kind   = "input"
+	KindCheckDecision Kind   = "check_decision"
 )
 
 // MaxInputCommentBytes is also the maximum markdown payload accepted by a
@@ -58,6 +59,24 @@ type InputPayload struct {
 	AgentEnabled         bool   `json:"agent_enabled,omitempty"`
 	InitialResult        string `json:"initial_result,omitempty"`
 	EditedAgentAttemptID string `json:"edited_agent_attempt_id,omitempty"`
+}
+
+// StageCheckTrigger идентифицирует approval, поднятый проваленной проверкой
+// результата этапа (B-40). Отдельный trigger защищает resume от смешения с
+// graph-переходами и delivery-планом.
+const StageCheckTrigger = "stage_check"
+
+// CheckDecisionPayload — контракт запроса решения по проваленной проверке
+// этапа. Действия new_version/override/return остаются в actions; семантика
+// override/return наполняется B-41.
+type CheckDecisionPayload struct {
+	Kind         string   `json:"kind"`
+	StageID      string   `json:"stage_id"`
+	CheckKind    string   `json:"check_kind"`
+	Status       string   `json:"status"`
+	ReportPath   string   `json:"report_path,omitempty"`
+	ReportSHA256 string   `json:"report_sha256,omitempty"`
+	FailedRules  []string `json:"failed_rules,omitempty"`
 }
 
 type Decision struct {
@@ -459,6 +478,10 @@ func inferKind(payload json.RawMessage, actions []string) Kind {
 		request.Kind == string(KindQuestions) && contains(actions, "answer_questions") {
 		return KindQuestions
 	}
+	if len(payload) > 0 && json.Unmarshal(payload, &request) == nil &&
+		request.Kind == string(KindCheckDecision) && contains(actions, "new_version") {
+		return KindCheckDecision
+	}
 	return KindApprove
 }
 
@@ -468,7 +491,7 @@ func validate(value PendingApproval) error {
 		!validSHA256(value.SubjectHash) || value.CreatedAt.IsZero() {
 		return errors.New("approval содержит недопустимые обязательные поля")
 	}
-	if value.Kind != KindApprove && value.Kind != KindQuestions && value.Kind != KindInput {
+	if value.Kind != KindApprove && value.Kind != KindQuestions && value.Kind != KindInput && value.Kind != KindCheckDecision {
 		return fmt.Errorf("неподдерживаемый approval kind %q", value.Kind)
 	}
 	if value.Kind == KindQuestions {
@@ -514,6 +537,28 @@ func validate(value PendingApproval) error {
 		}
 		if len(payload.InitialResult) > MaxInputCommentBytes || (payload.EditedAgentAttemptID != "" && !safeName(payload.EditedAgentAttemptID)) {
 			return errors.New("input approval initial agent result is invalid")
+		}
+	}
+	if value.Kind == KindCheckDecision {
+		var payload CheckDecisionPayload
+		if json.Unmarshal(value.Payload, &payload) != nil || payload.Kind != string(KindCheckDecision) ||
+			payload.StageID == "" || payload.StageID != value.FromStage || value.ToStage != value.FromStage ||
+			value.Trigger != StageCheckTrigger || value.Quorum != QuorumAny ||
+			(payload.CheckKind != "hard" && payload.CheckKind != "agent") ||
+			(payload.Status != "failed" && payload.Status != "error") ||
+			!contains(value.Actions, "new_version") || value.Targets["new_version"] != value.FromStage {
+			return errors.New("check_decision approval must bind a failed stage check and a new_version route")
+		}
+		for _, action := range value.Actions {
+			if action != "new_version" && action != "override" && action != "return" {
+				return fmt.Errorf("check_decision approval action %q is unsupported", action)
+			}
+		}
+		if len(payload.ReportPath) > 0 && !validInputOutputPath(payload.ReportPath) {
+			return errors.New("check_decision approval report path is invalid")
+		}
+		if payload.ReportSHA256 != "" && !validSHA256(payload.ReportSHA256) {
+			return errors.New("check_decision approval report hash is invalid")
 		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {

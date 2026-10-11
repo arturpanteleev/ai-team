@@ -231,6 +231,19 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			return fmt.Errorf("workflow graph: для %s outcome %s нет ребра", current, result.State.Outcome)
 		}
 
+		// B-40: проваленная (или сорвавшаяся) проверка блочит переход и
+		// поднимает запрос kind=check_decision; новая версия = повторный
+		// прогон этапа по решению человека. Проверка идемпотентна на
+		// durable-событиях (runStageChecks), поэтому её вызываем и для
+		// переигранной попытки: крах между attempt_finished и проверкой не
+		// должен пропускать проверку (fail-open).
+		if result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed &&
+			!skippedByConfig {
+			if err := rs.runStageChecks(ctx, current, result); err != nil {
+				return err
+			}
+		}
+
 		target := edge.To
 		action := ""
 		if edge.Approval != nil {

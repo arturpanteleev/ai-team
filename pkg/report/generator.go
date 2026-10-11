@@ -351,3 +351,18 @@ func ReadStageSummary(artifactsRoot, feature, agent string) string {
 	}
 	return ui.Truncate(strings.TrimSpace(string(data)), 200)
 }
+
+// ReadStageCheckReport читает отчёт проверки этапа (B-40) из
+// {artifactsRoot}/{feature}/.stage-check/{stage}.md.
+func ReadStageCheckReport(artifactsRoot, feature, stage string) string {
+	path := filepath.Join(artifactsRoot, feature, ".stage-check", stage+".md")
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return ""
+	}
+	data, err := safeio.ReadRegularFile(path, 256<<10)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}

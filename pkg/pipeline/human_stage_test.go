@@ -423,6 +423,32 @@ func (s *humanCrashEvidenceStore) Append(event evidence.Event) error {
 		s.factory.crashed = true
 		panic("simulated crash before transition_selected")
 	}
+	if !s.factory.crashed && s.factory.point == "after-human-attempt-finished" && event.Type == "attempt_finished" &&
+		event.Data["executor"] == "human" {
+		if err := s.EvidenceStore.Append(event); err != nil {
+			return err
+		}
+		s.factory.crashed = true
+		panic("simulated crash after durable human attempt_finished before stage check")
+	}
+	if !s.factory.crashed && s.factory.point == "after-check-event" {
+		switch event.Type {
+		case "check_passed", "check_failed", "check_error":
+			if err := s.EvidenceStore.Append(event); err != nil {
+				return err
+			}
+			s.factory.crashed = true
+			panic("simulated crash after durable stage check event")
+		}
+	}
+	if !s.factory.crashed && s.factory.point == "after-check-decision-requested" &&
+		event.Type == "approval_requested" && event.Data["trigger"] == approval.StageCheckTrigger {
+		if err := s.EvidenceStore.Append(event); err != nil {
+			return err
+		}
+		s.factory.crashed = true
+		panic("simulated crash after durable check_decision request")
+	}
 	return s.EvidenceStore.Append(event)
 }
 

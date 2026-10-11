@@ -262,6 +262,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/template/validate", srv.handleValidateTemplate)
 		router.Post("/api/template/publish", srv.handlePublishTemplate)
 		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)
+		router.Post("/api/runs/{runID}/executor", srv.handleChangeStageExecutor)
 		router.Post("/api/runs/{runID}/delivery/retry", srv.handleRetryDelivery)
 		router.Post("/api/runs/{runID}/cancel", srv.handleCancelRun)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)

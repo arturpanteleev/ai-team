@@ -76,17 +76,43 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if err := rs.authorizeStage(current); err != nil {
 			return err
 		}
+		executor := rs.stageExecutorForRun(current)
+		if override, active := rs.activeExecutorOverride(current); active {
+			if err := rs.recordExecutorChanged(current, override.PreviousExecutor, override.Executor, override.ActorID, override.VisitID, override.ChangedAt); err != nil {
+				return err
+			}
+		}
+		stageApproval := rs.activeResolvedApproval(current)
+		if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+			(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+			decision := lastApprovalDecision(stageApproval)
+			if err := rs.recordExecutorChanged(current, "human", "agent", decision.ActorID, stageApproval.ID, decision.DecidedAt); err != nil {
+				return err
+			}
+		}
 		var result notifier.StageResult
 		replayedHumanAttempt := false
-		if rs.p.stageExecutor(current) == "human" {
+		if executor == "human" {
 			var humanErr error
 			result, humanErr = rs.runHumanStage(ctx, index, current)
 			if humanErr != nil {
 				return humanErr
 			}
 		} else {
+			var cleanup func()
+			if stageApproval != nil && stageApproval.Kind == approval.KindInput && stageApproval.ResolvedAction == "refine_agent" {
+				var refineErr error
+				cleanup, refineErr = rs.addRefinementInput(current, lastApprovalDecision(stageApproval).Comment)
+				if refineErr != nil {
+					return refineErr
+				}
+			}
 			result = rs.runStage(ctx, index, current)
+			if cleanup != nil {
+				cleanup()
+			}
 		}
+		rs.clearExecutorOverride(current)
 		for _, previous := range rs.results {
 			if previous.AttemptID == result.AttemptID && result.AttemptID != "" {
 				replayedHumanAttempt = true
@@ -116,6 +142,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			if rs.p.recorder != nil {
 				rs.p.recorder.StageFinished(result)
 			}
+		}
+		if errors.Is(result.Err, ErrAgentFinishedEvidence) {
+			return result.Err
 		}
 		if result.Status == notifier.StatusBlocked {
 			logging.Printf("\n%s %s\n", ui.Colorize("⊘ Блокер:", ui.ColorBold+ui.ColorYellow), result.Blocker)
@@ -210,6 +239,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if rs.p.recorder != nil {
 			rs.p.recorder.TransitionSelected(rs.runID, result.AttemptID, transitionAt, transitionData)
 		}
+		// The incoming approval authorized this dispatch only. Clear it before
+		// advancing so a same-stage loop cannot inherit the previous visit.
+		rs.lifecycleState.ActiveApprovalID = ""
+		if activeStageApprovalID(rs.resumedApproval, current) != "" {
+			rs.resumedApproval = nil
+		}
 		rs.ps.DoneAgent(current)
 		if workflow.IsTerminal(target) {
 			if err := rs.saveLifecycle(lifecycle.PhaseRunning, target); err != nil {
@@ -280,8 +315,8 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 		result := notifier.StageResult{
 			RunID: run.RunID, AttemptID: attempt.AttemptID, Name: attempt.Stage,
 			Executor: attempt.Executor, ActorID: attempt.ActorID, ActorRole: attempt.ActorRole,
-			HumanInputApprovalID: attempt.HumanInputApprovalID,
-			StageIndex:           attempt.StageIndex, StartedAt: attempt.StartedAt,
+			HumanInputApprovalID: attempt.HumanInputApprovalID, HumanEditOfAgentAttemptID: attempt.HumanEditOfAgentAttemptID,
+			StageIndex: attempt.StageIndex, StartedAt: attempt.StartedAt,
 			FinishedAt: attempt.FinishedAt, Duration: attempt.FinishedAt.Sub(attempt.StartedAt),
 			Status: attempt.Status, State: attempt.State, Verdict: verdict.Verdict(attempt.Verdict),
 			Blocker: attempt.Blocker, Err: attemptErr, Superseded: attempt.Superseded, TotalStages: totalStages,
@@ -293,6 +328,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 				return nil, runtime.Usage{}, false, fmt.Errorf("read attempt %s manifest: %w", attempt.AttemptID, err)
 			}
 			result.Checks = append(result.Checks, manifest.Checks...)
+			result.HumanEditOfAgentAttemptID = manifest.HumanEditOfAgentAttemptID
 			result.Usage = manifest.Usage
 			result.Mutations = append([]string(nil), manifest.Mutations...)
 			result.MutationChanges = append([]workflow.MutationChange(nil), manifest.MutationChanges...)
@@ -371,6 +407,13 @@ func (rs *runState) saveLifecycle(phase lifecycle.Phase, nextStage string) error
 	next.Phase = phase
 	next.NextStage = nextStage
 	next.PendingApprovalID = ""
+	next.ActiveApprovalID = ""
+	if phase == lifecycle.PhaseRunning || phase == lifecycle.PhaseResumable {
+		// Keep the exact resolved handoff across the running checkpoint. A crash
+		// after this save but before dispatch must not turn a human agent action
+		// into an ordinary human submission or lose an executor override's visit.
+		next.ActiveApprovalID = activeStageApprovalID(rs.resumedApproval, nextStage)
+	}
 	next.AttemptOrdinal = rs.attemptOrdinal
 	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
 	if err != nil {
@@ -385,7 +428,14 @@ func (rs *runState) saveWaiting(nextStage, approvalID string) error {
 	next.Phase = lifecycle.PhaseWaiting
 	next.NextStage = nextStage
 	next.PendingApprovalID = approvalID
+	next.ActiveApprovalID = ""
 	next.AttemptOrdinal = rs.attemptOrdinal
+	if override, ok := next.ExecutorOverrides[nextStage]; ok && override.Executor == "human" {
+		// Once the human executor has opened its typed input form, bind that
+		// same stage visit to the new approval identity until the human submits.
+		override.ApprovalID = approvalID
+		next.ExecutorOverrides[nextStage] = override
+	}
 	saved, err := saveLifecycleCheckpoint(rs.lifecycleStore, rs.lifecycleState, next)
 	if err != nil {
 		return fmt.Errorf("lifecycle approval checkpoint: %w", err)

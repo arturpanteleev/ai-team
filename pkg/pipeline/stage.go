@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
@@ -85,6 +86,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	var evidenceInputs []evidence.Artifact
 	modelAttempt := false
 	executionInvoked := false
+	agentEventStarted := false
 	cleanupEvidenceInputs := func() error { return nil }
 	fail := func(err error) notifier.StageResult {
 		r.Err = err
@@ -98,6 +100,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}); err != nil {
 		return fail(fmt.Errorf("агент %s: запись attempt_started: %w", name, err))
 	}
+	stageApproval := rs.activeResolvedApproval(name)
 	defer func() {
 		r.FinishedAt = time.Now().UTC()
 		r.Duration = r.FinishedAt.Sub(r.StartedAt)
@@ -170,7 +173,35 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			r.Err = errors.Join(r.Err, fmt.Errorf("запись attempt_finished %s: %w", attemptID, err))
 			rs.deriveStageState(&r)
 		}
+		if agentEventStarted {
+			agentData := map[string]any{"status": r.Status}
+			if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+				(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+				agentData["action"] = stageApproval.ResolvedAction
+				agentData["approval_id"] = stageApproval.ID
+			}
+			if r.Err != nil {
+				agentData["error"] = r.Err.Error()
+			}
+			if err := rs.appendAgentFinished(evidence.Event{Type: "agent_finished", Stage: name, AttemptID: attemptID, Timestamp: r.FinishedAt, Data: agentData}); err != nil {
+				r.Err = errors.Join(r.Err, ErrAgentFinishedEvidence, fmt.Errorf("запись agent_finished %s: %w", attemptID, err))
+				logging.Printf("error: запись agent_finished %s не подтверждена: %v", attemptID, err)
+			}
+		}
 	}()
+	agentStartData := map[string]any{"stage_index": i + 1}
+	if stageApproval != nil && stageApproval.Kind == approval.KindInput &&
+		(stageApproval.ResolvedAction == "run_agent" || stageApproval.ResolvedAction == "refine_agent") {
+		agentStartData["action"] = stageApproval.ResolvedAction
+		agentStartData["approval_id"] = stageApproval.ID
+		if decision := lastApprovalDecision(stageApproval); decision.ActorID != "" {
+			agentStartData["started_by"] = decision.ActorID
+		}
+	}
+	if err := rs.evidence.Append(evidence.Event{Type: "agent_started", Stage: name, AttemptID: attemptID, Timestamp: stageStart.UTC(), Data: agentStartData}); err != nil {
+		return fail(fmt.Errorf("агент %s: запись agent_started: %w", name, err))
+	}
+	agentEventStarted = true
 
 	rs.ps.StartAgent(i+1, name)
 	if rs.p.recorder != nil {

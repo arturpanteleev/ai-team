@@ -706,3 +706,36 @@ func TestStoreInfersCheckDecisionKindWhenUnset(t *testing.T) {
 		t.Fatalf("kind не выведён из payload/actions: %q", reloaded.Kind)
 	}
 }
+
+func TestCheckDecisionOverrideRequiresReason(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := checkDecisionApproval()
+	created, err := store.Create(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, comment := range []string{"", "   ", "\n\t"} {
+		if _, err := store.Decide(created.RunID, created.ID, Decision{
+			ActorID: "local-user", ActorRole: "architect", Action: "override",
+			Comment: comment, SubjectHash: created.SubjectHash, DecidedAt: time.Now().UTC(),
+		}); err == nil || !strings.Contains(err.Error(), "причину") {
+			t.Fatalf("override без причины %q должен быть отклонён: %v", comment, err)
+		}
+	}
+	reloaded, err := store.Load(created.RunID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Status != StatusPending {
+		t.Fatalf("approval не должен быть разрешён без причины: %+v", reloaded)
+	}
+	if _, err := store.Decide(created.RunID, created.ID, Decision{
+		ActorID: "local-user", ActorRole: "architect", Action: "override",
+		Comment: "риск принят", SubjectHash: created.SubjectHash, DecidedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("override с причиной должен быть принят: %v", err)
+	}
+}

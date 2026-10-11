@@ -337,6 +337,9 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if contains(value.FeedbackActions, decision.Action) && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("для возврата требуется причина или feedback")
 	}
+	if value.Kind == KindCheckDecision && decision.Action == "override" && strings.TrimSpace(decision.Comment) == "" {
+		return PendingApproval{}, errors.New("обход проверки этапа требует причину")
+	}
 	if value.Kind == KindInput {
 		if len(decision.Comment) > MaxInputCommentBytes {
 			return PendingApproval{}, fmt.Errorf("human input exceeds maximum size of %d bytes", MaxInputCommentBytes)

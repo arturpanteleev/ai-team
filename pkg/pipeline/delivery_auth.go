@@ -214,7 +214,9 @@ func (rs *runState) requiredControllerCheck(stage config.TemplateStage, checkNam
 		return notifier.StageResult{}, checks.Result{}, fmt.Errorf("delivery запрещён: требуемая проверка %s не запускалась на этапе %s", checkName, stage.ID)
 	}
 	if result.Status != notifier.StatusPassed || result.Err != nil {
-		return result, checks.Result{}, fmt.Errorf("delivery запрещён: этап %s с required check %s не завершился успешно", stage.ID, checkName)
+		if !result.CheckOverridden {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: этап %s с required check %s не завершился успешно", stage.ID, checkName)
+		}
 	}
 	manifest, err := rs.verifiedAttemptManifest(result)
 	if err != nil {
@@ -256,7 +258,7 @@ func (rs *runState) requiredDeliveryVerdictEvidence(deliveryStage config.Templat
 			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s не найден", requiredStageID)
 		}
 		result, exists := rs.stageResult(*requiredStage)
-		if !exists || result.Status != notifier.StatusPassed || result.Err != nil {
+		if !exists || result.Err != nil || (result.Status != notifier.StatusPassed && !result.CheckOverridden) {
 			return nil, fmt.Errorf("delivery запрещён: required verdict stage %s отсутствует или не прошёл", requiredStageID)
 		}
 		definitionName := rs.p.cfg.RegistryAgentName(requiredStage.ID)

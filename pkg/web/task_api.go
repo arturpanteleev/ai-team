@@ -662,7 +662,13 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 	if !authOK {
 		return
 	}
-	decision := approval.Decision{ActorID: actorID, ActorRole: actorRole, Action: "approve", SubjectHash: pending.SubjectHash, ControllerAuthenticated: true}
+	revisions, err := s.confirmationArtifactRevisions(runID, pending)
+	if err != nil {
+		s.taskConflict(w, runID, stageID, err.Error())
+		return
+	}
+	decision := approval.Decision{ActorID: actorID, ActorRole: actorRole, Action: "approve",
+		SubjectHash: pending.SubjectHash, ArtifactRevisions: revisions, ControllerAuthenticated: true}
 	resolved, err := s.controller.Decide(runID, pending.ID, decision)
 	if err != nil {
 		s.taskConflict(w, runID, stageID, err.Error())
@@ -748,6 +754,28 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "from_stage": stageID, "to_stage": command.ToStage, "actor_id": actorID})
+}
+
+// confirmationArtifactRevisions mirrors the legacy quorum decision path for the
+// task confirm endpoint. The first vote pins the exact artifact revisions that
+// were reviewed (including an intentionally empty selection); later voters reuse
+// that binding even if newer human revisions appeared while the approval stayed
+// pending. A human revision appended after the first vote is therefore never
+// silently adopted.
+func (s *Server) confirmationArtifactRevisions(runID string, pending *approval.PendingApproval) (map[string]string, error) {
+	if len(pending.Decisions) > 0 {
+		pinned := pending.Decisions[0].ArtifactRevisions
+		revisions := make(map[string]string, len(pinned))
+		for path, revisionID := range pinned {
+			revisions[path] = revisionID
+		}
+		return revisions, nil
+	}
+	attemptID, err := s.approvalAttemptID(runID, pending.ID)
+	if err != nil {
+		return nil, err
+	}
+	return s.latestAttemptRevisions(runID, attemptID)
 }
 
 func (s *Server) taskReturnAllowed(runID, from, to string) bool {

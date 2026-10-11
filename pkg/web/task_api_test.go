@@ -1,7 +1,10 @@
 package web
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -207,6 +211,184 @@ func TestTaskActionInvalidStateReturnsAllowedActions(t *testing.T) {
 		body.Code != "invalid_state" || body.AllowedActions == nil {
 		t.Fatalf("invalid-state response must carry a JSON allowed_actions array: %d %s", response.Code, response.Body.String())
 	}
+}
+
+func TestTaskConfirmPinsAndReusesFirstVotedArtifactRevision(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const runID, stageID = "run-confirm", "tech_design"
+	relative := "attempts/attempt-1/artifacts/design.md"
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-confirm", RunID: runID, AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: stageID, ToStage: stageID, Trigger: "stage_completed", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"architect"}, Actions: []string{"approve"},
+		Targets: map[string]string{"approve": stageID},
+	}}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun(runID, runID); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{RunID: runID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: stageID, PendingApprovalID: "approval-confirm",
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	runRoot := filepath.Join(target, ".ai-team", "runs", runID)
+	source := []byte("source design\n")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(runRoot, relative)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, relative), source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"run_id":%q,"attempt_id":"attempt-1","outputs":[{"name":"design","evidence_path":%q}]}`, runID, relative)
+	if err := os.MkdirAll(filepath.Join(runRoot, "attempts", "attempt-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, "attempts", "attempt-1", "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%x", sha256.Sum256(source))
+	pinned, err := humanStore.Append(runID, relative, "", base, "design A\n", "first voter selection", "architect-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/stages/"+stageID+"/confirm", "")
+	firstResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusAccepted || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("first confirm should pin the reviewed revision: code=%d selection=%v body=%s",
+			firstResponse.Code, controller.decision.ArtifactRevisions, firstResponse.Body.String())
+	}
+	// Model the durable post-vote state, then append a newer human edit while
+	// the approval stays pending.
+	controller.approvals[0].Decisions = []approval.Decision{{
+		ActorID: "architect-1", ActorRole: "architect", Action: "approve",
+		ArtifactRevisions: map[string]string{relative: pinned.ID},
+	}}
+	newer, err := humanStore.Append(runID, relative, pinned.ID, pinned.SHA256, "design B\n", "later edit", "architect-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.ID == pinned.ID {
+		t.Fatal("test setup expected a distinct newer revision")
+	}
+
+	second := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/stages/"+stageID+"/confirm", "")
+	secondResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusAccepted || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("later confirm must reuse the first pinned revision instead of the newer edit: code=%d selection=%v body=%s",
+			secondResponse.Code, controller.decision.ArtifactRevisions, secondResponse.Body.String())
+	}
+}
+
+func TestTaskStageSkipReachesConnectedController(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controller := &actionRecordingController{fakeRunController: &fakeRunController{}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun("run-skip", "run-skip"); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{RunID: "run-skip", Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseResumable, NextStage: "tech_design",
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-skip/stages/tech_design/skip", `{"reason":"not needed"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || controller.skipCalls != 1 ||
+		controller.skipRunID != "run-skip" || controller.skipStageID != "tech_design" ||
+		controller.skipReason != "not needed" || controller.skipActorRole != "architect" {
+		t.Fatalf("skip action did not reach the connected controller: code=%d calls=%d run=%q stage=%q reason=%q role=%q body=%s",
+			response.Code, controller.skipCalls, controller.skipRunID, controller.skipStageID,
+			controller.skipReason, controller.skipActorRole, response.Body.String())
+	}
+}
+
+type actionRecordingController struct {
+	*fakeRunController
+	skipCalls                                                      int
+	skipRunID, skipStageID, skipReason, skipActorID, skipActorRole string
+}
+
+func (c *actionRecordingController) SkipStage(_ context.Context, runID, stageID, reason, actorID, actorRole string) error {
+	c.skipCalls++
+	c.skipRunID, c.skipStageID, c.skipReason = runID, stageID, reason
+	c.skipActorID, c.skipActorRole = actorID, actorRole
+	return nil
 }
 
 func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {

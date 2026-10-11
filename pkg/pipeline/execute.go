@@ -233,10 +233,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 
 		// B-40: проваленная (или сорвавшаяся) проверка блочит переход и
 		// поднимает запрос kind=check_decision; новая версия = повторный
-		// прогон этапа по решению человека. Повторный прогон проверяется
-		// заново, поэтому replayed-попытки проверку не проходят.
+		// прогон этапа по решению человека. Проверка идемпотентна на
+		// durable-событиях (runStageChecks), поэтому её вызываем и для
+		// переигранной попытки: крах между attempt_finished и проверкой не
+		// должен пропускать проверку (fail-open).
 		if result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed &&
-			!replayedHumanAttempt && !skippedByConfig {
+			!skippedByConfig {
 			if err := rs.runStageChecks(ctx, current, result); err != nil {
 				return err
 			}

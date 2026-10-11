@@ -42,6 +42,22 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	if check.Kind == "agent" && check.Mode == grillMode {
 		return nil // grill обрабатывается отдельной механикой (B-42).
 	}
+
+	// Replay-safe: a crash can leave an attempt durably finished before its
+	// check ran, or after a failed check but before the human decision was
+	// recorded. Decide from the durable check event (not the attempt replay
+	// flag): no completed check means the check must run again, a passed check
+	// is already satisfied, and a failed/erroring check must still block the
+	// transition instead of silently advancing.
+	if applied, found, err := rs.replayedStageCheck(stageID, result.AttemptID); err != nil {
+		return err
+	} else if found {
+		if applied.Status == stagecheck.StatusPassed {
+			return nil
+		}
+		return rs.blockOnDurableCheckFailure(stage, result, applied)
+	}
+
 	startedAt := time.Now().UTC()
 	if err := rs.evidence.Append(evidence.Event{
 		Type: "check_started", Stage: stageID, AttemptID: result.AttemptID, Timestamp: startedAt,
@@ -93,6 +109,97 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		return nil
 	}
 	return rs.requestCheckDecision(stage, result, report, reportPath, reportSHA)
+}
+
+// durableStageCheck is the replay view of a completed stage check, rebuilt
+// from the run's hash-chained evidence so a crash cannot lose the outcome.
+type durableStageCheck struct {
+	Kind       string
+	Status     string
+	ReportPath string
+	ReportSHA  string
+}
+
+// replayedStageCheck returns the completed check already recorded for the
+// attempt, if any. "Completed" means a check_passed/check_failed/check_error
+// event exists; a lone check_started (crash mid-check) is deliberately treated
+// as not-run so the check is retried.
+func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageCheck, bool, error) {
+	if attemptID == "" {
+		return durableStageCheck{}, false, nil
+	}
+	events, found, err := rs.readEvidenceEvents()
+	if err != nil {
+		return durableStageCheck{}, false, fmt.Errorf("чтение событий проверки %s: %w", stageID, err)
+	}
+	if !found {
+		return durableStageCheck{}, false, nil
+	}
+	for _, event := range events {
+		if event.AttemptID != attemptID || event.Stage != stageID {
+			continue
+		}
+		switch event.Type {
+		case "check_passed", "check_failed", "check_error":
+			return durableStageCheck{
+				Kind:       eventDataString(event, "check_kind"),
+				Status:     eventDataString(event, "status"),
+				ReportPath: eventDataString(event, "report_path"),
+				ReportSHA:  eventDataString(event, "report_sha256"),
+			}, true, nil
+		}
+	}
+	return durableStageCheck{}, false, nil
+}
+
+// blockOnDurableCheckFailure re-establishes the human decision that a prior,
+// durably failed check requires. It reuses a still-pending check_decision
+// approval, and otherwise raises a fresh one from the recorded report binding.
+// A resolved decision for the same attempt is not treated as permission to
+// advance: the failed attempt must not transition.
+func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, result notifier.StageResult, applied durableStageCheck) error {
+	existing, err := rs.checkDecisionForAttempt(stage.ID, result.AttemptID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if existing.Status == approval.StatusPending {
+			if err := rs.saveWaiting(stage.ID, existing.ID); err != nil {
+				return err
+			}
+			return &ApprovalRequiredError{
+				Checkpoint: fmt.Sprintf("проверка этапа %s (%s)", stage.ID, applied.Status),
+				RunID:      rs.runID, ApprovalID: existing.ID, SubjectHash: existing.SubjectHash,
+			}
+		}
+		return fmt.Errorf("проверка этапа %s (%s) уже разрешена действием %q; требуется повторный прогон этапа",
+			stage.ID, applied.Status, existing.ResolvedAction)
+	}
+	report := stagecheck.Report{Stage: stage.ID, Kind: applied.Kind, Status: applied.Status}
+	if report.Kind == "" {
+		report.Kind = stage.Check.Kind
+	}
+	return rs.requestCheckDecision(stage, result, report, applied.ReportPath, applied.ReportSHA)
+}
+
+func (rs *runState) checkDecisionForAttempt(stageID, attemptID string) (*approval.PendingApproval, error) {
+	values, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return nil, fmt.Errorf("list check decisions для %s: %w", stageID, err)
+	}
+	for index := range values {
+		value := values[index]
+		if value.Kind == approval.KindCheckDecision && value.Trigger == approval.StageCheckTrigger &&
+			value.FromStage == stageID && value.AttemptID == attemptID {
+			return &value, nil
+		}
+	}
+	return nil, nil
+}
+
+func eventDataString(event evidence.Event, key string) string {
+	value, _ := event.Data[key].(string)
+	return value
 }
 
 func stageStatusGlyph(status string) string {

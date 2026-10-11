@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,14 +13,20 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
+
+// humanInputTrigger mirrors pipeline.humanInputTrigger: the approval trigger
+// used for stage-bound human input decisions.
+const humanInputTrigger = "human_input"
 
 var ErrActive = errors.New("run уже исполняется")
 
@@ -32,6 +39,12 @@ type runEngine interface {
 	Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error)
 	Resume(context.Context, pipeline.ResumeConfig) (pipeline.RunResult, error)
 	Cancel(pipeline.CancelConfig) (pipeline.RunResult, error)
+}
+
+// skipStageEngine is implemented by pipeline.RunEngine. Controllers built on
+// lighter engines keep the REST skip action returning controller_action_unavailable.
+type skipStageEngine interface {
+	SkipStage(context.Context, pipeline.SkipStageConfig) (pipeline.RunResult, error)
 }
 
 type PreflightChecker interface {
@@ -185,6 +198,16 @@ func (c *Controller) Resume(runID string) error {
 			return errors.New("run всё ещё ожидает human decision")
 		}
 	}
+	return c.launch(runID, func(ctx context.Context, cancelRequested <-chan struct{}) (pipeline.RunResult, error) {
+		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target,
+			CancelRequested: func() bool { return cancellationRequested(c.target, runID, cancelRequested) }})
+	})
+}
+
+// launch registers a process-local worker exactly like Resume. Engine actions
+// that must not block the HTTP request (skip, deferred delivery) reuse it so
+// the active-run guard stays consistent.
+func (c *Controller) launch(runID string, execute func(context.Context, <-chan struct{}) (pipeline.RunResult, error)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	active := &worker{cancel: cancel, cancelRequested: make(chan struct{})}
 	c.mu.Lock()
@@ -196,8 +219,7 @@ func (c *Controller) Resume(runID string) error {
 	c.active[runID] = active
 	c.mu.Unlock()
 	go c.run(runID, ctx, nil, func(ctx context.Context) (pipeline.RunResult, error) {
-		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target,
-			CancelRequested: func() bool { return cancellationRequested(c.target, runID, active.cancelRequested) }})
+		return execute(ctx, active.cancelRequested)
 	})
 	return nil
 }
@@ -228,6 +250,301 @@ func (c *Controller) Decide(runID, approvalID string, decision approval.Decision
 
 func (c *Controller) Approvals(runID string) ([]approval.PendingApproval, error) {
 	return c.approvals.List(runID)
+}
+
+// ChangeStageExecutor persists a human-selected executor for the stage that is
+// currently ready. The override is bound to the pending approval visit, so the
+// pipeline applies it once and a later visit cannot inherit it. The
+// executor_changed evidence event is emitted by the engine when the run resumes,
+// keeping state transitions inside the engine.
+func (c *Controller) ChangeStageExecutor(runID, stageID, executor, actorID string) error {
+	if strings.TrimSpace(actorID) == "" {
+		return errors.New("actor id is required to change a stage executor")
+	}
+	if executor != "human" && executor != "agent" {
+		return errors.New("executor must be human or agent")
+	}
+	state, err := c.loadLifecycle(runID)
+	if err != nil {
+		return err
+	}
+	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" || state.NextStage != stageID {
+		return errors.New("executor можно менять только у текущего ready stage с ожидающим approval")
+	}
+	stage, err := c.pinnedStage(runID, stageID)
+	if err != nil {
+		return err
+	}
+	if executor == "agent" && stage.Agent == "" {
+		return errors.New("у stage нет привязанного агента")
+	}
+	value, err := c.approvals.Load(runID, state.PendingApprovalID)
+	if err != nil {
+		return err
+	}
+	opensStage := false
+	for _, target := range value.Targets {
+		if target == stageID {
+			opensStage = true
+			break
+		}
+	}
+	if value.Status != approval.StatusPending || !opensStage {
+		return errors.New("approval больше не открывает этот stage")
+	}
+	stateStore, err := lifecycle.NewStore(c.target)
+	if err != nil {
+		return err
+	}
+	previousState := state
+	previousExecutor := stage.Executor
+	if prior, ok := state.ExecutorOverrides[stageID]; ok && prior.ApprovalID == state.PendingApprovalID {
+		previousExecutor = prior.Executor
+	}
+	if state.ExecutorOverrides == nil {
+		state.ExecutorOverrides = make(map[string]lifecycle.ExecutorOverride)
+	}
+	state.ExecutorOverrides[stageID] = lifecycle.ExecutorOverride{
+		Executor: executor, PreviousExecutor: previousExecutor, ActorID: actorID,
+		ApprovalID: state.PendingApprovalID, VisitID: state.PendingApprovalID, ChangedAt: time.Now().UTC(),
+	}
+	return stateStore.Save(previousState, state)
+}
+
+// RunStageAgent dispatches the configured agent for a ready or resumable stage.
+// A pending human input approval is resolved with run_agent (or refine_agent,
+// which feeds the current result back as refinement input) before resuming.
+func (c *Controller) RunStageAgent(_ context.Context, runID, stageID, actorID string, refine bool) error {
+	state, err := c.loadLifecycle(runID)
+	if err != nil {
+		return err
+	}
+	if state.NextStage != stageID {
+		return fmt.Errorf("stage %q is not current", stageID)
+	}
+	switch state.Phase {
+	case lifecycle.PhaseResumable:
+		return c.Resume(runID)
+	case lifecycle.PhaseWaiting:
+		if state.PendingApprovalID == "" {
+			return errors.New("stage has no pending approval")
+		}
+		value, err := c.approvals.Load(runID, state.PendingApprovalID)
+		if err != nil {
+			return err
+		}
+		if value.Kind != approval.KindInput || value.Trigger != humanInputTrigger || value.FromStage != stageID {
+			return errors.New("agent run requires a pending human input approval")
+		}
+		stage, err := c.pinnedStage(runID, stageID)
+		if err != nil {
+			return err
+		}
+		action, comment := "run_agent", ""
+		if refine {
+			action = "refine_agent"
+			var payload approval.InputPayload
+			if len(value.Payload) == 0 || json.Unmarshal(value.Payload, &payload) != nil {
+				return errors.New("refine requires the current agent result payload")
+			}
+			comment = payload.InitialResult
+			if strings.TrimSpace(comment) == "" {
+				return errors.New("refine_agent requires the current result as input")
+			}
+		}
+		if _, err := c.approvals.Decide(runID, value.ID, approval.Decision{
+			ActorID: actorID, ActorRole: stage.Function, Action: action, Comment: comment,
+			SubjectHash: value.SubjectHash, ControllerAuthenticated: true,
+		}); err != nil {
+			return err
+		}
+		return c.Resume(runID)
+	default:
+		return errors.New("agent run requires a ready or resumable stage")
+	}
+}
+
+// SkipStage records an explicit, reasoned skip. Pending human input resolves its
+// stage-bound approval with the skip action (preserving the actor identity);
+// an agent stage is skipped from its resumable checkpoint through the engine.
+func (c *Controller) SkipStage(_ context.Context, runID, stageID, reason, actorID, actorRole string) error {
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("пропуск этапа требует причину")
+	}
+	state, err := c.loadLifecycle(runID)
+	if err != nil {
+		return err
+	}
+	if state.NextStage != stageID {
+		return fmt.Errorf("stage %q is not current", stageID)
+	}
+	switch state.Phase {
+	case lifecycle.PhaseWaiting:
+		if state.PendingApprovalID == "" {
+			return errors.New("stage has no pending approval")
+		}
+		value, err := c.approvals.Load(runID, state.PendingApprovalID)
+		if err != nil {
+			return err
+		}
+		if value.Kind != approval.KindInput || value.Trigger != humanInputTrigger || value.FromStage != stageID ||
+			!containsAction(value.Actions, "skip") {
+			return errors.New("stage has no pending skippable human input")
+		}
+		stage, err := c.pinnedStage(runID, stageID)
+		if err != nil {
+			return err
+		}
+		if !stage.Skippable {
+			return fmt.Errorf("stage %q is not configured as skippable", stageID)
+		}
+		if _, err := c.approvals.Decide(runID, value.ID, approval.Decision{
+			ActorID: actorID, ActorRole: actorRole, Action: "skip", Comment: reason,
+			SubjectHash: value.SubjectHash, ControllerAuthenticated: true,
+		}); err != nil {
+			return err
+		}
+		return c.Resume(runID)
+	case lifecycle.PhaseResumable:
+		engine, ok := c.engine.(skipStageEngine)
+		if !ok {
+			return errors.New("run engine does not support stage skip")
+		}
+		return c.launch(runID, func(ctx context.Context, _ <-chan struct{}) (pipeline.RunResult, error) {
+			return engine.SkipStage(ctx, pipeline.SkipStageConfig{RunID: runID, TargetDir: c.target, StageID: stageID, Reason: reason})
+		})
+	default:
+		return errors.New("stage cannot be skipped in its current state")
+	}
+}
+
+// ReturnStage resolves the current ready approval with the exact configured
+// return route to toStage. The reviewed artifact revisions are pinned on the
+// first vote and reused afterwards, so a return cannot silently adopt a newer
+// human edit made while the approval stayed pending.
+func (c *Controller) ReturnStage(_ context.Context, runID, stageID, toStage, reason, actorID, actorRole string) error {
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("для возврата требуется причина")
+	}
+	state, err := c.loadLifecycle(runID)
+	if err != nil {
+		return err
+	}
+	if state.NextStage != stageID {
+		return fmt.Errorf("stage %q is not current", stageID)
+	}
+	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" {
+		return errors.New("return requires a current waiting stage")
+	}
+	value, err := c.approvals.Load(runID, state.PendingApprovalID)
+	if err != nil {
+		return err
+	}
+	action := ""
+	for _, candidate := range value.Actions {
+		if strings.HasPrefix(candidate, "return_to_") && value.Targets[candidate] == toStage {
+			action = candidate
+			break
+		}
+	}
+	if action == "" {
+		return fmt.Errorf("return to %q is not offered by the pending approval", toStage)
+	}
+	revisions, err := c.reviewedRevisions(runID, value)
+	if err != nil {
+		return err
+	}
+	if _, err := c.approvals.Decide(runID, value.ID, approval.Decision{
+		ActorID: actorID, ActorRole: actorRole, Action: action, Comment: reason,
+		SubjectHash: value.SubjectHash, ArtifactRevisions: revisions, ControllerAuthenticated: true,
+	}); err != nil {
+		return err
+	}
+	return c.Resume(runID)
+}
+
+func (c *Controller) loadLifecycle(runID string) (lifecycle.State, error) {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return lifecycle.State{}, err
+	}
+	stateStore, err := lifecycle.NewStore(c.target)
+	if err != nil {
+		return lifecycle.State{}, err
+	}
+	return stateStore.Load(runID)
+}
+
+func (c *Controller) pinnedStage(runID, stageID string) (config.TemplateStage, error) {
+	store, err := config.NewTemplateStore(c.target)
+	if err != nil {
+		return config.TemplateStage{}, errors.New("pinned template store недоступен")
+	}
+	data, _, found, err := store.ReadPinnedRun(runID)
+	if err != nil || !found {
+		return config.TemplateStage{}, errors.New("у run нет проверяемого pinned template")
+	}
+	template, err := config.ParseYAML(data)
+	if err != nil {
+		return config.TemplateStage{}, errors.New("pinned template повреждён")
+	}
+	for _, stage := range template.Stages {
+		if stage.ID == stageID {
+			return stage, nil
+		}
+	}
+	return config.TemplateStage{}, fmt.Errorf("stage %q отсутствует в pinned template", stageID)
+}
+
+// reviewedRevisions mirrors the legacy decision pinning: the first vote fixes
+// the artifact revisions (including an intentionally empty selection); later
+// votes reuse that binding. Only when no vote exists yet does it read the
+// reviewed attempt's latest human revisions.
+func (c *Controller) reviewedRevisions(runID string, value approval.PendingApproval) (map[string]string, error) {
+	if len(value.Decisions) > 0 {
+		pinned := value.Decisions[0].ArtifactRevisions
+		revisions := make(map[string]string, len(pinned))
+		for path, revisionID := range pinned {
+			revisions[path] = revisionID
+		}
+		return revisions, nil
+	}
+	if value.AttemptID == "" {
+		return nil, nil
+	}
+	_, manifest, err := evidence.ReadAttemptManifest(nil, filepath.Join(c.target, ".ai-team", "runs", runID), runID, value.AttemptID)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if manifest.RunID != runID || manifest.AttemptID != value.AttemptID {
+		return nil, errors.New("approval attempt manifest identity mismatch")
+	}
+	store, err := humanartifact.New(c.target)
+	if err != nil {
+		return nil, err
+	}
+	selection := make(map[string]string)
+	for _, output := range manifest.Outputs {
+		revisions, listErr := store.List(runID, output.EvidencePath)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(revisions) > 0 {
+			selection[output.EvidencePath] = revisions[len(revisions)-1].ID
+		}
+	}
+	return selection, nil
+}
+
+func containsAction(actions []string, wanted string) bool {
+	for _, action := range actions {
+		if action == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // DeliverDeferred retries the exact deferred delivery prepared by a terminal

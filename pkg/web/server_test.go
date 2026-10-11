@@ -30,6 +30,16 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
+// The production controller must satisfy every action interface the REST layer
+// type-asserts, otherwise the corresponding endpoint silently degrades to 503.
+var (
+	_ RunController           = (*control.Controller)(nil)
+	_ StageExecutorController = (*control.Controller)(nil)
+	_ StageAgentController    = (*control.Controller)(nil)
+	_ StageSkipController     = (*control.Controller)(nil)
+	_ StageReturnController   = (*control.Controller)(nil)
+)
+
 type fakeRunController struct {
 	startFeature   string
 	startTask      string

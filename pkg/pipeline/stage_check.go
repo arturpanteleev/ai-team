@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,7 +124,9 @@ type durableStageCheck struct {
 // replayedStageCheck returns the completed check already recorded for the
 // attempt, if any. "Completed" means a check_passed/check_failed/check_error
 // event exists; a lone check_started (crash mid-check) is deliberately treated
-// as not-run so the check is retried.
+// as not-run so the check is retried. A check_overridden event takes
+// precedence over the failed check it bypasses: the human decision satisfies
+// the check requirement.
 func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageCheck, bool, error) {
 	if attemptID == "" {
 		return durableStageCheck{}, false, nil
@@ -135,8 +138,16 @@ func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageC
 	if !found {
 		return durableStageCheck{}, false, nil
 	}
+	overridden := false
 	for _, event := range events {
 		if event.AttemptID != attemptID || event.Stage != stageID {
+			continue
+		}
+		if event.Type == "check_overridden" {
+			overridden = true
+			continue
+		}
+		if overridden {
 			continue
 		}
 		switch event.Type {
@@ -149,14 +160,18 @@ func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageC
 			}, true, nil
 		}
 	}
+	if overridden {
+		return durableStageCheck{Status: stagecheck.StatusPassed}, true, nil
+	}
 	return durableStageCheck{}, false, nil
 }
 
 // blockOnDurableCheckFailure re-establishes the human decision that a prior,
 // durably failed check requires. It reuses a still-pending check_decision
 // approval, and otherwise raises a fresh one from the recorded report binding.
-// A resolved decision for the same attempt is not treated as permission to
-// advance: the failed attempt must not transition.
+// A resolved override for the same attempt satisfies the check requirement;
+// any other resolved action is not treated to advance: the failed attempt must
+// not transition.
 func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, result notifier.StageResult, applied durableStageCheck) error {
 	existing, err := rs.checkDecisionForAttempt(stage.ID, result.AttemptID)
 	if err != nil {
@@ -172,6 +187,9 @@ func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, resul
 				RunID:      rs.runID, ApprovalID: existing.ID, SubjectHash: existing.SubjectHash,
 			}
 		}
+		if existing.ResolvedAction == "override" {
+			return nil
+		}
 		return fmt.Errorf("проверка этапа %s (%s) уже разрешена действием %q; требуется повторный прогон этапа",
 			stage.ID, applied.Status, existing.ResolvedAction)
 	}
@@ -180,6 +198,69 @@ func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, resul
 		report.Kind = stage.Check.Kind
 	}
 	return rs.requestCheckDecision(stage, result, report, applied.ReportPath, applied.ReportSHA)
+}
+
+// applyCheckOverride фиксирует обход проверки этапа решением человека и
+// возвращает результат попытки с флагом CheckOverridden. Этап не
+// перезапускается: переход продолжается как «пройденный с обходом».
+func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, error) {
+	if rs.resumedApproval == nil {
+		return notifier.StageResult{}, errors.New("обход проверки: отсутствует решённый check_decision")
+	}
+	decision := lastApprovalDecision(rs.resumedApproval)
+	reason := strings.TrimSpace(decision.Comment)
+	if reason == "" {
+		return notifier.StageResult{}, errors.New("обход проверки требует причину")
+	}
+	var result *notifier.StageResult
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		if rs.results[index].Name == stageID && rs.results[index].AttemptID == rs.resumedApproval.AttemptID {
+			result = &rs.results[index]
+			break
+		}
+	}
+	if result == nil {
+		return notifier.StageResult{}, fmt.Errorf("обход проверки: попытка %s этапа %s не найдена",
+			rs.resumedApproval.AttemptID, stageID)
+	}
+	applied, _, err := rs.replayedStageCheck(stageID, result.AttemptID)
+	if err != nil {
+		return notifier.StageResult{}, err
+	}
+	checkKind := applied.Kind
+	if checkKind == "" {
+		stage, ok := rs.p.templateStage(stageID)
+		if !ok || stage.Check == nil {
+			return notifier.StageResult{}, fmt.Errorf("обход проверки: этап %s не имеет проверки", stageID)
+		}
+		checkKind = stage.Check.Kind
+	}
+	eventData := map[string]any{
+		"severity":    "warning",
+		"warning":     true,
+		"reason":      reason,
+		"actor_id":    decision.ActorID,
+		"actor_role":  decision.ActorRole,
+		"approval_id": rs.resumedApproval.ID,
+		"check_kind":  checkKind,
+	}
+	if applied.Status != "" {
+		eventData["check_status"] = applied.Status
+	}
+	if applied.ReportPath != "" {
+		eventData["report_path"] = applied.ReportPath
+	}
+	if applied.ReportSHA != "" {
+		eventData["report_sha256"] = applied.ReportSHA
+	}
+	if err := rs.evidence.Append(evidence.Event{
+		Type: "check_overridden", Stage: stageID, AttemptID: result.AttemptID,
+		Timestamp: time.Now().UTC(), Data: eventData,
+	}); err != nil {
+		return notifier.StageResult{}, fmt.Errorf("запись check_overridden для %s: %w", stageID, err)
+	}
+	result.CheckOverridden = true
+	return *result, nil
 }
 
 func (rs *runState) checkDecisionForAttempt(stageID, attemptID string) (*approval.PendingApproval, error) {

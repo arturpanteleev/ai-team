@@ -54,6 +54,9 @@ type AttemptUsage struct {
 }
 
 // StageResult is the domain record of one immutable stage attempt.
+// CheckOverridden marks an attempt whose failed stage check (B-40) was
+// bypassed by an explicit, reasoned human decision (B-41); delivery and
+// subsequent stages read it as "passed with override".
 type StageResult struct {
 	RunID                     string
 	AttemptID                 string
@@ -73,6 +76,7 @@ type StageResult struct {
 	Superseded                bool
 	ValidationFailed          bool
 	ControlStopped            bool
+	CheckOverridden           bool
 	State                     AttemptState
 	Checks                    []checks.Result
 	Mutations                 []string

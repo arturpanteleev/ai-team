@@ -96,7 +96,18 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		var result notifier.StageResult
 		replayedHumanAttempt := false
 		skippedByConfig := rs.runCfg.skipStageID == current && executor != "human"
-		if skippedByConfig {
+		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
+			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
+			current == rs.runCfg.retryFrom
+		if overriddenByDecision {
+			var overrideErr error
+			result, overrideErr = rs.applyCheckOverride(current)
+			if overrideErr != nil {
+				return overrideErr
+			}
+			rs.runCfg.resumeDecisionAction = ""
+			rs.resumedApproval = nil
+		} else if skippedByConfig {
 			var found bool
 			var skipErr error
 			result, found, skipErr = rs.replayedSkippedStage(current, rs.runCfg.skipReason)
@@ -238,7 +249,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		// переигранной попытки: крах между attempt_finished и проверкой не
 		// должен пропускать проверку (fail-open).
 		if result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed &&
-			!skippedByConfig {
+			!skippedByConfig && !overriddenByDecision {
 			if err := rs.runStageChecks(ctx, current, result); err != nil {
 				return err
 			}

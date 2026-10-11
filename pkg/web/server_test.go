@@ -30,14 +30,26 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/worker"
 )
 
+// The production controller must satisfy every action interface the REST layer
+// type-asserts, otherwise the corresponding endpoint silently degrades to 503.
+var (
+	_ RunController           = (*control.Controller)(nil)
+	_ StageExecutorController = (*control.Controller)(nil)
+	_ StageAgentController    = (*control.Controller)(nil)
+	_ StageSkipController     = (*control.Controller)(nil)
+	_ StageReturnController   = (*control.Controller)(nil)
+)
+
 type fakeRunController struct {
 	startFeature   string
 	startTask      string
 	startCalls     int
 	resumeRunID    string
+	resumeCalls    int
 	cancelRunID    string
 	cancelErr      error
 	decision       approval.Decision
+	decisionCalls  int
 	approvalID     string
 	runID          string
 	approvals      []approval.PendingApproval
@@ -443,9 +455,14 @@ func (f *fakeRunController) StartWithAdmission(feature, task string, admit func(
 	}
 	return f.Start(feature, task)
 }
-func (f *fakeRunController) Resume(runID string) error { f.resumeRunID = runID; return nil }
+func (f *fakeRunController) Resume(runID string) error {
+	f.resumeRunID = runID
+	f.resumeCalls++
+	return nil
+}
 func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return f.cancelErr }
 func (f *fakeRunController) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	f.decisionCalls++
 	f.runID, f.approvalID, f.decision = runID, approvalID, decision
 	return approval.PendingApproval{ID: approvalID, RunID: runID, Status: approval.StatusResolved, ResolvedAction: decision.Action}, nil
 }
@@ -2415,10 +2432,9 @@ func TestUnsupportedMethodKeepsAllowHeader(t *testing.T) {
 		{http.MethodPatch, "/api/runs/run-1/cancel", []string{"POST"}},
 		{http.MethodOptions, "/api/pipelines", []string{"GET"}},
 		{http.MethodHead, "/api/pipelines", []string{"GET"}},
-		{http.MethodPut, "/api/runs", []string{"POST"}},
-		// GET на путь, зарегистрированный только под POST, раньше проваливался
-		// в SPA-fallback и отдавал HTML.
-		{http.MethodGet, "/api/runs", []string{"POST"}},
+		{http.MethodPut, "/api/runs", []string{"GET", "POST"}},
+		// GET списка задач и POST создания теперь живут на одном пути.
+		{http.MethodDelete, "/api/runs", []string{"GET", "POST"}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.method+" "+testCase.target, func(t *testing.T) {

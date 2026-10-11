@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,11 +13,13 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 type fakeEngine struct {
@@ -25,6 +28,8 @@ type fakeEngine struct {
 	release     chan struct{}
 	observed    bool
 	cancelCalls int
+	skipCalls   int
+	skipConfig  pipeline.SkipStageConfig
 }
 
 func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
@@ -54,6 +59,20 @@ func (f *fakeEngine) Cancel(config pipeline.CancelConfig) (pipeline.RunResult, e
 	f.cancelCalls++
 	f.mu.Unlock()
 	return pipeline.RunResult{RunID: config.RunID}, nil
+}
+
+func (f *fakeEngine) SkipStage(_ context.Context, config pipeline.SkipStageConfig) (pipeline.RunResult, error) {
+	if f.started != nil {
+		close(f.started)
+	}
+	if f.release != nil {
+		<-f.release
+	}
+	f.mu.Lock()
+	f.skipCalls++
+	f.skipConfig = config
+	f.mu.Unlock()
+	return pipeline.RunResult{RunID: config.RunID, Outcome: workflow.RunCompleted}, nil
 }
 
 func TestNewRequiresEngine(t *testing.T) {
@@ -261,6 +280,256 @@ func TestControllerRejectsDuplicateResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(engine.release)
+}
+
+type recordingApprovalStore struct {
+	values    map[string]approval.PendingApproval
+	decisions []approval.Decision
+}
+
+func newRecordingApprovalStore(values ...approval.PendingApproval) *recordingApprovalStore {
+	store := &recordingApprovalStore{values: make(map[string]approval.PendingApproval)}
+	for _, value := range values {
+		store.values[value.RunID+"/"+value.ID] = value
+	}
+	return store
+}
+
+func (s *recordingApprovalStore) Create(value approval.PendingApproval) (approval.PendingApproval, error) {
+	s.values[value.RunID+"/"+value.ID] = value
+	return value, nil
+}
+
+func (s *recordingApprovalStore) Load(runID, approvalID string) (approval.PendingApproval, error) {
+	value, ok := s.values[runID+"/"+approvalID]
+	if !ok {
+		return approval.PendingApproval{}, errors.New("approval not found")
+	}
+	return value, nil
+}
+
+func (s *recordingApprovalStore) List(runID string) ([]approval.PendingApproval, error) {
+	var result []approval.PendingApproval
+	for _, value := range s.values {
+		if value.RunID == runID {
+			result = append(result, value)
+		}
+	}
+	return result, nil
+}
+
+func (s *recordingApprovalStore) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	s.decisions = append(s.decisions, decision)
+	value, ok := s.values[runID+"/"+approvalID]
+	if !ok {
+		return approval.PendingApproval{}, errors.New("approval not found")
+	}
+	value.Status = approval.StatusResolved
+	value.ResolvedAction = decision.Action
+	value.ResolvedAt = time.Now().UTC()
+	value.Decisions = append(value.Decisions, decision)
+	s.values[runID+"/"+approvalID] = value
+	return value, nil
+}
+
+func (s *recordingApprovalStore) ResolveDeferred(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	return s.Decide(runID, approvalID, decision)
+}
+
+func newStageActionFixture(t *testing.T, state lifecycle.State, engine *fakeEngine, store *recordingApprovalStore) (*Controller, string) {
+	t.Helper()
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun(state.RunID, state.RunID); err != nil {
+		t.Fatal(err)
+	}
+	state.TargetDir = target
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now().UTC()
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(state); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(engine, target, WithApprovalStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller, target
+}
+
+func stageActionState(runID, stageID, approvalID string, phase lifecycle.Phase) lifecycle.State {
+	return lifecycle.State{
+		RunID: runID, Feature: "feature", Task: "task", Phase: phase,
+		NextStage: stageID, PendingApprovalID: approvalID,
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64),
+	}
+}
+
+func waitControllerIdle(t *testing.T, controller *Controller, runID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		controller.mu.Lock()
+		_, active := controller.active[runID]
+		controller.mu.Unlock()
+		if !active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("controller worker for %s did not finish", runID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestControllerChangeStageExecutorBindsOverrideToPendingVisit(t *testing.T) {
+	engine := &fakeEngine{}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-executor", RunID: "run-executor", AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: "tech_design", ToStage: "tech_design", Trigger: "stage_completed", SubjectHash: strings.Repeat("a", 64),
+		RequiredRoles: []string{"architect"}, Actions: []string{"approve"}, Targets: map[string]string{"approve": "tech_design"},
+	})
+	controller, target := newStageActionFixture(t, stageActionState("run-executor", "tech_design", "approval-executor", lifecycle.PhaseWaiting), engine, store)
+
+	if err := controller.ChangeStageExecutor("run-executor", "tech_design", "human", "actor-1"); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := stateStore.Load("run-executor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	override, ok := state.ExecutorOverrides["tech_design"]
+	if !ok || override.Executor != "human" || override.PreviousExecutor != "agent" ||
+		override.ActorID != "actor-1" || override.ApprovalID != "approval-executor" || override.VisitID != "approval-executor" {
+		t.Fatalf("executor override not bound to the pending visit: %+v", state.ExecutorOverrides)
+	}
+	if err := controller.ChangeStageExecutor("missing-run", "tech_design", "human", "actor-1"); err == nil {
+		t.Fatal("executor change for an unknown run must fail")
+	}
+}
+
+func TestControllerSkipPendingHumanStagePreservesActorAndReason(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-skip", RunID: "run-skip-human", AttemptID: "attempt-1", Status: approval.StatusPending,
+		Kind: approval.KindInput, FromStage: "design_review", ToStage: "design_review", Trigger: "human_input",
+		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"reject", "submit", "skip"},
+		Targets: map[string]string{"reject": "design_review", "submit": "design_review", "skip": "design_review"},
+	})
+	controller, _ := newStageActionFixture(t, stageActionState("run-skip-human", "design_review", "approval-skip", lifecycle.PhaseWaiting), engine, store)
+
+	if err := controller.SkipStage(context.Background(), "run-skip-human", "design_review", "out of scope", "actor-1", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].Action != "skip" ||
+		store.decisions[0].ActorID != "actor-1" || store.decisions[0].ActorRole != "reviewer" ||
+		store.decisions[0].Comment != "out of scope" || !store.decisions[0].ControllerAuthenticated {
+		t.Fatalf("skip decision lost actor or reason: %+v", store.decisions)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, "run-skip-human")
+}
+
+func TestControllerSkipResumableAgentStageUsesEngine(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore()
+	controller, _ := newStageActionFixture(t, stageActionState("run-skip-agent", "tech_design", "", lifecycle.PhaseResumable), engine, store)
+
+	if err := controller.SkipStage(context.Background(), "run-skip-agent", "tech_design", "not needed", "actor-1", "architect"); err != nil {
+		t.Fatal(err)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, "run-skip-agent")
+	engine.mu.Lock()
+	config := engine.skipConfig
+	calls := engine.skipCalls
+	engine.mu.Unlock()
+	if calls != 1 || config.RunID != "run-skip-agent" || config.StageID != "tech_design" || config.Reason != "not needed" {
+		t.Fatalf("engine skip config mismatch: calls=%d config=%+v", calls, config)
+	}
+}
+
+func TestControllerRunStageAgentRefineFeedsCurrentResult(t *testing.T) {
+	payload, err := json.Marshal(approval.InputPayload{
+		Kind: string(approval.KindInput), StageID: "design_review", Result: "md",
+		OutputName: "result", OutputPath: "feature/result.md", AgentEnabled: true, InitialResult: "current agent result",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-agent", RunID: "run-agent", AttemptID: "attempt-1", Status: approval.StatusPending,
+		Kind: approval.KindInput, FromStage: "design_review", ToStage: "design_review", Trigger: "human_input",
+		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"reject", "submit", "run_agent", "refine_agent"},
+		Targets: map[string]string{"reject": "design_review", "submit": "design_review", "run_agent": "design_review", "refine_agent": "design_review"},
+		Payload: payload,
+	})
+	controller, _ := newStageActionFixture(t, stageActionState("run-agent", "design_review", "approval-agent", lifecycle.PhaseWaiting), engine, store)
+
+	if err := controller.RunStageAgent(context.Background(), "run-agent", "design_review", "actor-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].Action != "refine_agent" ||
+		store.decisions[0].ActorRole != "reviewer" || store.decisions[0].Comment != "current agent result" {
+		t.Fatalf("refine decision did not carry the current result: %+v", store.decisions)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, "run-agent")
+}
+
+func TestControllerReturnStageResolvesConfiguredRoute(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-return", RunID: "run-return", AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: "design_review", ToStage: "design_review", Trigger: "graph_outcome:passed",
+		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "return_to_tech_design"},
+		Targets: map[string]string{"approve": "implementation", "return_to_tech_design": "tech_design"},
+	})
+	controller, _ := newStageActionFixture(t, stageActionState("run-return", "design_review", "approval-return", lifecycle.PhaseWaiting), engine, store)
+
+	if err := controller.ReturnStage(context.Background(), "run-return", "design_review", "tech_design", "redo design", "actor-1", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].Action != "return_to_tech_design" ||
+		store.decisions[0].Comment != "redo design" || !store.decisions[0].ControllerAuthenticated {
+		t.Fatalf("return decision mismatch: %+v", store.decisions)
+	}
+	if err := controller.ReturnStage(context.Background(), "run-return", "design_review", "qa", "nope", "actor-1", "reviewer"); err == nil {
+		t.Fatal("return to an unconfigured target must fail")
+	}
 }
 
 func stringHex(value []byte) string {

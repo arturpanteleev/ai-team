@@ -1,0 +1,623 @@
+package web
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/metrics"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
+)
+
+func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateYAML, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), templateYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun("run-read-api", "run-read-api"); err != nil {
+		t.Fatal(err)
+	}
+	recorder := NewStoreRecorder(srv.store)
+	recorder.RunStarted("run-read-api", "feature-read", `{"task":"review feature","mode":"auto"}`, started)
+	recorder.StageStarted("run-read-api", "attempt-1", "acceptance", 1, started.Add(time.Minute))
+	completedAt := started.Add(5 * time.Minute)
+	recorder.StageFinished(notifier.StageResult{RunID: "run-read-api", AttemptID: "attempt-1", Name: "acceptance",
+		Status: notifier.StatusPassed, StartedAt: started.Add(time.Minute), FinishedAt: completedAt})
+
+	cases := []struct {
+		name, path, want string
+	}{
+		{"templates", "/api/templates", `"templates":[`},
+		{"run list", "/api/runs?status=running&limit=5", `"run_id":"run-read-api"`},
+		{"run details", "/api/runs/run-read-api", `"attempt_id":"attempt-1"`},
+		{"run events", "/api/runs/run-read-api/events?after=0", `"type":"run_started"`},
+		{"global events", "/api/events?after=0", `"run_id":"run-read-api"`},
+		{"flow metrics", "/api/metrics/flow?from=" + started.Add(-time.Minute).Format(time.RFC3339) + "&to=" + started.Add(24*time.Hour).Format(time.RFC3339), `"tokens_input":null`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := newLoopbackRequest(http.MethodGet, testCase.path, nil)
+			response := httptest.NewRecorder()
+			srv.router.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("GET %s: status=%d body=%s", testCase.path, response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), testCase.want) {
+				t.Fatalf("GET %s did not contain %q: %s", testCase.path, testCase.want, response.Body.String())
+			}
+		})
+	}
+	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow.csv", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/csv") ||
+		!strings.Contains(response.Body.String(), `tokens_input,"",,"tokens","unknown","metrics.UsageEnvelope"`) {
+		t.Fatalf("flow CSV: status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+}
+
+func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	withoutAuth := newLoopbackRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"feature":"auth","task":"task"}`))
+	withoutAuthResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(withoutAuthResponse, withoutAuth)
+	var authError apiResponseError
+	if withoutAuthResponse.Code != http.StatusUnauthorized || json.Unmarshal(withoutAuthResponse.Body.Bytes(), &authError) != nil || authError.Code != "unauthorized" {
+		t.Fatalf("write without auth should be JSON 401: %d %s", withoutAuthResponse.Code, withoutAuthResponse.Body.String())
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task"}`)
+	request.Header.Set("Idempotency-Key", "create-task-once")
+	first := httptest.NewRecorder()
+	srv.router.ServeHTTP(first, request)
+	if first.Code != http.StatusAccepted || controller.startCalls != 1 {
+		t.Fatalf("first create: status=%d calls=%d body=%s", first.Code, controller.startCalls, first.Body.String())
+	}
+
+	replayRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task"}`)
+	replayRequest.Header.Set("Idempotency-Key", "create-task-once")
+	replay := httptest.NewRecorder()
+	srv.router.ServeHTTP(replay, replayRequest)
+	if replay.Code != first.Code || replay.Body.String() != first.Body.String() || controller.startCalls != 1 {
+		t.Fatalf("retry was not an exact replay: first=%d %s retry=%d %s calls=%d", first.Code, first.Body.String(), replay.Code, replay.Body.String(), controller.startCalls)
+	}
+
+	conflictRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"different","task":"task"}`)
+	conflictRequest.Header.Set("Idempotency-Key", "create-task-once")
+	conflict := httptest.NewRecorder()
+	srv.router.ServeHTTP(conflict, conflictRequest)
+	var conflictBody apiResponseError
+	if conflict.Code != http.StatusConflict || json.Unmarshal(conflict.Body.Bytes(), &conflictBody) != nil || conflictBody.Code != "idempotency_conflict" || controller.startCalls != 1 {
+		t.Fatalf("key reuse with different request should conflict: status=%d calls=%d body=%s", conflict.Code, controller.startCalls, conflict.Body.String())
+	}
+
+	advanced := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task","mode":"auto"}`)
+	advancedResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(advancedResponse, advanced)
+	var advancedError apiResponseError
+	if advancedResponse.Code != http.StatusServiceUnavailable || json.Unmarshal(advancedResponse.Body.Bytes(), &advancedError) != nil ||
+		advancedError.Code != "controller_action_unavailable" || controller.startCalls != 1 {
+		t.Fatalf("unsupported task mode must fail closed instead of silently starting legacy mode: %d calls=%d body=%s",
+			advancedResponse.Code, controller.startCalls, advancedResponse.Body.String())
+	}
+}
+
+func TestTaskActionInvalidStateReturnsAllowedActions(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := lifecycle.State{RunID: "run-invalid-state", Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseRunning, NextStage: cfg.Stages[0].ID, ConfigSHA256: strings.Repeat("0", 64),
+		WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC()}
+	if _, err := templateStore.PinCurrentForRun(state.RunID, state.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(state); err != nil {
+		t.Fatal(err)
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/"+state.RunID+"/stages/"+state.NextStage+"/skip", `{"reason":"skip for test"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	var body struct {
+		Error          string   `json:"error"`
+		Code           string   `json:"code"`
+		AllowedActions []string `json:"allowed_actions"`
+	}
+	if response.Code != http.StatusConflict || json.Unmarshal(response.Body.Bytes(), &body) != nil ||
+		body.Code != "invalid_state" || body.AllowedActions == nil {
+		t.Fatalf("invalid-state response must carry a JSON allowed_actions array: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestTaskConfirmPinsAndReusesFirstVotedArtifactRevision(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const runID, stageID = "run-confirm", "tech_design"
+	relative := "attempts/attempt-1/artifacts/design.md"
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "approval-confirm", RunID: runID, AttemptID: "attempt-1", Status: approval.StatusPending,
+		FromStage: stageID, ToStage: stageID, Trigger: "stage_completed", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"architect"}, Actions: []string{"approve"},
+		Targets: map[string]string{"approve": stageID},
+	}}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun(runID, runID); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{RunID: runID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: stageID, PendingApprovalID: "approval-confirm",
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	runRoot := filepath.Join(target, ".ai-team", "runs", runID)
+	source := []byte("source design\n")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(runRoot, relative)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, relative), source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"run_id":%q,"attempt_id":"attempt-1","outputs":[{"name":"design","evidence_path":%q}]}`, runID, relative)
+	if err := os.MkdirAll(filepath.Join(runRoot, "attempts", "attempt-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runRoot, "attempts", "attempt-1", "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%x", sha256.Sum256(source))
+	pinned, err := humanStore.Append(runID, relative, "", base, "design A\n", "first voter selection", "architect-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/stages/"+stageID+"/confirm", "")
+	firstResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusAccepted || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("first confirm should pin the reviewed revision: code=%d selection=%v body=%s",
+			firstResponse.Code, controller.decision.ArtifactRevisions, firstResponse.Body.String())
+	}
+	// Model the durable post-vote state, then append a newer human edit while
+	// the approval stays pending.
+	controller.approvals[0].Decisions = []approval.Decision{{
+		ActorID: "architect-1", ActorRole: "architect", Action: "approve",
+		ArtifactRevisions: map[string]string{relative: pinned.ID},
+	}}
+	newer, err := humanStore.Append(runID, relative, pinned.ID, pinned.SHA256, "design B\n", "later edit", "architect-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.ID == pinned.ID {
+		t.Fatal("test setup expected a distinct newer revision")
+	}
+
+	second := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/stages/"+stageID+"/confirm", "")
+	secondResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusAccepted || controller.decision.ArtifactRevisions[relative] != pinned.ID {
+		t.Fatalf("later confirm must reuse the first pinned revision instead of the newer edit: code=%d selection=%v body=%s",
+			secondResponse.Code, controller.decision.ArtifactRevisions, secondResponse.Body.String())
+	}
+}
+
+func TestTaskStageSkipReachesConnectedController(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controller := &actionRecordingController{fakeRunController: &fakeRunController{}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun("run-skip", "run-skip"); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{RunID: "run-skip", Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseResumable, NextStage: "tech_design",
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-skip/stages/tech_design/skip", `{"reason":"not needed"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || controller.skipCalls != 1 ||
+		controller.skipRunID != "run-skip" || controller.skipStageID != "tech_design" ||
+		controller.skipReason != "not needed" || controller.skipActorRole != "architect" {
+		t.Fatalf("skip action did not reach the connected controller: code=%d calls=%d run=%q stage=%q reason=%q role=%q body=%s",
+			response.Code, controller.skipCalls, controller.skipRunID, controller.skipStageID,
+			controller.skipReason, controller.skipActorRole, response.Body.String())
+	}
+}
+
+type actionRecordingController struct {
+	*fakeRunController
+	skipCalls                                                      int
+	skipRunID, skipStageID, skipReason, skipActorID, skipActorRole string
+}
+
+func (c *actionRecordingController) SkipStage(_ context.Context, runID, stageID, reason, actorID, actorRole string) error {
+	c.skipCalls++
+	c.skipRunID, c.skipStageID, c.skipReason = runID, stageID, reason
+	c.skipActorID, c.skipActorRole = actorID, actorRole
+	return nil
+}
+
+func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planHash := strings.Repeat("a", 64)
+	controller := &fakeRunController{approvals: []approval.PendingApproval{{
+		ID: "plan-approval", RunID: "run-plan", Status: approval.StatusPending,
+		Trigger: "delivery_plan", SubjectHash: planHash, RequiredRoles: []string{"release_manager"},
+		Actions: []string{"approve"},
+	}}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	malicious := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve",
+		`{"plan_hash":"`+planHash+`","actor_id":"spoofed"}`)
+	maliciousResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(maliciousResponse, malicious)
+	if maliciousResponse.Code != http.StatusBadRequest || controller.decisionCalls != 0 || controller.resumeCalls != 0 {
+		t.Fatalf("request body must not supply actor identity: status=%d decisions=%d resumes=%d body=%s",
+			maliciousResponse.Code, controller.decisionCalls, controller.resumeCalls, maliciousResponse.Body.String())
+	}
+
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve", `{"plan_hash":"`+planHash+`"}`)
+	request.Header.Set("Idempotency-Key", "approve-plan-once")
+	first := httptest.NewRecorder()
+	srv.router.ServeHTTP(first, request)
+	if first.Code != http.StatusAccepted || controller.decisionCalls != 1 || controller.resumeCalls != 1 ||
+		controller.decision.ActorID != "local-user" || controller.decision.ActorRole != "release_manager" {
+		t.Fatalf("plan approval did not use server identity and controller: status=%d decision=%+v decisions=%d resumes=%d body=%s",
+			first.Code, controller.decision, controller.decisionCalls, controller.resumeCalls, first.Body.String())
+	}
+
+	replayRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-plan/plan/approve", `{"plan_hash":"`+planHash+`"}`)
+	replayRequest.Header.Set("Idempotency-Key", "approve-plan-once")
+	replay := httptest.NewRecorder()
+	srv.router.ServeHTTP(replay, replayRequest)
+	if replay.Code != first.Code || replay.Body.String() != first.Body.String() || controller.decisionCalls != 1 || controller.resumeCalls != 1 {
+		t.Fatalf("plan approval retry repeated controller action: first=%d retry=%d decisions=%d resumes=%d",
+			first.Code, replay.Code, controller.decisionCalls, controller.resumeCalls)
+	}
+}
+
+func TestFlowMetricsReportsPerStageUsageAndAgentEdits(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Usage = &config.UsageConfig{MonthlySubscriptionAmount: 50, MonthlySubscriptionCurrency: "USD"}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	run := &store.PipelineRun{RunID: "run-flow-metrics", Feature: "feature", Status: "completed", StartedAt: started}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	agentFinished, humanStarted := started.Add(10*time.Minute), started.Add(11*time.Minute)
+	completed := agentFinished.Add(time.Minute)
+	stages := []store.Stage{
+		{PipelineRunID: run.ID, AttemptID: "attempt-agent", StageIndex: 1, AgentName: "implementation", Status: "passed",
+			Execution: "agent", Outcome: "passed", StartedAt: started.Add(9 * time.Minute), CompletedAt: &agentFinished, DurationMs: 60_000},
+		{PipelineRunID: run.ID, AttemptID: "attempt-human", StageIndex: 2, AgentName: "implementation", Status: "passed",
+			Execution: "human", Outcome: "passed", StartedAt: humanStarted, CompletedAt: &completed, DurationMs: 60_000},
+		{PipelineRunID: run.ID, AttemptID: "attempt-review", StageIndex: 3, AgentName: "review", Status: "passed",
+			Execution: "agent", Outcome: "passed", StartedAt: completed.Add(time.Second), CompletedAt: timePointer(completed.Add(2 * time.Minute)), DurationMs: 120_000},
+	}
+	for index := range stages {
+		if err := srv.store.CreateStage(&stages[index]); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.store.UpdateStage(&stages[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestDir := filepath.Join(srv.runRoot, run.RunID, "attempts", "attempt-agent")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(evidence.AttemptManifest{RunID: run.RunID, AttemptID: "attempt-agent",
+		Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 12, TokensOutput: 8, CostUSD: 0.01}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := srv.buildFlowMetrics(started.Add(-time.Minute), started.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentResults != 2 || result.AgentAcceptedWithoutEdit != 1 || result.AgentAcceptedWithoutEditRate == nil || *result.AgentAcceptedWithoutEditRate != 0.5 {
+		t.Fatalf("agent acceptance metric=%+v", result)
+	}
+	var implementation, review *flowStageStats
+	for index := range result.ByStage {
+		switch result.ByStage[index].Stage {
+		case "implementation":
+			implementation = &result.ByStage[index]
+		case "review":
+			review = &result.ByStage[index]
+		}
+	}
+	if implementation == nil || implementation.TokensInput == nil || *implementation.TokensInput != 12 ||
+		implementation.TokensOutput == nil || *implementation.TokensOutput != 8 ||
+		implementation.UsageKnownAttempts != 1 || implementation.UsageUnknownAttempts != 0 ||
+		implementation.UsageAttestation != "complete" || implementation.UsageSource != "attempt_manifest" {
+		t.Fatalf("implementation usage=%+v", implementation)
+	}
+	if review == nil || review.UsageUnknownAttempts != 1 || review.UsageAttestation != "unknown" ||
+		result.Usage.UnknownRuns != 1 || result.Usage.TokensInput != nil || result.Usage.SubscriptionShareEstimate != nil {
+		t.Fatalf("unknown usage was not explicit: review=%+v totals=%+v", review, result.Usage)
+	}
+}
+
+func TestFlowMetricsUsesSubscriptionShareAndPreservesUsageProvenance(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Usage = &config.UsageConfig{MonthlySubscriptionAmount: 100, MonthlySubscriptionCurrency: "USD"}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"), WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	month := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+	first := store.PipelineRun{RunID: "run-usage-first", Feature: "usage", Status: "completed", StartedAt: month,
+		CompletedAt: timePointer(month.Add(time.Hour))}
+	peer := store.PipelineRun{RunID: "run-usage-peer", Feature: "usage", Status: "completed", StartedAt: month.Add(24 * time.Hour),
+		CompletedAt: timePointer(month.Add(25 * time.Hour))}
+	envelopeStore := metrics.FileUsageEnvelopeStore{}
+	for _, run := range []store.PipelineRun{first, peer} {
+		if err := srv.store.CreatePipelineRun(&run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEnvelope := func(runID string, startedAt, finishedAt time.Time, input, output int64) {
+		t.Helper()
+		envelope := metrics.UsageEnvelope{SchemaVersion: metrics.SchemaVersion, RunID: runID, Feature: "usage",
+			StartedAt: startedAt, FinishedAt: finishedAt, UsageReported: true, TokensInput: input, TokensOutput: output, Outcome: "completed"}
+		if runID == first.RunID {
+			runDir := filepath.Join(controlDir, "runs", runID)
+			if err := os.MkdirAll(runDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "usage.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err := envelopeStore.Reserve(target, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := envelopeStore.Write(target, runID, envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEnvelope(first.RunID, month, month.Add(time.Hour), 40, 60)
+	writeEnvelope(peer.RunID, month.Add(24*time.Hour), month.Add(25*time.Hour), 200, 300)
+
+	result, err := srv.buildFlowMetrics(month.Add(-time.Minute), month.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.KnownRuns != 1 || result.Usage.UnknownRuns != 0 || result.Usage.Attestation != "complete" ||
+		result.Usage.Source != "metrics.UsageEnvelope" || result.Usage.TokensInput == nil || *result.Usage.TokensInput != 40 ||
+		result.Usage.TokensOutput == nil || *result.Usage.TokensOutput != 60 {
+		t.Fatalf("run usage lost token attestation/provenance: %+v", result.Usage)
+	}
+	if result.Usage.SubscriptionShareEstimate == nil || *result.Usage.SubscriptionShareEstimate < 16.6666 || *result.Usage.SubscriptionShareEstimate > 16.6667 ||
+		result.Usage.SubscriptionCurrency != "USD" || result.Usage.EstimateSource != "project_config+metrics.UsageEnvelope" ||
+		result.Usage.EstimateBasis != "monthly_subscription_weighted_by_attested_tokens" {
+		t.Fatalf("subscription share estimate=%+v, want ≈16.67 USD from 100/600 tokens", result.Usage)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"cost_usd"`) {
+		t.Fatalf("flow API must not report provider token prices as subscription cost: %s", encoded)
+	}
+	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow.csv?from="+month.Add(-time.Minute).Format(time.RFC3339)+"&to="+month.Add(2*time.Hour).Format(time.RFC3339), nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `subscription_share_estimate,"",16.666667,"USD","estimated","project_config+metrics.UsageEnvelope","monthly_subscription_weighted_by_attested_tokens"`) ||
+		!strings.Contains(response.Body.String(), `"complete","metrics.UsageEnvelope"`) {
+		t.Fatalf("flow CSV lost estimate provenance: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func timePointer(value time.Time) *time.Time { return &value }

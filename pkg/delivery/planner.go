@@ -255,6 +255,17 @@ func VerifyPreparedWorkspace(targetDir string, plan Plan, workspaceDigest string
 	return nil
 }
 
+// DetectBaseBranch resolves the protected base branch for a workspace. It is
+// exported so stage checks (B-40) can reuse the planner's git semantics for the
+// pr_base_branch rule instead of duplicating detection.
+func DetectBaseBranch(ctx context.Context, targetDir string) (string, error) {
+	current, err := commandOutput(ctx, targetDir, "git", "branch", "--show-current")
+	if err != nil {
+		return "", fmt.Errorf("delivery planner: не удалось определить текущую git branch: %w", err)
+	}
+	return detectBaseBranch(ctx, targetDir, current)
+}
+
 func detectBaseBranch(ctx context.Context, targetDir, current string) (string, error) {
 	if remoteHead, err := commandOutput(ctx, targetDir, "git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
 		if base := strings.TrimPrefix(remoteHead, "origin/"); base != "" {

@@ -33,13 +33,20 @@ agent-executed stage MUST reference an existing `agent`.
 `link_kind` MUST be `pr`, `build`, or `other` and is valid only for
 `result: link`. `required_sections` MAY be set only for `result: md`. `confirm` MUST be
 `required` or `auto`; its default MUST be `auto` for `approve` and `required`
-for other results. Optional stage fields MUST be strictly decoded.
+for other results. `skippable` MAY be set to allow an explicit skip with a
+non-empty reason. Optional stage fields MUST be strictly decoded.
 
 #### Scenario: Invalid result metadata
 
 - **КОГДА** a stage has an invalid link kind or required sections on a
   non-markdown result
 - **ТОГДА** config MUST be rejected
+
+#### Scenario: Unsupported no-confirm mode
+
+- **КОГДА** a stage declares `confirm: none`
+- **ТОГДА** config MUST be rejected because schema v5 supports only `required`
+  and `auto`
 
 ### Requirement: Human executor stages collect typed results
 
@@ -82,23 +89,51 @@ its independent confirmation policy.
 Each `returns` entry MUST reference existing stages and point from a later
 stage to an earlier stage. A positive `max_visits` MAY be set per return target
 or route; omitted limits MUST default to three visits for every return target.
+The engine MUST expose only configured return targets, require a non-empty
+reason for a return decision, invalidate downstream attempts after the target,
+and re-execute every stage between the selected target and the returning stage.
+The reason MUST be delivered to the target executor as read-only feedback.
 
 #### Scenario: Forward return rejected
 
 - **КОГДА** a return targets the same or a later stage
 - **ТОГДА** config MUST be rejected before graph compilation
 
+#### Scenario: Return repeats the intervening stages
+
+- **КОГДА** QA at a later stage selects a configured return to `implementation`
+- **ТОГДА** the engine MUST rerun `implementation`, each intervening stage,
+  and QA in order
+- **И** the target executor MUST receive the persisted human reason as
+  read-only feedback
+
+#### Scenario: Return without a reason
+
+- **КОГДА** a return action has an empty or whitespace-only reason
+- **ТОГДА** the decision MUST be rejected without resolving the approval
+
+#### Scenario: Return visit limit is reached
+
+- **КОГДА** the selected return would start a target whose `max_visits` is
+  exhausted
+- **ТОГДА** the run MUST fail before starting another target attempt
+
 ### Requirement: Generate graph from template order
 
 The compiled graph MUST contain one node per stage in the same order. Each
 stage MUST have a `passed` edge to the following stage, with the final stage
-leading to `$complete`. Each declared return MUST compile into a rejected
+leading to `$complete`. A `skippable: true` stage MUST additionally have a
+`skipped` edge to the following stage (or `$complete` for the final stage).
+Each declared return MUST compile into a rejected
 transition to its exact backward target, and its target MUST carry the
-effective `max_visits` limit. A forward edge MUST require approval only when
-its source stage has `confirm: required`; `confirm: auto` MUST permit the
-transition without an edge approval. Backward return edges MUST continue to
-require approval. This rule applies to schema v5 templates; legacy workflow
-graphs retain their existing approval validation.
+effective `max_visits` limit. A forward edge MUST require approval when its
+source stage has `confirm: required` or declares one or more return routes. A
+`confirm: auto` stage without return routes MUST permit the transition without
+an edge approval. When return routes exist, the forward decision MUST expose
+`approve` and only the configured `return_to_*` targets, so return remains an
+available stage action even with `confirm: auto`. Backward return edges MUST
+continue to require approval. This rule applies to schema v5 templates; legacy
+workflow graphs retain their existing approval validation.
 
 #### Scenario: Ordered forward transitions
 
@@ -109,10 +144,14 @@ graphs retain their existing approval validation.
 
 #### Scenario: Stage confirmation controls forward approval
 
-- **КОГДА** a non-terminal stage has `confirm: auto`
+- **КОГДА** a non-terminal stage has `confirm: auto` and no configured returns
 - **ТОГДА** its `passed` edge MUST be valid without an approval policy
 - **КОГДА** a non-terminal stage has `confirm: required`
 - **ТОГДА** its `passed` edge MUST carry an approval policy
+- **КОГДА** a stage has configured return routes, regardless of its `confirm`
+  setting
+- **ТОГДА** its `passed` edge MUST carry `approve` and those exact
+  `return_to_*` actions
 - **И** backward return edges MUST carry approval policies regardless of
   `confirm`
 
@@ -121,6 +160,13 @@ graphs retain their existing approval validation.
 - **КОГДА** a valid backward return is declared
 - **ТОГДА** the compiled graph MUST expose its exact target as a return action
 - **И** the target node MUST have the declared or default visit limit
+
+#### Scenario: Skip edge compilation
+
+- **КОГДА** a template stage declares `skippable: true`
+- **ТОГДА** its compiled graph MUST contain a `skipped` edge to the next stage
+- **КОГДА** a stage is not skippable
+- **ТОГДА** its compiled graph MUST NOT contain a `skipped` edge
 
 ### Requirement: Profile presets materialize templates
 

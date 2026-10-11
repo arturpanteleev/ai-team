@@ -1,10 +1,5 @@
-# stage-result-checks Specification
+## ADDED Requirements
 
-## Purpose
-Automatic validation of a stage result before the transition is confirmed: hard
-rules and checker agents, with a blocked stage surfaced as a `check_decision`
-approval and a markdown report visible in the task.
-## Requirements
 ### Requirement: Declarative stage check
 
 A template stage MUST be able to declare a `check`:
@@ -27,9 +22,15 @@ and negative `max_rounds`. A `check` agent MUST be listed as a pipeline agent.
 
 ### Requirement: Check runs before the transition
 
-After an attempt passes and before the edge to the next stage is confirmed, the
-pipeline MUST run the stage check on the fresh attempt. A check MUST NOT run for
-replayed human attempts, config-skipped stages or `check.mode: grill`.
+The pipeline MUST run the stage check after an attempt passes and before the
+edge to the next stage is confirmed, except for config-skipped stages and
+`check.mode: grill`. The check MUST NOT depend on whether the attempt was
+replayed: replay MUST decide from durable evidence, where a durable
+`check_passed` skips re-evaluation, a durable `check_failed` or `check_error`
+blocks through the same `check_decision` request, and an attempt with no
+completed durable check (including a replayed human attempt interrupted after
+`attempt_finished` but before the check) MUST run the check again. Re-running
+MUST be idempotent and MUST fail closed on ambiguous evidence.
 
 The pipeline MUST append `check_started` before evaluation and
 `check_passed`/`check_failed`/`check_error` after, with the report path, its

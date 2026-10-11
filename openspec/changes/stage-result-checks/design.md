@@ -31,7 +31,12 @@ The report is a controller file at `{artifacts}/{feature}/.stage-check/{stage}.m
 with the other ephemeral stage artifacts (AUD-04), and the evidence copy is
 attempt-suffixed so immutable evidence is preserved.
 
-Checks run only on fresh attempts: the hook is skipped for replayed human
-attempts and config-skipped stages. `pr_*` rules reuse `delivery.CheckPullRequest`
+The hook runs after every attempt exit except config-skipped stages. Replay
+decides from durable evidence (not from a replayed-attempt flag): a durable
+`check_passed` skips the check, a durable `check_failed`/`check_error` blocks
+through the same `check_decision` request, and an attempt with no completed
+durable check — including a replayed human attempt interrupted between
+`attempt_finished` and the check — runs the check (idempotent, fail closed).
+`pr_*` rules reuse `delivery.CheckPullRequest`
 against the detected base branch; detection failure is recorded as a rule error
 and also blocks the transition (fail closed).

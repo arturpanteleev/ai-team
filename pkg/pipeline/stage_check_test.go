@@ -477,3 +477,52 @@ func TestHumanStageCheckReusesPendingDecisionAfterCrash(t *testing.T) {
 		t.Fatalf("expected exactly one check_decision request, got %d:\n%s", count, events)
 	}
 }
+
+// new_version on a human stage must clear the previous output and check report
+// so the resubmitted version can be written and re-checked.
+func TestHumanStageCheckNewVersionResubmits(t *testing.T) {
+	dir := env(t)
+	store, runID, pending := startHumanStageCheckRun(t, dir)
+	submitHumanStage(t, store, pending, "## Спека\n\nбез маркера\n")
+	if _, err := resumeHumanCrashRun(t, newHumanStageCheckPipeline(WithApprovalStore(store)), dir, runID); err == nil {
+		t.Fatal("first failing check should block the run")
+	}
+	check, err := store.List(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decision approval.PendingApproval
+	for _, value := range check {
+		if value.Kind == approval.KindCheckDecision {
+			decision = value
+		}
+	}
+	if decision.ID == "" {
+		t.Fatal("check_decision approval not found")
+	}
+	if _, err := store.Decide(runID, decision.ID, approval.Decision{
+		ActorID: "alice", ActorRole: "product_owner", Action: "new_version", SubjectHash: decision.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := resumeHumanCrashRun(t, newHumanStageCheckPipeline(WithApprovalStore(store)), dir, runID)
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("new_version must reopen the human input: result=%+v err=%v", result, err)
+	}
+	newInput, err := store.Load(runID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newInput.Kind != approval.KindInput {
+		t.Fatalf("new_version must ask for a fresh human input, got %+v", newInput)
+	}
+	submitHumanStage(t, store, newInput, "## Спека v2\n\n**Verdict:** APPROVED\n")
+	if _, err := resumeHumanCrashRun(t, newHumanStageCheckPipeline(WithApprovalStore(store)), dir, runID); err != nil {
+		t.Fatalf("resubmitted version must pass the stage check: %v", err)
+	}
+	events := readEvents(t, dir)
+	if countEvent(events, "check_passed") != 1 {
+		t.Fatalf("the resubmitted version must pass exactly one check:\n%s", events)
+	}
+}

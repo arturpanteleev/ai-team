@@ -279,6 +279,13 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		if contentErr != nil {
 			result.Err = contentErr
 			result.ValidationFailed = true
+		} else if clearErr := rs.clearStaleHumanRerun(stageID, definition, outputPath); clearErr != nil {
+			// A re-run of the same human stage (for example after a failed stage
+			// check chose new_version) must drop the previous live output and the
+			// stale check report before writing the new version. Otherwise the
+			// immutable write path (AUD-04) and the O_EXCL check report collide
+			// with the previous bytes.
+			result.Err = clearErr
 		} else if writeErr := writeHumanOutputWithEdit(rs.task.ArtifactRoot, outputPath, content, result.HumanEditOfAgentAttemptID != ""); writeErr != nil {
 			result.Err = writeErr
 		}
@@ -630,6 +637,28 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 	default:
 		return nil, fmt.Errorf("unsupported human result type %q", stage.Result)
 	}
+}
+
+// clearStaleHumanRerun removes the live artifacts of a previous human attempt
+// for the same stage before a new submission overwrites them. The immutable
+// per-attempt evidence copies stay addressable, so removing the workspace
+// projection does not weaken AUD-04: it only prevents the next version of the
+// stage from colliding with the previous one's output and check report.
+func (rs *runState) clearStaleHumanRerun(stageID string, definition *agent.Agent, outputPath string) error {
+	if err := rs.clearStageEphemeral(stageID, definition); err != nil {
+		return fmt.Errorf("clear stale human artifacts before re-running %s: %w", stageID, err)
+	}
+	outputFullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, filepath.FromSlash(outputPath))
+	if err != nil {
+		return err
+	}
+	if err := validateRemovalPath(rs.task.ArtifactRoot, outputFullPath); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(outputFullPath); err != nil {
+		return fmt.Errorf("remove stale human output before re-running %s: %w", stageID, err)
+	}
+	return nil
 }
 
 func writeHumanOutput(artifactRoot, outputPath string, content []byte) error {

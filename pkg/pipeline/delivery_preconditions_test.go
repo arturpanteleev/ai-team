@@ -135,7 +135,11 @@ func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
 	// This case exercises an agent-executed implementation stage and its stable
 	// stage-ID-to-registry-agent mapping. The standard template's production
 	// implementation is human-executed, covered by the human input flow tests.
+	// The stage-check rules (B-40) are exercised by dedicated stage-check tests,
+	// not by this fake-output fixture: clearing them keeps the test focused on
+	// registry alias resolution and controller check persistence.
 	implementation.Executor = "agent"
+	implementation.Check = nil
 	cfg.Stages = []config.TemplateStage{implementation}
 	cfg.PipelineAgents = []config.AgentConfig{{Name: implementation.ID}}
 	cfg.Returns = nil

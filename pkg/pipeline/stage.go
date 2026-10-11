@@ -610,6 +610,7 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 	paths := []string{
 		verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", name+".md"),
+		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-check", name+".md"),
 	}
 	if a != nil && a.AskQuestions {
 		paths = append(paths, stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))

@@ -21,7 +21,7 @@ import (
 // approvals.go — единый approval-примитив переходов и subject hash.
 
 func isBackwardTransition(graph workflow.Graph, value *approval.PendingApproval) bool {
-	if value == nil || value.Trigger == "delivery_plan" || value.Kind == approval.KindInput {
+	if value == nil || value.Trigger == "delivery_plan" || value.Kind == approval.KindInput || value.Kind == approval.KindCheckDecision {
 		return false
 	}
 	fromIndex := graph.Index(value.FromStage)

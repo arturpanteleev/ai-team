@@ -315,7 +315,7 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if strings.HasPrefix(decision.Action, "return_to_") && !contains(value.Actions, decision.Action) {
 		return PendingApproval{}, fmt.Errorf("запрещён возврат по маршруту %q: действие отсутствует в графе этого approval", decision.Action)
 	}
-	if contains(value.FeedbackActions, decision.Action) && decision.Comment == "" {
+	if contains(value.FeedbackActions, decision.Action) && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("для возврата требуется причина или feedback")
 	}
 	if value.Kind == KindInput {
@@ -339,6 +339,9 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 		}
 		if decision.Action == "refine_agent" && strings.TrimSpace(decision.Comment) == "" {
 			return PendingApproval{}, errors.New("refine_agent requires the current result as input")
+		}
+		if decision.Action == "skip" && strings.TrimSpace(decision.Comment) == "" {
+			return PendingApproval{}, errors.New("пропуск этапа требует причину")
 		}
 	}
 	if decision.ActorID == "" || !contains(value.RequiredRoles, decision.ActorRole) || !contains(value.Actions, decision.Action) {
@@ -501,8 +504,11 @@ func validate(value PendingApproval) error {
 				return fmt.Errorf("%s requires an available same-stage agent route", action)
 			}
 		}
+		if contains(value.Actions, "skip") && value.Targets["skip"] != value.FromStage {
+			return errors.New("skip input must remain on the human stage")
+		}
 		for _, action := range value.Actions {
-			if action != "reject" && action != "approve" && action != "submit" && action != "run_agent" && action != "refine_agent" {
+			if action != "reject" && action != "approve" && action != "submit" && action != "run_agent" && action != "refine_agent" && action != "skip" {
 				return fmt.Errorf("input approval action %q is unsupported", action)
 			}
 		}
@@ -553,6 +559,9 @@ func validate(value PendingApproval) error {
 				if !validSHA256(decision.ContentSHA256) || decision.ContentSHA256 != hex.EncodeToString(digest[:]) {
 					return errors.New("approval human submission hash does not match its comment")
 				}
+			}
+			if (decision.Action == "submit" || decision.Action == "skip") && strings.TrimSpace(decision.Comment) == "" {
+				return errors.New("human input decision requires non-empty content or skip reason")
 			}
 		}
 	}

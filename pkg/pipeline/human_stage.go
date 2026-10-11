@@ -141,6 +141,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		if definition != nil {
 			actions = append(actions, "run_agent", "refine_agent")
 		}
+		if stage.Skippable {
+			actions = append(actions, "skip")
+		}
 		roles := []string{stage.Function}
 		value, createErr := rs.approvalStore.Create(approval.PendingApproval{
 			Kind: approval.KindInput, RunID: rs.runID, AttemptID: attemptID,
@@ -180,7 +183,25 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if decision.SubjectHash != subjectHash || decision.ActorID == "" || decision.ActorRole != stage.Function {
 		return notifier.StageResult{}, errors.New("human input decision actor or subject is invalid")
 	}
-	if decision.Action != "run_agent" && decision.Action != "refine_agent" &&
+	if decision.Action == "skip" {
+		if !stage.Skippable || strings.TrimSpace(decision.Comment) == "" {
+			return notifier.StageResult{}, errors.New("stage skip requires a skippable stage and a non-empty reason")
+		}
+		decision.Comment = strings.TrimSpace(decision.Comment)
+		if err := rs.clearStageEphemeral(stageID, definition); err != nil {
+			return notifier.StageResult{}, fmt.Errorf("clear stale human outputs before skipping %s: %w", stageID, err)
+		}
+		outputFullPath, pathErr := confinedArtifactPath(rs.task.ArtifactRoot, filepath.FromSlash(outputPath))
+		if pathErr != nil {
+			return notifier.StageResult{}, pathErr
+		}
+		if err := validateRemovalPath(rs.task.ArtifactRoot, outputFullPath); err != nil {
+			return notifier.StageResult{}, err
+		}
+		if err := os.RemoveAll(outputFullPath); err != nil {
+			return notifier.StageResult{}, fmt.Errorf("remove stale human output before skipping %s: %w", stageID, err)
+		}
+	} else if decision.Action != "run_agent" && decision.Action != "refine_agent" &&
 		(stage.Result == "approve" && decision.Action != "approve" && decision.Action != "reject" ||
 			stage.Result != "approve" && decision.Action != "submit" && decision.Action != "reject") {
 		return notifier.StageResult{}, errors.New("human input action does not match stage result type")
@@ -226,6 +247,10 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if result.HumanEditOfAgentAttemptID != "" {
 		startedData["human_edit_of_agent_attempt_id"] = result.HumanEditOfAgentAttemptID
 	}
+	if decision.Action == "skip" {
+		startedData["stage_action"] = "skip"
+		startedData["stage_skip_version"] = evidence.StageSkipProtocolVersion
+	}
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_started", Stage: stageID, AttemptID: attemptID,
 		Timestamp: started, Data: startedData}); err != nil {
 		result.Err = fmt.Errorf("record human attempt start: %w", err)
@@ -247,7 +272,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 			defer func() { _ = cleanupEvidenceInputs() }()
 		}
 	}
-	if result.Err == nil && decision.Action != "reject" && decision.Action != "run_agent" && decision.Action != "refine_agent" {
+	if result.Err == nil && decision.Action == "skip" {
+		result.ControlStopped = true
+	} else if result.Err == nil && decision.Action != "reject" && decision.Action != "run_agent" && decision.Action != "refine_agent" {
 		content, contentErr := humanResultContent(stage, decision, outputName, outputPath)
 		if contentErr != nil {
 			result.Err = contentErr
@@ -277,12 +304,14 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	}
 	if decision.Action == "reject" {
 		result.Verdict = verdict.Rejected
-	} else if result.Err == nil {
+	} else if decision.Action != "skip" && result.Err == nil {
 		result.Verdict = verdict.Approved
 	}
 	result.FinishedAt = time.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(started)
-	result.Summary = report.ReadStageSummary(rs.task.ArtifactRoot, rs.runCfg.Feature, stageID)
+	if decision.Action != "skip" {
+		result.Summary = report.ReadStageSummary(rs.task.ArtifactRoot, rs.runCfg.Feature, stageID)
+	}
 	rs.deriveStageState(&result)
 	manifest := evidence.AttemptManifest{
 		AttemptID: attemptID, Stage: stageID, Executor: "human", ActorID: decision.ActorID, ActorRole: decision.ActorRole,
@@ -333,6 +362,9 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	if result.HumanEditOfAgentAttemptID != "" {
 		finishedData["human_edit_of_agent_attempt_id"] = result.HumanEditOfAgentAttemptID
 	}
+	if decision.Action == "skip" && result.State.Outcome == workflow.OutcomeSkipped {
+		finishedData["stage_skip_reason"] = decision.Comment
+	}
 	if result.Err != nil {
 		finishedData["error"] = result.Err.Error()
 	}
@@ -360,6 +392,16 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 	}
 	if err := rs.evidence.Append(evidence.Event{Type: "attempt_finished", Stage: stageID, AttemptID: attemptID, Timestamp: result.FinishedAt, Data: finishedData}); err != nil {
 		result.Err = errors.Join(result.Err, fmt.Errorf("record human attempt finish: %w", err))
+	}
+	if decision.Action == "skip" && result.Err == nil {
+		if err := rs.evidence.Append(evidence.Event{Type: "stage_skipped", Stage: stageID, AttemptID: attemptID,
+			Timestamp: result.FinishedAt, Data: map[string]any{
+				"reason": decision.Comment, "warning": true,
+				"actor_id": decision.ActorID, "actor_role": decision.ActorRole,
+			}}); err != nil {
+			result.Err = errors.Join(result.Err, fmt.Errorf("record stage skip warning: %w", err))
+			rs.deriveStageState(&result)
+		}
 	}
 	if rs.p.recorder != nil {
 		rs.p.recorder.StageFinished(result)
@@ -564,6 +606,9 @@ func (rs *runState) humanInputSubject(stage config.TemplateStage, name, outputPa
 }
 
 func humanResultContent(stage config.TemplateStage, decision approval.Decision, outputName, outputPath string) ([]byte, error) {
+	if decision.Action == "skip" {
+		return nil, errors.New("skipped human stage has no result artifact")
+	}
 	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, decision.Comment); err != nil {
 		return nil, err
 	}

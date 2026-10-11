@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -33,6 +34,13 @@ type ResumeConfig struct {
 type CancelConfig struct {
 	RunID     string
 	TargetDir string
+}
+
+type SkipStageConfig struct {
+	RunID     string
+	TargetDir string
+	StageID   string
+	Reason    string
 }
 
 func NewRunEngine(pipeline *Pipeline) *RunEngine {
@@ -71,6 +79,34 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 		ApproveGates:    config.ApproveGates,
 		ApprovePlanHash: config.ApprovePlanHash,
 		CancelRequested: config.CancelRequested,
+	})
+}
+
+// SkipStage resumes a run at its current stage and records a skipped attempt.
+// Human stages waiting for input resolve their stage-bound approval with the
+// explicit skip action; agent stages can be skipped from a resumable checkpoint.
+func (e *RunEngine) SkipStage(ctx context.Context, config SkipStageConfig) (RunResult, error) {
+	if config.RunID == "" || config.TargetDir == "" || config.StageID == "" {
+		return RunResult{}, errors.New("RunEngine.SkipStage требует run_id, target и stage_id")
+	}
+	reason := strings.TrimSpace(config.Reason)
+	if reason == "" {
+		return RunResult{}, errors.New("пропуск этапа требует причину")
+	}
+	if err := evidence.ValidateRunID(config.RunID); err != nil {
+		return RunResult{}, fmt.Errorf("skip stage run id: %w", err)
+	}
+	runPipeline, err := e.pipelineForTask(config.RunID, config.TargetDir, false)
+	if err != nil {
+		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, err
+	}
+	stage, exists := runPipeline.templateStage(config.StageID)
+	if !exists || !stage.Skippable {
+		return RunResult{RunID: config.RunID, Outcome: workflow.RunFailed}, fmt.Errorf("stage %q is not configured as skippable", config.StageID)
+	}
+	return runPipeline.RunWithResult(ctx, RunConfig{
+		ResumeRunID: config.RunID, TargetDir: config.TargetDir,
+		skipStageID: config.StageID, skipReason: reason,
 	})
 }
 

@@ -42,6 +42,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 	if rs.runCfg.retryFrom != "" {
 		current = rs.runCfg.retryFrom
 	}
+	if rs.runCfg.skipStageID != "" && current != rs.runCfg.skipStageID {
+		return fmt.Errorf("skip stage %q does not match current stage %q", rs.runCfg.skipStageID, current)
+	}
 	if workflow.IsTerminal(current) {
 		return graphTerminalError(current, "", nil)
 	}
@@ -92,7 +95,21 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 		var result notifier.StageResult
 		replayedHumanAttempt := false
-		if executor == "human" {
+		skippedByConfig := rs.runCfg.skipStageID == current && executor != "human"
+		if skippedByConfig {
+			var found bool
+			var skipErr error
+			result, found, skipErr = rs.replayedSkippedStage(current, rs.runCfg.skipReason)
+			if skipErr != nil {
+				return skipErr
+			}
+			if !found {
+				result, skipErr = rs.runSkippedStage(ctx, index, current, rs.runCfg.skipReason)
+				if skipErr != nil {
+					return skipErr
+				}
+			}
+		} else if executor == "human" {
 			var humanErr error
 			result, humanErr = rs.runHumanStage(ctx, index, current)
 			if humanErr != nil {
@@ -113,6 +130,13 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			}
 		}
 		rs.clearExecutorOverride(current)
+		if skippedByConfig {
+			if result.State.Outcome != workflow.OutcomeSkipped {
+				return fmt.Errorf("stage %q did not record the requested skip", current)
+			}
+			rs.runCfg.skipStageID = ""
+			rs.runCfg.skipReason = ""
+		}
 		for _, previous := range rs.results {
 			if previous.AttemptID == result.AttemptID && result.AttemptID != "" {
 				replayedHumanAttempt = true

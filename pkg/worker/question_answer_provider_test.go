@@ -554,6 +554,9 @@ func TestWorkerAPIEventLogAuthorityAndRecorderIgnoreControllerOnlyCallbacks(t *t
 		t.Fatal("worker event API must declare the controller as external event authority")
 	}
 	marker.ExternalEventAuthority()
+	if _, ok := eventLog.(interface{ WorkerAppendBoundary() }); !ok {
+		t.Fatal("worker event API must identify its untrusted append boundary")
+	}
 
 	recorder := &workerAPIRecorder{}
 	recorder.ReconcileInterrupted(time.Now())

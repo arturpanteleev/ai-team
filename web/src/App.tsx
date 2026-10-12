@@ -7,6 +7,8 @@ import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
 import { Team } from './pages/Team';
 import { TemplateEditor } from './pages/TemplateEditor';
+import { Tasks } from './pages/Tasks';
+import { NewTask } from './pages/NewTask';
 import { activateTeamInvitation, getAuthConfig, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }) {
@@ -14,6 +16,8 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
     <Layout teamManagementEnabled={teamManagementEnabled}>
       <Routes routes={[
         { path: '/', element: <Dashboard /> },
+        { path: '/tasks', element: <Tasks /> },
+        { path: '/tasks/new', element: <NewTask /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },
         { path: '/template', element: <TemplateEditor /> },
         { path: '/pipelines/:id', element: <PipelineDetail /> },

@@ -48,6 +48,13 @@ func NewRunEngine(pipeline *Pipeline) *RunEngine {
 	return &RunEngine{pipeline: pipeline}
 }
 
+// SupportsRunMode reports whether the engine applies the requested run mode
+// itself. RunEngine owns auto-mode template pinning; queue and process engines
+// enqueue jobs without mode semantics and must fail closed instead.
+func (e *RunEngine) SupportsRunMode(mode string) bool {
+	return mode == "" || mode == "manual" || mode == "auto"
+}
+
 func (e *RunEngine) Start(ctx context.Context, config RunConfig) (RunResult, error) {
 	if config.ResumeRunID != "" {
 		return RunResult{}, errors.New("RunEngine.Start не принимает resume_run_id")

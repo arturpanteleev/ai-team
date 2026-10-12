@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -424,6 +425,60 @@ func (s *Store) LatestEventCursor() (int64, error) {
 	var cursor int64
 	err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&cursor)
 	return cursor, err
+}
+
+// WarningEventTypes lists persisted event types that count as task warnings.
+// The task API's isTaskWarningEvent shares this list, so the board badges and
+// the warnings event feed cannot drift apart.
+var WarningEventTypes = []string{
+	"check_overridden", "check_error", "description_missing",
+	"stage_skipped", "stage_stalled", "integration_error",
+}
+
+// CountRunWarningEvents groups warning events by run for the given run IDs.
+// A warning is a typed warning event or any event whose data carries
+// severity=warning (mirrors isTaskWarningEvent). One grouped query per small
+// chunk keeps the task list responsive with thousands of runs.
+func (s *Store) CountRunWarningEvents(runIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(runIDs))
+	const chunkSize = 400
+	for start := 0; start < len(runIDs); start += chunkSize {
+		end := min(start+chunkSize, len(runIDs))
+		chunk := runIDs[start:end]
+		runPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		typePlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(WarningEventTypes)), ",")
+		args := make([]any, 0, len(chunk)+len(WarningEventTypes))
+		for _, runID := range chunk {
+			args = append(args, runID)
+		}
+		for _, eventType := range WarningEventTypes {
+			args = append(args, eventType)
+		}
+		rows, err := s.db.Query(`SELECT run_uid, COUNT(*) FROM events
+			WHERE run_uid IN (`+runPlaceholders+`)
+			AND (type IN (`+typePlaceholders+`) OR LOWER(COALESCE(json_extract(data_json, '$.severity'), '')) = 'warning')
+			GROUP BY run_uid`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var runID string
+			var count int
+			if err := rows.Scan(&runID, &count); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			counts[runID] = count
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return counts, nil
 }
 
 func (s *Store) GetPipelineRuns() ([]PipelineRun, error) { return s.GetPipelineRunsPage(100, 0) }

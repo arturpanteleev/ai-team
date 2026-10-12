@@ -38,7 +38,7 @@ type StageExecutorController interface {
 // TaskCreateController owns the new task metadata and mode semantics. Legacy
 // controllers continue to support the original feature/task request shape.
 type TaskCreateController interface {
-	StartTask(context.Context, startRunCommand, func(runID string) error) (string, error)
+	StartTask(ctx context.Context, feature, task, title, idea, mode string, externalLinks []string, admit func(runID string) error) (string, error)
 }
 
 type StageAgentController interface {
@@ -72,6 +72,7 @@ type taskStageActionCommand struct {
 }
 
 type taskRunListItem struct {
+	ID              int64      `json:"id"`
 	RunID           string     `json:"run_id"`
 	Feature         string     `json:"feature"`
 	Task            string     `json:"task,omitempty"`
@@ -80,10 +81,14 @@ type taskRunListItem struct {
 	CurrentStage    string     `json:"current_stage,omitempty"`
 	CurrentFunction string     `json:"current_function,omitempty"`
 	Executor        string     `json:"executor,omitempty"`
+	ExecutorAgent   string     `json:"executor_agent,omitempty"`
 	Mode            string     `json:"mode,omitempty"`
 	AllowedActions  []string   `json:"allowed_actions"`
 	StartedAt       time.Time  `json:"started_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	StageEnteredAt  *time.Time `json:"stage_entered_at,omitempty"`
+	Warnings        int        `json:"warnings"`
+	ExternalLinks   []string   `json:"external_links,omitempty"`
 }
 
 type taskRunDetails struct {
@@ -196,23 +201,37 @@ func (s *Server) listTaskRuns() ([]taskRunListItem, error) {
 	}
 	items := make([]taskRunListItem, 0, len(runs))
 	for _, run := range runs {
-		item := taskRunListItem{RunID: run.RunID, Feature: run.Feature, Status: run.Status,
+		item := taskRunListItem{ID: run.ID, RunID: run.RunID, Feature: run.Feature, Status: run.Status,
 			StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, AllowedActions: []string{}}
 		var snapshot startRunCommand
 		if json.Unmarshal([]byte(run.ConfigSnapshot), &snapshot) == nil {
 			item.Task, item.Mode = snapshot.Task, snapshot.Mode
+			item.ExternalLinks = snapshot.ExternalLinks
 		}
 		if stateStore, err := lifecycle.NewStore(s.targetDir); err == nil {
 			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
 				item.Phase, item.CurrentStage = string(state.Phase), state.NextStage
+				enteredAt := state.UpdatedAt
+				item.StageEnteredAt = &enteredAt
 				item.AllowedActions = s.taskAllowedActions(run.RunID, state.NextStage, state)
 				if stage, stageErr := s.pinnedTaskStage(run.RunID, state.NextStage); stageErr == nil {
 					item.CurrentFunction = stage.Function
 					item.Executor = stage.Executor
+					item.ExecutorAgent = stage.Agent
 				}
 			}
 		}
 		items = append(items, item)
+	}
+	runIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		runIDs = append(runIDs, item.RunID)
+	}
+	warnings, warnErr := s.store.CountRunWarningEvents(runIDs)
+	if warnErr == nil {
+		for index := range items {
+			items[index].Warnings = warnings[items[index].RunID]
+		}
 	}
 	return items, nil
 }
@@ -1028,12 +1047,12 @@ func isTaskWarningEvent(event Event) bool {
 	if severity, ok := event.Data["severity"].(string); ok && strings.EqualFold(severity, "warning") {
 		return true
 	}
-	switch event.Type {
-	case "check_overridden", "check_error", "description_missing", "stage_skipped", "stage_stalled", "integration_error":
-		return true
-	default:
-		return false
+	for _, eventType := range store.WarningEventTypes {
+		if event.Type == eventType {
+			return true
+		}
 	}
+	return false
 }
 
 type flowDurationStats struct {

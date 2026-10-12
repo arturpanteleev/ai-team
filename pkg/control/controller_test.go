@@ -197,6 +197,114 @@ func TestControllerAllowsEnqueueWhenReadinessIsUnknown(t *testing.T) {
 	}
 }
 
+type recordingModeEngine struct {
+	*fakeEngine
+	mu       sync.Mutex
+	startCfg pipeline.RunConfig
+}
+
+func (e *recordingModeEngine) SupportsRunMode(string) bool { return true }
+
+func (e *recordingModeEngine) Start(ctx context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
+	e.mu.Lock()
+	e.startCfg = config
+	e.mu.Unlock()
+	return e.fakeEngine.Start(ctx, config)
+}
+
+func waitForControllerIdle(t *testing.T, controller *Controller, runID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		controller.mu.Lock()
+		_, active := controller.active[runID]
+		controller.mu.Unlock()
+		if !active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("controller worker did not finish after releasing the fake engine")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestControllerStartTaskAppliesIdeaAndManualMode(t *testing.T) {
+	engine := &recordingModeEngine{fakeEngine: &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}}
+	controller, err := New(engine, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted := false
+	runID, err := controller.StartTask(context.Background(), "feature", "task text", "Название",
+		"  Идея из браузера  ", "manual", []string{"JIRA-1 https://tracker.example/JIRA-1"}, func(run string) error {
+			admitted = true
+			if run == "" {
+				t.Fatal("admission получил пустой run id")
+			}
+			return nil
+		})
+	if err != nil || runID == "" || !admitted {
+		t.Fatalf("StartTask manual: run=%q admitted=%v err=%v", runID, admitted, err)
+	}
+	<-engine.started
+	engine.mu.Lock()
+	observed := engine.startCfg
+	engine.mu.Unlock()
+	if observed.TaskDesc != "Идея из браузера" {
+		t.Fatalf("idea text must feed the run description: %q", observed.TaskDesc)
+	}
+	if observed.Mode != "" {
+		t.Fatalf("manual mode must keep the default run mode, got %q", observed.Mode)
+	}
+	close(engine.release)
+	waitForControllerIdle(t, controller, runID)
+}
+
+func TestControllerStartTaskFallsBackToTaskWhenIdeaEmpty(t *testing.T) {
+	engine := &recordingModeEngine{fakeEngine: &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}}
+	controller, err := New(engine, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := controller.StartTask(context.Background(), "feature", "task text", "", "", "", nil, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("StartTask without metadata: %v", err)
+	}
+	<-engine.started
+	engine.mu.Lock()
+	observed := engine.startCfg
+	engine.mu.Unlock()
+	if observed.TaskDesc != "task text" {
+		t.Fatalf("empty idea must keep the task description: %q", observed.TaskDesc)
+	}
+	close(engine.release)
+	waitForControllerIdle(t, controller, runID)
+}
+
+func TestControllerStartTaskFailsClosedOnUnsupportedMode(t *testing.T) {
+	engine := &fakeEngine{}
+	controller, err := New(engine, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.StartTask(context.Background(), "feature", "task", "", "", "turbo", nil, func(string) error { return nil }); err == nil {
+		t.Fatal("unsupported mode должен быть отклонён")
+	}
+	// fakeEngine does not implement runModeEngine: auto must fail closed
+	// instead of silently starting a manual run.
+	admitted := false
+	if _, err := controller.StartTask(context.Background(), "feature", "task", "", "идея", "auto", nil, func(string) error {
+		admitted = true
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "auto mode") {
+		t.Fatalf("auto mode on a mode-less engine must fail closed: %v", err)
+	}
+	if admitted {
+		t.Fatal("admission не должен вызываться при отклонённом mode")
+	}
+}
+
 func TestControllerStartAndCancelActiveWorker(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	controller, err := New(engine, t.TempDir())

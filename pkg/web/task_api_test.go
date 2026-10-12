@@ -95,6 +95,154 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 	}
 }
 
+func TestGlobalEventFeedPaginatesWarningsByPersistedCursor(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	startedAt := time.Now().UTC().Truncate(time.Millisecond)
+	run := &store.PipelineRun{RunID: "run-global-feed", Feature: "feed demo", Status: "running", StartedAt: startedAt}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	storedEvents := []*store.Event{
+		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{"feature":"feed demo"}`},
+		{RunID: run.RunID, Type: "check_error", Stage: "qa", Severity: "warning", Timestamp: startedAt.Add(time.Second), DataJSON: `{"reason":"check failed"}`},
+		{RunID: run.RunID, Type: "attempt_started", Stage: "review", Timestamp: startedAt.Add(2 * time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "stage_skipped", Stage: "review", Timestamp: startedAt.Add(3 * time.Second), DataJSON: `{"reason":"not required"}`},
+	}
+	for _, event := range storedEvents {
+		if err := srv.store.AppendEventNext(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := newLoopbackRequest(http.MethodGet, "/api/events?after=0&limit=10", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	var allPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &allPage) != nil || len(allPage.Events) != len(storedEvents) {
+		t.Fatalf("all event page: status=%d body=%s events=%+v", response.Code, response.Body.String(), allPage.Events)
+	}
+	if allPage.Events[0].Type != "run_started" || allPage.Events[3].Type != "stage_skipped" || allPage.NextCursor != storedEvents[3].ID {
+		t.Fatalf("all event cursor order=%+v next=%d", allPage.Events, allPage.NextCursor)
+	}
+
+	firstWarningRequest := newLoopbackRequest(http.MethodGet, "/api/events?after=0&limit=1&warnings=true", nil)
+	firstWarningResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstWarningResponse, firstWarningRequest)
+	var firstWarningPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if firstWarningResponse.Code != http.StatusOK || json.Unmarshal(firstWarningResponse.Body.Bytes(), &firstWarningPage) != nil ||
+		len(firstWarningPage.Events) != 1 || firstWarningPage.Events[0].Type != "check_error" ||
+		firstWarningPage.NextCursor != storedEvents[1].ID {
+		t.Fatalf("first warning page: status=%d body=%s page=%+v", firstWarningResponse.Code, firstWarningResponse.Body.String(), firstWarningPage)
+	}
+
+	secondWarningRequest := newLoopbackRequest(http.MethodGet, fmt.Sprintf("/api/events?after=%d&limit=1&warnings=true", firstWarningPage.NextCursor), nil)
+	secondWarningResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondWarningResponse, secondWarningRequest)
+	var secondWarningPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if secondWarningResponse.Code != http.StatusOK || json.Unmarshal(secondWarningResponse.Body.Bytes(), &secondWarningPage) != nil ||
+		len(secondWarningPage.Events) != 1 || secondWarningPage.Events[0].Type != "stage_skipped" ||
+		secondWarningPage.NextCursor != storedEvents[3].ID {
+		t.Fatalf("second warning page: status=%d body=%s page=%+v", secondWarningResponse.Code, secondWarningResponse.Body.String(), secondWarningPage)
+	}
+}
+
+func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	startedAt := time.Now().UTC().Truncate(time.Millisecond)
+	run := &store.PipelineRun{RunID: "run-desc-feed", Feature: "feed demo", Status: "running", StartedAt: startedAt}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	storedEvents := []*store.Event{
+		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{}`},
+		{RunID: run.RunID, Type: "check_error", Stage: "qa", Severity: "warning", Timestamp: startedAt.Add(time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "attempt_started", Stage: "review", Timestamp: startedAt.Add(2 * time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "stage_skipped", Stage: "review", Timestamp: startedAt.Add(3 * time.Second), DataJSON: `{}`},
+	}
+	for _, event := range storedEvents {
+		if err := srv.store.AppendEventNext(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type page struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	get := func(path string) (int, page) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, newLoopbackRequest(http.MethodGet, path, nil))
+		var value page
+		if response.Code == http.StatusOK {
+			if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
+				t.Fatalf("decode %s: %v body=%s", path, err, response.Body.String())
+			}
+		}
+		return response.Code, value
+	}
+	cursors := func(events []Event) []int64 {
+		values := make([]int64, 0, len(events))
+		for _, event := range events {
+			values = append(values, event.Cursor)
+		}
+		return values
+	}
+
+	status, newest := get("/api/events?order=desc&limit=2")
+	if status != http.StatusOK || fmt.Sprint(cursors(newest.Events)) != fmt.Sprint([]int64{storedEvents[3].ID, storedEvents[2].ID}) ||
+		newest.NextCursor != storedEvents[2].ID {
+		t.Fatalf("newest page status=%d page=%+v", status, newest)
+	}
+	status, older := get(fmt.Sprintf("/api/events?order=desc&limit=2&before=%d", newest.NextCursor))
+	if status != http.StatusOK || fmt.Sprint(cursors(older.Events)) != fmt.Sprint([]int64{storedEvents[1].ID, storedEvents[0].ID}) ||
+		older.NextCursor != storedEvents[0].ID {
+		t.Fatalf("older page status=%d page=%+v", status, older)
+	}
+	status, warnings := get("/api/events?order=desc&limit=1&warnings=true")
+	if status != http.StatusOK || len(warnings.Events) != 1 || warnings.Events[0].Type != "stage_skipped" {
+		t.Fatalf("newest warning status=%d page=%+v", status, warnings)
+	}
+	status, olderWarnings := get(fmt.Sprintf("/api/events?order=desc&limit=1&warnings=true&before=%d", warnings.NextCursor))
+	if status != http.StatusOK || len(olderWarnings.Events) != 1 || olderWarnings.Events[0].Type != "check_error" ||
+		olderWarnings.NextCursor != storedEvents[1].ID {
+		t.Fatalf("older warning status=%d page=%+v", status, olderWarnings)
+	}
+	status, runPage := get(fmt.Sprintf("/api/runs/%s/events?order=desc&limit=1", run.RunID))
+	if status != http.StatusOK || len(runPage.Events) != 1 || runPage.Events[0].Cursor != storedEvents[3].ID {
+		t.Fatalf("run newest page status=%d page=%+v", status, runPage)
+	}
+	for _, path := range []string{
+		"/api/events?before=3",
+		"/api/events?order=desc&after=1",
+		"/api/events?order=desc&after=1&before=3",
+		"/api/events?order=sideways",
+		"/api/events?order=desc&before=-1",
+	} {
+		if status, _ := get(path); status != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d, want 400", path, status)
+		}
+	}
+}
+
 func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
 	verifier, err := NewLocalAuthenticator(token)
@@ -1004,6 +1152,9 @@ func TestFlowMetricsJSONSubscriptionEstimatesStayFinite(t *testing.T) {
 func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 	if flowMetricsRaceBuild || testing.CoverMode() != "" {
 		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")
+	}
+	if os.Getenv("CI") == "true" && os.Getenv("AI_TEAM_FLOW_METRICS_PERF") != "1" {
+		t.Skip("CI runs the wall-clock acceptance check separately after the unit and coverage suites")
 	}
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")

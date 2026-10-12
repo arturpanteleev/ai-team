@@ -19,7 +19,8 @@ interface RouterLocation {
 }
 
 type NavigateTarget = string | number;
-type Navigate = (target: NavigateTarget) => void;
+interface NavigateOptions { replace?: boolean }
+type Navigate = (target: NavigateTarget, options?: NavigateOptions) => void;
 
 interface RouterContextValue {
   location: RouterLocation;
@@ -55,12 +56,13 @@ export function BrowserRouter({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  const navigate = useCallback<Navigate>((target) => {
+  const navigate = useCallback<Navigate>((target, options) => {
     if (typeof target === 'number') {
       window.history.go(target);
       return;
     }
-    window.history.pushState(null, '', target);
+    if (options?.replace) window.history.replaceState(null, '', target);
+    else window.history.pushState(null, '', target);
     setLocation(currentBrowserLocation());
   }, []);
 

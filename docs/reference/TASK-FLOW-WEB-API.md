@@ -26,15 +26,28 @@ fields.
 | `POST /api/runs/{runID}/stages/{stageID}/grill/answer` | Answer a grill question |
 | `POST /api/runs/{runID}/stages/{stageID}/grill/done` | Finish the grill without more help |
 | `POST /api/runs/{runID}/plan/approve` | Approve a pinned delivery plan hash |
-| `GET /api/runs/{runID}/events?after=&limit=&warnings=` | Run event feed |
-| `GET /api/events?after=&limit=&warnings=&run_id=` | Global event feed |
+| `GET /api/runs/{runID}/events?after=&limit=&warnings=&order=&before=` | Run event feed |
+| `GET /api/events?after=&limit=&warnings=&run_id=&order=&before=` | Global event feed |
 | `GET /api/metrics/flow?from=&to=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=` | Flow metrics CSV |
 
-Event endpoints share the persisted SQLite event-ID cursor. `from` and `to`
+Event endpoints share the persisted SQLite event-ID cursor. By default
+(`order=asc`) they return events with a cursor greater than `after`, oldest
+first; this is the replay contract for resuming a stream. With `order=desc`
+they return events newest first: without `before` the page starts at the newest
+persisted event, and `before=<next_cursor>` returns only older events.
+`next_cursor` is the last cursor examined in the requested direction. `before`
+requires `order=desc` and cannot be combined with `after`. `from` and `to`
 accept RFC3339 timestamps or `YYYY-MM-DD`; intervals are half-open `[from,to)`
 and default to the last 30 days. Pagination limits range from 1 to 100 for run
 lists and 1 to 1000 for event feeds.
+
+The `/events` page shows the newest events first (`order=desc`), puts new
+events from the WebSocket stream at the top, and offers a server-side
+warnings-only filter. Each event links by stable `run_id`; the UI resolves that
+ID to the existing task detail page. “Показать ещё” loads older events with
+`before=<next_cursor>`; the cursor also moves past non-warning events when the
+warning filter is selected.
 
 Write callers can send `Idempotency-Key` (or legacy `X-Request-Key`) to replay
 an exact prior response. Keys are scoped to the authenticated actor; reusing a

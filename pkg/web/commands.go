@@ -422,6 +422,13 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
+	// Resuming an agent stage launches its agent: record the actor first so
+	// forbid_self_approval sees the launch; an unrecorded launch must not run.
+	session, _ := s.requestSession(r)
+	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); err != nil {
+		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.controller.Resume(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return

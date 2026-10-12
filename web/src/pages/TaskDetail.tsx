@@ -60,7 +60,8 @@ function eventTitle(type: string): string {
     run_canceled: 'Задача отменена', run_finished: 'Задача завершена', attempt_started: 'Этап начат',
     attempt_finished: 'Этап завершён', attempts_invalidated: 'Результаты этапа пересчитаны',
     approval_requested: 'Запрошено решение', approval_decided: 'Решение принято',
-    transition_selected: 'Выбран переход', stage_taken: 'Этап взят участником', stage_skipped: 'Этап пропущен',
+    transition_selected: 'Выбран переход', stage_taken: 'Этап взят участником', stage_agent_requested: 'Участник запустил агента',
+    executor_changed: 'Сменён исполнитель этапа', stage_skipped: 'Этап пропущен',
     stage_returned: 'Выполнен возврат', stage_stalled: 'Этап остановился', check_overridden: 'Проверка обойдена',
     integration_error: 'Ошибка интеграции', description_missing: 'Нет описания результата',
   };

@@ -585,3 +585,150 @@ func TestForbidSelfApprovalCountsEveryStageContribution(t *testing.T) {
 		}
 	})
 }
+
+// moveToConfirmation advances a run checkpoint to the pending confirmation
+// gate-1 through the lifecycle transitions the engine would take.
+func moveToConfirmation(t *testing.T, fixture functionPermissionFixture, runID string, mutate func(*lifecycle.State)) {
+	t.Helper()
+	stateStore, err := lifecycle.NewStore(fixture.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := stateStore.Load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Phase != lifecycle.PhaseRunning {
+		running := current
+		running.Phase, running.PendingApprovalID = lifecycle.PhaseRunning, ""
+		if err := stateStore.Save(current, running); err != nil {
+			t.Fatal(err)
+		}
+		current = running
+	}
+	next := current
+	next.Phase, next.PendingApprovalID = lifecycle.PhaseWaiting, "gate-1"
+	if mutate != nil {
+		mutate(&next)
+	}
+	if err := stateStore.Save(current, next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForbidSelfApprovalCountsExecutorSwitchAndResume(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	confirmPath := "/api/runs/run-confirm/stages/build/confirm"
+
+	t.Run("executor switch through the task API", func(t *testing.T) {
+		now := time.Now().UTC()
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{
+			buildInputApproval("input-1", approval.StatusPending, now),
+			agentConfirmApproval(now.Add(time.Hour)),
+		}, map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "input-1"}})
+		switched := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/executor", `{"executor":"agent"}`)
+		if switched.Code != http.StatusOK || fixture.controller.calls["executor"] != 1 {
+			t.Fatalf("executor switch: %d %s", switched.Code, switched.Body.String())
+		}
+		moveToConfirmation(t, fixture, "run-confirm", nil)
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusForbidden {
+			t.Fatalf("executor switcher confirmed: %d %s", response.Code, response.Body.String())
+		}
+		if response := fixture.requestAs(t, "c@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("other member must confirm: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("executor override recorded only in the lifecycle checkpoint", func(t *testing.T) {
+		now := time.Now().UTC()
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(now)},
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		moveToConfirmation(t, fixture, "run-confirm", func(state *lifecycle.State) {
+			state.ExecutorOverrides = map[string]lifecycle.ExecutorOverride{"build": {
+				Executor: "agent", PreviousExecutor: "human", ActorID: "a@example.test",
+				ApprovalID: "input-1", VisitID: "input-1", ChangedAt: now.Add(-time.Minute),
+			}}
+		})
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusForbidden {
+			t.Fatalf("checkpoint executor switcher confirmed: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("resume of an agent stage", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(time.Now().UTC())},
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		resumed := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/resume", "")
+		if resumed.Code != http.StatusAccepted || fixture.controller.resumeCalls != 1 {
+			t.Fatalf("resume: %d %s", resumed.Code, resumed.Body.String())
+		}
+		moveToConfirmation(t, fixture, "run-confirm", nil)
+		fixture.controller.approvals[0].CreatedAt = time.Now().UTC()
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusForbidden {
+			t.Fatalf("resuming member confirmed the agent result: %d %s", response.Code, response.Body.String())
+		}
+		if response := fixture.requestAs(t, "c@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("other member must confirm: %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+// sessionRequestAs prepares an authenticated request without serving it, so a
+// test can break the store between session setup and the action.
+func (f functionPermissionFixture) sessionRequestAs(t *testing.T, actorID string, roles []cloudidentity.Role, method, target, body string) *http.Request {
+	t.Helper()
+	request := authorizedRequest(t, f.srv, method, target, body)
+	principal, err := cloudidentity.NewPrincipal(actorID, roles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.sessionMu.Lock()
+	session := f.srv.sessions[cookie.Value]
+	session.Principal = principal
+	f.srv.sessions[cookie.Value] = session
+	f.srv.sessionMu.Unlock()
+	return request
+}
+
+func TestAuthorshipRecordingFailuresFailClosed(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+
+	t.Run("unrecorded run-agent launch does not dispatch", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		request := fixture.sessionRequestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/run-agent", `{"action":"run"}`)
+		_ = fixture.srv.store.Close()
+		response := httptest.NewRecorder()
+		fixture.srv.router.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.calls["run-agent"] != 0 {
+			t.Fatalf("run-agent without a recorded actor must not dispatch: %d calls=%v %s", response.Code, fixture.controller.calls, response.Body.String())
+		}
+	})
+
+	t.Run("unrecorded resume launch does not resume", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		request := fixture.sessionRequestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/resume", "")
+		_ = fixture.srv.store.Close()
+		response := httptest.NewRecorder()
+		fixture.srv.router.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("resume without a recorded actor must not run: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("unreadable run events refuse confirmation", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(time.Now().UTC())},
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"}})
+		request := fixture.sessionRequestAs(t, "c@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		_ = fixture.srv.store.Close()
+		response := httptest.NewRecorder()
+		fixture.srv.router.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 {
+			t.Fatalf("unverifiable authorship must be refused: %d %s", response.Code, response.Body.String())
+		}
+	})
+}

@@ -580,6 +580,15 @@ func (s *Server) handleTaskStageExecutor(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "stage executor action is not connected to the task controller", "controller_action_unavailable")
 		return
 	}
+	// Record the switching actor before the controller changes the executor so
+	// the switch always counts as stage authorship for forbid_self_approval.
+	if err := s.appendRunEventRequired(runID, "executor_changed", time.Now().UTC(), map[string]any{
+		"stage_id": stageID, "to_executor": command.Executor, "actor_id": actorID,
+		"approval_id": state.PendingApprovalID,
+	}); err != nil {
+		writeJSONAPIError(w, http.StatusServiceUnavailable, "executor change could not be recorded", "event_unavailable")
+		return
+	}
 	if err := controller.ChangeStageExecutor(runID, stageID, command.Executor, actorID); err != nil {
 		s.taskConflict(w, runID, stageID, err.Error())
 		return

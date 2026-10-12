@@ -10,6 +10,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 )
 
 // errSelfApprovalUnverifiable is returned when the self-approval policy is
@@ -48,7 +49,8 @@ var stageAuthorEventTypes = map[string]bool{stageAgentRequestedEvent: true, "exe
 //   - actors of decisions on human input, grill (answer/new_version/done) and
 //     check-override approvals of the stage in the visit;
 //   - the owner who took a human input of the visit;
-//   - actors who launched the stage agent or switched its executor;
+//   - actors who launched the stage agent (run-agent or resume of an agent
+//     stage) or switched its executor (lifecycle override or event);
 //   - actors who appended a revision of the stage result or of an output of
 //     any stage attempt in the visit (agent output edits included).
 //
@@ -104,17 +106,33 @@ func (s *Server) stageWorkAuthors(runID string, pending approval.PendingApproval
 		}
 	}
 
+	// The lifecycle checkpoint is the durable record of executor switches made
+	// through either executor route, even when no web event was projected.
+	stateStore, err := lifecycle.NewStore(s.targetDir)
+	if err != nil {
+		return nil, err
+	}
+	state, err := stateStore.Load(runID)
+	if err != nil {
+		return nil, err
+	}
+	if override, ok := state.ExecutorOverrides[stageID]; ok && inVisit(override.ChangedAt) {
+		if override.ActorID == "" {
+			return nil, fmt.Errorf("executor override of stage %s has no actor", stageID)
+		}
+		authors = append(authors, override.ActorID)
+	}
+
+	events, err := s.allRunEvents(runID)
+	if err != nil {
+		return nil, err
+	}
 	owners, err := s.store.GetStageOwners(runID)
 	if err != nil {
 		return nil, err
 	}
 	if owner, ok := owners[stageID]; ok && inputIDs[owner.ApprovalID] {
 		authors = append(authors, owner.ActorID)
-	}
-
-	events, err := s.allRunEvents(runID)
-	if err != nil {
-		return nil, err
 	}
 	for _, event := range events {
 		if stageAuthorEventTypes[event.Type] && event.Stage == stageID && inVisit(event.Timestamp) {
@@ -161,4 +179,35 @@ func (s *Server) stageWorkAuthors(runID string, pending approval.PendingApproval
 func isStageConfirmation(pending approval.PendingApproval) bool {
 	return (pending.Kind == "" || pending.Kind == approval.KindApprove) &&
 		pending.Trigger != "delivery_plan" && pending.FromStage != ""
+}
+
+// recordResumeAgentLaunch records the actor who is about to resume an agent
+// stage. It does nothing when the current stage is not a resumable
+// agent stage of a pinned task template.
+func (s *Server) recordResumeAgentLaunch(runID, actorID string) error {
+	stateStore, err := lifecycle.NewStore(s.targetDir)
+	if err != nil {
+		return nil
+	}
+	state, err := stateStore.Load(runID)
+	if err != nil || state.Phase != lifecycle.PhaseResumable || state.NextStage == "" {
+		return nil
+	}
+	_, found, err := s.pinnedTaskConfig(runID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	stage, err := s.pinnedTaskStage(runID, state.NextStage)
+	if err != nil {
+		return err
+	}
+	if stage.Agent == "" {
+		return nil
+	}
+	return s.appendRunEventRequired(runID, stageAgentRequestedEvent, time.Now().UTC(), map[string]any{
+		"stage_id": state.NextStage, "actor_id": actorID, "via": "resume",
+	})
 }

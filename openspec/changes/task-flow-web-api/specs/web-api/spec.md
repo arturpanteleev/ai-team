@@ -60,17 +60,34 @@ filtering.
 
 The Web API MUST provide `GET /api/metrics/flow` and
 `GET /api/metrics/flow.csv` for a half-open time interval. JSON metrics MUST
-include lead/cycle durations, stage durations and execution counts, override,
-skip, and return counts, and token usage completeness. Missing or incomplete
+include lead and cycle time through acceptance completion, with median and
+nearest-rank p80; stage attempt counts and durations broken down by execution,
+decision, and outcome; the agent-attempt share by stage; the share of successful
+agent results without linked human edits; and override, skip, and return counts
+by stage. JSON and CSV MUST expose the same metric set. Missing or incomplete
 usage MUST be reported as unknown rather than zero.
+
+Cycle time MUST start at the first recorded human take or stage/agent attempt
+start for the run and end at acceptance completion. Median MUST be the
+arithmetic median (the mean of the two center values for an even count); p80
+MUST use the nearest-rank definition. Invalidated attempts MUST be excluded
+from stage counts and durations.
 
 Run token totals MUST come from complete attested usage envelopes, and stage
 token totals MUST come from attested attempt manifests. JSON and CSV MUST
-preserve attestation state and data source. If a configured monthly
-subscription amount is available, the report MAY estimate each selected run's
-subscription share in proportion to its attested tokens; it MUST NOT calculate
-an API cost from per-model token prices. The estimate MUST be unavailable when
-the selected run or a run in its monthly token denominator has unknown usage.
+preserve attestation state and data source. If
+`usage.monthly_subscription_amount` is configured, the report MAY show an
+approximate subscription share for the selected runs and for each stage. The
+configured amount and optional `usage.monthly_subscription_currency` in the
+project's `.ai-team/config.yaml` are the only price source; when currency is
+omitted, the documented default is USD. The run estimate is the monthly
+subscription amount multiplied by selected-run attested tokens divided by all
+complete project-run tokens in the same UTC month. The stage estimate uses
+attested stage-manifest tokens for the selected period over that same monthly
+project token denominator, summed across months. These values are subscription
+allocations, not provider token prices or runtime `cost_usd`. An estimate MUST
+be null when any required selected usage, stage manifest, or monthly
+denominator usage is missing, incomplete, invalid, or has a zero denominator.
 
 #### Scenario: Unknown token usage
 
@@ -84,7 +101,26 @@ the selected run or a run in its monthly token denominator has unknown usage.
 - **WHEN** a monthly subscription amount and complete usage envelopes are
   available for all runs in the relevant UTC month
 - **THEN** the flow report MAY show a token-weighted subscription-share estimate
-- **AND** the report MUST identify it as an estimate and retain usage provenance
+- **AND** it MAY show the same token-weighted allocation for each stage with
+  complete attested stage usage
+- **AND** JSON and CSV MUST identify each value as an estimate and retain its
+  configuration, envelope, or manifest provenance
+
+#### Scenario: Stage and state breakdown
+
+- **WHEN** a client requests flow metrics for a period with recorded stage
+  attempts
+- **THEN** each stage MUST include attempt count and duration grouped by
+  execution, decision, and outcome
+- **AND** each stage MUST include the share of its non-invalidated attempts
+  executed by an agent
+- **AND** override, skip, and return events MUST be attributed to the issuing
+  stage, including events whose stage is stored in the structured event field
+
+#### Scenario: 1000-run performance
+
+- **WHEN** the flow metrics API processes 1000 recorded runs
+- **THEN** the metrics calculation MUST complete in 300 milliseconds or less
 
 ### Requirement: JSON API errors
 

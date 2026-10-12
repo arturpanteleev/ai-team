@@ -44,13 +44,30 @@ with JSON 503 while their engine work is being integrated.
 
 Task API errors use `{ "error": "...", "code": "..." }`. A lifecycle
 conflict returns 409 with `code: "invalid_state"` and `allowed_actions`.
-Flow metrics include token totals only when all selected runs have complete
-usage envelopes; otherwise token values are `null`, with known/unknown counts,
-attestation state, and source retained in both JSON and CSV. Per-stage token
-totals use attested attempt manifests and are `null` when any agent attempt for
-that stage is unknown. When `usage.monthly_subscription_amount` is configured,
-the API estimates the selected runs' share of that monthly subscription in
-proportion to their attested tokens. It does not apply per-model token prices;
-the estimate is unavailable when usage in the same monthly denominator is
-unknown. JSON includes the envelope/configuration source and estimate basis;
-CSV rows include attestation, source, and basis columns for usage values.
+Flow metrics report lead and cycle time through acceptance completion as a
+median and nearest-rank p80. Each stage includes duration and attempt counts by
+execution, decision, and outcome, plus its share of non-invalidated attempts
+executed by an agent. The report includes overrides, skips, and returns by the
+stage that issued the action, and successful agent results without linked human
+edits. The JSON and CSV exports contain the same metrics.
+
+Run token totals use complete attested usage envelopes; if selected usage is
+incomplete, token values are `null` with known/unknown counts, attestation, and
+source retained. Per-stage token totals use attested attempt manifests and are
+`null` when any agent attempt for that stage is unknown. When
+`usage.monthly_subscription_amount` is configured in `.ai-team/config.yaml`,
+the API estimates a proportional share of that configured monthly subscription
+for selected runs and for each stage. It uses the configured currency, or USD
+when omitted; no provider or per-token price is assumed. The run formula is
+monthly subscription amount × selected-run attested tokens ÷ all complete
+project-run tokens in the same UTC month. The stage formula substitutes
+attested stage-manifest tokens from the selected period in the numerator; for
+periods spanning months, the per-month allocations are summed. The estimate is
+`null` if selected usage, stage usage, or any run in a required monthly
+denominator is unknown or incomplete, or if the denominator is zero.
+These are subscription estimates, not runtime `cost_usd`. JSON and CSV preserve
+attestation, configuration/envelope/manifest source, currency, and formula
+basis.
+
+The flow metrics calculation is expected to complete in 300 ms or less for
+1000 recorded runs.

@@ -228,7 +228,7 @@ func (rs *runState) runStageGrill(ctx context.Context, stage config.TemplateStag
 	payload := approval.GrillQuestionsPayload{
 		Kind: string(approval.KindGrillQuestions), Markdown: strings.TrimSpace(checkerOutput), Round: round,
 	}
-	payload.ArtifactRevisions, err = rs.attemptArtifactRevisions(result)
+	payload.ArtifactRevisions, payload.ArtifactContentSHA256, err = rs.attemptArtifactRevisions(result)
 	if err != nil {
 		return fmt.Errorf("bind grill result revisions for %s: %w", stage.ID, err)
 	}
@@ -342,39 +342,45 @@ func (rs *runState) completeStageGrill(stageID, attemptID string, rounds, openQu
 	return nil
 }
 
-func (rs *runState) attemptArtifactRevisions(result notifier.StageResult) (map[string]string, error) {
+func (rs *runState) attemptArtifactRevisions(result notifier.StageResult) (map[string]string, map[string]string, error) {
 	if result.AttemptID == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	runDir := rs.evidence.RunDir()
 	_, manifest, err := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, runDir, rs.runID, result.AttemptID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	store, err := humanartifact.New(rs.runCfg.TargetDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	revisions := make(map[string]string)
+	contentSHA256 := make(map[string]string)
 	for _, output := range manifest.Outputs {
 		values, listErr := store.List(rs.runID, output.EvidencePath)
 		if listErr != nil {
-			return nil, listErr
+			return nil, nil, listErr
 		}
 		if len(values) > 0 {
 			revisions[output.EvidencePath] = values[len(values)-1].ID
+		} else if output.Type == "file" && output.SHA256 != "" {
+			// Agent outputs are already immutable and hashed by the attempt
+			// manifest. Bind that exact source content so the first human edit
+			// can be compared without inventing a mutable baseline revision.
+			contentSHA256[output.EvidencePath] = output.SHA256
 		}
 	}
 	for _, path := range stageHumanResultPaths(manifest.Stage) {
 		values, listErr := store.List(rs.runID, path)
 		if listErr != nil {
-			return nil, listErr
+			return nil, nil, listErr
 		}
 		if len(values) > 0 {
 			revisions[path] = values[len(values)-1].ID
 		}
 	}
-	return revisions, nil
+	return revisions, contentSHA256, nil
 }
 
 func stageHumanResultPaths(stageID string) []string {

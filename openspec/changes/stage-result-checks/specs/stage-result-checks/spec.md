@@ -57,7 +57,10 @@ answer, new-version, and done actions. An answer MUST be passed to the next
 checker round as untrusted context. A new-version action MUST pin an immutable
 human result revision whose content SHA-256 differs from the pinned baseline;
 a different revision ID with identical bytes or a comment-only revision MUST
-not resolve the question. The revision MUST satisfy the SHA-256-verified pinned
+not resolve the question. When an agent attempt has no human revision yet, its
+output SHA-256 from the immutable attempt manifest MUST be the baseline; the
+controller MUST verify the output bytes against that manifest before comparing
+the first human revision. The revision MUST satisfy the SHA-256-verified pinned
 stage's typed-result and required-section contract before append, and the next
 checker round MUST read that exact revision. Done and `max_rounds` MUST complete
 the advisory grill without bypassing the stage's normal confirmation.
@@ -83,6 +86,15 @@ verified decision evidence after a process crash.
 - **КОГДА** a new immutable revision ID has the same content SHA-256 as the
   pinned result
 - **ТОГДА** `new_version` MUST be rejected and leave the grill approval pending
+
+#### Scenario: First edit of an agent output uses the immutable attempt baseline
+
+- **КОГДА** the agent output has no human revision and the responsible person
+  submits its first edited revision during a pending grill question
+- **ТОГДА** the controller MUST compare it with the source output bytes pinned
+  by the attempt manifest
+- **И** a changed revision MUST resolve the question while substituted source
+  bytes MUST be rejected
 
 #### Scenario: Resume after a resolved grill decision
 

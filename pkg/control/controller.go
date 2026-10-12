@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -347,7 +348,7 @@ func (c *Controller) resolveStageGrill(_ context.Context, runID, stageID, action
 		if err != nil {
 			return fmt.Errorf("resolve new grill result revisions: %w", err)
 		}
-		changed, err := c.grillResultContentChanged(runID, payload.ArtifactRevisions, decision.ArtifactRevisions)
+		changed, err := c.grillResultContentChanged(runID, value.AttemptID, payload.ArtifactRevisions, payload.ArtifactContentSHA256, decision.ArtifactRevisions)
 		if err != nil {
 			return fmt.Errorf("verify changed grill result content: %w", err)
 		}
@@ -361,7 +362,7 @@ func (c *Controller) resolveStageGrill(_ context.Context, runID, stageID, action
 	return c.Resume(runID)
 }
 
-func (c *Controller) grillResultContentChanged(runID string, baseline, selected map[string]string) (bool, error) {
+func (c *Controller) grillResultContentChanged(runID, attemptID string, baseline, baselineSHA256, selected map[string]string) (bool, error) {
 	artifacts, err := humanartifact.New(c.target)
 	if err != nil {
 		return false, err
@@ -369,20 +370,30 @@ func (c *Controller) grillResultContentChanged(runID string, baseline, selected 
 	changed := false
 	for artifactPath, revisionID := range selected {
 		baselineID := baseline[artifactPath]
-		if baselineID == "" {
+		var beforeSHA string
+		if baselineID != "" {
+			before, err := artifacts.Get(runID, artifactPath, baselineID)
+			if err != nil {
+				return false, fmt.Errorf("read pinned revision %q: %w", artifactPath, err)
+			}
+			beforeSHA = humanartifact.Digest([]byte(before.Content))
+			if before.RunID != runID || before.ArtifactPath != artifactPath || before.SHA256 != beforeSHA {
+				return false, fmt.Errorf("pinned revision content digest mismatch for %q", artifactPath)
+			}
+		} else if expectedSHA := baselineSHA256[artifactPath]; expectedSHA != "" {
+			beforeSHA, err = c.verifiedAttemptOutputSHA256(runID, attemptID, artifactPath, expectedSHA)
+			if err != nil {
+				return false, fmt.Errorf("verify immutable source output %q: %w", artifactPath, err)
+			}
+		} else {
 			return false, fmt.Errorf("selected revision %q has no pinned baseline for %q", revisionID, artifactPath)
-		}
-		before, err := artifacts.Get(runID, artifactPath, baselineID)
-		if err != nil {
-			return false, fmt.Errorf("read pinned revision %q: %w", artifactPath, err)
 		}
 		after, err := artifacts.Get(runID, artifactPath, revisionID)
 		if err != nil {
 			return false, fmt.Errorf("read selected revision %q: %w", artifactPath, err)
 		}
-		beforeSHA, afterSHA := humanartifact.Digest([]byte(before.Content)), humanartifact.Digest([]byte(after.Content))
-		if before.RunID != runID || before.ArtifactPath != artifactPath || before.SHA256 != beforeSHA ||
-			after.RunID != runID || after.ArtifactPath != artifactPath || after.SHA256 != afterSHA {
+		afterSHA := humanartifact.Digest([]byte(after.Content))
+		if after.RunID != runID || after.ArtifactPath != artifactPath || after.SHA256 != afterSHA {
 			return false, fmt.Errorf("revision content digest mismatch for %q", artifactPath)
 		}
 		if beforeSHA != afterSHA {
@@ -390,6 +401,49 @@ func (c *Controller) grillResultContentChanged(runID string, baseline, selected 
 		}
 	}
 	return changed, nil
+}
+
+func (c *Controller) verifiedAttemptOutputSHA256(runID, attemptID, artifactPath, expectedSHA string) (string, error) {
+	if attemptID == "" || expectedSHA == "" {
+		return "", errors.New("attempt, path, and expected digest are required")
+	}
+	if len(expectedSHA) != 64 {
+		return "", errors.New("source output baseline digest is malformed")
+	}
+	if _, err := hex.DecodeString(expectedSHA); err != nil {
+		return "", errors.New("source output baseline digest is malformed")
+	}
+	runDir := filepath.Join(c.target, ".ai-team", "runs", runID)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, attemptID)
+	if err != nil {
+		return "", err
+	}
+	if manifest.RunID != runID || manifest.AttemptID != attemptID {
+		return "", errors.New("attempt manifest identity mismatch")
+	}
+	var output *evidence.ArtifactRecord
+	for i := range manifest.Outputs {
+		if manifest.Outputs[i].EvidencePath == artifactPath {
+			output = &manifest.Outputs[i]
+			break
+		}
+	}
+	if output == nil || output.Type != "file" || !strings.EqualFold(output.SHA256, expectedSHA) {
+		return "", errors.New("baseline digest is not pinned by the source attempt manifest")
+	}
+	cleanPath := filepath.Clean(filepath.FromSlash(output.EvidencePath))
+	if filepath.IsAbs(cleanPath) || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", errors.New("source output path is not local to the run")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, cleanPath), humanartifact.MaxContentBytes)
+	if err != nil {
+		return "", err
+	}
+	actualSHA := humanartifact.Digest(data)
+	if !strings.EqualFold(actualSHA, output.SHA256) || int64(len(data)) != output.Size {
+		return "", errors.New("source output bytes do not match the pinned attempt manifest")
+	}
+	return actualSHA, nil
 }
 
 // ChangeStageExecutor persists a human-selected executor for the stage that is

@@ -356,7 +356,7 @@ func (s *Server) pendingGrillIncludesArtifact(runID, stageID, artifactPath strin
 		}
 		var payload approval.GrillQuestionsPayload
 		if json.Unmarshal(pending.Payload, &payload) == nil && payload.Kind == string(approval.KindGrillQuestions) &&
-			payload.ArtifactRevisions[artifactPath] != "" {
+			(payload.ArtifactRevisions[artifactPath] != "" || payload.ArtifactContentSHA256[artifactPath] != "") {
 			return true
 		}
 	}

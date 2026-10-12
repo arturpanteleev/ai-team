@@ -87,10 +87,11 @@ const StageCheckTrigger = "stage_check"
 // содержит вопросы агента-проверяющего; Round — номер раунда грилла
 // (с единицы), чтобы ответственный и метрики видели, какой это раунд.
 type GrillQuestionsPayload struct {
-	Kind              string            `json:"kind"`
-	Markdown          string            `json:"markdown"`
-	Round             int               `json:"round"`
-	ArtifactRevisions map[string]string `json:"artifact_revisions,omitempty"`
+	Kind                  string            `json:"kind"`
+	Markdown              string            `json:"markdown"`
+	Round                 int               `json:"round"`
+	ArtifactRevisions     map[string]string `json:"artifact_revisions,omitempty"`
+	ArtifactContentSHA256 map[string]string `json:"artifact_content_sha256,omitempty"`
 }
 
 // CheckDecisionPayload — контракт запроса решения по проваленной проверке
@@ -640,6 +641,13 @@ func validate(value PendingApproval) error {
 			clean := path.Clean(artifactPath)
 			if artifactPath == "" || path.IsAbs(artifactPath) || clean != artifactPath || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || !safeName(revisionID) {
 				return errors.New("grill_questions approval contains an invalid artifact revision binding")
+			}
+		}
+		for artifactPath, digest := range payload.ArtifactContentSHA256 {
+			clean := path.Clean(artifactPath)
+			if artifactPath == "" || path.IsAbs(artifactPath) || clean != artifactPath || clean == "." || clean == ".." ||
+				strings.HasPrefix(clean, "../") || !validSHA256(digest) {
+				return errors.New("grill_questions approval contains an invalid source artifact digest binding")
 			}
 		}
 	}

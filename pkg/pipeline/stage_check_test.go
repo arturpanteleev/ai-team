@@ -511,10 +511,18 @@ func TestRun_GrillNewVersionUsesPinnedArtifactRevision(t *testing.T) {
 	}
 	runID := filepath.Base(onlyRunDir(t, dir))
 	pending := grillApproval(t, store, runID)
+	var payload approval.GrillQuestionsPayload
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
 	runDir := onlyRunDir(t, dir)
 	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, pending.AttemptID)
 	if err != nil || len(manifest.Outputs) != 1 {
 		t.Fatalf("read source output manifest: outputs=%d err=%v", len(manifest.Outputs), err)
+	}
+	if payload.ArtifactContentSHA256[manifest.Outputs[0].EvidencePath] != manifest.Outputs[0].SHA256 {
+		t.Fatalf("grill approval did not bind the immutable agent-output baseline: payload=%+v output=%+v",
+			payload.ArtifactContentSHA256, manifest.Outputs[0])
 	}
 	artifactPath := "stages/tech/result.md"
 	artifacts, err := humanartifact.New(dir)

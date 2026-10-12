@@ -119,6 +119,7 @@ stage_timeout: 30m
 | `delivery_timeout` | нет | `10m` | бюджет всей delivery: commit, push и PR |
 | `budget` | нет | `24h`, `100` | жёсткие лимиты всего прогона; см. [лимиты](#лимиты-времени-и-попыток) |
 | `tracker` | нет | — | односторонние интеграции задач; см. [Jira](#внешний-трекер-jira) |
+| `cicd` | нет | — | CI/CD-провайдер этапа выкладки; см. [TeamCity](#выкладка-через-teamcity) |
 | `notifications` | нет | — | уведомления о событиях задач; см. [уведомления](#уведомления-webhook-slack-e-mail) |
 | `redaction` | нет | блок экспорта включён | правила поиска секретов |
 | `retention` | нет | `720h`, `20` | умолчания для `ai-team gc` |
@@ -241,6 +242,65 @@ tracker:
 автоматически; при аварийном завершении между успешным комментарием Jira и
 фиксацией локального курсора комментарий может быть отправлен повторно после
 перезапуска.
+
+### Выкладка через TeamCity
+
+Этап выкладки может выполнять контроллер, а не человек и не модель. Для этого
+этапу с `result: link` и `link_kind: build` назначают встроенного агента
+`cicd-deploy` (`kind: deploy`, без модели и без промпта) и настраивают
+провайдера в `cicd`:
+
+```yaml
+stages:
+  # ... implementation с delivery и hard-проверкой pr_exists ...
+  - id: deploy
+    title: Выкладка
+    function: deployer
+    result: link
+    link_kind: build
+    executor: agent
+    agent: cicd-deploy
+
+cicd:
+  teamcity:
+    base_url: https://teamcity.example.com
+    build_type: Project_DeployProduction
+    token_env: AI_TEAM_TEAMCITY_TOKEN
+    branch: main
+    timeout: 30m        # необязательно, по умолчанию 30m, максимум 24h
+    poll_interval: 15s  # необязательно, по умолчанию 15s, от 1s до 10m
+```
+
+Порядок работы этапа:
+
+1. Ожидаемый коммит берётся из controller receipt более раннего PR-этапа
+   (`delivery` + `check: pr_exists`). Без такого этапа выкладка не начинается.
+2. Контроллер делает `git fetch origin <branch>` и через
+   `git merge-base --is-ancestor` проверяет, что именно этот SHA уже входит в
+   ветку. Ответам TeamCity и GitHub это решение не доверяется. Squash- и
+   rebase-merge меняют SHA, поэтому для них проверка не пройдёт — используйте
+   merge commit.
+3. В `build_type` ставится сборка на `branch` с ревизией, закреплённой на этом
+   SHA. Идентификатор сборки записывается в
+   `.ai-team/state/deploy/<run>-<stage>.json`; повтор этапа продолжает ждать
+   ту же сборку или переиспользует успешную, а не ставит новую.
+4. Статус опрашивается раз в `poll_interval`. По истечении `timeout` или при
+   отмене задачи контроллер отменяет сборку в TeamCity.
+5. Этап успешен, только если сборка завершилась `SUCCESS` и TeamCity сообщает
+   ровно ожидаемую ревизию. Ссылка на сборку (`webUrl` на хосте `base_url`)
+   записывается в `<feature>/deploy/build.link` и становится результатом этапа.
+
+При любой ошибке попытка этапа завершается неуспешно, а в поток событий
+задачи пишется предупреждение `integration_error` с `integration: cicd`.
+
+Токен TeamCity хранится только в переменной окружения из `token_env` процесса
+контроллера (`ai-team run` или `ai-team web` без `--worker-command`). Он
+передаётся заголовком `Authorization: Bearer` и не попадает в YAML, evidence,
+события и тексты ошибок; в ошибках нет и URL запросов. `base_url` обязан быть
+`https`, редирект на другой хост или схему не выполняется. Disposable worker
+провайдера не получает: в этом режиме этап `cicd-deploy` завершается ошибкой.
+Таймаут этапа (`stage_timeout`) тоже ограничивает ожидание, поэтому он должен
+быть не меньше `cicd.teamcity.timeout`.
 
 ### Уведомления: webhook, Slack, e-mail
 
@@ -377,6 +437,9 @@ tree_hash:
 | `confirm` | `required` или `auto`; по умолчанию `auto` для `approve`, иначе `required` |
 | `skippable` | можно ли пропустить этап с причиной; по умолчанию `false` |
 | `delivery` | требования delivery для PR-этапа с указанным `agent`: `require_checks` выбирает controller checks проекта, `require_verdicts` — дополнительные verdict stages |
+
+Этап `link_kind: build` с агентом `cicd-deploy` выполняет выкладку силами
+контроллера; см. [выкладку через CI/CD](#выкладка-через-teamcity).
 
 Если указан `executor: agent`, поле `agent` обязательно. Все agent-ссылки,
 включая `check.agent`, проверяются по registry. `required_sections` нельзя

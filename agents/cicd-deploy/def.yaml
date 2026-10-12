@@ -1,0 +1,7 @@
+name: cicd-deploy
+description: Controller-owned выкладка — запускает CI/CD-сборку смёрженного коммита, ждёт результата и сохраняет ссылку на сборку
+runtime: deploy
+kind: deploy
+mutation: external
+outputs:
+  link: '{feature}/deploy/build.link'

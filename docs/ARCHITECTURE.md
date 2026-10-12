@@ -26,6 +26,7 @@ pkg/
 ├── eval/             независимая LLM-оценка артефактов
 ├── notifier/         уведомления: консоль, webhook, Slack, e-mail
 ├── tracker/          one-way task tracker adapters
+├── cicd/             controller-owned CI/CD deploy adapters (TeamCity)
 ├── report/           HTML-отчёты по завершённым run
 ├── ui/               консольный вывод (цвет, progress bar)
 └── web/              HTTP API + SQLite store + StoreRecorder (дашборд)
@@ -148,6 +149,20 @@ evidence. Решения сериализуются in-process mutex и flock н
 поэтому конкурентные CLI/web-решения не теряются. События
 `approval_requested` и `approval_decided` входят и в immutable hash chain,
 и в SQLite/WebSocket projection.
+
+### Выкладка через CI/CD
+
+`pkg/cicd` задаёт интерфейс `Provider` (trigger, status, cancel) и адаптер
+TeamCity REST с bearer-токеном из окружения контроллера. Этап с агентом
+`kind: deploy` (встроенный `cicd-deploy`) исполняется контроллером без
+runtime модели: ожидаемый SHA берётся из controller receipt PR-этапа,
+`git merge-base --is-ancestor` после fetch доказывает, что он смёржен в
+`cicd.teamcity.branch`, затем ставится сборка с закреплённой ревизией и
+ожидается её финальный статус с таймаутом и отменой (часы инжектируются).
+Build ID сохраняется в `.ai-team/state/deploy/`, поэтому повтор не ставит
+вторую сборку. Ссылка на сборку — обычный output попытки; сбой проецируется в
+поток задачи как `integration_error`. Провайдер передаётся в pipeline только
+опцией локального контроллера, поэтому sandboxed worker не получает токен.
 
 ### Односторонние интеграции трекера
 

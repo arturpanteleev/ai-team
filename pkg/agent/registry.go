@@ -117,7 +117,7 @@ func validateDefinition(dirName string, a *Agent) error {
 		}
 	}
 	switch a.Kind {
-	case "", "agent", "delivery":
+	case "", "agent", "delivery", "deploy":
 	default:
 		return fmt.Errorf("агент %s: неизвестный kind %q", dirName, a.Kind)
 	}
@@ -129,8 +129,8 @@ func validateDefinition(dirName string, a *Agent) error {
 	default:
 		return fmt.Errorf("агент %s: неизвестный mutation %q", dirName, a.Mutation)
 	}
-	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Kind == "delivery" {
-		return fmt.Errorf("агент %s: kind delivery не поддерживает read_scope %q", dirName, runtime.ReadScopeInputsOnly)
+	if a.ReadScope == runtime.ReadScopeInputsOnly && (a.Kind == "delivery" || a.Kind == "deploy") {
+		return fmt.Errorf("агент %s: kind %s не поддерживает read_scope %q", dirName, a.Kind, runtime.ReadScopeInputsOnly)
 	}
 	if a.ReadScope == runtime.ReadScopeInputsOnly && a.Mutation != "none" {
 		return fmt.Errorf("агент %s: read_scope %q несовместим с mutation %q", dirName, runtime.ReadScopeInputsOnly, a.Mutation)
@@ -138,8 +138,11 @@ func validateDefinition(dirName string, a *Agent) error {
 	if a.Kind == "delivery" && a.Mutation != "external" {
 		return fmt.Errorf("агент %s: kind delivery требует mutation external", dirName)
 	}
-	if a.Mutation == "external" && a.Kind != "delivery" {
-		return fmt.Errorf("агент %s: mutation external разрешён только для kind delivery", dirName)
+	if a.Kind == "deploy" && a.Mutation != "external" {
+		return fmt.Errorf("агент %s: kind deploy требует mutation external", dirName)
+	}
+	if a.Mutation == "external" && a.Kind != "delivery" && a.Kind != "deploy" {
+		return fmt.Errorf("агент %s: mutation external разрешён только для kind delivery и deploy", dirName)
 	}
 	if a.RequireDiff && a.Mutation != "source" && a.Mutation != "tests" {
 		return fmt.Errorf("агент %s: require_diff требует mutation source или tests", dirName)
@@ -212,6 +215,15 @@ func validateDefinition(dirName string, a *Agent) error {
 			return fmt.Errorf("агент %s: delivery verdict/checks должны быть controller-owned до этапа", dirName)
 		}
 	}
+	if a.Kind == "deploy" {
+		linkPath, exists := a.Outputs["link"]
+		if !exists || path.Ext(linkPath) != ".link" || len(a.Outputs) != 1 {
+			return fmt.Errorf("агент %s: kind deploy требует единственный output link с расширением .link", dirName)
+		}
+		if len(a.Inputs) > 0 || len(a.Preconditions) > 0 || a.Verdict != nil || len(a.Checks) > 0 || a.AskQuestions {
+			return fmt.Errorf("агент %s: kind deploy не принимает inputs, preconditions, verdict, checks и ask_questions", dirName)
+		}
+	}
 	for inputName, contract := range a.Preconditions {
 		if _, exists := a.Inputs[inputName]; !exists {
 			return fmt.Errorf("агент %s: precondition ссылается на неизвестный input %s", dirName, inputName)
@@ -233,6 +245,10 @@ func validateDefinition(dirName string, a *Agent) error {
 	if a.Kind == "delivery" {
 		if a.RuntimeType != "delivery" || a.CLI != "" || a.PromptFile != "" {
 			return fmt.Errorf("агент %s: delivery требует runtime delivery без cli/prompt_file", dirName)
+		}
+	} else if a.Kind == "deploy" {
+		if a.RuntimeType != "deploy" || a.CLI != "" || a.PromptFile != "" {
+			return fmt.Errorf("агент %s: deploy требует runtime deploy без cli/prompt_file", dirName)
 		}
 	} else {
 		if a.RuntimeType != "agentcli" {

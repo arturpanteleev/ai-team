@@ -25,6 +25,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/cicd"
 	"github.com/arturpanteleev/ai-team/pkg/ciimport"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -1328,6 +1329,7 @@ func cmdRun() {
 		defer closeStore()
 	}
 
+	opts = append(opts, deployProviderOptions(cfg)...)
 	p := pipeline.New(cfg, reg, opts...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -2193,10 +2195,12 @@ func cmdWeb() {
 	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
 		fatal("Не удалось безопасно перенести file approvals в web DB: %v", err)
 	}
-	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg,
+	localEngineOptions := append([]pipeline.Option{
 		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
 		pipeline.WithApprovalStore(approvalStore),
-		pipeline.WithControllerReadDenyPaths(*dbPath)))
+		pipeline.WithControllerReadDenyPaths(*dbPath),
+	}, deployProviderOptions(cfg)...)
+	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg, localEngineOptions...))
 	controllerOptions := []control.Option{
 		control.WithApprovalStore(approvalStore),
 		control.WithDeferredDelivery(localEngine.DeliverDeferred),
@@ -2374,4 +2378,22 @@ func reconcileSchedulerQueueOnce(recorderStore *webstore.Store, schedulerQueue *
 			srv.RecordQueueStatus(job.ID, string(job.Status), job.Error)
 		}
 	}
+}
+
+// deployProviderOptions builds the controller-owned CI/CD provider from the
+// project template and the controller's environment. Sandboxed workers never
+// call it, so provider credentials stay in the controller process. A
+// misconfiguration is reported once; a deploy stage then fails closed.
+func deployProviderOptions(cfg *config.Config) []pipeline.Option {
+	if cfg == nil || cfg.CICD == nil || cfg.CICD.TeamCity == nil {
+		return nil
+	}
+	settings := cfg.CICD.TeamCity
+	provider, err := cicd.NewTeamCity(cicd.TeamCitySettings{BaseURL: settings.BaseURL, BuildType: settings.BuildType},
+		os.Getenv(settings.TokenEnv), nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s CI/CD TeamCity недоступен (token из %s): %v\n", ui.Colorize("⚠", ui.ColorYellow), settings.TokenEnv, err)
+		return nil
+	}
+	return []pipeline.Option{pipeline.WithDeployProvider(provider)}
 }

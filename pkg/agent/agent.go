@@ -36,6 +36,12 @@ type Agent struct {
 	Checks    []checks.Definition `yaml:"checks,omitempty"`
 }
 
+// ControllerOperation reports whether the stage is executed by the controller
+// itself (delivery or CI/CD deploy) without a model runtime.
+func (a *Agent) ControllerOperation() bool {
+	return a != nil && (a.Kind == "delivery" || a.Kind == "deploy")
+}
+
 // EffectiveTestModifyPolicy возвращает фактическую политику мутаций тестов:
 // явное значение в def.yaml либо default — required для source-агентов
 // (fail-closed, V0-1), off для остальных.

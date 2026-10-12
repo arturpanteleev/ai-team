@@ -466,7 +466,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load historical stage %s: %w", attempt.Stage, err)
 			}
-			if definition.Kind != "delivery" {
+			if !definition.ControllerOperation() {
 				usageUnknown = true
 			}
 		}
@@ -479,7 +479,7 @@ func replayedStageResults(run evidence.ReplayedRun, runDir string, source eviden
 			if err != nil {
 				return nil, runtime.Usage{}, false, fmt.Errorf("load interrupted stage %s: %w", attempt.Stage, err)
 			}
-			if definition.Kind != "delivery" {
+			if !definition.ControllerOperation() {
 				usageUnknown = true
 			}
 		}

@@ -127,6 +127,7 @@ type Pipeline struct {
 	deployProvider          cicd.Provider
 	deployClock             cicd.Clock
 	deployRunner            delivery.CommandRunner
+	deployGitRunner         delivery.CommandRunner
 	approvals               ApprovalStore
 	lifecycle               lifecycle.StorePort
 	evidence                EvidenceStoreFactory

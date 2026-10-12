@@ -111,12 +111,13 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 		}
 		build, err = provider.Trigger(ctx, TriggerRequest{CommitSHA: proof.DeploySHA, Branch: request.Merge.Branch})
 		if err != nil {
-			if IsTransient(err) || ctx.Err() != nil {
-				// No definite answer: the build may exist. Keep the marker and
-				// never present the failure as retryable.
+			if !IsDefiniteRejection(err) {
+				// No explicit refusal (network error, 5xx, 408/429, or a 2xx
+				// answer that could not be read): the build may exist. Keep the
+				// marker and never present the failure as retryable.
 				return Build{}, fmt.Errorf("deploy trigger outcome unknown: %v", err)
 			}
-			// TeamCity answered and rejected the request: nothing was queued.
+			// TeamCity explicitly refused the request: nothing was queued.
 			if clearErr := writeReceipt(request, provider.Name(), proof, Build{}, false); clearErr != nil {
 				return Build{}, errors.Join(err, clearErr)
 			}

@@ -45,6 +45,30 @@ type TransientError struct{ Err error }
 func (e *TransientError) Error() string { return e.Err.Error() }
 func (e *TransientError) Unwrap() error { return e.Err }
 
+// HTTPStatusError is a provider answer with a non-2xx status. It carries only
+// the method, API path and status code.
+type HTTPStatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s returned HTTP %d", e.Method, e.Path, e.StatusCode)
+}
+
+// IsDefiniteRejection reports whether the provider explicitly refused the
+// request, so it had no effect: HTTP 4xx except 408 and 429. Everything else,
+// including a 2xx answer that could not be read, leaves the outcome unknown.
+func IsDefiniteRejection(err error) bool {
+	var status *HTTPStatusError
+	if !errors.As(err, &status) {
+		return false
+	}
+	return status.StatusCode >= 400 && status.StatusCode < 500 &&
+		status.StatusCode != 408 && status.StatusCode != 429
+}
+
 // IsTransient reports whether err may be retried by a status poll.
 func IsTransient(err error) bool {
 	var transient *TransientError

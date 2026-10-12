@@ -20,15 +20,20 @@ different base branch, a PR outside the repository captured at run start
 (`TaskRepository`) or a `headRefOid` other than the published commit is
 rejected. The branch tip comes from `gh api repos/<o>/<r>/branches/<b>` for the
 captured repository: a checkout-local `url.*.insteadOf` cannot redirect it.
-`git fetch <captured repository URL> refs/heads/<b>` must then make that exact
-object available; since objects are content-addressed, a redirected fetch can
-only fail, not substitute the tip. Git runs with `GIT_CONFIG_NOSYSTEM`,
-`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_REPLACE_OBJECTS` and an empty graft
-file. GitHub only names the merge commit; Git decides: the merge commit must
+All Git work happens in a private temporary bare repository (`GIT_DIR` in the
+system temp directory, removed afterwards) that fetches
+`refs/heads/<b>` and `refs/pull/<n>/head` from the captured repository URL; the
+fetched objects must include that exact tip. Nothing in the agent-writable
+checkout is read. Git runs with `GIT_CONFIG_NOSYSTEM`,
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_REPLACE_OBJECTS`, an empty graft file,
+inherited `GIT_*` location/config variables removed, and `GIT_CONFIG_COUNT`
+entries `credential.helper=` (reset), `credential.helper=!gh auth git-credential`,
+`core.commitGraph=false` and `core.hooksPath=/dev/null`. Private repositories
+therefore authenticate with the controller's gh login only. GitHub only names the merge commit; Git decides: the merge commit must
 exist and be an ancestor of the tip, and it must
 contain the PR change: either the PR head is its ancestor (merge commit,
 fast-forward) or `git diff <merge>^1 <merge>` equals `git diff <base> <prHead>`
-with `base = git merge-base <prHead> <merge>^1`, built with `--no-textconv --no-ext-diff --binary` and
+with `base = git merge-base <prHead> <merge>^1`, built with `--no-textconv --no-ext-diff --binary --ignore-submodules=none` and
 explicit context, rename, prefix and algorithm options, compared after dropping
 hunk line numbers and `index` lines (the normalization of `git patch-id`). The base
 is computed by Git rather than read from the delivery plan's `baseline_head`,
@@ -63,8 +68,9 @@ build, wrong revision, misconfiguration) mark the attempt as validation failure;
 transport errors and timeouts are infra failures. Each failure is projected to
 the task event feed as `integration_error` with `integration: cicd`.
 
-Before a trigger the receipt records `trigger_pending`. A definite rejection
-from TeamCity clears it; a lost response keeps it, and the next attempt refuses
+Before a trigger the receipt records `trigger_pending`. Only a definite
+rejection (`HTTPStatusError` 4xx except 408/429) clears it; a lost, unreadable
+or 5xx response keeps it, and the next attempt refuses
 to trigger until an operator checks TeamCity and removes the receipt. Trigger
 failures are never treated as retryable.
 

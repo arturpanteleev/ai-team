@@ -9,14 +9,17 @@ receipt of an earlier PR delivery stage. The controller MUST wait, bounded by
 `merge_timeout`, until GitHub reports the pull request as merged into the
 configured branch, the PR belongs to the repository captured at run start and
 its head is the commit the controller published. The branch tip MUST come from
-the GitHub API for that repository, and the controller MUST fetch from that
-repository's URL, never through the checkout's remotes, and require the tip
-object locally. GitHub only names the merge commit; local Git MUST prove that
+the GitHub API for that repository. The controller MUST perform the proof in a
+private temporary repository that fetches the branch and the PR head from that
+repository's URL with only an explicitly configured credential helper, never
+through the checkout, and MUST require the tip object among the fetched
+objects. GitHub only names the merge commit; local Git MUST prove that
 the merge commit is reachable from the tip and contains the pull request
 change: either the PR head is its ancestor, or its own diff, built without
-textconv or external diff drivers, equals the PR diff against their merge base
+textconv, external diff drivers or ignored submodules, equals the PR diff against their merge base
 ignoring line numbers. Checkout Git configuration (URL rewrites, attributes,
-replace refs, grafts) MUST NOT change this decision. The deploy stage MUST use
+credential helpers, submodule settings, replace refs, grafts, commit-graph)
+MUST NOT change this decision or run commands in the controller. The deploy stage MUST use
 its own time budget covering the merge wait and the build wait instead of the
 generic stage timeout. The deployed revision MUST be the fetched branch tip, never the
 PR head, so that changes merged after the PR are not rolled back. Existing
@@ -36,6 +39,12 @@ templates without such a stage MUST keep their behavior.
   of a squash commit
 - **THEN** the deployed revision MUST remain the tip reported by GitHub
 - **AND** the squash commit with extra content MUST be rejected
+
+#### Scenario: Private repository
+
+- **WHEN** the task repository requires authentication
+- **THEN** the fetch MUST authenticate only through the explicit credential
+  helper, and helpers from global or checkout configuration MUST NOT run
 
 #### Scenario: The pull request is not merged or does not match
 
@@ -63,8 +72,10 @@ deadline. A retried stage for the same run, stage and revision MUST resume or
 reuse the recorded build instead of triggering another one, and MUST re-read
 that build from the provider instead of trusting the stored receipt; a receipt
 of another run or stage MUST be rejected. The controller MUST record a pending
-trigger before triggering; when the trigger outcome is unknown, a retry MUST
-refuse to trigger again until an operator resolves it. Every failure MUST be recorded as an
+trigger before triggering and clear it only when the provider explicitly
+refused the request (HTTP 4xx except 408 and 429). For any other outcome,
+including a 2xx answer that cannot be read, a retry MUST refuse to trigger again
+until an operator resolves it. Every failure MUST be recorded as an
 `integration_error` task event with `integration: cicd`.
 
 #### Scenario: Build succeeds

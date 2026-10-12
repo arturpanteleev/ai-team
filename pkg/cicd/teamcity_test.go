@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -81,6 +83,14 @@ func (f *fakeTeamCity) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		case "reject":
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		case "garbage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"state":`))
+			return
+		case "noid":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"queued"}`))
 			return
 		}
 		f.writeBuild(w, map[string]any{"state": "queued"})
@@ -404,6 +414,8 @@ func (r *gitRepo) prBranch(content string) string {
 	r.t.Helper()
 	r.git(r.work, "checkout", "-qb", "ai-team/feat", "main")
 	head := r.commitFile("feature.txt", content, "P")
+	// GitHub keeps refs/pull/<n>/head; the deploy proof fetches it.
+	r.git(r.work, "push", "-q", "origin", "ai-team/feat:refs/pull/1/head")
 	r.git(r.work, "checkout", "-q", "main")
 	return head
 }
@@ -451,7 +463,7 @@ func (r *gitRepo) gh(prHead string, views ...string) *ghStub {
 }
 
 func (r *gitRepo) request(prHead string) MergeRequest {
-	return MergeRequest{RepositoryDir: r.work, Repository: "github.example/org/repo", FetchURL: r.remote, Branch: "main",
+	return MergeRequest{Repository: "github.example/org/repo", FetchURL: r.remote, Branch: "main",
 		PRURL: "https://github.example/org/repo/pull/1", PRHead: prHead}
 }
 
@@ -752,5 +764,141 @@ func TestDeployKeepsPendingTriggerWhenOutcomeIsUnknown(t *testing.T) {
 	rejected.mu.Unlock()
 	if build, err := Deploy(context.Background(), rejected.provider(t), request); err != nil || build.Status != StatusSuccess {
 		t.Fatalf("a definite trigger rejection must allow a retry: %+v %v", build, err)
+	}
+}
+
+func TestDeployKeepsPendingTriggerAfterUnreadableAcceptedResponse(t *testing.T) {
+	for _, mode := range []string{"garbage", "noid"} {
+		t.Run(mode, func(t *testing.T) {
+			repo, prHead, tip := mergedRepo(t)
+			fake := newFakeTeamCity(t, finished("SUCCESS", tip))
+			fake.triggerMode = mode
+			request := DeployRequest{RunID: "run-1", Stage: "deploy", Merge: repo.request(prHead), Runner: repo.gh(prHead, merged(tip)),
+				ReceiptPath: filepath.Join(t.TempDir(), "receipt.json"), Wait: waitOptions(&fakeClock{})}
+			if _, err := Deploy(context.Background(), fake.provider(t), request); err == nil || !strings.Contains(err.Error(), "outcome unknown") {
+				t.Fatalf("2xx with unreadable body must leave the outcome unknown, got %v", err)
+			}
+			fake.mu.Lock()
+			fake.triggerMode = ""
+			fake.mu.Unlock()
+			if _, err := Deploy(context.Background(), fake.provider(t), request); !errors.Is(err, ErrDeployRejected) || !strings.Contains(err.Error(), "unknown outcome") {
+				t.Fatalf("retry must be refused, got %v", err)
+			}
+			if triggers, _ := fake.snapshot(); len(triggers) != 1 {
+				t.Fatalf("an accepted trigger must never be repeated, got %d", len(triggers))
+			}
+		})
+	}
+	for status, definite := range map[int]bool{400: true, 403: true, 404: true, 408: false, 429: false, 500: false, 503: false} {
+		err := fmt.Errorf("teamcity %w", &HTTPStatusError{Method: "POST", Path: "/app/rest/buildQueue", StatusCode: status})
+		if IsDefiniteRejection(err) != definite {
+			t.Fatalf("HTTP %d definite=%v", status, !definite)
+		}
+	}
+	if IsDefiniteRejection(errors.New("decode teamcity response: invalid JSON")) {
+		t.Fatal("an unreadable 2xx answer is not a rejection")
+	}
+}
+
+func TestIsolatedGitEnvironment(t *testing.T) {
+	env := strings.Join(isolatedGitEnv("/tmp/x.git", "!helper"), "\n")
+	for _, want := range []string{
+		"GIT_DIR=/tmp/x.git", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS=1", "GIT_GRAFT_FILE=" + os.DevNull,
+		"GIT_CONFIG_KEY_0=credential.helper\nGIT_CONFIG_VALUE_0=\n",
+		"GIT_CONFIG_KEY_1=credential.helper\nGIT_CONFIG_VALUE_1=!helper",
+		"=core.commitGraph\n", "core.hooksPath",
+	} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("isolated git environment lacks %q:\n%s", want, env)
+		}
+	}
+	if !strings.Contains(strings.Join(diffArgs, " "), "--ignore-submodules=none") || !strings.Contains(strings.Join(diffArgs, " "), "--no-textconv") {
+		t.Fatalf("diff options are not pinned: %v", diffArgs)
+	}
+}
+
+// newAuthGitServer serves bare repositories under root through git
+// http-backend behind HTTP basic auth, like a private GitHub repository.
+func newAuthGitServer(t *testing.T, root string) *httptest.Server {
+	t.Helper()
+	execPath, err := exec.Command("git", "--exec-path").Output()
+	if err != nil {
+		t.Skip("git exec path is unavailable")
+	}
+	backend := filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend")
+	if _, err := os.Stat(backend); err != nil {
+		t.Skip("git http-backend is unavailable")
+	}
+	handler := &cgi.Handler{Path: backend, Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "deploy" || password != "s3cret" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestResolveMergedDeployPrivateRepositoryUsesExplicitHelperOnly(t *testing.T) {
+	repo, prHead, tip := mergedRepo(t)
+	server := newAuthGitServer(t, filepath.Dir(repo.remote))
+	marker := filepath.Join(t.TempDir(), "foreign-helper-ran")
+	// A helper in the controller's global Git config and one in the checkout
+	// must never run: only the explicitly passed helper may answer.
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	foreign := "!f() { touch " + marker + "; echo username=deploy; echo password=s3cret; }; f"
+	if err := os.WriteFile(global, []byte("[credential]\n\thelper = \""+foreign+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	repo.git(repo.work, "config", "credential.helper", foreign)
+
+	request := repo.request(prHead)
+	request.FetchURL = server.URL + "/" + filepath.Base(repo.remote)
+	request.CredentialHelper = "!f() { echo username=deploy; echo password=s3cret; }; f"
+	proof, err := ResolveMergedDeploy(context.Background(), repo.gh(prHead, merged(tip)), request)
+	if err != nil || proof.DeploySHA != tip {
+		t.Fatalf("private fetch with the explicit helper: %+v %v", proof, err)
+	}
+	request.CredentialHelper = "!true"
+	if _, err := ResolveMergedDeploy(context.Background(), repo.gh(prHead, merged(tip)), request); err == nil || !IsTransient(err) {
+		t.Fatalf("fetch without credentials must fail, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("a credential helper from the global or checkout config was executed")
+	}
+}
+
+func TestResolveMergedDeployIgnoresCheckoutReplaceAndSubmoduleConfig(t *testing.T) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	tip := repo.commitFile("y.txt", "Y\n", "Y")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	// In the checkout, graft prHead into main's history: with replace refs
+	// honored, the PR head would look merged.
+	repo.git(repo.work, "replace", "--graft", tip, tip+"^", prHead)
+	if _, err := ResolveMergedDeploy(context.Background(), repo.gh(prHead, merged(prHead)), repo.request(prHead)); !errors.Is(err, ErrDeployRejected) {
+		t.Fatalf("checkout replace refs must not prove a merge, got %v", err)
+	}
+
+	// A squash that also moves a submodule pointer must be rejected even if
+	// the checkout ignores submodules in diffs.
+	repo.git(repo.work, "config", "diff.ignoreSubmodules", "all")
+	if err := os.WriteFile(filepath.Join(repo.work, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo.git(repo.work, "add", "feature.txt")
+	repo.git(repo.work, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("c", 40)+",vendor/lib")
+	repo.git(repo.work, "commit", "-qm", "squash P with submodule bump")
+	squash := repo.git(repo.work, "rev-parse", "HEAD")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	_, err := ResolveMergedDeploy(context.Background(), repo.gh(prHead, merged(squash)), repo.request(prHead))
+	if !errors.Is(err, ErrDeployRejected) || !strings.Contains(err.Error(), "exactly the pull request change") {
+		t.Fatalf("squash with an extra submodule change must be rejected, got %v", err)
 	}
 }

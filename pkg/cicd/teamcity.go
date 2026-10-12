@@ -279,7 +279,7 @@ func (t *TeamCity) requestJSON(ctx context.Context, method, path string, request
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, teamCityResponseLimit))
-		statusErr := fmt.Errorf("teamcity %s %s returned HTTP %d", method, path, response.StatusCode)
+		statusErr := fmt.Errorf("teamcity %w", &HTTPStatusError{Method: method, Path: path, StatusCode: response.StatusCode})
 		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
 			return &TransientError{Err: statusErr}
 		}

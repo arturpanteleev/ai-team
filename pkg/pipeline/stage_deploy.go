@@ -34,7 +34,10 @@ func WithDeployClock(clock cicd.Clock) Option {
 // WithDeployCommandRunner replaces the Git runner used to prove that the
 // deployed commit is merged (tests).
 func WithDeployCommandRunner(runner delivery.CommandRunner) Option {
-	return func(p *Pipeline) { p.deployRunner = runner }
+	return func(p *Pipeline) {
+		p.deployRunner = runner
+		p.deployGitRunner = runner
+	}
 }
 
 // runControllerDeploy is the body of a kind=deploy stage. The controller, not
@@ -97,8 +100,10 @@ func (rs *runState) runControllerDeploy(ctx context.Context, name, attemptID str
 	build, err := cicd.Deploy(ctx, provider, cicd.DeployRequest{
 		RunID: rs.runID, Stage: name,
 		Merge: cicd.MergeRequest{
-			RepositoryDir: rs.runCfg.TargetDir, Repository: rs.taskRepository, FetchURL: fetchURL, Branch: settings.Branch,
-			PRURL: receipt.PRURL, PRHead: prHead,
+			Repository: rs.taskRepository, FetchURL: fetchURL, Branch: settings.Branch,
+			PRURL: receipt.PRURL, PRHead: prHead, DropEnv: []string{settings.TokenEnv},
+			// nil outside tests: Git then runs in an isolated temporary repository.
+			GitRunner: rs.p.deployGitRunner,
 		},
 		ReceiptPath: filepath.Join(stateDir, rs.runID+"-"+name+".json"),
 		Runner:      runner,

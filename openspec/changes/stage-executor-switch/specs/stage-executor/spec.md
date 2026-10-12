@@ -87,6 +87,10 @@ stage with the source agent attempt ID in its evidence manifest and emit
 The pipeline MUST retry an ambiguous `agent_finished` append only after
 checking the event log for the exact event. Strict replay MUST reject a finished
 agent attempt that has `agent_started` but no matching `agent_finished` event.
+Worker append validation MUST allow a candidate `attempt_finished` to leave the
+matching agent attempt's `agent_finished` pending only while validating that
+candidate as the last event. This append-boundary exception MUST NOT weaken
+strict replay.
 Resume preflight MUST reconcile the single durable crash window where
 `attempt_finished` was appended before the process stopped, by reconstructing
 and appending the matching `agent_finished` from the verified attempt and
@@ -98,10 +102,19 @@ start events before strict replay.
   was not recorded
 - **THEN** the pipeline retries the append and keeps exactly one matching event
 
-#### Scenario: Replay encounters a missing agent completion event
+#### Scenario: Append validation permits the pending completion event
 
-- **WHEN** an agent attempt has both `agent_started` and `attempt_finished` but
-  no matching `agent_finished`
+- **WHEN** worker append validation receives an `attempt_finished` candidate
+  for an agent attempt whose matching `agent_started` is already in the log and
+  whose `agent_finished` has not yet been appended
+- **THEN** it accepts the pending completion only for that candidate attempt
+- **AND** strict replay still rejects the log until its matching
+  `agent_finished` is appended
+
+#### Scenario: Strict replay encounters a missing agent completion event
+
+- **WHEN** strict replay reads an event log where an agent attempt has both
+  `agent_started` and `attempt_finished` but no matching `agent_finished`
 - **THEN** replay fails closed instead of accepting the attempt as complete
 
 #### Scenario: Resume recovers a crash between attempt and agent completion

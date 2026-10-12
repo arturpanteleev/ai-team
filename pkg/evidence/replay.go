@@ -25,6 +25,7 @@ const StageSkipProtocolVersion = 1
 type ReplayedRun struct {
 	RunID             string                     `json:"run_id"`
 	StartedAt         time.Time                  `json:"started_at"`
+	Mode              string                     `json:"mode,omitempty"`
 	FinishedAt        time.Time                  `json:"finished_at,omitempty"`
 	Status            workflow.RunOutcome        `json:"status,omitempty"`
 	Attempts          []ReplayedAttempt          `json:"attempts"`
@@ -285,10 +286,11 @@ func replayEventsWithAttemptManifestSourceAndTargetModeWithPending(events []Even
 	agentFinishedEvents := make(map[string]bool)
 	attemptFinishedEvents := make(map[string]bool)
 	stageSkippedAttempts := make(map[string]bool)
+	autoCheckRetries := make(map[string]bool)
 	finishedCount := 0
 	terminal := false
 	canceled := false
-	for _, event := range events {
+	for eventIndex, event := range events {
 		if terminal {
 			return ReplayedRun{}, fmt.Errorf("event %d occurs after run_finished", event.Sequence)
 		}
@@ -297,6 +299,11 @@ func replayEventsWithAttemptManifestSourceAndTargetModeWithPending(events []Even
 			if event.Sequence != 1 || !result.StartedAt.IsZero() {
 				return ReplayedRun{}, fmt.Errorf("run_started must be the first unique event")
 			}
+			mode, modeErr := eventString(event.Data, "mode", false)
+			if modeErr != nil || (mode != "" && mode != "auto") {
+				return ReplayedRun{}, fmt.Errorf("run_started mode is invalid")
+			}
+			result.Mode = mode
 			result.StartedAt = event.Timestamp
 		case "attempt_started":
 			if result.StartedAt.IsZero() || !safeEventIdentifier(event.AttemptID) || strings.TrimSpace(event.Stage) == "" || event.Timestamp.Before(result.StartedAt) {
@@ -712,6 +719,28 @@ func replayEventsWithAttemptManifestSourceAndTargetModeWithPending(events []Even
 			if policyErr != nil || (policy != "off" && policy != "required" && policy != "warn") || !exists || result.Attempts[index].Stage != event.Stage {
 				return ReplayedRun{}, errors.New("test_mutations не соответствует attempt")
 			}
+		case "auto_check_retry":
+			index, exists := byID[event.AttemptID]
+			path, pathErr := eventString(event.Data, "report_path", true)
+			digest, digestErr := eventString(event.Data, "report_sha256", true)
+			retry, retryErr := eventInt(event.Data, "retry")
+			key := event.Stage + "\x00" + event.AttemptID
+			matchedFailure := false
+			for _, previous := range events[:eventIndex] {
+				previousPath, _ := previous.Data["report_path"].(string)
+				previousDigest, _ := previous.Data["report_sha256"].(string)
+				if (previous.Type == "check_failed" || previous.Type == "check_error") &&
+					previous.Stage == event.Stage && previous.AttemptID == event.AttemptID &&
+					previousPath == path && previousDigest == digest {
+					matchedFailure = true
+				}
+			}
+			if !exists || result.Attempts[index].Stage != event.Stage || result.Attempts[index].FinishedAt.IsZero() ||
+				pathErr != nil || digestErr != nil || retryErr != nil || retry != 1 || !validSHA256(digest) ||
+				!matchedFailure || autoCheckRetries[key] || event.Timestamp.Before(result.Attempts[index].FinishedAt) {
+				return ReplayedRun{}, errors.New("auto_check_retry does not match a failed check attempt")
+			}
+			autoCheckRetries[key] = true
 		case "resume_blocked":
 			reason, reasonErr := eventString(event.Data, "reason", true)
 			if reasonErr != nil || strings.TrimSpace(reason) == "" {

@@ -26,6 +26,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/prchecks"
 	"github.com/arturpanteleev/ai-team/pkg/provenance"
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -135,6 +136,7 @@ type Pipeline struct {
 	attemptManifestSource   evidence.AttemptManifestSource
 	attemptManifestWriter   AttemptManifestWriter
 	eventLogSource          evidence.EventLog
+	prStageChecks           PRStageChecks
 	deliveryApprovalHash    string
 	questionAnswerInputs    QuestionAnswerInputProvider
 	controllerReadDenyPaths []string
@@ -270,6 +272,12 @@ func WithAttemptManifestStore(source evidence.AttemptManifestSource, writer Atte
 	}
 }
 
+// WithPRStageChecks injects the controller-side PR diff and project-check
+// boundary. Production uses the gh/git-backed prchecks.Runner.
+func WithPRStageChecks(checks PRStageChecks) Option {
+	return func(p *Pipeline) { p.prStageChecks = checks }
+}
+
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 	if cfg == nil {
 		cfg = config.Default()
@@ -289,6 +297,9 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 	}
 	if p.delivery == nil {
 		p.delivery = delivery.NewController()
+	}
+	if p.prStageChecks == nil {
+		p.prStageChecks = prchecks.Runner{}
 	}
 	if p.evidence == nil {
 		p.evidence = filesystemEvidenceStoreFactory{}
@@ -337,6 +348,8 @@ func (p *Pipeline) Agents() []string {
 // переиспользовать для нескольких запусков).
 type runState struct {
 	p                         *Pipeline
+	taskRepository            string
+	taskRepositoryErr         string
 	runCfg                    RunConfig
 	task                      *runtime.Task
 	reportsDir                string
@@ -531,6 +544,9 @@ func (p *Pipeline) Run(ctx context.Context, runCfg RunConfig) error {
 }
 
 func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResult, error) {
+	if runCfg.Mode != "" && runCfg.Mode != "auto" {
+		return RunResult{}, fmt.Errorf("unsupported run mode %q", runCfg.Mode)
+	}
 	approvePlanExplicit := strings.TrimSpace(runCfg.ApprovePlanHash) != ""
 	if err := p.cfg.Validate(p.reg); err != nil {
 		return RunResult{}, err
@@ -802,6 +818,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	var replayedRun evidence.ReplayedRun
 	var resumeInvalidated []string
 	var resumeMutations []string
+	// taskRepository is the PR-check repository identity captured before any
+	// agent runs; a resumed run reuses the value recorded in run.json.
+	var taskRepository, taskRepositoryErr string
 	attemptOrdinal := 0
 	if runCfg.ResumeRunID != "" {
 		var manifest evidence.RunManifest
@@ -833,7 +852,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if err != nil {
 			return RunResult{}, fmt.Errorf("resume evidence run: %w", err)
 		}
+		if replayedRun.Mode != "" {
+			if runCfg.Mode != "" && runCfg.Mode != replayedRun.Mode {
+				return RunResult{}, fmt.Errorf("resume run: mode %q conflicts with recorded mode %q", runCfg.Mode, replayedRun.Mode)
+			}
+			runCfg.Mode = replayedRun.Mode
+		}
 		taskCreatedAt = manifest.StartedAt
+		taskRepository = manifest.TaskRepository
+		if taskRepository == "" {
+			taskRepositoryErr = "run was started without a captured GitHub task repository"
+		}
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
@@ -1153,15 +1182,32 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if marshalErr != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("provenance manifest: %w", marshalErr)
 		}
+		if repository, repositoryErr := p.prStageChecks.TaskRepository(ctx, runCfg.TargetDir); repositoryErr == nil {
+			taskRepository = repository
+		} else {
+			// Non-GitHub targets are valid runs; only PR rules fail closed later.
+			taskRepositoryErr = repositoryErr.Error()
+		}
 		evidenceStore, err = p.startEvidence(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
 			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
+			TaskRepository: taskRepository,
 			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot, Provenance: provenanceData,
 		})
 		if err != nil {
 			return RunResult{}, fmt.Errorf("создание evidence run: %w", err)
 		}
-		if err := evidenceStore.Append(evidence.Event{Type: "run_started", Timestamp: runStartedAt}); err != nil {
-			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("запись run_started: %w", err)
+		started := evidence.Event{Type: "run_started", Timestamp: runStartedAt}
+		if runCfg.Mode == "auto" {
+			started.Data = map[string]any{"mode": "auto"}
+		}
+		var startErr error
+		if runCfg.Mode == "auto" {
+			startErr = evidenceStore.AppendControllerEvent(started)
+		} else {
+			startErr = evidenceStore.Append(started)
+		}
+		if startErr != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("запись run_started: %w", startErr)
 		}
 		configDigest := sha256.Sum256(configSnapshot)
 		workflowDigest := sha256.Sum256(workflowSnapshot)
@@ -1178,6 +1224,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if err != nil {
 			return RunResult{}, fmt.Errorf("чтение созданного lifecycle state: %w", err)
 		}
+	}
+	if runCfg.Mode == "auto" {
+		// Auto mode treats ordinary graph confirmations as automatic. The
+		// approval layer still keeps question answers and the agreed-spec
+		// checkpoint human, while delivery-plan approval is separate and stays
+		// explicitly human.
+		runCfg.ApproveGates = true
 	}
 	briefStore := p.briefs
 	if briefStore == nil {
@@ -1271,9 +1324,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 
 	rs := &runState{
-		p:        p,
-		runCfg:   runCfg,
-		replayed: replayedRun,
+		p:                 p,
+		runCfg:            runCfg,
+		replayed:          replayedRun,
+		taskRepository:    taskRepository,
+		taskRepositoryErr: taskRepositoryErr,
 		task: &runtime.Task{
 			Feature:      runCfg.Feature,
 			TaskDesc:     runCfg.TaskDesc,

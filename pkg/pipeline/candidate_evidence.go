@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +17,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/prchecks"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/stagecheck"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // candidate_evidence.go — controller-owned evidence о кандидате:
@@ -466,12 +474,189 @@ func (rs *runState) prepareControllerStageEvidence(ctx context.Context, stage st
 		resolved := filepath.ToSlash(runtime.ReplaceVars(declaredPath, rs.runCfg.Feature))
 		switch {
 		case inputName == "candidate" && strings.HasSuffix(resolved, "/.control/review-candidate.json"):
-			return rs.writeCandidateEvidence(ctx, "review-candidate.json", "semantic_code_review")
+			if err := rs.writeCandidateEvidence(ctx, "review-candidate.json", "semantic_code_review"); err != nil {
+				return err
+			}
 		case inputName == "reviewed-candidate" && strings.HasSuffix(resolved, "/.control/review-candidate.json"):
 			return rs.verifyCandidateEvidence("review-candidate.json", "semantic_code_review")
 		case inputName == "candidate" && strings.HasSuffix(resolved, "/.control/verification-candidate.json"):
 			return rs.writeCandidateEvidence(ctx, "verification-candidate.json", "final_verification")
 		}
+	}
+	stageDef, ok := rs.p.templateStage(stage)
+	if !ok || stageDef.Function != "reviewer" || stageDef.Result != "md" || definition.Name != "reviewer" {
+		return nil
+	}
+	return rs.preparePRDiffInput(ctx, stage)
+}
+
+func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string) error {
+	if rs.p.prStageChecks == nil {
+		return errors.New("controller PR checks are not configured")
+	}
+	var reference string
+	foundPRResult := false
+	var prStage config.TemplateStage
+	var prResult notifier.StageResult
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		result := rs.results[index]
+		if result.Superseded || result.Status != notifier.StatusPassed || result.State.Outcome != workflow.OutcomePassed {
+			continue
+		}
+		stage, ok := rs.p.templateStage(result.Name)
+		if !ok || stage.Result != "link" || stage.LinkKind != "pr" {
+			continue
+		}
+		foundPRResult = true
+		_, reference = rs.stageCheckInputs(stage, result)
+		if strings.TrimSpace(reference) != "" {
+			prStage, prResult = stage, result
+			break
+		}
+	}
+	if strings.TrimSpace(reference) == "" {
+		if !foundPRResult {
+			return nil
+		}
+		return fmt.Errorf("PR reviewer %s has no successful preceding PR result", reviewerStage)
+	}
+	expected, err := rs.prIdentityFromAcceptedChecks(prStage, prResult)
+	if err != nil {
+		return fmt.Errorf("load accepted PR identity for reviewer %s: %w", reviewerStage, err)
+	}
+	repository, err := rs.prTaskRepository()
+	if err != nil {
+		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
+	}
+	diff, pull, err := rs.p.prStageChecks.DiffIdentity(ctx, rs.runCfg.TargetDir, repository, reference, expected)
+	if err != nil {
+		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
+	}
+	digest := sha256.Sum256(diff)
+	digestHex := hex.EncodeToString(digest[:])
+	directory, err := safeio.EnsureDir(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID, "pr-review")
+	if err != nil {
+		return fmt.Errorf("prepare PR review inputs: %w", err)
+	}
+	diffPath := filepath.Join(directory, digestHex+".patch")
+	if err := writeImmutablePRReviewFile(diffPath, diff, maxArtifactFileBytes); err != nil {
+		return fmt.Errorf("persist PR diff input: %w", err)
+	}
+	identity, err := json.MarshalIndent(pull, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode PR identity: %w", err)
+	}
+	identity = append(identity, '\n')
+	identityDigest := sha256.Sum256(identity)
+	identityPath := filepath.Join(directory, hex.EncodeToString(identityDigest[:])+".json")
+	if err := writeImmutablePRReviewFile(identityPath, identity, 64<<10); err != nil {
+		return fmt.Errorf("persist PR identity input: %w", err)
+	}
+	filtered := rs.extraInputs[reviewerStage][:0]
+	for _, artifact := range rs.extraInputs[reviewerStage] {
+		if artifact.Name != "pr-diff" && artifact.Name != "pr-identity" {
+			filtered = append(filtered, artifact)
+		}
+	}
+	rs.extraInputs[reviewerStage] = filtered
+	rs.extraInputs[reviewerStage] = append(rs.extraInputs[reviewerStage], []runtime.Artifact{
+		{Name: "pr-diff", Path: diffPath, Size: int64(len(diff)), ModTime: time.Unix(0, 0).UTC()},
+		{Name: "pr-identity", Path: identityPath, Size: int64(len(identity)), ModTime: time.Unix(0, 0).UTC()},
+	}...)
+	return nil
+}
+
+func (rs *runState) prIdentityFromAcceptedChecks(stage config.TemplateStage, result notifier.StageResult) (*prchecks.PullRequest, error) {
+	if stage.Check == nil {
+		return nil, nil
+	}
+	projectRules := false
+	for _, rule := range stage.Check.Rules {
+		if rule == "project_checks" || rule == "pr_checks_green" {
+			projectRules = true
+			break
+		}
+	}
+	if !projectRules {
+		return nil, nil
+	}
+	if result.AttemptID == "" {
+		return nil, errors.New("PR stage with project checks has no attempt identity")
+	}
+	applied, found, err := rs.replayedStageCheck(stage.ID, result.AttemptID)
+	if err != nil {
+		return nil, err
+	}
+	if !found || applied.Status != stagecheck.StatusPassed {
+		return nil, errors.New("accepted PR stage has no passing durable project-check report")
+	}
+	path, err := safeCheckReportPath(rs.task.ArtifactRoot, applied.ReportPath)
+	if err != nil {
+		return nil, err
+	}
+	data, err := safeio.ReadRegularFile(path, maxCheckReportBytes)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != applied.ReportSHA {
+		return nil, errors.New("project-check report digest mismatch")
+	}
+	const marker = "<!-- pr-identity: "
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, marker) || !strings.HasSuffix(line, " -->") {
+			continue
+		}
+		encoded := strings.TrimSuffix(strings.TrimPrefix(line, marker), " -->")
+		payload, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil {
+			return nil, errors.New("project-check PR identity is malformed")
+		}
+		var identity stagecheck.PRIdentity
+		decoder := json.NewDecoder(strings.NewReader(string(payload)))
+		decoder.DisallowUnknownFields()
+		if decodeErr = decoder.Decode(&identity); decodeErr != nil || identity.URL == "" || len(identity.BaseRefOID) != 40 || len(identity.HeadRefOID) != 40 {
+			return nil, errors.New("project-check PR identity is invalid")
+		}
+		return &prchecks.PullRequest{URL: identity.URL, BaseRefOID: identity.BaseRefOID, HeadRefOID: identity.HeadRefOID}, nil
+	}
+	return nil, errors.New("project-check report is missing its PR identity")
+}
+
+func safeCheckReportPath(root, reportPath string) (string, error) {
+	relative := filepath.Clean(filepath.FromSlash(reportPath))
+	if reportPath == "" || filepath.IsAbs(relative) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.ToSlash(relative) != reportPath {
+		return "", errors.New("project-check report path is invalid")
+	}
+	return filepath.Join(root, relative), nil
+}
+
+func (rs *runState) consumePRReviewInputs(stageID string) {
+	filtered := rs.extraInputs[stageID][:0]
+	for _, artifact := range rs.extraInputs[stageID] {
+		if artifact.Name != "pr-diff" && artifact.Name != "pr-identity" {
+			filtered = append(filtered, artifact)
+		}
+	}
+	rs.extraInputs[stageID] = filtered
+}
+
+func writeImmutablePRReviewFile(path string, data []byte, maxBytes int64) error {
+	if int64(len(data)) > maxBytes {
+		return fmt.Errorf("PR review input exceeds %d bytes", maxBytes)
+	}
+	if err := safeio.WriteRegularFileNoFollow(path, data, safeio.ReadOnlyFileMode); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	stored, err := safeio.ReadRegularFile(path, maxBytes)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(stored, data) {
+		return errors.New("existing immutable PR review input differs")
 	}
 	return nil
 }

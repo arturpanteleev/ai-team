@@ -86,6 +86,13 @@ type TerminalRecordWriter interface {
 	WriteTerminalRecord(delivery.TerminalRecord) error
 }
 
+// StageDeliveryExecutor delegates an approved stage delivery to the trusted
+// controller. Cloud workers use the scoped Worker API implementation; direct
+// local pipelines execute through their own trusted controller service.
+type StageDeliveryExecutor interface {
+	ExecuteStageDelivery(context.Context, delivery.StageDeliveryRequest) (delivery.StageDeliveryReceipt, error)
+}
+
 // AttestationWriter persists the worker-supplied terminal statement in
 // controller-owned storage for sandboxed workers.
 type AttestationWriter interface{ WriteAttestation(*attest.Statement) error }
@@ -114,6 +121,7 @@ type Pipeline struct {
 	newRuntime              runtime.Factory
 	recorder                Recorder
 	delivery                delivery.Service
+	stageDeliveryExecutor   StageDeliveryExecutor
 	approvals               ApprovalStore
 	lifecycle               lifecycle.StorePort
 	evidence                EvidenceStoreFactory
@@ -165,6 +173,10 @@ func WithRecorder(r Recorder) Option {
 
 func WithDeliveryService(service delivery.Service) Option {
 	return func(p *Pipeline) { p.delivery = service }
+}
+
+func WithStageDeliveryExecutor(executor StageDeliveryExecutor) Option {
+	return func(p *Pipeline) { p.stageDeliveryExecutor = executor }
 }
 
 // WithApprovalStore injects an ApprovalStore port. Local CLI runs default to
@@ -359,6 +371,8 @@ type runState struct {
 	liveWorkspaceSHA          string
 	loopbackCycles            int
 	deferredDelivery          *deferredDelivery
+	stageDeliveryReceipt      *delivery.StageDeliveryReceipt
+	deliveryContinuationStage string
 	budgetConfig              *config.BudgetConfig
 	usageTotal                runtime.Usage
 	usageUnknown              bool
@@ -491,10 +505,11 @@ func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedR
 	return nil
 }
 
-// deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
-// отложен до terminal finalize, когда attestation digest уже детерминирован.
-// Инициализируется в delivery-стадии после успешной авторизации плана; реальный
-// git-commit создаёт контроллер после finalize (см. executeDeferredDelivery).
+// deferredDelivery (V0-9) — подготовленный canonical plan, по которому
+// terminal finalize обязан записать run-level delivery evidence. Для PR-stage
+// с hard pr_exists фактический commit/push/PR уже создаётся отдельной
+// controller operation внутри графа; для остальных delivery он остаётся
+// post-terminal эффектом.
 type deferredDelivery struct {
 	StatePath string
 	PlanHash  string
@@ -1528,12 +1543,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if finalErr != nil {
 		return RunResult{RunID: runID, Outcome: outcome}, finalErr
 	}
-	// V0-9: отложенная (deferred) доставка — только после terminal finalize и
-	// только для полностью completed-ранна (включая completed_with_warnings:
-	// AUD-06 — warning не меняет delivery-контракт, пользователь ждёт
-	// commit/push/PR), когда attestation digest и runtime identity
-	// детерминированы. Enforcement: план перегружается из prepared state и
-	// должен совпасть с approvedPlanHash и маркером стадии.
+	// V0-9: terminal delivery evidence записывается после finalize и только для
+	// полностью completed-ранна (включая completed_with_warnings: AUD-06).
+	// В PR-stage пути он ссылается на уже созданный controller receipt; в прочих
+	// потоках здесь же исполняется отложенный commit/push/PR. Plan в обоих путях
+	// перепроверяется по prepared state, approval и delivery_deferred marker.
 	switch outcome {
 	case workflow.RunCompleted, workflow.RunCompletedWithWarnings:
 		if rs.deferredDelivery != nil {

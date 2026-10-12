@@ -29,11 +29,224 @@ import (
 
 var errDeferredMarkerNotFound = errors.New("delivery_deferred event не найден")
 
-// delivery_deferred.go (V0-9): string post-terminal доставка. Git-история
-// (commit, push, PR) меняется ТОЛЬКО после terminal finalize — когда
-// attestation digest и runtime identity детерминированы. Трейлеры commit
-// (run ID, runtime identity, attestation digest) собираются из evidence, а не
-// из состояния рантайма, поэтому не зависят от харнесс-детерминизма.
+// ControllerStageDeliveryInput is the controller-only authority bundle for
+// producing the PR result before later review stages run. The request carries
+// identity only; every identity and the delivery effect are re-derived from
+// controller-owned events, attempt manifests, run metadata and approvals.
+type ControllerStageDeliveryInput struct {
+	TargetDir        string
+	RunDir           string
+	Request          delivery.StageDeliveryRequest
+	EventLog         evidence.EventLog
+	AttemptManifests evidence.AttemptManifestSource
+	Approvals        DeliveryApprovalReader
+	ApprovedPlanHash string
+	Service          delivery.Service
+}
+
+// ExecuteControllerStageDelivery performs an idempotent, controller-owned
+// delivery for one completed agent attempt and projects its PR URL as a stage
+// result. The attempt manifest remains immutable; terminal attestation and its
+// run-level record are produced later by finalize.
+func ExecuteControllerStageDelivery(ctx context.Context, input ControllerStageDeliveryInput) (delivery.StageDeliveryReceipt, error) {
+	request := input.Request
+	if input.Service == nil || input.Approvals == nil || input.EventLog == nil || input.AttemptManifests == nil {
+		return delivery.StageDeliveryReceipt{}, errors.New("controller stage delivery authority is incomplete")
+	}
+	if err := evidence.ValidateRunID(request.RunID); err != nil {
+		return delivery.StageDeliveryReceipt{}, err
+	}
+	target, err := candidate.CanonicalTargetDir(input.TargetDir)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("stage delivery target: %w", err)
+	}
+	runDir := filepath.Join(target, ".ai-team", "runs", request.RunID)
+	if filepath.Clean(input.RunDir) != runDir {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery run directory differs from controller target and run identity")
+	}
+	manifestDigest, _, err := evidence.AttemptManifestDigest(input.AttemptManifests, runDir, request.RunID, request.AttemptID)
+	if err != nil || manifestDigest != request.AttemptManifestSHA256 {
+		return delivery.StageDeliveryReceipt{}, errors.Join(errors.New("stage delivery attempt manifest digest mismatch"), err)
+	}
+	_, attempt, err := evidence.ReadAttemptManifest(input.AttemptManifests, runDir, request.RunID, request.AttemptID)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("read controller stage delivery attempt: %w", err)
+	}
+	if attempt.RunID != request.RunID || attempt.AttemptID != request.AttemptID || attempt.Executor != "agent" ||
+		attempt.Status != string(workflow.OutcomePassed) || attempt.Outcome != string(workflow.OutcomePassed) ||
+		attempt.Delivery == nil || attempt.Delivery.PlanHash != request.PlanHash {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery attempt is not a passed agent attempt for the approved plan")
+	}
+	runtimeIdentity, err := runtimeIdentityOfRun(runDir)
+	if err != nil || runtimeIdentity != request.RuntimeIdentity {
+		return delivery.StageDeliveryReceipt{}, errors.Join(errors.New("stage delivery runtime identity mismatch"), err)
+	}
+	replayed, err := evidence.ReplayEventLogWithEventSourcesAndTarget(filepath.Join(runDir, "events.jsonl"), request.RunID,
+		input.EventLog, input.AttemptManifests, "")
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("replay controller stage delivery evidence: %w", err)
+	}
+	var replayedAttempt *evidence.ReplayedAttempt
+	for index := range replayed.Attempts {
+		if replayed.Attempts[index].AttemptID == request.AttemptID {
+			replayedAttempt = &replayed.Attempts[index]
+			break
+		}
+	}
+	if replayedAttempt == nil || replayedAttempt.Superseded || replayedAttempt.Stage != attempt.Stage ||
+		replayedAttempt.ManifestSHA256 != request.AttemptManifestSHA256 || replayedAttempt.State.Outcome != workflow.OutcomePassed {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery attempt is not the active, replay-verified passed attempt")
+	}
+	runManifest, err := readRunManifest(runDir)
+	if err != nil || runManifest.RunID != request.RunID || runManifest.Feature == "" {
+		return delivery.StageDeliveryReceipt{}, errors.Join(errors.New("stage delivery run manifest identity mismatch"), err)
+	}
+	cfg, err := pinnedDeliveryConfig(runDir, runManifest)
+	if err != nil || cfg == nil {
+		return delivery.StageDeliveryReceipt{}, errors.Join(errors.New("stage delivery pinned config is unavailable or invalid"), err)
+	}
+	var stage *config.TemplateStage
+	for index := range cfg.Stages {
+		if cfg.Stages[index].ID == attempt.Stage {
+			stage = &cfg.Stages[index]
+			break
+		}
+	}
+	if stage == nil || !stageRequiresControllerPRDelivery(*stage) {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery attempt is not a configured agent PR result stage")
+	}
+	if attempt.Delivery.StatePath == "" {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery attempt does not name its prepared state")
+	}
+	marker, approvalAttemptID, err := stageDeliveryEvidenceForAttempt(runDir, request, attempt.Stage, runManifest.Feature, input.EventLog)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, err
+	}
+	workspace, plan, canonical, planHash, err := preparedDeferredPlan(target, runManifest.Feature, marker)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("stage delivery prepared plan: %w", err)
+	}
+	if planHash != request.PlanHash || plan.SourceRunID != request.RunID ||
+		filepath.Clean(filepath.FromSlash(marker.StatePath)) != filepath.Clean(attempt.Delivery.StatePath) {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery prepared plan differs from the immutable attempt")
+	}
+	candidateSHA := plan.VerifiedWorkspaceDigest
+	if currentWorkspaceSHA, digestErr := checks.WorkspaceDigest(workspace); digestErr != nil || currentWorkspaceSHA != candidateSHA {
+		return delivery.StageDeliveryReceipt{}, errors.Join(errors.New("stage delivery workspace differs from the approved candidate digest"), digestErr)
+	}
+	approvalID, err := ValidateResolvedDeliveryOperationApproval(input.Approvals, input.AttemptManifests,
+		runDir, request.RunID, attempt.Stage, planHash, canonical, candidateSHA, input.ApprovedPlanHash)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("stage delivery approval: %w", err)
+	}
+	if approvalID != approval.NewID(request.RunID, approvalAttemptID, attempt.Stage, attempt.Stage, "delivery_plan", planHash) {
+		return delivery.StageDeliveryReceipt{}, errors.New("stage delivery evidence approval identity does not match controller approval")
+	}
+	lock, err := evidence.AcquireWorkspaceLock(workspace)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("stage delivery workspace lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	validateReceipt := func(receipt delivery.StageDeliveryReceipt) error {
+		if err := receipt.Validate(); err != nil {
+			return err
+		}
+		if receipt.RunID != request.RunID || receipt.AttemptID != request.AttemptID ||
+			receipt.AttemptManifestSHA256 != request.AttemptManifestSHA256 || receipt.PlanHash != request.PlanHash ||
+			receipt.RuntimeIdentity != request.RuntimeIdentity || receipt.ApprovalIdentity != approvalID || receipt.Feature != runManifest.Feature {
+			return errors.New("controller stage delivery receipt identity mismatch")
+		}
+		return nil
+	}
+	if existing, found, readErr := delivery.ReadControllerStageDeliveryReceipt(target, request); readErr != nil {
+		return delivery.StageDeliveryReceipt{}, readErr
+	} else if found {
+		if err := validateReceipt(*existing); err != nil {
+			return delivery.StageDeliveryReceipt{}, err
+		}
+		if _, err := ProjectControllerPRResultPair(target, workspace, cfg, runManifest.Feature, attempt.Stage, request.PlanHash, existing.PRURL); err != nil {
+			return delivery.StageDeliveryReceipt{}, fmt.Errorf("repair controller stage PR projection: %w", err)
+		}
+		return *existing, nil
+	}
+	result, err := input.Service.Execute(ctx, delivery.Request{
+		TargetDir: workspace, Feature: runManifest.Feature, Plan: plan,
+		Trailers: stageDeliveryTrailers(request.RunID, request.RuntimeIdentity),
+	})
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("execute controller stage delivery: %w", err)
+	}
+	if result.PlanHash != request.PlanHash || strings.TrimSpace(result.PRURL) == "" {
+		return delivery.StageDeliveryReceipt{}, errors.New("delivery service returned an unbound plan or empty PR URL")
+	}
+	receipt, err := delivery.SealStageDeliveryReceipt(delivery.StageDeliveryReceipt{
+		RunID: request.RunID, AttemptID: request.AttemptID,
+		AttemptManifestSHA256: request.AttemptManifestSHA256, PlanHash: request.PlanHash,
+		RuntimeIdentity: request.RuntimeIdentity, ApprovalIdentity: approvalID,
+		Feature: runManifest.Feature, CommitSHA: result.CommitSHA, PRURL: result.PRURL, PerformedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, err
+	}
+	if err := delivery.WriteControllerStageDeliveryReceipt(target, receipt); err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("persist controller stage delivery receipt: %w", err)
+	}
+	if _, err := ProjectControllerPRResultPair(target, workspace, cfg, runManifest.Feature, attempt.Stage, request.PlanHash, receipt.PRURL); err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("project controller stage PR result: %w", err)
+	}
+	return receipt, nil
+}
+
+func stageDeliveryEvidenceForAttempt(runDir string, request delivery.StageDeliveryRequest, stage, feature string, source evidence.EventLog) (deferredMarkerEvent, string, error) {
+	events, err := evidence.VerifyEventLogWithSource(filepath.Join(runDir, "events.jsonl"), request.RunID, source)
+	if err != nil {
+		return deferredMarkerEvent{}, "", fmt.Errorf("read stage delivery event chain: %w", err)
+	}
+	var approvalAttemptID string
+	var approved, deferred bool
+	var marker deferredMarkerEvent
+	for _, event := range events {
+		if event.AttemptID != request.AttemptID {
+			continue
+		}
+		switch event.Type {
+		case "delivery_plan_approved":
+			planHash, _ := event.Data["plan_hash"].(string)
+			operationAttemptID, _ := event.Data["operation_attempt_id"].(string)
+			mode, _ := event.Data["mode"].(string)
+			if planHash != request.PlanHash || operationAttemptID != request.AttemptID ||
+				(event.Stage != "" && event.Stage != stage) || (mode != "hash_flag" && mode != "resolved_approval") {
+				continue
+			}
+			approvalAttemptID, _ = event.Data["approval_attempt_id"].(string)
+			approved = approvalAttemptID != ""
+		case "delivery_deferred":
+			planHash, _ := event.Data["plan_hash"].(string)
+			if planHash != request.PlanHash || (event.Stage != "" && event.Stage != stage) {
+				continue
+			}
+			data, marshalErr := json.Marshal(event.Data)
+			if marshalErr != nil {
+				return deferredMarkerEvent{}, "", marshalErr
+			}
+			if err := json.Unmarshal(data, &marker); err != nil {
+				return deferredMarkerEvent{}, "", err
+			}
+			marker.Stage, marker.AttemptID = stage, request.AttemptID
+			deferred = marker.Feature == "" || marker.Feature == feature
+		}
+	}
+	if !approved || !deferred || marker.PlanHash != request.PlanHash || marker.StatePath == "" {
+		return deferredMarkerEvent{}, "", errors.New("stage delivery requires matching approved-plan and deferred-delivery events for the attempt")
+	}
+	return marker, approvalAttemptID, nil
+}
+
+// delivery_deferred.go (V0-9/B-35): terminal run-level delivery record.
+// Для configured PR stage сам commit/push/PR может произойти до review, чтобы
+// существующие hard PR checks могли проверить результат. Этот hook сохраняет
+// отдельную terminal attestation и ссылается на immutable controller receipt;
+// для прочих delivery он исполняет side effect после finalize.
 
 // executeDeferredDelivery — вызывается строго после финального finalize при
 // outcome Completed. Работает от реального контроллера (rs.p.delivery) и
@@ -79,17 +292,36 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	if err != nil {
 		return err
 	}
+	var result delivery.Result
 	trailers := []string{
 		delivery.TrailerRunID + ": " + rs.runID,
 		delivery.TrailerRuntime + ": " + runtimeIdentity,
 		delivery.TrailerAttestation + ": " + attestationDigest,
 	}
-
-	result, err := rs.p.delivery.Execute(ctx, delivery.Request{
-		TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan, Trailers: trailers,
-	})
-	if err != nil {
-		return fmt.Errorf("deferred delivery: controller.Execute: %w", annotateDeliveryFailure(ctx, parent, timeout, err))
+	var stageReceipt *delivery.StageDeliveryReceipt
+	if rs.deferredDelivery.StageID != "" {
+		stageReceipt, err = rs.ensureStageDeliveryReceipt(ctx)
+		if err != nil {
+			return fmt.Errorf("deferred delivery: recover stage receipt: %w", err)
+		}
+	}
+	if stageReceipt != nil {
+		if err := stageReceipt.Validate(); err != nil {
+			return fmt.Errorf("deferred delivery: stage receipt: %w", err)
+		}
+		if stageReceipt.RunID != rs.runID || stageReceipt.AttemptID != rs.deferredDelivery.AttemptID ||
+			stageReceipt.PlanHash != planHash || stageReceipt.RuntimeIdentity != runtimeIdentity || stageReceipt.Feature != rs.runCfg.Feature {
+			return errors.New("deferred delivery: stage receipt does not match terminal run identity")
+		}
+		result = delivery.Result{PlanHash: planHash, StatePath: stageReceiptStatePath(rs.sourceDir(), rs.runCfg.Feature), CommitSHA: stageReceipt.CommitSHA, PRURL: stageReceipt.PRURL}
+		trailers = stageDeliveryTrailers(rs.runID, runtimeIdentity)
+	} else {
+		result, err = rs.p.delivery.Execute(ctx, delivery.Request{
+			TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan, Trailers: trailers,
+		})
+		if err != nil {
+			return fmt.Errorf("deferred delivery: controller.Execute: %w", annotateDeliveryFailure(ctx, parent, timeout, err))
+		}
 	}
 
 	record := delivery.TerminalRecord{
@@ -103,6 +335,16 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 		AttestationSHA256: attestationDigest,
 		RuntimeIdentity:   runtimeIdentity,
 		PerformedAt:       time.Now().UTC(),
+	}
+	if stageReceipt != nil {
+		record.StageAttemptID = stageReceipt.AttemptID
+		record.StageAttemptManifestSHA256 = stageReceipt.AttemptManifestSHA256
+		record.StageDeliveryReceiptSHA256 = stageReceipt.ReceiptSHA256
+		if rs.p.terminalRecordWriter == nil {
+			if err := ValidateStageDeliveryTerminalRecord(rs.runCfg.TargetDir, rs.evidence.RunDir(), record, rs.p.eventLogSource); err != nil {
+				return fmt.Errorf("deferred delivery: validate stage terminal record: %w", err)
+			}
+		}
 	}
 	var writeErr error
 	if rs.p.terminalRecordWriter != nil {
@@ -133,10 +375,40 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	return nil
 }
 
-// publishDeferredDeliveryResult projects the controller's terminal PR URL to
-// the configured stage result path. This file is a post-terminal read model:
-// it is derived only from the validated TerminalRecord and is not inserted into
-// the immutable attempt manifest or the attested workspace.
+func (rs *runState) ensureStageDeliveryReceipt(ctx context.Context) (*delivery.StageDeliveryReceipt, error) {
+	if rs.stageDeliveryReceipt != nil {
+		return rs.stageDeliveryReceipt, nil
+	}
+	deferred := rs.deferredDelivery
+	if deferred == nil || deferred.StageID == "" || deferred.AttemptID == "" {
+		return nil, nil
+	}
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		result := rs.results[index]
+		if result.AttemptID != deferred.AttemptID || result.Name != deferred.StageID || result.Delivery == nil {
+			continue
+		}
+		if result.Delivery.PlanHash != deferred.PlanHash {
+			return nil, errors.New("stage result plan hash differs from deferred-delivery marker")
+		}
+		if err := rs.executeStageDelivery(ctx, deferred.StageID, &result); err != nil {
+			return nil, err
+		}
+		if rs.stageDeliveryReceipt != nil {
+			return rs.stageDeliveryReceipt, nil
+		}
+		return nil, nil
+	}
+	return nil, fmt.Errorf("stage delivery attempt %s is missing from run results", deferred.AttemptID)
+}
+
+func stageReceiptStatePath(workspace, feature string) string {
+	return filepath.Join(workspace, ".ai-team", "delivery", feature+".json")
+}
+
+// publishDeferredDeliveryResult refreshes the configured stage-result path
+// from the validated terminal record. Stage delivery may have projected the
+// same value before review; this repair remains outside the attempt manifest.
 func (rs *runState) publishDeferredDeliveryResult(record delivery.TerminalRecord) error {
 	deferred := rs.deferredDelivery
 	if deferred == nil || deferred.StageID == "" {
@@ -213,6 +485,32 @@ func writeDeferredPRResultLink(targetDir string, cfg *config.Config, feature, st
 		return "", err
 	}
 	return path, nil
+}
+
+// ProjectControllerPRResult writes the controller-derived PR link for a
+// configured stage. It is a separate task result projection and never changes
+// the immutable attempt manifest or attested workspace.
+func ProjectControllerPRResult(targetDir string, cfg *config.Config, feature, stageID, planHash, prURL string) (string, error) {
+	return writeDeferredPRResultLink(targetDir, cfg, feature, stageID, delivery.TerminalRecord{
+		Feature: feature, PlanHash: planHash, PRURL: prURL,
+	})
+}
+
+// ProjectControllerPRResultPair keeps the project read model and the isolated
+// candidate input in sync. The target copy is for UI/report consumers; the
+// workspace copy is an explicit runtime input for review and QA stages.
+func ProjectControllerPRResultPair(targetDir, workspaceDir string, cfg *config.Config, feature, stageID, planHash, prURL string) (string, error) {
+	targetPath, err := ProjectControllerPRResult(targetDir, cfg, feature, stageID, planHash, prURL)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(targetDir) == filepath.Clean(workspaceDir) {
+		return targetPath, nil
+	}
+	if _, err := ProjectControllerPRResult(workspaceDir, cfg, feature, stageID, planHash, prURL); err != nil {
+		return "", err
+	}
+	return targetPath, nil
 }
 
 // DeliverDeferred — standalone-повтор отложенной доставки (retry/CLI) по
@@ -327,8 +625,9 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 		}
 	}
 	approvalAttempts := evidence.ReservedAttemptManifestSource{TargetDir: targetDir}
-	if err := requireResolvedDeliveryOperationApproval(approvalStore, approvalAttempts, runDir,
-		runID, marker.Stage, planHash, canonical, candidateSHA, p.deliveryApprovalHash); err != nil {
+	approvalID, err := ValidateResolvedDeliveryOperationApproval(approvalStore, approvalAttempts, runDir,
+		runID, marker.Stage, planHash, canonical, candidateSHA, p.deliveryApprovalHash)
+	if err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: %w", err)
 	}
 	// A successful retry is idempotent. Do this after the exact current plan,
@@ -344,6 +643,53 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 			return delivery.TerminalRecord{}, fmt.Errorf("deliver: restore stage PR result: %w", err)
 		}
 		return *existing, nil
+	}
+	manifestDigest, _, err := evidence.AttemptManifestDigest(approvalAttempts, runDir, runID, marker.AttemptID)
+	if err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: stage receipt attempt manifest digest: %w", err)
+	}
+	stageRequest := delivery.StageDeliveryRequest{
+		RunID: runID, AttemptID: marker.AttemptID, AttemptManifestSHA256: manifestDigest,
+		PlanHash: planHash, RuntimeIdentity: runtimeIdentity,
+	}
+	if stageReceipt, found, readErr := delivery.ReadControllerStageDeliveryReceipt(targetDir, stageRequest); readErr != nil {
+		return delivery.TerminalRecord{}, readErr
+	} else if found {
+		if stageReceipt.ApprovalIdentity != approvalID || stageReceipt.Feature != feature {
+			return delivery.TerminalRecord{}, errors.New("deliver: stage receipt approval or feature identity mismatch")
+		}
+		record := delivery.TerminalRecord{
+			SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: runID, Feature: feature,
+			PlanHash: planHash, CommitSHA: stageReceipt.CommitSHA, PRURL: stageReceipt.PRURL,
+			Trailers:          stageDeliveryTrailers(runID, runtimeIdentity),
+			AttestationSHA256: attestationDigest, RuntimeIdentity: runtimeIdentity,
+			StageAttemptID: stageReceipt.AttemptID, StageAttemptManifestSHA256: stageReceipt.AttemptManifestSHA256,
+			StageDeliveryReceiptSHA256: stageReceipt.ReceiptSHA256, PerformedAt: time.Now().UTC(),
+		}
+		if err := ValidateStageDeliveryTerminalRecord(targetDir, runDir, record, p.eventLogSource); err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: validate stage receipt for terminal record: %w", err)
+		}
+		if err := delivery.WriteControllerDeliveryReceipt(targetDir, record); err != nil {
+			return delivery.TerminalRecord{}, err
+		}
+		stored, found, readErr := delivery.ReadControllerDeliveryReceipt(targetDir, runID)
+		if readErr != nil || !found {
+			return delivery.TerminalRecord{}, errors.Join(errors.New("deliver: controller terminal receipt did not persist"), readErr)
+		}
+		record = *stored
+		if err := delivery.WriteControllerTerminalRecord(targetDir, runID, record); err != nil {
+			logging.Printf("⚠ delivery compatibility controller record for run %s: %v", runID, err)
+		}
+		if err := delivery.WriteTerminalRecord(runDir, record); err != nil {
+			logging.Printf("⚠ delivery compatibility mirror for run %s: %v", runID, err)
+		}
+		if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: reseal terminal evidence: %w", err)
+		}
+		if err := publishDeferredPRResultFromRun(targetDir, runDir, manifest, marker, record); err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: publish stage PR result: %w", err)
+		}
+		return record, nil
 	}
 
 	trailers := []string{
@@ -647,9 +993,15 @@ func validateRecoveredTerminalRecord(runDir, runID, feature string, marker defer
 		return errors.New("record performed_at is empty")
 	}
 	expected := map[string]string{
-		delivery.TrailerRunID:       runID,
-		delivery.TrailerRuntime:     runtimeIdentity,
-		delivery.TrailerAttestation: attestationDigest,
+		delivery.TrailerRunID:   runID,
+		delivery.TrailerRuntime: runtimeIdentity,
+	}
+	if record.StageDeliveryReceiptSHA256 != "" {
+		if err := ValidateStageDeliveryTerminalRecord(filepath.Dir(filepath.Dir(filepath.Dir(runDir))), runDir, record, eventSource); err != nil {
+			return fmt.Errorf("record stage delivery receipt: %w", err)
+		}
+	} else {
+		expected[delivery.TrailerAttestation] = attestationDigest
 	}
 	if len(record.Trailers) != len(expected) {
 		return fmt.Errorf("record has %d trailers; expected %d identity trailers", len(record.Trailers), len(expected))
@@ -665,6 +1017,96 @@ func validateRecoveredTerminalRecord(runDir, runID, feature string, marker defer
 		return fmt.Errorf("record is missing identity trailers: %v", expected)
 	}
 	return nil
+}
+
+// ValidateStageDeliveryTerminalRecord verifies that a terminal attestation
+// record refers to the immutable controller receipt that created the PR before
+// human review. The late attestation remains a run-level fact and is never
+// appended to or used to rewrite the already reviewed commit.
+func ValidateStageDeliveryTerminalRecord(targetDir, runDir string, record delivery.TerminalRecord, eventSource evidence.EventLog) error {
+	if record.StageDeliveryReceiptSHA256 == "" {
+		return errors.New("terminal record has no stage delivery receipt reference")
+	}
+	request := delivery.StageDeliveryRequest{
+		RunID: record.RunID, AttemptID: record.StageAttemptID,
+		AttemptManifestSHA256: record.StageAttemptManifestSHA256,
+		PlanHash:              record.PlanHash, RuntimeIdentity: record.RuntimeIdentity,
+	}
+	receipt, found, err := delivery.ReadControllerStageDeliveryReceipt(targetDir, request)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("controller stage delivery receipt is missing")
+	}
+	if receipt.ReceiptSHA256 != record.StageDeliveryReceiptSHA256 || receipt.Feature != record.Feature ||
+		receipt.CommitSHA != record.CommitSHA || receipt.PRURL != record.PRURL {
+		return errors.New("terminal record delivery result differs from controller stage receipt")
+	}
+	runtimeIdentity, err := runtimeIdentityOfRun(runDir)
+	if err != nil || runtimeIdentity != record.RuntimeIdentity {
+		return errors.Join(errors.New("terminal record runtime identity differs from run evidence"), err)
+	}
+	attestationDigest, err := attestationDigestOfRun(runDir)
+	if err != nil || attestationDigest != record.AttestationSHA256 {
+		return errors.Join(errors.New("terminal record attestation differs from run evidence"), err)
+	}
+	manifest, err := readRunManifest(runDir)
+	if err != nil || manifest.RunID != record.RunID || manifest.Feature != record.Feature {
+		return errors.Join(errors.New("terminal record run manifest identity mismatch"), err)
+	}
+	cfg, err := pinnedDeliveryConfig(runDir, manifest)
+	if err != nil || cfg == nil {
+		return errors.Join(errors.New("terminal record pinned config is unavailable or invalid"), err)
+	}
+	_, attempt, err := evidence.ReadAttemptManifest(evidence.ReservedAttemptManifestSource{TargetDir: targetDir}, runDir, record.RunID, record.StageAttemptID)
+	if err != nil {
+		return fmt.Errorf("terminal record delivery attempt: %w", err)
+	}
+	if attempt.Stage == "" || attempt.Delivery == nil || attempt.Delivery.PlanHash != record.PlanHash ||
+		attempt.Status != string(workflow.OutcomePassed) || attempt.Outcome != string(workflow.OutcomePassed) {
+		return errors.New("terminal record stage attempt does not match the successful delivered plan")
+	}
+	marker, approvalAttemptID, err := stageDeliveryEvidenceForAttempt(runDir, request, attempt.Stage, record.Feature, eventSource)
+	if err != nil {
+		return err
+	}
+	if marker.PlanHash != record.PlanHash || receipt.ApprovalIdentity != approval.NewID(record.RunID, approvalAttemptID, attempt.Stage, attempt.Stage, "delivery_plan", record.PlanHash) {
+		return errors.New("terminal record receipt approval identity differs from run evidence")
+	}
+	replayed, err := evidence.ReplayEventLogWithEventSourcesAndTarget(filepath.Join(runDir, "events.jsonl"), record.RunID,
+		eventSource, evidence.ReservedAttemptManifestSource{TargetDir: targetDir}, "")
+	if err != nil {
+		return fmt.Errorf("terminal record replay: %w", err)
+	}
+	active := false
+	for _, replayedAttempt := range replayed.Attempts {
+		if replayedAttempt.AttemptID == record.StageAttemptID && !replayedAttempt.Superseded &&
+			replayedAttempt.ManifestSHA256 == request.AttemptManifestSHA256 && replayedAttempt.State.Outcome == workflow.OutcomePassed {
+			active = true
+			break
+		}
+	}
+	if !active {
+		return errors.New("terminal record stage attempt is not active in strict replay")
+	}
+	expectedTrailers := stageDeliveryTrailers(record.RunID, record.RuntimeIdentity)
+	if !sameStringSlices(record.Trailers, expectedTrailers) {
+		return errors.New("terminal record trailers differ from the controller stage delivery")
+	}
+	return nil
+}
+
+func sameStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // annotateDeliveryFailure объясняет, ПОЧЕМУ доставка оборвалась. Без этого
@@ -843,6 +1285,12 @@ func pinnedDeliveryConfig(runDir string, manifest *evidence.RunManifest) (*confi
 		return nil, fmt.Errorf("deferred delivery: pinned config parse: %w", err)
 	}
 	return &cfg, nil
+}
+
+// PinnedDeliveryConfig returns the hash-verified process config snapshot from a
+// run manifest for trusted controller API consumers.
+func PinnedDeliveryConfig(runDir string, manifest *evidence.RunManifest) (*config.Config, error) {
+	return pinnedDeliveryConfig(runDir, manifest)
 }
 
 // preparedDeferredPlan resolves the plan only from the marker's prepared

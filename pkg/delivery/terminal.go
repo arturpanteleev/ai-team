@@ -17,12 +17,10 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
-// terminal.go (V0-9): post-terminal delivery record — фиксирует результат
-// отложенного (deferred) commit/push/PR. Пишется контроллером в
-// {RunDir}/delivery.json ПОСЛЕ terminal finalize, когда attestation digest и
-// runtime identity уже детерминированы; эти же значения попадают в commit
-// trailer'ы. Attempt manifest внутри run не меняется (immutable); delivery.json
-// — канонический источник результата доставки для FindDelivered/export.
+// terminal.go (V0-9/B-35): post-finalize run-level delivery record. For the
+// pre-review PR path it references the immutable controller stage receipt and
+// carries the later attestation separately; for legacy deferred delivery it
+// records the final commit/push/PR result. Attempt manifests remain immutable.
 
 const (
 	TerminalRecordSchemaVersion            = 1
@@ -77,16 +75,23 @@ func (r controllerDeliveryReceipt) validate() error {
 
 // TerminalRecord — каноническая запись отложенной доставки run.
 type TerminalRecord struct {
-	SchemaVersion     int       `json:"schema_version"`
-	RunID             string    `json:"run_id"`
-	Feature           string    `json:"feature"`
-	PlanHash          string    `json:"plan_hash"`
-	CommitSHA         string    `json:"commit_sha,omitempty"`
-	PRURL             string    `json:"pr_url,omitempty"`
-	Trailers          []string  `json:"trailers,omitempty"`
-	AttestationSHA256 string    `json:"attestation_sha256,omitempty"`
-	RuntimeIdentity   string    `json:"runtime_identity,omitempty"`
-	PerformedAt       time.Time `json:"performed_at"`
+	SchemaVersion     int      `json:"schema_version"`
+	RunID             string   `json:"run_id"`
+	Feature           string   `json:"feature"`
+	PlanHash          string   `json:"plan_hash"`
+	CommitSHA         string   `json:"commit_sha,omitempty"`
+	PRURL             string   `json:"pr_url,omitempty"`
+	Trailers          []string `json:"trailers,omitempty"`
+	AttestationSHA256 string   `json:"attestation_sha256,omitempty"`
+	RuntimeIdentity   string   `json:"runtime_identity,omitempty"`
+	// Stage delivery identity binds terminal run attestation to a PR already
+	// created before code review/QA. It references the immutable controller
+	// receipt; it does not add the later attestation digest to that reviewed
+	// commit or re-run delivery with changed trailers.
+	StageAttemptID             string    `json:"stage_attempt_id,omitempty"`
+	StageAttemptManifestSHA256 string    `json:"stage_attempt_manifest_sha256,omitempty"`
+	StageDeliveryReceiptSHA256 string    `json:"stage_delivery_receipt_sha256,omitempty"`
+	PerformedAt                time.Time `json:"performed_at"`
 	// RecordSHA256 — self-integrity digest (sha256 canonical bytes record без
 	// этого поля). Делает record tamper-evident: любой ad-hoc правдоподобный
 	// edit фиксируется при повторном чтении.
@@ -120,6 +125,21 @@ func (r TerminalRecord) Validate() error {
 	}
 	if r.CommitSHA != "" && !gitHashPattern.MatchString(r.CommitSHA) {
 		return fmt.Errorf("terminal delivery record: некорректный commit_sha %q", r.CommitSHA)
+	}
+	stageReceiptReferenced := r.StageAttemptID != "" || r.StageAttemptManifestSHA256 != "" || r.StageDeliveryReceiptSHA256 != ""
+	if stageReceiptReferenced {
+		if !safeStageAttemptID(r.StageAttemptID) || !hex64(r.StageAttemptManifestSHA256) || !hex64(r.StageDeliveryReceiptSHA256) {
+			return errors.New("terminal delivery record: stage receipt identity is incomplete or invalid")
+		}
+		if !hex64(r.AttestationSHA256) || !hex64(r.RuntimeIdentity) {
+			return errors.New("terminal delivery record: stage receipt requires terminal attestation and runtime digests")
+		}
+		for _, trailer := range r.Trailers {
+			key, _, _ := strings.Cut(trailer, ": ")
+			if key == TrailerAttestation {
+				return errors.New("terminal delivery record: stage-delivered commit cannot be rebound to the terminal attestation trailer")
+			}
+		}
 	}
 	if r.CommitSHA == "" && r.PRURL == "" {
 		return errors.New("terminal delivery record: пустые commit_sha и pr_url")

@@ -218,7 +218,16 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if a == nil {
 		return fail(fmt.Errorf("human stage %s must execute through the typed input path", name))
 	}
-	modelAttempt = a.Kind != "delivery"
+	continuation, err := rs.deliveryApprovalContinuation(name, a)
+	if err != nil {
+		return fail(fmt.Errorf("агент %s: delivery approval continuation: %w", name, err))
+	}
+	if continuation {
+		rs.deliveryContinuationStage = name
+		defer func() { rs.deliveryContinuationStage = "" }()
+		logging.Printf("  ↻ %s: продолжение после ожидания delivery-плана, агент повторно не запускается\n", name)
+	}
+	modelAttempt = a.Kind != "delivery" && !continuation
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
 		agentCfg = &config.AgentConfig{Name: name}
@@ -287,7 +296,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var stageRuntime runtime.Runtime
 	var runtimeAgent *runtime.Agent
-	if a.Kind != "delivery" {
+	if a.Kind != "delivery" && !continuation {
 		stageRuntime, err = rs.p.newRuntime(a.RuntimeType)
 		if err != nil {
 			return fail(fmt.Errorf("ошибка создания runtime для %s: %w", name, err))
@@ -328,8 +337,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		defer cancel()
 	}
 
-	if err := rs.clearStageEphemeral(name, a); err != nil {
-		return fail(fmt.Errorf("агент %s: очистка stale control artifacts: %w", name, err))
+	// A delivery continuation keeps the outputs of the attempt whose candidate
+	// bytes the pending plan describes.
+	if !continuation {
+		if err := rs.clearStageEphemeral(name, a); err != nil {
+			return fail(fmt.Errorf("агент %s: очистка stale control artifacts: %w", name, err))
+		}
 	}
 
 	var workspaceBefore filesystemSnapshot
@@ -371,7 +384,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var execErr error
 	executionInvoked = true
-	if a.Kind == "delivery" {
+	if continuation {
+		// No model run: the controller only re-checks and re-authorizes.
+	} else if a.Kind == "delivery" {
 		execErr = rs.writeDeliveryPlan(stageCtx, a, preconditions)
 	} else {
 		stageTask := *rs.task
@@ -409,7 +424,16 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 	// BLOCKED имеет приоритет над ошибкой выполнения и проверкой выходов:
 	// заблокированный агент по контракту не создаёт обычных артефактов.
-	if blocked, reason := verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, name); blocked {
+	blockedStatusName := name
+	blocked, reason := verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, name)
+	if !blocked && a.Name != "" && a.Name != name {
+		// The runtime tells a template-stage agent to signal BLOCKED under its
+		// own agent name (see runtime service instructions).
+		if blocked, reason = verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, a.Name); blocked {
+			blockedStatusName = a.Name
+		}
+	}
+	if blocked {
 		for outputName, outputPath := range a.Outputs {
 			fullPath := filepath.Join(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
 			if _, statErr := os.Lstat(fullPath); statErr == nil {
@@ -419,7 +443,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 				return fail(fmt.Errorf("агент %s: проверка output при BLOCKED: %w", name, statErr))
 			}
 		}
-		statusPath := verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name)
+		statusPath := verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, blockedStatusName)
 		if statusInfo, statErr := os.Stat(statusPath); statErr == nil {
 			r.Outputs = []runtime.Artifact{{Name: "blocked-status", Path: statusPath, Size: statusInfo.Size(), ModTime: statusInfo.ModTime()}}
 		}
@@ -546,8 +570,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil {
 		// B-35: агентный этап с delivery.require_checks (FR-15). Только после
 		// проверки выходов и повторной проверки verdict контроллер связывает
-		// required checks с текущим workspace и готовит план. Commit/push/PR
-		// по-прежнему выполняются только после terminal finalize.
+		// required checks с текущим workspace и готовит план. PR-result этап
+		// с hard pr_exists доставляется отдельной controller operation после
+		// публикации attempt и до проверки PR; остальные delivery остаются
+		// deferred до terminal finalize.
 		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
 			mutationGuardApplied = true
 			r.ValidationFailed = true
@@ -663,6 +689,11 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 		verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", name+".md"),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-check", name+".md"),
+	}
+	if a != nil && a.Name != "" && a.Name != name {
+		paths = append(paths,
+			verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, a.Name),
+			filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", a.Name+".md"))
 	}
 	if a != nil && a.AskQuestions {
 		paths = append(paths, stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))

@@ -85,34 +85,35 @@ type workerAPIRequest struct {
 	IssuedAt time.Time       `json:"issued_at"`
 }
 type workerAPICall struct {
-	RunID                  string                     `json:"run_id,omitempty"`
-	A                      string                     `json:"a,omitempty"`
-	B                      string                     `json:"b,omitempty"`
-	C                      string                     `json:"c,omitempty"`
-	Index                  int                        `json:"index,omitempty"`
-	At                     time.Time                  `json:"at,omitempty"`
-	Data                   map[string]any             `json:"data,omitempty"`
-	IDs                    []string                   `json:"ids,omitempty"`
-	Stage                  notifier.StageResult       `json:"stage,omitempty"`
-	Error                  string                     `json:"error,omitempty"`
-	Approval               approval.PendingApproval   `json:"approval,omitempty"`
-	Lifecycle              lifecycle.State            `json:"lifecycle,omitempty"`
-	Previous               lifecycle.State            `json:"previous_lifecycle,omitempty"`
-	BriefVersion           pipeline.BriefVersion      `json:"brief_version,omitempty"`
-	BriefContent           []byte                     `json:"brief_content,omitempty"`
-	CandidateMetadata      candidate.Metadata         `json:"candidate_metadata,omitempty"`
-	Usage                  metrics.UsageEnvelope      `json:"usage_envelope,omitempty"`
-	TerminalRecord         delivery.TerminalRecord    `json:"terminal_record,omitempty"`
-	Attestation            attest.Statement           `json:"attestation,omitempty"`
-	ContainmentReceipt     *containment.Receipt       `json:"containment_receipt,omitempty"`
-	CandidateEvidenceName  string                     `json:"candidate_evidence_name,omitempty"`
-	CandidateEvidence      pipeline.CandidateEvidence `json:"candidate_evidence,omitempty"`
-	AttemptManifest        evidence.AttemptManifest   `json:"attempt_manifest,omitempty"`
-	Event                  evidence.Event             `json:"event,omitempty"`
-	ExpectedSequence       uint64                     `json:"expected_sequence,omitempty"`
-	ExpectedPreviousSHA256 string                     `json:"expected_previous_sha256,omitempty"`
-	Offset                 int64                      `json:"offset,omitempty"`
-	Snapshot               string                     `json:"snapshot,omitempty"`
+	RunID                  string                        `json:"run_id,omitempty"`
+	A                      string                        `json:"a,omitempty"`
+	B                      string                        `json:"b,omitempty"`
+	C                      string                        `json:"c,omitempty"`
+	Index                  int                           `json:"index,omitempty"`
+	At                     time.Time                     `json:"at,omitempty"`
+	Data                   map[string]any                `json:"data,omitempty"`
+	IDs                    []string                      `json:"ids,omitempty"`
+	Stage                  notifier.StageResult          `json:"stage,omitempty"`
+	Error                  string                        `json:"error,omitempty"`
+	Approval               approval.PendingApproval      `json:"approval,omitempty"`
+	Lifecycle              lifecycle.State               `json:"lifecycle,omitempty"`
+	Previous               lifecycle.State               `json:"previous_lifecycle,omitempty"`
+	BriefVersion           pipeline.BriefVersion         `json:"brief_version,omitempty"`
+	BriefContent           []byte                        `json:"brief_content,omitempty"`
+	CandidateMetadata      candidate.Metadata            `json:"candidate_metadata,omitempty"`
+	Usage                  metrics.UsageEnvelope         `json:"usage_envelope,omitempty"`
+	TerminalRecord         delivery.TerminalRecord       `json:"terminal_record,omitempty"`
+	Attestation            attest.Statement              `json:"attestation,omitempty"`
+	ContainmentReceipt     *containment.Receipt          `json:"containment_receipt,omitempty"`
+	CandidateEvidenceName  string                        `json:"candidate_evidence_name,omitempty"`
+	CandidateEvidence      pipeline.CandidateEvidence    `json:"candidate_evidence,omitempty"`
+	AttemptManifest        evidence.AttemptManifest      `json:"attempt_manifest,omitempty"`
+	StageDeliveryRequest   delivery.StageDeliveryRequest `json:"stage_delivery_request,omitempty"`
+	Event                  evidence.Event                `json:"event,omitempty"`
+	ExpectedSequence       uint64                        `json:"expected_sequence,omitempty"`
+	ExpectedPreviousSHA256 string                        `json:"expected_previous_sha256,omitempty"`
+	Offset                 int64                         `json:"offset,omitempty"`
+	Snapshot               string                        `json:"snapshot,omitempty"`
 }
 
 type workerAPIEventPage struct {
@@ -203,6 +204,7 @@ type workerAPIServer struct {
 	candidateAbsenceAllowed    bool
 	briefTask                  string
 	approvedPlanHash           string
+	stageDeliveryService       delivery.Service
 	dispatchMu                 sync.Mutex
 	requestSlots               chan struct{}
 	nonceMu                    sync.Mutex
@@ -302,7 +304,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 		}
 		return nil, fmt.Errorf("prepare controller business brief store: %w", err)
 	}
-	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, requestSlots: make(chan struct{}, 1), nonces: make(map[string]time.Time)}
+	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, requestSlots: make(chan struct{}, 1), nonces: make(map[string]time.Time), stageDeliveryService: delivery.NewController()}
 	api.approvedPlanHash = strings.ToLower(strings.TrimSpace(job.ApprovePlanHash))
 	api.usageAllowed = socketPath != ""
 	if api.usageAllowed {
@@ -711,7 +713,7 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid, expired, replayed, or exhausted request nonce", http.StatusUnauthorized)
 		return
 	}
-	result, err := s.dispatch(request.Method, call)
+	result, err := s.dispatchContext(r.Context(), request.Method, call)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, os.ErrNotExist) {
@@ -853,6 +855,38 @@ func containsWorkerString(values []string, expected string) bool {
 }
 
 func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) {
+	return s.dispatchContext(context.Background(), method, c)
+}
+
+func (s *workerAPIServer) executeStageDelivery(ctx context.Context, request delivery.StageDeliveryRequest) (delivery.StageDeliveryReceipt, error) {
+	if s == nil || request.RunID != s.scope.RunID {
+		return delivery.StageDeliveryReceipt{}, errors.New("controller stage delivery run mismatch")
+	}
+	target, err := candidate.CanonicalTargetDir(s.scope.TargetDir)
+	if err != nil {
+		return delivery.StageDeliveryReceipt{}, fmt.Errorf("controller stage delivery target: %w", err)
+	}
+	if filepath.Clean(target) != filepath.Clean(s.attemptManifests.TargetDir) {
+		return delivery.StageDeliveryReceipt{}, errors.New("controller stage delivery target differs from attempt-manifest authority")
+	}
+	reserved, err := s.attemptManifests.IsReserved(request.RunID)
+	if err != nil || !reserved {
+		if err == nil {
+			err = errors.New("controller stage delivery requires a reserved attempt-manifest store")
+		}
+		return delivery.StageDeliveryReceipt{}, err
+	}
+	runDir := filepath.Join(target, ".ai-team", "runs", request.RunID)
+	return pipeline.ExecuteControllerStageDelivery(ctx, pipeline.ControllerStageDeliveryInput{
+		TargetDir: target, RunDir: runDir, Request: request,
+		EventLog:         s.eventLogs,
+		AttemptManifests: evidence.ReservedAttemptManifestSource{TargetDir: target},
+		Approvals:        s.approvals, ApprovedPlanHash: s.approvedPlanHash,
+		Service: s.stageDeliveryService,
+	})
+}
+
+func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c workerAPICall) (any, error) {
 	// Recorder implementations such as web.StoreRecorder keep per-run sequence
 	// and stage state. Requests from one child can arrive concurrently, so keep
 	// each invocation's projection ordered and race-free.
@@ -1230,7 +1264,23 @@ func (s *workerAPIServer) dispatch(method string, c workerAPICall) (any, error) 
 		if err != nil {
 			return nil, err
 		}
+		if record.StageDeliveryReceiptSHA256 != "" {
+			runDir := filepath.Join(target, ".ai-team", "runs", s.scope.RunID)
+			if err := pipeline.ValidateStageDeliveryTerminalRecord(target, runDir, record, s.eventLogs); err != nil {
+				return nil, fmt.Errorf("validate controller stage delivery terminal record: %w", err)
+			}
+		}
 		return nil, delivery.WriteControllerTerminalRecord(target, s.scope.RunID, record)
+	case "delivery.stage.execute":
+		if !s.usageAllowed || s.attemptManifests.TargetDir == "" || s.eventLogs == nil || s.stageDeliveryService == nil {
+			return nil, errors.New("stage delivery execution requires controller Unix transport and stores")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("worker API stage delivery is not allowed for operation %q", s.scope.Operation)
+		}
+		return s.executeStageDelivery(ctx, c.StageDeliveryRequest)
 	case "attestation.write":
 		if !s.usageAllowed || s.attestations.TargetDir == "" {
 			return nil, errors.New("controller attestation writes require bubblewrap Unix transport")
@@ -2004,6 +2054,28 @@ func (w *workerAPIContainmentReceiptWriter) WriteContainmentReceipt(receipt cont
 type workerAPITerminalRecordWriter struct{ port *workerAPIPort }
 type WorkerAPITerminalRecordWriter = workerAPITerminalRecordWriter
 
+type workerAPIStageDeliveryExecutor struct{ port *workerAPIPort }
+
+// NewWorkerAPIStageDeliveryExecutor creates the controller-owned delivery
+// capability used by agent PR stages. It is unavailable on loopback transport.
+func NewWorkerAPIStageDeliveryExecutor(port *WorkerAPIPort) pipeline.StageDeliveryExecutor {
+	return &workerAPIStageDeliveryExecutor{port: port}
+}
+
+func (w *workerAPIStageDeliveryExecutor) ExecuteStageDelivery(ctx context.Context, request delivery.StageDeliveryRequest) (delivery.StageDeliveryReceipt, error) {
+	if w == nil || w.port == nil || !w.port.SupportsControllerUsageStore() {
+		return delivery.StageDeliveryReceipt{}, errors.New("worker controller stage delivery API unavailable")
+	}
+	if request.RunID != w.port.scope.RunID {
+		return delivery.StageDeliveryReceipt{}, errors.New("worker controller stage delivery run mismatch")
+	}
+	var receipt delivery.StageDeliveryReceipt
+	if err := w.port.callContext(ctx, "delivery.stage.execute", workerAPICall{StageDeliveryRequest: request}, &receipt); err != nil {
+		return delivery.StageDeliveryReceipt{}, err
+	}
+	return receipt, nil
+}
+
 func NewWorkerAPITerminalRecordWriter(port *WorkerAPIPort) pipeline.TerminalRecordWriter {
 	return &workerAPITerminalRecordWriter{port: port}
 }
@@ -2022,6 +2094,17 @@ func (p *workerAPIPort) call(method string, value, out any) error {
 }
 
 func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.Reader) error {
+	return p.callContextWithRandom(context.Background(), method, value, out, random, false)
+}
+
+func (p *workerAPIPort) callContext(ctx context.Context, method string, value, out any) error {
+	return p.callContextWithRandom(ctx, method, value, out, rand.Reader, true)
+}
+
+func (p *workerAPIPort) callContextWithRandom(ctx context.Context, method string, value, out any, random io.Reader, useContextDeadline bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -2034,13 +2117,22 @@ func (p *workerAPIPort) callWithRandom(method string, value, out any, random io.
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, p.address+"/v1/call", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.address+"/v1/call", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.client.Do(req)
+	client := p.client
+	if useContextDeadline && client != nil {
+		longOperationClient := *client
+		longOperationClient.Timeout = 0
+		client = &longOperationClient
+	}
+	if client == nil {
+		return errors.New("worker controller API client is unavailable")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

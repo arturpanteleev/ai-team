@@ -651,12 +651,29 @@ func validateResolvedDeliveryApproval(value approval.PendingApproval, runID, sta
 // is controller-owned for cloud runs.
 func requireResolvedDeliveryOperationApproval(store ApprovalStore, source evidence.AttemptManifestSource,
 	runDir, runID, stage, planHash string, canonical []byte, candidateSHA, explicitPlanHash string) error {
+	_, err := ValidateResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, planHash, canonical, candidateSHA, explicitPlanHash)
+	return err
+}
+
+// DeliveryApprovalReader is the read-only authority needed by the controller
+// delivery boundary. Worker API servers implement it with their controller
+// approval store; no worker-supplied approval or URL is accepted.
+type DeliveryApprovalReader interface {
+	Load(runID, approvalID string) (approval.PendingApproval, error)
+	List(runID string) ([]approval.PendingApproval, error)
+}
+
+// ValidateResolvedDeliveryOperationApproval validates the exact canonical
+// plan, candidate identity, stage attempt and human/controller decision. The
+// returned approval ID is suitable for binding a controller delivery receipt.
+func ValidateResolvedDeliveryOperationApproval(store DeliveryApprovalReader, source evidence.AttemptManifestSource,
+	runDir, runID, stage, planHash string, canonical []byte, candidateSHA, explicitPlanHash string) (string, error) {
 	if store == nil {
-		return errors.New("deferred delivery requires controller approval storage")
+		return "", errors.New("deferred delivery requires controller approval storage")
 	}
 	values, err := store.List(runID)
 	if err != nil {
-		return fmt.Errorf("list saved controller delivery approvals: %w", err)
+		return "", fmt.Errorf("list saved controller delivery approvals: %w", err)
 	}
 	var lastErr error
 	for _, value := range values {
@@ -676,12 +693,12 @@ func requireResolvedDeliveryOperationApproval(store ApprovalStore, source eviden
 			lastErr = err
 			continue
 		}
-		return nil
+		return value.ID, nil
 	}
 	if lastErr != nil {
-		return fmt.Errorf("no saved approval belongs to a controller-recorded delivery attempt: %w", lastErr)
+		return "", fmt.Errorf("no saved approval belongs to a controller-recorded delivery attempt: %w", lastErr)
 	}
-	return errors.New("no resolved release-manager approval matches this delivery plan and candidate")
+	return "", errors.New("no resolved release-manager approval matches this delivery plan and candidate")
 }
 
 func approvalAttemptMatchesStage(source evidence.AttemptManifestSource, runDir, runID, attemptID, stage string) error {

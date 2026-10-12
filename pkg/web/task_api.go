@@ -1234,17 +1234,68 @@ type flowUsageStats struct {
 }
 
 func (s *Server) handleGetFlowMetrics(w http.ResponseWriter, r *http.Request) {
-	from, to, err := parseFlowPeriod(r)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_period")
+	selection, ok := s.parseFlowSelection(w, r)
+	if !ok {
 		return
 	}
-	metricsValue, err := s.buildFlowMetrics(from, to)
+	metricsValue, err := s.buildFlowMetricsFor(selection)
 	if err != nil {
 		writeJSONAPIError(w, http.StatusInternalServerError, "flow metrics unavailable", "metrics_unavailable")
 		return
 	}
 	writeJSONResponse(w, http.StatusOK, metricsValue)
+}
+
+// flowSelection restricts flow metrics to runs started in [from, to) and,
+// when runID is set, to that one run. A run selection without an explicit
+// period covers the whole run, so the task timeline can show per-stage tokens
+// and subscription estimates computed by the same aggregate as the dashboard.
+type flowSelection struct {
+	from, to time.Time
+	runID    string
+	period   bool
+}
+
+func (selection flowSelection) includes(run store.PipelineRun) bool {
+	if selection.runID != "" && run.RunID != selection.runID {
+		return false
+	}
+	return !selection.period || (!run.StartedAt.Before(selection.from) && run.StartedAt.Before(selection.to))
+}
+
+// parseFlowSelection writes the API error itself and reports whether the
+// request may proceed.
+func (s *Server) parseFlowSelection(w http.ResponseWriter, r *http.Request) (flowSelection, bool) {
+	runID := strings.TrimSpace(r.URL.Query().Get("run_id"))
+	explicitPeriod := r.URL.Query().Get("from") != "" || r.URL.Query().Get("to") != ""
+	selection := flowSelection{runID: runID, period: true}
+	if runID != "" {
+		if !safeIdentity(runID) {
+			writeJSONAPIError(w, http.StatusBadRequest, "invalid run id", "bad_identity")
+			return selection, false
+		}
+		run, err := s.store.GetPipelineRunByRunID(runID)
+		if err != nil || run == nil {
+			writeJSONAPIError(w, http.StatusNotFound, "run not found", "not_found")
+			return selection, false
+		}
+		if !explicitPeriod {
+			selection.period = false
+			selection.from = run.StartedAt.UTC()
+			selection.to = time.Now().UTC()
+			if run.CompletedAt != nil {
+				selection.to = run.CompletedAt.UTC()
+			}
+			return selection, true
+		}
+	}
+	from, to, err := parseFlowPeriod(r)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_period")
+		return selection, false
+	}
+	selection.from, selection.to = from, to
+	return selection, true
 }
 
 func parseFlowPeriod(r *http.Request) (time.Time, time.Time, error) {
@@ -1279,6 +1330,11 @@ func parseFlowPeriod(r *http.Request) (time.Time, time.Time, error) {
 }
 
 func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, error) {
+	return s.buildFlowMetricsFor(flowSelection{from: from, to: to, period: true})
+}
+
+func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsResponse, error) {
+	from, to := selection.from, selection.to
 	response := flowMetricsResponse{From: from, To: to, ByStage: []flowStageStats{}, Overrides: map[string]int{}, Skips: map[string]int{}, Returns: map[string]int{}}
 	leadTimes, cycleTimes := make([]int64, 0), make([]int64, 0)
 	stageIndex := map[string]int{}
@@ -1330,7 +1386,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	var tokenInputTotal, tokenOutputTotal int64
 	requestedRuns := 0
 	for _, run := range runs {
-		if run.StartedAt.Before(from) || !run.StartedAt.Before(to) {
+		if !selection.includes(run) {
 			continue
 		}
 		requestedRuns++
@@ -1343,6 +1399,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			return response, err
 		}
 		humanEditAttemptIDs, humanEditMetadata := humanEditEvidence(events)
+		executors := attemptExecutors(events)
 		countedReturns := map[string]bool{}
 		acceptanceAt := time.Time{}
 		runFinishedAt := run.StartedAt
@@ -1384,9 +1441,10 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			}
 			stateStat.Attempts++
 			stateStat.DurationMS += stage.DurationMs
-			if strings.EqualFold(stage.Execution, "human") {
+			executor := stageExecutor(stage, executors)
+			if executor == "human" {
 				stat.Human++
-			} else if strings.EqualFold(stage.Execution, "agent") {
+			} else if executor == "agent" {
 				stat.Agent++
 				manifest, manifestErr := readTaskAttemptManifest(s, run.RunID, stage.AttemptID)
 				if manifestErr == nil && manifest.Usage != nil && manifest.Usage.Attested {
@@ -1426,7 +1484,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 				}
 				if taskStageSucceeded(stage) {
 					agentResults++
-					if !taskStageWasHumanEdited(stages, stagePosition, stage, humanEditAttemptIDs, humanEditMetadata) {
+					if !taskStageWasHumanEdited(stages, stagePosition, stage, executors, humanEditAttemptIDs, humanEditMetadata) {
 						agentAcceptedWithoutEdit++
 					}
 				}
@@ -1559,7 +1617,7 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			totalEstimate := float64(0)
 			estimateComplete := true
 			for _, run := range runs {
-				if run.StartedAt.Before(from) || !run.StartedAt.Before(to) {
+				if !selection.includes(run) {
 					continue
 				}
 				envelope, found := envelopesByRunID[run.RunID]
@@ -1682,7 +1740,7 @@ func taskStageSucceeded(stage store.Stage) bool {
 		strings.EqualFold(stage.Status, "success") || strings.EqualFold(stage.Status, "completed")
 }
 
-func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent store.Stage, editedAttemptIDs, metadataKnown map[string]bool) bool {
+func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent store.Stage, executors map[string]string, editedAttemptIDs, metadataKnown map[string]bool) bool {
 	if editedAttemptIDs[agent.AttemptID] {
 		return true
 	}
@@ -1691,12 +1749,49 @@ func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent stor
 	}
 	for position := agentPosition + 1; position < len(stages); position++ {
 		candidate := stages[position]
-		if candidate.AgentName == agent.AgentName && strings.EqualFold(candidate.Execution, "human") &&
+		if candidate.AgentName == agent.AgentName && stageExecutor(candidate, executors) == "human" &&
 			(candidate.StartedAt.After(*agent.CompletedAt) || candidate.StageIndex > agent.StageIndex) {
 			return !metadataKnown[candidate.AttemptID]
 		}
 	}
 	return false
+}
+
+// attemptExecutors maps attempt IDs to the executor kind recorded on their
+// attempt_finished event. The recorder stores the workflow execution state
+// (running, succeeded, ...) in stages.execution, so the executor kind must come
+// from the event stream.
+func attemptExecutors(events []store.Event) map[string]string {
+	executors := map[string]string{}
+	for _, event := range events {
+		if event.Type != "attempt_finished" || event.AttemptID == "" {
+			continue
+		}
+		executor := strings.ToLower(event.Executor)
+		if executor == "" {
+			var data map[string]any
+			if json.Unmarshal([]byte(event.DataJSON), &data) == nil {
+				executor = strings.ToLower(metricStringValue(data["executor"]))
+			}
+		}
+		if executor == "human" || executor == "agent" {
+			executors[event.AttemptID] = executor
+		}
+	}
+	return executors
+}
+
+// stageExecutor prefers the executor recorded for the attempt and falls back
+// to a stage row whose execution column already holds the executor kind.
+func stageExecutor(stage store.Stage, executors map[string]string) string {
+	if executor := executors[stage.AttemptID]; executor != "" {
+		return executor
+	}
+	execution := strings.ToLower(stage.Execution)
+	if execution == "human" || execution == "agent" {
+		return execution
+	}
+	return ""
 }
 
 func humanEditEvidence(events []store.Event) (map[string]bool, map[string]bool) {
@@ -1790,12 +1885,11 @@ func summarizeDurations(values []int64) flowDurationStats {
 }
 
 func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request) {
-	from, to, err := parseFlowPeriod(r)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_period")
+	selection, ok := s.parseFlowSelection(w, r)
+	if !ok {
 		return
 	}
-	value, err := s.buildFlowMetrics(from, to)
+	value, err := s.buildFlowMetricsFor(selection)
 	if err != nil {
 		writeJSONAPIError(w, http.StatusInternalServerError, "flow metrics unavailable", "metrics_unavailable")
 		return

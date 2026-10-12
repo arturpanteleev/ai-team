@@ -489,7 +489,10 @@ func TestRun_AgentDeliveryDefaultGraphPublishesPRBeforeReviewAndQA(t *testing.T)
 	}
 	service := &pullRequestDeliveryService{}
 	notifications := &captureNotifier{}
-	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithDeliveryService(service),
+	// The local bare remote is not a GitHub repository; the reviewer's PR diff
+	// boundary (B-44) is faked so this test stays focused on delivery order.
+	prChecks := &fakePRStageChecks{url: expectedPR}
+	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithDeliveryService(service), WithPRStageChecks(prChecks),
 		WithNotifier(notifications), WithPrompter(&scriptedPrompter{interactive: true, answers: []string{"y"}}))
 	result, runErr := p.RunWithResult(context.Background(), RunConfig{
 		Feature: "feat", TaskDesc: "run implementation then code review", TargetDir: dir, ApproveGates: true,

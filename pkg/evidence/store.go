@@ -90,6 +90,10 @@ type RunManifest struct {
 	ResolvedWorkflow       string             `json:"resolved_workflow_evidence"`
 	ResolvedWorkflowSHA256 string             `json:"resolved_workflow_sha256"`
 	Controller             ControllerIdentity `json:"controller"`
+	// TaskRepository is the lower-cased host/owner/repo of the target's origin,
+	// captured by the controller before any agent runs. PR stage checks bind
+	// every PR to it instead of trusting mutable checkout configuration.
+	TaskRepository string `json:"task_repository,omitempty"`
 	// Provenance (V0-2) — authority-bearing provenance manifest v1, хранится
 	// inline в run.json; при resume сверяется с заново построенным manifest'ом
 	// (drift detection). Опак для evidence: содержимое интерпретирует pipeline.
@@ -872,11 +876,12 @@ func (s *Store) Append(event Event) error {
 	return s.append(event, false)
 }
 
-// AppendControllerEvent records the one event that is derived from a trusted
-// resolved human submission. Remote workers use a separate, validated
-// controller API capability; they cannot submit this event through Append.
+// AppendControllerEvent records events derived from trusted controller
+// decisions. Remote workers use a separate, validated controller API
+// capability; they cannot submit these events through Append.
 func (s *Store) AppendControllerEvent(event Event) error {
-	if event.Type != "description_missing" {
+	if event.Type != "description_missing" && event.Type != "auto_check_retry" &&
+		!(event.Type == "run_started" && event.Data["mode"] == "auto") {
 		return fmt.Errorf("unsupported controller-only event type %q", event.Type)
 	}
 	return s.append(event, true)
@@ -888,8 +893,9 @@ func (s *Store) append(event Event, controllerOnly bool) error {
 	if s.eventLog == nil {
 		return errors.New("event log is unavailable")
 	}
-	if !controllerOnly && event.Type == "description_missing" {
-		return errors.New("description_missing can only be appended through AppendControllerEvent")
+	if !controllerOnly && (event.Type == "description_missing" || event.Type == "auto_check_retry" ||
+		(event.Type == "run_started" && event.Data != nil && event.Data["mode"] == "auto")) {
+		return fmt.Errorf("%s can only be appended through AppendControllerEvent", event.Type)
 	}
 	var appended Event
 	var err error

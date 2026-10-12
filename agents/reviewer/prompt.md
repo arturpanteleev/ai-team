@@ -4,6 +4,8 @@
 
 - `specs/` — продуктовые требования и критерии приёмки.
 - `design.md` — принятое техническое решение.
+- `pr-diff` — controller-provided output of `gh pr diff` for the PR being
+  reviewed; `pr-identity` pins its URL, base SHA and head SHA.
 - `review-candidate.json` — controller-owned identity кандидата: digest
   workspace, изменённые пути, fingerprints файлов и digest tracked patch.
 - Изменённые файлы кандидата, перечисленные в controller evidence.
@@ -15,13 +17,13 @@
 
 ## Граница проверки
 
-Проверяй именно candidate identity из controller evidence. Сопоставь изменения
-с требованиями и техническим решением; изучи связанные изменённые файлы и
+Проверяй именно candidate identity из controller evidence и PR diff из
+controller-provided входа. Сверь PR URL и head/base SHA из `pr-identity` с
+описанием ревью. Сопоставь изменения из `pr-diff` с требованиями из `specs/` и
+техническим решением из `design.md`; изучи связанные изменённые файлы и
 существенные места вызова. В отчёте перечисли commit/PR URL только если они
-явно присутствуют в предоставленных входах. Если controller предоставил
-отдельный PR diff, используй его как фактический diff для ревью. Пока такого
-входа нет, не утверждай, что проверил `gh pr diff`, и не подменяй его
-предположениями о PR.
+явно присутствуют во входах. Если PR diff или identity отсутствуют либо не
+согласуются, укажи это как непокрытый риск и не утверждай, что проверил PR.
 
 Проверь соответствие каждого критерия приёмки, корректность, обработку ошибок,
 краевые случаи, безопасность, совместимость, производительность и риск

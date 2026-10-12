@@ -94,6 +94,10 @@ type taskRunListItem struct {
 
 type taskRunDetails struct {
 	Run            *store.PipelineRun                  `json:"run"`
+	Task           string                              `json:"task,omitempty"`
+	Mode           string                              `json:"mode,omitempty"`
+	ExternalLinks  []string                            `json:"external_links,omitempty"`
+	Template       *templateValidation                 `json:"template,omitempty"`
 	State          *lifecycle.State                    `json:"state,omitempty"`
 	Stages         []store.Stage                       `json:"stages"`
 	Approvals      []approval.PendingApproval          `json:"approvals"`
@@ -260,9 +264,16 @@ func (s *Server) loadTaskRunDetails(runID string) (taskRunDetails, int, error) {
 	}
 	details := taskRunDetails{Run: run, Stages: stages, Approvals: []approval.PendingApproval{},
 		StageOwners: map[string]store.StageOwner{}, Results: map[string][]humanartifact.Revision{}, AllowedActions: []string{}}
+	var taskMetadata startRunCommand
+	if json.Unmarshal([]byte(run.ConfigSnapshot), &taskMetadata) == nil {
+		details.Task, details.Mode, details.ExternalLinks = taskMetadata.Task, taskMetadata.Mode, taskMetadata.ExternalLinks
+	}
 	if stateStore, stateErr := lifecycle.NewStore(s.targetDir); stateErr == nil {
 		if state, loadErr := stateStore.Load(runID); loadErr == nil {
 			details.State = &state
+			if details.Task == "" {
+				details.Task = state.Task
+			}
 			details.AllowedActions = s.taskAllowedActions(runID, state.NextStage, state)
 		}
 	}
@@ -277,8 +288,12 @@ func (s *Server) loadTaskRunDetails(runID string) (taskRunDetails, int, error) {
 		}
 		details.Approvals = approvals
 	}
-	if data, _, found, pinErr := s.pinnedTaskTemplate(runID); pinErr == nil && found {
+	if data, version, found, pinErr := s.pinnedTaskTemplate(runID); pinErr == nil && found {
 		if cfg, parseErr := config.ParseYAML(data); parseErr == nil {
+			if graph, graphErr := cfg.CompiledGraph(); graphErr == nil {
+				template := describeTemplate(templateValidation{Valid: true, Version: version}, cfg, graph)
+				details.Template = &template
+			}
 			for _, stage := range cfg.Stages {
 				for _, resultKind := range []string{stage.Result} {
 					path := humanStageResultPath(stage.ID, resultKind)

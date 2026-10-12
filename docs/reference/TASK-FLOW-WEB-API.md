@@ -44,6 +44,14 @@ stale revisions and edits after the grill resolves are rejected. Then call
 at least one selected result's content SHA-256 differs from the grill's pinned
 baseline before starting the next check round.
 
+The browser opens a task at `/tasks/{runID}`. Run detail also returns the task
+text, mode, external links, and the immutable template description pinned when
+the run was created. The page uses that pinned stage graph for historical
+tasks and renders each stage action only when its name is present in
+`allowed_actions`. It keeps result revisions and resolved grill decisions in
+the task history and displays checker evidence, event details, and attempt log
+links alongside the run.
+
 Event endpoints share the persisted SQLite event-ID cursor. By default
 (`order=asc`) they return events with a cursor greater than `after`, oldest
 first; this is the replay contract for resuming a stream. With `order=desc`

@@ -57,7 +57,7 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := NewStoreRecorder(srv.store)
-	recorder.RunStarted("run-read-api", "feature-read", `{"task":"review feature","mode":"auto"}`, started)
+	recorder.RunStarted("run-read-api", "feature-read", `{"task":"review feature","mode":"auto","external_links":["JIRA-12 https://tracker.example/JIRA-12"]}`, started)
 	recorder.StageStarted("run-read-api", "attempt-1", "acceptance", 1, started.Add(time.Minute))
 	completedAt := started.Add(5 * time.Minute)
 	recorder.StageFinished(notifier.StageResult{RunID: "run-read-api", AttemptID: "attempt-1", Name: "acceptance",
@@ -85,6 +85,18 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 				t.Fatalf("GET %s did not contain %q: %s", testCase.path, testCase.want, response.Body.String())
 			}
 		})
+	}
+	detailRequest := newLoopbackRequest(http.MethodGet, "/api/runs/run-read-api", nil)
+	detailResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(detailResponse, detailRequest)
+	var detail taskRunDetails
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode task detail: %v", err)
+	}
+	if detail.Task != "review feature" || detail.Mode != "auto" || len(detail.ExternalLinks) != 1 ||
+		detail.ExternalLinks[0] != "JIRA-12 https://tracker.example/JIRA-12" || detail.Template == nil ||
+		!detail.Template.Valid || detail.Template.Version == "" || len(detail.Template.Stages) == 0 {
+		t.Fatalf("task detail omitted its metadata or pinned template: %+v", detail)
 	}
 	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow.csv", nil)
 	response := httptest.NewRecorder()

@@ -35,15 +35,18 @@ type AgentConfig struct {
 }
 
 type Config struct {
-	SchemaVersion int                                `yaml:"schema_version"`
-	Template      string                             `yaml:"template"`
-	Title         string                             `yaml:"title"`
-	StallAfter    string                             `yaml:"stall_after,omitempty"`
-	Stages        []TemplateStage                    `yaml:"stages"`
-	Returns       []TemplateReturn                   `yaml:"returns,omitempty"`
-	MaxVisits     map[string]int                     `yaml:"max_visits,omitempty"`
-	Checks        []checks.Definition                `yaml:"checks,omitempty"`
-	MCPServers    map[string]runtime.MCPServerConfig `yaml:"mcp_servers,omitempty"`
+	SchemaVersion int    `yaml:"schema_version"`
+	Template      string `yaml:"template"`
+	Title         string `yaml:"title"`
+	StallAfter    string `yaml:"stall_after,omitempty"`
+	// ForbidSelfApproval запрещает участнику подтверждать этап, который он
+	// сам брал или сдавал (B-82). По умолчанию выключено.
+	ForbidSelfApproval bool                               `yaml:"forbid_self_approval,omitempty"`
+	Stages             []TemplateStage                    `yaml:"stages"`
+	Returns            []TemplateReturn                   `yaml:"returns,omitempty"`
+	MaxVisits          map[string]int                     `yaml:"max_visits,omitempty"`
+	Checks             []checks.Definition                `yaml:"checks,omitempty"`
+	MCPServers         map[string]runtime.MCPServerConfig `yaml:"mcp_servers,omitempty"`
 
 	// PipelineAgents and Workflow are runtime compatibility projections. They
 	// are never serialized; schema v5 stores stage IDs, agent references and
@@ -518,7 +521,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "template": true, "title": true,
-		"stall_after": true, "stages": true, "returns": true,
+		"stall_after": true, "forbid_self_approval": true, "stages": true, "returns": true,
 		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
@@ -528,29 +531,30 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	type rawConfig struct {
-		SchemaVersion    int                                `yaml:"schema_version"`
-		Template         string                             `yaml:"template"`
-		Title            string                             `yaml:"title"`
-		StallAfter       string                             `yaml:"stall_after"`
-		Stages           []TemplateStage                    `yaml:"stages"`
-		Returns          []TemplateReturn                   `yaml:"returns"`
-		MaxVisits        map[string]int                     `yaml:"max_visits"`
-		Checks           []checks.Definition                `yaml:"checks"`
-		MCPServers       map[string]runtime.MCPServerConfig `yaml:"mcp_servers"`
-		CLI              string                             `yaml:"cli"`
-		Model            string                             `yaml:"model"`
-		Effort           string                             `yaml:"effort"`
-		StageTimeout     string                             `yaml:"stage_timeout"`
-		PreflightTimeout string                             `yaml:"preflight_timeout"`
-		DeliveryTimeout  string                             `yaml:"delivery_timeout"`
-		Containment      *ContainmentConfig                 `yaml:"containment"`
-		Usage            *UsageConfig                       `yaml:"usage"`
-		Tracker          *TrackerConfig                     `yaml:"tracker"`
-		Notifications    *NotificationsConfig               `yaml:"notifications"`
-		TreeHash         *TreeHashConfig                    `yaml:"tree_hash"`
-		Budget           *BudgetConfig                      `yaml:"budget"`
-		Redaction        *RedactionConfig                   `yaml:"redaction"`
-		Retention        *RetentionConfig                   `yaml:"retention"`
+		SchemaVersion      int                                `yaml:"schema_version"`
+		Template           string                             `yaml:"template"`
+		Title              string                             `yaml:"title"`
+		StallAfter         string                             `yaml:"stall_after"`
+		ForbidSelfApproval bool                               `yaml:"forbid_self_approval"`
+		Stages             []TemplateStage                    `yaml:"stages"`
+		Returns            []TemplateReturn                   `yaml:"returns"`
+		MaxVisits          map[string]int                     `yaml:"max_visits"`
+		Checks             []checks.Definition                `yaml:"checks"`
+		MCPServers         map[string]runtime.MCPServerConfig `yaml:"mcp_servers"`
+		CLI                string                             `yaml:"cli"`
+		Model              string                             `yaml:"model"`
+		Effort             string                             `yaml:"effort"`
+		StageTimeout       string                             `yaml:"stage_timeout"`
+		PreflightTimeout   string                             `yaml:"preflight_timeout"`
+		DeliveryTimeout    string                             `yaml:"delivery_timeout"`
+		Containment        *ContainmentConfig                 `yaml:"containment"`
+		Usage              *UsageConfig                       `yaml:"usage"`
+		Tracker            *TrackerConfig                     `yaml:"tracker"`
+		Notifications      *NotificationsConfig               `yaml:"notifications"`
+		TreeHash           *TreeHashConfig                    `yaml:"tree_hash"`
+		Budget             *BudgetConfig                      `yaml:"budget"`
+		Redaction          *RedactionConfig                   `yaml:"redaction"`
+		Retention          *RetentionConfig                   `yaml:"retention"`
 	}
 	var raw rawConfig
 	if err := value.Decode(&raw); err != nil {
@@ -561,6 +565,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Template = raw.Template
 	c.Title = raw.Title
 	c.StallAfter = raw.StallAfter
+	c.ForbidSelfApproval = raw.ForbidSelfApproval
 	c.Stages = raw.Stages
 	c.Returns = raw.Returns
 	c.MaxVisits = raw.MaxVisits

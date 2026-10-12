@@ -18,9 +18,12 @@ var templateIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // TemplateStage is one ordered node in a project's process template.
 type TemplateStage struct {
-	ID               string            `yaml:"id"`
-	Title            string            `yaml:"title"`
-	Function         string            `yaml:"function"`
+	ID       string `yaml:"id"`
+	Title    string `yaml:"title"`
+	Function string `yaml:"function"`
+	// ApproverFunction — необязательная функция подтверждающего (B-82). Если
+	// задана, подтверждение и возврат этапа принадлежат ей, а не исполнителю.
+	ApproverFunction string            `yaml:"approver_function,omitempty"`
 	Result           string            `yaml:"result"`
 	Executor         string            `yaml:"executor,omitempty"`
 	Agent            string            `yaml:"agent,omitempty"`
@@ -60,7 +63,7 @@ type TemplateReturn struct {
 
 func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 	if err := validateMappingKeys(node, map[string]bool{
-		"id": true, "title": true, "function": true, "result": true,
+		"id": true, "title": true, "function": true, "approver_function": true, "result": true,
 		"executor": true, "agent": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
 		"skippable": true, "delivery": true, "mcp_servers": true,
@@ -165,6 +168,11 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 		if stage.Function == "" || strings.TrimSpace(stage.Function) != stage.Function {
 			add("%s: function обязателен", prefix)
+		}
+		if err := cloudidentity.ValidateStageFunctions(cloudidentity.StageFunctions{
+			Executor: stage.Function, Approver: stage.ApproverFunction,
+		}); err != nil {
+			add("%s: %v", prefix, err)
 		}
 		if stage.Result != "md" && stage.Result != "link" && stage.Result != "approve" {
 			add("%s: result %q недопустим (md|link|approve)", prefix, stage.Result)
@@ -448,7 +456,7 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		// otherwise automatic; this stage needs an explicit choice among the
 		// forward and backward targets.
 		if (next != workflow.TerminalComplete && confirm == "required") || len(bySource[stage.ID]) > 0 {
-			edge.Approval = generatedApprovalWithReturns(stage.Function, next, bySource[stage.ID])
+			edge.Approval = generatedApprovalWithReturns(stage.DecisionFunction(), next, bySource[stage.ID])
 		}
 		if stage.Skippable {
 			graph.Edges = append(graph.Edges, workflow.Edge{
@@ -514,10 +522,19 @@ func cloudRoleForFunction(function string) string {
 	return function
 }
 
+// DecisionFunction returns the function that confirms or returns the stage:
+// approver_function when configured, otherwise the executor function.
+func (s TemplateStage) DecisionFunction() string {
+	if s.ApproverFunction != "" {
+		return s.ApproverFunction
+	}
+	return s.Function
+}
+
 func stageFunction(stages []TemplateStage, id string) string {
 	for _, stage := range stages {
 		if stage.ID == id {
-			return stage.Function
+			return stage.DecisionFunction()
 		}
 	}
 	return "operator"

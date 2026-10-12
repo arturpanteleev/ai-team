@@ -422,6 +422,13 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
+	// Resuming an agent stage launches its agent: record the actor first so
+	// forbid_self_approval sees the launch; an unrecorded launch must not run.
+	session, _ := s.requestSession(r)
+	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); err != nil {
+		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.controller.Resume(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -599,6 +606,12 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			} else if command.Action == "approve_spec" {
 				http.Error(w, "approve_spec разрешён только для Product Owner согласования ТЗ", http.StatusConflict)
 				return
+			}
+			if (command.Action == "approve" || command.Action == "approve_spec") && isStageConfirmation(*matched) {
+				if err := s.selfApprovalViolation(chi.URLParam(r, "runID"), *matched, actorID); err != nil {
+					http.Error(w, err.Error(), http.StatusForbidden)
+					return
+				}
 			}
 		} else if command.Action == "answer_questions" || command.Action == "approve_spec" {
 			http.Error(w, "не найден соответствующий Product Owner approval", http.StatusConflict)

@@ -26,6 +26,8 @@ const eventLabels: Record<string, string> = {
   approval_decided: 'Решение по подтверждению',
   transition_selected: 'Выбран переход',
   stage_taken: 'Этап принят в работу',
+  stage_agent_requested: 'Участник запустил агента',
+  executor_changed: 'Сменён исполнитель этапа',
   check_overridden: 'Проверка переопределена',
   check_error: 'Ошибка проверки',
   description_missing: 'Не хватает описания',

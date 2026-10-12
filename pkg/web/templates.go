@@ -22,27 +22,31 @@ type templateCommand struct {
 }
 
 type templateValidation struct {
-	YAML       string               `json:"yaml,omitempty"`
-	Valid      bool                 `json:"valid"`
-	Diagnostic string               `json:"diagnostic,omitempty"`
-	Template   string               `json:"template,omitempty"`
-	Title      string               `json:"title,omitempty"`
-	Version    string               `json:"version,omitempty"`
-	Graph      *workflow.Graph      `json:"graph,omitempty"`
-	Stages     []templateStageView  `json:"stages,omitempty"`
-	Returns    []templateReturnView `json:"returns,omitempty"`
+	YAML       string `json:"yaml,omitempty"`
+	Valid      bool   `json:"valid"`
+	Diagnostic string `json:"diagnostic,omitempty"`
+	Template   string `json:"template,omitempty"`
+	Title      string `json:"title,omitempty"`
+	// ForbidSelfApproval mirrors the template's forbid_self_approval policy.
+	ForbidSelfApproval bool                 `json:"forbid_self_approval,omitempty"`
+	Version            string               `json:"version,omitempty"`
+	Graph              *workflow.Graph      `json:"graph,omitempty"`
+	Stages             []templateStageView  `json:"stages,omitempty"`
+	Returns            []templateReturnView `json:"returns,omitempty"`
 }
 
 type templateStageView struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Function  string `json:"function"`
-	Result    string `json:"result"`
-	Executor  string `json:"executor"`
-	Agent     string `json:"agent,omitempty"`
-	LinkKind  string `json:"link_kind,omitempty"`
-	Skippable bool   `json:"skippable,omitempty"`
-	MaxVisits int    `json:"max_visits,omitempty"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Function string `json:"function"`
+	// ApproverFunction is the optional confirming function (B-82).
+	ApproverFunction string `json:"approver_function,omitempty"`
+	Result           string `json:"result"`
+	Executor         string `json:"executor"`
+	Agent            string `json:"agent,omitempty"`
+	LinkKind         string `json:"link_kind,omitempty"`
+	Skippable        bool   `json:"skippable,omitempty"`
+	MaxVisits        int    `json:"max_visits,omitempty"`
 }
 
 type templateReturnView struct {
@@ -167,6 +171,7 @@ func (s *Server) handleValidateTemplate(w http.ResponseWriter, r *http.Request) 
 
 func describeTemplate(result templateValidation, cfg *config.Config, graph workflow.Graph) templateValidation {
 	result.Template, result.Title, result.Graph = cfg.Template, cfg.Title, &graph
+	result.ForbidSelfApproval = cfg.ForbidSelfApproval
 	result.Stages = make([]templateStageView, 0, len(cfg.Stages))
 	for _, stage := range cfg.Stages {
 		visits := 0
@@ -185,7 +190,7 @@ func describeTemplate(result templateValidation, cfg *config.Config, graph workf
 			}
 		}
 		result.Stages = append(result.Stages, templateStageView{
-			ID: stage.ID, Title: stage.Title, Function: stage.Function, Result: stage.Result,
+			ID: stage.ID, Title: stage.Title, Function: stage.Function, ApproverFunction: stage.ApproverFunction, Result: stage.Result,
 			Executor: stage.Executor, Agent: stage.Agent, LinkKind: stage.LinkKind,
 			Skippable: stage.Skippable, MaxVisits: visits,
 		})

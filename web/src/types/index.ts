@@ -150,6 +150,8 @@ export interface ProjectTemplateStage {
   id: string;
   title: string;
   function: string;
+  /** Optional confirming function; confirm/return require it when set (B-82). */
+  approver_function?: string;
   result: 'md' | 'link' | 'approve';
   executor: 'human' | 'agent';
   agent?: string;
@@ -312,6 +314,8 @@ export interface PinnedTaskTemplate {
   template: string;
   title: string;
   version: string;
+  /** Template forbids confirming a stage you took or submitted (B-82). */
+  forbid_self_approval?: boolean;
   stages: TaskStageTemplate[];
   returns: TaskTemplateReturn[];
   graph?: WorkflowGraph;

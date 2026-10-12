@@ -917,8 +917,8 @@ func TestFlowMetricsBreaksDownStagesStatesAndSubscriptionShare(t *testing.T) {
 }
 
 func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
-	if flowMetricsRaceBuild {
-		t.Skip("race instrumentation changes the wall-clock performance acceptance measurement")
+	if flowMetricsRaceBuild || testing.CoverMode() != "" {
+		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")
 	}
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")

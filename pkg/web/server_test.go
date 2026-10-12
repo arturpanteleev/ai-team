@@ -20,9 +20,12 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
@@ -38,6 +41,7 @@ var (
 	_ StageAgentController    = (*control.Controller)(nil)
 	_ StageSkipController     = (*control.Controller)(nil)
 	_ StageReturnController   = (*control.Controller)(nil)
+	_ StageGrillController    = (*control.Controller)(nil)
 )
 
 type fakeRunController struct {
@@ -218,6 +222,525 @@ func TestSubmitHumanStageEndpointPersistsVersionAndExposesHistory(t *testing.T) 
 	srv.router.ServeHTTP(listed, get)
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), receipt.Submission.ID) {
 		t.Fatalf("stage revision history endpoint: %d %s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestCreateArtifactRevisionForPendingGrillStage(t *testing.T) {
+	target := t.TempDir()
+	const runID, stageID = "run-grill-edit", "product_spec"
+	artifactPath := "stages/product_spec/result.md"
+	template, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateData, err := template.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinDataForRun(runID, runID, templateData); err != nil {
+		t.Fatal(err)
+	}
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialContent := "# Initial spec\n\nКритерии приёмки\nИсходные критерии.\n"
+	initial, err := humanStore.AppendSubmission(runID, stageID, "approval-human-input", "md", "", initialContent, "spec", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Which behavior is expected?",
+		Round: 1, ArtifactRevisions: map[string]string{artifactPath: initial.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := approval.PendingApproval{
+		ID: "approval-grill-question", RunID: runID, AttemptID: "attempt-product-spec",
+		Kind: approval.KindGrillQuestions, Trigger: approval.GrillTrigger, Status: approval.StatusPending,
+		FromStage: stageID, ToStage: stageID, Payload: payload,
+		Actions: []string{approval.GrillActionNewVersion},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{pending}}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
+		WithTargetDir(target), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	requestBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": initialContent, "comment": "Комментарий без изменения результата",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(requestBody))
+	commentOnlyBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"comment": "This comment does not revise the result",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentOnly := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(commentOnlyBody))
+	commentOnlyResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(commentOnlyResponse, commentOnly)
+	if commentOnlyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("comment-only stage revision must be rejected: %d %s", commentOnlyResponse.Code, commentOnlyResponse.Body.String())
+	}
+	unchanged := httptest.NewRecorder()
+	srv.router.ServeHTTP(unchanged, request)
+	if unchanged.Code != http.StatusBadRequest {
+		t.Fatalf("same result bytes must not create a new revision: %d %s", unchanged.Code, unchanged.Body.String())
+	}
+	revisions, err := srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("unchanged grill edit mutated revision history: %+v err=%v", revisions, err)
+	}
+
+	missingSectionBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": "# Revised spec\n\nThe acceptance section was removed.\n", "comment": "Updated wording",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingSection := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(missingSectionBody))
+	rejected := httptest.NewRecorder()
+	srv.router.ServeHTTP(rejected, missingSection)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "required section") {
+		t.Fatalf("revision that removes a required section must fail validation: %d %s", rejected.Code, rejected.Body.String())
+	}
+
+	requestBody, err = json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": "# Revised spec\n\nКритерии приёмки\nНовые измеримые критерии.\n", "comment": "Ответил на вопрос грилла",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(requestBody))
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("valid stage result revision during grill: %d %s", response.Code, response.Body.String())
+	}
+	revisions, err = srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 2 || revisions[1].BaseRevision != initial.ID ||
+		revisions[1].Content != "# Revised spec\n\nКритерии приёмки\nНовые измеримые критерии.\n" {
+		t.Fatalf("grill edit was not stored as a new immutable revision: %+v err=%v", revisions, err)
+	}
+
+	controller.approvals[0].Status = approval.StatusResolved
+	lateEditBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": revisions[1].ID, "base_sha256": revisions[1].SHA256,
+		"content": "# Late edit\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateEdit := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(lateEditBody))
+	blocked := httptest.NewRecorder()
+	srv.router.ServeHTTP(blocked, lateEdit)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("stage result must not be revised after grill resolves: %d %s", blocked.Code, blocked.Body.String())
+	}
+}
+
+func TestFirstGrillEditOfAgentOutputThroughWebAndController(t *testing.T) {
+	target := t.TempDir()
+	const runID, stageID, attemptID = "run-grill-first-agent-edit", "product_spec", "attempt-agent-output"
+	artifactPath := "attempts/" + attemptID + "/artifacts/result.md"
+	template, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateData, err := template.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), templateData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinDataForRun(runID, runID, templateData); err != nil {
+		t.Fatal(err)
+	}
+
+	source := []byte("# Product spec\n\nКритерии приёмки\nInitial measurable criteria.\n")
+	sourceSHA := fmt.Sprintf("%x", sha256.Sum256(source))
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	outputPath := filepath.Join(runDir, filepath.FromSlash(artifactPath))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, source, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID,
+		Stage: stageID, StageIndex: 1, StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(),
+		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success",
+		Outputs: []evidence.ArtifactRecord{{Name: "result", Type: "file", EvidencePath: artifactPath,
+			Size: int64(len(source)), SHA256: sourceSHA}},
+	}
+	manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Clarify acceptance criteria.", Round: 1,
+		ArtifactContentSHA256: map[string]string{artifactPath: sourceSHA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := approval.PendingApproval{
+		RunID: runID, AttemptID: attemptID, FromStage: stageID, ToStage: stageID,
+		Trigger: approval.GrillTrigger, SubjectHash: testSubjectHash, RequiredRoles: []string{"po"},
+		Quorum:  approval.QuorumAny,
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+		Targets: map[string]string{approval.GrillActionAnswer: stageID, approval.GrillActionNewVersion: stageID, approval.GrillActionDone: stageID},
+		Payload: payload,
+	}
+	approvals, err := approval.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = approvals.Create(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{
+		RunID: runID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: stageID, PendingApprovalID: pending.ID,
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := control.New(approvalBoundaryEngine{}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewLocalAuthenticator("test-local-web-token-0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	edited := "# Product spec\n\nКритерии приёмки\nUpdated measurable criteria.\n"
+	editBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_sha256": sourceSHA, "content": edited, "comment": "Updated after grill question",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	editResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(editResponse, authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/"+runID+"/artifact-revisions", string(editBody)))
+	if editResponse.Code != http.StatusCreated {
+		t.Fatalf("first agent output revision should be accepted without a preseeded human baseline: %d %s", editResponse.Code, editResponse.Body.String())
+	}
+	revisions, err := srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 1 || revisions[0].BaseSHA256 != sourceSHA || revisions[0].Content != edited {
+		t.Fatalf("first edited revision is not anchored to immutable attempt bytes: revisions=%+v err=%v", revisions, err)
+	}
+
+	if err := os.Chmod(outputPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("substituted attempt output\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	newVersion := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/"+runID+"/stages/"+stageID+"/grill/new-version", `{"answer":"updated output"}`)
+	newVersionResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(newVersionResponse, newVersion)
+	stillPending, loadErr := approvals.Load(runID, pending.ID)
+	if newVersionResponse.Code != http.StatusConflict || loadErr != nil || stillPending.Status != approval.StatusPending {
+		t.Fatalf("controller must reject source bytes that no longer match the immutable manifest: status=%d approval=%+v err=%v body=%s",
+			newVersionResponse.Code, stillPending, loadErr, newVersionResponse.Body.String())
+	}
+	if err := os.Chmod(outputPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, source, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	newVersion = authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/"+runID+"/stages/"+stageID+"/grill/new-version", `{"answer":"updated output"}`)
+	newVersionResponse = httptest.NewRecorder()
+	srv.router.ServeHTTP(newVersionResponse, newVersion)
+	if newVersionResponse.Code != http.StatusAccepted {
+		t.Fatalf("controller should accept a real first edit of agent output: %d %s", newVersionResponse.Code, newVersionResponse.Body.String())
+	}
+	resolved, err := approvals.Load(runID, pending.ID)
+	if err != nil || resolved.Status != approval.StatusResolved || len(resolved.Decisions) != 1 ||
+		resolved.ResolvedAction != approval.GrillActionNewVersion || resolved.Decisions[0].ArtifactRevisions[artifactPath] != revisions[0].ID {
+		t.Fatalf("web-submitted first edit was not pinned by controller: approval=%+v err=%v", resolved, err)
+	}
+}
+
+type grillAgentOutputFixture struct {
+	target, runID, stageID, attemptID string
+	srv                               *Server
+	approvals                         *approval.Store
+	lifecycle                         *lifecycle.Store
+	sourceSHA                         map[string]string
+}
+
+// newGrillAgentOutputFixture pins the built-in template, writes an immutable
+// agent attempt with the given markdown outputs, and opens round one of the
+// product_spec grill against those source bytes.
+func newGrillAgentOutputFixture(t *testing.T, runID string, outputs map[string]string) *grillAgentOutputFixture {
+	t.Helper()
+	target := t.TempDir()
+	const stageID, attemptID = "product_spec", "attempt-agent-output"
+	template, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateData, err := template.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), templateData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinDataForRun(runID, runID, templateData); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID,
+		Stage: stageID, StageIndex: 1, StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(),
+		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success",
+	}
+	sourceSHA := make(map[string]string, len(outputs))
+	for name, content := range outputs {
+		artifactPath := "attempts/" + attemptID + "/artifacts/" + name
+		data := []byte(content)
+		sourceSHA[artifactPath] = fmt.Sprintf("%x", sha256.Sum256(data))
+		outputPath := filepath.Join(runDir, filepath.FromSlash(artifactPath))
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(outputPath, data, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		manifest.Outputs = append(manifest.Outputs, evidence.ArtifactRecord{Name: strings.TrimSuffix(name, ".md"), Type: "file",
+			EvidencePath: artifactPath, Size: int64(len(data)), SHA256: sourceSHA[artifactPath]})
+	}
+	manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	approvals, err := approval.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := control.New(approvalBoundaryEngine{}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewLocalAuthenticator("test-local-web-token-0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	fixture := &grillAgentOutputFixture{target: target, runID: runID, stageID: stageID, attemptID: attemptID,
+		srv: srv, approvals: approvals, lifecycle: stateStore, sourceSHA: sourceSHA}
+	first := fixture.openGrillRound(t, 1, nil, sourceSHA)
+	if err := stateStore.Create(lifecycle.State{
+		RunID: runID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: stageID, PendingApprovalID: first.ID,
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func (f *grillAgentOutputFixture) openGrillRound(t *testing.T, round int, revisions, contentSHA map[string]string) approval.PendingApproval {
+	t.Helper()
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Clarify acceptance criteria.", Round: round,
+		ArtifactRevisions: revisions, ArtifactContentSHA256: contentSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.approvals.Create(approval.PendingApproval{
+		RunID: f.runID, AttemptID: f.attemptID, FromStage: f.stageID, ToStage: f.stageID,
+		Trigger: approval.GrillTrigger, SubjectHash: fmt.Sprintf("%064x", round), RequiredRoles: []string{"po"},
+		Quorum:  approval.QuorumAny,
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+		Targets: map[string]string{approval.GrillActionAnswer: f.stageID, approval.GrillActionNewVersion: f.stageID, approval.GrillActionDone: f.stageID},
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pending
+}
+
+func (f *grillAgentOutputFixture) editOutput(t *testing.T, artifactPath, baseRevision, baseSHA, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": baseRevision, "base_sha256": baseSHA,
+		"content": content, "comment": "Updated after grill question",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	f.srv.router.ServeHTTP(response, authorizedRequest(t, f.srv, http.MethodPost,
+		"/api/runs/"+f.runID+"/artifact-revisions", string(body)))
+	return response
+}
+
+func (f *grillAgentOutputFixture) submitNewVersion(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	f.srv.router.ServeHTTP(response, authorizedRequest(t, f.srv, http.MethodPost,
+		"/api/runs/"+f.runID+"/stages/"+f.stageID+"/grill/new-version", `{"answer":"updated output"}`))
+	return response
+}
+
+func TestSecondGrillRoundEditOfAgentOutputThroughWebAndController(t *testing.T) {
+	const runID = "run-grill-second-round-edit"
+	fixture := newGrillAgentOutputFixture(t, runID, map[string]string{
+		"result.md": "# Product spec\n\nКритерии приёмки\nInitial criteria.\n",
+	})
+	artifactPath := "attempts/" + fixture.attemptID + "/artifacts/result.md"
+
+	firstEdit := "# Product spec\n\nКритерии приёмки\nRound one criteria.\n"
+	if response := fixture.editOutput(t, artifactPath, "", fixture.sourceSHA[artifactPath], firstEdit); response.Code != http.StatusCreated {
+		t.Fatalf("round one edit: %d %s", response.Code, response.Body.String())
+	}
+	if response := fixture.submitNewVersion(t); response.Code != http.StatusAccepted {
+		t.Fatalf("round one new_version: %d %s", response.Code, response.Body.String())
+	}
+	revisions, err := fixture.srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("round one revision: %+v %v", revisions, err)
+	}
+
+	// The checker asks a second question about the same source attempt and
+	// pins the round-one revision as the new baseline.
+	second := fixture.openGrillRound(t, 2, map[string]string{artifactPath: revisions[0].ID}, nil)
+	state, err := fixture.lifecycle.Load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := state
+	next.Phase, next.NextStage, next.PendingApprovalID, next.ActiveApprovalID = lifecycle.PhaseWaiting, fixture.stageID, second.ID, ""
+	if err := fixture.lifecycle.Save(state, next); err != nil {
+		t.Fatal(err)
+	}
+
+	secondEdit := "# Product spec\n\nКритерии приёмки\nRound two measurable criteria.\n"
+	response := fixture.editOutput(t, artifactPath, revisions[0].ID, revisions[0].SHA256, secondEdit)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("resolved earlier grill round must not freeze the agent output in round two: %d %s", response.Code, response.Body.String())
+	}
+	if response := fixture.submitNewVersion(t); response.Code != http.StatusAccepted {
+		t.Fatalf("round two new_version: %d %s", response.Code, response.Body.String())
+	}
+	revisions, err = fixture.srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 2 || revisions[1].Content != secondEdit {
+		t.Fatalf("round two revision: %+v %v", revisions, err)
+	}
+	resolved, err := fixture.approvals.Load(runID, second.ID)
+	if err != nil || resolved.Status != approval.StatusResolved || resolved.ResolvedAction != approval.GrillActionNewVersion ||
+		len(resolved.Decisions) != 1 || resolved.Decisions[0].ArtifactRevisions[artifactPath] != revisions[1].ID {
+		t.Fatalf("controller did not pin the round-two edit: approval=%+v err=%v", resolved, err)
+	}
+
+	// Once no grill question is pending, resolved handoffs freeze the output again.
+	if response := fixture.editOutput(t, artifactPath, revisions[1].ID, revisions[1].SHA256, "# Product spec\n\nКритерии приёмки\nLate.\n"); response.Code != http.StatusConflict {
+		t.Fatalf("edit after the grill finished must stay blocked: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGrillAgentOutputEditMustKeepRequiredSections(t *testing.T) {
+	const runID = "run-grill-required-sections"
+	fixture := newGrillAgentOutputFixture(t, runID, map[string]string{
+		"proposal.md": "# Proposal\n\nScope only.\n",
+		"spec.md":     "# Product spec\n\nКритерии приёмки\nInitial criteria.\n",
+	})
+	specPath := "attempts/" + fixture.attemptID + "/artifacts/spec.md"
+	proposalPath := "attempts/" + fixture.attemptID + "/artifacts/proposal.md"
+
+	response := fixture.editOutput(t, specPath, "", fixture.sourceSHA[specPath], "# Product spec\n\nCriteria were dropped.\n")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "Критерии приёмки") {
+		t.Fatalf("agent output edit without a required section must be rejected: %d %s", response.Code, response.Body.String())
+	}
+	if revisions, err := fixture.srv.humanArtifacts.List(runID, specPath); err != nil || len(revisions) != 0 {
+		t.Fatalf("rejected edit must not be appended: %+v %v", revisions, err)
+	}
+	if response := fixture.editOutput(t, specPath, "", fixture.sourceSHA[specPath], "   \n"); response.Code != http.StatusBadRequest {
+		t.Fatalf("empty markdown agent output edit must be rejected: %d %s", response.Code, response.Body.String())
+	}
+	// The section requirement covers the agent result as a whole, so a
+	// companion output can still be edited while another file carries it.
+	if response := fixture.editOutput(t, proposalPath, "", fixture.sourceSHA[proposalPath], "# Proposal\n\nNarrowed scope.\n"); response.Code != http.StatusCreated {
+		t.Fatalf("companion output edit should be accepted: %d %s", response.Code, response.Body.String())
+	}
+	if response := fixture.editOutput(t, specPath, "", fixture.sourceSHA[specPath], "# Product spec\n\nКритерии приёмки\nMeasurable criteria.\n"); response.Code != http.StatusCreated {
+		t.Fatalf("valid agent output edit should be accepted: %d %s", response.Code, response.Body.String())
 	}
 }
 

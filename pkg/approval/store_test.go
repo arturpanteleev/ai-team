@@ -51,6 +51,51 @@ func TestStoreAnyQuorumAndIdempotentDecision(t *testing.T) {
 	}
 }
 
+func TestGrillApprovalRequiresAnswersAndPinsChangedVersion(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "attempts/attempt-1/outputs/spec.md"
+	baseline := "rev-000001-aaaaaaaaaaaaaaaa"
+	payload, err := json.Marshal(GrillQuestionsPayload{
+		Kind: string(KindGrillQuestions), Markdown: "**Question:** Уточните критерий.", Round: 1,
+		ArtifactRevisions: map[string]string{path: baseline},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		Kind: KindGrillQuestions, RunID: "run-grill", AttemptID: "attempt-1",
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: GrillTrigger,
+		SubjectHash: testSubject, RequiredRoles: []string{"product_owner"}, Quorum: QuorumAny,
+		Actions: []string{GrillActionAnswer, GrillActionNewVersion, GrillActionDone},
+		Targets: map[string]string{GrillActionAnswer: "product_spec", GrillActionNewVersion: "product_spec", GrillActionDone: "product_spec"},
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: GrillActionAnswer, SubjectHash: value.SubjectHash,
+	}); err == nil {
+		t.Fatal("empty grill answer must be rejected")
+	}
+	if _, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: GrillActionNewVersion,
+		ArtifactRevisions: map[string]string{path: baseline}, SubjectHash: value.SubjectHash,
+	}); err == nil {
+		t.Fatal("reusing the original artifact revision must not count as a new version")
+	}
+	updated, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: GrillActionNewVersion,
+		ArtifactRevisions: map[string]string{path: "rev-000002-bbbbbbbbbbbbbbbb"}, SubjectHash: value.SubjectHash,
+	})
+	if err != nil || updated.Status != StatusResolved || updated.ArtifactRevisions[path] != "rev-000002-bbbbbbbbbbbbbbbb" {
+		t.Fatalf("edited artifact revision was not pinned: approval=%+v err=%v", updated, err)
+	}
+}
+
 func TestInputApprovalBindsSubmissionContentAndActor(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

@@ -316,6 +316,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/stages/{stageID}/skip", srv.handleTaskStageSkip)
 		router.Post("/api/runs/{runID}/stages/{stageID}/return", srv.handleTaskStageReturn)
 		router.Post("/api/runs/{runID}/stages/{stageID}/grill/answer", srv.handleTaskGrillAnswer)
+		router.Post("/api/runs/{runID}/stages/{stageID}/grill/new-version", srv.handleTaskGrillNewVersion)
 		router.Post("/api/runs/{runID}/stages/{stageID}/grill/done", srv.handleTaskGrillDone)
 		router.Post("/api/runs/{runID}/plan/approve", srv.handleTaskPlanApprove)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)

@@ -350,11 +350,14 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: не удалось снять artifact baseline: %w", name, err))
 	}
+	mutationGuardApplied := false
 	defer func() {
-		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
-			r.ValidationFailed = true
-			r.Err = errors.Join(r.Err, guardErr)
-			r.Status = notifier.StatusFailed
+		if !mutationGuardApplied {
+			if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
+				r.ValidationFailed = true
+				r.Err = errors.Join(r.Err, guardErr)
+				r.Status = notifier.StatusFailed
+			}
 		}
 		if rs.candidate != nil {
 			currentLive, liveErr := checks.WorkspaceDigest(rs.runCfg.TargetDir)
@@ -484,6 +487,18 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return r
 	}
 
+	definitions := mergeChecks(a.Checks, agentCfg.Checks)
+	if len(definitions) > 0 {
+		r.Checks, err = (checks.Runner{TargetDir: rs.sourceDir()}).RunAll(stageCtx, definitions)
+		if err != nil {
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: детерминированные проверки: %w", name, err))
+		}
+		if stageCtx.Err() != nil {
+			return fail(stageCtx.Err())
+		}
+	}
+
 	if a.Kind == "delivery" {
 		plan, planErr := deliveryPlanFromOutputs(outputs)
 		if planErr != nil {
@@ -515,18 +530,46 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
 		}
 		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
-	}
-
-	definitions := mergeChecks(a.Checks, agentCfg.Checks)
-	if len(definitions) > 0 {
-		r.Checks, err = (checks.Runner{TargetDir: rs.sourceDir()}).RunAll(stageCtx, definitions)
-		if err != nil {
+	} else if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil {
+		// B-35: агентный этап с delivery.require_checks (FR-15). Контроллер
+		// проверяет проект из require_checks, формирует delivery-план и
+		// запрашивает подтверждение SHA-256 перед commit/push/PR. Инвариант §4:
+		// commit/push/PR делает только контроллер после подтверждения плана.
+		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
 			r.ValidationFailed = true
-			return fail(fmt.Errorf("агент %s: детерминированные проверки: %w", name, err))
+			r.Err = errors.Join(r.Err, guardErr)
+			r.Status = notifier.StatusFailed
 		}
-		if stageCtx.Err() != nil {
-			return fail(stageCtx.Err())
+		mutationGuardApplied = true
+		rs.results = append(rs.results, r)
+		if err := rs.validateDeliveryChecksFor(&r); err != nil {
+			return fail(fmt.Errorf("агент %s: %w", name, err))
 		}
+		plan, err := rs.buildDeliveryPlan()
+		if err != nil {
+			return fail(fmt.Errorf("агент %s: delivery plan: %w", name, err))
+		}
+		statePath, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan)
+		if prepareErr != nil {
+			return fail(fmt.Errorf("агент %s: подготовка delivery state: %w", name, prepareErr))
+		}
+		if approvalErr := rs.authorizeDelivery(name, r, plan); approvalErr != nil {
+			r.ControlStopped = true
+			return fail(approvalErr)
+		}
+		planHash, hashErr := plan.Hash()
+		if hashErr != nil {
+			return fail(fmt.Errorf("агент %s: delivery plan hash: %w", name, hashErr))
+		}
+		rs.deferredDelivery = &deferredDelivery{StatePath: statePath, PlanHash: planHash}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "delivery_deferred", Stage: name, AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
+			Data: map[string]any{"plan_hash": planHash, "state_path": filepath.ToSlash(statePath)},
+		}); err != nil {
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
+		}
+		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
 	}
 	if err := verifyArtifactIdentities(outputs, outputIdentities); err != nil {
 		r.ValidationFailed = true

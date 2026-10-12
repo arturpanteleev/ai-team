@@ -47,6 +47,32 @@ func (s *Server) clock() time.Time {
 	return s.now().UTC()
 }
 
+// sessionBinder is implemented by authenticators whose credentials can be
+// fingerprinted (cloud HMAC secret, local token).
+type sessionBinder interface {
+	SessionBinding(label string) string
+}
+
+// sessionBinding returns the credential fingerprint a session of method must
+// carry. It changes when the HMAC secret or local token rotates and, for OIDC
+// sessions, when the provider registration (issuer, client ID) changes or
+// OIDC is switched off — any of which invalidates existing sessions.
+func (s *Server) sessionBinding(method string) (string, bool) {
+	label := method
+	if method == sessionMethodOIDC {
+		if s.oidc == nil {
+			return "", false
+		}
+		label += "\x00" + s.oidc.Issuer() + "\x00" + s.oidc.ClientID()
+	}
+	if binder, ok := s.authenticator.(sessionBinder); ok {
+		return binder.SessionBinding(label), true
+	}
+	// Authenticators without a fingerprint get a per-process key: their
+	// sessions end with the process, as before B-83.
+	return cloudidentity.SessionBinding(s.processBindingKey, label), true
+}
+
 // createBrowserSession persists a new session and returns the raw cookie
 // value and CSRF token. Only the cookie digest is stored.
 func (s *Server) createBrowserSession(principal cloudidentity.Principal, epoch int64, method, subject string) (string, string, error) {
@@ -58,6 +84,10 @@ func (s *Server) createBrowserSession(principal cloudidentity.Principal, epoch i
 	if err != nil {
 		return "", "", err
 	}
+	binding, ok := s.sessionBinding(method)
+	if !ok {
+		return "", "", errors.New("session method is not configured")
+	}
 	now := s.clock()
 	roles := make([]string, len(principal.Roles))
 	for i, role := range principal.Roles {
@@ -65,7 +95,7 @@ func (s *Server) createBrowserSession(principal cloudidentity.Principal, epoch i
 	}
 	err = s.store.CreateWebSession(sessionToken, store.WebSession{
 		ActorID: principal.ActorID, Roles: roles, SessionEpoch: epoch, AuthMethod: method, Subject: subject,
-		CSRFToken: csrfToken, CreatedAt: now, ExpiresAt: now.Add(browserSessionTTL),
+		CSRFToken: csrfToken, CredentialBinding: binding, CreatedAt: now, ExpiresAt: now.Add(browserSessionTTL),
 		AbsoluteExpiresAt: now.Add(browserSessionMaxAge),
 	})
 	if err != nil {
@@ -104,6 +134,11 @@ func (s *Server) lookupBrowserSession(sessionToken string) (browserSession, bool
 	cloudMode := s.authenticator != nil && !s.localAuth
 	if (stored.AuthMethod == sessionMethodLocal) == cloudMode {
 		// A session minted in one auth mode is never valid in the other.
+		return browserSession{}, false
+	}
+	binding, ok := s.sessionBinding(stored.AuthMethod)
+	if !ok || !constantTimeEqual(stored.CredentialBinding, binding) {
+		// Credentials rotated (or OIDC reconfigured/disabled) since sign-in.
 		return browserSession{}, false
 	}
 	roles, err := cloudidentity.ParseRoles(stored.Roles)

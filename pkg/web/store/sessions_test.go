@@ -11,7 +11,7 @@ import (
 func testSession(now time.Time) WebSession {
 	return WebSession{
 		ActorID: "dev@example.test", Roles: []string{"developer"}, SessionEpoch: 3, AuthMethod: "oidc",
-		Subject: "https://idp user-1", CSRFToken: "csrf-value", CreatedAt: now,
+		Subject: "https://idp user-1", CSRFToken: "csrf-value", CredentialBinding: "binding", CreatedAt: now,
 		ExpiresAt: now.Add(8 * time.Hour), AbsoluteExpiresAt: now.Add(24 * time.Hour),
 	}
 }
@@ -78,7 +78,7 @@ func TestOIDCLoginStateIsSingleUseAndExpires(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	state := OIDCLoginState{Nonce: "n", CodeVerifier: "v", ExpiresAt: now.Add(10 * time.Minute)}
-	if err := s.SaveOIDCLoginState("state-1", state, now); err != nil {
+	if err := s.SaveOIDCLoginState("state-1", state, now, 10); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ConsumeOIDCLoginState("state-1", now.Add(time.Minute))
@@ -88,7 +88,7 @@ func TestOIDCLoginStateIsSingleUseAndExpires(t *testing.T) {
 	if _, err := s.ConsumeOIDCLoginState("state-1", now.Add(time.Minute)); !errors.Is(err, ErrOIDCLoginStateNotFound) {
 		t.Fatalf("second consume must fail: %v", err)
 	}
-	if err := s.SaveOIDCLoginState("state-2", state, now); err != nil {
+	if err := s.SaveOIDCLoginState("state-2", state, now, 10); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ConsumeOIDCLoginState("state-2", now.Add(11*time.Minute)); !errors.Is(err, ErrOIDCLoginStateNotFound) {
@@ -166,5 +166,23 @@ func TestRestartKeepsRunsEventsRequestsAndSessions(t *testing.T) {
 	}
 	if _, err := reopened.WebSession("cookie", now.Add(time.Minute)); err != nil {
 		t.Fatalf("session lost on restart: %v", err)
+	}
+}
+
+func TestOIDCLoginStatesAreBounded(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	state := OIDCLoginState{Nonce: "n", CodeVerifier: "v", ExpiresAt: now.Add(10 * time.Minute)}
+	for _, id := range []string{"a", "b"} {
+		if err := s.SaveOIDCLoginState(id, state, now, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveOIDCLoginState("c", state, now, 2); !errors.Is(err, ErrTooManyPendingLogins) {
+		t.Fatalf("third pending sign-in must be refused: %v", err)
+	}
+	// Expired sign-ins free their slots.
+	if err := s.SaveOIDCLoginState("c", OIDCLoginState{Nonce: "n", CodeVerifier: "v", ExpiresAt: now.Add(30 * time.Minute)}, now.Add(11*time.Minute), 2); err != nil {
+		t.Fatalf("expired states must be purged first: %v", err)
 	}
 }

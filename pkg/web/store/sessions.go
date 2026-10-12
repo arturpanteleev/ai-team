@@ -6,13 +6,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 )
 
 // ErrWebSessionNotFound is returned when a session is unknown, expired or
 // revoked. Callers MUST treat all three the same way (fail closed).
 var ErrWebSessionNotFound = errors.New("web session not found")
+
+// ErrTooManyPendingLogins is returned when the number of unfinished sign-ins
+// reaches the configured bound.
+var ErrTooManyPendingLogins = errors.New("too many pending oidc sign-ins")
 
 // ErrOIDCLoginStateNotFound is returned when a sign-in state is unknown,
 // already consumed or expired.
@@ -22,12 +25,16 @@ var ErrOIDCLoginStateNotFound = errors.New("oidc login state not found")
 // stored: rows are keyed by its SHA-256 digest, so a database read does not
 // yield a usable cookie.
 type WebSession struct {
-	ActorID           string
-	Roles             []string
-	SessionEpoch      int64
-	AuthMethod        string
-	Subject           string
-	CSRFToken         string
+	ActorID      string
+	Roles        []string
+	SessionEpoch int64
+	AuthMethod   string
+	Subject      string
+	CSRFToken    string
+	// CredentialBinding fingerprints the server credentials (HMAC secret or
+	// local token, and for OIDC the provider registration) the session was
+	// minted under. Rotating them invalidates every existing session.
+	CredentialBinding string
 	CreatedAt         time.Time
 	ExpiresAt         time.Time
 	AbsoluteExpiresAt time.Time
@@ -49,7 +56,7 @@ func SessionDigest(raw string) string {
 // CreateWebSession stores a new session under the digest of rawToken and
 // purges sessions whose lifetime is over.
 func (s *Store) CreateWebSession(rawToken string, session WebSession) error {
-	if rawToken == "" || session.CSRFToken == "" || session.AuthMethod == "" ||
+	if rawToken == "" || session.CSRFToken == "" || session.AuthMethod == "" || session.CredentialBinding == "" ||
 		!session.ExpiresAt.After(session.CreatedAt) || session.AbsoluteExpiresAt.Before(session.ExpiresAt) {
 		return errors.New("web session is incomplete")
 	}
@@ -66,9 +73,9 @@ func (s *Store) CreateWebSession(rawToken string, session WebSession) error {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO web_sessions(token_hash,actor_id,roles_json,session_epoch,auth_method,subject,
-		csrf_token,created_at,expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		csrf_token,credential_binding,created_at,expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		SessionDigest(rawToken), session.ActorID, string(roles), session.SessionEpoch, session.AuthMethod,
-		session.Subject, session.CSRFToken, session.CreatedAt.UnixMilli(), session.ExpiresAt.UnixMilli(),
+		session.Subject, session.CSRFToken, session.CredentialBinding, session.CreatedAt.UnixMilli(), session.ExpiresAt.UnixMilli(),
 		session.AbsoluteExpiresAt.UnixMilli()); err != nil {
 		return err
 	}
@@ -84,10 +91,10 @@ func (s *Store) WebSession(rawToken string, now time.Time) (WebSession, error) {
 	var session WebSession
 	var roles string
 	var created, expires, absolute int64
-	err := s.db.QueryRow(`SELECT actor_id,roles_json,session_epoch,auth_method,subject,csrf_token,created_at,expires_at,absolute_expires_at
+	err := s.db.QueryRow(`SELECT actor_id,roles_json,session_epoch,auth_method,subject,csrf_token,credential_binding,created_at,expires_at,absolute_expires_at
 		FROM web_sessions WHERE token_hash=? AND revoked_at IS NULL AND expires_at>? AND absolute_expires_at>?`,
 		SessionDigest(rawToken), now.UnixMilli(), now.UnixMilli()).Scan(&session.ActorID, &roles, &session.SessionEpoch,
-		&session.AuthMethod, &session.Subject, &session.CSRFToken, &created, &expires, &absolute)
+		&session.AuthMethod, &session.Subject, &session.CSRFToken, &session.CredentialBinding, &created, &expires, &absolute)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WebSession{}, ErrWebSessionNotFound
 	}
@@ -123,24 +130,10 @@ func (s *Store) RevokeWebSession(rawToken string, now time.Time) error {
 	return err
 }
 
-// SetWebSessionIdentity rebinds a live session to another actor and role
-// set. It exists for administrative tooling and tests that need a session
-// for a specific principal without a full sign-in.
-func (s *Store) SetWebSessionIdentity(rawToken, actorID string, roles []string) error {
-	encoded, err := json.Marshal(roles)
-	if err != nil {
-		return err
-	}
-	result, err := s.db.Exec(`UPDATE web_sessions SET actor_id=?, roles_json=? WHERE token_hash=?`,
-		strings.TrimSpace(actorID), string(encoded), SessionDigest(rawToken))
-	if err != nil {
-		return err
-	}
-	return requireAffected(result, "web session")
-}
-
-// SaveOIDCLoginState stores a pending sign-in under the digest of state.
-func (s *Store) SaveOIDCLoginState(state string, value OIDCLoginState, now time.Time) error {
+// SaveOIDCLoginState stores a pending sign-in under the digest of state. At
+// most maxPending unexpired sign-ins may exist; the endpoint that creates them
+// is unauthenticated, so the bound keeps it from growing the table unbounded.
+func (s *Store) SaveOIDCLoginState(state string, value OIDCLoginState, now time.Time, maxPending int) error {
 	if state == "" || value.Nonce == "" || value.CodeVerifier == "" || !value.ExpiresAt.After(now) {
 		return errors.New("oidc login state is incomplete")
 	}
@@ -151,6 +144,13 @@ func (s *Store) SaveOIDCLoginState(state string, value OIDCLoginState, now time.
 	defer func() { _ = tx.Rollback() }()
 	if _, err = tx.Exec(`DELETE FROM oidc_login_states WHERE expires_at <= ?`, now.UnixMilli()); err != nil {
 		return err
+	}
+	var pending int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM oidc_login_states`).Scan(&pending); err != nil {
+		return err
+	}
+	if maxPending <= 0 || pending >= maxPending {
+		return ErrTooManyPendingLogins
 	}
 	if _, err = tx.Exec(`INSERT INTO oidc_login_states(state_hash,nonce,code_verifier,created_at,expires_at) VALUES(?,?,?,?,?)`,
 		SessionDigest(state), value.Nonce, value.CodeVerifier, now.UnixMilli(), value.ExpiresAt.UnixMilli()); err != nil {
@@ -165,25 +165,15 @@ func (s *Store) ConsumeOIDCLoginState(state string, now time.Time) (OIDCLoginSta
 	if state == "" || len(state) > 512 {
 		return OIDCLoginState{}, ErrOIDCLoginStateNotFound
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return OIDCLoginState{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	var value OIDCLoginState
 	var expires int64
-	err = tx.QueryRow(`SELECT nonce,code_verifier,expires_at FROM oidc_login_states WHERE state_hash=?`,
+	// DELETE ... RETURNING consumes the row atomically: a state is usable once.
+	err := s.db.QueryRow(`DELETE FROM oidc_login_states WHERE state_hash=? RETURNING nonce,code_verifier,expires_at`,
 		SessionDigest(state)).Scan(&value.Nonce, &value.CodeVerifier, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OIDCLoginState{}, ErrOIDCLoginStateNotFound
 	}
 	if err != nil {
-		return OIDCLoginState{}, err
-	}
-	if _, err = tx.Exec(`DELETE FROM oidc_login_states WHERE state_hash=?`, SessionDigest(state)); err != nil {
-		return OIDCLoginState{}, err
-	}
-	if err = tx.Commit(); err != nil {
 		return OIDCLoginState{}, err
 	}
 	value.ExpiresAt = time.UnixMilli(expires).UTC()

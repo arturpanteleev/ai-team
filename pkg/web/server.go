@@ -129,6 +129,12 @@ func NewLocalAuthenticator(token string) (*LocalAuthenticator, error) {
 	return &LocalAuthenticator{token: token, principal: principal}, nil
 }
 
+// SessionBinding fingerprints the local token so a new token invalidates
+// sessions created with the old one.
+func (a *LocalAuthenticator) SessionBinding(label string) string {
+	return cloudidentity.SessionBinding([]byte(a.token), label)
+}
+
 func (a *LocalAuthenticator) Verify(token string) (cloudidentity.Principal, error) {
 	if a == nil || !constantTimeEqual(token, a.token) {
 		return cloudidentity.Principal{}, errors.New("invalid local web token")
@@ -165,6 +171,8 @@ type Server struct {
 	authenticator       IdentityVerifier
 	localAuth           bool
 	oidc                OIDCProvider
+	oidcMaxPending      int
+	processBindingKey   []byte
 	now                 func() time.Time
 	streamID            string
 	stallAfter          time.Duration
@@ -194,12 +202,19 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		_ = s.Close()
 		return nil, fmt.Errorf("stream identity: %w", tokenErr)
 	}
+	bindingKey, tokenErr := randomToken()
+	if tokenErr != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("session binding key: %w", tokenErr)
+	}
 	srv := &Server{
 		store:             s,
 		hub:               hub,
 		streamID:          streamID[:16],
 		artifactRoot:      absRoot,
 		stallPollInterval: time.Minute,
+		oidcMaxPending:    oidcMaxPendingLogins,
+		processBindingKey: []byte(bindingKey),
 	}
 	for _, option := range options {
 		option(srv)

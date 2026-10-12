@@ -149,11 +149,7 @@ func (f functionPermissionFixture) requestAs(t *testing.T, actorID string, roles
 		if err != nil {
 			t.Fatal(err)
 		}
-		cookie, err := request.Cookie(sessionCookieName)
-		if err != nil {
-			t.Fatal(err)
-		}
-		setSessionPrincipalForTest(t, f.srv, cookie, principal)
+		setSessionPrincipalForTest(t, f.srv, request, principal)
 	}
 	response := httptest.NewRecorder()
 	f.srv.router.ServeHTTP(response, request)
@@ -679,11 +675,7 @@ func (f functionPermissionFixture) sessionRequestAs(t *testing.T, actorID string
 	if err != nil {
 		t.Fatal(err)
 	}
-	cookie, err := request.Cookie(sessionCookieName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	setSessionPrincipalForTest(t, f.srv, cookie, principal)
+	setSessionPrincipalForTest(t, f.srv, request, principal)
 	return request
 }
 

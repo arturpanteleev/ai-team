@@ -100,3 +100,18 @@ func TestFunctionRoleResolvesLegacyFunctionAliasesForAuthorization(t *testing.T)
 		t.Fatal("unknown stage function unexpectedly resolved to a cloud role")
 	}
 }
+
+func TestSessionBindingDependsOnSecretAndLabel(t *testing.T) {
+	a, _ := NewTokenManager([]byte("0123456789abcdef0123456789abcdef"))
+	b, _ := NewTokenManager([]byte("0123456789abcdef0123456789abcdeX"))
+	same, _ := NewTokenManager([]byte("0123456789abcdef0123456789abcdef"))
+	if a.SessionBinding("token") != same.SessionBinding("token") {
+		t.Fatal("binding must be deterministic")
+	}
+	if a.SessionBinding("token") == b.SessionBinding("token") || a.SessionBinding("token") == a.SessionBinding("oidc") {
+		t.Fatal("binding must change with the secret and the label")
+	}
+	if strings.Contains(a.SessionBinding("token"), "0123456789abcdef") {
+		t.Fatal("binding must not reveal the secret")
+	}
+}

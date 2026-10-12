@@ -95,6 +95,10 @@ func TestExchangeRejectsInvalidTokens(t *testing.T) {
 		}},
 		{"wrong nonce", func(p *oidctest.Provider) { p.ModifyClaims = func(c map[string]any) { c["nonce"] = "replayed" } }},
 		{"missing nonce", func(p *oidctest.Provider) { p.ModifyClaims = func(c map[string]any) { delete(c, "nonce") } }},
+		{"not yet valid", func(p *oidctest.Provider) {
+			p.ModifyClaims = func(c map[string]any) { c["nbf"] = p.Now().Add(10 * time.Minute).Unix() }
+		}},
+		{"absurd exp", func(p *oidctest.Provider) { p.ModifyClaims = func(c map[string]any) { c["exp"] = 1e300 } }},
 		{"empty subject", func(p *oidctest.Provider) { p.ModifyClaims = func(c map[string]any) { c["sub"] = "" } }},
 	}
 	for _, test := range tests {
@@ -245,5 +249,81 @@ func TestNewRejectsInsecureConfiguration(t *testing.T) {
 		if _, err := oidc.New(config); err == nil {
 			t.Fatalf("%s: expected rejection", name)
 		}
+	}
+}
+
+// discoveryServer serves a discovery document built by metadata(base).
+func discoveryServer(t *testing.T, useTLS bool, metadata func(base string) map[string]any) (*httptest.Server, *oidc.Provider) {
+	t.Helper()
+	var server *httptest.Server
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration", "/moved":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(metadata(server.URL))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if useTLS {
+		server = httptest.NewTLSServer(handler)
+	} else {
+		server = httptest.NewServer(handler)
+	}
+	t.Cleanup(server.Close)
+	rp, err := oidc.New(oidc.Config{Issuer: server.URL, ClientID: "c", ClientSecret: "s",
+		RedirectURL: "http://127.0.0.1/cb", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, rp
+}
+
+func endpoints(base, other string) map[string]any {
+	return map[string]any{"issuer": base, "authorization_endpoint": other + "/a", "token_endpoint": other + "/t", "jwks_uri": other + "/k"}
+}
+
+func TestDiscoveryRejectsInsecureEndpoints(t *testing.T) {
+	// Sanity: a well-formed https discovery is accepted.
+	_, rp := discoveryServer(t, true, func(base string) map[string]any { return endpoints(base, base) })
+	if _, err := rp.AuthorizationURL(context.Background(), "s", "n", "c"); err != nil {
+		t.Fatalf("https discovery rejected: %v", err)
+	}
+	// Endpoints on another https host are fine (providers split hosts).
+	_, rp = discoveryServer(t, true, func(base string) map[string]any { return endpoints(base, "https://login.example") })
+	if _, err := rp.AuthorizationURL(context.Background(), "s", "n", "c"); err != nil {
+		t.Fatalf("https endpoints on another host rejected: %v", err)
+	}
+	// An https issuer must not be steered to cleartext, even on loopback.
+	_, rp = discoveryServer(t, true, func(base string) map[string]any {
+		return endpoints(base, strings.Replace(base, "https://", "http://", 1))
+	})
+	if _, err := rp.AuthorizationURL(context.Background(), "s", "n", "c"); !errors.Is(err, oidc.ErrUnavailable) {
+		t.Fatalf("http loopback endpoint for https issuer: want ErrUnavailable, got %v", err)
+	}
+	// Non-loopback http endpoints are never accepted.
+	_, rp = discoveryServer(t, false, func(base string) map[string]any { return endpoints(base, "http://idp.example") })
+	if _, err := rp.AuthorizationURL(context.Background(), "s", "n", "c"); !errors.Is(err, oidc.ErrUnavailable) {
+		t.Fatalf("http endpoint: want ErrUnavailable, got %v", err)
+	}
+}
+
+func TestProviderDoesNotFollowRedirects(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			http.Redirect(w, r, server.URL+"/moved", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(endpoints(server.URL, server.URL))
+	}))
+	defer server.Close()
+	rp, err := oidc.New(oidc.Config{Issuer: server.URL, ClientID: "c", ClientSecret: "s", RedirectURL: "http://127.0.0.1/cb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.AuthorizationURL(context.Background(), "s", "n", "c"); !errors.Is(err, oidc.ErrUnavailable) {
+		t.Fatalf("redirected discovery must be rejected, got %v", err)
 	}
 }

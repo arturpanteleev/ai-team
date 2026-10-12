@@ -378,7 +378,7 @@ func takeStageAs(t *testing.T, srv *Server, runID, stageID, actorID string) *htt
 		t.Fatal("session missing")
 	}
 	session.Principal.ActorID = actorID
-	setSessionPrincipalForTest(t, srv, cookie, session.Principal)
+	setSessionPrincipalForTest(t, srv, request, session.Principal)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	return response

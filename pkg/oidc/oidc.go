@@ -160,6 +160,26 @@ func validateEndpoint(raw, name string) error {
 	return fmt.Errorf("oidc: %s must use https", name)
 }
 
+// validateDiscoveredEndpoint requires https for endpoints named by discovery.
+// Plain http on loopback is accepted only when the issuer itself is a
+// loopback http URL (local development); otherwise a tampered discovery
+// document could direct the client secret to a cleartext local listener.
+// The host is not required to match the issuer: real providers split hosts.
+func (p *Provider) validateDiscoveredEndpoint(raw, name string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("oidc: %s must be an absolute URL", name)
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	issuer, _ := url.Parse(p.cfg.Issuer)
+	if parsed.Scheme == "http" && issuer.Scheme == "http" && isLoopback(issuer.Hostname()) && isLoopback(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("oidc: %s must use https", name)
+}
+
 func isLoopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -167,6 +187,12 @@ func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
+
+// Issuer returns the configured issuer identifier.
+func (p *Provider) Issuer() string { return p.cfg.Issuer }
+
+// ClientID returns the configured client ID.
+func (p *Provider) ClientID() string { return p.cfg.ClientID }
 
 // NewPKCE returns a code verifier and its S256 challenge.
 func NewPKCE() (verifier, challenge string, err error) {
@@ -394,7 +420,9 @@ func numericDate(value *json.Number) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	seconds, err := value.Float64()
-	if err != nil || seconds <= 0 {
+	// Reject non-positive values and anything past year ~5138 so the
+	// nanosecond conversion below cannot overflow.
+	if err != nil || seconds <= 0 || seconds > 1e11 {
 		return time.Time{}, false
 	}
 	return time.Unix(0, int64(seconds*float64(time.Second))), true
@@ -445,7 +473,7 @@ func (p *Provider) discover(ctx context.Context) (*providerMetadata, error) {
 		"token endpoint":         metadata.TokenEndpoint,
 		"jwks_uri":               metadata.JWKSURI,
 	} {
-		if err := validateEndpoint(endpoint, name); err != nil {
+		if err := p.validateDiscoveredEndpoint(endpoint, name); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 	}

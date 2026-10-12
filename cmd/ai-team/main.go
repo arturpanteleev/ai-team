@@ -2288,6 +2288,10 @@ func cmdWeb() {
 		serverOptions = append(serverOptions, web.WithLocalAuthenticator(localAuthenticator))
 		localWebToken, localWebTokenPath = token, tokenPath
 	}
+	if strings.TrimSpace(*oidcIssuer) == "" && (strings.TrimSpace(*oidcClientID) != "" || strings.TrimSpace(*oidcRedirectURL) != "") {
+		// Half-configured SSO must not silently fall back to token-only login.
+		fatal("OIDC client ID или redirect URL заданы без --oidc-issuer (AI_TEAM_OIDC_ISSUER)")
+	}
 	if strings.TrimSpace(*oidcIssuer) != "" {
 		if !cloudAuthEnabled {
 			fatal("Вход через OIDC требует cloud authentication (%s)", *authSecretEnv)

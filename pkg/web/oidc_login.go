@@ -21,6 +21,9 @@ const (
 	oidcStateCookiePath = "/api/auth/oidc/"
 	oidcStateTTL        = 10 * time.Minute
 	oidcExchangeTimeout = 15 * time.Second
+	// oidcMaxPendingLogins bounds unfinished sign-ins: the login endpoint is
+	// unauthenticated and each request stores one row.
+	oidcMaxPendingLogins = 1000
 )
 
 // OIDCProvider is the relying-party operations the server needs; *oidc.Provider
@@ -28,6 +31,9 @@ const (
 type OIDCProvider interface {
 	AuthorizationURL(ctx context.Context, state, nonce, codeChallenge string) (string, error)
 	Exchange(ctx context.Context, code, codeVerifier, nonce string) (oidc.Identity, error)
+	// Issuer and ClientID identify the registration; sessions are bound to them.
+	Issuer() string
+	ClientID() string
 }
 
 // WithOIDC enables OpenID Connect sign-in. It is valid only in cloud mode:
@@ -59,7 +65,11 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	now := s.clock()
 	if err := s.store.SaveOIDCLoginState(state, store.OIDCLoginState{
 		Nonce: nonce, CodeVerifier: verifier, ExpiresAt: now.Add(oidcStateTTL),
-	}, now); err != nil {
+	}, now, s.oidcMaxPending); err != nil {
+		if errors.Is(err, store.ErrTooManyPendingLogins) {
+			http.Error(w, "слишком много незавершённых входов, повторите позже", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "sign-in unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -109,11 +119,14 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
-	email := strings.ToLower(strings.TrimSpace(identity.Email))
-	if email == "" || !identity.EmailVerified {
+	email := strings.TrimSpace(identity.Email)
+	// Only ASCII e-mails are matched: Unicode case folding (e.g. KELVIN SIGN
+	// to "k") could otherwise map a provider address onto another member.
+	if email == "" || !identity.EmailVerified || !isASCII(email) {
 		http.Error(w, "провайдер не подтвердил e-mail", http.StatusUnauthorized)
 		return
 	}
+	email = asciiLower(email)
 	principal, epoch, err := s.activeMemberPrincipal(email)
 	if err != nil {
 		http.Error(w, "участник команды не активен или доступ отозван", http.StatusForbidden)
@@ -123,6 +136,13 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)
 		return
+	}
+	// The new session replaces any previous one in this browser; revoke it
+	// rather than leave it usable until it expires.
+	if previous, err := r.Cookie(sessionCookieName); err == nil && previous.Value != "" {
+		if err := s.store.RevokeWebSession(previous.Value, s.clock()); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ OIDC sign-in: revoke previous session: %v\n", err)
+		}
 	}
 	s.setSessionCookie(w, r, sessionToken)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -145,4 +165,23 @@ func (s *Server) activeMemberPrincipal(actorID string) (cloudidentity.Principal,
 	}
 	principal, err := cloudidentity.NewPrincipal(member.ActorID, roles)
 	return principal, member.SessionEpoch, err
+}
+
+func isASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(value string) string {
+	result := []byte(value)
+	for i, c := range result {
+		if 'A' <= c && c <= 'Z' {
+			result[i] = c + ('a' - 'A')
+		}
+	}
+	return string(result)
 }

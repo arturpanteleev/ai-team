@@ -1,0 +1,10 @@
+name: design-checker
+description: Design Checker — проверяет техническое решение на покрытие требований и согласованность с планом задач
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+inputs:
+  specs: '{feature}/specs'
+outputs:
+  design-check: '{feature}/design-check.md'

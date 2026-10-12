@@ -39,6 +39,7 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 | `tester` | пишет и запускает тесты | `test-report.md` | только тестовые файлы | `**Result:** PASS` или `FAIL` |
 | `verifier` | итоговая проверка: требования, тесты, ревью вместе | `verification.md` | ничего | `**Verdict:** APPROVED` или `CHANGES_REQUESTED` |
 | `observer` | готовит заготовку отчёта по предоставленным человеком данным | `observation.md` | только объявленный вход и результаты этапа | — |
+| `spec-checker`, `design-checker`, `qa-checker` | агенты-проверяющие для `check: kind: agent` в конфиге этапа: проверяют результат этапа по чек-листу и выносят заключение | `spec-check.md`, `design-check.md`, `qa-check.md` | ничего | `**Verdict:** PASSED` или `FAILED` |
 | `deployer` | не модель: контроллер строит delivery-план и после подтверждения доставляет | `delivery-plan.json` | коммит, push, PR | — |
 
 Документы этапов лежат в `.ai-team/artifacts/<feature>/`. Тестовыми файлами
@@ -69,6 +70,11 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 `APPROVED` и `PASS` ведут дальше. `CHANGES_REQUESTED`, `REJECTED` и `FAIL`
 возвращают работу программисту (`coder`) — это переход возврата (loopback).
 Сколько раз можно вернуться, ограничивает `max_visits` в конфиге.
+
+Агенты-проверяющие (`spec-checker`, `design-checker`, `qa-checker`) завершают
+свой отчёт маркером `**Verdict:** PASSED` или `**Verdict:** FAILED`. `PASSED`
+пропускает этап, `FAILED` блокирует переход до решения человека
+(check_decision).
 
 ## Когда агент не может продолжить: BLOCKED
 

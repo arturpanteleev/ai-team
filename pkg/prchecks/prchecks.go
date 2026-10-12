@@ -60,8 +60,13 @@ func (r Runner) commands() delivery.CommandRunner {
 	return delivery.ExecRunner{}
 }
 
-// Resolve reads and validates the exact pull request identity from gh.
-func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullRequest, error) {
+// Resolve reads and validates the exact pull request identity from gh. The PR
+// must belong to repository, the task repository captured by the controller
+// before any agent could change the checkout (see TaskRepository).
+func (r Runner) Resolve(ctx context.Context, targetDir, repository, reference string) (PullRequest, error) {
+	if strings.TrimSpace(repository) == "" {
+		return PullRequest{}, errors.New("task repository is unknown; PR checks require a GitHub origin captured at run start")
+	}
 	requestedNumber, err := pullNumber(reference)
 	if err != nil {
 		return PullRequest{}, err
@@ -105,43 +110,14 @@ func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullR
 	if err != nil || actualNumber != requestedNumber {
 		return PullRequest{}, errors.New("gh pr view returned a different pull request than requested")
 	}
-	if err := r.requireTaskRepository(ctx, targetDir, pull.URL); err != nil {
+	pullHost, pullRepo, err := repositoryIdentity(pull.URL, true)
+	if err != nil {
 		return PullRequest{}, err
 	}
+	if pullHost+"/"+pullRepo != strings.ToLower(repository) {
+		return PullRequest{}, fmt.Errorf("pull request repository %s/%s does not match task repository %s", pullHost, pullRepo, repository)
+	}
 	return pull, nil
-}
-
-// requireTaskRepository binds a PR to the task's own GitHub repository. A
-// trusted host alone is not enough: any green PR on github.com would otherwise
-// pass pr_checks_green and expose a foreign diff to the reviewer.
-func (r Runner) requireTaskRepository(ctx context.Context, targetDir, pullURL string) error {
-	result := r.commands().Run(ctx, targetDir, "gh", "repo", "view", "--json", "url")
-	if result.Status != delivery.StepPassed {
-		return commandError("gh repo view", result)
-	}
-	if result.Truncated {
-		return errors.New("gh repo view output was truncated")
-	}
-	var repository struct {
-		URL string `json:"url"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(result.Stdout))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&repository); err != nil {
-		return fmt.Errorf("invalid gh repo view JSON: %w", err)
-	}
-	taskHost, taskRepo, err := repositoryIdentity(repository.URL, false)
-	if err != nil {
-		return fmt.Errorf("gh repo view returned an invalid repository URL: %w", err)
-	}
-	pullHost, pullRepo, err := repositoryIdentity(pullURL, true)
-	if err != nil {
-		return err
-	}
-	if taskHost != pullHost || taskRepo != pullRepo {
-		return fmt.Errorf("pull request repository %s/%s does not match task repository %s/%s", pullHost, pullRepo, taskHost, taskRepo)
-	}
-	return nil
 }
 
 // repositoryIdentity returns the lower-cased host and owner/repo of a GitHub
@@ -165,16 +141,16 @@ func repositoryIdentity(value string, pull bool) (host, repository string, err e
 
 // Check evaluates one B-44 rule. A false condition returns status "failed";
 // transport, identity, or execution problems are returned as errors.
-func (r Runner) Check(ctx context.Context, targetDir, reference, rule string) (status, reason string, err error) {
-	status, reason, _, err = r.CheckIdentity(ctx, targetDir, reference, rule, nil)
+func (r Runner) Check(ctx context.Context, targetDir, repository, reference, rule string) (status, reason string, err error) {
+	status, reason, _, err = r.CheckIdentity(ctx, targetDir, repository, reference, rule, nil)
 	return status, reason, err
 }
 
 // CheckIdentity evaluates a rule against an optional identity established by a
 // prior rule in the same review. It returns the identity actually checked so
 // callers can persist and bind later review stages to it.
-func (r Runner) CheckIdentity(ctx context.Context, targetDir, reference, rule string, expected *PullRequest) (status, reason string, identity PullRequest, err error) {
-	pull, err := r.Resolve(ctx, targetDir, reference)
+func (r Runner) CheckIdentity(ctx context.Context, targetDir, repository, reference, rule string, expected *PullRequest) (status, reason string, identity PullRequest, err error) {
+	pull, err := r.Resolve(ctx, targetDir, repository, reference)
 	if err != nil {
 		return "", "", PullRequest{}, err
 	}
@@ -183,9 +159,9 @@ func (r Runner) CheckIdentity(ctx context.Context, targetDir, reference, rule st
 	}
 	switch rule {
 	case "project_checks":
-		status, reason, err = r.projectChecks(ctx, targetDir, pull)
+		status, reason, err = r.projectChecks(ctx, targetDir, repository, pull)
 	case "pr_checks_green":
-		status, reason, err = r.prChecksGreen(ctx, targetDir, reference, pull)
+		status, reason, err = r.prChecksGreen(ctx, targetDir, repository, reference, pull)
 	default:
 		err = fmt.Errorf("unsupported PR check rule %q", rule)
 	}
@@ -195,7 +171,7 @@ func (r Runner) CheckIdentity(ctx context.Context, targetDir, reference, rule st
 	return status, reason, pull, nil
 }
 
-func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string, before PullRequest) (string, string, error) {
+func (r Runner) prChecksGreen(ctx context.Context, targetDir, repository, reference string, before PullRequest) (string, string, error) {
 	result := r.commands().Run(ctx, targetDir, "gh", "pr", "checks", reference, "--json", "bucket,name")
 	if result.Truncated {
 		return "", "", errors.New("gh pr checks output was truncated")
@@ -234,7 +210,7 @@ func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string, 
 	if result.Status != delivery.StepPassed && len(reasons) == 0 {
 		return "", "", commandError("gh pr checks", result)
 	}
-	after, err := r.Resolve(ctx, targetDir, reference)
+	after, err := r.Resolve(ctx, targetDir, repository, reference)
 	if err != nil {
 		return "", "", err
 	}
@@ -247,7 +223,7 @@ func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string, 
 	return "passed", "all PR checks are green for head " + before.HeadRefOID, nil
 }
 
-func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRequest) (status, reason string, err error) {
+func (r Runner) projectChecks(ctx context.Context, targetDir, repository string, pull PullRequest) (status, reason string, err error) {
 	if pull.State != "OPEN" {
 		return "failed", fmt.Sprintf("pull request state is %q, expected OPEN", pull.State), nil
 	}
@@ -345,7 +321,7 @@ func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRe
 	if gateErr != nil {
 		return "", "", gateErr
 	}
-	after, err := r.Resolve(ctx, targetDir, pull.URL)
+	after, err := r.Resolve(ctx, targetDir, repository, pull.URL)
 	if err != nil {
 		return "", "", err
 	}
@@ -433,14 +409,14 @@ func strictSandboxReceipt() *containment.Receipt {
 
 // Diff returns gh's PR diff only when the exact head SHA remains stable around
 // the network request. The result is then written as immutable attempt input.
-func (r Runner) Diff(ctx context.Context, targetDir, reference string) ([]byte, PullRequest, error) {
-	return r.DiffIdentity(ctx, targetDir, reference, nil)
+func (r Runner) Diff(ctx context.Context, targetDir, repository, reference string) ([]byte, PullRequest, error) {
+	return r.DiffIdentity(ctx, targetDir, repository, reference, nil)
 }
 
 // DiffIdentity reads the PR diff only if the exact identity still matches the
 // one accepted by the project's check rules.
-func (r Runner) DiffIdentity(ctx context.Context, targetDir, reference string, expected *PullRequest) ([]byte, PullRequest, error) {
-	before, err := r.Resolve(ctx, targetDir, reference)
+func (r Runner) DiffIdentity(ctx context.Context, targetDir, repository, reference string, expected *PullRequest) ([]byte, PullRequest, error) {
+	before, err := r.Resolve(ctx, targetDir, repository, reference)
 	if err != nil {
 		return nil, PullRequest{}, err
 	}
@@ -457,7 +433,7 @@ func (r Runner) DiffIdentity(ctx context.Context, targetDir, reference string, e
 	if result.Truncated || len(result.Stdout) == 0 || len(result.Stdout) > maxDiffBytes {
 		return nil, PullRequest{}, fmt.Errorf("gh pr diff is empty or exceeds %d bytes", maxDiffBytes)
 	}
-	after, err := r.Resolve(ctx, targetDir, reference)
+	after, err := r.Resolve(ctx, targetDir, repository, reference)
 	if err != nil {
 		return nil, PullRequest{}, err
 	}

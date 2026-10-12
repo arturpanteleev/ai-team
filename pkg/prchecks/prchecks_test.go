@@ -13,6 +13,8 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 )
 
+const testRepository = "github.com/example/project"
+
 func TestProjectChecksUsesPinnedPRWorktreeAndStubGH(t *testing.T) {
 	target, baseSHA, headSHA, url, bin := makePRFixture(t, `[ {"bucket":"pass","name":"unit"} ]`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -32,7 +34,7 @@ func TestProjectChecksUsesPinnedPRWorktreeAndStubGH(t *testing.T) {
 		}
 		return testCommandSandbox{}, nil
 	}}
-	status, reason, err := runner.Check(context.Background(), target, url, "project_checks")
+	status, reason, err := runner.Check(context.Background(), target, testRepository, url, "project_checks")
 	if err != nil || status != "passed" || !strings.Contains(reason, headSHA) {
 		t.Fatalf("project checks: status=%q reason=%q err=%v", status, reason, err)
 	}
@@ -63,11 +65,11 @@ func TestPRChecksGreenAndDiffRequireStablePRIdentity(t *testing.T) {
 	t.Run("green", func(t *testing.T) {
 		target, _, _, url, bin := makePRFixture(t, `[{"bucket":"pass","name":"unit"},{"bucket":"skipping","name":"optional"}]`)
 		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-		status, _, err := (Runner{}).Check(context.Background(), target, url, "pr_checks_green")
+		status, _, err := (Runner{}).Check(context.Background(), target, testRepository, url, "pr_checks_green")
 		if err != nil || status != "passed" {
 			t.Fatalf("green PR checks: status=%q err=%v", status, err)
 		}
-		diff, info, err := (Runner{}).Diff(context.Background(), target, url)
+		diff, info, err := (Runner{}).Diff(context.Background(), target, testRepository, url)
 		if err != nil || string(diff) != "diff --git a/main.go b/main.go\n" || info.HeadRefOID == "" {
 			t.Fatalf("PR diff: diff=%q info=%+v err=%v", diff, info, err)
 		}
@@ -75,7 +77,7 @@ func TestPRChecksGreenAndDiffRequireStablePRIdentity(t *testing.T) {
 	t.Run("pending fails", func(t *testing.T) {
 		target, _, _, url, bin := makePRFixture(t, `[{"bucket":"pending","name":"unit"}]`)
 		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-		status, reason, err := (Runner{}).Check(context.Background(), target, url, "pr_checks_green")
+		status, reason, err := (Runner{}).Check(context.Background(), target, testRepository, url, "pr_checks_green")
 		if err != nil || status != "failed" || !strings.Contains(reason, "pending") {
 			t.Fatalf("pending CI must fail: status=%q reason=%q err=%v", status, reason, err)
 		}
@@ -86,19 +88,109 @@ func TestResolveRequiresPRFromTaskRepository(t *testing.T) {
 	target, _, _, url, bin := makePRFixture(t, `[{"bucket":"pass","name":"unit"}]`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	t.Setenv("GH_TEST_REPO_URL", "https://github.com/Example/Project")
-	if _, err := (Runner{}).Resolve(context.Background(), target, url); err != nil {
+	if _, err := (Runner{}).Resolve(context.Background(), target, "GitHub.com/Example/Project", url); err != nil {
 		t.Fatalf("PR from the task repository (case-insensitive) must resolve: %v", err)
 	}
+	for _, repository := range []string{"github.com/example/other-project", "github.com/other-owner/project", ""} {
+		status, _, err := (Runner{}).Check(context.Background(), target, repository, url, "pr_checks_green")
+		if err == nil || status != "" {
+			t.Errorf("green PR checked against task repository %q must be rejected: status=%q err=%v", repository, status, err)
+		}
+		if _, _, err := (Runner{}).Diff(context.Background(), target, repository, url); err == nil {
+			t.Errorf("diff checked against task repository %q must be rejected", repository)
+		}
+	}
+}
 
-	t.Setenv("GH_TEST_REPO_URL", "https://github.com/example/other-project")
-	status, _, err := (Runner{}).Check(context.Background(), target, url, "pr_checks_green")
-	if err == nil || status != "" || !strings.Contains(err.Error(), "does not match task repository") {
-		t.Fatalf("green PR from a foreign repository must be rejected: status=%q err=%v", status, err)
+func TestResolveRejectsForeignPRURLs(t *testing.T) {
+	const repository = "github.com/example/project"
+	pull := func(url string) string {
+		view, _ := json.Marshal(PullRequest{URL: url, State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("a", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("b", 40)})
+		return string(view)
 	}
-	if _, _, err := (Runner{}).Diff(context.Background(), target, url); err == nil {
-		t.Fatal("diff of a foreign-repository PR must be rejected")
+	for _, tc := range []struct {
+		name, url string
+		hosts     []string
+	}{
+		{name: "fork owner", url: "https://github.com/other-owner/project/pull/7"},
+		{name: "other repository", url: "https://github.com/example/other/pull/7"},
+		{name: "explicit port", url: "https://github.com:443/example/project/pull/7"},
+		{name: "enterprise host", url: "https://ghe.example.com/example/project/pull/7", hosts: []string{"github.com", "ghe.example.com"}},
+		{name: "userinfo", url: "https://user@github.com/example/project/pull/7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := Runner{AllowedHosts: tc.hosts, Commands: &movingPRRunner{views: []string{pull(tc.url)}}}
+			if _, err := runner.Resolve(context.Background(), t.TempDir(), repository, tc.url); err == nil {
+				t.Fatalf("PR %s must be rejected for task repository %s", tc.url, repository)
+			}
+		})
 	}
+}
+
+func TestTaskRepositoryReadsHardenedOrigin(t *testing.T) {
+	isolateGitConfig(t)
+	newRepo := func(t *testing.T, origin string) string {
+		dir := t.TempDir()
+		runIn(t, dir, "git", "init", "-q")
+		if origin != "" {
+			runIn(t, dir, "git", "remote", "add", "origin", origin)
+		}
+		return dir
+	}
+	for _, origin := range []string{
+		"https://github.com/Example/Project.git",
+		"git@github.com:example/project.git",
+		"ssh://git@github.com/example/project",
+	} {
+		repository, err := (Runner{}).TaskRepository(context.Background(), newRepo(t, origin))
+		if err != nil || repository != "github.com/example/project" {
+			t.Errorf("origin %s: repository=%q err=%v", origin, repository, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		origin string
+		tamper [][]string
+	}{
+		{name: "gh-resolved on another remote", origin: "https://github.com/example/project.git", tamper: [][]string{
+			{"remote", "add", "up", "https://github.com/cli/cli.git"},
+			{"config", "remote.up.gh-resolved", "base"},
+		}},
+		{name: "insteadOf rewrites origin", origin: "https://github.com/example/project.git", tamper: [][]string{
+			{"config", "url.https://github.com/cli/cli.git.insteadOf", "https://github.com/example/project.git"},
+		}},
+		{name: "pushInsteadOf rewrites origin", origin: "https://github.com/example/project.git", tamper: [][]string{
+			{"config", "url.https://github.com/cli/.pushInsteadOf", "https://github.com/"},
+		}},
+		{name: "second origin URL", origin: "https://github.com/example/project.git", tamper: [][]string{
+			{"config", "--add", "remote.origin.url", "https://github.com/cli/cli.git"},
+		}},
+		{name: "untrusted host", origin: "https://gitlab.example.com/example/project.git"},
+		{name: "local path", origin: "/srv/git/project.git"},
+		{name: "no origin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newRepo(t, tc.origin)
+			for _, args := range tc.tamper {
+				runIn(t, dir, "git", args...)
+			}
+			if repository, err := (Runner{}).TaskRepository(context.Background(), dir); err == nil {
+				t.Fatalf("tampered or non-GitHub origin must be rejected, got %q", repository)
+			}
+		})
+	}
+}
+
+// isolateGitConfig keeps the developer's global Git configuration (for example
+// a personal insteadOf rule) out of tests that inspect `git config --list`.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
 }
 
 func TestPRReferenceRejectsArbitraryURLAndFlag(t *testing.T) {
@@ -115,7 +207,7 @@ func TestResolveRejectsUntrustedHostBeforeCallingGH(t *testing.T) {
 		"https://127.0.0.1:8443/acme/repo/pull/7",
 		"https://attacker.example/acme/repo/pull/7",
 	} {
-		if _, err := (Runner{Commands: commands}).Resolve(context.Background(), t.TempDir(), reference); err == nil {
+		if _, err := (Runner{Commands: commands}).Resolve(context.Background(), t.TempDir(), testRepository, reference); err == nil {
 			t.Errorf("untrusted PR host %q was accepted", reference)
 		}
 	}
@@ -139,7 +231,7 @@ func TestPRChecksGreenRejectsHeadMovingDuringCheckQuery(t *testing.T) {
 	views, _ := json.Marshal(before)
 	updated, _ := json.Marshal(after)
 	runner := Runner{Commands: &movingPRRunner{views: []string{string(views), string(updated)}}}
-	status, _, err := runner.Check(context.Background(), t.TempDir(), url, "pr_checks_green")
+	status, _, err := runner.Check(context.Background(), t.TempDir(), testRepository, url, "pr_checks_green")
 	if err == nil || status != "" || !strings.Contains(err.Error(), "changed while reading") {
 		t.Fatalf("moving PR head must error: status=%q err=%v", status, err)
 	}
@@ -152,7 +244,7 @@ func TestPRChecksGreenRejectsIdentityDifferentFromPriorProjectCheck(t *testing.T
 	runner := Runner{Commands: &movingPRRunner{views: []string{string(view)}}}
 	expected := current
 	expected.HeadRefOID = strings.Repeat("b", 40)
-	status, _, identity, err := runner.CheckIdentity(context.Background(), t.TempDir(), url, "pr_checks_green", &expected)
+	status, _, identity, err := runner.CheckIdentity(context.Background(), t.TempDir(), testRepository, url, "pr_checks_green", &expected)
 	if err == nil || status != "" || identity.URL != "" || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("green check must reject a different cross-rule identity: status=%q identity=%+v err=%v", status, identity, err)
 	}
@@ -164,10 +256,6 @@ func (r *movingPRRunner) Run(_ context.Context, _ string, name string, args ...s
 	result := delivery.StepResult{Status: delivery.StepPassed, ExitCode: 0}
 	if name != "gh" || len(args) < 2 {
 		return delivery.StepResult{Status: delivery.StepFailed, ExitCode: 2, Stderr: "unexpected command"}
-	}
-	if args[0] == "repo" && args[1] == "view" {
-		result.Stdout = `{"url":"https://github.com/example/project"}`
-		return result
 	}
 	switch args[1] {
 	case "view":
@@ -229,7 +317,6 @@ checks: []
 		"  'pr view') printf '%s\\n' '" + string(info) + "' ;;\n" +
 		"  'pr checks') printf '%s\\n' '" + checksJSON + "' ;;\n" +
 		"  'pr diff') printf '%s\\n' 'diff --git a/main.go b/main.go' ;;\n" +
-		"  'repo view') printf '{\"url\":\"%s\"}\\n' \"${GH_TEST_REPO_URL:-https://github.com/example/project}\" ;;\n" +
 		"  *) exit 2 ;;\nesac\n"
 	write(t, filepath.Join(bin, "gh"), ghScript)
 	if err := os.Chmod(filepath.Join(bin, "gh"), 0o755); err != nil {

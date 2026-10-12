@@ -18,6 +18,11 @@ the same input if a crash occurs before the retry starts.
 `pkg/prchecks` resolves each PR through `gh pr view` and validates its URL,
 trusted GitHub host, state, base/head names and full commit IDs. The default
 trusted host is `github.com`; an enterprise host must be configured explicitly.
+The PR must also belong to the task repository: the controller reads the single
+`origin` URL from Git configuration at run start (rejecting `gh-resolved`
+hints and URL rewrites), records host/owner/repo in `run.json`, and resumed runs
+reuse the recorded value, so later changes to the agent-writable checkout
+configuration cannot redirect the comparison.
 `project_checks` fetches the base/head refs into unique temporary refs, verifies
 that Git resolved the same SHAs, then runs `gate.Run` in a fresh temporary
 repository that contains only the pinned base/head commits and is checked out

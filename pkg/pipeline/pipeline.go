@@ -336,6 +336,8 @@ func (p *Pipeline) Agents() []string {
 // переиспользовать для нескольких запусков).
 type runState struct {
 	p                         *Pipeline
+	taskRepository            string
+	taskRepositoryErr         string
 	runCfg                    RunConfig
 	task                      *runtime.Task
 	reportsDir                string
@@ -798,6 +800,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	var replayedRun evidence.ReplayedRun
 	var resumeInvalidated []string
 	var resumeMutations []string
+	// taskRepository is the PR-check repository identity captured before any
+	// agent runs; a resumed run reuses the value recorded in run.json.
+	var taskRepository, taskRepositoryErr string
 	attemptOrdinal := 0
 	if runCfg.ResumeRunID != "" {
 		var manifest evidence.RunManifest
@@ -836,6 +841,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			runCfg.Mode = replayedRun.Mode
 		}
 		taskCreatedAt = manifest.StartedAt
+		taskRepository = manifest.TaskRepository
+		if taskRepository == "" {
+			taskRepositoryErr = "run was started without a captured GitHub task repository"
+		}
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
@@ -1141,8 +1150,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		if marshalErr != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("provenance manifest: %w", marshalErr)
 		}
+		if repository, repositoryErr := p.prStageChecks.TaskRepository(ctx, runCfg.TargetDir); repositoryErr == nil {
+			taskRepository = repository
+		} else {
+			// Non-GitHub targets are valid runs; only PR rules fail closed later.
+			taskRepositoryErr = repositoryErr.Error()
+		}
 		evidenceStore, err = p.startEvidence(filepath.Join(runCfg.TargetDir, ".ai-team", "runs"), evidence.RunManifest{
 			RunID: runID, Feature: runCfg.Feature, TargetDir: runCfg.TargetDir, StartedAt: runStartedAt,
+			TaskRepository: taskRepository,
 			ConfigSnapshot: configSnapshot, WorkflowSnapshot: workflowSnapshot, Provenance: provenanceData,
 		})
 		if err != nil {
@@ -1276,8 +1292,10 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 
 	rs := &runState{
-		p:      p,
-		runCfg: runCfg,
+		p:                 p,
+		runCfg:            runCfg,
+		taskRepository:    taskRepository,
+		taskRepositoryErr: taskRepositoryErr,
 		task: &runtime.Task{
 			Feature:      runCfg.Feature,
 			TaskDesc:     runCfg.TaskDesc,

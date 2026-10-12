@@ -524,7 +524,11 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 	if err != nil {
 		return fmt.Errorf("load accepted PR identity for reviewer %s: %w", reviewerStage, err)
 	}
-	diff, pull, err := rs.p.prStageChecks.DiffIdentity(ctx, rs.runCfg.TargetDir, reference, expected)
+	repository, err := rs.prTaskRepository()
+	if err != nil {
+		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
+	}
+	diff, pull, err := rs.p.prStageChecks.DiffIdentity(ctx, rs.runCfg.TargetDir, repository, reference, expected)
 	if err != nil {
 		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
 	}

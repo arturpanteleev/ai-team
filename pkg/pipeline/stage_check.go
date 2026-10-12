@@ -501,7 +501,11 @@ func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStag
 			input.PRCheck = rs.prCheckClosure(baseErr, base)
 		case "project_checks", "pr_checks_green":
 			input.ProjectRuleCheck = func(ctx context.Context, rule, reference string) (stagecheck.RuleResult, error) {
-				status, reason, identity, err := rs.p.prStageChecks.CheckIdentity(ctx, rs.runCfg.TargetDir, reference, rule, pinnedPR)
+				repository, err := rs.prTaskRepository()
+				if err != nil {
+					return stagecheck.RuleResult{}, err
+				}
+				status, reason, identity, err := rs.p.prStageChecks.CheckIdentity(ctx, rs.runCfg.TargetDir, repository, reference, rule, pinnedPR)
 				if err != nil {
 					return stagecheck.RuleResult{}, err
 				}

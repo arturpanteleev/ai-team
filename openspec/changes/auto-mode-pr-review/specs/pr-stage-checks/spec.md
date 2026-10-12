@@ -13,10 +13,14 @@ MUST use `gh pr checks` and fail closed if the PR identity changes during the
 request. Both rules MUST be bound to one URL/base/head identity, and that exact
 identity MUST be retained for reviewer diff preparation. PR URLs MUST use a
 trusted GitHub host (github.com by default; enterprise hosts require explicit
-configuration). The PR MUST belong to the task's own repository (host and
-owner/repo compared case-insensitively with `gh repo view` in the task checkout);
-a PR from any other repository MUST be rejected by every rule and by reviewer diff
-preparation.
+configuration). The PR MUST belong to the task's own repository: the
+controller captures host/owner/repo from the checkout's single `origin` URL at
+run start, before any agent runs, records it in `run.json`, and compares every
+PR case-insensitively against that recorded value. Capture MUST fail closed when
+Git configuration could redirect the identity (`remote.*.gh-resolved`, an
+`insteadOf`/`pushInsteadOf` rewrite of origin, several origin URLs, or a
+non-trusted host); without a captured repository every PR rule and reviewer diff
+preparation MUST be rejected.
 
 Commands selected by the pinned base gate policy MUST run in an OS-enforced
 untrusted-code sandbox with a read-only host root, writable PR checkout and

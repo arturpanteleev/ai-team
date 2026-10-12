@@ -162,6 +162,9 @@ func TestPRReviewReceivesDiffIdentitySpecsAndTechnicalDecision(t *testing.T) {
 	if checks.called["project_checks"] != 1 || checks.called["pr_checks_green"] != 1 {
 		t.Fatalf("project checks must run on the PR stage for agent results: %+v", checks.called)
 	}
+	if checks.repositoryCaptures != 1 {
+		t.Fatalf("task repository must be captured exactly once at run start, got %d", checks.repositoryCaptures)
+	}
 	if checks.diffExpected == nil || checks.diffExpected.URL != prURL || checks.diffExpected.HeadRefOID != strings.Repeat("a", 40) {
 		t.Fatalf("reviewer diff did not use identity accepted by project checks: %+v", checks.diffExpected)
 	}
@@ -187,7 +190,7 @@ func TestPRHardRulesRunForHumanAndAgentImplementations(t *testing.T) {
 			}
 			checks := &fakePRStageChecks{}
 			p := New(&config.Config{}, nil, WithPRStageChecks(checks))
-			rs := &runState{p: p, runCfg: RunConfig{TargetDir: dir}}
+			rs := &runState{p: p, runCfg: RunConfig{TargetDir: dir}, taskRepository: fakeTaskRepository}
 			stage := config.TemplateStage{
 				ID: "implementation", Result: "link", LinkKind: "pr", Executor: executor,
 				Check: &config.TemplateCheck{Kind: "hard", Rules: []string{"project_checks", "pr_checks_green"}},
@@ -202,11 +205,22 @@ func TestPRHardRulesRunForHumanAndAgentImplementations(t *testing.T) {
 }
 
 type fakePRStageChecks struct {
-	called       map[string]int
-	diffExpected *prchecks.PullRequest
+	called             map[string]int
+	diffExpected       *prchecks.PullRequest
+	repositoryCaptures int
 }
 
-func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, _ string, rule string, expected *prchecks.PullRequest) (string, string, prchecks.PullRequest, error) {
+const fakeTaskRepository = "github.com/example/project"
+
+func (f *fakePRStageChecks) TaskRepository(context.Context, string) (string, error) {
+	f.repositoryCaptures++
+	return fakeTaskRepository, nil
+}
+
+func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, repository string, _ string, rule string, expected *prchecks.PullRequest) (string, string, prchecks.PullRequest, error) {
+	if repository != fakeTaskRepository {
+		return "", "", prchecks.PullRequest{}, errors.New("PR check did not receive the captured task repository")
+	}
 	if f.called == nil {
 		f.called = map[string]int{}
 	}
@@ -218,7 +232,10 @@ func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, _ string,
 	return stagecheck.RulePassed, "test pass", identity, nil
 }
 
-func (*fakePRStageChecks) Diff(_ context.Context, _ string, _ string) ([]byte, prchecks.PullRequest, error) {
+func (*fakePRStageChecks) Diff(_ context.Context, _ string, repository string, _ string) ([]byte, prchecks.PullRequest, error) {
+	if repository != fakeTaskRepository {
+		return nil, prchecks.PullRequest{}, errors.New("PR diff did not receive the captured task repository")
+	}
 	return []byte("diff --git a/main.go b/main.go\n+added\n"), prchecks.PullRequest{
 		URL: "https://github.com/example/project/pull/9", State: "OPEN",
 		BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40),
@@ -226,12 +243,12 @@ func (*fakePRStageChecks) Diff(_ context.Context, _ string, _ string) ([]byte, p
 	}, nil
 }
 
-func (f *fakePRStageChecks) DiffIdentity(ctx context.Context, targetDir, reference string, expected *prchecks.PullRequest) ([]byte, prchecks.PullRequest, error) {
+func (f *fakePRStageChecks) DiffIdentity(ctx context.Context, targetDir, repository, reference string, expected *prchecks.PullRequest) ([]byte, prchecks.PullRequest, error) {
 	if expected != nil {
 		copy := *expected
 		f.diffExpected = &copy
 	}
-	diff, identity, err := f.Diff(ctx, targetDir, reference)
+	diff, identity, err := f.Diff(ctx, targetDir, repository, reference)
 	if err == nil && expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
 		return nil, prchecks.PullRequest{}, errors.New("identity mismatch")
 	}
@@ -331,3 +348,23 @@ outputs:
 }
 
 var _ PRStageChecks = (*fakePRStageChecks)(nil)
+
+func TestPRRulesFailClosedWithoutCapturedTaskRepository(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pr-url.txt")
+	if err := os.WriteFile(path, []byte("https://github.com/example/project/pull/9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := &fakePRStageChecks{}
+	p := New(&config.Config{}, nil, WithPRStageChecks(checks))
+	rs := &runState{p: p, runCfg: RunConfig{TargetDir: dir}, taskRepositoryErr: "origin is not a GitHub repository URL"}
+	stage := config.TemplateStage{
+		ID: "implementation", Result: "link", LinkKind: "pr", Executor: "agent",
+		Check: &config.TemplateCheck{Kind: "hard", Rules: []string{"pr_checks_green"}},
+	}
+	result := notifier.StageResult{Outputs: []runtime.Artifact{{Name: "pr-url", Path: path}}}
+	report := rs.runHardChecks(context.Background(), stage, result)
+	if report.Status == stagecheck.StatusPassed || report.PRIdentity != nil || len(checks.called) != 0 {
+		t.Fatalf("PR rules must not run without a captured task repository: report=%+v calls=%+v", report, checks.called)
+	}
+}

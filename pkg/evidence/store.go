@@ -90,6 +90,10 @@ type RunManifest struct {
 	ResolvedWorkflow       string             `json:"resolved_workflow_evidence"`
 	ResolvedWorkflowSHA256 string             `json:"resolved_workflow_sha256"`
 	Controller             ControllerIdentity `json:"controller"`
+	// TaskRepository is the lower-cased host/owner/repo of the target's origin,
+	// captured by the controller before any agent runs. PR stage checks bind
+	// every PR to it instead of trusting mutable checkout configuration.
+	TaskRepository string `json:"task_repository,omitempty"`
 	// Provenance (V0-2) — authority-bearing provenance manifest v1, хранится
 	// inline в run.json; при resume сверяется с заново построенным manifest'ом
 	// (drift detection). Опак для evidence: содержимое интерпретирует pipeline.

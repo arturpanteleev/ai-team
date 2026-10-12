@@ -27,6 +27,7 @@ import { StageResultForm } from '../components/StageResultForm';
 import type { StageResultSubmission } from '../stageResultValidation';
 import { StageRow } from '../components/StageRow';
 import { StatusBadge } from '../components/StatusBadge';
+import { TaskTimeline } from '../components/TaskTimeline';
 import { clearStageResultDraft, loadStageResultDraft } from '../stageResultDraft';
 import styles from './TaskDetail.module.css';
 
@@ -362,6 +363,11 @@ export function TaskDetail() {
         )}
       </section>
 
+      <section className={styles.panel} aria-labelledby="timeline-heading">
+        <h2 id="timeline-heading">Таймлайн задачи</h2>
+        <TaskTimeline details={details} events={visibleSnapshot.events} eventTitle={eventTitle} />
+      </section>
+
       <section className={styles.panel} aria-labelledby="results-heading">
         <h2 id="results-heading">Результаты этапов и версии</h2>
         <div className={styles.resultStages}>
@@ -401,7 +407,7 @@ export function TaskDetail() {
           <div><h2 id="events-heading">Лента событий задачи</h2><p>Обновляется по событиям выполнения.</p></div>
         </div>
         {visibleSnapshot.events.length === 0 ? <p>Событий пока нет.</p> : <ol className={styles.events}>
-          {visibleSnapshot.events.map((event) => <li key={event.cursor} data-severity={event.severity}>
+          {visibleSnapshot.events.map((event) => <li key={event.cursor} id={`task-event-${event.cursor}`} data-severity={event.severity}>
             <time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleString('ru-RU')}</time>
             <strong>{eventTitle(event.type)}</strong>
             <span>{[event.stage, event.actor, event.executor, event.attempt_id].filter(Boolean).join(' · ')}</span>

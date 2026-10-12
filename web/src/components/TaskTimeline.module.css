@@ -1,0 +1,242 @@
+.timeline {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  list-style: none;
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 14px;
+}
+
+.markSwatch,
+.mark {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--text-primary);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.markSwatch[data-kind='override'],
+.mark[data-kind='override'] {
+  border-color: var(--warning-fg);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.markSwatch[data-kind='skip'],
+.mark[data-kind='skip'] {
+  border-radius: 3px;
+}
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.lanes {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.lane {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.lane[data-selected] .track {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.laneButton {
+  display: grid;
+  min-width: 0;
+  min-height: 44px;
+  gap: 2px;
+  text-align: left;
+}
+
+.laneTitle {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.laneMeta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.track {
+  position: relative;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+
+.segment,
+.swatch {
+  --lane-color: var(--executor-unknown);
+  border: 2px solid var(--lane-color);
+  border-radius: 3px;
+  background: var(--lane-color);
+}
+
+.segment {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 3px;
+}
+
+.segment[data-executor='agent'],
+.swatch[data-executor='agent'] {
+  --lane-color: var(--executor-agent);
+}
+
+.segment[data-executor='human'],
+.swatch[data-executor='human'] {
+  --lane-color: var(--executor-human);
+  border-style: dashed;
+}
+
+/* Состояние различается узором, а не только цветом. */
+.segment[data-state='waiting_executor'],
+.swatch[data-state='waiting_executor'] {
+  background: repeating-linear-gradient(45deg, var(--lane-color) 0 3px, transparent 3px 7px);
+}
+
+.segment[data-state='checking'],
+.swatch[data-state='checking'] {
+  background: repeating-linear-gradient(90deg, var(--lane-color) 0 2px, transparent 2px 5px);
+}
+
+.segment[data-state='awaiting_confirmation'],
+.swatch[data-state='awaiting_confirmation'] {
+  background: var(--surface);
+}
+
+.segment[data-open] {
+  border-right-style: dotted;
+}
+
+.mark {
+  position: absolute;
+  top: -6px;
+  transform: translateX(-50%);
+}
+
+.card {
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.cardHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cardHeading h3 {
+  margin: 0;
+}
+
+.facts {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.facts dt {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.inlineList,
+.cardEvents {
+  padding-left: 18px;
+  margin: 0;
+}
+
+.cardEvents time {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.textAlternative table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.textAlternative caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 8px 0;
+}
+
+.textAlternative th,
+.textAlternative td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+@media (max-width: 640px) {
+  .lane {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .textAlternative {
+    overflow-x: auto;
+  }
+}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getFlowMetrics, getGlobalEvents, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
+import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -159,6 +159,15 @@ describe('flow metrics API client', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/metrics/flow?from=2026-10-01&to=2026-11-01');
     expect(fetchMock.mock.calls[1][0]).toBe('/api/metrics/flow.csv?from=2026-10-01&to=2026-11-01');
     expect(blob.size).toBe('metric,stage,value\n'.length);
+  });
+
+  it('requests per-stage aggregates of one task by run_id', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ by_stage: [] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getTaskFlowMetrics('run/one');
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/metrics/flow?run_id=run%2Fone');
   });
 
   it('surfaces the API error of a rejected CSV export', async () => {

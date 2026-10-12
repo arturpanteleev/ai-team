@@ -20,6 +20,7 @@ vi.mock('../api', () => ({
   getRunLog: vi.fn().mockResolvedValue({ content: 'agent log', truncated: false }),
   getTaskRunDetails: vi.fn(),
   getTaskRunEvents: vi.fn().mockResolvedValue({ events: [], next_cursor: 0 }),
+  getTaskFlowMetrics: vi.fn().mockResolvedValue({ by_stage: [] }),
   overrideTaskStageCheck: vi.fn().mockResolvedValue({}),
   returnTaskStage: vi.fn().mockResolvedValue({}),
   runTaskStageAgent: vi.fn().mockResolvedValue({}),

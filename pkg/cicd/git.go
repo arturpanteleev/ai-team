@@ -43,9 +43,14 @@ type MergeProof struct {
 // MergeRequest identifies the controller-created pull request to deploy.
 type MergeRequest struct {
 	RepositoryDir string
-	Remote        string
-	Branch        string
-	PRURL         string
+	// Repository is the "host/owner/repo" identity captured at run start,
+	// before any agent could change the checkout's Git configuration.
+	Repository string
+	// FetchURL is the URL fetched for the deploy branch. The controller derives
+	// it from Repository; it never comes from the checkout's remotes.
+	FetchURL string
+	Branch   string
+	PRURL    string
 	// PRHead is the commit the controller pushed for the pull request.
 	PRHead string
 }
@@ -53,40 +58,73 @@ type MergeRequest struct {
 type pullRequestMergeView struct {
 	State       string `json:"state"`
 	BaseRefName string `json:"baseRefName"`
+	HeadRefOID  string `json:"headRefOid"`
 	MergeCommit *struct {
 		OID string `json:"oid"`
 	} `json:"mergeCommit"`
 }
 
+// RepositoryFetchURL derives the HTTPS fetch URL from a captured
+// "host/owner/repo" identity.
+func RepositoryFetchURL(repository string) (string, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" || strings.ContainsAny(repository, ":@?#\\ ") {
+		return "", fmt.Errorf("%w: task repository identity is invalid", ErrDeployRejected)
+	}
+	return "https://" + repository + ".git", nil
+}
+
+// deployGitEnv isolates deploy Git commands from configuration and object
+// substitution the checkout can carry: system/global config, replace refs and
+// grafts. Local .git/config still loads, so every decision below relies only
+// on content-addressed objects and on the branch tip reported by GitHub.
+var deployGitEnv = []string{
+	"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+	"GIT_NO_REPLACE_OBJECTS=1", "GIT_GRAFT_FILE=" + os.DevNull,
+}
+
 // ResolveMergedDeploy decides what to deploy for a merged pull request.
-// GitHub only points at the merge commit; Git decides whether it is valid:
+// GitHub names the merge commit and the branch tip; Git decides whether they
+// are valid:
 //
-//  1. the merge commit exists and is reachable from the fetched branch tip;
-//  2. the pull request content is in it: either the PR head is an ancestor of
+//  1. the pull request belongs to the captured repository, targets the deploy
+//     branch and its head is the commit the controller pushed;
+//  2. the deploy target is the branch tip reported by the GitHub API, which
+//     local Git configuration (url.insteadOf, remotes) cannot redirect; the
+//     fetch from the captured repository URL must make that exact object
+//     available locally;
+//  3. the merge commit is reachable from that tip;
+//  4. the pull request content is in it: either the PR head is an ancestor of
 //     the merge commit (merge commit or fast-forward), or the merge commit's
 //     own change equals the PR change against its merge base (squash, or a
-//     rebase of a single commit).
+//     rebase of a single commit), compared without textconv or external diff.
 //
-// The deploy target is the branch tip, never the PR head. An open pull request
-// returns ErrNotMerged; a closed one or any failed proof returns
-// ErrDeployRejected. Git and gh diagnostics are not copied into errors.
+// An open pull request returns ErrNotMerged; a closed one or any failed proof
+// returns ErrDeployRejected. Git and gh diagnostics are not copied into errors.
 func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, request MergeRequest) (MergeProof, error) {
 	if runner == nil {
-		runner = delivery.ExecRunner{}
-	}
-	if request.Remote == "" {
-		request.Remote = "origin"
+		runner = EnvFilteredRunner{}
 	}
 	if !ValidCommitSHA(request.PRHead) {
 		return MergeProof{}, fmt.Errorf("%w: pull request head SHA is invalid", ErrDeployRejected)
 	}
-	if !ValidBranch(request.Branch) || !ValidBranch(request.Remote) {
-		return MergeProof{}, fmt.Errorf("%w: deploy branch or remote is invalid", ErrDeployRejected)
+	if !ValidBranch(request.Branch) {
+		return MergeProof{}, fmt.Errorf("%w: deploy branch is invalid", ErrDeployRejected)
 	}
-	if parsed, err := url.Parse(request.PRURL); err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-		return MergeProof{}, fmt.Errorf("%w: pull request URL is invalid", ErrDeployRejected)
+	repoParts := strings.Split(request.Repository, "/")
+	if _, err := RepositoryFetchURL(request.Repository); err != nil {
+		return MergeProof{}, err
 	}
-	view := runner.Run(ctx, request.RepositoryDir, "gh", "pr", "view", request.PRURL, "--json", "state,baseRefName,mergeCommit")
+	if strings.TrimSpace(request.FetchURL) == "" || strings.HasPrefix(request.FetchURL, "-") {
+		return MergeProof{}, fmt.Errorf("%w: deploy fetch URL is invalid", ErrDeployRejected)
+	}
+	parsedPR, err := url.Parse(request.PRURL)
+	if err != nil || parsedPR.Scheme != "https" || parsedPR.User != nil || parsedPR.RawQuery != "" || parsedPR.Fragment != "" ||
+		!strings.EqualFold(parsedPR.Host, repoParts[0]) ||
+		!strings.HasPrefix(strings.ToLower(parsedPR.Path), "/"+strings.ToLower(repoParts[1]+"/"+repoParts[2])+"/pull/") {
+		return MergeProof{}, fmt.Errorf("%w: pull request URL is not in the task repository", ErrDeployRejected)
+	}
+	view := runner.Run(ctx, request.RepositoryDir, "gh", "pr", "view", request.PRURL, "--json", "state,baseRefName,headRefOid,mergeCommit")
 	if view.Status != delivery.StepPassed || view.Truncated {
 		if err := ctx.Err(); err != nil {
 			return MergeProof{}, err
@@ -98,6 +136,9 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&pr); err != nil {
 		return MergeProof{}, errors.New("gh pr view returned invalid JSON")
+	}
+	if !strings.EqualFold(pr.HeadRefOID, request.PRHead) {
+		return MergeProof{}, fmt.Errorf("%w: pull request head is not the commit published by the controller", ErrDeployRejected)
 	}
 	switch pr.State {
 	case "MERGED":
@@ -114,8 +155,11 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 	}
 	mergeCommit := strings.ToLower(pr.MergeCommit.OID)
 
-	tracking := "refs/remotes/" + request.Remote + "/" + request.Branch
-	fetch := runner.Run(ctx, request.RepositoryDir, "git", "fetch", "--no-tags", "--quiet", request.Remote, "+refs/heads/"+request.Branch+":"+tracking)
+	tip, err := githubBranchTip(ctx, runner, request.RepositoryDir, repoParts, request.Branch)
+	if err != nil {
+		return MergeProof{}, err
+	}
+	fetch := runner.Run(ctx, request.RepositoryDir, "git", "fetch", "--no-tags", "--quiet", "--end-of-options", request.FetchURL, "refs/heads/"+request.Branch)
 	if fetch.Status != delivery.StepPassed {
 		if err := ctx.Err(); err != nil {
 			return MergeProof{}, err
@@ -123,9 +167,10 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 		return MergeProof{}, &TransientError{Err: fmt.Errorf("git fetch of deploy branch %s failed (exit %d)", request.Branch, fetch.ExitCode)}
 	}
 	git := gitQuery{ctx: ctx, runner: runner, dir: request.RepositoryDir}
-	tip, err := git.commit(tracking)
-	if err != nil {
-		return MergeProof{}, fmt.Errorf("%w: deploy branch tip: %v", ErrDeployRejected, err)
+	if resolved, err := git.commit(tip); err != nil || resolved != tip {
+		// The fetch did not deliver the branch tip GitHub reports: the fetch was
+		// redirected or the branch moved between the two calls.
+		return MergeProof{}, &TransientError{Err: fmt.Errorf("deploy branch tip %s reported by GitHub is not present after fetch", tip)}
 	}
 	if resolved, err := git.commit(mergeCommit); err != nil || resolved != mergeCommit {
 		return MergeProof{}, fmt.Errorf("%w: merge commit %s is not present after fetch", ErrDeployRejected, mergeCommit)
@@ -134,7 +179,7 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 		return MergeProof{}, fmt.Errorf("%w: pull request head %s is not present locally", ErrDeployRejected, request.PRHead)
 	}
 	if ok, err := git.ancestor(mergeCommit, tip); err != nil || !ok {
-		return MergeProof{}, fmt.Errorf("%w: merge commit %s is not in %s/%s", ErrDeployRejected, mergeCommit, request.Remote, request.Branch)
+		return MergeProof{}, fmt.Errorf("%w: merge commit %s is not in branch %s", ErrDeployRejected, mergeCommit, request.Branch)
 	}
 	if ok, err := git.ancestor(request.PRHead, mergeCommit); err != nil {
 		return MergeProof{}, fmt.Errorf("%w: %v", ErrDeployRejected, err)
@@ -144,6 +189,34 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 		}
 	}
 	return MergeProof{MergeCommit: mergeCommit, DeploySHA: tip}, nil
+}
+
+// githubBranchTip asks the GitHub API for the branch head of the captured
+// repository. Unlike a fetched ref it does not depend on the checkout's Git
+// configuration.
+func githubBranchTip(ctx context.Context, runner delivery.CommandRunner, dir string, repo []string, branch string) (string, error) {
+	endpoint := "repos/" + url.PathEscape(repo[1]) + "/" + url.PathEscape(repo[2]) + "/branches/" + url.PathEscape(branch)
+	result := runner.Run(ctx, dir, "gh", "api", "--hostname", repo[0], endpoint)
+	if result.Status != delivery.StepPassed || result.Truncated {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "", &TransientError{Err: fmt.Errorf("gh api branch %s failed (exit %d)", branch, result.ExitCode)}
+	}
+	var response struct {
+		Name   string `json:"name"`
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
+		return "", errors.New("gh api returned invalid branch JSON")
+	}
+	tip := strings.ToLower(response.Commit.SHA)
+	if response.Name != branch || !ValidCommitSHA(tip) {
+		return "", fmt.Errorf("%w: GitHub returned no head for branch %s", ErrDeployRejected, branch)
+	}
+	return tip, nil
 }
 
 // WaitForMerge polls ResolveMergedDeploy while the pull request is open or a
@@ -232,11 +305,11 @@ func (g gitQuery) sameChange(prHead, mergeCommit string) error {
 		return fmt.Errorf("pull request head and deploy branch have no merge base")
 	}
 	base := strings.TrimSpace(baseOutput)
-	prDiff, err := g.run("diff", "--no-color", "--no-ext-diff", "--binary", base, prHead)
+	prDiff, err := g.run(append(diffArgs, base, prHead)...)
 	if err != nil {
 		return err
 	}
-	mergeDiff, err := g.run("diff", "--no-color", "--no-ext-diff", "--binary", parent, mergeCommit)
+	mergeDiff, err := g.run(append(diffArgs, parent, mergeCommit)...)
 	if err != nil {
 		return err
 	}
@@ -245,6 +318,12 @@ func (g gitQuery) sameChange(prHead, mergeCommit string) error {
 	}
 	return nil
 }
+
+// diffArgs pins every diff option a checkout could change through config or
+// attributes: textconv and external drivers are disabled, binary content is
+// shown in full and the context, rename and path settings are explicit.
+var diffArgs = []string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "--binary", "--full-index",
+	"--no-renames", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "-U3", "--diff-algorithm=myers"}
 
 var hunkHeader = regexp.MustCompile(`^@@ -[0-9]+(,[0-9]+)? \+[0-9]+(,[0-9]+)? @@`)
 
@@ -264,7 +343,8 @@ func normalizeDiff(diff string) string {
 }
 
 // EnvFilteredRunner runs git and gh like delivery.ExecRunner, but removes the
-// named variables (the CI/CD token) from the child environment.
+// named variables (the CI/CD token) from the child environment and isolates
+// Git from system/global configuration, replace refs and grafts.
 type EnvFilteredRunner struct {
 	Drop []string
 }
@@ -276,7 +356,7 @@ func (r EnvFilteredRunner) Run(ctx context.Context, dir, name string, args ...st
 	stdout, stderr := &limitedWriter{limit: filteredRunnerOutputLimit}, &limitedWriter{limit: filteredRunnerOutputLimit}
 	command := exec.Command(name, args...)
 	command.Dir, command.Stdout, command.Stderr = dir, stdout, stderr
-	command.Env = delivery.NonInteractiveEnv(filterEnv(os.Environ(), r.Drop))
+	command.Env = append(delivery.NonInteractiveEnv(filterEnv(os.Environ(), r.Drop)), deployGitEnv...)
 	err := process.Run(ctx, command)
 	result.FinishedAt = time.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(result.StartedAt)

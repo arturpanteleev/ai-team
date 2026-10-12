@@ -329,7 +329,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 
 	stageCtx := ctx
-	timeout, terr := agentCfg.StageTimeoutFor()
+	timeout, terr := rs.stageTimeoutFor(a, agentCfg)
 	if terr != nil {
 		return fail(fmt.Errorf("невалидный timeout агента %s: %w", name, terr))
 	}

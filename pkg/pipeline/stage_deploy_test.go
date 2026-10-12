@@ -39,9 +39,12 @@ type mergedGit struct{ calls int }
 
 func (g *mergedGit) Run(_ context.Context, _ string, name string, args ...string) delivery.StepResult {
 	g.calls++
+	if name == "gh" && args[0] == "api" {
+		return delivery.StepResult{Status: delivery.StepPassed, Stdout: `{"name":"main","commit":{"sha":"` + deployTestSHA + `"}}`}
+	}
 	if name == "gh" {
 		return delivery.StepResult{Status: delivery.StepPassed,
-			Stdout: `{"state":"MERGED","baseRefName":"main","mergeCommit":{"oid":"` + deployTestSHA + `"}}`}
+			Stdout: `{"state":"MERGED","baseRefName":"main","headRefOid":"` + deployTestSHA + `","mergeCommit":{"oid":"` + deployTestSHA + `"}}`}
 	}
 	if args[0] == "rev-parse" {
 		return delivery.StepResult{Status: delivery.StepPassed, Stdout: deployTestSHA + "\n"}
@@ -77,7 +80,7 @@ func deployTestState(t *testing.T, provider cicd.Provider, receipt *delivery.Sta
 	}
 	state := &runState{
 		p:     New(cfg, nil, options...),
-		runID: "run-deploy", runCfg: RunConfig{Feature: "feat", TargetDir: dir},
+		runID: "run-deploy", runCfg: RunConfig{Feature: "feat", TargetDir: dir}, taskRepository: "github.example/org/repo",
 		task:                 &runtime.Task{ArtifactRoot: filepath.Join(dir, ".ai-team", "artifacts")},
 		stageDeliveryReceipt: receipt,
 	}
@@ -190,5 +193,34 @@ func TestRunDeployStageIsControllerOwned(t *testing.T) {
 	events := readEvents(t, dir)
 	if !strings.Contains(events, `"type":"attempt_finished"`) || !strings.Contains(events, `"outcome":"failed"`) {
 		t.Fatalf("deploy attempt must finish failed:\n%s", events)
+	}
+}
+
+func TestControllerDeployRequiresCapturedRepository(t *testing.T) {
+	provider := &stubDeployProvider{}
+	state, _, deployAgent := deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA, PRURL: "https://github.example/org/repo/pull/1"})
+	state.taskRepository, state.taskRepositoryErr = "", "origin rewritten"
+	err := state.runControllerDeploy(context.Background(), "deploy", "attempt-1", deployAgent)
+	if !errors.Is(err, cicd.ErrDeployRejected) || !strings.Contains(err.Error(), "captured at run start") {
+		t.Fatalf("deploy without the captured repository must be rejected, got %v", err)
+	}
+	if len(provider.triggers) != 0 {
+		t.Fatal("deploy without repository identity triggered a build")
+	}
+}
+
+func TestDeployStageHasOwnBudgetInsteadOfStageTimeout(t *testing.T) {
+	state, _, deployAgent := deployTestState(t, &stubDeployProvider{}, nil)
+	state.p.cfg.StageTimeout = "1m"
+	state.p.cfg.CICD.TeamCity.MergeTimeout = "40m"
+	state.p.cfg.CICD.TeamCity.Timeout = "50m"
+	agentCfg := &config.AgentConfig{Name: "deploy", Timeout: "1m"}
+	budget, err := state.stageTimeoutFor(deployAgent, agentCfg)
+	if err != nil || budget != 40*time.Minute+50*time.Minute+config.DeployStageMargin {
+		t.Fatalf("deploy budget = %s, %v", budget, err)
+	}
+	ordinary, err := state.stageTimeoutFor(&agent.Agent{Name: "coder"}, agentCfg)
+	if err != nil || ordinary != time.Minute {
+		t.Fatalf("ordinary stage timeout = %s, %v", ordinary, err)
 	}
 }

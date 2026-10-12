@@ -10,6 +10,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/cicd"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -17,8 +18,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 )
-
-const deployRemote = "origin"
 
 // WithDeployProvider injects the controller-owned CI/CD provider. Only the
 // local controller process configures it; a sandboxed worker never receives
@@ -80,6 +79,15 @@ func (rs *runState) runControllerDeploy(ctx context.Context, name, attemptID str
 		// git and gh must not inherit the CI/CD token.
 		runner = cicd.EnvFilteredRunner{Drop: []string{settings.TokenEnv}}
 	}
+	// The repository identity was captured at run start, before any agent
+	// could change the checkout's Git configuration; remotes are not used.
+	if rs.taskRepository == "" {
+		return fmt.Errorf("%w: deploy requires the task's GitHub repository captured at run start: %s", cicd.ErrDeployRejected, rs.taskRepositoryErr)
+	}
+	fetchURL, err := cicd.RepositoryFetchURL(rs.taskRepository)
+	if err != nil {
+		return err
+	}
 	stateDir, err := safeio.EnsureDir(rs.runCfg.TargetDir, ".ai-team", "state", "deploy")
 	if err != nil {
 		return fmt.Errorf("deploy state directory: %w", err)
@@ -89,7 +97,7 @@ func (rs *runState) runControllerDeploy(ctx context.Context, name, attemptID str
 	build, err := cicd.Deploy(ctx, provider, cicd.DeployRequest{
 		RunID: rs.runID, Stage: name,
 		Merge: cicd.MergeRequest{
-			RepositoryDir: rs.runCfg.TargetDir, Remote: deployRemote, Branch: settings.Branch,
+			RepositoryDir: rs.runCfg.TargetDir, Repository: rs.taskRepository, FetchURL: fetchURL, Branch: settings.Branch,
 			PRURL: receipt.PRURL, PRHead: prHead,
 		},
 		ReceiptPath: filepath.Join(stateDir, rs.runID+"-"+name+".json"),
@@ -129,4 +137,24 @@ func (rs *runState) recordDeployIntegrationError(stage, attemptID, provider stri
 			"integration": "cicd", "provider": provider, "error": err.Error(), "severity": "warning",
 		},
 	})
+}
+
+// deployStageBudget gives a kind=deploy stage its own time budget: the merge
+// wait plus the build wait plus a margin. The generic stage_timeout must not
+// cancel a build midway because the merge took part of the same budget.
+func (rs *runState) deployStageBudget() (time.Duration, error) {
+	if rs.p.cfg == nil || rs.p.cfg.CICD == nil || rs.p.cfg.CICD.TeamCity == nil {
+		return 0, fmt.Errorf("%w: cicd.teamcity is not configured", cicd.ErrDeployRejected)
+	}
+	return rs.p.cfg.CICD.TeamCity.StageBudget()
+}
+
+// stageTimeoutFor returns the per-stage timeout. A deploy stage has its own
+// budget (merge wait + build wait + margin) instead of stage_timeout, which
+// must not cancel a deployment midway.
+func (rs *runState) stageTimeoutFor(a *agent.Agent, agentCfg *config.AgentConfig) (time.Duration, error) {
+	if a != nil && a.Kind == "deploy" {
+		return rs.deployStageBudget()
+	}
+	return agentCfg.StageTimeoutFor()
 }

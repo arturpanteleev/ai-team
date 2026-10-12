@@ -15,14 +15,22 @@ the deadline; triggers are never retried.
 
 The deploy target is resolved from the controller PR receipt (PR URL and the
 head commit the controller pushed). `gh pr view --json state,baseRefName,mergeCommit`
-is polled until the PR is `MERGED` (bounded by `merge_timeout`); `CLOSED` or a
-different base branch is rejected. GitHub only names the merge commit; Git
-decides: after `git fetch origin +refs/heads/<branch>:refs/remotes/origin/<branch>`
-the merge commit must exist and be an ancestor of the fetched tip, and it must
+is polled until the PR is `MERGED` (bounded by `merge_timeout`); `CLOSED`, a
+different base branch, a PR outside the repository captured at run start
+(`TaskRepository`) or a `headRefOid` other than the published commit is
+rejected. The branch tip comes from `gh api repos/<o>/<r>/branches/<b>` for the
+captured repository: a checkout-local `url.*.insteadOf` cannot redirect it.
+`git fetch <captured repository URL> refs/heads/<b>` must then make that exact
+object available; since objects are content-addressed, a redirected fetch can
+only fail, not substitute the tip. Git runs with `GIT_CONFIG_NOSYSTEM`,
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_REPLACE_OBJECTS` and an empty graft
+file. GitHub only names the merge commit; Git decides: the merge commit must
+exist and be an ancestor of the tip, and it must
 contain the PR change: either the PR head is its ancestor (merge commit,
 fast-forward) or `git diff <merge>^1 <merge>` equals `git diff <base> <prHead>`
-with `base = git merge-base <prHead> <merge>^1`, compared after dropping hunk
-line numbers and `index` lines (the normalization of `git patch-id`). The base
+with `base = git merge-base <prHead> <merge>^1`, built with `--no-textconv --no-ext-diff --binary` and
+explicit context, rename, prefix and algorithm options, compared after dropping
+hunk line numbers and `index` lines (the normalization of `git patch-id`). The base
 is computed by Git rather than read from the delivery plan's `baseline_head`,
 which keeps the proof independent of local plan files and matches GitHub's
 squash semantics. A multi-commit rebase merge is rejected.
@@ -54,3 +62,12 @@ deploy stage there fails closed. Deterministic negatives (not merged, failed
 build, wrong revision, misconfiguration) mark the attempt as validation failure;
 transport errors and timeouts are infra failures. Each failure is projected to
 the task event feed as `integration_error` with `integration: cicd`.
+
+Before a trigger the receipt records `trigger_pending`. A definite rejection
+from TeamCity clears it; a lost response keeps it, and the next attempt refuses
+to trigger until an operator checks TeamCity and removes the receipt. Trigger
+failures are never treated as retryable.
+
+A deploy stage does not use `stage_timeout`; its budget is
+`merge_timeout + timeout + 5m`, so a slow merge cannot cancel a running
+deployment. The run budget still applies.

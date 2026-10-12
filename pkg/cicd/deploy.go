@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,15 +21,18 @@ const receiptSchemaVersion = 2
 // triggering a duplicate deployment. It is only a pointer: every reuse
 // re-reads the build from the provider.
 type Receipt struct {
-	SchemaVersion int       `json:"schema_version"`
-	RunID         string    `json:"run_id"`
-	Stage         string    `json:"stage"`
-	Provider      string    `json:"provider"`
-	CommitSHA     string    `json:"commit_sha"`
-	MergeCommit   string    `json:"merge_commit"`
-	Branch        string    `json:"branch"`
-	Build         Build     `json:"build"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	SchemaVersion int    `json:"schema_version"`
+	RunID         string `json:"run_id"`
+	Stage         string `json:"stage"`
+	Provider      string `json:"provider"`
+	CommitSHA     string `json:"commit_sha"`
+	MergeCommit   string `json:"merge_commit"`
+	Branch        string `json:"branch"`
+	// TriggerPending is set before a trigger and cleared once the provider
+	// answered. A pending receipt without a build blocks automatic retries.
+	TriggerPending bool      `json:"trigger_pending,omitempty"`
+	Build          Build     `json:"build"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // DeployRequest describes one controller-initiated deployment.
@@ -57,9 +61,6 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 	if request.RunID == "" || request.Stage == "" {
 		return Build{}, errors.New("deploy request requires run and stage identity")
 	}
-	if request.Merge.Remote == "" {
-		request.Merge.Remote = "origin"
-	}
 	proof, err := WaitForMerge(ctx, request.Runner, request.Merge, request.MergeWait)
 	if err != nil {
 		return Build{}, err
@@ -70,6 +71,12 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 	}
 	if found && (previous.RunID != request.RunID || previous.Stage != request.Stage || previous.Provider != provider.Name()) {
 		return Build{}, fmt.Errorf("%w: deploy receipt belongs to another run, stage or provider", ErrDeployRejected)
+	}
+	if found && previous.TriggerPending && previous.Build.ID == "" {
+		// A previous trigger may have queued a build whose response was lost.
+		// Triggering again could deploy twice; an operator must check TeamCity.
+		return Build{}, fmt.Errorf("%w: the previous deploy trigger for %s has an unknown outcome; check the CI/CD system and remove %s to retry",
+			ErrDeployRejected, previous.CommitSHA, filepath.Base(request.ReceiptPath))
 	}
 	var build Build
 	if found && previous.Build.ID != "" {
@@ -88,7 +95,7 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 				cancelBuild(ctx, provider, current, "ai-team deploys a newer branch tip", request.Wait.CancelTimeout)
 			}
 		case current.Finished() && finishedBuildError(current, proof.DeploySHA) == nil:
-			if err := writeReceipt(request, provider.Name(), proof, current); err != nil {
+			if err := writeReceipt(request, provider.Name(), proof, current, false); err != nil {
 				return current, err
 			}
 			return current, nil
@@ -97,18 +104,32 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 		}
 	}
 	if build.ID == "" {
+		// Record the intent before the side effect: a crash or a lost response
+		// after this point leaves a pending marker instead of a silent retry.
+		if err := writeReceipt(request, provider.Name(), proof, Build{}, true); err != nil {
+			return Build{}, err
+		}
 		build, err = provider.Trigger(ctx, TriggerRequest{CommitSHA: proof.DeploySHA, Branch: request.Merge.Branch})
 		if err != nil {
+			if IsTransient(err) || ctx.Err() != nil {
+				// No definite answer: the build may exist. Keep the marker and
+				// never present the failure as retryable.
+				return Build{}, fmt.Errorf("deploy trigger outcome unknown: %v", err)
+			}
+			// TeamCity answered and rejected the request: nothing was queued.
+			if clearErr := writeReceipt(request, provider.Name(), proof, Build{}, false); clearErr != nil {
+				return Build{}, errors.Join(err, clearErr)
+			}
 			return Build{}, err
 		}
 	}
-	if err := writeReceipt(request, provider.Name(), proof, build); err != nil {
+	if err := writeReceipt(request, provider.Name(), proof, build, false); err != nil {
 		// The build exists; stop it rather than leave an untracked deployment.
 		cancelBuild(ctx, provider, build, "ai-team could not record the deploy build", request.Wait.CancelTimeout)
 		return build, err
 	}
 	final, waitErr := Wait(ctx, provider, build, proof.DeploySHA, request.Wait)
-	if err := writeReceipt(request, provider.Name(), proof, final); err != nil {
+	if err := writeReceipt(request, provider.Name(), proof, final, false); err != nil {
 		return final, errors.Join(waitErr, err)
 	}
 	return final, waitErr
@@ -133,12 +154,9 @@ func ReadReceipt(path string) (Receipt, bool, error) {
 	return receipt, true, nil
 }
 
-func writeReceipt(request DeployRequest, providerName string, proof MergeProof, build Build) error {
-	if build.ID == "" {
-		return nil
-	}
+func writeReceipt(request DeployRequest, providerName string, proof MergeProof, build Build, triggerPending bool) error {
 	data, err := json.MarshalIndent(Receipt{
-		SchemaVersion: receiptSchemaVersion, RunID: request.RunID, Stage: request.Stage,
+		SchemaVersion: receiptSchemaVersion, RunID: request.RunID, Stage: request.Stage, TriggerPending: triggerPending,
 		Provider: providerName, CommitSHA: proof.DeploySHA, MergeCommit: proof.MergeCommit,
 		Branch: request.Merge.Branch, Build: build, UpdatedAt: time.Now().UTC(),
 	}, "", "  ")

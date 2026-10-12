@@ -7,11 +7,18 @@ The controller MUST execute a template stage with `result: link`,
 deploy MUST start from the pull request URL and head commit in the controller
 receipt of an earlier PR delivery stage. The controller MUST wait, bounded by
 `merge_timeout`, until GitHub reports the pull request as merged into the
-configured branch. GitHub only names the merge commit; local Git, after fetching
-the branch from `origin`, MUST prove that the merge commit is reachable from the
-branch tip and contains the pull request change: either the PR head is its
-ancestor, or its own diff equals the PR diff against their merge base ignoring
-line numbers. The deployed revision MUST be the fetched branch tip, never the
+configured branch, the PR belongs to the repository captured at run start and
+its head is the commit the controller published. The branch tip MUST come from
+the GitHub API for that repository, and the controller MUST fetch from that
+repository's URL, never through the checkout's remotes, and require the tip
+object locally. GitHub only names the merge commit; local Git MUST prove that
+the merge commit is reachable from the tip and contains the pull request
+change: either the PR head is its ancestor, or its own diff, built without
+textconv or external diff drivers, equals the PR diff against their merge base
+ignoring line numbers. Checkout Git configuration (URL rewrites, attributes,
+replace refs, grafts) MUST NOT change this decision. The deploy stage MUST use
+its own time budget covering the merge wait and the build wait instead of the
+generic stage timeout. The deployed revision MUST be the fetched branch tip, never the
 PR head, so that changes merged after the PR are not rolled back. Existing
 templates without such a stage MUST keep their behavior.
 
@@ -21,6 +28,14 @@ templates without such a stage MUST keep their behavior.
   squash-merged as S and the branch then received Z
 - **THEN** the controller MUST trigger exactly one build pinned to the branch
   tip containing Y, S and Z
+
+#### Scenario: Checkout configuration tries to redirect the deploy
+
+- **WHEN** the checkout's Git configuration rewrites the repository URL to a
+  repository with another branch tip, or a textconv driver hides extra content
+  of a squash commit
+- **THEN** the deployed revision MUST remain the tip reported by GitHub
+- **AND** the squash commit with extra content MUST be rejected
 
 #### Scenario: The pull request is not merged or does not match
 
@@ -47,7 +62,9 @@ the stage's link output. Transient poll failures MUST be retried until the
 deadline. A retried stage for the same run, stage and revision MUST resume or
 reuse the recorded build instead of triggering another one, and MUST re-read
 that build from the provider instead of trusting the stored receipt; a receipt
-of another run or stage MUST be rejected. Every failure MUST be recorded as an
+of another run or stage MUST be rejected. The controller MUST record a pending
+trigger before triggering; when the trigger outcome is unknown, a retry MUST
+refuse to trigger again until an operator resolves it. Every failure MUST be recorded as an
 `integration_error` task event with `integration: cicd`.
 
 #### Scenario: Build succeeds

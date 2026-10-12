@@ -15,6 +15,9 @@ const (
 	DefaultDeployTimeout      = 30 * time.Minute
 	DefaultDeployPollInterval = 15 * time.Second
 	DefaultMergeTimeout       = 30 * time.Minute
+	// DeployStageMargin covers Git fetches, gh calls and the build cancel
+	// request on top of the merge and build waits.
+	DeployStageMargin = 5 * time.Minute
 )
 
 // CICDConfig configures the controller-owned CI/CD provider used by deploy
@@ -146,4 +149,19 @@ func (tc *TeamCityConfig) EffectiveMergeTimeout() (time.Duration, error) {
 		return 0, fmt.Errorf("cicd.teamcity.merge_timeout %q должен быть длительностью от 0 до 24h", tc.MergeTimeout)
 	}
 	return value, nil
+}
+
+// StageBudget is the time budget of a controller deploy stage: merge wait,
+// build wait and a fixed margin. It replaces stage_timeout for that stage so
+// a slow merge can never cancel a running deployment.
+func (tc *TeamCityConfig) StageBudget() (time.Duration, error) {
+	mergeTimeout, err := tc.EffectiveMergeTimeout()
+	if err != nil {
+		return 0, err
+	}
+	buildTimeout, err := tc.EffectiveTimeout()
+	if err != nil {
+		return 0, err
+	}
+	return mergeTimeout + buildTimeout + DeployStageMargin, nil
 }

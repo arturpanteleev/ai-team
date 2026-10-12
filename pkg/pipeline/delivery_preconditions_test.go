@@ -206,6 +206,21 @@ outputs: {}
 	if err != nil || strings.TrimSpace(string(link)) != terminal.PRURL {
 		t.Fatalf("controller PR result projection=%q err=%v", link, err)
 	}
+	// Simulate a crash or partial artifact write after the controller receipt
+	// became durable. DeliverDeferred must reuse the validated receipt and
+	// atomically repair the separate stage-result projection without redelivery.
+	if err := os.WriteFile(linkPath, []byte("interrupted projection"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	retry := New(cfg, registry, WithDeliveryService(service), WithDeliveryApprovalHash(planHash))
+	recovered, err := retry.DeliverDeferred(context.Background(), runDir, "feat", dir)
+	if err != nil || recovered.PRURL != terminal.PRURL || service.calls != 1 {
+		t.Fatalf("delivery retry did not recover the PR result idempotently: record=%+v delivery calls=%d err=%v", recovered, service.calls, err)
+	}
+	link, err = os.ReadFile(linkPath)
+	if err != nil || strings.TrimSpace(string(link)) != terminal.PRURL {
+		t.Fatalf("retry did not repair the stage result projection=%q err=%v", link, err)
+	}
 	if err := evidence.VerifyAnchor(runDir); err != nil {
 		t.Fatalf("post-terminal PR result projection must not alter immutable attempt evidence: %v", err)
 	}

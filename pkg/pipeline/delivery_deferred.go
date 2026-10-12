@@ -16,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -163,13 +164,8 @@ func (rs *runState) publishDeferredDeliveryResult(record delivery.TerminalRecord
 	if result.Delivery == nil || result.Delivery.PlanHash != record.PlanHash {
 		return errors.New("stage result does not reference the terminal delivery plan")
 	}
-	relative := filepath.Join(rs.runCfg.Feature, "stages", stage.ID, "result.link")
-	path, err := confinedArtifactPath(rs.task.ArtifactRoot, relative)
+	path, err := writeDeferredPRResultLink(rs.runCfg.TargetDir, rs.p.cfg, rs.runCfg.Feature, stage.ID, record)
 	if err != nil {
-		return err
-	}
-	content := []byte(strings.TrimSpace(record.PRURL) + "\n")
-	if err := safeio.WriteRegularFileNoFollow(path, content, 0644); err != nil {
 		return err
 	}
 	info, err := os.Stat(path)
@@ -181,15 +177,42 @@ func (rs *runState) publishDeferredDeliveryResult(record delivery.TerminalRecord
 		Name: "link", Path: path, Size: info.Size(), ModTime: info.ModTime(),
 	})
 	rs.results[resultIndex] = result
-	if rs.candidate != nil {
-		controlArtifacts := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "artifacts")
-		if err := syncArtifactProjection(rs.task.ArtifactRoot, controlArtifacts, rs.runCfg.Feature); err != nil {
-			return fmt.Errorf("sync controller PR result projection: %w", err)
+	// The attempt report was sealed during terminal finalize; this stage-result link is a separate read model.
+	return nil
+}
+
+// writeDeferredPRResultLink publishes the terminal PR URL as a controller-owned
+// task result. It is an idempotent read model outside the attempt manifest: a
+// retry may atomically repair a missing or partial file from the validated
+// terminal record without changing the attested attempt.
+func writeDeferredPRResultLink(targetDir string, cfg *config.Config, feature, stageID string, record delivery.TerminalRecord) (string, error) {
+	if cfg == nil {
+		return "", errors.New("deferred delivery result: pinned config is unavailable")
+	}
+	var stage *config.TemplateStage
+	for index := range cfg.Stages {
+		if cfg.Stages[index].ID == stageID {
+			stage = &cfg.Stages[index]
+			break
 		}
 	}
-	// The attempt report was sealed during terminal finalize, so this projection
-	// remains a separate stage-result artifact rather than rewriting that report.
-	return nil
+	if stage == nil || stage.Delivery == nil || stage.Result != "link" || stage.LinkKind != "pr" {
+		return "", fmt.Errorf("delivery result stage %s is not a configured PR delivery stage", stageID)
+	}
+	if !workflow.ValidFeature(feature) || strings.TrimSpace(record.PRURL) == "" {
+		return "", errors.New("deferred delivery result: feature or PR URL is invalid")
+	}
+	artifactRoot := filepath.Join(targetDir, ".ai-team", "artifacts")
+	relative := filepath.Join(feature, "stages", stage.ID, "result.link")
+	path, err := confinedArtifactPath(artifactRoot, relative)
+	if err != nil {
+		return "", err
+	}
+	content := []byte(strings.TrimSpace(record.PRURL) + "\n")
+	if err := safeio.ReplaceRegularFileNoFollow(path, content, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // DeliverDeferred — standalone-повтор отложенной доставки (retry/CLI) по
@@ -317,6 +340,9 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 		if err := validateRecoveredTerminalRecord(runDir, runID, feature, marker, *existing, p.eventLogSource); err != nil {
 			return delivery.TerminalRecord{}, fmt.Errorf("deliver: existing controller receipt mismatch: %w", err)
 		}
+		if err := publishDeferredPRResultFromRun(targetDir, runDir, manifest, marker, *existing); err != nil {
+			return delivery.TerminalRecord{}, fmt.Errorf("deliver: restore stage PR result: %w", err)
+		}
 		return *existing, nil
 	}
 
@@ -371,6 +397,9 @@ func (p *Pipeline) DeliverDeferred(parent context.Context, runDir, feature, targ
 	}
 	if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
 		return delivery.TerminalRecord{}, fmt.Errorf("deliver: reseal terminal evidence: %w", err)
+	}
+	if err := publishDeferredPRResultFromRun(targetDir, runDir, manifest, marker, record); err != nil {
+		return delivery.TerminalRecord{}, fmt.Errorf("deliver: publish stage PR result: %w", err)
 	}
 	return record, nil
 }
@@ -577,6 +606,9 @@ func (p *Pipeline) ReconcileTerminalDelivery(ctx context.Context, runID, targetD
 		if err := evidence.ResealTerminalEvidence(runDir, p.eventLogSource); err != nil {
 			return fmt.Errorf("recover delivery anchor: %w", err)
 		}
+		if err := publishDeferredPRResultFromRun(targetDir, runDir, manifest, marker, *record); err != nil {
+			return fmt.Errorf("recover delivery stage result: %w", err)
+		}
 		return nil
 	}
 	if _, err := p.DeliverDeferred(ctx, runDir, manifest.Feature, targetDir); err != nil {
@@ -761,6 +793,56 @@ func deferredMarkerWithAttemptStage(source evidence.AttemptManifestSource, runDi
 		return deferredMarkerEvent{}, errors.New("deliver: attempt manifest has no stage for delivery approval")
 	}
 	return marker, nil
+}
+
+func publishDeferredPRResultFromRun(targetDir, runDir string, manifest *evidence.RunManifest, marker deferredMarkerEvent, record delivery.TerminalRecord) error {
+	cfg, err := pinnedDeliveryConfig(runDir, manifest)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		// Older direct-delivery runs may not have a template snapshot. They have
+		// no controller stage-result contract to project.
+		return nil
+	}
+	var stage *config.TemplateStage
+	for index := range cfg.Stages {
+		if cfg.Stages[index].ID == marker.Stage {
+			stage = &cfg.Stages[index]
+			break
+		}
+	}
+	if stage == nil || stage.Delivery == nil {
+		return nil
+	}
+	if record.RunID != manifest.RunID || record.Feature != manifest.Feature ||
+		record.PlanHash != marker.PlanHash || strings.TrimSpace(record.PRURL) == "" {
+		return errors.New("terminal record does not match the pinned PR result stage")
+	}
+	_, err = writeDeferredPRResultLink(targetDir, cfg, manifest.Feature, marker.Stage, record)
+	return err
+}
+
+func pinnedDeliveryConfig(runDir string, manifest *evidence.RunManifest) (*config.Config, error) {
+	if manifest == nil || manifest.ConfigEvidence == "" {
+		return nil, nil
+	}
+	if manifest.ConfigEvidence != "config.json" {
+		return nil, errors.New("deferred delivery: unexpected pinned config evidence path")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, manifest.ConfigEvidence), 8<<20)
+	if err != nil {
+		return nil, fmt.Errorf("deferred delivery: pinned config snapshot: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != manifest.ConfigSHA256 {
+		return nil, errors.New("deferred delivery: pinned config snapshot digest mismatch")
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("deferred delivery: pinned config parse: %w", err)
+	}
+	return &cfg, nil
 }
 
 // preparedDeferredPlan resolves the plan only from the marker's prepared

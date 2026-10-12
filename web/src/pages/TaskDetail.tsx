@@ -93,32 +93,63 @@ export function TaskDetail() {
   const [grillAnswer, setGrillAnswer] = useState('');
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const snapshotRef = useRef<TaskDetailSnapshot | null>(null);
+  const activeRunID = useRef(runID);
+  const refreshGeneration = useRef(0);
+  activeRunID.current = runID;
 
   const refresh = useCallback(async () => {
-    if (!runID) return;
-    const details = await getTaskRunDetails(runID);
-    const [artifacts, events] = await Promise.all([
-      getPipelineArtifacts(details.run.id),
-      loadRunEvents(runID),
-    ]);
-    const next = { detail: details, artifacts, events };
-    snapshotRef.current = next;
-    setSnapshot(next);
-    setError('');
+    const requestedRunID = runID;
+    if (!requestedRunID || activeRunID.current !== requestedRunID) return;
+    const generation = ++refreshGeneration.current;
+    const isCurrent = () => activeRunID.current === requestedRunID && refreshGeneration.current === generation;
+    try {
+      const details = await getTaskRunDetails(requestedRunID);
+      if (!isCurrent()) return;
+      if (details.run.run_id !== requestedRunID) throw new Error('Сервер вернул данные другой задачи.');
+      const [artifacts, events] = await Promise.all([
+        getPipelineArtifacts(details.run.id),
+        loadRunEvents(requestedRunID),
+      ]);
+      if (!isCurrent()) return;
+      const next = { detail: details, artifacts, events };
+      snapshotRef.current = next;
+      setSnapshot(next);
+      setError('');
+    } catch (reason) {
+      if (isCurrent()) throw reason;
+    }
   }, [runID]);
 
   useEffect(() => {
     let active = true;
+    snapshotRef.current = null;
+    setSnapshot(null);
     setLoading(true);
+    setError('');
+    setActionError('');
+    setActionStatus('');
+    setWorking(false);
+    setShowResultForm(false);
+    setResultContent('');
+    setResultURL('');
+    setResultLinkKind('other');
+    setResultNote('');
+    setResultDescription('');
+    setSkipReason('');
+    setOverrideReason('');
+    setReturnReason('');
+    setReturnTarget('');
+    setGrillAnswer('');
     refresh()
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : 'Не удалось загрузить задачу.');
       })
       .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [refresh]);
+    return () => { active = false; refreshGeneration.current += 1; };
+  }, [refresh, runID]);
 
-  const details = snapshot?.detail;
+  const visibleSnapshot = snapshot?.detail.run.run_id === runID ? snapshot : null;
+  const details = visibleSnapshot?.detail;
   const run = details?.run;
   usePageTitle(run?.feature ?? 'Задача');
 
@@ -128,18 +159,23 @@ export function TaskDetail() {
       eventQueue.current = eventQueue.current.then(async () => {
         if (snapshotRef.current?.detail.run.run_id !== runID) return;
         await refresh();
-      }).catch(() => setError('Не удалось получить обновление задачи.'));
+      }).catch(() => {
+        if (activeRunID.current === runID) setError('Не удалось получить обновление задачи.');
+      });
     },
   });
 
   useEffect(() => {
     const runStatus = run?.status;
     if (!runStatus || !['queued', 'running', 'waiting_for_approval'].includes(runStatus)) return;
+    let active = true;
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh().catch(() => setError('Не удалось обновить задачу.'));
+      if (document.visibilityState === 'visible') void refresh().catch(() => {
+        if (active && activeRunID.current === runID) setError('Не удалось обновить задачу.');
+      });
     }, 30000);
-    return () => window.clearInterval(timer);
-  }, [run?.status, refresh]);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [run?.status, refresh, runID]);
 
   const template = details?.template;
   const currentStageID = details?.state?.next_stage ?? '';
@@ -155,21 +191,26 @@ export function TaskDetail() {
     : null;
 
   const perform = async (label: string, action: () => Promise<unknown>): Promise<boolean> => {
+    const actionRunID = runID;
+    const actionStillTargetsCurrentRun = () => activeRunID.current === actionRunID;
     setActionError('');
     setActionStatus(`${label}…`);
     setWorking(true);
     try {
       await action();
+      if (!actionStillTargetsCurrentRun()) return false;
       await refresh();
+      if (!actionStillTargetsCurrentRun()) return false;
       setActionStatus(`${label} выполнено.`);
       return true;
     } catch (reason) {
+      if (!actionStillTargetsCurrentRun()) return false;
       setActionStatus('');
       setActionError(reason instanceof Error ? reason.message : `Не удалось выполнить действие: ${label.toLowerCase()}.`);
       await refresh().catch(() => undefined);
       return false;
     } finally {
-      setWorking(false);
+      if (actionStillTargetsCurrentRun()) setWorking(false);
     }
   };
 
@@ -206,12 +247,13 @@ export function TaskDetail() {
   };
 
   if (loading) return <main className={styles.state}>Загружаем задачу…</main>;
-  if (error || !snapshot || !details || !run) {
+  if (error || !visibleSnapshot || !details || !run) {
+    if (!error && !visibleSnapshot) return <main className={styles.state}>Загружаем задачу…</main>;
     return <main className={styles.state} role="alert">{error || 'Задача не найдена.'}</main>;
   }
 
   const runCancelable = ['queued', 'running', 'waiting_for_approval'].includes(run.status);
-  const attemptArtifacts = (stage: Stage) => snapshot.artifacts.filter((artifact) =>
+  const attemptArtifacts = (stage: Stage) => visibleSnapshot.artifacts.filter((artifact) =>
     artifact.path.includes(`attempts/${stage.attempt_id}/`));
 
   return (
@@ -388,8 +430,8 @@ export function TaskDetail() {
         <div className={styles.panelHeading}>
           <div><h2 id="events-heading">Лента событий задачи</h2><p>Обновляется по событиям выполнения.</p></div>
         </div>
-        {snapshot.events.length === 0 ? <p>Событий пока нет.</p> : <ol className={styles.events}>
-          {snapshot.events.map((event) => <li key={event.cursor} data-severity={event.severity}>
+        {visibleSnapshot.events.length === 0 ? <p>Событий пока нет.</p> : <ol className={styles.events}>
+          {visibleSnapshot.events.map((event) => <li key={event.cursor} data-severity={event.severity}>
             <time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleString('ru-RU')}</time>
             <strong>{eventTitle(event.type)}</strong>
             <span>{[event.stage, event.actor, event.executor, event.attempt_id].filter(Boolean).join(' · ')}</span>

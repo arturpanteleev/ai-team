@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Routes } from '../router';
+import { Link, MemoryRouter, Routes } from '../router';
 import type { TaskRunDetails } from '../types';
 import { TaskDetail } from './TaskDetail';
 
@@ -68,6 +68,12 @@ function renderDetail() {
       <Routes routes={[{ path: '/tasks/:runID', element: <TaskDetail /> }]} />
     </MemoryRouter>,
   );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 beforeEach(async () => {
@@ -191,5 +197,84 @@ describe('Task detail', () => {
     expect(await screen.findByRole('heading', { name: 'История грилла' })).toBeInTheDocument();
     expect(screen.getByText('Что проверить перед релизом?')).toBeInTheDocument();
     expect(screen.getByText('Проверить миграцию базы')).toBeInTheDocument();
+  });
+
+  it('ignores a late previous-run refresh and clears all draft inputs on route change', async () => {
+    const api = await import('../api');
+    const oldRunDetails: TaskRunDetails = {
+      ...baseDetails,
+      run: { ...baseDetails.run, run_id: 'old-run', feature: 'Старая задача' },
+      task: 'Старое описание',
+      state: { ...baseDetails.state!, run_id: 'old-run', next_stage: 'qa', pending_approval_id: 'grill-old' },
+      template: { ...baseDetails.template!, stages: [
+        ...baseDetails.template!.stages,
+        { id: 'qa', title: 'Проверка', function: 'qa', result: 'md', executor: 'human', skippable: true },
+      ], returns: [{ from: 'qa', to: 'intent' }] },
+      approvals: [{
+        id: 'grill-old', run_id: 'old-run', attempt_id: 'qa-attempt', from_stage: 'qa', to_stage: 'qa',
+        trigger: 'graph_outcome:blocked', subject_hash: 'd'.repeat(64), required_roles: ['qa'], quorum: 'any',
+        actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Старый вопрос' }, status: 'pending', created_at: '2026-10-12T09:02:00Z',
+      }],
+      allowed_actions: ['results', 'skip', 'override', 'return', 'grill/answer', 'grill/done'],
+    };
+    const newRunDetails: TaskRunDetails = {
+      ...oldRunDetails,
+      run: { ...oldRunDetails.run, run_id: 'new-run', feature: 'Новая задача' },
+      task: 'Новое описание',
+      state: { ...oldRunDetails.state!, run_id: 'new-run', pending_approval_id: 'grill-new' },
+      approvals: [{
+        ...oldRunDetails.approvals[0], id: 'grill-new', run_id: 'new-run',
+        payload: { kind: 'questions', markdown: 'Новый вопрос' },
+      }],
+    };
+    const oldRefresh = deferred<TaskRunDetails>();
+    let oldRunCalls = 0;
+    vi.mocked(api.getTaskRunDetails).mockImplementation((runID) => {
+      if (runID === 'old-run') {
+        oldRunCalls += 1;
+        return oldRunCalls === 1 ? Promise.resolve(oldRunDetails) : oldRefresh.promise;
+      }
+      return Promise.resolve(newRunDetails);
+    });
+    vi.mocked(api.getTaskRunEvents).mockResolvedValue({ events: [], next_cursor: 0 });
+
+    render(
+      <MemoryRouter initialEntries={['/tasks/old-run']}>
+        <Link to="/tasks/new-run">Перейти к новой задаче</Link>
+        <Routes routes={[{ path: '/tasks/:runID', element: <TaskDetail /> }]} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole('heading', { name: 'Старая задача' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Старый результат' } });
+    fireEvent.change(screen.getByLabelText('Причина пропуска'), { target: { value: 'Старый skip' } });
+    fireEvent.change(screen.getByLabelText('Причина обхода проверки'), { target: { value: 'Старый override' } });
+    fireEvent.change(screen.getByLabelText('Причина возврата'), { target: { value: 'Старый return' } });
+    fireEvent.change(screen.getByLabelText('Ваш ответ'), { target: { value: 'Старый ответ' } });
+
+    await act(async () => {
+      live.onEvent?.({ run_id: 'old-run' });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(oldRunCalls).toBe(2));
+    fireEvent.click(screen.getByRole('link', { name: 'Перейти к новой задаче' }));
+    expect(await screen.findByRole('heading', { name: 'Новая задача' })).toBeInTheDocument();
+    expect(screen.queryByText('Старое описание')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
+    expect(screen.getByLabelText('Причина пропуска')).toHaveValue('');
+    expect(screen.getByLabelText('Причина обхода проверки')).toHaveValue('');
+    expect(screen.getByLabelText('Причина возврата')).toHaveValue('');
+    expect(screen.getByLabelText('Ваш ответ')).toHaveValue('');
+
+    await act(async () => {
+      oldRefresh.resolve(oldRunDetails);
+      await oldRefresh.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Новая задача' })).toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: 'Старая задача' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
   });
 });

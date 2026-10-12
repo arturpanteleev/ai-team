@@ -1,11 +1,15 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
@@ -187,9 +191,44 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 		return
 	}
 	r.event("attempt_finished", stage.AttemptID, completedAt, map[string]any{
-		"agent": stage.Name, "status": stage.Status, "execution": stored.Execution,
+		"stage": stage.Name, "agent": stage.Name, "actor_id": stage.ActorID, "executor": stage.Executor,
+		"status": stage.Status, "execution": stored.Execution,
 		"decision": stored.Decision, "outcome": stored.Outcome,
 	})
+}
+
+// EventRecorded projects selected immutable warning events to the task event
+// feed. The pipeline calls this only after the evidence append succeeds.
+func (r *StoreRecorder) EventRecorded(runID string, source evidence.Event) {
+	if r.runID == 0 || runID != r.runUID {
+		return
+	}
+	actor, _ := source.Data["actor_id"].(string)
+	if actor == "" {
+		actor, _ = source.Data["actor"].(string)
+	}
+	executor, _ := source.Data["executor"].(string)
+	severity, _ := source.Data["severity"].(string)
+	if severity == "" {
+		severity = "warning"
+	}
+	event := &store.Event{
+		RunID: runID, Type: source.Type, Stage: source.Stage, Actor: actor,
+		Executor: executor, Severity: severity, AttemptID: source.AttemptID,
+		Timestamp: source.Timestamp, DataJSON: marshalJSON(source.Data),
+		DedupeKey: typedEvidenceEventKey(source),
+	}
+	if _, err := r.store.AppendEventNextIfAbsent(event); err != nil {
+		r.warn("append typed event", err)
+	}
+}
+
+func typedEvidenceEventKey(event evidence.Event) string {
+	identity := strings.Join([]string{
+		event.Type, event.Stage, event.AttemptID, event.Timestamp.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return "evidence:" + hex.EncodeToString(digest[:])
 }
 
 func (r *StoreRecorder) AttemptsInvalidated(runID string, attemptIDs []string, at time.Time) {

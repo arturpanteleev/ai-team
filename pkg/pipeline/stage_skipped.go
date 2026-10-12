@@ -128,11 +128,13 @@ func (rs *runState) runSkippedStage(ctx context.Context, index int, stageID, rea
 	}); err != nil {
 		return notifier.StageResult{}, fmt.Errorf("record skipped attempt finish: %w", err)
 	}
-	if err := rs.evidence.Append(evidence.Event{
+	skippedEvent := evidence.Event{
 		Type: "stage_skipped", Stage: stageID, AttemptID: attemptID, Timestamp: result.FinishedAt,
 		Data: map[string]any{"reason": reason, "warning": true},
-	}); err != nil {
+	}
+	if err := rs.evidence.Append(skippedEvent); err != nil {
 		return notifier.StageResult{}, fmt.Errorf("record stage skip warning: %w", err)
 	}
+	rs.recordTypedEvent(skippedEvent)
 	return result, nil
 }

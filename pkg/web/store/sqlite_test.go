@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,85 @@ func TestGetEventsAfterUsesGlobalCursorOrdering(t *testing.T) {
 	}
 	if _, err := s.GetEventsAfter(-1, 10); err == nil {
 		t.Fatal("отрицательный cursor должен быть отклонён")
+	}
+}
+
+func TestEventsProjectFieldsAndPublishToSubscribers(t *testing.T) {
+	s := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subscription := s.SubscribeEvents(ctx, 2)
+	event := &Event{
+		RunID: "run-events", Type: "check_overridden", Timestamp: time.Now().UTC(),
+		DataJSON: `{"stage_id":"qa","actor_id":"alice","executor":"human","severity":"warning"}`,
+	}
+	if err := s.AppendEventNext(event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case received := <-subscription:
+		if received.Cursor != event.ID || received.Type != "check_overridden" || received.Stage != "qa" || received.Actor != "alice" ||
+			received.Executor != "human" || received.Severity != "warning" || received.Sequence != 1 {
+			t.Fatalf("subscriber received incomplete event: %+v", received)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscriber did not receive committed event")
+	}
+	stored, err := s.GetEventsAfter(0, 10)
+	if err != nil || len(stored) != 1 || stored[0].Stage != "qa" || stored[0].Actor != "alice" ||
+		stored[0].Executor != "human" || stored[0].Severity != "warning" {
+		t.Fatalf("structured fields not projected: %+v err=%v", stored, err)
+	}
+}
+
+func TestAppendEventNextIfAbsentDeduplicatesAcrossRestarts(t *testing.T) {
+	s := newTestStore(t)
+	makeEvent := func() *Event {
+		return &Event{RunID: "run-stall", Type: "stage_stalled", Stage: "qa", Severity: "warning",
+			Timestamp: time.Now().UTC(), DataJSON: `{"stage":"qa","severity":"warning"}`,
+			DedupeKey: "stage_stalled:qa:ready:2026-10-12T00:00:00Z"}
+	}
+	inserted, err := s.AppendEventNextIfAbsent(makeEvent())
+	if err != nil || !inserted {
+		t.Fatalf("first append inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = s.AppendEventNextIfAbsent(makeEvent())
+	if err != nil || inserted {
+		t.Fatalf("duplicate append inserted=%v err=%v", inserted, err)
+	}
+	events, err := s.GetRunEventsAfter("run-stall", 0, 10)
+	if err != nil || len(events) != 1 || events[0].Sequence != 1 {
+		t.Fatalf("duplicate stall event was persisted: events=%+v err=%v", events, err)
+	}
+}
+
+func TestMigrationProjectsStructuredFieldsFromLegacyEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, run_uid TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL,
+		attempt_uid TEXT, timestamp DATETIME NOT NULL, data_json TEXT, UNIQUE(run_uid, sequence))`)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO events(run_uid, sequence, type, timestamp, data_json)
+			VALUES ('legacy-run', 1, 'stage_skipped', ?, '{"stage_id":"optional","actor_id":"alice","warning":true}')`, time.Now().UTC())
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	values, err := s.GetEventsAfter(0, 10)
+	if err != nil || len(values) != 1 || values[0].Stage != "optional" || values[0].Actor != "alice" || values[0].Severity != "warning" {
+		t.Fatalf("legacy fields were not backfilled: events=%+v err=%v", values, err)
 	}
 }
 

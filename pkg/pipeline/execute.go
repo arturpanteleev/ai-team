@@ -31,6 +31,7 @@ import (
 // execute.go — исполнение графа workflow и lifecycle-переходы.
 
 func (rs *runState) execute(ctx context.Context) error {
+	rs.replayTypedEvents()
 	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) {
 		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
 	}

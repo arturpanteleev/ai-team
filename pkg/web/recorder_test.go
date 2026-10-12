@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
@@ -80,6 +81,65 @@ func TestStoreRecorder_FullLifecycle(t *testing.T) {
 	}
 	if stages[2].Status != "failed" || stages[2].Error != "boom" {
 		t.Errorf("stage[2]: %+v", stages[2])
+	}
+}
+
+func TestStoreRecorder_ReplaysWarningEvidenceIdempotently(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	r := NewStoreRecorder(s)
+	at := time.Date(2026, 10, 12, 1, 2, 3, 0, time.UTC)
+	r.RunStarted("run-warning-replay", "feature", "", at)
+	warning := evidence.Event{
+		Type: "check_error", Stage: "qa", AttemptID: "attempt-qa-1", Timestamp: at.Add(time.Second),
+		Data: map[string]any{"status": "error", "error": "checker unavailable"},
+	}
+
+	// The first call models replay from the durable evidence log after the
+	// process stopped before creating its SQLite projection. Further resumes
+	// must keep the projection to one row.
+	r.EventRecorded("run-warning-replay", warning)
+	r.EventRecorded("run-warning-replay", warning)
+	events, err := s.GetRunEventsAfter("run-warning-replay", 0, 10)
+	if err != nil || len(events) != 2 || events[1].Type != "check_error" {
+		t.Fatalf("warning projection count=%d events=%+v err=%v", len(events), events, err)
+	}
+	if events[1].Stage != "qa" || events[1].AttemptID != warning.AttemptID || events[1].Severity != "warning" {
+		t.Fatalf("warning projection is incomplete: %+v", events[1])
+	}
+}
+
+func TestStoreRecorder_DoesNotDuplicateLegacyWarningProjection(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	r := NewStoreRecorder(s)
+	at := time.Date(2026, 10, 12, 2, 3, 4, 0, time.UTC)
+	r.RunStarted("run-warning-legacy", "feature", "", at)
+	warning := evidence.Event{
+		Type: "check_error", Stage: "qa", AttemptID: "attempt-qa-1", Timestamp: at.Add(time.Second),
+		Data: map[string]any{"status": "error", "error": "checker unavailable"},
+	}
+	// Rows projected by the earlier B-50 implementation have no DedupeKey.
+	if err := s.AppendEventNext(&store.Event{
+		RunID: "run-warning-legacy", Type: warning.Type, Stage: warning.Stage,
+		AttemptID: warning.AttemptID, Timestamp: warning.Timestamp,
+		DataJSON: marshalJSON(warning.Data),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.EventRecorded("run-warning-legacy", warning)
+
+	events, err := s.GetRunEventsAfter("run-warning-legacy", 0, 10)
+	if err != nil || len(events) != 2 || events[1].Type != "check_error" {
+		t.Fatalf("legacy projection was duplicated: events=%+v err=%v", events, err)
 	}
 }
 

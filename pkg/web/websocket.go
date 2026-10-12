@@ -42,6 +42,10 @@ type Event struct {
 	RunID     string         `json:"run_id"`
 	Sequence  int64          `json:"sequence"`
 	Type      string         `json:"type"`
+	Stage     string         `json:"stage,omitempty"`
+	Actor     string         `json:"actor,omitempty"`
+	Executor  string         `json:"executor,omitempty"`
+	Severity  string         `json:"severity,omitempty"`
 	AttemptID string         `json:"attempt_id,omitempty"`
 	Timestamp time.Time      `json:"timestamp"`
 	Data      map[string]any `json:"data"`
@@ -193,10 +197,35 @@ func wireEvent(event store.Event) (Event, error) {
 			return Event{}, fmt.Errorf("event %d payload: %w", event.ID, err)
 		}
 	}
+	if event.Stage == "" {
+		event.Stage = stringValue(data, "stage", "stage_id", "from_stage")
+	}
+	if event.Actor == "" {
+		event.Actor = stringValue(data, "actor", "actor_id")
+	}
+	if event.Executor == "" {
+		event.Executor = stringValue(data, "executor")
+	}
+	if event.Severity == "" {
+		event.Severity = stringValue(data, "severity")
+		if event.Severity == "" && data["warning"] == true {
+			event.Severity = "warning"
+		}
+	}
 	return Event{
 		Version: 1, Cursor: event.ID, RunID: event.RunID, Sequence: event.Sequence,
-		Type: event.Type, AttemptID: event.AttemptID, Timestamp: event.Timestamp, Data: data,
+		Type: event.Type, Stage: event.Stage, Actor: event.Actor, Executor: event.Executor,
+		Severity: event.Severity, AttemptID: event.AttemptID, Timestamp: event.Timestamp, Data: data,
 	}, nil
+}
+
+func stringValue(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c *Client) readPump() {

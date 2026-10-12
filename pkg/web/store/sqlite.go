@@ -1,16 +1,19 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -51,12 +54,20 @@ type Event struct {
 	RunID     string    `json:"run_id"`
 	Sequence  int64     `json:"sequence"`
 	Type      string    `json:"type"`
+	Stage     string    `json:"stage,omitempty"`
+	Actor     string    `json:"actor,omitempty"`
+	Executor  string    `json:"executor,omitempty"`
+	Severity  string    `json:"severity,omitempty"`
 	AttemptID string    `json:"attempt_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	DataJSON  string    `json:"data_json,omitempty"`
+	DedupeKey string    `json:"-"`
 }
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db       *sql.DB
+	eventBus *notifier.EventBus
+}
 
 func New(dbPath string) (*Store, error) {
 	db, err := sql.Open("sqlite", dbPath)
@@ -87,10 +98,17 @@ func New(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, eventBus: notifier.NewEventBus()}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// SubscribeEvents returns a live subscription for events committed through
+// this store. Consumers that reconnect should use the SQLite cursor API to
+// replay any events missed while disconnected.
+func (s *Store) SubscribeEvents(ctx context.Context, capacity int) <-chan notifier.Event {
+	return s.eventBus.Subscribe(ctx, capacity)
+}
 
 func (s *Store) CreatePipelineRun(run *PipelineRun) error {
 	result, err := s.db.Exec(
@@ -369,28 +387,82 @@ func (s *Store) InvalidateAttempts(pipelineRunID int64, attemptIDs []string, at 
 }
 
 func (s *Store) AppendEvent(event *Event) error {
-	result, err := s.db.Exec(`INSERT INTO events (run_uid, sequence, type, attempt_uid, timestamp, data_json) VALUES (?, ?, ?, ?, ?, ?)`,
-		event.RunID, event.Sequence, event.Type, event.AttemptID, event.Timestamp, event.DataJSON)
+	populateEventFields(event)
+	result, err := s.db.Exec(`INSERT INTO events (run_uid, sequence, type, stage, actor, executor, severity, attempt_uid, timestamp, data_json, dedupe_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.RunID, event.Sequence, event.Type, event.Stage, event.Actor, event.Executor, event.Severity,
+		event.AttemptID, event.Timestamp, event.DataJSON, event.DedupeKey)
 	if err != nil {
 		return err
 	}
 	event.ID, err = result.LastInsertId()
+	if err == nil {
+		s.publishEvent(*event)
+	}
 	return err
 }
 
 // AppendEventNext allocates the next per-run sequence inside one transaction,
 // so asynchronous queue projection and pipeline recorder events cannot collide.
 func (s *Store) AppendEventNext(event *Event) error {
-	return s.db.QueryRow(`INSERT INTO events(run_uid, sequence, type, attempt_uid, timestamp, data_json)
-		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ? FROM events WHERE run_uid = ? RETURNING sequence`,
-		event.RunID, event.Type, event.AttemptID, event.Timestamp, event.DataJSON, event.RunID).Scan(&event.Sequence)
+	populateEventFields(event)
+	err := s.db.QueryRow(`INSERT INTO events(run_uid, sequence, type, stage, actor, executor, severity, attempt_uid, timestamp, data_json, dedupe_key)
+		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM events WHERE run_uid = ? RETURNING id, sequence`,
+		event.RunID, event.Type, event.Stage, event.Actor, event.Executor, event.Severity,
+		event.AttemptID, event.Timestamp, event.DataJSON, event.DedupeKey, event.RunID).Scan(&event.ID, &event.Sequence)
+	if err == nil {
+		s.publishEvent(*event)
+	}
+	return err
+}
+
+// AppendEventNextIfAbsent assigns a per-run sequence atomically and uses a
+// stable dedupe key to keep timer events exactly once across restarts.
+func (s *Store) AppendEventNextIfAbsent(event *Event) (bool, error) {
+	if event.DedupeKey == "" {
+		return false, fmt.Errorf("event dedupe key is required")
+	}
+	populateEventFields(event)
+	err := s.db.QueryRow(`INSERT INTO events(run_uid, sequence, type, stage, actor, executor, severity, attempt_uid, timestamp, data_json, dedupe_key)
+		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM events WHERE run_uid = ?
+		AND NOT EXISTS (SELECT 1 FROM events WHERE run_uid = ? AND dedupe_key = ?)
+		AND NOT EXISTS (SELECT 1 FROM events WHERE run_uid = ? AND COALESCE(dedupe_key, '') = ''
+			AND type = ? AND COALESCE(stage, '') = ? AND COALESCE(attempt_uid, '') = ? AND timestamp = ?)
+		ON CONFLICT(run_uid, dedupe_key) WHERE dedupe_key <> '' DO NOTHING RETURNING id, sequence`,
+		event.RunID, event.Type, event.Stage, event.Actor, event.Executor, event.Severity,
+		event.AttemptID, event.Timestamp, event.DataJSON, event.DedupeKey, event.RunID,
+		event.RunID, event.DedupeKey, event.RunID, event.Type, event.Stage, event.AttemptID, event.Timestamp).Scan(&event.ID, &event.Sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	s.publishEvent(*event)
+	return true, nil
+}
+
+func (s *Store) publishEvent(event Event) {
+	var data map[string]any
+	if event.DataJSON != "" {
+		_ = json.Unmarshal([]byte(event.DataJSON), &data)
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	s.eventBus.PublishEvent(notifier.Event{
+		Cursor: event.ID, RunID: event.RunID, Sequence: event.Sequence, Type: event.Type,
+		Stage: event.Stage, Actor: event.Actor, Executor: event.Executor,
+		Severity: event.Severity, AttemptID: event.AttemptID,
+		Timestamp: event.Timestamp, Data: data,
+	})
 }
 
 func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 	if cursor < 0 || limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid event query cursor=%d limit=%d", cursor, limit)
 	}
-	rows, err := s.db.Query(`SELECT id, run_uid, sequence, type, COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
+	rows, err := s.db.Query(`SELECT id, run_uid, sequence, type, COALESCE(stage, ''), COALESCE(actor, ''), COALESCE(executor, ''), COALESCE(severity, ''), COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
 		FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`, cursor, limit)
 	if err != nil {
 		return nil, err
@@ -399,7 +471,7 @@ func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 	events := make([]Event, 0)
 	for rows.Next() {
 		var event Event
-		if err := rows.Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.AttemptID, &event.Timestamp, &event.DataJSON); err != nil {
+		if err := rows.Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.Stage, &event.Actor, &event.Executor, &event.Severity, &event.AttemptID, &event.Timestamp, &event.DataJSON); err != nil {
 			return nil, err
 		}
 		events = append(events, event)
@@ -409,9 +481,9 @@ func (s *Store) GetEventsAfter(cursor int64, limit int) ([]Event, error) {
 
 func (s *Store) LatestRunEvent(runID, eventType string) (*Event, error) {
 	var event Event
-	err := s.db.QueryRow(`SELECT id, run_uid, sequence, type, COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
+	err := s.db.QueryRow(`SELECT id, run_uid, sequence, type, COALESCE(stage, ''), COALESCE(actor, ''), COALESCE(executor, ''), COALESCE(severity, ''), COALESCE(attempt_uid, ''), timestamp, COALESCE(data_json, '')
 		FROM events WHERE run_uid = ? AND type = ? ORDER BY sequence DESC LIMIT 1`, runID, eventType).
-		Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.AttemptID, &event.Timestamp, &event.DataJSON)
+		Scan(&event.ID, &event.RunID, &event.Sequence, &event.Type, &event.Stage, &event.Actor, &event.Executor, &event.Severity, &event.AttemptID, &event.Timestamp, &event.DataJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -419,6 +491,44 @@ func (s *Store) LatestRunEvent(runID, eventType string) (*Event, error) {
 		return nil, err
 	}
 	return &event, nil
+}
+
+func populateEventFields(event *Event) {
+	var data map[string]any
+	if event.DataJSON != "" && json.Unmarshal([]byte(event.DataJSON), &data) == nil {
+		if event.Stage == "" {
+			event.Stage = firstString(data, "stage", "stage_id", "from_stage")
+		}
+		if event.Actor == "" {
+			event.Actor = firstString(data, "actor", "actor_id")
+		}
+		if event.Executor == "" {
+			event.Executor = firstString(data, "executor")
+		}
+		if event.Severity == "" {
+			event.Severity = firstString(data, "severity")
+			if event.Severity == "" && data["warning"] == true {
+				event.Severity = "warning"
+			}
+		}
+	}
+	if event.Severity == "" {
+		for _, warningType := range WarningEventTypes {
+			if event.Type == warningType {
+				event.Severity = "warning"
+				break
+			}
+		}
+	}
+}
+
+func firstString(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Store) LatestEventCursor() (int64, error) {
@@ -624,6 +734,7 @@ func migrate(db *sql.DB) error {
 			attempt_uid TEXT, timestamp DATETIME NOT NULL, data_json TEXT,
 			UNIQUE(run_uid, sequence))`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_uid, sequence)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON events(run_uid, dedupe_key) WHERE dedupe_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS team_members (
 			actor_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, roles_json TEXT NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('invited','active','revoked')),
@@ -639,9 +750,26 @@ func migrate(db *sql.DB) error {
 			scope TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
 			status_code INTEGER NOT NULL DEFAULT 0, response_headers TEXT NOT NULL DEFAULT '{}', response_body BLOB,
 			created_at DATETIME NOT NULL, PRIMARY KEY(scope, request_key))`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
+		if strings.Contains(query, "idx_events_dedupe") {
+			for _, column := range []struct{ name, declaration string }{
+				{"stage", "TEXT"}, {"actor", "TEXT"}, {"executor", "TEXT"}, {"severity", "TEXT"}, {"dedupe_key", "TEXT"},
+			} {
+				if err := ensureColumn(tx, "events", column.name, column.declaration); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`UPDATE events SET
+				stage = COALESCE(NULLIF(stage, ''), json_extract(data_json, '$.stage'), json_extract(data_json, '$.stage_id'), json_extract(data_json, '$.from_stage'), ''),
+				actor = COALESCE(NULLIF(actor, ''), json_extract(data_json, '$.actor'), json_extract(data_json, '$.actor_id'), ''),
+				executor = COALESCE(NULLIF(executor, ''), json_extract(data_json, '$.executor'), ''),
+				severity = COALESCE(NULLIF(severity, ''), json_extract(data_json, '$.severity'), CASE WHEN json_extract(data_json, '$.warning') = 1 OR type IN ('check_overridden', 'check_error', 'description_missing', 'stage_skipped', 'stage_stalled', 'integration_error') THEN 'warning' ELSE '' END)
+				WHERE json_valid(data_json)`); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(query); err != nil {
 			return err
 		}

@@ -1044,6 +1044,9 @@ func (s *Server) taskEventPage(runID string, r *http.Request) ([]Event, int64, e
 }
 
 func isTaskWarningEvent(event Event) bool {
+	if strings.EqualFold(event.Severity, "warning") {
+		return true
+	}
 	if severity, ok := event.Data["severity"].(string); ok && strings.EqualFold(severity, "warning") {
 		return true
 	}

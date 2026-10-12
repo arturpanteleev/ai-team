@@ -49,6 +49,27 @@ type RunController interface {
 
 type ServerOption func(*Server)
 
+// WithStallAfter overrides each run's configured stall_after threshold.
+// It is primarily useful for deployments that set a server-wide policy.
+func WithStallAfter(duration time.Duration) ServerOption {
+	return func(server *Server) {
+		if duration > 0 {
+			server.stallAfter = duration
+			server.stallAfterOverride = true
+		}
+	}
+}
+
+// WithStallPollInterval controls how often the server checks lifecycle
+// checkpoints for stalled stages.
+func WithStallPollInterval(duration time.Duration) ServerOption {
+	return func(server *Server) {
+		if duration > 0 {
+			server.stallPollInterval = duration
+		}
+	}
+}
+
 func WithRunController(controller RunController) ServerOption {
 	return func(server *Server) { server.controller = controller }
 }
@@ -141,6 +162,9 @@ type Server struct {
 	sessions            map[string]browserSession
 	sessionMu           sync.Mutex
 	streamID            string
+	stallAfter          time.Duration
+	stallAfterOverride  bool
+	stallPollInterval   time.Duration
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -166,11 +190,12 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		return nil, fmt.Errorf("stream identity: %w", tokenErr)
 	}
 	srv := &Server{
-		store:        s,
-		hub:          hub,
-		streamID:     streamID[:16],
-		artifactRoot: absRoot,
-		sessions:     make(map[string]browserSession),
+		store:             s,
+		hub:               hub,
+		streamID:          streamID[:16],
+		artifactRoot:      absRoot,
+		sessions:          make(map[string]browserSession),
+		stallPollInterval: time.Minute,
 	}
 	for _, option := range options {
 		option(srv)
@@ -199,6 +224,9 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	}
 	srv.targetDir = filepath.Clean(target)
 	srv.runRoot = filepath.Join(srv.targetDir, ".ai-team", "runs")
+	if srv.stallAfter <= 0 {
+		srv.stallAfter = 24 * time.Hour
+	}
 	srv.humanArtifacts, err = humanartifact.New(srv.targetDir)
 	if err != nil {
 		_ = s.Close()
@@ -217,6 +245,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	}
 	srv.eventWorkers.Add(1)
 	go srv.tailEvents(eventContext, eventCursor)
+	srv.eventWorkers.Add(1)
+	go srv.monitorStalledStages(eventContext)
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
@@ -489,6 +519,115 @@ func (s *Server) tailEvents(ctx context.Context, cursor int64) {
 			}
 		}
 	}
+}
+
+func (s *Server) monitorStalledStages(ctx context.Context) {
+	defer s.eventWorkers.Done()
+	interval := s.stallPollInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := s.checkStalledRuns(now.UTC()); err != nil {
+				fmt.Fprintf(os.Stderr, "stage stall monitor: %v\n", err)
+			}
+		}
+	}
+}
+
+func (s *Server) checkStalledRuns(now time.Time) error {
+	stateStore, err := lifecycle.NewStore(s.targetDir)
+	if err != nil {
+		return err
+	}
+	for offset := 0; ; offset += 100 {
+		runs, err := s.store.GetPipelineRunsPage(100, offset)
+		if err != nil {
+			return err
+		}
+		for _, run := range runs {
+			if run.RunID == "" || (run.Status != "running" && run.Status != "waiting_for_approval") {
+				continue
+			}
+			state, loadErr := stateStore.Load(run.RunID)
+			if loadErr != nil || state.NextStage == "" || state.UpdatedAt.IsZero() {
+				continue
+			}
+			stateName := ""
+			switch state.Phase {
+			case lifecycle.PhaseWaiting:
+				stateName = "ready"
+			case lifecycle.PhaseRunning:
+				stateName = "in_progress"
+			default:
+				continue
+			}
+			threshold, executor := s.stallPolicy(run, state, state.NextStage)
+			enteredAt := state.UpdatedAt.UTC()
+			if now.Sub(enteredAt) < threshold {
+				continue
+			}
+			data := map[string]any{
+				"stage": state.NextStage, "stage_id": state.NextStage,
+				"state": stateName, "stage_entered_at": enteredAt.Format(time.RFC3339Nano),
+				"stall_after": threshold.String(), "severity": "warning", "warning": true,
+				"actor": "system", "executor": executor,
+			}
+			encoded, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			event := &store.Event{
+				RunID: run.RunID, Type: "stage_stalled", Stage: state.NextStage,
+				Actor: "system", Executor: executor, Severity: "warning", Timestamp: now,
+				DataJSON: string(encoded), DedupeKey: "stage_stalled:" + state.NextStage + ":" + stateName + ":" + enteredAt.Format(time.RFC3339Nano),
+			}
+			if _, err := s.store.AppendEventNextIfAbsent(event); err != nil {
+				return fmt.Errorf("append stage_stalled for run %s: %w", run.RunID, err)
+			}
+		}
+		if len(runs) < 100 {
+			return nil
+		}
+	}
+}
+
+func (s *Server) stallPolicy(run store.PipelineRun, state lifecycle.State, stageID string) (time.Duration, string) {
+	threshold := s.stallAfter
+	if threshold <= 0 {
+		threshold = 24 * time.Hour
+	}
+	cfg, err := config.ParseYAML([]byte(run.ConfigSnapshot))
+	executor := ""
+	if err == nil {
+		if !s.stallAfterOverride {
+			if parsed, err := time.ParseDuration(cfg.StallAfter); err == nil && parsed > 0 {
+				threshold = parsed
+			}
+		}
+		for _, stage := range cfg.Stages {
+			if stage.ID == stageID {
+				executor = stage.Executor
+				break
+			}
+		}
+	}
+	if override, ok := state.ExecutorOverrides[stageID]; ok {
+		approvalID := state.ActiveApprovalID
+		if approvalID == "" {
+			approvalID = state.PendingApprovalID
+		}
+		if approvalID != "" && override.ApprovalID == approvalID {
+			executor = override.Executor
+		}
+	}
+	return threshold, executor
 }
 
 func (s *Server) handleGetPipelines(w http.ResponseWriter, r *http.Request) {

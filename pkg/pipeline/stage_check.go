@@ -96,10 +96,14 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	if report.Status == stagecheck.StatusError {
 		eventData["error"] = strings.TrimSpace(report.Notes)
 	}
-	if err := rs.evidence.Append(evidence.Event{
+	checkEvent := evidence.Event{
 		Type: eventType, Stage: stageID, AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: eventData,
-	}); err != nil {
+	}
+	if err := rs.evidence.Append(checkEvent); err != nil {
 		return fmt.Errorf("запись %s для %s: %w", eventType, stageID, err)
+	}
+	if eventType == "check_error" {
+		rs.recordTypedEvent(checkEvent)
 	}
 	logging.Printf("%s проверка %s: %s\n",
 		ui.Colorize(stageStatusGlyph(report.Status), stageStatusColor(report.Status)),
@@ -253,12 +257,14 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	if applied.ReportSHA != "" {
 		eventData["report_sha256"] = applied.ReportSHA
 	}
-	if err := rs.evidence.Append(evidence.Event{
+	overriddenEvent := evidence.Event{
 		Type: "check_overridden", Stage: stageID, AttemptID: result.AttemptID,
 		Timestamp: time.Now().UTC(), Data: eventData,
-	}); err != nil {
+	}
+	if err := rs.evidence.Append(overriddenEvent); err != nil {
 		return notifier.StageResult{}, fmt.Errorf("запись check_overridden для %s: %w", stageID, err)
 	}
+	rs.recordTypedEvent(overriddenEvent)
 	result.CheckOverridden = true
 	return *result, nil
 }

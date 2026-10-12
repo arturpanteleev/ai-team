@@ -256,9 +256,17 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		result.Err = fmt.Errorf("record human attempt start: %w", err)
 	}
 	if result.Err == nil && decision.Action != "reject" && strings.TrimSpace(decision.Description) == "" {
-		if err := rs.evidence.AppendControllerEvent(evidence.Event{Type: "description_missing", Stage: stageID, AttemptID: attemptID,
-			Timestamp: time.Now().UTC(), Data: map[string]any{"field": "description", "approval_id": resolved.ID}}); err != nil {
+		missingDescription := evidence.Event{Type: "description_missing", Stage: stageID, AttemptID: attemptID,
+			Timestamp: time.Now().UTC(), Data: map[string]any{"field": "description", "approval_id": resolved.ID}}
+		if err := rs.evidence.AppendControllerEvent(missingDescription); err != nil {
 			result.Err = fmt.Errorf("record missing human submission description: %w", err)
+		} else {
+			projected := missingDescription
+			projected.Data = map[string]any{
+				"field": "description", "approval_id": resolved.ID,
+				"actor_id": decision.ActorID, "actor_role": decision.ActorRole,
+			}
+			rs.recordTypedEvent(projected)
 		}
 	}
 
@@ -401,13 +409,16 @@ func (rs *runState) runHumanStage(ctx context.Context, index int, stageID string
 		result.Err = errors.Join(result.Err, fmt.Errorf("record human attempt finish: %w", err))
 	}
 	if decision.Action == "skip" && result.Err == nil {
-		if err := rs.evidence.Append(evidence.Event{Type: "stage_skipped", Stage: stageID, AttemptID: attemptID,
+		skippedEvent := evidence.Event{Type: "stage_skipped", Stage: stageID, AttemptID: attemptID,
 			Timestamp: result.FinishedAt, Data: map[string]any{
 				"reason": decision.Comment, "warning": true,
 				"actor_id": decision.ActorID, "actor_role": decision.ActorRole,
-			}}); err != nil {
+			}}
+		if err := rs.evidence.Append(skippedEvent); err != nil {
 			result.Err = errors.Join(result.Err, fmt.Errorf("record stage skip warning: %w", err))
 			rs.deriveStageState(&result)
+		} else {
+			rs.recordTypedEvent(skippedEvent)
 		}
 	}
 	if rs.p.recorder != nil {

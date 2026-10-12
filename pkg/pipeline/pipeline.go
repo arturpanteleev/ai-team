@@ -498,6 +498,8 @@ func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedR
 type deferredDelivery struct {
 	StatePath string
 	PlanHash  string
+	StageID   string
+	AttemptID string
 }
 
 func (rs *runState) sourceDir() string {

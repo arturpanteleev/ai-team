@@ -95,9 +95,12 @@ func (rs *runState) validateDeliveryChecksFor(current *notifier.StageResult) err
 			return evidenceErr
 		}
 	}
+	// For a source stage, delivery verification is selected when the plan is
+	// built. A stage with no attributed source changes may reuse a prepared
+	// plan, whose exact check evidence is verified there; requiring this attempt
+	// to contain a test check would reject that valid path.
 	if current != nil {
-		_, err = rs.currentDeliveryVerificationFor(*current)
-		return err
+		return nil
 	}
 	_, err = rs.currentDeliveryVerification()
 	return err
@@ -133,14 +136,18 @@ func (rs *runState) requiredControllerCheckIn(stage config.TemplateStage, checkN
 // currentDeliveryVerificationFor строит delivery.Verification из свежих
 // результатов проверок текущего этапа (B-35): контрольная сумма evidence и
 // workspace digest берутся из r.Checks напрямую.
-func (rs *runState) currentDeliveryVerificationFor(result notifier.StageResult) (delivery.Verification, error) {
+func (rs *runState) currentDeliveryVerificationFor(result notifier.StageResult, requiredChecks []string) (delivery.Verification, error) {
 	workspaceDigest, err := checks.WorkspaceDigest(rs.sourceDir())
 	if err != nil {
 		return delivery.Verification{}, fmt.Errorf("delivery workspace digest: %w", err)
 	}
+	required := make(map[string]bool, len(requiredChecks))
+	for _, name := range requiredChecks {
+		required[name] = true
+	}
 	for checkIndex := len(result.Checks) - 1; checkIndex >= 0; checkIndex-- {
 		check := result.Checks[checkIndex]
-		if checks.IsTestEvidence(check) && check.EvidenceDigest != "" &&
+		if required[check.Name] && checks.IsTestEvidence(check) && checks.VerifyResultDigest(check) &&
 			check.WorkspaceDigestBefore == workspaceDigest && check.WorkspaceDigestAfter == workspaceDigest {
 			return delivery.Verification{
 				SourceRunID: rs.runID, WorkspaceDigest: workspaceDigest, CheckEvidenceDigest: check.EvidenceDigest,
@@ -834,7 +841,7 @@ func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preco
 // с delivery.require_checks (B-35/FR-15). В отличие от writeDeliveryPlan не
 // требует output plan у агента: план формируется из результатов проверок и
 // мутаций этапа, затем записывается в artifacts как delivery-plan.json.
-func (rs *runState) buildDeliveryPlan() (delivery.Plan, error) {
+func (rs *runState) buildDeliveryPlan(ctx context.Context, current notifier.StageResult) (delivery.Plan, error) {
 	requirements, configured, err := rs.templateDeliveryRequirements()
 	if err != nil {
 		return delivery.Plan{}, err
@@ -849,7 +856,7 @@ func (rs *runState) buildDeliveryPlan() (delivery.Plan, error) {
 			preconditions[name] = value
 		}
 	}
-	files := rs.attributedDeliveryFiles()
+	files := rs.attributedDeliveryFiles(&current)
 	var plan delivery.Plan
 	if len(files) == 0 {
 		var exists bool
@@ -875,13 +882,13 @@ func (rs *runState) buildDeliveryPlan() (delivery.Plan, error) {
 			return delivery.Plan{}, verifyErr
 		}
 	} else {
-		verification, verificationErr := rs.currentDeliveryVerification()
+		verification, verificationErr := rs.currentDeliveryVerificationFor(current, requirements.Delivery.RequireChecks)
 		if verificationErr != nil {
 			return delivery.Plan{}, verificationErr
 		}
 		verification.Preconditions = preconditions
 		var err error
-		plan, err = delivery.BuildPlan(context.Background(), rs.sourceDir(), rs.runCfg.Feature, rs.runCfg.TaskDesc, files, verification)
+		plan, err = delivery.BuildPlan(ctx, rs.sourceDir(), rs.runCfg.Feature, rs.runCfg.TaskDesc, files, verification)
 		if err != nil {
 			return delivery.Plan{}, err
 		}
@@ -893,10 +900,15 @@ func (rs *runState) buildDeliveryPlan() (delivery.Plan, error) {
 	return plan, nil
 }
 
-func (rs *runState) attributedDeliveryFiles() []string {
+func (rs *runState) attributedDeliveryFiles(current ...*notifier.StageResult) []string {
 	seen := make(map[string]bool)
 	var files []string
-	for _, result := range rs.results {
+	results := make([]notifier.StageResult, 0, len(rs.results)+1)
+	results = append(results, rs.results...)
+	if len(current) > 0 && current[0] != nil {
+		results = append(results, *current[0])
+	}
+	for _, result := range results {
 		if result.Err != nil {
 			continue
 		}

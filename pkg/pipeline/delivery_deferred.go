@@ -20,6 +20,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -123,8 +124,71 @@ func (rs *runState) executeDeferredDelivery(parent context.Context) error {
 	if err := rs.evidence.SealTerminalEvidence(); err != nil {
 		return fmt.Errorf("deferred delivery: reseal terminal evidence: %w", err)
 	}
+	if err := rs.publishDeferredDeliveryResult(record); err != nil {
+		return fmt.Errorf("deferred delivery: publish stage PR result: %w", err)
+	}
 	logging.Printf("\n%s delivery по run %s: commit=%s pr=%s\n",
 		ui.Colorize("✓", ui.ColorGreen), rs.runID, result.CommitSHA, result.PRURL)
+	return nil
+}
+
+// publishDeferredDeliveryResult projects the controller's terminal PR URL to
+// the configured stage result path. This file is a post-terminal read model:
+// it is derived only from the validated TerminalRecord and is not inserted into
+// the immutable attempt manifest or the attested workspace.
+func (rs *runState) publishDeferredDeliveryResult(record delivery.TerminalRecord) error {
+	deferred := rs.deferredDelivery
+	if deferred == nil || deferred.StageID == "" {
+		return nil
+	}
+	stage, ok := rs.p.templateStage(deferred.StageID)
+	if !ok || stage.Delivery == nil || stage.Result != "link" || stage.LinkKind != "pr" {
+		return fmt.Errorf("delivery result stage %s is not a configured PR delivery stage", deferred.StageID)
+	}
+	if record.RunID != rs.runID || record.Feature != rs.runCfg.Feature ||
+		record.PlanHash != deferred.PlanHash || strings.TrimSpace(record.PRURL) == "" {
+		return errors.New("terminal delivery record does not match the prepared stage result")
+	}
+	var resultIndex = -1
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		if rs.results[index].AttemptID == deferred.AttemptID && rs.results[index].Name == deferred.StageID {
+			resultIndex = index
+			break
+		}
+	}
+	if resultIndex < 0 {
+		return fmt.Errorf("delivery result attempt %s for stage %s is missing", deferred.AttemptID, deferred.StageID)
+	}
+	result := rs.results[resultIndex]
+	if result.Delivery == nil || result.Delivery.PlanHash != record.PlanHash {
+		return errors.New("stage result does not reference the terminal delivery plan")
+	}
+	relative := filepath.Join(rs.runCfg.Feature, "stages", stage.ID, "result.link")
+	path, err := confinedArtifactPath(rs.task.ArtifactRoot, relative)
+	if err != nil {
+		return err
+	}
+	content := []byte(strings.TrimSpace(record.PRURL) + "\n")
+	if err := safeio.WriteRegularFileNoFollow(path, content, 0644); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	result.Delivery.PRURL = record.PRURL
+	result.Outputs = append(result.Outputs, runtime.Artifact{
+		Name: "link", Path: path, Size: info.Size(), ModTime: info.ModTime(),
+	})
+	rs.results[resultIndex] = result
+	if rs.candidate != nil {
+		controlArtifacts := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "artifacts")
+		if err := syncArtifactProjection(rs.task.ArtifactRoot, controlArtifacts, rs.runCfg.Feature); err != nil {
+			return fmt.Errorf("sync controller PR result projection: %w", err)
+		}
+	}
+	// The attempt report was sealed during terminal finalize, so this projection
+	// remains a separate stage-result artifact rather than rewriting that report.
 	return nil
 }
 

@@ -530,24 +530,43 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
 		}
 		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
-	} else if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil {
-		// B-35: агентный этап с delivery.require_checks (FR-15). Контроллер
-		// проверяет проект из require_checks, формирует delivery-план и
-		// запрашивает подтверждение SHA-256 перед commit/push/PR. Инвариант §4:
-		// commit/push/PR делает только контроллер после подтверждения плана.
+	}
+	if err := verifyArtifactIdentities(outputs, outputIdentities); err != nil {
+		r.ValidationFailed = true
+		return fail(fmt.Errorf("агент %s: output изменён после controller checks: %w", name, err))
+	}
+	finalVerdict, err := verdict.FromOutputsContract(outputPaths, a.Verdict)
+	if err != nil || finalVerdict != r.Verdict {
+		r.ValidationFailed = true
+		if err == nil {
+			err = fmt.Errorf("verdict изменился с %s на %s", r.Verdict, finalVerdict)
+		}
+		return fail(fmt.Errorf("агент %s: повторная валидация verdict: %w", name, err))
+	}
+	if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil {
+		// B-35: агентный этап с delivery.require_checks (FR-15). Только после
+		// проверки выходов и повторной проверки verdict контроллер связывает
+		// required checks с текущим workspace и готовит план. Commit/push/PR
+		// по-прежнему выполняются только после terminal finalize.
 		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
+			mutationGuardApplied = true
 			r.ValidationFailed = true
-			r.Err = errors.Join(r.Err, guardErr)
-			r.Status = notifier.StatusFailed
+			return fail(fmt.Errorf("агент %s: mutation guard: %w", name, guardErr))
 		}
 		mutationGuardApplied = true
-		rs.results = append(rs.results, r)
+		// The current attempt is not in rs.results yet. Mark its execution result
+		// successful for the current-attempt evidence validator; later plan or
+		// approval failures still pass through fail() and become failed/stopped.
+		r.Status = notifier.StatusPassed
 		if err := rs.validateDeliveryChecksFor(&r); err != nil {
 			return fail(fmt.Errorf("агент %s: %w", name, err))
 		}
-		plan, err := rs.buildDeliveryPlan()
+		plan, err := rs.buildDeliveryPlan(stageCtx, r)
 		if err != nil {
 			return fail(fmt.Errorf("агент %s: delivery plan: %w", name, err))
+		}
+		if err := stageCtx.Err(); err != nil {
+			return fail(err)
 		}
 		statePath, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan)
 		if prepareErr != nil {
@@ -561,7 +580,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		if hashErr != nil {
 			return fail(fmt.Errorf("агент %s: delivery plan hash: %w", name, hashErr))
 		}
-		rs.deferredDelivery = &deferredDelivery{StatePath: statePath, PlanHash: planHash}
+		rs.deferredDelivery = &deferredDelivery{
+			StatePath: statePath, PlanHash: planHash, StageID: name, AttemptID: r.AttemptID,
+		}
 		if err := rs.evidence.Append(evidence.Event{
 			Type: "delivery_deferred", Stage: name, AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
 			Data: map[string]any{"plan_hash": planHash, "state_path": filepath.ToSlash(statePath)},
@@ -570,18 +591,6 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
 		}
 		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
-	}
-	if err := verifyArtifactIdentities(outputs, outputIdentities); err != nil {
-		r.ValidationFailed = true
-		return fail(fmt.Errorf("агент %s: output изменён после controller checks: %w", name, err))
-	}
-	finalVerdict, err := verdict.FromOutputsContract(outputPaths, a.Verdict)
-	if err != nil || finalVerdict != r.Verdict {
-		r.ValidationFailed = true
-		if err == nil {
-			err = fmt.Errorf("verdict изменился с %s на %s", r.Verdict, finalVerdict)
-		}
-		return fail(fmt.Errorf("агент %s: повторная валидация verdict: %w", name, err))
 	}
 	r.Status = notifier.StatusPassed
 	r.Duration = time.Since(stageStart)
@@ -661,6 +670,17 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 	if a != nil {
 		for _, outputPath := range a.Outputs {
 			fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
+			if err != nil {
+				return err
+			}
+			paths = append(paths, fullPath)
+		}
+		if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil && stage.Result == "link" && stage.LinkKind == "pr" {
+			// The controller publishes this derived link only after terminal
+			// delivery. Clear the prior run's task-level projection before this
+			// stage starts; it is not a runtime output or attempt-manifest output.
+			relative := filepath.Join(rs.runCfg.Feature, "stages", stage.ID, "result.link")
+			fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, relative)
 			if err != nil {
 				return err
 			}

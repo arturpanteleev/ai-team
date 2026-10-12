@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,6 +103,117 @@ func TestRun_DeliveryPlanUsesConfiguredChecksWithoutReviewOrQAAgents(t *testing.
 	}
 }
 
+func TestRun_AgentDeliveryUsesCurrentAttemptEvidenceAndProjectsPRResult(t *testing.T) {
+	dir := env(t)
+	gitInit(t, dir)
+	for name, content := range map[string]string{
+		".gitignore":     ".ai-team/\n",
+		"go.mod":         "module example.test/b35\n\ngo 1.26\n",
+		"answer.go":      "package b35\nfunc answer() int { return 42 }\n",
+		"answer_test.go": "package b35\nimport \"testing\"\nfunc TestAnswer(t *testing.T) { if answer() != 42 { t.Fatal(\"wrong answer\") } }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "main"}} {
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	for _, args := range [][]string{{"init", "--bare", remote}, {"remote", "add", "origin", remote}} {
+		command := exec.Command("git", args...)
+		if args[0] == "remote" {
+			command.Dir = dir
+		}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+
+	checkDefinition := checks.Definition{
+		Name: "go-test", Class: "unit", Adapter: checks.AdapterGoTest,
+		Command: []string{"go", "test", "-json", "-count=1", "./..."}, Policy: checks.PolicyRequired,
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, Template: "b35-current-attempt", Title: "B35 current attempt",
+		CLI: "opencode", PipelineAgents: []config.AgentConfig{{Name: "implementation"}},
+		Checks: []checks.Definition{checkDefinition},
+		Stages: []config.TemplateStage{{
+			ID: "implementation", Title: "Implementation", Function: "developer",
+			Result: "link", LinkKind: "pr", Executor: "agent", Agent: "coder", Confirm: "auto",
+			Delivery: &config.TemplateDelivery{RequireChecks: []string{"go-test"}},
+		}},
+	}
+	registry := agent.NewFS(fstest.MapFS{
+		"coder/def.yaml": def(`name: coder
+runtime: agentcli
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+require_diff: true
+test_modify_policy: off
+outputs: {}
+`),
+		"coder/prompt.md": def("test"),
+	})
+	rt := newScripted()
+	rt.onExecute = func(agentName string, task *runtime.Task, _ []runtime.Artifact) {
+		if agentName == "coder" {
+			if err := os.WriteFile(filepath.Join(task.TargetDir, "change.go"), []byte("package b35\nfunc changed() bool { return true }\n"), 0644); err != nil {
+				t.Errorf("coder mutation: %v", err)
+			}
+		}
+	}
+	service := &fakeDeliveryService{}
+	notifications := &captureNotifier{}
+	p := New(cfg, registry,
+		WithRuntimeFactory(rt.factory), WithNotifier(notifications), WithDeliveryService(service),
+		WithPrompter(&scriptedPrompter{interactive: true, answers: []string{"y"}}))
+	result, err := p.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "deliver current attempt", TargetDir: dir, ApproveGates: true,
+	})
+	if err != nil || result.Outcome != workflow.RunCompleted {
+		t.Fatalf("agent delivery result=%+v err=%v", result, err)
+	}
+	if strings.Join(rt.executed, ",") != "coder" || service.calls != 1 || len(notifications.calls) != 1 || notifications.calls[0].Status != notifier.StatusPassed {
+		t.Fatalf("current attempt was skipped/replayed: runtimes=%v deliveries=%d notifications=%+v", rt.executed, service.calls, notifications.calls)
+	}
+	runDir := onlyRunDir(t, dir)
+	runID := filepath.Base(runDir)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, notifications.calls[0].AttemptID)
+	if err != nil || manifest.Delivery == nil || manifest.Delivery.PRURL != "" || len(manifest.Checks) != 1 || manifest.Checks[0].Name != "go-test" || !checks.IsTestEvidence(manifest.Checks[0]) {
+		t.Fatalf("attempt manifest must retain immutable plan/check evidence without a post-terminal PR URL: manifest=%+v err=%v", manifest, err)
+	}
+	candidateRoot := filepath.Join(dir, ".ai-team", "worktrees", runID)
+	plan, found, err := delivery.LoadPreparedPlan(candidateRoot, "feat")
+	if err != nil || !found || plan.SourceRunID != runID || plan.CheckEvidenceDigest != manifest.Checks[0].EvidenceDigest || !containsString(plan.Files, "change.go") {
+		t.Fatalf("delivery plan must bind the current attempt's exact check and mutations: plan=%+v found=%t err=%v", plan, found, err)
+	}
+	planHash, err := plan.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, found, err := delivery.ReadTerminalRecord(runDir)
+	if err != nil || !found || terminal.PRURL != "https://example.test/pr/1" || terminal.PlanHash != planHash {
+		t.Fatalf("controller terminal record mismatch: record=%+v found=%t err=%v", terminal, found, err)
+	}
+	linkPath := filepath.Join(dir, ".ai-team", "artifacts", "feat", "stages", "implementation", "result.link")
+	link, err := os.ReadFile(linkPath)
+	if err != nil || strings.TrimSpace(string(link)) != terminal.PRURL {
+		t.Fatalf("controller PR result projection=%q err=%v", link, err)
+	}
+	if err := evidence.VerifyAnchor(runDir); err != nil {
+		t.Fatalf("post-terminal PR result projection must not alter immutable attempt evidence: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", ".control", "candidate.json")); err != nil {
+		t.Fatalf("afterAttempt candidate evidence was skipped: %v", err)
+	}
+}
+
 func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
 	dir := env(t)
 	for name, content := range map[string]string{
@@ -132,16 +244,17 @@ func TestRun_DefaultGoPresetRunsChecksForStageAgentAlias(t *testing.T) {
 		strings.Join(implementation.Delivery.RequireChecks, ",") != "go-test,go-vet" {
 		t.Fatalf("built-in Go checks were not attached to stage implementation/coder: %+v", implementation)
 	}
-	// This case exercises an agent-executed implementation stage and its stable
-	// stage-ID-to-registry-agent mapping. The standard template's production
-	// implementation is human-executed, covered by the human input flow tests.
-	// The stage-check rules (B-40) are exercised by dedicated stage-check tests,
-	// not by this fake-output fixture: clearing them keeps the test focused on
-	// registry alias resolution and controller check persistence.
+	if implementation.Check == nil || implementation.Check.Kind != "hard" ||
+		strings.Join(implementation.Check.Rules, ",") != "pr_exists,pr_open,pr_base_branch" {
+		t.Fatalf("default PR checks must remain configured for the deferred-delivery contract review: %+v", implementation.Check)
+	}
+	// This case exercises check execution and stage-ID-to-registry-agent mapping;
+	// actual delivery and controller PR projection have their own B-35 test.
 	implementation.Executor = "agent"
 	implementation.Check = nil
+	implementation.Delivery = nil
 	cfg.Stages = []config.TemplateStage{implementation}
-	cfg.PipelineAgents = []config.AgentConfig{{Name: implementation.ID}}
+	cfg.PipelineAgents = []config.AgentConfig{{Name: implementation.ID, Checks: append([]checks.Definition(nil), cfg.Checks...)}}
 	cfg.Returns = nil
 	cfg.MaxVisits = nil
 	rt := newScripted()

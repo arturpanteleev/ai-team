@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskEvent, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 
 const API_BASE = '/api';
 
@@ -47,6 +47,16 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
 
 export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection }> {
   return fetchJson(`/pipelines/${id}`);
+}
+
+export async function getTaskRun(runID: string): Promise<{ run: PipelineRun; stages: Stage[] }> {
+  return fetchJson(`/runs/${encodeURIComponent(runID)}`);
+}
+
+export async function getGlobalEvents(after = 0, limit = 100, warningsOnly = false): Promise<{ events: TaskEvent[]; next_cursor: number }> {
+  const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+  if (warningsOnly) query.set('warnings', 'true');
+  return fetchJson(`/events?${query.toString()}`);
 }
 
 let csrfToken: string | null = null;

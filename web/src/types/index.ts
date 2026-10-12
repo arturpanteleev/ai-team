@@ -242,16 +242,23 @@ export interface ArtifactRevision {
   sha256: string;
 }
 
-export interface WsEvent {
+export interface TaskEvent {
   version: 1;
-  stream?: string;
   cursor: number;
   run_id: string;
   sequence: number;
-  type: 'run_started' | 'run_resumed' | 'run_paused' | 'run_canceled' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'stage_taken' | 'run_finished';
+  type: string;
+  stage?: string;
+  actor?: string;
+  executor?: string;
+  severity?: string;
   attempt_id?: string;
   timestamp: string;
   data: Record<string, unknown>;
+}
+
+export interface WsEvent extends TaskEvent {
+  stream?: string;
 }
 
 // Элемент GET /api/runs: карточка доски/списка задач (B-70 task API).

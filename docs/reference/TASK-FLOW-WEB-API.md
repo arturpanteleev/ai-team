@@ -36,6 +36,12 @@ accept RFC3339 timestamps or `YYYY-MM-DD`; intervals are half-open `[from,to)`
 and default to the last 30 days. Pagination limits range from 1 to 100 for run
 lists and 1 to 1000 for event feeds.
 
+The `/events` page shows events in persisted cursor order, appends new events
+from the WebSocket stream, and offers a server-side warnings-only filter. Each
+event links by stable `run_id`; the UI resolves that ID to the existing task
+detail page. “Показать ещё” continues from the response `next_cursor`, which
+also advances past non-warning events when the warning filter is selected.
+
 Write callers can send `Idempotency-Key` (or legacy `X-Request-Key`) to replay
 an exact prior response. Keys are scoped to the authenticated actor; reusing a
 key with a different method, path, or body returns JSON 409. A retry in flight

@@ -64,14 +64,15 @@ type Config struct {
 	// терминального finalize, поэтому её нельзя обрывать бюджетом run'а; но
 	// её внешние команды сетевые, и без собственного дедлайна зависший git/gh
 	// делает контроллер неостанавливаемым (QS-06).
-	DeliveryTimeout string             `yaml:"delivery_timeout,omitempty"`
-	Containment     *ContainmentConfig `yaml:"containment,omitempty"`
-	TreeHash        *TreeHashConfig    `yaml:"tree_hash,omitempty"`
-	Budget          *BudgetConfig      `yaml:"budget,omitempty"`
-	Usage           *UsageConfig       `yaml:"usage,omitempty"`
-	Tracker         *TrackerConfig     `yaml:"tracker,omitempty"`
-	Redaction       *RedactionConfig   `yaml:"redaction,omitempty"`
-	Retention       *RetentionConfig   `yaml:"retention,omitempty"`
+	DeliveryTimeout string               `yaml:"delivery_timeout,omitempty"`
+	Containment     *ContainmentConfig   `yaml:"containment,omitempty"`
+	TreeHash        *TreeHashConfig      `yaml:"tree_hash,omitempty"`
+	Budget          *BudgetConfig        `yaml:"budget,omitempty"`
+	Usage           *UsageConfig         `yaml:"usage,omitempty"`
+	Tracker         *TrackerConfig       `yaml:"tracker,omitempty"`
+	Notifications   *NotificationsConfig `yaml:"notifications,omitempty"`
+	Redaction       *RedactionConfig     `yaml:"redaction,omitempty"`
+	Retention       *RetentionConfig     `yaml:"retention,omitempty"`
 }
 
 // BudgetConfig — лимит времени одного исполнения и суммарное число попыток
@@ -521,7 +522,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
-		"tree_hash": true, "budget": true, "tracker": true, "redaction": true, "retention": true,
+		"tree_hash": true, "budget": true, "tracker": true, "notifications": true, "redaction": true, "retention": true,
 		"mcp_servers": true,
 	}, "config"); err != nil {
 		return err
@@ -545,6 +546,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Containment      *ContainmentConfig                 `yaml:"containment"`
 		Usage            *UsageConfig                       `yaml:"usage"`
 		Tracker          *TrackerConfig                     `yaml:"tracker"`
+		Notifications    *NotificationsConfig               `yaml:"notifications"`
 		TreeHash         *TreeHashConfig                    `yaml:"tree_hash"`
 		Budget           *BudgetConfig                      `yaml:"budget"`
 		Redaction        *RedactionConfig                   `yaml:"redaction"`
@@ -575,6 +577,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Budget = raw.Budget
 	c.Usage = raw.Usage
 	c.Tracker = raw.Tracker
+	c.Notifications = raw.Notifications
 	c.Redaction = raw.Redaction
 	c.Retention = raw.Retention
 
@@ -996,6 +999,15 @@ func (c *Config) Validate(reg AgentLookup) error {
 			stageIDs[stage.ID] = true
 		}
 		if err := c.Tracker.Validate(stageIDs); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if c.Notifications != nil {
+		stageFunctions := make(map[string]bool, len(c.Stages))
+		for _, stage := range c.Stages {
+			stageFunctions[stage.Function] = true
+		}
+		if err := c.Notifications.Validate(stageFunctions); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

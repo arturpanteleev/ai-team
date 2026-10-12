@@ -26,6 +26,7 @@ describe('Layout team navigation', () => {
 
     expect(screen.queryByRole('link', { name: 'Команда' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Лента' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Наблюдаемость' })).toHaveAttribute('href', '/observability');
   });
 
   it('keeps Team navigation for cloud auth', () => {

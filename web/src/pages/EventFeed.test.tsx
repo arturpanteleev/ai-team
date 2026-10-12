@@ -22,6 +22,12 @@ function renderFeed() {
   return render(<MemoryRouter initialEntries={['/events']}><EventFeed /></MemoryRouter>);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((finish) => { resolve = finish; });
+  return { promise, resolve };
+}
+
 describe('global event feed', () => {
   beforeEach(() => {
     vi.mocked(useWebSocket).mockReset();
@@ -71,5 +77,31 @@ describe('global event feed', () => {
     await waitFor(() => expect(getGlobalEvents).toHaveBeenLastCalledWith(100, 100, false));
     expect(screen.getAllByText('Ошибка проверки')).toHaveLength(2);
     expect(screen.getByText('Этап пропущен')).toBeInTheDocument();
+  });
+
+  it('discards an all-events page that finishes after switching to warnings', async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      ...regularEvent, cursor: index + 1, sequence: index + 1,
+    }));
+    const pendingAllEventsPage = deferred<{ events: TaskEvent[]; next_cursor: number }>();
+    vi.mocked(getGlobalEvents)
+      .mockResolvedValueOnce({ events: firstPage, next_cursor: 100 })
+      .mockReturnValueOnce(pendingAllEventsPage.promise)
+      .mockResolvedValueOnce({ events: [warningEvent], next_cursor: 101 });
+    renderFeed();
+    await waitFor(() => expect(screen.getAllByText('Задача создана')).toHaveLength(100));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
+    await waitFor(() => expect(getGlobalEvents).toHaveBeenLastCalledWith(100, 100, false));
+    fireEvent.click(screen.getByRole('button', { name: 'Предупреждения' }));
+    expect(await screen.findByText('Ошибка проверки')).toBeInTheDocument();
+    expect(screen.queryByText('Задача создана')).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingAllEventsPage.resolve({ events: [{ ...regularEvent, cursor: 101 }], next_cursor: 101 });
+      await pendingAllEventsPage.promise;
+    });
+    expect(screen.queryByText('Задача создана')).not.toBeInTheDocument();
+    expect(screen.getByText('Ошибка проверки')).toBeInTheDocument();
   });
 });

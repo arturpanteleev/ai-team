@@ -79,6 +79,7 @@ export function EventFeed() {
     setEvents([]);
     setCursor(0);
     setHasMore(false);
+    setLoadingMore(false);
     setError('');
     setLoading(true);
     void getGlobalEvents(0, PAGE_SIZE, warningsOnly)
@@ -105,22 +106,31 @@ export function EventFeed() {
     setEvents((current) => mergeEvents(current, [event]));
   }, [warningsOnly]);
 
+  const changeWarningsOnly = useCallback((next: boolean) => {
+    if (next === warningsOnly) return;
+    // Invalidate in-flight pagination immediately, before the next effect runs.
+    requestGeneration.current += 1;
+    setWarningsOnly(next);
+  }, [warningsOnly]);
+
   useWebSocket({ onEvent: onLiveEvent });
 
   const loadMore = useCallback(async () => {
     if (loadingMore || !hasMore) return;
+    const generation = requestGeneration.current;
     setLoadingMore(true);
     setError('');
     try {
       const page = await getGlobalEvents(cursor, PAGE_SIZE, warningsOnly);
+      if (generation !== requestGeneration.current) return;
       const pageEvents = page.events ?? [];
       setEvents((current) => mergeEvents(current, pageEvents));
       setCursor((current) => Math.max(current, page.next_cursor ?? current));
       setHasMore(pageEvents.length === PAGE_SIZE);
     } catch {
-      setError('Не удалось загрузить следующие события. Попробуйте ещё раз.');
+      if (generation === requestGeneration.current) setError('Не удалось загрузить следующие события. Попробуйте ещё раз.');
     } finally {
-      setLoadingMore(false);
+      if (generation === requestGeneration.current) setLoadingMore(false);
     }
   }, [cursor, hasMore, loadingMore, warningsOnly]);
 
@@ -132,8 +142,8 @@ export function EventFeed() {
           <p className={styles.subtitle}>Обновляется автоматически по мере поступления событий.</p>
         </div>
         <div className={styles.filters} role="group" aria-label="Фильтр событий">
-          <button type="button" aria-pressed={!warningsOnly} onClick={() => setWarningsOnly(false)}>Все</button>
-          <button type="button" aria-pressed={warningsOnly} onClick={() => setWarningsOnly(true)}>Предупреждения</button>
+          <button type="button" aria-pressed={!warningsOnly} onClick={() => changeWarningsOnly(false)}>Все</button>
+          <button type="button" aria-pressed={warningsOnly} onClick={() => changeWarningsOnly(true)}>Предупреждения</button>
         </div>
       </header>
 

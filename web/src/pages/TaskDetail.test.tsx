@@ -20,6 +20,7 @@ vi.mock('../api', () => ({
   getRunLog: vi.fn().mockResolvedValue({ content: 'agent log', truncated: false }),
   getTaskRunDetails: vi.fn(),
   getTaskRunEvents: vi.fn().mockResolvedValue({ events: [], next_cursor: 0 }),
+  getTaskFlowMetrics: vi.fn().mockResolvedValue({ by_stage: [] }),
   overrideTaskStageCheck: vi.fn().mockResolvedValue({}),
   returnTaskStage: vi.fn().mockResolvedValue({}),
   runTaskStageAgent: vi.fn().mockResolvedValue({}),
@@ -76,10 +77,33 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+class MemoryStorage implements Storage {
+  private values = new Map<string, string>();
+  failWrites = false;
+  get length() { return this.values.size; }
+  clear() { this.values.clear(); }
+  getItem(key: string) { return this.values.get(key) ?? null; }
+  key(index: number) { return [...this.values.keys()][index] ?? null; }
+  removeItem(key: string) { this.values.delete(key); }
+  setItem(key: string, value: string) {
+    if (this.failWrites) throw new DOMException('quota exceeded', 'QuotaExceededError');
+    this.values.set(key, value);
+  }
+}
+
+let storage: MemoryStorage;
+
+function useStorage(value: () => Storage) {
+  Object.defineProperty(window, 'localStorage', { configurable: true, get: value });
+}
+
 beforeEach(async () => {
   live.onEvent = undefined;
+  storage = new MemoryStorage();
+  useStorage(() => storage);
   const api = await import('../api');
   vi.mocked(api.getTaskRunDetails).mockResolvedValue(baseDetails);
+  vi.mocked(api.submitTaskStageResult).mockReset().mockResolvedValue({});
   vi.mocked(api.getTaskRunEvents).mockResolvedValue({ events: [{
     version: 1, cursor: 1, run_id: 'run-detail-1', sequence: 1, type: 'run_started',
     timestamp: '2026-10-12T09:00:00Z', data: { mode: 'manual' },
@@ -308,5 +332,200 @@ describe('Task detail', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Новая задача' })).toBeInTheDocument());
     expect(screen.queryByRole('heading', { name: 'Старая задача' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
+  });
+});
+
+function detailsAt(stage: TaskRunDetails['template'] extends infer T ? T extends { stages: Array<infer S> } ? S : never : never): TaskRunDetails {
+  return {
+    ...baseDetails,
+    template: { ...baseDetails.template!, stages: [stage] },
+    state: { ...baseDetails.state!, next_stage: stage.id },
+    approvals: [{ ...baseDetails.approvals[0], from_stage: stage.id, to_stage: stage.id }],
+    results: {},
+  };
+}
+
+const draftKey = (stage = 'intent') => `ai-team:stage-result-draft:v1:run-detail-1:${stage}`;
+
+async function openResultForm() {
+  renderDetail();
+  fireEvent.click(await screen.findByRole('button', { name: 'Сдать результат' }));
+}
+
+describe('Browser stage submission', () => {
+  it('previews markdown, submits it, and drops the draft after the server accepts it', async () => {
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: '# План\n\nшаги' } });
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Собран план' } });
+    expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: '# План\n\nшаги', description: 'Собран план' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр' }));
+    expect(screen.getByRole('heading', { name: 'План', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Результат в Markdown')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+
+    const api = await import('../api');
+    await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
+      result: 'md', content: '# План\n\nшаги', description: 'Собран план',
+    }));
+    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(storage.getItem(draftKey())).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Предпросмотр' })).not.toBeInTheDocument();
+  });
+
+  it('loads a markdown file into the editor and rejects files over the server limit', async () => {
+    await openResultForm();
+    const input = screen.getByLabelText('Загрузить файл .md');
+    fireEvent.change(input, { target: { files: [new File(['# Из файла\n'], 'result.md', { type: 'text/markdown' })] } });
+    await waitFor(() => expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('# Из файла\n'));
+    expect(screen.getByText('Загружен файл: result.md')).toBeInTheDocument();
+
+    const tooLarge = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'huge.md', { type: 'text/markdown' });
+    fireEvent.change(input, { target: { files: [tooLarge] } });
+    expect(await screen.findByText(/Файл huge\.md больше 10\.0 МиБ/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('# Из файла\n');
+
+    fireEvent.change(input, { target: { files: [new File([new Uint8Array([0xff, 0xfe, 0x00])], 'binary.md')] } });
+    expect(await screen.findByText('Файл binary.md должен быть текстом в UTF-8.')).toBeInTheDocument();
+  });
+
+  it('blocks markdown larger than the server limit in bytes, not characters', async () => {
+    await openResultForm();
+    // 5.5M Cyrillic characters fit a character limit but are 11 MB of UTF-8.
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'я'.repeat(5_500_000) } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Результат больше 10.0 МиБ');
+    expect(screen.getByRole('button', { name: 'Отправить результат' })).toBeDisabled();
+  });
+
+  it('submits a link with the stage link kind after validating the URL', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(detailsAt(
+      { id: 'deploy', title: 'Выкладка', function: 'deployer', result: 'link', link_kind: 'build', executor: 'human' }));
+    await openResultForm();
+    expect(screen.getByText('Вид ссылки: Сборка')).toBeInTheDocument();
+    const url = screen.getByLabelText('Ссылка на результат');
+    const submit = screen.getByRole('button', { name: 'Отправить результат' });
+    expect(submit).toBeDisabled();
+
+    fireEvent.change(url, { target: { value: 'ftp://ci.example/build/7' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Ссылка должна начинаться с http:// или https://.');
+    expect(submit).toBeDisabled();
+    fireEvent.change(url, { target: { value: 'ci.example/build/7' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Введите полный адрес');
+    fireEvent.change(url, { target: { value: 'https://bot:secret@ci.example/build/7' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Уберите логин и пароль из ссылки.');
+    fireEvent.change(url, { target: { value: ` https://ci.example/${'a'.repeat(16 * 1024)} ` } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Ссылка длиннее 16384 байт.');
+
+    fireEvent.change(url, { target: { value: ' https://ci.example/build/7 ' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Выложено на стенд' } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'deploy', {
+      result: 'link', url: 'https://ci.example/build/7', link_kind: 'build', description: 'Выложено на стенд',
+    }));
+  });
+
+  it('hints when a pull-request link does not point to a pull request', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(detailsAt(
+      { id: 'implementation', title: 'Реализация', function: 'developer', result: 'link', link_kind: 'pr', executor: 'human' }));
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Ссылка на результат'), { target: { value: 'https://github.com/org/repo' } });
+    expect(screen.getByText(/не похожа на pull request/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Ссылка на результат'), { target: { value: 'https://github.com/org/repo/pull/12' } });
+    expect(screen.queryByText(/не похожа на pull request/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Отправить результат' })).toBeEnabled();
+  });
+
+  it('approves with confirmation text', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(detailsAt(
+      { id: 'release', title: 'Релиз', function: 'release_manager', result: 'approve', executor: 'human' }));
+    await openResultForm();
+    expect(screen.queryByLabelText('Результат в Markdown')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Текст подтверждения'), { target: { value: 'Релиз согласован' } });
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Проверен чек-лист' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить результат' }));
+    await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'release', {
+      result: 'approve', note: 'Релиз согласован', description: 'Проверен чек-лист',
+    }));
+  });
+
+  it('warns about an empty "what was done" field but still submits without it', async () => {
+    await openResultForm();
+    const warning = /Поле «Что сделано» пустое/;
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: '   ' } });
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Итог' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    const api = await import('../api');
+    await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Итог' }));
+
+    cleanup();
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Описано' } });
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+  });
+
+  it('restores the draft after a page reload and reopens the form', async () => {
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Черновик идеи' } });
+    fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Половина' } });
+    fireEvent.change(screen.getByLabelText('Заметка'), { target: { value: 'Вернуться после обеда' } });
+    cleanup();
+
+    renderDetail();
+    expect(await screen.findByLabelText('Результат в Markdown')).toHaveValue('Черновик идеи');
+    expect(screen.getByLabelText('Что сделано')).toHaveValue('Половина');
+    expect(screen.getByLabelText('Заметка')).toHaveValue('Вернуться после обеда');
+    expect(screen.getByText('Восстановлен черновик, сохранённый в этом браузере.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Очистить черновик' }));
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
+    expect(storage.getItem(draftKey())).toBeNull();
+  });
+
+  it('keeps the draft when the server rejects the submission', async () => {
+    const api = await import('../api');
+    vi.mocked(api.submitTaskStageResult).mockRejectedValueOnce(new Error('human markdown is missing required section "## Цель"'));
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Без раздела' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+
+    expect(await screen.findByText('human markdown is missing required section "## Цель"')).toBeInTheDocument();
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Без раздела');
+    expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: 'Без раздела' });
+
+    cleanup();
+    renderDetail();
+    expect(await screen.findByLabelText('Результат в Markdown')).toHaveValue('Без раздела');
+  });
+
+  it('works without browser storage and says the draft is not saved', async () => {
+    useStorage(() => { throw new DOMException('blocked', 'SecurityError'); });
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Без хранилища' } });
+    expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    const api = await import('../api');
+    await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Без хранилища' }));
+    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+  });
+
+  it('keeps editing when the storage quota is exceeded', async () => {
+    storage.failWrites = true;
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Большой текст' } });
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Большой текст');
+    expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
+  });
+
+  it('ignores a corrupted stored draft', async () => {
+    storage.setItem(draftKey(), '{not json');
+    await openResultForm();
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
+    expect(screen.queryByText(/Восстановлен черновик/)).not.toBeInTheDocument();
   });
 });

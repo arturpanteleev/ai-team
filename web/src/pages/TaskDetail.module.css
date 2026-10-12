@@ -123,7 +123,6 @@
 
 .inlineSelect,
 .reasonForm label,
-.resultForm label,
 .grill label {
   display: grid;
   min-width: min(100%, 200px);
@@ -135,9 +134,6 @@
 .inlineSelect select,
 .reasonForm input,
 .reasonForm select,
-.resultForm input,
-.resultForm textarea,
-.resultForm select,
 .grill textarea {
   width: 100%;
   min-width: 0;
@@ -160,7 +156,6 @@
   flex: 1 1 200px;
 }
 
-.resultForm,
 .grill {
   display: grid;
   gap: 12px;
@@ -171,20 +166,14 @@
   background: var(--surface-raised);
 }
 
-.resultForm h3,
 .grill h3 {
   margin: 0;
   color: var(--text-primary);
   font-size: 1rem;
 }
 
-.resultForm textarea,
 .grill textarea {
   resize: vertical;
-}
-
-.resultForm .actions {
-  margin-top: 0;
 }
 
 .actionStatus,

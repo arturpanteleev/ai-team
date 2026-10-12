@@ -23,6 +23,9 @@
   --info-bg: #e0f2fe;
   --info-fg: #075985;
   --shadow: 0 8px 24px rgb(15 23 42 / 10%);
+  --executor-agent: #1d4ed8;
+  --executor-human: #9a3412;
+  --executor-unknown: #475569;
 }
 
 :root[data-theme='dark'] {
@@ -49,6 +52,9 @@
   --info-bg: #0c4a6e;
   --info-fg: #bae6fd;
   --shadow: 0 8px 24px rgb(0 0 0 / 24%);
+  --executor-agent: #60a5fa;
+  --executor-human: #fdba74;
+  --executor-unknown: #94a3b8;
 }
 
 * {

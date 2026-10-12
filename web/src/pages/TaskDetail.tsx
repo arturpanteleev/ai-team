@@ -23,8 +23,12 @@ import type { Approval, Artifact, Stage, TaskEvent, TaskResultRevision, TaskRunD
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
+import { StageResultForm } from '../components/StageResultForm';
+import type { StageResultSubmission } from '../stageResultValidation';
 import { StageRow } from '../components/StageRow';
 import { StatusBadge } from '../components/StatusBadge';
+import { TaskTimeline } from '../components/TaskTimeline';
+import { clearStageResultDraft, loadStageResultDraft } from '../stageResultDraft';
 import styles from './TaskDetail.module.css';
 
 interface TaskDetailSnapshot {
@@ -82,11 +86,6 @@ export function TaskDetail() {
   const [actionStatus, setActionStatus] = useState('');
   const [working, setWorking] = useState(false);
   const [showResultForm, setShowResultForm] = useState(false);
-  const [resultContent, setResultContent] = useState('');
-  const [resultURL, setResultURL] = useState('');
-  const [resultLinkKind, setResultLinkKind] = useState<'pr' | 'build' | 'other'>('other');
-  const [resultNote, setResultNote] = useState('');
-  const [resultDescription, setResultDescription] = useState('');
   const [skipReason, setSkipReason] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
   const [returnReason, setReturnReason] = useState('');
@@ -131,11 +130,6 @@ export function TaskDetail() {
     setActionStatus('');
     setWorking(false);
     setShowResultForm(false);
-    setResultContent('');
-    setResultURL('');
-    setResultLinkKind('other');
-    setResultNote('');
-    setResultDescription('');
     setSkipReason('');
     setOverrideReason('');
     setReturnReason('');
@@ -186,6 +180,15 @@ export function TaskDetail() {
     : 'human';
   const allowed = useMemo(() => new Set(details?.allowed_actions ?? []), [details?.allowed_actions]);
   const pending = details ? currentApproval(details) : undefined;
+  const resultsAllowed = allowed.has('results');
+  const currentRunID = run?.run_id;
+
+  // A draft saved before a page reload reopens the result form for that stage.
+  useEffect(() => {
+    if (currentRunID && currentStageID && resultsAllowed && loadStageResultDraft(currentRunID, currentStageID)) {
+      setShowResultForm(true);
+    }
+  }, [currentRunID, currentStageID, resultsAllowed]);
   const returnOptions = template?.returns.filter((route) => route.from === currentStageID) ?? [];
   const duration = run?.completed_at
     ? Math.max(0, new Date(run.completed_at).getTime() - new Date(run.started_at).getTime())
@@ -215,23 +218,17 @@ export function TaskDetail() {
     }
   };
 
-  const submitResult = async (event: FormEvent) => {
-    event.preventDefault();
+  const submitResult = async (value: StageResultSubmission) => {
     if (!run || !currentStage) return;
-    const succeeded = await perform('Результат отправлен', () => submitTaskStageResult(run.run_id, currentStage.id, {
-      result: currentStage.result,
-      ...(currentStage.result === 'md' ? { content: resultContent } : {}),
-      ...(currentStage.result === 'link' ? { url: resultURL, link_kind: currentStage.link_kind ?? resultLinkKind } : {}),
-      ...(resultNote.trim() ? { note: resultNote.trim() } : {}),
-      ...(resultDescription.trim() ? { description: resultDescription.trim() } : {}),
-    }));
-    if (succeeded) {
-      setShowResultForm(false);
-      setResultContent('');
-      setResultURL('');
-      setResultNote('');
-      setResultDescription('');
-    }
+    const stageRunID = run.run_id;
+    const stageID = currentStage.id;
+    // The draft is dropped only once the server accepted the result; a
+    // rejected submission keeps it for the next attempt.
+    const succeeded = await perform('Результат отправлен', async () => {
+      await submitTaskStageResult(stageRunID, stageID, value);
+      clearStageResultDraft(stageRunID, stageID);
+    });
+    if (succeeded) setShowResultForm(false);
   };
 
   const submitReason = (action: 'skip' | 'override' | 'return') => async (event: FormEvent) => {
@@ -361,36 +358,14 @@ export function TaskDetail() {
         </div>}
 
         {currentStage && showResultForm && allowed.has('results') && (
-          <form className={styles.resultForm} onSubmit={submitResult}>
-            <h3>Результат этапа «{currentStage.title}»</h3>
-            {currentStage.result === 'md' && <label>Результат в Markdown
-              <textarea value={resultContent} onChange={(event) => setResultContent(event.target.value)} rows={8} required maxLength={10 * 1024 * 1024} />
-            </label>}
-            {currentStage.result === 'link' && <>
-              <label>Ссылка на результат
-                <input type="url" value={resultURL} onChange={(event) => setResultURL(event.target.value)} required />
-              </label>
-              {!currentStage.link_kind && <label>Вид ссылки
-                <select value={resultLinkKind} onChange={(event) => setResultLinkKind(event.target.value as 'pr' | 'build' | 'other')}>
-                  <option value="pr">Pull request</option><option value="build">Сборка</option><option value="other">Другое</option>
-                </select>
-              </label>}
-            </>}
-            {currentStage.result === 'approve' && <p>Подтвердите завершение этапа и при желании добавьте заметку.</p>}
-            <label>Что сделано
-              <input value={resultDescription} onChange={(event) => setResultDescription(event.target.value)} maxLength={4000} />
-            </label>
-            <label>Заметка
-              <textarea value={resultNote} onChange={(event) => setResultNote(event.target.value)} rows={3} maxLength={16000} />
-            </label>
-            <div className={styles.actions}>
-              <button disabled={working || currentStage.result === 'md' && !resultContent.trim() || currentStage.result === 'link' && !resultURL.trim()}>
-                {working ? 'Отправляем…' : 'Отправить результат'}
-              </button>
-              <button type="button" disabled={working} onClick={() => setShowResultForm(false)}>Отмена</button>
-            </div>
-          </form>
+          <StageResultForm key={`${run.run_id}:${currentStage.id}`} runId={run.run_id} stage={currentStage}
+            working={working} onSubmit={(value) => void submitResult(value)} onCancel={() => setShowResultForm(false)} />
         )}
+      </section>
+
+      <section className={styles.panel} aria-labelledby="timeline-heading">
+        <h2 id="timeline-heading">Таймлайн задачи</h2>
+        <TaskTimeline details={details} events={visibleSnapshot.events} eventTitle={eventTitle} />
       </section>
 
       <section className={styles.panel} aria-labelledby="results-heading">
@@ -432,7 +407,7 @@ export function TaskDetail() {
           <div><h2 id="events-heading">Лента событий задачи</h2><p>Обновляется по событиям выполнения.</p></div>
         </div>
         {visibleSnapshot.events.length === 0 ? <p>Событий пока нет.</p> : <ol className={styles.events}>
-          {visibleSnapshot.events.map((event) => <li key={event.cursor} data-severity={event.severity}>
+          {visibleSnapshot.events.map((event) => <li key={event.cursor} id={`task-event-${event.cursor}`} data-severity={event.severity}>
             <time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleString('ru-RU')}</time>
             <strong>{eventTitle(event.type)}</strong>
             <span>{[event.stage, event.actor, event.executor, event.attempt_id].filter(Boolean).join(' · ')}</span>

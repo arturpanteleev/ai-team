@@ -29,8 +29,8 @@ fields.
 | `POST /api/runs/{runID}/plan/approve` | Approve a pinned delivery plan hash |
 | `GET /api/runs/{runID}/events?after=&limit=&warnings=&order=&before=` | Run event feed |
 | `GET /api/events?after=&limit=&warnings=&run_id=&order=&before=` | Global event feed |
-| `GET /api/metrics/flow?from=&to=` | Flow metrics JSON |
-| `GET /api/metrics/flow.csv?from=&to=` | Flow metrics CSV |
+| `GET /api/metrics/flow?from=&to=&run_id=` | Flow metrics JSON |
+| `GET /api/metrics/flow.csv?from=&to=&run_id=` | Flow metrics CSV |
 
 Stage actions are authorized by the functions of the run's pinned template
 (B-82). `take`, `executor`, `run-agent`, `results`/`submit`, `grill/*`,
@@ -65,6 +65,18 @@ tasks and renders each stage action only when its name is present in
 `allowed_actions`. It keeps result revisions and resolved grill decisions in
 the task history and displays checker evidence, event details, and attempt log
 links alongside the run.
+
+When `allowed_actions` contains `results`, the page submits the stage's
+configured result type through `POST .../results`: a Markdown editor with
+preview and `.md` file upload (UTF-8, up to 10 MiB), a link form that uses the
+stage's pinned `link_kind` and accepts only HTTP(S) URLs without credentials,
+or an approve with optional text sent as `note`. An empty “Что сделано”
+(`description`) shows a warning but does not block submission; the server then
+records `description_missing`. The unsent form is kept as a draft in the
+browser's `localStorage` per run and stage, restored (and the form reopened)
+after a page reload, kept when the server rejects the submission, and removed
+once the server accepts it. Without usable storage the form still works and
+says the draft is not saved.
 
 Event endpoints share the persisted SQLite event-ID cursor. By default
 (`order=asc`) they return events with a cursor greater than `after`, oldest
@@ -116,6 +128,28 @@ denominator is unknown or incomplete, or if the denominator is zero.
 These are subscription estimates, not runtime `cost_usd`. JSON and CSV preserve
 attestation, configuration/envelope/manifest source, currency, and formula
 basis.
+
+The optional `run_id` restricts the selected runs to one task (400 for an
+unsafe ID, 404 for an unknown task). Without `from` and `to` it covers the
+whole task; monthly subscription denominators still use all project runs. The
+executor kind of an attempt (`human_attempts`, `agent_attempts`, stage tokens)
+comes from its `attempt_finished` event, because `stages.execution` holds the
+workflow execution state.
+
+The task page shows a timeline (FR-22) with one lane per pinned stage. Lane
+segments are derived from the task event feed only: `attempt_started` opens
+work for an agent or waiting for executor for a human; `approval_requested`
+with `human_input` is waiting for executor, with `grill_questions` or
+`stage_check` is a check, and any other trigger is awaiting confirmation;
+`stage_taken` and a decided `human_input` are work; `attempt_finished` opens a
+check (stage checks and gates run after the attempt) unless the outcome failed;
+`transition_selected`, `stage_skipped`, `run_finished` and `run_canceled` close
+the interval. Returns (`return_to_*` transitions and return events), check
+overrides and skips are marked on the issuing stage. A stage without events has
+no bar. Selecting a lane opens the stage card (FR-23), whose tokens and
+subscription-share estimate come from `GET /api/metrics/flow?run_id=`; unknown
+values read “нет данных”. A table of the same segments and marks is available
+for screen readers, and lanes are navigable with the arrow, Home and End keys.
 
 The flow metrics calculation is expected to complete in 300 ms or less for
 1000 recorded runs.

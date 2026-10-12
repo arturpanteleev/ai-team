@@ -343,6 +343,12 @@ export function getFlowMetrics(from: string, to: string): Promise<FlowMetrics> {
   return fetchJson(`/metrics/flow?${flowMetricsQuery(from, to)}`);
 }
 
+// Агрегаты потока (токены, оценка стоимости подписки, раунды) по этапам одной
+// задачи — тот же расчёт, что и на странице наблюдаемости.
+export function getTaskFlowMetrics(runId: string): Promise<FlowMetrics> {
+  return fetchJson(`/metrics/flow?${new URLSearchParams({ run_id: runId }).toString()}`);
+}
+
 export async function downloadFlowMetricsCsv(from: string, to: string): Promise<Blob> {
   const response = await fetch(`${API_BASE}/metrics/flow.csv?${flowMetricsQuery(from, to)}`, { credentials: 'same-origin' });
   if (!response.ok) throw await responseError(response, 'Не удалось экспортировать метрики');

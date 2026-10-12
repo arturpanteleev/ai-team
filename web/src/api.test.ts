@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, getActivePrincipal, getGlobalEvents, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
+import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getFlowMetrics, getGlobalEvents, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -141,5 +141,32 @@ describe('observability API client', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/preflight');
     expect(fetchMock.mock.calls[1][0]).toBe('/api/runs/run%2Fone/logs/attempt%20one');
     expect(fetchMock.mock.calls[2][0]).toBe('/api/runs/run%2Fone/workflow');
+  });
+});
+
+describe('flow metrics API client', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('requests JSON and CSV for the same half-open period', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ lead_time: { count: 0 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('metric,stage,value\n', { status: 200, headers: { 'Content-Type': 'text/csv' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getFlowMetrics('2026-10-01', '2026-11-01');
+    const blob = await downloadFlowMetricsCsv('2026-10-01', '2026-11-01');
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/metrics/flow?from=2026-10-01&to=2026-11-01');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/metrics/flow.csv?from=2026-10-01&to=2026-11-01');
+    expect(blob.size).toBe('metric,stage,value\n'.length);
+  });
+
+  it('surfaces the API error of a rejected CSV export', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: 'to must be later than from', code: 'bad_period' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await expect(downloadFlowMetricsCsv('2026-10-02', '2026-10-01')).rejects.toThrow('to must be later than from');
   });
 });

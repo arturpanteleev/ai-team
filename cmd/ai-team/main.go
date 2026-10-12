@@ -2251,6 +2251,9 @@ func cmdWeb() {
 		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)
 		serverOptions = append(serverOptions, web.WithTrackerAdapter(jira))
 	}
+	if dispatcher := web.NotificationDispatcherFromConfig(cfg, os.Getenv, nil); dispatcher != nil {
+		serverOptions = append(serverOptions, web.WithNotifications(dispatcher))
+	}
 	cloudAuthEnabled := false
 	var localWebToken, localWebTokenPath string
 	if secret := os.Getenv(*authSecretEnv); secret != "" {

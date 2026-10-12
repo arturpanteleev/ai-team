@@ -118,6 +118,7 @@ stage_timeout: 30m
 | `delivery_timeout` | нет | `10m` | бюджет всей delivery: commit, push и PR |
 | `budget` | нет | `24h`, `100` | жёсткие лимиты всего прогона; см. [лимиты](#лимиты-времени-и-попыток) |
 | `tracker` | нет | — | односторонние интеграции задач; см. [Jira](#внешний-трекер-jira) |
+| `notifications` | нет | — | уведомления о событиях задач; см. [уведомления](#уведомления-webhook-slack-e-mail) |
 | `redaction` | нет | блок экспорта включён | правила поиска секретов |
 | `retention` | нет | `720h`, `20` | умолчания для `ai-team gc` |
 | `tree_hash` | нет | — | дополнительные каталоги, которые не входят в хеш дерева |
@@ -239,6 +240,76 @@ tracker:
 автоматически; при аварийном завершении между успешным комментарием Jira и
 фиксацией локального курсора комментарий может быть отправлен повторно после
 перезапуска.
+
+### Уведомления: webhook, Slack, e-mail
+
+`ai-team web` может отправлять события задач во внешние каналы. Каждый канал
+подписывается на типы событий (`events`) и, при желании, на функции этапов
+шаблона (`functions`: `developer`, `qa`, `bo` и т. п.). Без `functions` канал
+получает выбранные типы событий любого этапа, включая события без этапа
+(`run_started`, `run_finished`); с `functions` — только события этапов этих
+функций.
+
+```yaml
+notifications:
+  web_base_url: https://ai-team.example   # ссылка на /tasks/<run_id>, необязательно
+  channels:
+    - name: ops-hook
+      type: webhook
+      url_env: AI_TEAM_NOTIFY_WEBHOOK_URL
+      events: [stage_stalled, check_overridden, integration_error]
+    - name: team-slack
+      type: slack
+      url_env: AI_TEAM_SLACK_WEBHOOK_URL
+      events: [attempt_finished, approval_requested]
+      functions: [developer, qa]
+    - name: leads
+      type: email
+      smtp_url_env: AI_TEAM_SMTP_URL          # smtp://user:pass@host:587 или smtps://user:pass@host:465
+      from: ai-team <bot@example.com>
+      to: [lead@example.com]
+      events: [check_overridden]
+```
+
+| Тип | Что отправляется | Откуда адрес |
+|---|---|---|
+| `webhook` | `POST` JSON: `event_id`, `type`, `run_id`, `task_id`, `stage`, `function`, `severity`, `timestamp`, `task_url`, `summary`, `data`; заголовки `Idempotency-Key: ai-team-event-<id>` и `X-AI-Team-Event-ID` | `url_env` |
+| `slack` | incoming webhook, поле `text` с кратким описанием и ссылкой | `url_env` |
+| `email` | `text/plain` письмо, `Message-ID: <ai-team-event-<id>@ai-team.invalid>` | `smtp_url_env` |
+
+Адреса webhook и Slack — только `https`, без логина в URL. Редирект
+разрешён только на тот же хост по `https`; редирект на другой хост
+отклоняется, и тело запроса туда не уходит. Каждая доставка ограничена
+10 секундами. Для SMTP при `smtp://` используется STARTTLS, если сервер его
+предлагает; логин и пароль не отправляются без TLS (кроме loopback-сервера).
+
+Неизвестный тип события в `events`, неизвестный `type` канала или функция,
+которой нет в шаблоне, — ошибка конфигурации. Список допустимых событий:
+`approval_decided`, `approval_requested`, `attempt_finished`,
+`attempt_started`, `attempts_invalidated`, `check_error`, `check_overridden`,
+`delivery_deferred`, `delivery_plan_approved`, `delivery_retry_failed`,
+`delivery_retry_requested`, `delivery_retry_succeeded`, `description_missing`,
+`executor_changed`, `grill_completed`, `human_result_edited_agent`,
+`integration_error`, `queue_updated`, `run_canceled`, `run_cancel_requested`,
+`run_finished`, `run_paused`, `run_queued`, `run_resumed`, `run_started`,
+`stage_returned`, `stage_skipped`, `stage_stalled`, `stage_taken`,
+`transition_selected`.
+
+Адреса и пароли хранятся только в переменных окружения процесса
+`ai-team web`; в YAML пишутся лишь их имена. Если переменная не задана или
+канал недоступен, задача продолжается, а в поток событий пишется durable
+предупреждение `integration_error` с `integration: notifier` и именем канала;
+URL, тело ответа и учётные данные в него не попадают. Об ошибках самих
+уведомлений канал не уведомляет, даже если подписан на `integration_error`.
+
+Уведомления читают события из SQLite по собственному курсору. При первом
+включении курсор ставится на текущий край, старые события не рассылаются.
+Каждая пара «канал — событие» фиксируется в журнале доставок, поэтому повтор
+события после переподключения, перезапуска или отката курсора второе
+уведомление не создаёт. Окно повтора остаётся одно: если процесс завершился
+после того, как канал принял запрос, но до записи в журнал, после перезапуска
+событие уйдёт ещё раз — для этого случая webhook несёт `Idempotency-Key`, а
+письмо — стабильный `Message-ID`.
 
 ### redaction
 

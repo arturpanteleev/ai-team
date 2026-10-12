@@ -1006,6 +1006,28 @@ func (s *Server) taskEventPage(runID string, r *http.Request) ([]Event, int64, e
 			return nil, cursor, errors.New("limit must be between 1 and 1000")
 		}
 	}
+	descending := false
+	switch order := r.URL.Query().Get("order"); order {
+	case "", "asc":
+	case "desc":
+		descending = true
+	default:
+		return nil, cursor, errors.New("order must be asc or desc")
+	}
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		if !descending {
+			return nil, cursor, errors.New("before requires order=desc")
+		}
+		if r.URL.Query().Get("after") != "" {
+			return nil, cursor, errors.New("after and before cannot be combined")
+		}
+		cursor, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cursor < 0 {
+			return nil, cursor, errors.New("before must be a non-negative event cursor")
+		}
+	} else if descending && r.URL.Query().Get("after") != "" {
+		return nil, cursor, errors.New("order=desc pages with before, not after")
+	}
 	warningsOnly := strings.EqualFold(r.URL.Query().Get("warnings"), "true")
 	values := make([]Event, 0, limit)
 	for len(values) < limit {
@@ -1014,9 +1036,12 @@ func (s *Server) taskEventPage(runID string, r *http.Request) ([]Event, int64, e
 			batchSize = 1000
 		}
 		var batch []store.Event
-		if runID == "" {
+		switch {
+		case descending:
+			batch, err = s.store.GetEventsBefore(runID, cursor, batchSize)
+		case runID == "":
 			batch, err = s.store.GetEventsAfter(cursor, batchSize)
-		} else {
+		default:
 			batch, err = s.store.GetRunEventsAfter(runID, cursor, batchSize)
 		}
 		if err != nil {

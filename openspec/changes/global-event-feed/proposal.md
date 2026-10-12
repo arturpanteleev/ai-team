@@ -9,7 +9,10 @@ warnings, and open the task that produced an event.
 
 - Add a global event feed page backed by the persisted event API and live
   WebSocket stream.
-- Add an all-events and warnings-only filter, cursor pagination, and task links.
+- Add an all-events and warnings-only filter, newest-first cursor pagination,
+  and task links.
+- Add `order=desc` and `before` to the event API so the feed opens on the
+  newest events; ascending `after` pagination stays the default.
 - Resolve stable run IDs from events to the existing task detail page.
 
 ## Impact
@@ -18,4 +21,4 @@ warnings, and open the task that produced an event.
 - A stable `/runs/:runID` UI link that resolves to the existing
   `/pipelines/:id` task detail route.
 - No new backend event storage format; the feed reuses the existing global
-  cursor and warning contract.
+  cursor and warning contract. Existing `after` clients are unchanged.

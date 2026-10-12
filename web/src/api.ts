@@ -53,8 +53,11 @@ export async function getTaskRun(runID: string): Promise<{ run: PipelineRun; sta
   return fetchJson(`/runs/${encodeURIComponent(runID)}`);
 }
 
-export async function getGlobalEvents(after = 0, limit = 100, warningsOnly = false): Promise<{ events: TaskEvent[]; next_cursor: number }> {
-  const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+// getGlobalEvents pages the global feed newest-first. `before` is the previous
+// page's next_cursor; 0 starts from the newest persisted event.
+export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = false): Promise<{ events: TaskEvent[]; next_cursor: number }> {
+  const query = new URLSearchParams({ order: 'desc', limit: String(limit) });
+  if (before > 0) query.set('before', String(before));
   if (warningsOnly) query.set('warnings', 'true');
   return fetchJson(`/events?${query.toString()}`);
 }

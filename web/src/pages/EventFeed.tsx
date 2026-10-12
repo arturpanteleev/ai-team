@@ -40,11 +40,12 @@ function isWarningEvent(event: Pick<TaskEvent, 'type' | 'severity' | 'data'>): b
     warningTypes.has(event.type);
 }
 
+// The feed is newest-first: live events land on top, older pages below.
 function mergeEvents(existing: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
   const byCursor = new Map<number, TaskEvent>();
   for (const event of existing) byCursor.set(event.cursor, event);
   for (const event of incoming) byCursor.set(event.cursor, event);
-  return [...byCursor.values()].sort((left, right) => left.cursor - right.cursor);
+  return [...byCursor.values()].sort((left, right) => right.cursor - left.cursor);
 }
 
 function dataLabel(data: Record<string, unknown>): string {
@@ -125,7 +126,11 @@ export function EventFeed() {
       if (generation !== requestGeneration.current) return;
       const pageEvents = page.events ?? [];
       setEvents((current) => mergeEvents(current, pageEvents));
-      setCursor((current) => Math.max(current, page.next_cursor ?? current));
+      // Older pages only move the "before" cursor down.
+      setCursor((current) => {
+        const next = page.next_cursor ?? current;
+        return current > 0 && next > 0 ? Math.min(current, next) : next || current;
+      });
       setHasMore(pageEvents.length === PAGE_SIZE);
     } catch {
       if (generation === requestGeneration.current) setError('Не удалось загрузить следующие события. Попробуйте ещё раз.');

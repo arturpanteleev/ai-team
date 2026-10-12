@@ -107,14 +107,16 @@ describe('cloud authentication client', () => {
 describe('global event feed API', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('uses the persisted global cursor and server-side warning filter', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ events: [], next_cursor: 23 }), { status: 200 }));
+  it('pages newest-first before the persisted global cursor with the server-side warning filter', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ events: [], next_cursor: 23 }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
+    await getGlobalEvents(0, 100);
     await getGlobalEvents(12, 50, true);
 
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/events?after=12&limit=50&warnings=true');
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: 'same-origin' });
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/events?order=desc&limit=100');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/events?order=desc&limit=50&before=12&warnings=true');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: 'same-origin' });
   });
 });
 

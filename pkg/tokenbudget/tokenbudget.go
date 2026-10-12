@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -179,11 +180,26 @@ func (l FilesystemLedger) TokensBetween(start, end time.Time) (Usage, error) {
 	return total, nil
 }
 
-// RunCheckerUsage суммирует весь расход проверяющих одного run.
+// RunCheckerUsage суммирует весь расход проверяющих одного run. Маркер
+// начала без итоговой записи — прерванный запуск: его расход неизвестен.
 func RunCheckerUsage(runDir string) (Usage, error) {
-	return checkerUsageBetween(runDir, time.Time{}, time.Unix(1<<62, 0))
+	total, err := checkerUsageBetween(runDir, time.Time{}, time.Unix(1<<62, 0))
+	if err != nil {
+		return Usage{}, err
+	}
+	orphans, err := orphanCheckerMarkers(runDir)
+	if err != nil {
+		return Usage{}, err
+	}
+	if len(orphans) > 0 {
+		total.Unknown = true
+	}
+	return total, nil
 }
 
+// checkerUsageBetween суммирует итоговые записи. Маркеры начала дневной итог
+// не видит: запуск, который идёт прямо сейчас, учитывается по завершении —
+// как и попытка агента этапа до публикации манифеста.
 func checkerUsageBetween(runDir string, start, end time.Time) (Usage, error) {
 	dir := filepath.Join(runDir, CheckerUsageDir)
 	entries, err := os.ReadDir(dir)
@@ -207,22 +223,146 @@ func checkerUsageBetween(runDir string, start, end time.Time) (Usage, error) {
 	return total, nil
 }
 
-// WriteCheckerUsage сохраняет запись расхода проверяющего. Имя файла
-// уникально и запись не перезаписывается: повтор проверки — новая запись.
-func WriteCheckerUsage(runDir string, record CheckerUsageRecord) error {
+const checkerStartedExt = ".started"
+
+func orphanCheckerMarkers(runDir string) ([]string, error) {
+	dir := filepath.Join(runDir, CheckerUsageDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var orphans []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != checkerStartedExt {
+			continue
+		}
+		key := strings.TrimSuffix(entry.Name(), checkerStartedExt)
+		if _, err := os.Lstat(filepath.Join(dir, key+".json")); errors.Is(err, fs.ErrNotExist) {
+			orphans = append(orphans, key)
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	return orphans, nil
+}
+
+// BeginCheckerUsage атомарно пишет маркер начала запуска проверяющего до
+// вызова модели и возвращает ключ записи. Ключ — префикс (попытка этапа,
+// проверяющий, раунд) и первый свободный номер: часы в ключ не входят.
+func BeginCheckerUsage(runDir, prefix string, record CheckerUsageRecord) (string, error) {
 	dir, err := safeio.EnsureDir(runDir, CheckerUsageDir)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if prefix == "" || filepath.Base(prefix) != prefix || strings.ContainsAny(prefix, "\x00") {
+		return "", fmt.Errorf("checker usage key %q is unsafe", prefix)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	for index := 1; index < 10000; index++ {
+		key := fmt.Sprintf("%s-%03d", prefix, index)
+		if _, err := os.Lstat(filepath.Join(dir, key+".json")); err == nil {
+			continue
+		}
+		err := createFileAtomic(dir, key+checkerStartedExt, data)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return key, err
+	}
+	return "", fmt.Errorf("checker usage key %q exhausted", prefix)
+}
+
+// FinishCheckerUsage атомарно пишет итоговую запись расхода под ключом.
+func FinishCheckerUsage(runDir, key string, record CheckerUsageRecord) error {
+	if key == "" || filepath.Base(key) != key {
+		return fmt.Errorf("checker usage key %q is unsafe", key)
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%s-%s-%d.json", record.Stage, record.Checker, record.StartedAt.UTC().UnixNano())
-	if filepath.Base(name) != name {
-		return fmt.Errorf("checker usage record name %q is unsafe", name)
+	dir, err := safeio.EnsureDir(runDir, CheckerUsageDir)
+	if err != nil {
+		return err
 	}
-	return safeio.WriteRegularFileNoFollow(filepath.Join(dir, name), data, 0o644)
+	return createFileAtomic(dir, key+".json", data)
+}
+
+// ReconcileCheckerUsage превращает маркеры прерванных запусков в итоговые
+// записи с неизвестным расходом: после рестарта их видят и бюджет задачи, и
+// дневной итог. Вызывается только владельцем run (под workspace lock), когда
+// ни один проверяющий этого run не исполняется.
+func ReconcileCheckerUsage(runDir string) (int, error) {
+	orphans, err := orphanCheckerMarkers(runDir)
+	if err != nil {
+		return 0, err
+	}
+	dir := filepath.Join(runDir, CheckerUsageDir)
+	for _, key := range orphans {
+		data, err := safeio.ReadRegularFile(filepath.Join(dir, key+checkerStartedExt), maxManifestBytes)
+		if err != nil {
+			return 0, err
+		}
+		var record CheckerUsageRecord
+		if err := json.Unmarshal(data, &record); err != nil || record.StartedAt.IsZero() {
+			record = CheckerUsageRecord{StartedAt: time.Now().UTC()}
+		}
+		record.FinishedAt = record.StartedAt
+		record.Usage = &workflow.AttemptUsage{}
+		if err := FinishCheckerUsage(runDir, key, record); err != nil && !errors.Is(err, fs.ErrExist) {
+			return 0, err
+		}
+	}
+	return len(orphans), nil
+}
+
+// WriteCheckerUsage сохраняет итоговую запись без отдельного маркера.
+func WriteCheckerUsage(runDir string, record CheckerUsageRecord) error {
+	key, err := BeginCheckerUsage(runDir, record.Stage+"-"+record.Checker, record)
+	if err != nil {
+		return err
+	}
+	return FinishCheckerUsage(runDir, key, record)
+}
+
+// createFileAtomic пишет файл через временный файл, fsync и link: читатель
+// видит либо полный JSON, либо ничего, а существующий файл не перезаписывается.
+func createFileAtomic(dir, name string, data []byte) error {
+	temp, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tempPath, filepath.Join(dir, name)); err != nil {
+		return err
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	if closeErr := directory.Close(); syncErr == nil {
+		syncErr = closeErr
+	}
+	return syncErr
 }
 
 func manifestUsage(path string, start, end time.Time) (Usage, error) {

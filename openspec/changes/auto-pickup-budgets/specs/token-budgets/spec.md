@@ -7,7 +7,11 @@
 The pipeline MUST check a positive `budget.max_task_tokens` or
 `budget.max_daily_tokens` before every agent attempt that invokes a model
 and before every checker-agent run, including grill rounds. Checker usage MUST
-be recorded durably and MUST count toward both budgets.
+be recorded durably and MUST count toward both budgets. A checker run MUST
+leave a start marker before calling the model; on resume a marker without a
+final record MUST count as unknown usage. Resume after a budget stop before a
+checker MUST run only the pending check and MUST NOT repeat the finished stage
+attempt.
 Delivery stages MUST NOT be stopped by the token budget. A budget MUST count
 as exhausted when usage is equal to or greater than the limit. Usage MUST be
 recomputed from durable attempt manifests, not process memory; an attempt
@@ -53,3 +57,10 @@ be re-checked on resume.
 - **GIVEN** a grill checker round consumed the rest of the task budget
 - **WHEN** a human answers and the run resumes in a new process
 - **THEN** the next checker round MUST NOT invoke the model
+
+#### Scenario: Stage attempt consumed the whole budget
+
+- **GIVEN** a stage attempt used exactly `max_task_tokens` and the run stopped before its checker
+- **WHEN** a human resumes the run
+- **THEN** the checker MUST run on the granted allowance
+- **AND** the stage attempt MUST NOT be repeated

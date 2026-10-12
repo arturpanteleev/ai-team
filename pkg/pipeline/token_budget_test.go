@@ -282,13 +282,6 @@ func TestCheckerAgentStopsOnExhaustedTaskBudget(t *testing.T) {
 			}
 			cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
 			cfg.Budget = &config.BudgetConfig{MaxTaskTokens: tc.limit}
-			rt.onExec = func(agentName string, _ []runtime.Artifact) {
-				// Повтор этапа после resume расходует ноль токенов, чтобы
-				// выданного человеком бюджета хватило на проверяющего.
-				if agentName == "tech" {
-					rt.usagePer["tech"] = &runtime.Usage{Attested: true}
-				}
-			}
 			p := New(cfg, stageCheckRegistry(true), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
 			result, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
 			if got := slices.Contains(rt.executed, "verifier"); got != tc.checkerRun {
@@ -310,10 +303,14 @@ func TestCheckerAgentStopsOnExhaustedTaskBudget(t *testing.T) {
 				t.Fatal("budget stop must precede check_started so the check reruns after resume")
 			}
 			resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: result.RunID, TargetDir: dir, ApproveGates: true})
-			// Resume повторяет этап с непройденной проверкой (обычная семантика
-			// resume), после чего проверяющий получает выданный бюджет.
-			if err != nil || rt.calls["verifier"] != 1 {
-				t.Fatalf("resume must run the pending check: result=%+v err=%v calls=%v", resumed, err, rt.calls)
+			// Этап съел весь бюджет; resume не повторяет оплаченную попытку, а
+			// запускает только проверку на выданный человеком бюджет.
+			if err != nil || rt.calls["verifier"] != 1 || rt.calls["tech"] != 1 {
+				t.Fatalf("resume must run only the pending check: result=%+v err=%v calls=%v", resumed, err, rt.calls)
+			}
+			usage, usageErr := tokenbudget.RunCheckerUsage(runDir)
+			if usageErr != nil || usage != (tokenbudget.Usage{Tokens: 4}) {
+				t.Fatalf("checker usage after resume = %+v err=%v", usage, usageErr)
 			}
 		})
 	}
@@ -368,7 +365,7 @@ func TestDeliveryStageIgnoresExhaustedBudget(t *testing.T) {
 		def   string
 		want  bool
 	}{
-		{"delivery kind", "shipper", "name: shipper\nruntime: delivery\nkind: delivery\nmutation: external\noutputs: {}\n", false},
+		{"delivery kind", "shipper", "name: shipper\nruntime: delivery\nkind: delivery\nmutation: external\noutputs:\n  plan: '{feature}/delivery-plan.json'\n", false},
 		{"model agent", "shipper", "name: shipper\nruntime: agentcli\nprompt_file: prompt.md\nmutation: none\noutputs: {}\n", true},
 	}
 	for _, tc := range cases {
@@ -379,6 +376,9 @@ func TestDeliveryStageIgnoresExhaustedBudget(t *testing.T) {
 				tc.agent + "/def.yaml":  def(tc.def),
 				tc.agent + "/prompt.md": def("test"),
 			}))
+			if definition, loadErr := p.loadStageDefinition(tc.agent); loadErr != nil || definition == nil {
+				t.Fatalf("fixture definition must load, otherwise the test is vacuous: %v", loadErr)
+			}
 			store := &appendOnlyEvidence{runDir: filepath.Join(dir, ".ai-team", "runs", "run-budget")}
 			rs := &runState{p: p, runID: "run-budget", evidence: store, budgetConfig: cfg.Budget,
 				usageTotal: runtime.Usage{Attested: true, TokensInput: 5}}
@@ -403,4 +403,44 @@ func (e *appendOnlyEvidence) RunDir() string { return e.runDir }
 func (e *appendOnlyEvidence) Append(event evidence.Event) error {
 	e.events = append(e.events, event)
 	return nil
+}
+
+// Процесс умер посреди вызова проверяющего: маркер начала без итоговой записи.
+// Resume не считает такой расход нулевым — бюджет задачи становится
+// неизвестным, задача стоит, а дневной итог видит неизвестную запись.
+func TestInterruptedCheckerUsageIsUnknownOnResume(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "# Решение\n\nок\n"}
+	rt.content["verifier"] = map[string]string{"verification": "# Отчёт проверки\n\n**Verdict:** PASSED\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"tech":     {Attested: true, TokensInput: 7},
+		"verifier": {Attested: true, TokensInput: 1},
+	}
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+	cfg.Budget = &config.BudgetConfig{MaxTaskTokens: 7}
+	p := New(cfg, stageCheckRegistry(true), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, first, err)
+	runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+	crashedAt := time.Now().UTC()
+	if _, err := tokenbudget.BeginCheckerUsage(runDir, "crashed-verifier-r00", tokenbudget.CheckerUsageRecord{
+		RunID: first.RunID, Stage: "tech", Checker: "verifier", StartedAt: crashedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, resumed, err)
+	if rt.calls["verifier"] != 0 {
+		t.Fatalf("checker must not run with unknown usage: %v", rt.calls)
+	}
+	events := budgetEvents(t, dir, first.RunID)
+	if last := events[len(events)-1]; last.Data["usage_unknown"] != true {
+		t.Fatalf("interrupted checker must make usage unknown: %+v", last)
+	}
+	start, end := tokenbudget.DayWindow(crashedAt)
+	daily, err := tokenbudget.FilesystemLedger{RunsRoot: filepath.Dir(runDir)}.TokensBetween(start, end)
+	if err != nil || !daily.Unknown {
+		t.Fatalf("daily ledger must see the reconciled interrupted checker as unknown: %+v err=%v", daily, err)
+	}
 }

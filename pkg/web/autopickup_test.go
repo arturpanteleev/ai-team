@@ -454,4 +454,11 @@ func TestResumeRecordsActorAndBudgetAllowance(t *testing.T) {
 	if second := resume(); !strings.Contains(second.DataJSON, `"budget_allowance_granted":false`) {
 		t.Fatalf("resume without a new budget stop must not claim a grant: %+v", second)
 	}
+	// Дневной стоп resume новым бюджетом не снимает.
+	if err := srv.store.AppendEventNext(&store.Event{RunID: "run-budget", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"daily"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if third := resume(); !strings.Contains(third.DataJSON, `"budget_allowance_granted":false`) {
+		t.Fatalf("daily budget stop must not report a task allowance grant: %+v", third)
+	}
 }

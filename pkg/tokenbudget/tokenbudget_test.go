@@ -232,3 +232,66 @@ func TestCheckerUsageRecordsCountTowardLedger(t *testing.T) {
 		t.Fatalf("run without checker records = %+v err=%v", empty, err)
 	}
 }
+
+// Маркер начала пишется до вызова модели. Пока итога нет, дневной итог его не
+// видит (запуск идёт), а итог run считает расход неизвестным; reconcile после
+// рестарта превращает маркер в итоговую запись с неизвестным расходом.
+func TestCheckerUsageMarkersAndAtomicKeys(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "20261012T010000Z-eeeeeeee")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	record := CheckerUsageRecord{Stage: "spec", Checker: "spec-checker", StartedAt: at}
+	// Фиксированные часы не дают одинаковых ключей.
+	first, err := BeginCheckerUsage(runDir, "attempt-1-spec-checker-r01", record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := BeginCheckerUsage(runDir, "attempt-1-spec-checker-r01", record)
+	if err != nil || second == first {
+		t.Fatalf("keys must be unique under a fixed clock: %q %q err=%v", first, second, err)
+	}
+	if _, err := BeginCheckerUsage(runDir, "../escape", record); err == nil {
+		t.Fatal("unsafe key prefix must be rejected")
+	}
+	done := record
+	done.FinishedAt = at.Add(time.Minute)
+	done.Usage = &workflow.AttemptUsage{Attested: true, TokensInput: 5}
+	if err := FinishCheckerUsage(runDir, first, done); err != nil {
+		t.Fatal(err)
+	}
+	if err := FinishCheckerUsage(runDir, first, done); err == nil {
+		t.Fatal("final record must not be overwritten")
+	}
+	start, end := DayWindow(at)
+	daily, err := FilesystemLedger{RunsRoot: root}.TokensBetween(start, end)
+	if err != nil || daily != (Usage{Tokens: 5}) {
+		t.Fatalf("in-flight marker must not change the daily total: %+v err=%v", daily, err)
+	}
+	run, err := RunCheckerUsage(runDir)
+	if err != nil || !run.Unknown || run.Tokens != 5 {
+		t.Fatalf("orphan marker must make run usage unknown: %+v err=%v", run, err)
+	}
+	reconciled, err := ReconcileCheckerUsage(runDir)
+	if err != nil || reconciled != 1 {
+		t.Fatalf("reconcile = %d err=%v", reconciled, err)
+	}
+	if again, err := ReconcileCheckerUsage(runDir); err != nil || again != 0 {
+		t.Fatalf("reconcile must be idempotent: %d err=%v", again, err)
+	}
+	daily, err = FilesystemLedger{RunsRoot: root}.TokensBetween(start, end)
+	if err != nil || !daily.Unknown {
+		t.Fatalf("reconciled interrupted checker must be unknown in the daily total: %+v err=%v", daily, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(runDir, CheckerUsageDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" && filepath.Ext(entry.Name()) != ".started" {
+			t.Fatalf("temporary file left behind: %s", entry.Name())
+		}
+	}
+}

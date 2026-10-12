@@ -439,11 +439,18 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
-// pendingBudgetStop сообщает, стоит ли run на паузе по бюджету, ещё не
-// снятой человеком: последнее budget_exceeded новее последнего resume.
+// pendingBudgetStop сообщает, снимает ли resume паузу по бюджету задачи:
+// последнее budget_exceeded со scope=task новее последнего resume. Только
+// такая пауза даёт задаче новый бюджет; дневной бюджет resume не выдаёт.
 func (s *Server) pendingBudgetStop(runID string) bool {
 	stop, err := s.store.LatestRunEvent(runID, "budget_exceeded")
 	if err != nil || stop == nil {
+		return false
+	}
+	var data struct {
+		Scope string `json:"scope"`
+	}
+	if json.Unmarshal([]byte(stop.DataJSON), &data) != nil || data.Scope != "task" {
 		return false
 	}
 	resumed, err := s.store.LatestRunEvent(runID, "run_resume_requested")

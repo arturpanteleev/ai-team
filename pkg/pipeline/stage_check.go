@@ -72,7 +72,7 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	if check.Kind == "agent" {
 		// Бюджет проверяется до check_started: после resume проверка
 		// повторится целиком, а не останется незавершённой.
-		if err := rs.enforceTokenBudget(stageID); err != nil {
+		if err := rs.enforceCheckTokenBudget(stageID, result.AttemptID); err != nil {
 			return err
 		}
 	}
@@ -357,7 +357,7 @@ func (rs *runState) runStageGrill(ctx context.Context, stage config.TemplateStag
 		return rs.completeStageGrill(stage.ID, result.AttemptID, maxRounds, 0, "max_rounds")
 	}
 
-	if err := rs.enforceTokenBudget(stage.ID); err != nil {
+	if err := rs.enforceCheckTokenBudget(stage.ID, result.AttemptID); err != nil {
 		return err
 	}
 	if err := rs.evidence.Append(evidence.Event{
@@ -1115,12 +1115,16 @@ func (rs *runState) runCheckerAgentWithInputs(ctx context.Context, stage config.
 	task := *rs.task
 	// Проверяющий вызывает модель, поэтому подчиняется тем же бюджетам, что
 	// и агент этапа, а его расход записывается до разбора результата.
-	if err := rs.enforceTokenBudget(stage.ID); err != nil {
+	if err := rs.enforceCheckTokenBudget(stage.ID, result.AttemptID); err != nil {
 		return "", fmt.Errorf("агент проверки %s: %w", check.Agent, err)
 	}
 	checkerStarted := rs.p.clock()
+	usageKey, err := rs.beginCheckerUsage(stage.ID, check.Agent, result.AttemptID, checkerRound, checkerStarted)
+	if err != nil {
+		return "", fmt.Errorf("агент проверки %s: маркер расхода токенов: %w", check.Agent, err)
+	}
 	execErr := checkerRuntime.Execute(ctx, runtimeAgent, &task, inputs)
-	if err := rs.recordCheckerUsage(stage.ID, check.Agent, checkerRuntime, checkerStarted, rs.p.clock()); err != nil {
+	if err := rs.finishCheckerUsage(usageKey, stage.ID, check.Agent, checkerRuntime, checkerStarted, rs.p.clock()); err != nil {
 		return "", errors.Join(execErr, fmt.Errorf("агент проверки %s: запись расхода токенов: %w", check.Agent, err))
 	}
 	if execErr != nil {

@@ -1410,6 +1410,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		rs.usageTotal = usage
 		// Расход проверяющих живёт в отдельных записях run и тоже
 		// восстанавливается с диска, а не из памяти прошлого процесса.
+		if _, err = tokenbudget.ReconcileCheckerUsage(evidenceStore.RunDir()); err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume checker usage: %w", err)
+		}
 		rs.checkerUsage, err = tokenbudget.RunCheckerUsage(evidenceStore.RunDir())
 		if err != nil {
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume checker usage: %w", err)

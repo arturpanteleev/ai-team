@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -98,6 +99,17 @@ func (rs *runState) taskBudgetBaseline() (int64, error) {
 // enforceTokenBudget проверяет бюджеты перед модельной попыткой stage. При
 // исчерпании пишет budget_exceeded в evidence и возвращает TokenBudgetError.
 func (rs *runState) enforceTokenBudget(stage string) error {
+	return rs.enforceTokenBudgetFor(stage, "")
+}
+
+// enforceCheckTokenBudget — проверка бюджета перед проверяющим уже
+// завершённой попытки этапа. Событие привязано к попытке (phase=check):
+// resume по нему запускает только проверку, не повторяя оплаченную попытку.
+func (rs *runState) enforceCheckTokenBudget(stage, attemptID string) error {
+	return rs.enforceTokenBudgetFor(stage, attemptID)
+}
+
+func (rs *runState) enforceTokenBudgetFor(stage, checkAttemptID string) error {
 	budget := rs.budgetConfig
 	if budget == nil || (budget.MaxTaskTokens <= 0 && budget.MaxDailyTokens <= 0) {
 		return nil
@@ -148,6 +160,10 @@ func (rs *runState) enforceTokenBudget(stage string) error {
 	data["limit"] = exceeded.Limit
 	data["usage_unknown"] = exceeded.Unknown
 	data["next_stage"] = stage
+	if checkAttemptID != "" {
+		data["phase"] = budgetPhaseCheck
+		data["check_attempt_id"] = checkAttemptID
+	}
 	event := evidence.Event{Type: tokenbudget.EventBudgetExceeded, Stage: stage, Timestamp: now, Data: data}
 	if err := rs.evidence.Append(event); err != nil {
 		return errors.Join(&TokenBudgetError{Exceeded: *exceeded}, fmt.Errorf("record budget_exceeded: %w", err))
@@ -177,10 +193,23 @@ func (rs *runState) enforceStageTokenBudget(stage string) error {
 	return rs.enforceTokenBudget(stage)
 }
 
-// recordCheckerUsage сохраняет расход агента-проверяющего: в счётчик задачи и
-// в долговечную запись run, которую видят resume и дневной ledger. Рантайм,
+// budgetPhaseCheck помечает остановку перед проверяющим завершённой попытки.
+const budgetPhaseCheck = "check"
+
+// beginCheckerUsage пишет маркер начала запуска проверяющего до вызова
+// модели: если процесс умрёт посреди вызова, resume увидит маркер без итога
+// и сочтёт расход неизвестным, а не нулевым.
+func (rs *runState) beginCheckerUsage(stage, checker, attemptID string, round int, startedAt time.Time) (string, error) {
+	prefix := fmt.Sprintf("%s-%s-r%02d", attemptID, checker, round)
+	return tokenbudget.BeginCheckerUsage(rs.evidence.RunDir(), prefix, tokenbudget.CheckerUsageRecord{
+		RunID: rs.runID, Stage: stage, Checker: checker, StartedAt: startedAt.UTC(),
+	})
+}
+
+// finishCheckerUsage сохраняет расход агента-проверяющего: в счётчик задачи и
+// в итоговую запись run, которую видят resume и дневной ledger. Рантайм,
 // не сообщивший подтверждённый расход, делает расход неизвестным.
-func (rs *runState) recordCheckerUsage(stage, checker string, reporter any, startedAt, finishedAt time.Time) error {
+func (rs *runState) finishCheckerUsage(key, stage, checker string, reporter any, startedAt, finishedAt time.Time) error {
 	usage := &workflow.AttemptUsage{}
 	if source, ok := reporter.(runtime.UsageReporter); ok {
 		if reported := source.Usage(); reported != nil && reported.Attested {
@@ -189,8 +218,48 @@ func (rs *runState) recordCheckerUsage(stage, checker string, reporter any, star
 		}
 	}
 	rs.checkerUsage = rs.checkerUsage.Add(tokenbudget.AttemptUsage(usage))
-	return tokenbudget.WriteCheckerUsage(rs.evidence.RunDir(), tokenbudget.CheckerUsageRecord{
+	return tokenbudget.FinishCheckerUsage(rs.evidence.RunDir(), key, tokenbudget.CheckerUsageRecord{
 		RunID: rs.runID, Stage: stage, Checker: checker,
 		StartedAt: startedAt.UTC(), FinishedAt: finishedAt.UTC(), Usage: usage,
 	})
+}
+
+// pendingCheckAfterBudgetStop находит попытку этапа, которая завершилась,
+// но чья проверка была остановлена бюджетом. Resume продолжает с проверки
+// этой попытки: повтор этапа заново оплачивал бы уже сделанную работу и при
+// бюджете не больше одной попытки зацикливался бы.
+func (rs *runState) pendingCheckAfterBudgetStop(stage string) (notifier.StageResult, bool, error) {
+	events, found, err := rs.readEvidenceEvents()
+	if err != nil || !found {
+		return notifier.StageResult{}, false, err
+	}
+	attemptID := ""
+	for _, event := range events {
+		switch {
+		case event.Type == tokenbudget.EventBudgetExceeded && event.Stage == stage && event.Data["phase"] == budgetPhaseCheck:
+			attemptID, _ = event.Data["check_attempt_id"].(string)
+		case event.Type == "attempt_started" && event.Stage == stage, event.Type == "attempts_invalidated":
+			// Новая попытка или откат делают старую остановку неактуальной.
+			attemptID = ""
+		}
+	}
+	if attemptID == "" {
+		return notifier.StageResult{}, false, nil
+	}
+	if _, checked, err := rs.replayedStageCheck(stage, attemptID); err != nil {
+		return notifier.StageResult{}, false, err
+	} else if checked {
+		return notifier.StageResult{}, false, nil
+	}
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		result := rs.results[index]
+		if result.AttemptID != attemptID {
+			continue
+		}
+		if result.Superseded || result.Status != notifier.StatusPassed || result.State.Outcome != workflow.OutcomePassed {
+			return notifier.StageResult{}, false, nil
+		}
+		return result, true, nil
+	}
+	return notifier.StageResult{}, false, nil
 }

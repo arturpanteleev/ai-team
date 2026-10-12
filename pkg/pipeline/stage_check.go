@@ -471,9 +471,20 @@ func (rs *runState) runGrillChecker(ctx context.Context, stage config.TemplateSt
 	if err != nil {
 		return "", fmt.Errorf("load immutable grill inputs: %w", err)
 	}
-	if len(rs.selectedArtifactRevisions) > 0 {
+	selection := make(map[string]string, len(rs.selectedArtifactRevisions))
+	for path, revisionID := range rs.selectedArtifactRevisions {
+		selection[path] = revisionID
+	}
+	grillSelection, err := rs.grillRevisionSelection(rs.replayed, stage.ID, result.AttemptID)
+	if err != nil {
+		return "", fmt.Errorf("resolve verified grill revisions: %w", err)
+	}
+	for path, revisionID := range grillSelection {
+		selection[path] = revisionID
+	}
+	if len(selection) > 0 {
 		for index := range outputs {
-			selected, err := selectedGrillRevision(rs.runCfg.TargetDir, rs.runID, stage.ID, outputs[index], rs.selectedArtifactRevisions)
+			selected, err := selectedGrillRevision(rs.runCfg.TargetDir, rs.runID, stage.ID, outputs[index], selection)
 			if err != nil {
 				return "", fmt.Errorf("select revised grill input %s: %w", outputs[index].Name, err)
 			}

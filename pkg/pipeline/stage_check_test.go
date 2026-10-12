@@ -535,10 +535,179 @@ func TestRun_GrillNewVersionUsesPinnedArtifactRevision(t *testing.T) {
 		return map[string]string{"verification": "**Verdict:** PASSED\n"}
 	}
 	if err := runGrillPipeline(t, p, dir, runID); err != nil {
-		t.Fatalf("new version should be checked and accepted: %v\nreport: %s", err, checkReportFile(t, dir))
+		values, _ := store.List(runID)
+		var reportText string
+		for _, value := range values {
+			if value.Kind != approval.KindCheckDecision {
+				continue
+			}
+			var payload approval.CheckDecisionPayload
+			_ = json.Unmarshal(value.Payload, &payload)
+			data, _ := os.ReadFile(filepath.Join(dir, ".ai-team", "artifacts", filepath.FromSlash(payload.ReportPath)))
+			reportText = string(data)
+		}
+		t.Fatalf("new version should be checked and accepted: %v; report=%s", err, reportText)
 	}
 	if !revisedArtifactSeen {
 		t.Fatal("checker did not receive the pinned human revision")
+	}
+}
+
+func TestRun_GrillNewVersionFeedsNextStageAfterResume(t *testing.T) {
+	dir := env(t)
+	registry := agent.NewFS(fstest.MapFS{
+		"tech/def.yaml": def(`name: tech
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  result: '{feature}/tech.md'
+`),
+		"tech/prompt.md": def("test"),
+		"verifier/def.yaml": def(`name: verifier
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs:
+  verification: '{feature}/verification.md'
+`),
+		"verifier/prompt.md": def("test"),
+		"reviewer/def.yaml": def(`name: reviewer
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  result: '{feature}/tech.md'
+outputs:
+  review: '{feature}/review.md'
+`),
+		"reviewer/prompt.md": def("test"),
+	})
+	cfg := grillStageCheckConfig(3)
+	cfg.PipelineAgents = append(cfg.PipelineAgents, config.AgentConfig{Name: "reviewer"})
+	cfg.Stages = append(cfg.Stages, config.TemplateStage{
+		ID: "reviewer", Title: "Review", Function: "reviewer", Result: "md", Executor: "agent", Agent: "reviewer", Confirm: "auto",
+	})
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nИсходная версия.\n"}
+	rt.contentFn["verifier"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"verification": "**Question:** Уточните критерий.\n"}
+		}
+		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+	}
+	var checkerSawRevision, nextStageSawRevision bool
+	var nextStageRevisionPath, nextStageRevisionDigest string
+	var expectedRevision humanartifact.Revision
+	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
+		if agentName != "verifier" && agentName != "reviewer" {
+			return
+		}
+		for _, input := range inputs {
+			if input.Name != "result" {
+				continue
+			}
+			data, err := os.ReadFile(input.Path)
+			if err != nil {
+				t.Errorf("read %s result input: %v", agentName, err)
+				continue
+			}
+			if strings.Contains(string(data), "Новая версия с проверяемым критерием") {
+				if agentName == "verifier" {
+					checkerSawRevision = true
+				} else {
+					nextStageSawRevision = true
+					nextStageRevisionPath = input.Path
+					_, _, nextStageRevisionDigest, err = evidence.ArtifactDigest(input.Path)
+					if err != nil {
+						t.Errorf("digest downstream revision input: %v", err)
+					}
+				}
+			}
+		}
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithApprovalStore(store),
+		WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}))
+	if err := runGrillPipeline(t, p, dir, ""); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	runDir := onlyRunDir(t, dir)
+	manifestPath := filepath.Join(runDir, "attempts", pending.AttemptID, "manifest.json")
+	manifestBefore, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := humanartifact.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := "stages/tech/result.md"
+	expectedRevision, err = revisions.Append(runID, artifactPath, "", "",
+		"## Спецификация\n\nНовая версия с проверяемым критерием.\n", "", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionNewVersion,
+		ArtifactRevisions: map[string]string{artifactPath: expectedRevision.ID}, SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop after transition_selected is durable but before lifecycle advances.
+	// Replay must reconstruct the exact pinned revision for the downstream
+	// stage without rerunning or mutating the immutable source attempt.
+	crashFactory := &humanCrashEvidenceFactory{point: "after-transition"}
+	crashing := New(cfg, registry, WithRuntimeFactory(rt.factory), WithApprovalStore(store),
+		WithEvidenceStoreFactory(crashFactory), WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}))
+	var crashErr error
+	crashCaught := false
+	func() {
+		defer func() { crashCaught = recover() != nil }()
+		_, crashErr = resumeHumanCrashRun(t, crashing, dir, runID)
+	}()
+	if !crashCaught {
+		values, _ := store.List(runID)
+		var reportText string
+		for _, value := range values {
+			if value.Kind != approval.KindCheckDecision {
+				continue
+			}
+			var payload approval.CheckDecisionPayload
+			_ = json.Unmarshal(value.Payload, &payload)
+			data, _ := os.ReadFile(filepath.Join(dir, ".ai-team", "artifacts", filepath.FromSlash(payload.ReportPath)))
+			reportText = string(data)
+		}
+		t.Fatalf("expected post-transition crash, got err=%v report=%s", crashErr, reportText)
+	}
+	if !crashFactory.crashed || !checkerSawRevision {
+		t.Fatalf("expected crash after checker accepted the selected revision: crashed=%v checkerSawRevision=%v", crashFactory.crashed, checkerSawRevision)
+	}
+	resumed := New(cfg, registry, WithRuntimeFactory(rt.factory), WithApprovalStore(store),
+		WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}))
+	if _, err := resumeHumanCrashRun(t, resumed, dir, runID); err != nil {
+		t.Fatalf("resume should pass the pinned revision to the next stage: %v", err)
+	}
+	if !nextStageSawRevision {
+		t.Fatal("next stage consumed the immutable source output instead of the approved human revision")
+	}
+	if !strings.Contains(nextStageRevisionPath, expectedRevision.ID) {
+		t.Fatalf("downstream projection path does not bind the pinned revision ID %s: %s", expectedRevision.ID, nextStageRevisionPath)
+	}
+	if nextStageRevisionDigest != expectedRevision.SHA256 {
+		t.Fatalf("downstream projection digest=%s want=%s", nextStageRevisionDigest, expectedRevision.SHA256)
+	}
+	manifestAfter, err := os.ReadFile(manifestPath)
+	if err != nil || string(manifestAfter) != string(manifestBefore) {
+		t.Fatalf("source attempt manifest must remain immutable: err=%v", err)
 	}
 }
 

@@ -330,6 +330,7 @@ type runState struct {
 	reportsDir                string
 	names                     []string
 	results                   []notifier.StageResult
+	replayed                  evidence.ReplayedRun
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
 	selectedInputOverrides    map[string]map[string]runtime.Artifact
 	questionAnswerTargetStage string
@@ -832,10 +833,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				return RunResult{}, fmt.Errorf("resume human input approval: %w", err)
 			}
 		}
-		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil && resumedApproval.Kind == approval.KindInput {
-			// A crash can happen after a completed human attempt and its graph
-			// transition are durable but before lifecycle advances. Reconcile the
-			// exact transition and resume at its target without replaying the input.
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			(resumedApproval.Kind == approval.KindInput || resumedApproval.Kind == approval.KindGrillQuestions) {
+			// A crash can happen after a completed human/grill-gated attempt and its
+			// graph transition are durable but before lifecycle advances. Reconcile
+			// the exact transition and resume at its target without replaying the
+			// already-completed source attempt.
 			reconciledTo, reconciled, reconcileErr := ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
 			if reconcileErr != nil {
 				return RunResult{}, fmt.Errorf("resume human stage transition: %w", reconcileErr)
@@ -1055,6 +1058,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}); err != nil {
 					return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
 				}
+				replayedRun, err = evidence.ReplayEventLogWithEventSourcesAndTarget(
+					filepath.Join(evidenceStore.RunDir(), "events.jsonl"), runID,
+					p.eventLogSource, p.attemptManifestSource, runCfg.TargetDir,
+				)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("replay resolved approval evidence: %w", err)
+				}
 			}
 			if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
 				if err := evidenceStore.Append(evidence.Event{
@@ -1244,8 +1254,9 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	}
 
 	rs := &runState{
-		p:      p,
-		runCfg: runCfg,
+		p:        p,
+		runCfg:   runCfg,
+		replayed: replayedRun,
 		task: &runtime.Task{
 			Feature:      runCfg.Feature,
 			TaskDesc:     runCfg.TaskDesc,
@@ -1462,6 +1473,19 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 	}
+	// A grill-approved human revision belongs to the source result, but the
+	// attempt manifest remains immutable. If a process crashed after the
+	// transition to retryFrom was journaled, rebuild the downstream input from
+	// that transition's exact source attempt and the verified approval decision.
+	if runCfg.ResumeRunID != "" && runCfg.retryFrom != "" {
+		if incoming := latestInboundTransition(replayedRun.Transitions, runCfg.retryFrom); incoming != nil {
+			if err := rs.projectGrillRevisionInputs(replayedRun, incoming.From, incoming.AttemptID, runCfg.retryFrom); err != nil {
+				outcome, finalErr := rs.finalize(fmt.Errorf("resume grill revision input for %s: %w", runCfg.retryFrom, err))
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+		}
+	}
+
 	graphInputApproval := recoveredGraphApproval
 	if graphInputApproval == nil && resumedApproval != nil && strings.HasPrefix(resumedApproval.Trigger, "graph_outcome:") {
 		graphInputApproval = resumedApproval

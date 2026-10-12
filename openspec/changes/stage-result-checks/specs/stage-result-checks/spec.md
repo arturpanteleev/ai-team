@@ -61,6 +61,11 @@ not resolve the question. The revision MUST satisfy the SHA-256-verified pinned
 stage's typed-result and required-section contract before append, and the next
 checker round MUST read that exact revision. Done and `max_rounds` MUST complete
 the advisory grill without bypassing the stage's normal confirmation.
+When the stage advances, the latest checker-approved `new_version` revision
+MUST be materialized as the matching downstream input, bound by its immutable
+revision ID and content SHA-256. The source attempt manifest MUST remain
+unchanged. Resume after a durable transition but before the target attempt
+MUST reconstruct that same input from the verified transition and approval.
 `grill_completed` MUST record the round count, open-question count, and
 completion reason. A resolved grill approval checkpoint MUST recover from
 verified decision evidence after a process crash.
@@ -85,6 +90,14 @@ verified decision evidence after a process crash.
   as the active stage approval
 - **ТОГДА** resume MUST verify the approval decision and source attempt from
   evidence, then continue the same checker round without losing the decision
+
+#### Scenario: Resume after a grill-approved result transitions downstream
+
+- **КОГДА** a crash occurs after the source transition is durable but before
+  the target stage starts
+- **ТОГДА** resume MUST materialize the exact `new_version` revision selected
+  by the verified grill decision as the target stage input
+- **И** the source attempt manifest MUST remain byte-for-byte unchanged
 
 ### Requirement: Failed check blocks the stage
 

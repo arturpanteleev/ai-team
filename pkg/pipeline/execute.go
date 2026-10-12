@@ -285,6 +285,11 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if target == "" {
 			return fmt.Errorf("workflow graph: edge %s/%s выбрал пустой target", current, edge.Outcome)
 		}
+		if !workflow.IsTerminal(target) {
+			if err := rs.projectGrillRevisionInputs(rs.replayed, current, result.AttemptID, target); err != nil {
+				return fmt.Errorf("project approved grill revision to %s: %w", target, err)
+			}
+		}
 		transitionAt := time.Now().UTC()
 		transitionData := map[string]any{
 			"from": current, "outcome": string(edge.Outcome), "edge_target": edge.To,

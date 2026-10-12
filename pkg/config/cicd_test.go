@@ -51,3 +51,20 @@ func TestCICDTeamCityConfigParsesAndValidates(t *testing.T) {
 		t.Fatal("cicd without provider must be rejected")
 	}
 }
+
+func TestTeamCityMergeTimeout(t *testing.T) {
+	config := &TeamCityConfig{}
+	if value, err := config.EffectiveMergeTimeout(); err != nil || value != DefaultMergeTimeout {
+		t.Fatalf("default merge timeout = %s, %v", value, err)
+	}
+	config.MergeTimeout = "0s"
+	if value, err := config.EffectiveMergeTimeout(); err != nil || value != 0 {
+		t.Fatalf("zero merge timeout = %s, %v", value, err)
+	}
+	for _, invalid := range []string{"-1m", "25h", "soon"} {
+		config.MergeTimeout = invalid
+		if _, err := config.EffectiveMergeTimeout(); err == nil {
+			t.Fatalf("merge_timeout %q accepted", invalid)
+		}
+	}
+}

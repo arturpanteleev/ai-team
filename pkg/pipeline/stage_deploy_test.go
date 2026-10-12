@@ -37,8 +37,12 @@ func (p *stubDeployProvider) Cancel(context.Context, cicd.Build, string) error {
 
 type mergedGit struct{ calls int }
 
-func (g *mergedGit) Run(_ context.Context, _ string, _ string, args ...string) delivery.StepResult {
+func (g *mergedGit) Run(_ context.Context, _ string, name string, args ...string) delivery.StepResult {
 	g.calls++
+	if name == "gh" {
+		return delivery.StepResult{Status: delivery.StepPassed,
+			Stdout: `{"state":"MERGED","baseRefName":"main","mergeCommit":{"oid":"` + deployTestSHA + `"}}`}
+	}
 	if args[0] == "rev-parse" {
 		return delivery.StepResult{Status: delivery.StepPassed, Stdout: deployTestSHA + "\n"}
 	}
@@ -88,7 +92,7 @@ func deployTestState(t *testing.T, provider cicd.Provider, receipt *delivery.Sta
 func TestControllerDeployWritesBuildLinkForMergedCommit(t *testing.T) {
 	provider := &stubDeployProvider{final: cicd.Build{ID: "7", State: cicd.StateFinished, Status: cicd.StatusSuccess,
 		Revision: deployTestSHA, WebURL: "https://teamcity.example.test/build/7"}}
-	state, recorder, deployAgent := deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA})
+	state, recorder, deployAgent := deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA, PRURL: "https://github.example/org/repo/pull/1"})
 	if err := state.runControllerDeploy(context.Background(), "deploy", "attempt-1", deployAgent); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +114,7 @@ func TestControllerDeployWritesBuildLinkForMergedCommit(t *testing.T) {
 func TestControllerDeployFailureRecordsIntegrationError(t *testing.T) {
 	provider := &stubDeployProvider{final: cicd.Build{ID: "7", State: cicd.StateFinished, Status: cicd.StatusFailure,
 		Revision: deployTestSHA, WebURL: "https://teamcity.example.test/build/7"}}
-	state, recorder, deployAgent := deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA})
+	state, recorder, deployAgent := deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA, PRURL: "https://github.example/org/repo/pull/1"})
 	err := state.runControllerDeploy(context.Background(), "deploy", "attempt-1", deployAgent)
 	if !errors.Is(err, cicd.ErrDeployRejected) {
 		t.Fatalf("failed build must reject the stage, got %v", err)
@@ -139,13 +143,13 @@ func TestControllerDeployFailsClosedWithoutCommitOrProvider(t *testing.T) {
 		t.Fatal("deploy without a commit triggered a build")
 	}
 
-	state, _, deployAgent = deployTestState(t, nil, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA})
+	state, _, deployAgent = deployTestState(t, nil, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA, PRURL: "https://github.example/org/repo/pull/1"})
 	if err := state.runControllerDeploy(context.Background(), "deploy", "attempt-1", deployAgent); err == nil ||
 		!strings.Contains(err.Error(), "local controller") {
 		t.Fatalf("process without a provider (worker) must fail closed, got %v", err)
 	}
 
-	state, _, deployAgent = deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA})
+	state, _, deployAgent = deployTestState(t, provider, &delivery.StageDeliveryReceipt{CommitSHA: deployTestSHA, PRURL: "https://github.example/org/repo/pull/1"})
 	state.p.cfg.Stages[0].LinkKind = "pr"
 	if err := state.runControllerDeploy(context.Background(), "deploy", "attempt-1", deployAgent); !errors.Is(err, cicd.ErrDeployRejected) {
 		t.Fatalf("deploy stage must be a build link stage, got %v", err)

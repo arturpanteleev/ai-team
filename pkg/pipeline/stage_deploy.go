@@ -59,10 +59,10 @@ func (rs *runState) runControllerDeploy(ctx context.Context, name, attemptID str
 	if err != nil {
 		return fmt.Errorf("deploy commit: %w", err)
 	}
-	if receipt == nil || strings.TrimSpace(receipt.CommitSHA) == "" {
-		return fmt.Errorf("%w: deploy requires a controller PR delivery receipt with a commit SHA from an earlier stage", cicd.ErrDeployRejected)
+	if receipt == nil || strings.TrimSpace(receipt.CommitSHA) == "" || strings.TrimSpace(receipt.PRURL) == "" {
+		return fmt.Errorf("%w: deploy requires a controller PR delivery receipt with a commit SHA and PR URL from an earlier stage", cicd.ErrDeployRejected)
 	}
-	commitSHA := strings.ToLower(strings.TrimSpace(receipt.CommitSHA))
+	prHead := strings.ToLower(strings.TrimSpace(receipt.CommitSHA))
 	timeout, err := settings.EffectiveTimeout()
 	if err != nil {
 		return err
@@ -71,17 +71,31 @@ func (rs *runState) runControllerDeploy(ctx context.Context, name, attemptID str
 	if err != nil {
 		return err
 	}
+	mergeTimeout, err := settings.EffectiveMergeTimeout()
+	if err != nil {
+		return err
+	}
+	runner := rs.p.deployRunner
+	if runner == nil {
+		// git and gh must not inherit the CI/CD token.
+		runner = cicd.EnvFilteredRunner{Drop: []string{settings.TokenEnv}}
+	}
 	stateDir, err := safeio.EnsureDir(rs.runCfg.TargetDir, ".ai-team", "state", "deploy")
 	if err != nil {
 		return fmt.Errorf("deploy state directory: %w", err)
 	}
-	logging.Printf("  %s выкладка %s через %s: commit %s (%s)\n",
-		ui.Colorize("⇪", ui.ColorCyan), name, provider.Name(), commitSHA, settings.Branch)
+	logging.Printf("  %s выкладка %s через %s: ожидание мержа %s в %s\n",
+		ui.Colorize("⇪", ui.ColorCyan), name, provider.Name(), receipt.PRURL, settings.Branch)
 	build, err := cicd.Deploy(ctx, provider, cicd.DeployRequest{
-		RepositoryDir: rs.runCfg.TargetDir, Remote: deployRemote, Branch: settings.Branch,
-		CommitSHA: commitSHA, ReceiptPath: filepath.Join(stateDir, rs.runID+"-"+name+".json"),
-		Runner: rs.p.deployRunner,
-		Wait:   cicd.WaitOptions{Timeout: timeout, PollInterval: pollInterval, Clock: rs.p.deployClock},
+		RunID: rs.runID, Stage: name,
+		Merge: cicd.MergeRequest{
+			RepositoryDir: rs.runCfg.TargetDir, Remote: deployRemote, Branch: settings.Branch,
+			PRURL: receipt.PRURL, PRHead: prHead,
+		},
+		ReceiptPath: filepath.Join(stateDir, rs.runID+"-"+name+".json"),
+		Runner:      runner,
+		MergeWait:   cicd.WaitOptions{Timeout: mergeTimeout, PollInterval: pollInterval, Clock: rs.p.deployClock},
+		Wait:        cicd.WaitOptions{Timeout: timeout, PollInterval: pollInterval, Clock: rs.p.deployClock},
 	})
 	if err != nil {
 		rs.recordDeployIntegrationError(name, attemptID, provider.Name(), err)

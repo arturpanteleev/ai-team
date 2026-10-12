@@ -33,7 +33,23 @@ var (
 	// ErrDeployTimeout marks an exhausted wait budget. The controller has
 	// requested cancellation of the build.
 	ErrDeployTimeout = errors.New("deploy wait timed out")
+	// ErrNotMerged means the pull request is still open; the deploy waits.
+	ErrNotMerged = errors.New("pull request is not merged yet")
 )
+
+// TransientError marks a failure that a status poll may retry until the
+// deadline: network errors, HTTP 5xx and 429. It never wraps a trigger
+// failure, because a repeated trigger could start a second deployment.
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// IsTransient reports whether err may be retried by a status poll.
+func IsTransient(err error) bool {
+	var transient *TransientError
+	return errors.As(err, &transient)
+}
 
 var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
@@ -49,6 +65,7 @@ type TriggerRequest struct {
 // Build is the provider-neutral view of one CI/CD build.
 type Build struct {
 	ID         string `json:"id"`
+	BuildType  string `json:"build_type,omitempty"`
 	State      string `json:"state"`
 	Status     string `json:"status,omitempty"`
 	StatusText string `json:"status_text,omitempty"`
@@ -94,8 +111,8 @@ type WaitOptions struct {
 
 // Wait polls the build until it finishes, the timeout elapses or ctx is
 // canceled. On timeout or cancellation it asks the provider to cancel the
-// build. A finished build succeeds only with status success and the exact
-// expected revision.
+// build. Transient poll failures are retried until the deadline. A finished
+// build succeeds only with status success and the exact expected revision.
 func Wait(ctx context.Context, provider Provider, build Build, expectedSHA string, options WaitOptions) (Build, error) {
 	if provider == nil {
 		return build, errors.New("cicd provider is not configured")
@@ -134,6 +151,9 @@ func Wait(ctx context.Context, provider Provider, build Build, expectedSHA strin
 			if ctx.Err() != nil {
 				cancelBuild(ctx, provider, build, "ai-team deploy canceled", options.CancelTimeout)
 				return build, fmt.Errorf("deploy wait for build %s: %w", build.ID, ctx.Err())
+			}
+			if IsTransient(err) {
+				continue
 			}
 			return build, err
 		}

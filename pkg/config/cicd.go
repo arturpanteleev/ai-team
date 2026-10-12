@@ -14,6 +14,7 @@ import (
 const (
 	DefaultDeployTimeout      = 30 * time.Minute
 	DefaultDeployPollInterval = 15 * time.Second
+	DefaultMergeTimeout       = 30 * time.Minute
 )
 
 // CICDConfig configures the controller-owned CI/CD provider used by deploy
@@ -30,6 +31,7 @@ type TeamCityConfig struct {
 	TokenEnv     string `yaml:"token_env"`
 	Branch       string `yaml:"branch"`
 	Timeout      string `yaml:"timeout,omitempty"`
+	MergeTimeout string `yaml:"merge_timeout,omitempty"`
 	PollInterval string `yaml:"poll_interval,omitempty"`
 }
 
@@ -54,7 +56,7 @@ func (cc *CICDConfig) UnmarshalYAML(value *yaml.Node) error {
 func (tc *TeamCityConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"base_url": true, "build_type": true, "token_env": true, "branch": true,
-		"timeout": true, "poll_interval": true,
+		"timeout": true, "merge_timeout": true, "poll_interval": true,
 	}, "config: cicd teamcity"); err != nil {
 		return err
 	}
@@ -97,6 +99,9 @@ func (tc *TeamCityConfig) Validate() error {
 	if _, err := tc.EffectiveTimeout(); err != nil {
 		problems = append(problems, err.Error())
 	}
+	if _, err := tc.EffectiveMergeTimeout(); err != nil {
+		problems = append(problems, err.Error())
+	}
 	if _, err := tc.EffectivePollInterval(); err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -126,6 +131,19 @@ func (tc *TeamCityConfig) EffectivePollInterval() (time.Duration, error) {
 	value, err := time.ParseDuration(tc.PollInterval)
 	if err != nil || value < time.Second || value > 10*time.Minute {
 		return 0, fmt.Errorf("cicd.teamcity.poll_interval %q должен быть от 1s до 10m", tc.PollInterval)
+	}
+	return value, nil
+}
+
+// EffectiveMergeTimeout bounds how long a deploy stage waits for the pull
+// request merge. Zero means a single check without waiting.
+func (tc *TeamCityConfig) EffectiveMergeTimeout() (time.Duration, error) {
+	if tc == nil || strings.TrimSpace(tc.MergeTimeout) == "" {
+		return DefaultMergeTimeout, nil
+	}
+	value, err := time.ParseDuration(tc.MergeTimeout)
+	if err != nil || value < 0 || value > 24*time.Hour {
+		return 0, fmt.Errorf("cicd.teamcity.merge_timeout %q должен быть длительностью от 0 до 24h", tc.MergeTimeout)
 	}
 	return value, nil
 }

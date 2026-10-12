@@ -20,6 +20,8 @@ const (
 	maxTeamCityRedirects  = 5
 )
 
+var errForeignRedirect = errors.New("teamcity redirect to another host or scheme is not allowed")
+
 var teamCityBuildTypePattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,225}$`)
 
 // ValidTeamCityBuildType accepts a TeamCity build configuration external ID.
@@ -63,7 +65,7 @@ func NewTeamCity(settings TeamCitySettings, token string, client *http.Client) (
 			return errors.New("teamcity redirect limit exceeded")
 		}
 		if request.URL.Scheme != "https" || !strings.EqualFold(request.URL.Host, base.Host) {
-			return errors.New("teamcity redirect to another host or scheme is not allowed")
+			return errForeignRedirect
 		}
 		return nil
 	}
@@ -87,6 +89,7 @@ func (t *TeamCity) Name() string { return "teamcity" }
 
 type teamCityBuild struct {
 	ID           int64  `json:"id"`
+	BuildTypeID  string `json:"buildTypeId"`
 	State        string `json:"state"`
 	Status       string `json:"status"`
 	StatusText   string `json:"statusText"`
@@ -184,7 +187,12 @@ func (t *TeamCity) convert(response teamCityBuild) (Build, error) {
 	if response.ID <= 0 {
 		return Build{}, errors.New("teamcity response has no build id")
 	}
-	build := Build{ID: strconv.FormatInt(response.ID, 10), StatusText: limitText(response.StatusText, 512)}
+	build := Build{ID: strconv.FormatInt(response.ID, 10), BuildType: response.BuildTypeID, StatusText: limitText(response.StatusText, 512)}
+	// A build ID from another build configuration (for example a tampered
+	// receipt) must never stand in for the configured deploy build.
+	if response.BuildTypeID != t.buildType {
+		return Build{}, fmt.Errorf("%w: teamcity build %s belongs to another build configuration", ErrDeployRejected, build.ID)
+	}
 	switch strings.ToLower(response.State) {
 	case "queued":
 		build.State = StateQueued
@@ -220,7 +228,7 @@ func (t *TeamCity) convert(response teamCityBuild) (Build, error) {
 	if response.WebURL != "" {
 		webURL, err := t.validateWebURL(response.WebURL)
 		if err != nil {
-			return Build{}, fmt.Errorf("teamcity build %s: %w", build.ID, err)
+			return Build{}, fmt.Errorf("%w: teamcity build %s: %v", ErrDeployRejected, build.ID, err)
 		}
 		build.WebURL = webURL
 	}
@@ -260,12 +268,22 @@ func (t *TeamCity) requestJSON(ctx context.Context, method, path string, request
 	}
 	response, err := t.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("teamcity %s %s request failed: %w", method, path, t.redact(safeNetworkError(err)))
+		if ctx.Err() != nil {
+			return fmt.Errorf("teamcity %s %s request: %w", method, path, ctx.Err())
+		}
+		if errors.Is(err, errForeignRedirect) {
+			return fmt.Errorf("teamcity %s %s: %w", method, path, errForeignRedirect)
+		}
+		return &TransientError{Err: fmt.Errorf("teamcity %s %s request failed: %w", method, path, t.redact(safeNetworkError(err)))}
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, teamCityResponseLimit))
-		return fmt.Errorf("teamcity %s %s returned HTTP %d", method, path, response.StatusCode)
+		statusErr := fmt.Errorf("teamcity %s %s returned HTTP %d", method, path, response.StatusCode)
+		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+			return &TransientError{Err: statusErr}
+		}
+		return statusErr
 	}
 	if responseBody == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, teamCityResponseLimit))

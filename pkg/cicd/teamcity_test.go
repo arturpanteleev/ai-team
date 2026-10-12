@@ -36,6 +36,8 @@ type fakeTeamCity struct {
 	cancels  []string
 	authOK   bool
 	webHost  string
+	// unavailable answers the first N status polls with HTTP 503.
+	unavailable int
 }
 
 func newFakeTeamCity(t *testing.T, states ...map[string]any) *fakeTeamCity {
@@ -66,6 +68,11 @@ func (f *fakeTeamCity) handle(w http.ResponseWriter, r *http.Request) {
 		f.triggers = append(f.triggers, trigger)
 		f.writeBuild(w, map[string]any{"state": "queued"})
 	case r.Method == http.MethodGet && r.URL.Path == "/app/rest/builds/id:42":
+		if f.unavailable > 0 {
+			f.unavailable--
+			http.Error(w, "maintenance", http.StatusServiceUnavailable)
+			return
+		}
 		state := f.states[min(f.polls, len(f.states)-1)]
 		f.polls++
 		f.writeBuild(w, state)
@@ -78,7 +85,7 @@ func (f *fakeTeamCity) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeTeamCity) writeBuild(w http.ResponseWriter, fields map[string]any) {
-	build := map[string]any{"id": 42, "webUrl": "https://" + f.webHost + "/buildConfiguration/Deploy/42"}
+	build := map[string]any{"id": 42, "buildTypeId": "Project_Deploy", "webUrl": "https://" + f.webHost + "/buildConfiguration/Deploy/42"}
 	for key, value := range fields {
 		build[key] = value
 	}
@@ -306,148 +313,300 @@ func TestTeamCityRejectsUnsafeConfigurationAndLinks(t *testing.T) {
 	}
 }
 
-// scriptedGit answers Git commands for VerifyMergedCommit without a repository.
-type scriptedGit struct {
-	mergeExit int
-	resolved  string
-	calls     [][]string
+func TestTeamCityWaitRetriesTransientPollFailures(t *testing.T) {
+	fake := newFakeTeamCity(t, finished("SUCCESS", testSHA))
+	fake.unavailable = 2
+	final, err := Wait(context.Background(), fake.provider(t), Build{ID: "42", State: StateQueued}, testSHA, waitOptions(&fakeClock{}))
+	if err != nil || final.Status != StatusSuccess {
+		t.Fatalf("503 during polling must be retried until the deadline: %+v %v", final, err)
+	}
+	fake.unavailable = 100
+	_, err = Wait(context.Background(), fake.provider(t), Build{ID: "42", State: StateQueued}, testSHA, waitOptions(&fakeClock{}))
+	if !errors.Is(err, ErrDeployTimeout) {
+		t.Fatalf("persistent 503 must end at the deadline, got %v", err)
+	}
 }
 
-func (g *scriptedGit) Run(_ context.Context, _ string, name string, args ...string) delivery.StepResult {
-	g.calls = append(g.calls, append([]string{name}, args...))
-	result := delivery.StepResult{Status: delivery.StepPassed}
-	switch args[0] {
-	case "rev-parse":
-		result.Stdout = g.resolved + "\n"
-	case "merge-base":
-		if g.mergeExit != 0 {
-			result = delivery.StepResult{Status: delivery.StepFailed, ExitCode: g.mergeExit, Stderr: "https://" + testToken + "@git.example"}
+func TestTeamCityRejectsBuildOfAnotherConfiguration(t *testing.T) {
+	fake := newFakeTeamCity(t, map[string]any{"state": "finished", "status": "SUCCESS", "buildTypeId": "Other_Config",
+		"revisions": map[string]any{"revision": []map[string]any{{"version": testSHA}}}})
+	_, err := fake.provider(t).Build(context.Background(), "42")
+	if !errors.Is(err, ErrDeployRejected) || !strings.Contains(err.Error(), "another build configuration") {
+		t.Fatalf("build of another configuration must be rejected, got %v", err)
+	}
+}
+
+// gitRepo is a real local repository with a bare origin; gh is stubbed.
+type gitRepo struct {
+	t      *testing.T
+	work   string
+	remote string
+}
+
+func newGitRepo(t *testing.T) *gitRepo {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	root := t.TempDir()
+	repo := &gitRepo{t: t, work: filepath.Join(root, "work"), remote: filepath.Join(root, "remote.git")}
+	repo.git(root, "init", "-q", "--bare", "--initial-branch=main", repo.remote)
+	repo.git(root, "init", "-q", "--initial-branch=main", repo.work)
+	repo.git(repo.work, "remote", "add", "origin", repo.remote)
+	repo.commitFile("base.txt", "base\n", "X")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	return repo
+}
+
+func (r *gitRepo) git(dir string, args ...string) string {
+	r.t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.test",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.test")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func (r *gitRepo) commitFile(name, content, message string) string {
+	r.t.Helper()
+	if err := os.WriteFile(filepath.Join(r.work, name), []byte(content), 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+	r.git(r.work, "add", name)
+	r.git(r.work, "commit", "-qm", message)
+	return r.git(r.work, "rev-parse", "HEAD")
+}
+
+// prBranch creates the controller PR commit on a feature branch forked from
+// main and returns to main.
+func (r *gitRepo) prBranch(content string) string {
+	r.t.Helper()
+	r.git(r.work, "checkout", "-qb", "ai-team/feat", "main")
+	head := r.commitFile("feature.txt", content, "P")
+	r.git(r.work, "checkout", "-q", "main")
+	return head
+}
+
+// ghStub answers gh pr view with a sequence of states and delegates git to a
+// real runner.
+type ghStub struct {
+	mu     sync.Mutex
+	views  []string
+	calls  int
+	runner delivery.CommandRunner
+}
+
+func (g *ghStub) Run(ctx context.Context, dir, name string, args ...string) delivery.StepResult {
+	if name != "gh" {
+		return g.runner.Run(ctx, dir, name, args...)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	view := g.views[min(g.calls, len(g.views)-1)]
+	g.calls++
+	return delivery.StepResult{Status: delivery.StepPassed, Stdout: view}
+}
+
+func merged(oid string) string {
+	return `{"state":"MERGED","baseRefName":"main","mergeCommit":{"oid":"` + oid + `"}}`
+}
+
+const openPR = `{"state":"OPEN","baseRefName":"main","mergeCommit":null}`
+
+func (r *gitRepo) request(prHead string) MergeRequest {
+	return MergeRequest{RepositoryDir: r.work, Remote: "origin", Branch: "main",
+		PRURL: "https://github.example/org/repo/pull/1", PRHead: prHead}
+}
+
+func TestResolveMergedDeploySquashOnMovedMainDeploysBranchTip(t *testing.T) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	repo.commitFile("y.txt", "Y\n", "Y")
+	squash := repo.commitFile("feature.txt", "feature\n", "squash P")
+	tip := repo.commitFile("z.txt", "Z\n", "Z")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+
+	gh := &ghStub{views: []string{merged(squash)}, runner: EnvFilteredRunner{}}
+	proof, err := ResolveMergedDeploy(context.Background(), gh, repo.request(prHead))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.MergeCommit != squash || proof.DeploySHA != tip {
+		t.Fatalf("must deploy the branch tip %s with squash %s, got %+v (PR head %s)", tip, squash, proof, prHead)
+	}
+
+	// End to end: the build is pinned to the tip, never to the PR head that
+	// lacks Y and Z.
+	fake := newFakeTeamCity(t, finished("SUCCESS", tip))
+	request := DeployRequest{RunID: "run-1", Stage: "deploy", Merge: repo.request(prHead), Runner: gh,
+		ReceiptPath: filepath.Join(t.TempDir(), "receipt.json"), Wait: waitOptions(&fakeClock{})}
+	build, err := Deploy(context.Background(), fake.provider(t), request)
+	if err != nil || build.Revision != tip {
+		t.Fatalf("deploy: %+v %v", build, err)
+	}
+	triggers, _ := fake.snapshot()
+	encoded, _ := json.Marshal(triggers)
+	if len(triggers) != 1 || !strings.Contains(string(encoded), tip) || strings.Contains(string(encoded), prHead) {
+		t.Fatalf("trigger must pin the tip, got %s", encoded)
+	}
+}
+
+func TestResolveMergedDeployMergeCommit(t *testing.T) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	repo.commitFile("y.txt", "Y\n", "Y")
+	repo.git(repo.work, "merge", "-q", "--no-ff", "-m", "merge PR", "ai-team/feat")
+	mergeCommit := repo.git(repo.work, "rev-parse", "HEAD")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	proof, err := ResolveMergedDeploy(context.Background(), &ghStub{views: []string{merged(mergeCommit)}, runner: EnvFilteredRunner{}}, repo.request(prHead))
+	if err != nil || proof.DeploySHA != mergeCommit {
+		t.Fatalf("merge commit: %+v %v", proof, err)
+	}
+}
+
+func TestResolveMergedDeployRejectsForeignOrDifferentMerge(t *testing.T) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	altered := repo.commitFile("feature.txt", "something else\n", "squash with other content")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	for name, view := range map[string]string{
+		"different squash content": merged(altered),
+		"merge commit not on main": merged(prHead + ""),
+		"closed":                   `{"state":"CLOSED","baseRefName":"main","mergeCommit":null}`,
+		"other base":               `{"state":"MERGED","baseRefName":"release","mergeCommit":{"oid":"` + altered + `"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ResolveMergedDeploy(context.Background(), &ghStub{views: []string{view}, runner: EnvFilteredRunner{}}, repo.request(prHead))
+			if !errors.Is(err, ErrDeployRejected) {
+				t.Fatalf("must be rejected, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDeployWaitsForMergeAndRejectsClosedPR(t *testing.T) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	repo.git(repo.work, "merge", "-q", "--no-ff", "-m", "merge PR", "ai-team/feat")
+	mergeCommit := repo.git(repo.work, "rev-parse", "HEAD")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+
+	gh := &ghStub{views: []string{openPR, openPR, merged(mergeCommit)}, runner: EnvFilteredRunner{}}
+	proof, err := WaitForMerge(context.Background(), gh, repo.request(prHead), waitOptions(&fakeClock{}))
+	if err != nil || proof.DeploySHA != mergeCommit || gh.calls != 3 {
+		t.Fatalf("must wait for the merge: %+v %v calls=%d", proof, err, gh.calls)
+	}
+	gh = &ghStub{views: []string{openPR}, runner: EnvFilteredRunner{}}
+	if _, err := WaitForMerge(context.Background(), gh, repo.request(prHead), waitOptions(&fakeClock{})); !errors.Is(err, ErrDeployTimeout) {
+		t.Fatalf("an open PR must time out, got %v", err)
+	}
+
+	fake := newFakeTeamCity(t, finished("SUCCESS", mergeCommit))
+	request := DeployRequest{RunID: "run-1", Stage: "deploy", Merge: repo.request(prHead),
+		Runner:      &ghStub{views: []string{`{"state":"CLOSED","baseRefName":"main","mergeCommit":null}`}, runner: EnvFilteredRunner{}},
+		ReceiptPath: filepath.Join(t.TempDir(), "receipt.json"), MergeWait: waitOptions(&fakeClock{}), Wait: waitOptions(&fakeClock{})}
+	if _, err := Deploy(context.Background(), fake.provider(t), request); !errors.Is(err, ErrDeployRejected) {
+		t.Fatalf("closed PR must be rejected, got %v", err)
+	}
+	if triggers, _ := fake.snapshot(); len(triggers) != 0 {
+		t.Fatalf("closed PR triggered %d builds", len(triggers))
+	}
+}
+
+func mergedRepo(t *testing.T) (*gitRepo, string, string) {
+	repo := newGitRepo(t)
+	prHead := repo.prBranch("feature\n")
+	repo.git(repo.work, "merge", "-q", "--no-ff", "-m", "merge PR", "ai-team/feat")
+	mergeCommit := repo.git(repo.work, "rev-parse", "HEAD")
+	repo.git(repo.work, "push", "-q", "origin", "main")
+	return repo, prHead, mergeCommit
+}
+
+func TestDeployReReadsRecordedBuildInsteadOfTrustingReceipt(t *testing.T) {
+	repo, prHead, tip := mergedRepo(t)
+	gh := &ghStub{views: []string{merged(tip)}, runner: EnvFilteredRunner{}}
+	newRequest := func() DeployRequest {
+		return DeployRequest{RunID: "run-1", Stage: "deploy", Merge: repo.request(prHead), Runner: gh,
+			ReceiptPath: filepath.Join(t.TempDir(), "receipt.json"), Wait: waitOptions(&fakeClock{})}
+	}
+	tamper := func(request DeployRequest, runID string, build Build) {
+		t.Helper()
+		request.RunID = runID
+		if err := writeReceipt(request, "teamcity", MergeProof{MergeCommit: tip, DeploySHA: tip}, build); err != nil {
+			t.Fatal(err)
 		}
 	}
-	return result
-}
+	forged := Build{ID: "42", BuildType: "Project_Deploy", State: StateFinished, Status: StatusSuccess,
+		Revision: tip, WebURL: "https://evil.example/build/42"}
 
-func deployRequest(t *testing.T, runner delivery.CommandRunner, clock Clock) DeployRequest {
-	t.Helper()
-	return DeployRequest{
-		RepositoryDir: t.TempDir(), Remote: "origin", Branch: "main", CommitSHA: testSHA,
-		ReceiptPath: filepath.Join(t.TempDir(), "receipt.json"), Runner: runner, Wait: waitOptions(clock),
-	}
-}
-
-func TestDeployRefusesUnmergedCommitBeforeTrigger(t *testing.T) {
-	fake := newFakeTeamCity(t, finished("SUCCESS", testSHA))
-	git := &scriptedGit{mergeExit: 1, resolved: testSHA}
-	_, err := Deploy(context.Background(), fake.provider(t), deployRequest(t, git, &fakeClock{}))
-	if !errors.Is(err, ErrDeployRejected) || !strings.Contains(err.Error(), "not merged") {
-		t.Fatalf("unmerged commit must be rejected, got %v", err)
-	}
-	if strings.Contains(err.Error(), testToken) {
-		t.Fatalf("git diagnostics leaked into error: %v", err)
+	// A forged "finished/success" receipt is re-read: the real build is still
+	// running and the result link comes from TeamCity.
+	fake := newFakeTeamCity(t, map[string]any{"state": "running"}, finished("SUCCESS", tip))
+	request := newRequest()
+	tamper(request, "run-1", forged)
+	build, err := Deploy(context.Background(), fake.provider(t), request)
+	if err != nil || strings.Contains(build.WebURL, "evil.example") || !strings.Contains(build.WebURL, fake.webHost) {
+		t.Fatalf("receipt must not be trusted: %+v %v", build, err)
 	}
 	if triggers, _ := fake.snapshot(); len(triggers) != 0 {
-		t.Fatalf("unmerged commit triggered %d builds", len(triggers))
+		t.Fatalf("recorded build must be resumed, got %d triggers", len(triggers))
+	}
+	receipt, _, _ := ReadReceipt(request.ReceiptPath)
+	if receipt.Build.WebURL != build.WebURL || receipt.RunID != "run-1" || receipt.Stage != "deploy" {
+		t.Fatalf("receipt not refreshed: %+v", receipt)
 	}
 
-	git = &scriptedGit{resolved: otherSHA}
-	if _, err := Deploy(context.Background(), fake.provider(t), deployRequest(t, git, &fakeClock{})); !errors.Is(err, ErrDeployRejected) {
-		t.Fatalf("commit resolving to another object must be rejected, got %v", err)
+	// A receipt pointing at a build of another configuration is rejected.
+	other := newFakeTeamCity(t, map[string]any{"state": "finished", "status": "SUCCESS", "buildTypeId": "Other_Config",
+		"revisions": map[string]any{"revision": []map[string]any{{"version": tip}}}})
+	request = newRequest()
+	tamper(request, "run-1", forged)
+	if _, err := Deploy(context.Background(), other.provider(t), request); !errors.Is(err, ErrDeployRejected) {
+		t.Fatalf("foreign build configuration must be rejected, got %v", err)
 	}
-	request := deployRequest(t, &scriptedGit{resolved: testSHA}, &fakeClock{})
-	request.CommitSHA = "HEAD"
+	if triggers, _ := other.snapshot(); len(triggers) != 0 {
+		t.Fatal("rejected receipt triggered a build")
+	}
+
+	// A receipt of another run is never reused.
+	request = newRequest()
+	tamper(request, "run-other", forged)
 	if _, err := Deploy(context.Background(), fake.provider(t), request); !errors.Is(err, ErrDeployRejected) {
-		t.Fatalf("symbolic revision must be rejected, got %v", err)
+		t.Fatalf("receipt of another run must be rejected, got %v", err)
 	}
-	if triggers, _ := fake.snapshot(); len(triggers) != 0 {
-		t.Fatalf("invalid commits triggered %d builds", len(triggers))
-	}
-}
 
-func TestDeployReusesAndResumesRecordedBuild(t *testing.T) {
-	fake := newFakeTeamCity(t, map[string]any{"state": "running"}, finished("SUCCESS", testSHA))
-	request := deployRequest(t, &scriptedGit{resolved: testSHA}, &fakeClock{})
-	first, err := Deploy(context.Background(), fake.provider(t), request)
-	if err != nil || first.Status != StatusSuccess {
-		t.Fatalf("first deploy: %+v %v", first, err)
+	// A genuine successful build is reused after re-reading, without a trigger.
+	done := newFakeTeamCity(t, finished("SUCCESS", tip))
+	request = newRequest()
+	first, err := Deploy(context.Background(), done.provider(t), request)
+	if err != nil {
+		t.Fatal(err)
 	}
-	again, err := Deploy(context.Background(), fake.provider(t), request)
+	again, err := Deploy(context.Background(), done.provider(t), request)
 	if err != nil || again.WebURL != first.WebURL {
 		t.Fatalf("repeat deploy: %+v %v", again, err)
 	}
-	if triggers, _ := fake.snapshot(); len(triggers) != 1 {
-		t.Fatalf("repeat deploy must reuse the successful build, got %d triggers", len(triggers))
+	if triggers, _ := done.snapshot(); len(triggers) != 1 {
+		t.Fatalf("repeat deploy must reuse the build, got %d triggers", len(triggers))
 	}
-
-	pending := newFakeTeamCity(t, map[string]any{"state": "running"}, finished("SUCCESS", testSHA))
-	pendingRequest := deployRequest(t, &scriptedGit{resolved: testSHA}, &fakeClock{})
-	if err := writeReceipt(pendingRequest.ReceiptPath, "teamcity", pendingRequest, Build{ID: "42", State: StateRunning}); err != nil {
-		t.Fatal(err)
-	}
-	resumed, err := Deploy(context.Background(), pending.provider(t), pendingRequest)
-	if err != nil || resumed.Status != StatusSuccess {
-		t.Fatalf("resumed deploy: %+v %v", resumed, err)
-	}
-	if triggers, _ := pending.snapshot(); len(triggers) != 0 {
-		t.Fatalf("resume must poll the recorded build instead of triggering, got %d triggers", len(triggers))
-	}
-	receipt, found, err := ReadReceipt(pendingRequest.ReceiptPath)
-	if err != nil || !found || receipt.Build.Status != StatusSuccess || receipt.CommitSHA != testSHA {
-		t.Fatalf("final receipt: %+v found=%v err=%v", receipt, found, err)
-	}
-	data, _ := os.ReadFile(pendingRequest.ReceiptPath)
+	data, _ := os.ReadFile(request.ReceiptPath)
 	if strings.Contains(string(data), testToken) {
 		t.Fatal("receipt contains the token")
 	}
 }
 
-func TestVerifyMergedCommitWithRealGit(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is unavailable")
+func TestEnvFilteredRunnerDropsToken(t *testing.T) {
+	if _, err := exec.LookPath("env"); err != nil {
+		t.Skip("env is unavailable")
 	}
-	root := t.TempDir()
-	remote, work := filepath.Join(root, "remote.git"), filepath.Join(root, "work")
-	run := func(dir string, args ...string) string {
-		t.Helper()
-		command := exec.Command("git", args...)
-		command.Dir = dir
-		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.test",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.test")
-		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, output)
-		}
-		return strings.TrimSpace(string(output))
-	}
-	run(root, "init", "--bare", "--initial-branch=main", remote)
-	run(root, "init", "--initial-branch=main", work)
-	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run(work, "add", ".")
-	run(work, "commit", "-qm", "merged")
-	merged := run(work, "rev-parse", "HEAD")
-	run(work, "remote", "add", "origin", remote)
-	run(work, "push", "-q", "origin", "main")
-	run(work, "checkout", "-qb", "feature")
-	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("b"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run(work, "add", ".")
-	run(work, "commit", "-qm", "unmerged")
-	unmerged := run(work, "rev-parse", "HEAD")
-
-	if err := VerifyMergedCommit(context.Background(), nil, work, "origin", "main", merged); err != nil {
-		t.Fatalf("merged commit: %v", err)
-	}
-	if err := VerifyMergedCommit(context.Background(), nil, work, "origin", "main", unmerged); !errors.Is(err, ErrDeployRejected) {
-		t.Fatalf("unmerged commit must be rejected, got %v", err)
-	}
-	if err := VerifyMergedCommit(context.Background(), nil, work, "origin", "main", strings.Repeat("a", 40)); !errors.Is(err, ErrDeployRejected) {
-		t.Fatalf("unknown commit must be rejected, got %v", err)
-	}
-	for _, branch := range []string{"-main", "main..x", "a b", "main/"} {
-		if err := VerifyMergedCommit(context.Background(), nil, work, "origin", branch, merged); !errors.Is(err, ErrDeployRejected) {
-			t.Fatalf("branch %q must be rejected, got %v", branch, err)
-		}
+	t.Setenv("AI_TEAM_TEST_TEAMCITY_TOKEN", testToken)
+	t.Setenv("AI_TEAM_TEST_KEEP", "kept")
+	result := EnvFilteredRunner{Drop: []string{"AI_TEAM_TEST_TEAMCITY_TOKEN"}}.Run(context.Background(), t.TempDir(), "env")
+	if result.Status != delivery.StepPassed || strings.Contains(result.Stdout, testToken) || !strings.Contains(result.Stdout, "AI_TEAM_TEST_KEEP=kept") {
+		t.Fatalf("token must not reach git/gh: status=%s", result.Status)
 	}
 }

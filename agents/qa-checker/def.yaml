@@ -1,0 +1,11 @@
+name: qa-checker
+description: QA Checker — проверяет тестовое покрытие и отчёт тестирования на соответствие критериям приёмки
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+inputs:
+  specs: '{feature}/specs'
+  design: '{feature}/design.md'
+outputs:
+  qa-check: '{feature}/qa-check.md'

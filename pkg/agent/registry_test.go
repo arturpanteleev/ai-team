@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/arturpanteleev/ai-team/pkg/stagecheck"
 )
 
 func TestRegistry_Load(t *testing.T) {
@@ -144,6 +146,98 @@ func TestRegistry_InputsOnlyReadScopeKeepsObserverValid(t *testing.T) {
 	}
 	if a.ReadScope != "inputs-only" || a.Mutation != "none" {
 		t.Fatalf("observer read/mutation scope = %q/%q, want inputs-only/none", a.ReadScope, a.Mutation)
+	}
+}
+
+// TestRegistry_BuiltinCheckerAgents — контракт встроенных агентов-проверяющих
+// (B-43): mutation none, без verdict-контракта в def.yaml (PASSED/FAILED
+// разбирает stagecheck по тексту отчёта), фиксированные входы/выходы и
+// промпт, который требует ровно одну итоговую строку маркера, совместимую с
+// stagecheck.ParseVerdict.
+func TestRegistry_BuiltinCheckerAgents(t *testing.T) {
+	r := NewFS(os.DirFS("../../agents"))
+	cases := []struct {
+		name         string
+		inputs       map[string]string
+		outputName   string
+		outputPath   string
+		askQuestions bool
+	}{
+		{
+			name:         "spec-checker",
+			inputs:       map[string]string{"task": "tasks/{feature}/task.md"},
+			outputName:   "spec-check",
+			outputPath:   "{feature}/spec-check.md",
+			askQuestions: true,
+		},
+		{
+			name:       "design-checker",
+			inputs:     map[string]string{"specs": "{feature}/specs"},
+			outputName: "design-check",
+			outputPath: "{feature}/design-check.md",
+		},
+		{
+			name: "qa-checker",
+			inputs: map[string]string{
+				"specs":  "{feature}/specs",
+				"design": "{feature}/design.md",
+			},
+			outputName: "qa-check",
+			outputPath: "{feature}/qa-check.md",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := r.Load(tc.name)
+			if err != nil {
+				t.Fatalf("агент-проверяющий %s должен загружаться: %v", tc.name, err)
+			}
+			if a.Mutation != "none" || a.ReadScope != "" {
+				t.Errorf("%s mutation/read scope = %q/%q, want none/\"\"", tc.name, a.Mutation, a.ReadScope)
+			}
+			if a.Verdict != nil {
+				t.Errorf("%s не должен объявлять verdict-контракт (PASSED/FAILED разбирает stagecheck): %+v", tc.name, a.Verdict)
+			}
+			if a.AskQuestions != tc.askQuestions {
+				t.Errorf("%s ask_questions = %v, want %v", tc.name, a.AskQuestions, tc.askQuestions)
+			}
+			if len(a.Inputs) != len(tc.inputs) {
+				t.Errorf("%s inputs = %v, want %v", tc.name, a.Inputs, tc.inputs)
+			}
+			for name, want := range tc.inputs {
+				if got := a.Inputs[name]; got != want {
+					t.Errorf("%s input %q = %q, want %q", tc.name, name, got, want)
+				}
+			}
+			if got := a.Outputs[tc.outputName]; got != tc.outputPath {
+				t.Errorf("%s output %q = %q, want %q", tc.name, tc.outputName, got, tc.outputPath)
+			}
+			if len(a.Outputs) != 1 {
+				t.Errorf("%s outputs = %v, want ровно один md-отчёт", tc.name, a.Outputs)
+			}
+			prompt := strings.Join(strings.Fields(a.Prompt), " ")
+			for _, phrase := range []string{
+				"на русском языке",
+				"ровно одной итоговой строкой", "Не повторяй этот маркер",
+				"**Verdict:** PASSED", "**Verdict:** FAILED",
+			} {
+				if !strings.Contains(prompt, phrase) {
+					t.Errorf("%s prompt должен требовать контрольную строку вердикта (%q отсутствует)", tc.name, phrase)
+				}
+			}
+			if !strings.Contains(prompt, "едоверенные данные") {
+				t.Errorf("%s prompt должен помечать входы недоверенными данными", tc.name)
+			}
+			// Маркер в промпте обязан парситься тем же парсером, который
+			// использует контроллер на B-40.
+			for _, verdict := range []string{"PASSED", "FAILED"} {
+				report := "# Отчёт\n\n**Verdict:** " + verdict + "\n"
+				got, ok := stagecheck.ParseVerdict(report)
+				if !ok || got != verdict {
+					t.Fatalf("маркер **Verdict:** %s из промпта не парсится stagecheck: got=%q ok=%v", verdict, got, ok)
+				}
+			}
+		})
 	}
 }
 

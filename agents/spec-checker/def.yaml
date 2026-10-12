@@ -1,0 +1,11 @@
+name: spec-checker
+description: Spec Checker — проверяет продуктовую спецификацию на полноту, непротиворечивость и прослеживаемость до целей задачи
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+ask_questions: true
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  spec-check: '{feature}/spec-check.md'

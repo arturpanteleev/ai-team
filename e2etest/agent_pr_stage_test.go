@@ -82,6 +82,9 @@ cli: opencode
 	if code != 3 {
 		t.Fatalf("run must stop in awaiting_plan for exact delivery approval (exit 3), got %d:\n%s", code, out)
 	}
+	if !strings.Contains(out, "MOCK: agent=coder") {
+		t.Fatalf("first run must execute the coder through the mock runtime:\n%s", out)
+	}
 	hashMatch := regexp.MustCompile(`Plan SHA-256: ([a-f0-9]{64})`).FindStringSubmatch(out)
 	resumeMatch := regexp.MustCompile(`ai-team run --resume ([^ ]+) --approve-plan`).FindStringSubmatch(out)
 	if len(hashMatch) != 2 || len(resumeMatch) != 2 {
@@ -94,7 +97,7 @@ cli: opencode
 		t.Fatalf("nothing may be pushed before plan approval, remote has %q", branches)
 	}
 
-	// A wrong hash is rejected without side effects or a new model run;
+	// A wrong hash is rejected before the graph runs and without side effects;
 	// approval is always for the exact canonical plan.
 	wrongHash := strings.Repeat("0", 64)
 	wrongCode, wrongOut := runHumanCLI(t, bin, dir, pathEnv, "run", "--target", dir, "--resume", resumeMatch[1], "--approve-plan", wrongHash)
@@ -104,13 +107,19 @@ cli: opencode
 	if calls := readGHLog(t, ghLog); strings.Contains(calls, "pr create") {
 		t.Fatalf("mismatched approval created a PR:\n%s", calls)
 	}
-	if strings.Contains(wrongOut, "MOCK: agent=coder") {
-		t.Fatalf("delivery approval continuation must not re-run the coder:\n%s", wrongOut)
+	if branches := strings.TrimSpace(runCommand(t, dir, "git", "--git-dir", remote, "branch", "--list", "ai-team/*")); branches != "" {
+		t.Fatalf("mismatched approval pushed to the remote: %q", branches)
 	}
 
 	code, out = runHumanCLI(t, bin, dir, pathEnv, "run", "--target", dir, "--resume", resumeMatch[1], "--approve-plan", hashMatch[1])
 	if code != 0 {
 		t.Fatalf("approved resume must deliver and complete (exit 0), got %d:\n%s", code, out)
+	}
+	// The approved resume continues the stopped stage from its prepared plan:
+	// the coder must not run again, otherwise the delivered code would not be
+	// the code whose plan the human approved.
+	if strings.Contains(out, "MOCK: agent=coder") || !strings.Contains(out, "агент повторно не запускается") {
+		t.Fatalf("approved resume re-ran the coder instead of continuing the approved plan:\n%s", out)
 	}
 	runID := resumeMatch[1]
 	runDir := filepath.Join(dir, ".ai-team", "runs", runID)

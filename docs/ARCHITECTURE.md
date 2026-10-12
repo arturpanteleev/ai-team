@@ -155,7 +155,7 @@ evidence. Решения сериализуются in-process mutex и flock н
 server читает новые события из durable SQLite cursor и передаёт
 `attempt_finished` вместе с `external_links` задачи. Встроенный Jira Cloud
 adapter извлекает issue key из внешней ссылки (только поле, целиком равное
-`KEY-N`, или URL `<base_url>/browse/KEY-N` на хосте `base_url`; поиска по
+`KEY-N` после обрезки пробелов, или URL `<base_url>/browse/KEY-N` на хосте `base_url`; поиска по
 подстроке нет), при наличии stage mapping и только для успешной попытки
 (`status=passed`, `outcome=passed`, decision не `rejected`) переходит к
 целевому статусу, затем при любом исходе добавляет комментарий со ссылкой на

@@ -21,10 +21,11 @@ event's run, stage, result data, and task external links.
 ### Requirement: Jira maps stage status and comments on the task
 
 The Jira adapter MUST find the issue key in the task's `external_links`. A key
-is recognized only when an external-link field is exactly `KEY-N`, or when it is
+is recognized only when an external-link field, after trimming surrounding
+whitespace, is exactly `KEY-N`, or when it is
 an `http`/`https` URL whose host equals the `base_url` host (case-insensitive)
-and whose path is `<base_url path>/browse/KEY-N` (a trailing `/` and a query
-string are allowed). Keys MUST NOT be searched for inside arbitrary text: a
+and whose path is `<base_url path>/browse/KEY-N`; trailing `/` characters, a
+query string and a `#` fragment are allowed. Keys MUST NOT be searched for inside arbitrary text: a
 combined field such as `APP-12 https://example.atlassian.net/browse/APP-12` or
 a URL with a lowercase key is not recognized. For a completed stage it MUST add
 a comment containing the ai-team task URL and stage result, whatever the

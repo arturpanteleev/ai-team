@@ -224,6 +224,8 @@ func TestIssueKeyFromLinksIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
 		{"https://acme.atlassian.net/browse/APP-1/extra"},
 		{"ftp://acme.atlassian.net/browse/APP-1"},
 		{"APP-1 https://acme.atlassian.net/browse/APP-1"},
+		{"app-1"},
+		{"https://acme.atlassian.net/browse/app-1"},
 	} {
 		key, err := issueKeyFromLinks(links, base)
 		if err != nil || key != "" {
@@ -236,6 +238,8 @@ func TestIssueKeyFromLinksIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
 		"https://acme.atlassian.net/browse/APP-7":                    "APP-7",
 		"https://ACME.atlassian.net/browse/APP-7/":                   "APP-7",
 		"https://acme.atlassian.net/browse/APP-7?focusedCommentId=1": "APP-7",
+		"https://acme.atlassian.net/browse/APP-7#comment-1":          "APP-7",
+		"https://acme.atlassian.net/browse/APP-7//":                  "APP-7",
 	} {
 		key, err := issueKeyFromLinks([]string{"https://other.example/browse/OTHER-1", "UTF-8 text", links}, base)
 		if err != nil || key != want {

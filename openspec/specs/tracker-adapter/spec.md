@@ -26,10 +26,11 @@ source input; the adapter MUST NOT write inbound tracker state into ai-team.
 ### Requirement: Jira maps configured stages and comments on the task
 
 The Jira adapter MUST find the issue key in the task's `external_links`. A key
-is recognized only when an external-link field is exactly `KEY-N`, or when it is
+is recognized only when an external-link field, after trimming surrounding
+whitespace, is exactly `KEY-N`, or when it is
 an `http`/`https` URL whose host equals the `base_url` host (case-insensitive)
-and whose path is `<base_url path>/browse/KEY-N` (a trailing `/` and a query
-string are allowed). The adapter MUST NOT search for a key inside arbitrary
+and whose path is `<base_url path>/browse/KEY-N`; trailing `/` characters, a
+query string and a `#` fragment are allowed. The adapter MUST NOT search for a key inside arbitrary
 text: a combined field such as `APP-12 https://example.atlassian.net/browse/APP-12`
 or a URL with a lowercase key is not recognized. For an `attempt_finished`
 event it MUST post a comment containing the ai-team task URL and stage result,

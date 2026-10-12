@@ -14,11 +14,16 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const jiraResponseLimit = 1 << 20
 
-var issueKeyPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{0,9}-[1-9][0-9]*\b`)
+// issueKeyPattern matches a whole Jira issue key. It is applied only to a bare
+// external-link field or to the last segment of a /browse/ URL on the
+// configured Jira host, never searched for inside arbitrary text: substrings
+// such as UTF-8, SHA-256 or CVE-2024 have the same shape as issue keys.
+var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]*$`)
 
 // JiraAdapter changes Jira Cloud status and posts stage comments. It only
 // sends data from ai-team to Jira and never polls or mutates ai-team state.
@@ -43,7 +48,8 @@ func (a *JiraAdapter) HandleTaskEvent(ctx context.Context, event TaskEvent) erro
 	if a == nil || event.Type != "attempt_finished" {
 		return nil
 	}
-	issueKey, err := issueKeyFromLinks(event.ExternalLinks)
+	baseURL := strings.TrimRight(strings.TrimSpace(a.settings.BaseURL), "/")
+	issueKey, err := issueKeyFromLinks(event.ExternalLinks, baseURL)
 	if err != nil {
 		return err
 	}
@@ -56,12 +62,14 @@ func (a *JiraAdapter) HandleTaskEvent(ctx context.Context, event TaskEvent) erro
 	if event.TaskID <= 0 {
 		return errors.New("ai-team task link is unavailable")
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(a.settings.BaseURL), "/")
 	if baseURL == "" {
 		return errors.New("jira base URL is empty")
 	}
 	targetStatus := strings.TrimSpace(a.settings.StageStatuses[event.Stage])
-	if targetStatus != "" {
+	// attempt_finished is emitted for failed, rejected, infra-failed and
+	// skipped attempts too. Only a successful stage may move the issue; every
+	// outcome is still reported in the comment.
+	if targetStatus != "" && attemptSucceeded(event.Data) {
 		if err := a.transitionStatus(ctx, baseURL, issueKey, targetStatus); err != nil {
 			return err
 		}
@@ -69,17 +77,59 @@ func (a *JiraAdapter) HandleTaskEvent(ctx context.Context, event TaskEvent) erro
 	return a.addComment(ctx, baseURL, issueKey, event, a.taskURL(event.TaskID))
 }
 
-func issueKeyFromLinks(links []string) (string, error) {
+// attemptSucceeded reports whether attempt_finished data describes a passed
+// stage. Missing fields are treated as unsuccessful.
+func attemptSucceeded(data map[string]any) bool {
+	field := func(key string) string {
+		value, _ := data[key].(string)
+		return strings.TrimSpace(value)
+	}
+	return field("status") == workflow.StatusPassed &&
+		field("outcome") == string(workflow.OutcomePassed) &&
+		field("decision") != string(workflow.DecisionRejected)
+}
+
+// issueKeyFromLinks accepts a key only from a field that is exactly KEY-N or
+// from a URL on the configured Jira host whose path is <base path>/browse/KEY-N.
+func issueKeyFromLinks(links []string, baseURL string) (string, error) {
 	var found string
 	for _, link := range links {
-		for _, match := range issueKeyPattern.FindAllString(link, -1) {
-			if found != "" && found != match {
-				return "", errors.New("external links contain multiple Jira issue keys")
-			}
-			found = match
+		match := issueKeyFromLink(strings.TrimSpace(link), baseURL)
+		if match == "" {
+			continue
 		}
+		if found != "" && found != match {
+			return "", errors.New("external links contain multiple Jira issue keys")
+		}
+		found = match
 	}
 	return found, nil
+}
+
+func issueKeyFromLink(link, baseURL string) string {
+	if issueKeyPattern.MatchString(link) {
+		return link
+	}
+	if baseURL == "" {
+		return ""
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Host == "" {
+		return ""
+	}
+	parsed, err := url.Parse(link)
+	if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, base.Host) {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	prefix := strings.TrimRight(base.Path, "/") + "/browse/"
+	key, ok := strings.CutPrefix(strings.TrimRight(parsed.Path, "/"), prefix)
+	if !ok || !issueKeyPattern.MatchString(key) {
+		return ""
+	}
+	return key
 }
 
 func (a *JiraAdapter) taskURL(taskID int64) string {

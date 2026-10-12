@@ -36,7 +36,7 @@ func TestTrackerConsumerReplaysDurableEventsAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := createJiraTask(t, first, "jira-replay-run", []string{"APP-21 https://jira.example/browse/APP-21"})
+	run := createJiraTask(t, first, "jira-replay-run", []string{"APP-21"})
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestTrackerConsumerReplaysDurableEventsAfterRestart(t *testing.T) {
 	}
 	if err := offlineStore.AppendEventNext(&store.Event{
 		RunID: run.RunID, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-offline",
-		Timestamp: time.Now().UTC(), DataJSON: `{"status":"passed","outcome":"success"}`,
+		Timestamp: time.Now().UTC(), DataJSON: `{"status":"passed","outcome":"passed"}`,
 	}); err != nil {
 		_ = offlineStore.Close()
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestTrackerConsumerReplaysDurableEventsAfterRestart(t *testing.T) {
 	select {
 	case event := <-restartedAdapter.events:
 		if event.RunID != run.RunID || event.Type != "attempt_finished" || event.Stage != "qa" ||
-			event.TaskID != run.ID || len(event.ExternalLinks) != 1 || event.ExternalLinks[0] != "APP-21 https://jira.example/browse/APP-21" {
+			event.TaskID != run.ID || len(event.ExternalLinks) != 1 || event.ExternalLinks[0] != "APP-21" {
 			t.Fatalf("replayed tracker event=%+v", event)
 		}
 	case <-time.After(5 * time.Second):
@@ -107,10 +107,10 @@ func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	run := createJiraTask(t, srv, "jira-event-run", []string{"APP-19 https://jira.example/browse/APP-19"})
+	run := createJiraTask(t, srv, "jira-event-run", []string{"APP-19"})
 	if err := srv.store.AppendEventNext(&store.Event{
 		RunID: run.RunID, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-qa",
-		Timestamp: time.Now().UTC(), DataJSON: `{"status":"passed","outcome":"success","decision":"approve","execution":"completed"}`,
+		Timestamp: time.Now().UTC(), DataJSON: `{"status":"passed","outcome":"passed","decision":"approved","execution":"succeeded"}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
 	if !strings.Contains(got[2].Body, `"id":"44"`) {
 		t.Fatalf("transition body=%s", got[2].Body)
 	}
-	for _, want := range []string{"https://ai-team.example/pipelines/", "Stage result: qa", "status=passed", "outcome=success"} {
+	for _, want := range []string{"https://ai-team.example/pipelines/", "Stage result: qa", "status=passed", "outcome=passed"} {
 		if !strings.Contains(got[3].Body, want) {
 			t.Errorf("Jira comment missing %q: %s", want, got[3].Body)
 		}
@@ -166,7 +166,7 @@ func TestJiraFailureIsIsolatedAndRecordsDurableIntegrationError(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	run := createJiraTask(t, srv, "jira-failure-run", []string{"APP-20 https://jira.example/browse/APP-20"})
+	run := createJiraTask(t, srv, "jira-failure-run", []string{"APP-20"})
 	completedAt := time.Now().UTC()
 	run.Status = "completed"
 	run.CompletedAt = &completedAt

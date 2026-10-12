@@ -298,7 +298,7 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 	}
 	var command *exec.Cmd
 	if r.Sandbox != nil {
-		command, err = r.Sandbox.Command(checkCtx, workingDir, toolPath, definition.Command[1:]...)
+		command, err = r.Sandbox.Command(checkCtx, r.TargetDir, workingDir, toolPath, definition.Command[1:]...)
 		if err != nil {
 			result.Status, result.Reason = StatusFailed, "sandbox setup: "+err.Error()
 			return result, err

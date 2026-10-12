@@ -13,8 +13,10 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
@@ -48,7 +50,7 @@ type Runner struct {
 	AllowedHosts []string
 	// SandboxFactory exists to inject a deterministic test sandbox. Production
 	// callers leave it nil and require the platform's enforced implementation.
-	SandboxFactory func() (checks.CommandSandbox, error)
+	SandboxFactory func(candidateDir, trustedRepoDir string) (checks.CommandSandbox, error)
 }
 
 func (r Runner) commands() delivery.CommandRunner {
@@ -209,10 +211,15 @@ func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRe
 	}
 
 	commands := r.commands()
-	worktreeAdded := false
 	var worktreePath, tempRoot string
 	fetched := true
-	tempRoot, err = os.MkdirTemp("", "ai-team-pr-checks-")
+	tempBase := os.TempDir()
+	if runtime.GOOS == "linux" {
+		// bubblewrap replaces /tmp with a private mount. Keep both the isolated
+		// repository and its scratch files there even when TMPDIR is customized.
+		tempBase = "/tmp"
+	}
+	tempRoot, err = os.MkdirTemp(tempBase, "ai-team-pr-checks-")
 	if err != nil {
 		return "", "", err
 	}
@@ -223,12 +230,6 @@ func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRe
 	headRef = "refs/ai-team/pr-checks/" + key + "/head"
 	worktreePath = filepath.Join(tempRoot, "worktree")
 	defer func() {
-		if worktreeAdded {
-			cleanup := commands.Run(context.Background(), targetDir, "git", "worktree", "remove", "--force", worktreePath)
-			if cleanup.Status != delivery.StepPassed {
-				err = errors.Join(err, commandError("git worktree remove", cleanup))
-			}
-		}
 		if fetched {
 			cleanup := commands.Run(context.Background(), targetDir, "git", "update-ref", "-d", baseRef)
 			if cleanup.Status != delivery.StepPassed {
@@ -261,19 +262,14 @@ func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRe
 	if baseOID != pull.BaseRefOID || headOID != pull.HeadRefOID {
 		return "", "", errors.New("pull request changed while preparing project checks; retry against stable head/base SHAs")
 	}
-	add := commands.Run(ctx, targetDir, "git", "worktree", "add", "--detach", worktreePath, headOID)
-	if add.Status != delivery.StepPassed {
-		if registered, checkErr := worktreeIsRegistered(commands, targetDir, worktreePath); checkErr == nil {
-			worktreeAdded = registered
-		}
-		return "", "", commandError("git worktree add for PR", add)
+	if err := createIsolatedPRCheckout(ctx, targetDir, worktreePath, baseRef, headRef); err != nil {
+		return "", "", fmt.Errorf("create isolated PR checkout: %w", err)
 	}
-	worktreeAdded = true
 	gateConfig, err := loadTrustedBaseGateConfig(ctx, commands, targetDir, baseOID)
 	if err != nil {
 		return "", "", err
 	}
-	sandbox, err := r.newSandbox()
+	sandbox, err := r.newSandbox(worktreePath, targetDir)
 	if err != nil {
 		return "", "", fmt.Errorf("project checks blocked: %w", err)
 	}
@@ -307,11 +303,61 @@ func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRe
 	return "passed", fmt.Sprintf("ai-team gate passed for head %s against base %s", headOID, baseOID), nil
 }
 
-func (r Runner) newSandbox() (checks.CommandSandbox, error) {
+func (r Runner) newSandbox(targetDir, trustedRepoDir string) (checks.CommandSandbox, error) {
 	if r.SandboxFactory != nil {
-		return r.SandboxFactory()
+		return r.SandboxFactory(targetDir, trustedRepoDir)
 	}
-	return checks.NewUntrustedCommandSandbox()
+	return checks.NewUntrustedCommandSandbox(targetDir, trustedRepoDir)
+}
+
+// createIsolatedPRCheckout builds a fresh repository containing only the
+// pinned base/head commits. A linked Git worktree would point its .git file at
+// the controller's common gitdir, exposing controller configuration to an
+// untrusted check even when the checkout itself is mounted separately.
+func createIsolatedPRCheckout(ctx context.Context, sourceDir, checkoutDir, baseRef, headRef string) error {
+	if err := runIsolatedGit(ctx, filepath.Dir(checkoutDir), "init", "--quiet", checkoutDir); err != nil {
+		return fmt.Errorf("git init: %w", err)
+	}
+	if err := runIsolatedGit(ctx, checkoutDir, "fetch", "--no-tags", "--no-write-fetch-head", sourceDir,
+		"+"+baseRef+":refs/ai-team/pr-checks/base", "+"+headRef+":refs/ai-team/pr-checks/head"); err != nil {
+		return fmt.Errorf("git fetch pinned commits: %w", err)
+	}
+	if err := runIsolatedGit(ctx, checkoutDir, "checkout", "--detach", "refs/ai-team/pr-checks/head"); err != nil {
+		return fmt.Errorf("git checkout pinned head: %w", err)
+	}
+	return nil
+}
+
+func runIsolatedGit(ctx context.Context, dir string, args ...string) error {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return fmt.Errorf("locate git: %w", err)
+	}
+	command := exec.CommandContext(ctx, gitPath, args...)
+	command.Dir = dir
+	command.Env = isolatedGitEnvironment(os.Environ())
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func isolatedGitEnvironment(environment []string) []string {
+	clean := make([]string, 0, len(environment)+4)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "GIT_") {
+			continue
+		}
+		clean = append(clean, entry)
+	}
+	return append(clean,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_TERMINAL_PROMPT=0",
+	)
 }
 
 func strictSandboxReceipt() *containment.Receipt {
@@ -328,19 +374,6 @@ func strictSandboxReceipt() *containment.Receipt {
 			containment.AxisEnv:  {"secret_environment_stripped": true, "clean_inner_environment": true},
 		},
 	}
-}
-
-func worktreeIsRegistered(commands delivery.CommandRunner, target, worktree string) (bool, error) {
-	result := commands.Run(context.Background(), target, "git", "worktree", "list", "--porcelain")
-	if result.Status != delivery.StepPassed {
-		return false, commandError("git worktree list", result)
-	}
-	for _, line := range strings.Split(result.Stdout, "\n") {
-		if line == "worktree "+worktree {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // Diff returns gh's PR diff only when the exact head SHA remains stable around

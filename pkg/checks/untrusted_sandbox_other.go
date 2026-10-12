@@ -6,6 +6,6 @@ import (
 	"errors"
 )
 
-func NewUntrustedCommandSandbox() (CommandSandbox, error) {
+func NewUntrustedCommandSandbox(string, string) (CommandSandbox, error) {
 	return nil, errors.New("OS-enforced untrusted project-check sandbox is unavailable on this platform")
 }

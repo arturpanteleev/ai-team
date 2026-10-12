@@ -16,7 +16,8 @@ both human and agent results.
   human-owned. A failed hard/agent stage check gives an agent stage one retry
   with an immutable report-bound feedback input, then pauses for human action.
 - Run `project_checks` with `ai-team gate` against the exact PR head and base in
-  an isolated detached worktree. Use gate policy from the pinned PR base so a
+  an isolated temporary repository that does not share the controller's
+  gitdir. Use gate policy from the pinned PR base so a
   candidate cannot weaken its own checks. Run `pr_checks_green` with
   `gh pr checks` and reject a moving PR identity.
 - Give a reviewer the stable `gh pr diff` and pinned PR identity alongside its

@@ -18,7 +18,9 @@ configuration).
 Commands selected by the pinned base gate policy MUST run in an OS-enforced
 untrusted-code sandbox with a read-only host root, writable PR checkout and
 private temporary/home directories, network disabled, and credential-bearing
-environment variables removed. If the platform cannot establish that sandbox,
+environment variables removed. The candidate checkout MUST NOT reference the
+controller's gitdir, and the controller checkout, its gitdir/common gitdir and
+custom temporary directories MUST NOT be readable from inside the sandbox. If the platform cannot establish that sandbox,
 `project_checks` MUST block without running a configured check command.
 
 #### Scenario: Check an agent or human PR result

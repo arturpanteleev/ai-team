@@ -17,7 +17,21 @@ func TestProjectChecksUsesPinnedPRWorktreeAndStubGH(t *testing.T) {
 	target, baseSHA, headSHA, url, bin := makePRFixture(t, `[ {"bucket":"pass","name":"unit"} ]`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	runner := Runner{SandboxFactory: func() (checks.CommandSandbox, error) { return testCommandSandbox{}, nil }}
+	runIn(t, target, "git", "config", "http.extraheader", "Authorization: Bearer controller-git-config-sentinel")
+	runner := Runner{SandboxFactory: func(candidateDir, trustedRepoDir string) (checks.CommandSandbox, error) {
+		if trustedRepoDir != target {
+			t.Fatalf("sandbox trusted repo path = %q, want %q", trustedRepoDir, target)
+		}
+		gitInfo, statErr := os.Stat(filepath.Join(candidateDir, ".git"))
+		if statErr != nil || !gitInfo.IsDir() {
+			t.Fatalf("candidate must have isolated .git directory, got info=%v err=%v", gitInfo, statErr)
+		}
+		config, readErr := os.ReadFile(filepath.Join(candidateDir, ".git", "config"))
+		if readErr != nil || strings.Contains(string(config), "controller-git-config-sentinel") {
+			t.Fatalf("candidate git config exposed controller credentials: %q err=%v", config, readErr)
+		}
+		return testCommandSandbox{}, nil
+	}}
 	status, reason, err := runner.Check(context.Background(), target, url, "project_checks")
 	if err != nil || status != "passed" || !strings.Contains(reason, headSHA) {
 		t.Fatalf("project checks: status=%q reason=%q err=%v", status, reason, err)
@@ -38,7 +52,7 @@ type testCommandSandbox struct{}
 
 func (testCommandSandbox) Enforced() bool { return true }
 func (testCommandSandbox) Close() error   { return nil }
-func (testCommandSandbox) Command(ctx context.Context, workingDir, executable string, args ...string) (*exec.Cmd, error) {
+func (testCommandSandbox) Command(ctx context.Context, targetDir, workingDir, executable string, args ...string) (*exec.Cmd, error) {
 	command := exec.CommandContext(ctx, executable, args...)
 	command.Dir = workingDir
 	command.Env = os.Environ()

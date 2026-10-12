@@ -83,7 +83,8 @@ invocation. Прочие run evidence, manifests, artifacts и файлы target
 
 Секреты внешних интеграций (`tracker.jira.token_env`,
 `cicd.teamcity.token_env`, адреса webhook и Slack, SMTP-URL уведомлений) задаются в шаблоне только именем переменной окружения
-процесса `ai-team web`. Ошибки доставки записываются в поток событий без URL,
+процесса `ai-team web` (адреса и SMTP-URL уведомлений — также процесса
+`ai-team run` и `ai-team scheduler-worker`, которые отправляют уведомления сами). Ошибки доставки записываются в поток событий без URL,
 тела ответа и учётных данных; webhook и Slack принимают только `https` и не
 следуют редиректу на другой хост. Подробно — в
 [Конфигурация](config.md#уведомления-webhook-slack-e-mail).

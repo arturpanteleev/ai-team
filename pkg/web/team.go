@@ -93,7 +93,7 @@ func (s *Server) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "нужен корректный email", http.StatusBadRequest)
 		return
 	}
-	roles, err := cloudidentity.ParseRoles(command.Roles)
+	roles, err := cloudidentity.ParseFunctions(command.Roles)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -186,7 +186,7 @@ func (s *Server) handleTeamRoles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	roles, err := cloudidentity.ParseRoles(command.Roles)
+	roles, err := cloudidentity.ParseFunctions(command.Roles)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

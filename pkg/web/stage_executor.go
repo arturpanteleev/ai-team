@@ -79,12 +79,19 @@ func (s *Server) handleChangeStageExecutor(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "approval больше не открывает этот stage", http.StatusConflict)
 		return
 	}
-	role := stageFunctionRole(stage.Function)
-	if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
+	session, ok := s.requestSession(r)
+	if !ok || session.Principal.ActorID == "" {
+		http.Error(w, "требуется web session", http.StatusUnauthorized)
+		return
+	}
+	role, err := cloudidentity.AuthorizeStageAction(session.Principal, cloudidentity.StageActionTake, stageFunctions(stage))
+	if err == nil {
+		err = s.authorize(r, cloudidentity.PermissionDecision, role)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	session, _ := s.requestSession(r)
 	actorID := session.Principal.ActorID
 	changedAt := time.Now().UTC()
 	if state.ExecutorOverrides == nil {
@@ -135,23 +142,4 @@ func (s *Server) pinnedStage(runID, stageID string) (config.TemplateStage, error
 		}
 	}
 	return config.TemplateStage{}, errors.New("stage отсутствует в pinned template")
-}
-
-func stageFunctionRole(function string) cloudidentity.Role {
-	switch strings.TrimSpace(strings.ToLower(function)) {
-	case "bo", "po", "business_owner", "product_owner":
-		return cloudidentity.RoleProductOwner
-	case "architect":
-		return cloudidentity.RoleArchitect
-	case "developer":
-		return cloudidentity.RoleDeveloper
-	case "reviewer":
-		return cloudidentity.RoleReviewer
-	case "qa":
-		return cloudidentity.RoleQA
-	case "deployer", "release_manager":
-		return cloudidentity.RoleReleaseManager
-	default:
-		return ""
-	}
 }

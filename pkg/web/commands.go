@@ -600,6 +600,12 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "approve_spec разрешён только для Product Owner согласования ТЗ", http.StatusConflict)
 				return
 			}
+			if (command.Action == "approve" || command.Action == "approve_spec") && isStageConfirmation(*matched) {
+				if err := s.selfApprovalViolation(chi.URLParam(r, "runID"), *matched, actorID); err != nil {
+					http.Error(w, err.Error(), http.StatusForbidden)
+					return
+				}
+			}
 		} else if command.Action == "answer_questions" || command.Action == "approve_spec" {
 			http.Error(w, "не найден соответствующий Product Owner approval", http.StatusConflict)
 			return

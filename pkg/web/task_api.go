@@ -490,37 +490,35 @@ func (s *Server) taskConflict(w http.ResponseWriter, runID, stageID, message str
 	}{Error: message, Code: "invalid_state", AllowedActions: allowed})
 }
 
-func taskStageRole(stage config.TemplateStage) cloudidentity.Role {
-	switch strings.TrimSpace(strings.ToLower(stage.Function)) {
-	case "bo", "po", "business_owner", "product_owner":
-		return cloudidentity.RoleProductOwner
-	case "architect":
-		return cloudidentity.RoleArchitect
-	case "developer":
-		return cloudidentity.RoleDeveloper
-	case "reviewer":
-		return cloudidentity.RoleReviewer
-	case "qa":
-		return cloudidentity.RoleQA
-	case "deployer", "release_manager":
-		return cloudidentity.RoleReleaseManager
-	default:
-		return ""
-	}
-}
-
-func (s *Server) taskActionActor(w http.ResponseWriter, r *http.Request, stage config.TemplateStage) (string, string, bool) {
+// taskActionActor authorizes a stage action by the pinned stage functions
+// (B-82) and returns the trusted actor ID plus the approval actor role. Take,
+// submit and bypass belong to the executor function; confirm/return belong to
+// approver_function when configured. A missing function assignment fails
+// closed with 403.
+func (s *Server) taskActionActor(w http.ResponseWriter, r *http.Request, stage config.TemplateStage, action cloudidentity.StageAction) (string, string, bool) {
 	session, ok := s.requestSession(r)
 	if !ok || session.Principal.ActorID == "" {
 		writeJSONAPIError(w, http.StatusUnauthorized, "web session unavailable", "unauthorized")
 		return "", "", false
 	}
-	role := taskStageRole(stage)
-	if err := s.authorize(r, cloudidentity.PermissionDecision, role); err != nil {
+	role, err := cloudidentity.AuthorizeStageAction(session.Principal, action, stageFunctions(stage))
+	if err == nil {
+		err = s.authorize(r, cloudidentity.PermissionDecision, role)
+	}
+	if err != nil {
 		writeJSONAPIError(w, http.StatusForbidden, err.Error(), "forbidden")
 		return "", "", false
 	}
-	return session.Principal.ActorID, stage.Function, true
+	actorRole := stage.Function
+	if action == cloudidentity.StageActionConfirm && stage.ApproverFunction != "" {
+		// Generated stage approvals carry the canonical approver role.
+		actorRole = string(role)
+	}
+	return session.Principal.ActorID, actorRole, true
+}
+
+func stageFunctions(stage config.TemplateStage) cloudidentity.StageFunctions {
+	return cloudidentity.StageFunctions{Executor: stage.Function, Approver: stage.ApproverFunction}
 }
 
 func (s *Server) taskStagePreconditions(w http.ResponseWriter, runID, stageID string) (lifecycle.State, config.TemplateStage, bool) {
@@ -573,7 +571,7 @@ func (s *Server) handleTaskStageExecutor(w http.ResponseWriter, r *http.Request)
 		s.taskConflict(w, runID, stageID, "stage has no configured agent")
 		return
 	}
-	actorID, _, ok := s.taskActionActor(w, r, stage)
+	actorID, _, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionTake)
 	if !ok {
 		return
 	}
@@ -612,7 +610,7 @@ func (s *Server) handleTaskStageRunAgent(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusBadRequest, "action must be run or refine", "bad_action")
 		return
 	}
-	actorID, _, ok := s.taskActionActor(w, r, stage)
+	actorID, _, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionTake)
 	if !ok {
 		return
 	}
@@ -647,7 +645,7 @@ func (s *Server) handleTaskStageOverride(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusBadRequest, "override reason is required", "reason_required")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage)
+	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionBypass)
 	if !ok {
 		return
 	}
@@ -693,8 +691,12 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		s.taskConflict(w, runID, stageID, "current approval is not a stage confirmation")
 		return
 	}
-	actorID, actorRole, authOK := s.taskActionActor(w, r, stage)
+	actorID, actorRole, authOK := s.taskActionActor(w, r, stage, cloudidentity.StageActionConfirm)
 	if !authOK {
+		return
+	}
+	if err := s.selfApprovalViolation(runID, *pending, actorID); err != nil {
+		writeJSONAPIError(w, http.StatusForbidden, err.Error(), "self_approval_forbidden")
 		return
 	}
 	revisions, err := s.confirmationArtifactRevisions(runID, pending)
@@ -740,7 +742,7 @@ func (s *Server) handleTaskStageSkip(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusBadRequest, "skip reason is required", "reason_required")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage)
+	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionBypass)
 	if !ok {
 		return
 	}
@@ -775,7 +777,7 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 		s.taskConflict(w, runID, stageID, "return target is not configured for this stage")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage)
+	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionConfirm)
 	if !ok {
 		return
 	}
@@ -866,7 +868,7 @@ func (s *Server) handleTaskGrillAction(w http.ResponseWriter, r *http.Request, f
 		writeJSONAPIError(w, http.StatusBadRequest, "answer is required", "bad_answer")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage)
+	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionSubmit)
 	if !ok {
 		return
 	}
@@ -902,7 +904,7 @@ func (s *Server) handleTaskGrillDone(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage)
+	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionSubmit)
 	if !ok {
 		return
 	}

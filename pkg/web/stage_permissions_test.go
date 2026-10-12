@@ -1,0 +1,396 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
+)
+
+const functionPermissionsTemplate = `schema_version: 5
+template: permissions
+title: Permissions
+forbid_self_approval: %FORBID%
+stages:
+  - id: spec
+    title: Spec
+    function: po
+    result: md
+  - id: build
+    title: Build
+    function: developer
+    approver_function: reviewer
+    result: md
+    skippable: true
+  - id: accept
+    title: Accept
+    function: bo
+    result: approve
+returns:
+  - from: build
+    to: spec
+`
+
+// stageActionRecorder accepts every connected stage action so authorization is
+// the only reason a request can be refused.
+type stageActionRecorder struct {
+	*fakeRunController
+	calls map[string]int
+}
+
+func (c *stageActionRecorder) record(action string) error {
+	c.calls[action]++
+	return nil
+}
+func (c *stageActionRecorder) ChangeStageExecutor(string, string, string, string) error {
+	return c.record("executor")
+}
+func (c *stageActionRecorder) OverrideStageCheck(context.Context, string, string, string, string, string) error {
+	return c.record("override")
+}
+func (c *stageActionRecorder) SkipStage(context.Context, string, string, string, string, string) error {
+	return c.record("skip")
+}
+func (c *stageActionRecorder) ReturnStage(context.Context, string, string, string, string, string, string) error {
+	return c.record("return")
+}
+func (c *stageActionRecorder) AnswerStageGrill(context.Context, string, string, string, string, string) error {
+	return c.record("grill")
+}
+func (c *stageActionRecorder) SubmitStageGrillVersion(context.Context, string, string, string, string, string) error {
+	return c.record("grill")
+}
+func (c *stageActionRecorder) CompleteStageGrill(context.Context, string, string, string, string) error {
+	return c.record("grill")
+}
+
+type functionPermissionFixture struct {
+	srv        *Server
+	controller *stageActionRecorder
+	target     string
+}
+
+func newFunctionPermissionFixture(t *testing.T, forbidSelfApproval bool, approvals []approval.PendingApproval, runs map[string]lifecycle.State) functionPermissionFixture {
+	t.Helper()
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	forbid := "false"
+	if forbidSelfApproval {
+		forbid = "true"
+	}
+	yamlData := strings.Replace(functionPermissionsTemplate, "%FORBID%", forbid, 1)
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), []byte(yamlData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controller := &stageActionRecorder{fakeRunController: &fakeRunController{approvals: approvals}, calls: map[string]int{}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for runID, state := range runs {
+		if _, err := templateStore.PinCurrentForRun(runID, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.store.CreatePipelineRun(&store.PipelineRun{RunID: runID, Feature: "feature",
+			Status: "waiting_for_approval", StartedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		state.RunID, state.Feature, state.TargetDir, state.Task = runID, "feature", target, "task"
+		state.ConfigSHA256, state.WorkflowSHA256 = strings.Repeat("0", 64), strings.Repeat("1", 64)
+		state.CreatedAt = time.Now().UTC()
+		if err := stateStore.Create(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return functionPermissionFixture{srv: srv, controller: controller, target: target}
+}
+
+// requestAs issues an authenticated request and replaces the session principal
+// so each case exercises one exact set of assigned functions. A nil roles list
+// keeps the local single-user principal.
+func (f functionPermissionFixture) requestAs(t *testing.T, actorID string, roles []cloudidentity.Role, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := authorizedRequest(t, f.srv, method, target, body)
+	if roles != nil {
+		principal, err := cloudidentity.NewPrincipal(actorID, roles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cookie, err := request.Cookie(sessionCookieName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.srv.sessionMu.Lock()
+		session := f.srv.sessions[cookie.Value]
+		session.Principal = principal
+		f.srv.sessions[cookie.Value] = session
+		f.srv.sessionMu.Unlock()
+	}
+	response := httptest.NewRecorder()
+	f.srv.router.ServeHTTP(response, request)
+	return response
+}
+
+func buildInputApproval(id string, status approval.Status, created time.Time, decisions ...approval.Decision) approval.PendingApproval {
+	return approval.PendingApproval{
+		Kind: approval.KindInput, ID: id, RunID: "run", AttemptID: "attempt-1",
+		FromStage: "build", ToStage: "build", Trigger: humanInputTrigger, Status: status,
+		RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"reject", "submit", "skip"}, Targets: map[string]string{"submit": "build", "skip": "build"},
+		SubjectHash: testSubjectHash, CreatedAt: created, Decisions: decisions,
+		Payload: []byte(`{"kind":"input","stage_id":"build","result":"md","output_name":"build","output_path":"build.md"}`),
+	}
+}
+
+func buildConfirmApproval(created time.Time) approval.PendingApproval {
+	return approval.PendingApproval{
+		ID: "gate-1", RunID: "run", AttemptID: "attempt-2", FromStage: "build", ToStage: "accept",
+		Trigger: "stage_completed", Status: approval.StatusPending, SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "reject", "return_to_spec"},
+		Targets: map[string]string{"approve": "accept", "return_to_spec": "spec"}, CreatedAt: created,
+	}
+}
+
+func TestStageActionsAreAuthorizedByStageFunction(t *testing.T) {
+	now := time.Now().UTC()
+	approvals := []approval.PendingApproval{
+		buildInputApproval("input-take", approval.StatusPending, now),
+		{
+			Kind: approval.KindCheckDecision, ID: "check-1", RunID: "run", FromStage: "build", ToStage: "build",
+			Trigger: approval.StageCheckTrigger, Status: approval.StatusPending, SubjectHash: testSubjectHash,
+			RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny, Actions: []string{"override", "reject"},
+			Targets: map[string]string{"override": "build"}, CreatedAt: now,
+		},
+		{
+			Kind: approval.KindGrillQuestions, ID: "grill-1", RunID: "run", FromStage: "build", ToStage: "build",
+			Trigger: approval.GrillTrigger, Status: approval.StatusPending, SubjectHash: testSubjectHash,
+			RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny,
+			Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, "done"}, CreatedAt: now,
+		},
+		buildConfirmApproval(now.Add(time.Minute)),
+	}
+	runs := map[string]lifecycle.State{
+		"run-input":    {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "input-take"},
+		"run-check":    {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "check-1"},
+		"run-grill":    {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "grill-1"},
+		"run-skip":     {Phase: lifecycle.PhaseResumable, NextStage: "build"},
+		"run-confirm":  {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+		"run-return":   {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+		"run-executor": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "input-take"},
+	}
+
+	type action struct {
+		name, stageAction, path, body string
+	}
+	actions := []action{
+		{"take", "take", "/api/runs/run-input/stages/build/take", ""},
+		{"executor", "take", "/api/runs/run-executor/stages/build/executor", `{"executor":"human"}`},
+		{"grill done", "submit", "/api/runs/run-grill/stages/build/grill/done", ""},
+		{"override", "bypass", "/api/runs/run-check/stages/build/override", `{"reason":"flaky check"}`},
+		{"skip", "bypass", "/api/runs/run-skip/stages/build/skip", `{"reason":"not needed"}`},
+		{"confirm", "confirm", "/api/runs/run-confirm/stages/build/confirm", ""},
+		{"return", "confirm", "/api/runs/run-return/stages/build/return", `{"to_stage":"spec","reason":"spec gap"}`},
+	}
+	members := []struct {
+		name    string
+		roles   []cloudidentity.Role
+		allowed map[string]bool
+	}{
+		{"developer executes but cannot confirm", []cloudidentity.Role{cloudidentity.RoleDeveloper},
+			map[string]bool{"take": true, "submit": true, "bypass": true}},
+		{"reviewer confirms but cannot execute", []cloudidentity.Role{cloudidentity.RoleReviewer},
+			map[string]bool{"confirm": true}},
+		{"member with both functions", []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer},
+			map[string]bool{"take": true, "submit": true, "bypass": true, "confirm": true}},
+		{"foreign function is denied", []cloudidentity.Role{cloudidentity.RoleQA}, map[string]bool{}},
+		{"product owner without stage function is denied", []cloudidentity.Role{cloudidentity.RoleProductOwner}, map[string]bool{}},
+	}
+	for _, member := range members {
+		for _, current := range actions {
+			t.Run(member.name+"/"+current.name, func(t *testing.T) {
+				fixture := newFunctionPermissionFixture(t, true, append([]approval.PendingApproval(nil), approvals...), runs)
+				response := fixture.requestAs(t, "member@example.test", member.roles, http.MethodPost, current.path, current.body)
+				if member.allowed[current.stageAction] {
+					if response.Code == http.StatusForbidden || response.Code == http.StatusUnauthorized || response.Code >= 400 {
+						t.Fatalf("expected %s to be allowed: %d %s", current.name, response.Code, response.Body.String())
+					}
+					return
+				}
+				if response.Code != http.StatusForbidden {
+					t.Fatalf("expected %s to be forbidden: %d %s", current.name, response.Code, response.Body.String())
+				}
+				if len(fixture.controller.calls) != 0 || fixture.controller.decisionCalls != 0 {
+					t.Fatalf("forbidden %s reached the controller: calls=%v decisions=%d", current.name, fixture.controller.calls, fixture.controller.decisionCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestStageResultSubmissionRequiresExecutorFunction(t *testing.T) {
+	now := time.Now().UTC()
+	runs := map[string]lifecycle.State{
+		"run-input": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "input-take"},
+	}
+	for _, tc := range []struct {
+		name    string
+		roles   []cloudidentity.Role
+		allowed bool
+	}{
+		{"executor function submits", []cloudidentity.Role{cloudidentity.RoleDeveloper}, true},
+		{"approver function cannot submit", []cloudidentity.Role{cloudidentity.RoleReviewer}, false},
+		{"foreign function cannot submit", []cloudidentity.Role{cloudidentity.RoleQA}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFunctionPermissionFixture(t, false, []approval.PendingApproval{buildInputApproval("input-take", approval.StatusPending, now)}, runs)
+			response := fixture.requestAs(t, "member@example.test", tc.roles, http.MethodPost,
+				"/api/runs/run-input/stages/build/results", `{"result":"md","content":"# Build\n"}`)
+			if tc.allowed && (response.Code == http.StatusForbidden || response.Code == http.StatusUnauthorized) {
+				t.Fatalf("executor submission must pass authorization: %d %s", response.Code, response.Body.String())
+			}
+			if !tc.allowed && response.Code != http.StatusForbidden {
+				t.Fatalf("submission must be forbidden: %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestForbidSelfApprovalRejectsStageAuthors(t *testing.T) {
+	submitted := time.Now().UTC().Add(-time.Hour)
+	confirmAt := submitted.Add(30 * time.Minute)
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	runs := map[string]lifecycle.State{
+		"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+	}
+	cases := []struct {
+		name      string
+		forbid    bool
+		submitter string
+		owner     string
+		actor     string
+		roles     []cloudidentity.Role
+		wantCode  int
+	}{
+		{"submitter cannot confirm own result", true, "author@example.test", "", "author@example.test", both, http.StatusForbidden},
+		{"stage owner cannot confirm own result", true, "other@example.test", "author@example.test", "author@example.test", both, http.StatusForbidden},
+		{"another reviewer confirms", true, "author@example.test", "author@example.test", "reviewer@example.test", []cloudidentity.Role{cloudidentity.RoleReviewer}, http.StatusAccepted},
+		{"policy disabled allows self confirmation", false, "author@example.test", "author@example.test", "author@example.test", both, http.StatusAccepted},
+		{"local single user is bound by the policy", true, "local-user", "", "local-user", nil, http.StatusForbidden},
+		{"local single user confirms with the policy disabled", false, "local-user", "", "local-user", nil, http.StatusAccepted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			approvals := []approval.PendingApproval{
+				buildInputApproval("input-old", approval.StatusResolved, submitted.Add(-time.Hour),
+					approval.Decision{ActorID: "old-author@example.test", ActorRole: "developer", Action: "submit"}),
+				buildInputApproval("input-1", approval.StatusResolved, submitted,
+					approval.Decision{ActorID: tc.submitter, ActorRole: "developer", Action: "submit"}),
+				buildConfirmApproval(confirmAt),
+			}
+			fixture := newFunctionPermissionFixture(t, tc.forbid, approvals, runs)
+			if tc.owner != "" {
+				if _, _, err := fixture.srv.store.TakeStage("run-confirm", "build", "input-1", tc.owner, "developer", submitted); err != nil {
+					t.Fatal(err)
+				}
+			}
+			response := fixture.requestAs(t, tc.actor, tc.roles, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+			if response.Code != tc.wantCode {
+				t.Fatalf("confirm code=%d want %d body=%s", response.Code, tc.wantCode, response.Body.String())
+			}
+			if tc.wantCode == http.StatusForbidden {
+				if !strings.Contains(response.Body.String(), "self_approval_forbidden") || fixture.controller.decisionCalls != 0 {
+					t.Fatalf("self approval must be refused before a decision: decisions=%d body=%s", fixture.controller.decisionCalls, response.Body.String())
+				}
+			} else if fixture.controller.decision.ActorID != tc.actor || fixture.controller.decision.ActorRole != "reviewer" {
+				t.Fatalf("confirmation must be recorded under the approver role: %+v", fixture.controller.decision)
+			}
+		})
+	}
+}
+
+func TestForbidSelfApprovalCoversGenericDecisionRoute(t *testing.T) {
+	submitted := time.Now().UTC().Add(-time.Hour)
+	approvals := []approval.PendingApproval{
+		buildInputApproval("input-1", approval.StatusResolved, submitted,
+			approval.Decision{ActorID: "local-user", ActorRole: "developer", Action: "submit"}),
+		buildConfirmApproval(submitted.Add(time.Minute)),
+	}
+	runs := map[string]lifecycle.State{
+		"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+	}
+	fixture := newFunctionPermissionFixture(t, true, approvals, runs)
+	response := fixture.requestAs(t, "local-user", nil, http.MethodPost, "/api/runs/run-confirm/approvals/gate-1/decisions",
+		`{"action":"approve","subject_hash":"`+testSubjectHash+`"}`)
+	if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 {
+		t.Fatalf("generic decision route must enforce forbid_self_approval: code=%d decisions=%d body=%s",
+			response.Code, fixture.controller.decisionCalls, response.Body.String())
+	}
+}
+
+func TestTeamFunctionAssignmentAcceptsTemplateAliases(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithAuthenticator(manager), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	adminCookie, adminCSRF := cloudSessionForTest(t, srv, manager, "owner@example.com", cloudidentity.RoleProductOwner)
+	invite := teamRequest(srv, adminCookie, adminCSRF, http.MethodPost, "/api/team/invitations",
+		`{"email":"dev@example.com","roles":["developer","deployer"]}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite with function aliases: %d %s", invite.Code, invite.Body.String())
+	}
+	var invitation struct {
+		Token string `json:"activation_token"`
+	}
+	if err := json.NewDecoder(invite.Body).Decode(&invitation); err != nil {
+		t.Fatal(err)
+	}
+	activation := newLoopbackRequest(http.MethodPost, "/api/team/activate", strings.NewReader(`{"token":"`+invitation.Token+`"}`))
+	activation.Header.Set("Content-Type", "application/json")
+	activated := httptest.NewRecorder()
+	srv.router.ServeHTTP(activated, activation)
+	if activated.Code != http.StatusOK {
+		t.Fatalf("activate member: %d %s", activated.Code, activated.Body.String())
+	}
+	update := teamRequest(srv, adminCookie, adminCSRF, http.MethodPatch, "/api/team/members/dev@example.com/roles",
+		`{"roles":["po","Developer","product_owner"]}`)
+	if update.Code != http.StatusOK {
+		t.Fatalf("assign function aliases: %d %s", update.Code, update.Body.String())
+	}
+	member, err := srv.store.TeamMember("dev@example.com")
+	if err != nil || member == nil || strings.Join(member.Roles, ",") != "developer,product_owner" {
+		t.Fatalf("functions must be stored as canonical roles: member=%+v err=%v", member, err)
+	}
+	rejected := teamRequest(srv, adminCookie, adminCSRF, http.MethodPatch, "/api/team/members/dev@example.com/roles", `{"roles":["operator"]}`)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("unknown function must be rejected: %d %s", rejected.Code, rejected.Body.String())
+	}
+}

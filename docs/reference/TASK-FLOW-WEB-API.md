@@ -32,6 +32,17 @@ fields.
 | `GET /api/metrics/flow?from=&to=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=` | Flow metrics CSV |
 
+Stage actions are authorized by the functions of the run's pinned template
+(B-82). `take`, `executor`, `run-agent`, `results`/`submit`, `grill/*`,
+`override` and `skip` require the stage `function`; `confirm` and `return`
+require `approver_function` when the stage declares one, otherwise `function`.
+A member without the required function receives `403 forbidden` before the
+controller is called. When the template sets `forbid_self_approval: true`,
+`confirm` and `POST /api/runs/{runID}/approvals/{approvalID}/decisions` reject
+a stage confirmation by the member who took the stage or submitted its result
+in the confirmed visit with `403` (code `self_approval_forbidden` on the stage
+route).
+
 To edit a human stage result during a pending grill, post a new immutable
 revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,
 the latest `base_revision` and `base_sha256`, and changed result content. The

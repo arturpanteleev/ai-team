@@ -1213,16 +1213,14 @@ func TestPendingAdmissionRecoversQueueCorrelationAfterCrashAndRetry(t *testing.T
 
 func TestStartRunProjectionFailurePreventsControllerStart(t *testing.T) {
 	controller := &fakeRunController{}
-	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	dbPath := filepath.Join(t.TempDir(), "web.db")
+	srv, err := NewServer(dbPath, "", t.TempDir(), WithRunController(controller))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
-	if err := srv.store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	breakTablesForTest(t, dbPath, "pipeline_runs")
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
@@ -1255,17 +1253,15 @@ func TestSchedulerAdmissionProjectionFailureCannotLeaveClaimableJob(t *testing.T
 		t.Fatal(err)
 	}
 	controller := &admissionCapturingController{Controller: baseController}
-	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	dbPath := filepath.Join(t.TempDir(), "web.db")
+	srv, err := NewServer(dbPath, "", t.TempDir(), WithRunController(controller))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
 	baseController.SetAdmissionSink(srv.RecordQueuedJob)
-	if err := srv.store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	breakTablesForTest(t, dbPath, "pipeline_runs")
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
@@ -1774,11 +1770,7 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 		t.Fatalf("cross-site metadata recovery: %d %s", crossSiteWriter.Code, crossSiteWriter.Body.String())
 	}
 
-	srv.sessionMu.Lock()
-	session := srv.sessions[cookie.Value]
-	session.ExpiresAt = time.Now().UTC().Add(-time.Second)
-	srv.sessions[cookie.Value] = session
-	srv.sessionMu.Unlock()
+	srv.now = func() time.Time { return time.Now().Add(browserSessionTTL + time.Second) }
 	expired := newLoopbackRequest(http.MethodGet, "/api/session", nil)
 	expired.AddCookie(cookie)
 	expired.Header.Set("Origin", "http://127.0.0.1")
@@ -3203,4 +3195,24 @@ func newFrontendTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv
+}
+
+// breakTablesForTest renames tables through a second connection, so the
+// server's own projection writes fail while durable sessions keep working.
+// Closing the whole store would also (correctly) drop every session.
+func breakTablesForTest(t *testing.T, dbPath string, tables ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range tables {
+		if _, err := db.Exec(`ALTER TABLE ` + table + ` RENAME TO broken_` + table); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

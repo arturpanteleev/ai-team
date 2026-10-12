@@ -355,3 +355,26 @@ func TestEmptyTeamRolesAreRejectedWithoutChangingInvitationOrMember(t *testing.T
 		t.Fatalf("rejected role edit revoked a valid member session: %d %s", me.Code, me.Body.String())
 	}
 }
+
+// setSessionPrincipalForTest replaces the request's session with a freshly
+// minted one for principal, standing in for a full sign-in as that actor.
+func setSessionPrincipalForTest(t *testing.T, s *Server, request *http.Request, principal cloudidentity.Principal) {
+	t.Helper()
+	method := sessionMethodToken
+	if s.localAuth {
+		method = sessionMethodLocal
+	}
+	var epoch int64
+	if !s.localAuth {
+		if member, err := s.store.TeamMember(principal.ActorID); err == nil && member != nil {
+			epoch = member.SessionEpoch
+		}
+	}
+	sessionToken, csrfToken, err := s.createBrowserSession(principal, epoch, method, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Del("Cookie")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
+	request.Header.Set("X-CSRF-Token", csrfToken)
+}

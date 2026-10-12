@@ -103,3 +103,22 @@ func (m *TokenManager) sign(value string) []byte {
 	_, _ = mac.Write([]byte(value))
 	return mac.Sum(nil)
 }
+
+// sessionBindingLabel separates the session-binding HMAC from token
+// signatures computed with the same secret.
+const sessionBindingLabel = "ai-team/web-session-binding/v1\x00"
+
+// SessionBinding returns a fingerprint of the signing secret for label. It is
+// stored with browser sessions so that rotating the secret invalidates every
+// session minted under the old one. The secret itself cannot be derived from
+// the result.
+func (m *TokenManager) SessionBinding(label string) string {
+	return SessionBinding(m.secret, label)
+}
+
+// SessionBinding computes HMAC-SHA256(secret, fixed label || label), hex.
+func SessionBinding(secret []byte, label string) string {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(sessionBindingLabel + label))
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}

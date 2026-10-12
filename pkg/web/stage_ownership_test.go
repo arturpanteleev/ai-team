@@ -373,11 +373,12 @@ func takeStageAs(t *testing.T, srv *Server, runID, stageID, actorID string) *htt
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.sessionMu.Lock()
-	session := srv.sessions[cookie.Value]
+	session, ok := srv.lookupBrowserSession(cookie.Value)
+	if !ok {
+		t.Fatal("session missing")
+	}
 	session.Principal.ActorID = actorID
-	srv.sessions[cookie.Value] = session
-	srv.sessionMu.Unlock()
+	setSessionPrincipalForTest(t, srv, request, session.Principal)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	return response

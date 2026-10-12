@@ -130,12 +130,8 @@ func (c *EmailChannel) deliver(ctx context.Context, endpoint smtpEndpoint, from 
 	if endpoint.implicitTLS {
 		conn = tls.Client(conn, c.tlsConfig(endpoint.host))
 	}
-	client, err := smtp.NewClient(conn, endpoint.host)
-	if err != nil {
-		_ = conn.Close()
-		return errors.New(smtpStepError("greeting", err))
-	}
-	defer func() { _ = client.Close() }()
+	// The deadline may surface either as an i/o timeout or, after AfterFunc
+	// closed the connection, as a closed-connection error.
 	step := func(name string, err error) error {
 		if err == nil {
 			return nil
@@ -145,6 +141,12 @@ func (c *EmailChannel) deliver(ctx context.Context, endpoint smtpEndpoint, from 
 		}
 		return errors.New(smtpStepError(name, err))
 	}
+	client, err := smtp.NewClient(conn, endpoint.host)
+	if err != nil {
+		_ = conn.Close()
+		return step("greeting", err)
+	}
+	defer func() { _ = client.Close() }()
 	if err := step("hello", client.Hello("ai-team")); err != nil {
 		return err
 	}

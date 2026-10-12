@@ -9,6 +9,9 @@ import (
 // Event is the structured task event sent to live observers after the event
 // has been durably projected to the event store.
 type Event struct {
+	// Cursor is the global durable event-store cursor. Sequence remains scoped
+	// to a run; consumers must resume through the durable cursor.
+	Cursor    int64
 	RunID     string
 	Sequence  int64
 	Type      string

@@ -425,9 +425,13 @@ func (s *Store) AppendEventNextIfAbsent(event *Event) (bool, error) {
 	populateEventFields(event)
 	err := s.db.QueryRow(`INSERT INTO events(run_uid, sequence, type, stage, actor, executor, severity, attempt_uid, timestamp, data_json, dedupe_key)
 		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM events WHERE run_uid = ?
+		AND NOT EXISTS (SELECT 1 FROM events WHERE run_uid = ? AND dedupe_key = ?)
+		AND NOT EXISTS (SELECT 1 FROM events WHERE run_uid = ? AND COALESCE(dedupe_key, '') = ''
+			AND type = ? AND COALESCE(stage, '') = ? AND COALESCE(attempt_uid, '') = ? AND timestamp = ?)
 		ON CONFLICT(run_uid, dedupe_key) WHERE dedupe_key <> '' DO NOTHING RETURNING id, sequence`,
 		event.RunID, event.Type, event.Stage, event.Actor, event.Executor, event.Severity,
-		event.AttemptID, event.Timestamp, event.DataJSON, event.DedupeKey, event.RunID).Scan(&event.ID, &event.Sequence)
+		event.AttemptID, event.Timestamp, event.DataJSON, event.DedupeKey, event.RunID,
+		event.RunID, event.DedupeKey, event.RunID, event.Type, event.Stage, event.AttemptID, event.Timestamp).Scan(&event.ID, &event.Sequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -447,7 +451,7 @@ func (s *Store) publishEvent(event Event) {
 		data = map[string]any{}
 	}
 	s.eventBus.PublishEvent(notifier.Event{
-		RunID: event.RunID, Sequence: event.Sequence, Type: event.Type,
+		Cursor: event.ID, RunID: event.RunID, Sequence: event.Sequence, Type: event.Type,
 		Stage: event.Stage, Actor: event.Actor, Executor: event.Executor,
 		Severity: event.Severity, AttemptID: event.AttemptID,
 		Timestamp: event.Timestamp, Data: data,

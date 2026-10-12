@@ -169,7 +169,7 @@ func TestEventsProjectFieldsAndPublishToSubscribers(t *testing.T) {
 	}
 	select {
 	case received := <-subscription:
-		if received.Type != "check_overridden" || received.Stage != "qa" || received.Actor != "alice" ||
+		if received.Cursor != event.ID || received.Type != "check_overridden" || received.Stage != "qa" || received.Actor != "alice" ||
 			received.Executor != "human" || received.Severity != "warning" || received.Sequence != 1 {
 			t.Fatalf("subscriber received incomplete event: %+v", received)
 		}

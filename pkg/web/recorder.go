@@ -1,9 +1,12 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -213,10 +216,19 @@ func (r *StoreRecorder) EventRecorded(runID string, source evidence.Event) {
 		RunID: runID, Type: source.Type, Stage: source.Stage, Actor: actor,
 		Executor: executor, Severity: severity, AttemptID: source.AttemptID,
 		Timestamp: source.Timestamp, DataJSON: marshalJSON(source.Data),
+		DedupeKey: typedEvidenceEventKey(source),
 	}
-	if err := r.store.AppendEventNext(event); err != nil {
+	if _, err := r.store.AppendEventNextIfAbsent(event); err != nil {
 		r.warn("append typed event", err)
 	}
+}
+
+func typedEvidenceEventKey(event evidence.Event) string {
+	identity := strings.Join([]string{
+		event.Type, event.Stage, event.AttemptID, event.Timestamp.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return "evidence:" + hex.EncodeToString(digest[:])
 }
 
 func (r *StoreRecorder) AttemptsInvalidated(runID string, attemptIDs []string, at time.Time) {

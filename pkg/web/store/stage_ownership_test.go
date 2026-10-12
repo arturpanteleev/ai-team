@@ -1,10 +1,38 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
 )
+
+func TestTakeStagePublishesCommittedEventWithGlobalCursor(t *testing.T) {
+	s := newTestStore(t)
+	run := &PipelineRun{RunID: "run-owner-live", Feature: "feature", Status: "waiting_for_approval", StartedAt: time.Now().UTC()}
+	if err := s.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subscription := s.SubscribeEvents(ctx, 1)
+	if _, changed, err := s.TakeStage(run.RunID, "qa", "approval-qa", "alice", "qa", time.Now().UTC()); err != nil || !changed {
+		t.Fatalf("take stage changed=%v err=%v", changed, err)
+	}
+	select {
+	case event := <-subscription:
+		if event.Cursor <= 0 || event.Sequence != 1 || event.RunID != run.RunID || event.Type != "stage_taken" ||
+			event.Stage != "qa" || event.Actor != "alice" {
+			t.Fatalf("unexpected live stage_taken event: %+v", event)
+		}
+		stored, err := s.GetRunEventsAfter(run.RunID, event.Cursor-1, 10)
+		if err != nil || len(stored) != 1 || stored[0].ID != event.Cursor {
+			t.Fatalf("live cursor does not point at committed event: %+v err=%v", stored, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stage_taken was not published after its transaction committed")
+	}
+}
 
 func TestTakeStageRecordsOwnerAndTakeover(t *testing.T) {
 	s := newTestStore(t)

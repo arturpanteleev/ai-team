@@ -20,6 +20,9 @@ func TestStalledStageWarningIsDeduplicatedAfterServerRestart(t *testing.T) {
 	state := lifecycle.State{
 		RunID: "stalled-run", Feature: "feature", TargetDir: target, Task: "test stall events",
 		Phase: lifecycle.PhaseWaiting, NextStage: "qa", PendingApprovalID: "approval-qa",
+		ExecutorOverrides: map[string]lifecycle.ExecutorOverride{
+			"qa": {Executor: "human", PreviousExecutor: "agent", ActorID: "alice", ApprovalID: "approval-qa", VisitID: "approval-qa", ChangedAt: enteredAt.Add(time.Minute)},
+		},
 		ConfigSHA256:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		WorkflowSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		CreatedAt:      enteredAt,
@@ -58,7 +61,7 @@ func TestStalledStageWarningIsDeduplicatedAfterServerRestart(t *testing.T) {
 	if err != nil || len(events) != 1 {
 		t.Fatalf("stall warning count after restart=%d err=%v events=%+v", len(events), err, events)
 	}
-	if events[0].Type != "stage_stalled" || events[0].Stage != "qa" || events[0].Severity != "warning" || events[0].Actor != "system" {
+	if events[0].Type != "stage_stalled" || events[0].Stage != "qa" || events[0].Severity != "warning" || events[0].Actor != "system" || events[0].Executor != "human" {
 		t.Fatalf("stall warning fields missing: %+v", events[0])
 	}
 }

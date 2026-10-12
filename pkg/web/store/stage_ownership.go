@@ -102,15 +102,17 @@ func (s *Store) TakeStage(runID, stageID, approvalID, actorID, actorRole string,
 	if err != nil {
 		return StageOwner{}, false, err
 	}
-	var sequence int64
-	if err := tx.QueryRow(`INSERT INTO events(run_uid, sequence, type, attempt_uid, timestamp, data_json)
-		SELECT ?, COALESCE(MAX(sequence), 0) + 1, 'stage_taken', NULL, ?, ? FROM events WHERE run_uid = ? RETURNING sequence`,
-		runID, at, string(encoded), runID).Scan(&sequence); err != nil {
+	event := &Event{RunID: runID, Type: "stage_taken", Stage: stageID, Actor: actorID, Timestamp: at, DataJSON: string(encoded)}
+	populateEventFields(event)
+	if err := tx.QueryRow(`INSERT INTO events(run_uid, sequence, type, stage, actor, executor, severity, attempt_uid, timestamp, data_json, dedupe_key)
+		SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?, ?, NULL, ?, ?, ? FROM events WHERE run_uid = ? RETURNING id, sequence`,
+		runID, event.Type, event.Stage, event.Actor, event.Executor, event.Severity, event.Timestamp, event.DataJSON, event.DedupeKey, runID).Scan(&event.ID, &event.Sequence); err != nil {
 		return StageOwner{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return StageOwner{}, false, err
 	}
+	s.publishEvent(*event)
 	return StageOwner{StageID: stageID, ApprovalID: approvalID, ActorID: actorID, ActorRole: actorRole, TakenAt: at}, true, nil
 }
 

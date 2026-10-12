@@ -1,6 +1,13 @@
 package pipeline
 
-import "github.com/arturpanteleev/ai-team/pkg/evidence"
+import (
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/logging"
+)
+
+var taskWarningEventTypes = map[string]struct{}{
+	"check_error": {}, "check_overridden": {}, "description_missing": {}, "stage_skipped": {},
+}
 
 // eventRecorder is optional so external Recorder implementations retain
 // source compatibility while web recorders can project typed warning events.
@@ -14,5 +21,24 @@ func (rs *runState) recordTypedEvent(event evidence.Event) {
 	}
 	if recorder, ok := rs.p.recorder.(eventRecorder); ok {
 		recorder.EventRecorded(rs.runID, event)
+	}
+}
+
+// replayTypedEvents repairs the secondary SQLite task feed from authoritative
+// evidence. A process can stop after appending evidence but before recording
+// the task event; StoreRecorder deduplicates this replay by evidence identity.
+func (rs *runState) replayTypedEvents() {
+	events, found, err := rs.readEvidenceEvents()
+	if err != nil {
+		logging.Printf("warning: cannot replay task warning events: %v\n", err)
+		return
+	}
+	if !found {
+		return
+	}
+	for _, event := range events {
+		if _, ok := taskWarningEventTypes[event.Type]; ok {
+			rs.recordTypedEvent(event)
+		}
 	}
 }

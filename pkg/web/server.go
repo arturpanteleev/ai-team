@@ -568,7 +568,7 @@ func (s *Server) checkStalledRuns(now time.Time) error {
 			default:
 				continue
 			}
-			threshold, executor := s.stallPolicy(run, state.NextStage)
+			threshold, executor := s.stallPolicy(run, state, state.NextStage)
 			enteredAt := state.UpdatedAt.UTC()
 			if now.Sub(enteredAt) < threshold {
 				continue
@@ -598,26 +598,36 @@ func (s *Server) checkStalledRuns(now time.Time) error {
 	}
 }
 
-func (s *Server) stallPolicy(run store.PipelineRun, stageID string) (time.Duration, string) {
+func (s *Server) stallPolicy(run store.PipelineRun, state lifecycle.State, stageID string) (time.Duration, string) {
 	threshold := s.stallAfter
 	if threshold <= 0 {
 		threshold = 24 * time.Hour
 	}
 	cfg, err := config.ParseYAML([]byte(run.ConfigSnapshot))
-	if err != nil {
-		return threshold, ""
-	}
-	if !s.stallAfterOverride {
-		if parsed, err := time.ParseDuration(cfg.StallAfter); err == nil && parsed > 0 {
-			threshold = parsed
+	executor := ""
+	if err == nil {
+		if !s.stallAfterOverride {
+			if parsed, err := time.ParseDuration(cfg.StallAfter); err == nil && parsed > 0 {
+				threshold = parsed
+			}
+		}
+		for _, stage := range cfg.Stages {
+			if stage.ID == stageID {
+				executor = stage.Executor
+				break
+			}
 		}
 	}
-	for _, stage := range cfg.Stages {
-		if stage.ID == stageID {
-			return threshold, stage.Executor
+	if override, ok := state.ExecutorOverrides[stageID]; ok {
+		approvalID := state.ActiveApprovalID
+		if approvalID == "" {
+			approvalID = state.PendingApprovalID
+		}
+		if approvalID != "" && override.ApprovalID == approvalID {
+			executor = override.Executor
 		}
 	}
-	return threshold, ""
+	return threshold, executor
 }
 
 func (s *Server) handleGetPipelines(w http.ResponseWriter, r *http.Request) {

@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -442,6 +442,31 @@ func (s *Store) AppendEventNextIfAbsent(event *Event) (bool, error) {
 	return true, nil
 }
 
+// IntegrationCursor returns the last durable event cursor acknowledged by an
+// event adapter. found is false until the adapter is first enabled.
+func (s *Store) IntegrationCursor(integration string) (cursor int64, found bool, err error) {
+	if strings.TrimSpace(integration) == "" {
+		return 0, false, fmt.Errorf("integration name is required")
+	}
+	err = s.db.QueryRow(`SELECT cursor FROM integration_cursors WHERE integration = ?`, integration).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return cursor, err == nil, err
+}
+
+// SetIntegrationCursor monotonically advances an adapter's acknowledged event
+// position. The cursor is committed only after an event was handled or its
+// integration_error was durably recorded.
+func (s *Store) SetIntegrationCursor(integration string, cursor int64) error {
+	if strings.TrimSpace(integration) == "" || cursor < 0 {
+		return fmt.Errorf("invalid integration cursor %q=%d", integration, cursor)
+	}
+	_, err := s.db.Exec(`INSERT INTO integration_cursors(integration, cursor) VALUES (?, ?)
+		ON CONFLICT(integration) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)`, integration, cursor)
+	return err
+}
+
 func (s *Store) publishEvent(event Event) {
 	var data map[string]any
 	if event.DataJSON != "" {
@@ -734,6 +759,8 @@ func migrate(db *sql.DB) error {
 			attempt_uid TEXT, timestamp DATETIME NOT NULL, data_json TEXT,
 			UNIQUE(run_uid, sequence))`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_uid, sequence)`,
+		`CREATE TABLE IF NOT EXISTS integration_cursors (
+			integration TEXT PRIMARY KEY, cursor INTEGER NOT NULL CHECK(cursor >= 0))`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON events(run_uid, dedupe_key) WHERE dedupe_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS team_members (
 			actor_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, roles_json TEXT NOT NULL,
@@ -750,7 +777,7 @@ func migrate(db *sql.DB) error {
 			scope TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
 			status_code INTEGER NOT NULL DEFAULT 0, response_headers TEXT NOT NULL DEFAULT '{}', response_body BLOB,
 			created_at DATETIME NOT NULL, PRIMARY KEY(scope, request_key))`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {

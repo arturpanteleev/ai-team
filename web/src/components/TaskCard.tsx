@@ -50,11 +50,11 @@ export function TaskCard({ run, stageTitle, now, onCancel }: TaskCardProps) {
     <article
       className={styles.card}
       aria-label={`Задача ${run.feature}`}
-      onClick={() => navigate(`/pipelines/${run.id}`)}
+      onClick={() => navigate(`/tasks/${encodeURIComponent(run.run_id)}`)}
       onKeyDown={(event) => {
         if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          navigate(`/pipelines/${run.id}`);
+          navigate(`/tasks/${encodeURIComponent(run.run_id)}`);
         }
       }}
       role="link"

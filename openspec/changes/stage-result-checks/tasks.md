@@ -18,4 +18,6 @@
 - [x] Wire `pr_*` rules through `delivery.CheckPullRequest` with detected base branch.
 - [x] Add stagecheck unit tests and pipeline integration tests (hard pass/fail,
       required sections, agent pass/fail/error, resume with `new_version`).
+- [x] Project the SHA-verified grill `new_version` into the next stage input and
+      recover it after a crash between transition and target-stage execution.
 - [x] Run `GOTOOLCHAIN=go1.26.9 make verify` (build, vet, lint, coverage gate).

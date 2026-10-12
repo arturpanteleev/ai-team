@@ -57,7 +57,7 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := NewStoreRecorder(srv.store)
-	recorder.RunStarted("run-read-api", "feature-read", `{"task":"review feature","mode":"auto"}`, started)
+	recorder.RunStarted("run-read-api", "feature-read", `{"task":"review feature","mode":"auto","external_links":["JIRA-12 https://tracker.example/JIRA-12"]}`, started)
 	recorder.StageStarted("run-read-api", "attempt-1", "acceptance", 1, started.Add(time.Minute))
 	completedAt := started.Add(5 * time.Minute)
 	recorder.StageFinished(notifier.StageResult{RunID: "run-read-api", AttemptID: "attempt-1", Name: "acceptance",
@@ -86,6 +86,18 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 			}
 		})
 	}
+	detailRequest := newLoopbackRequest(http.MethodGet, "/api/runs/run-read-api", nil)
+	detailResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(detailResponse, detailRequest)
+	var detail taskRunDetails
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode task detail: %v", err)
+	}
+	if detail.Task != "review feature" || detail.Mode != "auto" || len(detail.ExternalLinks) != 1 ||
+		detail.ExternalLinks[0] != "JIRA-12 https://tracker.example/JIRA-12" || detail.Template == nil ||
+		!detail.Template.Valid || detail.Template.Version == "" || len(detail.Template.Stages) == 0 {
+		t.Fatalf("task detail omitted its metadata or pinned template: %+v", detail)
+	}
 	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow.csv", nil)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
@@ -93,6 +105,186 @@ func TestTaskReadAPIListsTemplatesRunsEventsAndMetrics(t *testing.T) {
 		!strings.Contains(response.Body.String(), `tokens_input,"",,"tokens","unknown","metrics.UsageEnvelope"`) {
 		t.Fatalf("flow CSV: status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 	}
+}
+
+func TestGlobalEventFeedPaginatesWarningsByPersistedCursor(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	startedAt := time.Now().UTC().Truncate(time.Millisecond)
+	run := &store.PipelineRun{RunID: "run-global-feed", Feature: "feed demo", Status: "running", StartedAt: startedAt}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	storedEvents := []*store.Event{
+		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{"feature":"feed demo"}`},
+		{RunID: run.RunID, Type: "check_error", Stage: "qa", Severity: "warning", Timestamp: startedAt.Add(time.Second), DataJSON: `{"reason":"check failed"}`},
+		{RunID: run.RunID, Type: "attempt_started", Stage: "review", Timestamp: startedAt.Add(2 * time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "stage_skipped", Stage: "review", Timestamp: startedAt.Add(3 * time.Second), DataJSON: `{"reason":"not required"}`},
+	}
+	for _, event := range storedEvents {
+		if err := srv.store.AppendEventNext(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := newLoopbackRequest(http.MethodGet, "/api/events?after=0&limit=10", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	var allPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &allPage) != nil || len(allPage.Events) != len(storedEvents) {
+		t.Fatalf("all event page: status=%d body=%s events=%+v", response.Code, response.Body.String(), allPage.Events)
+	}
+	if allPage.Events[0].Type != "run_started" || allPage.Events[3].Type != "stage_skipped" || allPage.NextCursor != storedEvents[3].ID {
+		t.Fatalf("all event cursor order=%+v next=%d", allPage.Events, allPage.NextCursor)
+	}
+
+	firstWarningRequest := newLoopbackRequest(http.MethodGet, "/api/events?after=0&limit=1&warnings=true", nil)
+	firstWarningResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(firstWarningResponse, firstWarningRequest)
+	var firstWarningPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if firstWarningResponse.Code != http.StatusOK || json.Unmarshal(firstWarningResponse.Body.Bytes(), &firstWarningPage) != nil ||
+		len(firstWarningPage.Events) != 1 || firstWarningPage.Events[0].Type != "check_error" ||
+		firstWarningPage.NextCursor != storedEvents[1].ID {
+		t.Fatalf("first warning page: status=%d body=%s page=%+v", firstWarningResponse.Code, firstWarningResponse.Body.String(), firstWarningPage)
+	}
+
+	secondWarningRequest := newLoopbackRequest(http.MethodGet, fmt.Sprintf("/api/events?after=%d&limit=1&warnings=true", firstWarningPage.NextCursor), nil)
+	secondWarningResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(secondWarningResponse, secondWarningRequest)
+	var secondWarningPage struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	if secondWarningResponse.Code != http.StatusOK || json.Unmarshal(secondWarningResponse.Body.Bytes(), &secondWarningPage) != nil ||
+		len(secondWarningPage.Events) != 1 || secondWarningPage.Events[0].Type != "stage_skipped" ||
+		secondWarningPage.NextCursor != storedEvents[3].ID {
+		t.Fatalf("second warning page: status=%d body=%s page=%+v", secondWarningResponse.Code, secondWarningResponse.Body.String(), secondWarningPage)
+	}
+}
+
+func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	startedAt := time.Now().UTC().Truncate(time.Millisecond)
+	run := &store.PipelineRun{RunID: "run-desc-feed", Feature: "feed demo", Status: "running", StartedAt: startedAt}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	storedEvents := []*store.Event{
+		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{}`},
+		{RunID: run.RunID, Type: "check_error", Stage: "qa", Severity: "warning", Timestamp: startedAt.Add(time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "attempt_started", Stage: "review", Timestamp: startedAt.Add(2 * time.Second), DataJSON: `{}`},
+		{RunID: run.RunID, Type: "stage_skipped", Stage: "review", Timestamp: startedAt.Add(3 * time.Second), DataJSON: `{}`},
+	}
+	for _, event := range storedEvents {
+		if err := srv.store.AppendEventNext(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type page struct {
+		Events     []Event `json:"events"`
+		NextCursor int64   `json:"next_cursor"`
+	}
+	get := func(path string) (int, page) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, newLoopbackRequest(http.MethodGet, path, nil))
+		var value page
+		if response.Code == http.StatusOK {
+			if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
+				t.Fatalf("decode %s: %v body=%s", path, err, response.Body.String())
+			}
+		}
+		return response.Code, value
+	}
+	cursors := func(events []Event) []int64 {
+		values := make([]int64, 0, len(events))
+		for _, event := range events {
+			values = append(values, event.Cursor)
+		}
+		return values
+	}
+
+	status, newest := get("/api/events?order=desc&limit=2")
+	if status != http.StatusOK || fmt.Sprint(cursors(newest.Events)) != fmt.Sprint([]int64{storedEvents[3].ID, storedEvents[2].ID}) ||
+		newest.NextCursor != storedEvents[2].ID {
+		t.Fatalf("newest page status=%d page=%+v", status, newest)
+	}
+	status, older := get(fmt.Sprintf("/api/events?order=desc&limit=2&before=%d", newest.NextCursor))
+	if status != http.StatusOK || fmt.Sprint(cursors(older.Events)) != fmt.Sprint([]int64{storedEvents[1].ID, storedEvents[0].ID}) ||
+		older.NextCursor != storedEvents[0].ID {
+		t.Fatalf("older page status=%d page=%+v", status, older)
+	}
+	status, warnings := get("/api/events?order=desc&limit=1&warnings=true")
+	if status != http.StatusOK || len(warnings.Events) != 1 || warnings.Events[0].Type != "stage_skipped" {
+		t.Fatalf("newest warning status=%d page=%+v", status, warnings)
+	}
+	status, olderWarnings := get(fmt.Sprintf("/api/events?order=desc&limit=1&warnings=true&before=%d", warnings.NextCursor))
+	if status != http.StatusOK || len(olderWarnings.Events) != 1 || olderWarnings.Events[0].Type != "check_error" ||
+		olderWarnings.NextCursor != storedEvents[1].ID {
+		t.Fatalf("older warning status=%d page=%+v", status, olderWarnings)
+	}
+	status, runPage := get(fmt.Sprintf("/api/runs/%s/events?order=desc&limit=1", run.RunID))
+	if status != http.StatusOK || len(runPage.Events) != 1 || runPage.Events[0].Cursor != storedEvents[3].ID {
+		t.Fatalf("run newest page status=%d page=%+v", status, runPage)
+	}
+	for _, path := range []string{
+		"/api/events?before=3",
+		"/api/events?order=desc&after=1",
+		"/api/events?order=desc&after=1&before=3",
+		"/api/events?order=sideways",
+		"/api/events?order=desc&before=-1",
+	} {
+		if status, _ := get(path); status != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d, want 400", path, status)
+		}
+	}
+}
+
+func TestStoreRecorderProjectsGrillOpenQuestionCount(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	started := time.Now().UTC()
+	recorder := NewStoreRecorder(srv.store)
+	recorder.RunStarted("run-grill-event", "feature", "{}", started)
+	recorder.RecordEvent("run-grill-event", "grill_completed", "attempt-grill", started.Add(time.Second), map[string]any{
+		"rounds": 2, "open_questions": 1, "reason": "done",
+	})
+	values, err := srv.store.GetRunEventsAfter("run-grill-event", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if value.Type != "grill_completed" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(value.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["open_questions"] != float64(1) || data["reason"] != "done" {
+			t.Fatalf("projected grill completion lost open-question metric: %+v", data)
+		}
+		return
+	}
+	t.Fatalf("grill completion was not projected: %+v", values)
 }
 
 func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
@@ -527,6 +719,119 @@ func (c *actionRecordingController) SkipStage(_ context.Context, runID, stageID,
 	c.skipRunID, c.skipStageID, c.skipReason = runID, stageID, reason
 	c.skipActorID, c.skipActorRole = actorID, actorRole
 	return nil
+}
+
+type grillActionRecordingController struct {
+	*fakeRunController
+	action, answer, actorID, actorRole string
+}
+
+func (c *grillActionRecordingController) AnswerStageGrill(_ context.Context, _, _, answer, actorID, actorRole string) error {
+	c.action, c.answer, c.actorID, c.actorRole = approval.GrillActionAnswer, answer, actorID, actorRole
+	return nil
+}
+
+func (c *grillActionRecordingController) SubmitStageGrillVersion(_ context.Context, _, _, comment, actorID, actorRole string) error {
+	c.action, c.answer, c.actorID, c.actorRole = approval.GrillActionNewVersion, comment, actorID, actorRole
+	return nil
+}
+
+func (c *grillActionRecordingController) CompleteStageGrill(_ context.Context, _, _, actorID, actorRole string) error {
+	c.action, c.actorID, c.actorRole = approval.GrillActionDone, actorID, actorRole
+	return nil
+}
+
+func TestTaskGrillNewVersionActionReachesController(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := approval.PendingApproval{
+		ID: "approval-grill-api", RunID: "run-grill-api", AttemptID: "attempt-grill-api",
+		Kind: approval.KindGrillQuestions, Status: approval.StatusPending,
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: approval.GrillTrigger,
+		SubjectHash: testSubjectHash, RequiredRoles: []string{"po"},
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+	}
+	controller := &grillActionRecordingController{fakeRunController: &fakeRunController{approvals: []approval.PendingApproval{pending}}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun(pending.RunID, pending.RunID); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{
+		RunID: pending.RunID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: pending.FromStage, PendingApprovalID: pending.ID,
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/run-grill-api/stages/product_spec/grill/new-version", `{"answer":"обновил результат"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || controller.action != approval.GrillActionNewVersion ||
+		controller.actorID != "local-user" || controller.actorRole != "po" {
+		t.Fatalf("new-version grill action did not reach controller with stage identity: status=%d action=%q actor=%q role=%q body=%s",
+			response.Code, controller.action, controller.actorID, controller.actorRole, response.Body.String())
+	}
+	actions := srv.taskAllowedActions(pending.RunID, pending.FromStage, lifecycle.State{Phase: lifecycle.PhaseWaiting, PendingApprovalID: pending.ID})
+	if !actionAllowed(actions, "grill/new-version") || !actionAllowed(actions, "grill/answer") || !actionAllowed(actions, "grill/done") {
+		t.Fatalf("task projection omitted grill actions: %v", actions)
+	}
+}
+
+func TestGenericDecisionCannotBypassGrillNewVersionValidation(t *testing.T) {
+	pending := approval.PendingApproval{
+		ID: "approval-grill-generic", RunID: "run-grill-generic", AttemptID: "attempt-product-spec",
+		Kind: approval.KindGrillQuestions, Trigger: approval.GrillTrigger, Status: approval.StatusPending,
+		FromStage: "product_spec", ToStage: "product_spec", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"po"}, Actions: []string{approval.GrillActionNewVersion},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{pending}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	request := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/run-grill-generic/approvals/approval-grill-generic/decisions",
+		`{"actor_role":"po","action":"new_version","comment":"comment-only","subject_hash":"`+testSubjectHash+`","artifact_revisions":{"stages/product_spec/result.md":"rev-older"}}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || controller.decisionCalls != 0 {
+		t.Fatalf("generic decision must not resolve a grill new_version or trust client revision IDs: status=%d calls=%d body=%s",
+			response.Code, controller.decisionCalls, response.Body.String())
+	}
 }
 
 func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {
@@ -1004,6 +1309,9 @@ func TestFlowMetricsJSONSubscriptionEstimatesStayFinite(t *testing.T) {
 func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 	if flowMetricsRaceBuild || testing.CoverMode() != "" {
 		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")
+	}
+	if os.Getenv("CI") == "true" && os.Getenv("AI_TEAM_FLOW_METRICS_PERF") != "1" {
+		t.Skip("CI runs the wall-clock acceptance check separately after the unit and coverage suites")
 	}
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")

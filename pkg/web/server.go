@@ -27,6 +27,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
+	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
@@ -35,6 +36,7 @@ const maxLogTailSize = 64 << 10
 const maxCommandBody = 64 << 10
 const maxSubmissionBody = 64 << 20 // escaped JSON for a maximum-size markdown submission plus metadata.
 const sessionCookieName = "ai_team_session"
+const trackerIntegrationName = "tracker"
 
 type RunController interface {
 	Start(feature, task string) (string, error)
@@ -48,6 +50,13 @@ type RunController interface {
 }
 
 type ServerOption func(*Server)
+
+// WithTrackerAdapter registers a one-way adapter for task lifecycle events.
+// The adapter runs in a separate worker, so external tracker failures cannot
+// change a task's pipeline result.
+func WithTrackerAdapter(adapter tracker.Adapter) ServerOption {
+	return func(server *Server) { server.trackerAdapter = adapter }
+}
 
 // WithStallAfter overrides each run's configured stall_after threshold.
 // It is primarily useful for deployments that set a server-wide policy.
@@ -155,6 +164,7 @@ type Server struct {
 	cancelEvents        context.CancelFunc
 	eventWorkers        sync.WaitGroup
 	controller          RunController
+	trackerAdapter      tracker.Adapter
 	templateAgentLookup config.AgentLookup
 	templateMu          sync.Mutex
 	authenticator       IdentityVerifier
@@ -243,8 +253,28 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		_ = s.Close()
 		return nil, fmt.Errorf("initial event cursor: %w", err)
 	}
+	trackerCursor := eventCursor
+	if srv.trackerAdapter != nil {
+		storedCursor, found, cursorErr := s.IntegrationCursor(trackerIntegrationName)
+		if cursorErr != nil {
+			fmt.Fprintf(os.Stderr, "tracker cursor unavailable; replaying from the beginning: %v\n", cursorErr)
+			trackerCursor = 0
+		} else if found {
+			trackerCursor = storedCursor
+		} else if cursorErr := s.SetIntegrationCursor(trackerIntegrationName, eventCursor); cursorErr != nil {
+			fmt.Fprintf(os.Stderr, "tracker cursor could not be initialized: %v\n", cursorErr)
+			// Until the initial position is durable, replay from the beginning.
+			// Starting at eventCursor here would permanently skip events if the
+			// process stopped before it could establish the subscription cursor.
+			trackerCursor = 0
+		}
+	}
 	srv.eventWorkers.Add(1)
 	go srv.tailEvents(eventContext, eventCursor)
+	if srv.trackerAdapter != nil {
+		srv.eventWorkers.Add(1)
+		go srv.consumeTrackerEvents(eventContext, trackerCursor)
+	}
 	srv.eventWorkers.Add(1)
 	go srv.monitorStalledStages(eventContext)
 
@@ -316,6 +346,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/stages/{stageID}/skip", srv.handleTaskStageSkip)
 		router.Post("/api/runs/{runID}/stages/{stageID}/return", srv.handleTaskStageReturn)
 		router.Post("/api/runs/{runID}/stages/{stageID}/grill/answer", srv.handleTaskGrillAnswer)
+		router.Post("/api/runs/{runID}/stages/{stageID}/grill/new-version", srv.handleTaskGrillNewVersion)
 		router.Post("/api/runs/{runID}/stages/{stageID}/grill/done", srv.handleTaskGrillDone)
 		router.Post("/api/runs/{runID}/plan/approve", srv.handleTaskPlanApprove)
 		router.Post("/api/runs/{runID}/approvals/{approvalID}/decisions", srv.handleDecision)
@@ -519,6 +550,100 @@ func (s *Server) tailEvents(ctx context.Context, cursor int64) {
 			}
 		}
 	}
+}
+
+// consumeTrackerEvents wakes on the live bus and drains from SQLite's durable
+// cursor. The database remains authoritative if the bounded live buffer drops
+// a notification while an adapter is handling a slow HTTP request.
+func (s *Server) consumeTrackerEvents(ctx context.Context, cursor int64) {
+	defer s.eventWorkers.Done()
+	updates := s.store.SubscribeEvents(ctx, 256)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, open := <-updates:
+			if !open {
+				return
+			}
+		case <-ticker.C:
+		}
+		for {
+			events, err := s.store.GetEventsAfter(cursor, 100)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "tracker event replay: %v\n", err)
+				break
+			}
+			stopDrain := false
+			for _, event := range events {
+				if event.Type == "attempt_finished" && !s.deliverTrackerEvent(ctx, event) {
+					stopDrain = true
+					break
+				}
+				if err := s.store.SetIntegrationCursor(trackerIntegrationName, event.ID); err != nil {
+					fmt.Fprintf(os.Stderr, "tracker cursor update: %v\n", err)
+					stopDrain = true
+					break
+				}
+				cursor = event.ID
+			}
+			if stopDrain || len(events) < 100 {
+				break
+			}
+		}
+	}
+}
+
+func (s *Server) deliverTrackerEvent(ctx context.Context, stored store.Event) bool {
+	run, err := s.store.GetPipelineRunByRunID(stored.RunID)
+	if err != nil || run == nil {
+		return s.recordIntegrationError(stored, "tracker task lookup failed")
+	}
+	var task startRunCommand
+	if err := json.Unmarshal([]byte(run.ConfigSnapshot), &task); err != nil {
+		return s.recordIntegrationError(stored, "task external links are unavailable")
+	}
+	if len(task.ExternalLinks) == 0 {
+		return true
+	}
+	var data map[string]any
+	if stored.DataJSON != "" {
+		if err := json.Unmarshal([]byte(stored.DataJSON), &data); err != nil {
+			return s.recordIntegrationError(stored, "task event payload is invalid")
+		}
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	adapterEvent := tracker.TaskEvent{
+		Cursor: stored.ID, RunID: stored.RunID, TaskID: run.ID, Type: stored.Type,
+		Stage: stored.Stage, AttemptID: stored.AttemptID, Timestamp: stored.Timestamp,
+		Data: data, ExternalLinks: task.ExternalLinks,
+	}
+	if err := s.trackerAdapter.HandleTaskEvent(ctx, adapterEvent); err != nil {
+		return s.recordIntegrationError(stored, err.Error())
+	}
+	return true
+}
+
+func (s *Server) recordIntegrationError(source store.Event, reason string) bool {
+	data, err := json.Marshal(map[string]any{
+		"integration": "tracker", "source_cursor": source.ID,
+		"source_event": source.Type, "error": reason,
+	})
+	if err != nil {
+		return false
+	}
+	if err := s.store.AppendEventNext(&store.Event{
+		RunID: source.RunID, Type: "integration_error", Stage: source.Stage,
+		Severity: "warning", Timestamp: time.Now().UTC(), DataJSON: string(data),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "tracker integration error event could not be persisted for run %s: %v\n", source.RunID, err)
+		return false
+	}
+	return true
 }
 
 func (s *Server) monitorStalledStages(ctx context.Context) {

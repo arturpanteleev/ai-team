@@ -318,6 +318,24 @@ func ValidateSubmission(resultKind, linkKind, content string) error {
 	return nil
 }
 
+// ValidateStageResult applies both the typed result constraints and the
+// required markdown sections declared by a pinned human stage. Revision edits
+// and pipeline resume use the same validation before accepting stage bytes.
+func ValidateStageResult(resultKind, linkKind, content string, requiredSections []string) error {
+	if err := ValidateSubmission(resultKind, linkKind, content); err != nil {
+		return err
+	}
+	if resultKind != "md" && len(requiredSections) > 0 {
+		return errors.New("required sections are only valid for markdown results")
+	}
+	for _, section := range requiredSections {
+		if !strings.Contains(content, section) {
+			return fmt.Errorf("human markdown is missing required section %q", section)
+		}
+	}
+	return nil
+}
+
 // Digest returns the lowercase SHA-256 digest of the exact submitted bytes.
 func Digest(content []byte) string { return digest(content) }
 

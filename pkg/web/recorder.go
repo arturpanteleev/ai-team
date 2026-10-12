@@ -125,6 +125,15 @@ func (r *StoreRecorder) ApprovalDecided(runID, approvalID, attemptID string, at 
 	r.event("approval_decided", attemptID, at, data)
 }
 
+// RecordEvent projects task-specific evidence such as grill completion metrics
+// into the same run event stream shown by the task API.
+func (r *StoreRecorder) RecordEvent(runID, eventType, attemptID string, at time.Time, data map[string]any) {
+	if r.runID == 0 || runID != r.runUID {
+		return
+	}
+	r.event(eventType, attemptID, at, data)
+}
+
 func (r *StoreRecorder) TransitionSelected(runID, attemptID string, at time.Time, data map[string]any) {
 	if r.runID == 0 || runID != r.runUID {
 		return

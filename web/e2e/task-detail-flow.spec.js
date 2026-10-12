@@ -238,7 +238,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByText('Сегмент малого бизнеса')).toBeVisible()
     await expect(page.getByRole('link', { name: 'Открыть лог этапа' })).toBeVisible()
     await page.getByRole('button', { name: 'Этап analysis: показать детали' }).click()
-    await expect(page.getByText('required-sections')).toBeVisible()
+    await expect(page.getByText('required-sections', { exact: true })).toBeVisible()
 
     await page.getByLabel('Причина обхода проверки').fill('Проверено вручную')
     await page.getByRole('button', { name: 'Обойти проверку' }).click()

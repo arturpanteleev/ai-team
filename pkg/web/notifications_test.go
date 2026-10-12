@@ -146,6 +146,9 @@ func TestNotificationsDeliverSubscribedEventsOnceAcrossReconnect(t *testing.T) {
 		t.Fatalf("replay after reconnect duplicated event %d", hit.EventID)
 	}
 	// A repeated live delivery of the same stored event is a no-op as well.
+	// Wait for the worker's bookkeeping: the single production worker never
+	// handles one event concurrently with itself.
+	waitNotifierCursor(t, restarted.store, third)
 	stored, err := restarted.store.GetEventsAfter(third-1, 1)
 	if err != nil || len(stored) != 1 {
 		t.Fatalf("stored=%v err=%v", stored, err)

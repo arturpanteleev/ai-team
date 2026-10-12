@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -140,6 +141,46 @@ func TestStoreRecorder_DoesNotDuplicateLegacyWarningProjection(t *testing.T) {
 	events, err := s.GetRunEventsAfter("run-warning-legacy", 0, 10)
 	if err != nil || len(events) != 2 || events[1].Type != "check_error" {
 		t.Fatalf("legacy projection was duplicated: events=%+v err=%v", events, err)
+	}
+}
+
+func TestStoreRecorder_PreservesHumanEditLinkInStageEvent(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	r := NewStoreRecorder(s)
+	at := time.Date(2026, 10, 12, 3, 4, 5, 0, time.UTC)
+	r.RunStarted("run-human-edit", "feature", "", at)
+	r.StageStarted("run-human-edit", "agent-attempt", "implementation", 1, at)
+	r.StageFinished(notifier.StageResult{RunID: "run-human-edit", AttemptID: "agent-attempt", Name: "implementation",
+		Status: notifier.StatusPassed, StartedAt: at, FinishedAt: at.Add(time.Minute)})
+	r.StageStarted("run-human-edit", "human-attempt", "implementation", 2, at.Add(time.Minute))
+	r.StageFinished(notifier.StageResult{RunID: "run-human-edit", AttemptID: "human-attempt", Name: "implementation",
+		Status: notifier.StatusPassed, HumanEditOfAgentAttemptID: "agent-attempt", StartedAt: at.Add(time.Minute), FinishedAt: at.Add(2 * time.Minute)})
+
+	events, err := s.GetRunEventsAfter("run-human-edit", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, event := range events {
+		if event.Type != "attempt_finished" || event.AttemptID != "human-attempt" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(event.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["human_edit_of_agent_attempt_id"] != "agent-attempt" {
+			t.Fatalf("human edit link was lost from attempt_finished: %v", data)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("missing human attempt_finished event")
 	}
 }
 

@@ -194,6 +194,7 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 		"stage": stage.Name, "agent": stage.Name, "actor_id": stage.ActorID, "executor": stage.Executor,
 		"status": stage.Status, "execution": stored.Execution,
 		"decision": stored.Decision, "outcome": stored.Outcome,
+		"human_edit_of_agent_attempt_id": stage.HumanEditOfAgentAttemptID,
 	})
 }
 

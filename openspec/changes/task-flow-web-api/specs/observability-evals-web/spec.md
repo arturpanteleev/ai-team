@@ -14,17 +14,25 @@ warning lifecycle events without changing the cursor ordering.
 
 ### Requirement: Flow observability
 
-Flow metrics MUST report lead time and cycle time through acceptance, stage
-durations and execution counts, action counts, and known versus unknown token
-usage for the selected period. JSON and CSV exports MUST use the same selected
-period and data source.
+Flow metrics MUST report lead time and cycle time through acceptance, with
+median and nearest-rank p80; stage durations and attempt counts grouped by
+execution, decision, and outcome; agent-attempt share by stage; successful
+agent results without linked human edits; override, skip, and return counts by
+issuing stage; and known versus unknown token usage for the selected period.
+JSON and CSV exports MUST use the same selected period and expose the same
+metric set.
 
 Flow reports MUST preserve usage attestation and provenance. Run totals MUST
 use complete usage envelopes and stage totals MUST use attested attempt
-manifests. A configured monthly subscription amount MAY be allocated across
-runs by token share, but reports MUST NOT infer a price per model token. Missing
-or incomplete usage in the applicable monthly denominator makes the estimate
-unavailable.
+manifests. The monthly subscription amount and optional currency in
+`.ai-team/config.yaml` are the only price source; omitted currency defaults to
+USD. A configured monthly subscription amount MAY be allocated across runs and
+stages in proportion to their attested tokens divided by all complete project
+run tokens in the same UTC month. Reports MUST NOT infer a price per model
+token or expose runtime `cost_usd` as subscription cost. Missing or incomplete
+selected usage, stage manifests, or monthly denominators makes the estimate
+unknown rather than zero. A 1000-run metrics calculation MUST complete within
+300 milliseconds.
 
 #### Scenario: No usage envelope
 
@@ -39,5 +47,13 @@ unavailable.
   runs in the relevant month
 - **THEN** metrics MAY report the selected runs' token-weighted subscription
   share as an approximation
+- **AND** metrics MAY report each stage's token-weighted subscription share
 - **AND** JSON and CSV MUST identify the value as an estimate and preserve its
   envelope attestation source
+
+#### Scenario: State-grouped stage metrics
+
+- **WHEN** a client requests metrics for a period containing stage attempts
+- **THEN** stage attempt counts and durations MUST be grouped by execution,
+  decision, and outcome, with invalidated attempts excluded
+- **AND** override, skip, and return counts MUST use the issuing stage

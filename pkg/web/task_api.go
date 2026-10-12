@@ -1065,17 +1065,37 @@ type flowDurationStats struct {
 }
 
 type flowStageStats struct {
-	Stage                string `json:"stage"`
-	Attempts             int    `json:"attempts"`
-	DurationMS           int64  `json:"duration_ms"`
-	Human                int    `json:"human_attempts"`
-	Agent                int    `json:"agent_attempts"`
-	TokensInput          *int64 `json:"tokens_input"`
-	TokensOutput         *int64 `json:"tokens_output"`
-	UsageKnownAttempts   int    `json:"usage_known_attempts"`
-	UsageUnknownAttempts int    `json:"usage_unknown_attempts"`
-	UsageAttestation     string `json:"usage_attestation"`
-	UsageSource          string `json:"usage_source,omitempty"`
+	Stage                     string                `json:"stage"`
+	Attempts                  int                   `json:"attempts"`
+	DurationMS                int64                 `json:"duration_ms"`
+	Human                     int                   `json:"human_attempts"`
+	Agent                     int                   `json:"agent_attempts"`
+	AgentShare                *float64              `json:"agent_share"`
+	ByState                   []flowStageStateStats `json:"by_state"`
+	TokensInput               *int64                `json:"tokens_input"`
+	TokensOutput              *int64                `json:"tokens_output"`
+	UsageKnownAttempts        int                   `json:"usage_known_attempts"`
+	UsageUnknownAttempts      int                   `json:"usage_unknown_attempts"`
+	UsageAttestation          string                `json:"usage_attestation"`
+	UsageSource               string                `json:"usage_source,omitempty"`
+	SubscriptionShareEstimate *float64              `json:"subscription_share_estimate"`
+	SubscriptionCurrency      string                `json:"subscription_currency,omitempty"`
+	EstimateSource            string                `json:"estimate_source,omitempty"`
+	EstimateBasis             string                `json:"estimate_basis,omitempty"`
+}
+
+type flowStageStateStats struct {
+	Execution  string `json:"execution"`
+	Decision   string `json:"decision"`
+	Outcome    string `json:"outcome"`
+	Attempts   int    `json:"attempts"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+type flowStateKey struct {
+	execution string
+	decision  string
+	outcome   string
 }
 
 type flowMetricsResponse struct {
@@ -1155,6 +1175,9 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	response := flowMetricsResponse{From: from, To: to, ByStage: []flowStageStats{}, Overrides: map[string]int{}, Skips: map[string]int{}, Returns: map[string]int{}}
 	leadTimes, cycleTimes := make([]int64, 0), make([]int64, 0)
 	stageIndex := map[string]int{}
+	stageStates := map[string]map[flowStateKey]*flowStageStateStats{}
+	stageTokensByMonth := map[string]map[string]int64{}
+	stageUsageReady := map[string]bool{}
 	agentResults, agentAcceptedWithoutEdit := 0, 0
 	runs := make([]store.PipelineRun, 0)
 	for offset := 0; ; offset += 100 {
@@ -1167,22 +1190,35 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			break
 		}
 	}
-	usageEnvelopes := make([]metrics.UsageEnvelope, 0, len(runs))
 	envelopesByRunID := make(map[string]metrics.UsageEnvelope, len(runs))
+	monthTokens := map[string]int64{}
+	monthEstimateReady := map[string]bool{}
 	for _, run := range runs {
 		envelope, readErr := readTaskUsageEnvelope(s, run.RunID)
 		if readErr == nil {
 			envelopesByRunID[run.RunID] = envelope
-			usageEnvelopes = append(usageEnvelopes, envelope)
+		} else {
+			finishedAt := run.StartedAt
+			if run.CompletedAt != nil {
+				finishedAt = *run.CompletedAt
+			}
+			envelope = metrics.UsageEnvelope{RunID: run.RunID, FinishedAt: finishedAt}
+		}
+		month := envelope.FinishedAt.UTC().Format("2006-01")
+		if _, initialized := monthEstimateReady[month]; !initialized {
+			monthEstimateReady[month] = true
+		}
+		if !envelope.HasCompleteTokenUsage() || envelope.TokensInput < 0 || envelope.TokensOutput < 0 ||
+			envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {
+			monthEstimateReady[month] = false
 			continue
 		}
-		finishedAt := run.StartedAt
-		if run.CompletedAt != nil {
-			finishedAt = *run.CompletedAt
+		tokens := envelope.TokensInput + envelope.TokensOutput
+		if tokens < 0 || monthTokens[month] > math.MaxInt64-tokens {
+			monthEstimateReady[month] = false
+			continue
 		}
-		// A missing or unreadable envelope is an unknown monthly denominator,
-		// so subscription allocation must fail closed for that month.
-		usageEnvelopes = append(usageEnvelopes, metrics.UsageEnvelope{RunID: run.RunID, FinishedAt: finishedAt})
+		monthTokens[month] += tokens
 	}
 	var tokenInputTotal, tokenOutputTotal int64
 	requestedRuns := 0
@@ -1195,7 +1231,20 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 		if err != nil {
 			return response, err
 		}
+		events, err := s.allRunEvents(run.RunID)
+		if err != nil {
+			return response, err
+		}
+		humanEditAttemptIDs, humanEditMetadata := humanEditEvidence(events)
+		countedReturns := map[string]bool{}
 		acceptanceAt := time.Time{}
+		runFinishedAt := run.StartedAt
+		if envelope, found := envelopesByRunID[run.RunID]; found && !envelope.FinishedAt.IsZero() {
+			runFinishedAt = envelope.FinishedAt
+		} else if run.CompletedAt != nil {
+			runFinishedAt = *run.CompletedAt
+		}
+		runMonth := runFinishedAt.UTC().Format("2006-01")
 		for stagePosition, stage := range stages {
 			if stage.Status == "invalidated" || stage.Outcome == "invalidated" {
 				continue
@@ -1213,11 +1262,21 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			if !exists {
 				position = len(response.ByStage)
 				stageIndex[stageName] = position
-				response.ByStage = append(response.ByStage, flowStageStats{Stage: stageName})
+				response.ByStage = append(response.ByStage, flowStageStats{Stage: stageName, ByState: []flowStageStateStats{}})
+				stageStates[stageName] = map[flowStateKey]*flowStageStateStats{}
+				stageUsageReady[stageName] = true
 			}
 			stat := &response.ByStage[position]
 			stat.Attempts++
 			stat.DurationMS += stage.DurationMs
+			stateKey := flowStateKey{execution: metricState(stage.Execution), decision: metricState(stage.Decision), outcome: metricState(stage.Outcome)}
+			stateStat := stageStates[stageName][stateKey]
+			if stateStat == nil {
+				stateStat = &flowStageStateStats{Execution: stateKey.execution, Decision: stateKey.decision, Outcome: stateKey.outcome}
+				stageStates[stageName][stateKey] = stateStat
+			}
+			stateStat.Attempts++
+			stateStat.DurationMS += stage.DurationMs
 			if strings.EqualFold(stage.Execution, "human") {
 				stat.Human++
 			} else if strings.EqualFold(stage.Execution, "agent") {
@@ -1240,13 +1299,27 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 						input += manifest.Usage.TokensInput
 						output += manifest.Usage.TokensOutput
 						stat.TokensInput, stat.TokensOutput = &input, &output
+						if stageTokensByMonth[stageName] == nil {
+							stageTokensByMonth[stageName] = map[string]int64{}
+						}
+						if manifest.Usage.TokensInput > math.MaxInt64-manifest.Usage.TokensOutput {
+							stageUsageReady[stageName] = false
+						} else {
+							stageTokens := manifest.Usage.TokensInput + manifest.Usage.TokensOutput
+							if stageTokensByMonth[stageName][runMonth] > math.MaxInt64-stageTokens {
+								stageUsageReady[stageName] = false
+							} else {
+								stageTokensByMonth[stageName][runMonth] += stageTokens
+							}
+						}
 					}
 				} else {
 					stat.UsageUnknownAttempts++
+					stageUsageReady[stageName] = false
 				}
 				if taskStageSucceeded(stage) {
 					agentResults++
-					if !taskStageWasHumanEdited(stages, stagePosition, stage) {
+					if !taskStageWasHumanEdited(stages, stagePosition, stage, humanEditAttemptIDs, humanEditMetadata) {
 						agentAcceptedWithoutEdit++
 					}
 				}
@@ -1254,26 +1327,44 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 		}
 		if !acceptanceAt.IsZero() && !acceptanceAt.Before(run.StartedAt) {
 			leadTimes = append(leadTimes, acceptanceAt.Sub(run.StartedAt).Milliseconds())
-			start := firstCycleStart(s, run.RunID, acceptanceAt)
+			start := firstCycleStartFromEvents(events, acceptanceAt)
 			if !start.IsZero() && !acceptanceAt.Before(start) {
 				cycleTimes = append(cycleTimes, acceptanceAt.Sub(start).Milliseconds())
 			}
 		}
-		events, err := s.allRunEvents(run.RunID)
-		if err != nil {
-			return response, err
-		}
 		for _, event := range events {
 			var data map[string]any
 			_ = json.Unmarshal([]byte(event.DataJSON), &data)
-			stageID, _ := data["stage_id"].(string)
+			stageID := firstNonEmpty(event.Stage, metricStringValue(data["stage_id"]), metricStringValue(data["stage"]), metricStringValue(data["from_stage"]), metricStringValue(data["from"]))
+			countReturn := func() {
+				if stageID == "" {
+					return
+				}
+				key := event.AttemptID
+				if key == "" {
+					key = fmt.Sprintf("event:%d", event.ID)
+				}
+				if !countedReturns[key] {
+					response.Returns[stageID]++
+					countedReturns[key] = true
+				}
+			}
 			switch event.Type {
 			case "check_overridden":
-				response.Overrides[stageID]++
+				if stageID != "" {
+					response.Overrides[stageID]++
+				}
 			case "stage_skipped":
-				response.Skips[stageID]++
+				if stageID != "" {
+					response.Skips[stageID]++
+				}
 			case "stage_returned", "stage_return_requested", "stage_returned_to":
-				response.Returns[stageID]++
+				countReturn()
+			case "transition_selected":
+				action := metricStringValue(data["action"])
+				if strings.HasPrefix(action, "return_to_") {
+					countReturn()
+				}
 			}
 		}
 		if envelope, found := envelopesByRunID[run.RunID]; found && envelope.HasCompleteTokenUsage() {
@@ -1292,6 +1383,23 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	}
 	for index := range response.ByStage {
 		stage := &response.ByStage[index]
+		if stage.Attempts > 0 {
+			agentShare := float64(stage.Agent) / float64(stage.Attempts)
+			stage.AgentShare = &agentShare
+		}
+		for _, stateStat := range stageStates[stage.Stage] {
+			stage.ByState = append(stage.ByState, *stateStat)
+		}
+		sort.Slice(stage.ByState, func(i, j int) bool {
+			left, right := stage.ByState[i], stage.ByState[j]
+			if left.Execution != right.Execution {
+				return left.Execution < right.Execution
+			}
+			if left.Decision != right.Decision {
+				return left.Decision < right.Decision
+			}
+			return left.Outcome < right.Outcome
+		})
 		switch {
 		case stage.Agent == 0:
 			stage.UsageAttestation = "not_applicable"
@@ -1333,6 +1441,14 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 			response.Usage.SubscriptionCurrency = currency
 			response.Usage.EstimateSource = "project_config+metrics.UsageEnvelope"
 			response.Usage.EstimateBasis = "monthly_subscription_weighted_by_attested_tokens"
+			for index := range response.ByStage {
+				stage := &response.ByStage[index]
+				if stage.Agent > 0 {
+					stage.SubscriptionCurrency = currency
+					stage.EstimateSource = "project_config+metrics.UsageEnvelope+attempt_manifest"
+					stage.EstimateBasis = "monthly_subscription_weighted_by_attested_stage_tokens"
+				}
+			}
 			totalEstimate := float64(0)
 			estimateComplete := true
 			for _, run := range runs {
@@ -1340,19 +1456,41 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 					continue
 				}
 				envelope, found := envelopesByRunID[run.RunID]
-				if !found || !envelope.HasCompleteTokenUsage() {
+				if !found || !envelope.HasCompleteTokenUsage() || envelope.TokensInput < 0 || envelope.TokensOutput < 0 ||
+					envelope.TokensInput > math.MaxInt64-envelope.TokensOutput {
 					estimateComplete = false
 					break
 				}
-				share, available := metrics.EstimateSubscriptionShare(cfg.Usage.MonthlySubscriptionAmount, envelope, usageEnvelopes)
-				if !available {
+				month := envelope.FinishedAt.UTC().Format("2006-01")
+				denominator := monthTokens[month]
+				if !monthEstimateReady[month] || denominator == 0 {
 					estimateComplete = false
 					break
 				}
-				totalEstimate += share
+				tokens := envelope.TokensInput + envelope.TokensOutput
+				totalEstimate += cfg.Usage.MonthlySubscriptionAmount * float64(tokens) / float64(denominator)
 			}
 			if estimateComplete {
 				response.Usage.SubscriptionShareEstimate = &totalEstimate
+			}
+			for index := range response.ByStage {
+				stage := &response.ByStage[index]
+				if stage.Agent == 0 || !stageUsageReady[stage.Stage] || stage.UsageAttestation != "complete" || len(stageTokensByMonth[stage.Stage]) == 0 {
+					continue
+				}
+				stageEstimate := float64(0)
+				stageEstimateComplete := true
+				for month, tokens := range stageTokensByMonth[stage.Stage] {
+					denominator := monthTokens[month]
+					if !monthEstimateReady[month] || denominator == 0 {
+						stageEstimateComplete = false
+						break
+					}
+					stageEstimate += cfg.Usage.MonthlySubscriptionAmount * float64(tokens) / float64(denominator)
+				}
+				if stageEstimateComplete {
+					stage.SubscriptionShareEstimate = &stageEstimate
+				}
 			}
 		}
 	}
@@ -1415,7 +1553,10 @@ func taskStageSucceeded(stage store.Stage) bool {
 		strings.EqualFold(stage.Status, "success") || strings.EqualFold(stage.Status, "completed")
 }
 
-func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent store.Stage) bool {
+func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent store.Stage, editedAttemptIDs, metadataKnown map[string]bool) bool {
+	if editedAttemptIDs[agent.AttemptID] {
+		return true
+	}
 	if agent.CompletedAt == nil {
 		return true
 	}
@@ -1423,17 +1564,36 @@ func taskStageWasHumanEdited(stages []store.Stage, agentPosition int, agent stor
 		candidate := stages[position]
 		if candidate.AgentName == agent.AgentName && strings.EqualFold(candidate.Execution, "human") &&
 			(candidate.StartedAt.After(*agent.CompletedAt) || candidate.StageIndex > agent.StageIndex) {
-			return true
+			return !metadataKnown[candidate.AttemptID]
 		}
 	}
 	return false
 }
 
-func firstCycleStart(s *Server, runID string, before time.Time) time.Time {
-	events, err := s.allRunEvents(runID)
-	if err != nil {
-		return time.Time{}
+func humanEditEvidence(events []store.Event) (map[string]bool, map[string]bool) {
+	editedAttemptIDs := map[string]bool{}
+	metadataKnown := map[string]bool{}
+	for _, event := range events {
+		if event.Type != "attempt_finished" || event.AttemptID == "" {
+			continue
+		}
+		var data map[string]any
+		if json.Unmarshal([]byte(event.DataJSON), &data) != nil {
+			continue
+		}
+		value, exists := data["human_edit_of_agent_attempt_id"]
+		if !exists {
+			continue
+		}
+		metadataKnown[event.AttemptID] = true
+		if agentAttemptID, ok := value.(string); ok && agentAttemptID != "" {
+			editedAttemptIDs[agentAttemptID] = true
+		}
 	}
+	return editedAttemptIDs, metadataKnown
+}
+
+func firstCycleStartFromEvents(events []store.Event, before time.Time) time.Time {
 	start := time.Time{}
 	for _, event := range events {
 		if event.Timestamp.After(before) || (event.Type != "stage_taken" && event.Type != "agent_started" && event.Type != "attempt_started") {
@@ -1444,6 +1604,27 @@ func firstCycleStart(s *Server, runID string, before time.Time) time.Time {
 		}
 	}
 	return start
+}
+
+func metricState(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func metricStringValue(value any) string {
+	valueString, _ := value.(string)
+	return valueString
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) allRunEvents(runID string) ([]store.Event, error) {
@@ -1470,6 +1651,10 @@ func summarizeDurations(values []int64) flowDurationStats {
 	sorted := append([]int64(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	median := sorted[(len(sorted)-1)/2]
+	if len(sorted)%2 == 0 {
+		lower, upper := sorted[len(sorted)/2-1], sorted[len(sorted)/2]
+		median = lower + (upper-lower)/2
+	}
 	p80 := sorted[(len(sorted)*80+99)/100-1]
 	stats.MedianMS, stats.P80MS = &median, &p80
 	return stats
@@ -1489,28 +1674,46 @@ func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=flow-metrics.csv")
 	_, _ = fmt.Fprintln(w, "metric,stage,value,unit,attestation,source,basis")
+	writeCSVMetric(w, "lead_time_count", "", int64Pointer(int64(value.LeadTime.Count)), "runs", "not_applicable", "sqlite")
 	writeCSVMetric(w, "lead_time_median", "", value.LeadTime.MedianMS, "ms", "not_applicable", "sqlite")
 	writeCSVMetric(w, "lead_time_p80", "", value.LeadTime.P80MS, "ms", "not_applicable", "sqlite")
+	writeCSVMetric(w, "cycle_time_count", "", int64Pointer(int64(value.CycleTime.Count)), "runs", "not_applicable", "sqlite")
 	writeCSVMetric(w, "cycle_time_median", "", value.CycleTime.MedianMS, "ms", "not_applicable", "sqlite")
 	writeCSVMetric(w, "cycle_time_p80", "", value.CycleTime.P80MS, "ms", "not_applicable", "sqlite")
+	writeCSVMetric(w, "agent_results", "", int64Pointer(int64(value.AgentResults)), "attempts", "not_applicable", "sqlite")
+	writeCSVMetric(w, "agent_accepted_without_edit", "", int64Pointer(int64(value.AgentAcceptedWithoutEdit)), "attempts", "not_applicable", "sqlite")
+	agentEditRateAttestation := "unknown"
+	if value.AgentAcceptedWithoutEditRate != nil {
+		agentEditRateAttestation = "complete"
+	}
+	writeCSVFloatMetric(w, "agent_accepted_without_edit_rate", "", value.AgentAcceptedWithoutEditRate, "ratio", agentEditRateAttestation, "sqlite", "accepted_agent_attempts_without_linked_human_edit / successful_agent_attempts")
 	for _, stage := range value.ByStage {
+		writeCSVMetric(w, "stage_attempts", stage.Stage, int64Pointer(int64(stage.Attempts)), "attempts", "not_applicable", "sqlite")
 		writeCSVMetric(w, "stage_duration", stage.Stage, int64Pointer(stage.DurationMS), "ms", "not_applicable", "sqlite")
+		writeCSVMetric(w, "stage_human_attempts", stage.Stage, int64Pointer(int64(stage.Human)), "attempts", "not_applicable", "sqlite")
+		writeCSVMetric(w, "stage_agent_attempts", stage.Stage, int64Pointer(int64(stage.Agent)), "attempts", "not_applicable", "sqlite")
+		writeCSVFloatMetric(w, "stage_agent_share", stage.Stage, stage.AgentShare, "ratio", "complete", "sqlite", "agent_attempts / all_non_invalidated_attempts")
 		writeCSVMetric(w, "stage_tokens_input", stage.Stage, stage.TokensInput, "tokens", stage.UsageAttestation, stage.UsageSource)
 		writeCSVMetric(w, "stage_tokens_output", stage.Stage, stage.TokensOutput, "tokens", stage.UsageAttestation, stage.UsageSource)
 		writeCSVMetric(w, "stage_usage_known_attempts", stage.Stage, int64Pointer(int64(stage.UsageKnownAttempts)), "attempts", stage.UsageAttestation, stage.UsageSource)
 		writeCSVMetric(w, "stage_usage_unknown_attempts", stage.Stage, int64Pointer(int64(stage.UsageUnknownAttempts)), "attempts", stage.UsageAttestation, stage.UsageSource)
+		for _, state := range stage.ByState {
+			basis := "execution=" + state.Execution + ";decision=" + state.Decision + ";outcome=" + state.Outcome
+			writeCSVMetric(w, "stage_state_attempts", stage.Stage, int64Pointer(int64(state.Attempts)), "attempts", "not_applicable", "sqlite", basis)
+			writeCSVMetric(w, "stage_state_duration", stage.Stage, int64Pointer(state.DurationMS), "ms", "not_applicable", "sqlite", basis)
+		}
+		writeCSVFloatMetric(w, "stage_subscription_share_estimate", stage.Stage, stage.SubscriptionShareEstimate, stage.SubscriptionCurrency,
+			csvEstimateAttestation(stage.SubscriptionShareEstimate), stage.EstimateSource, stage.EstimateBasis)
 	}
 	writeCSVMetric(w, "tokens_input", "", value.Usage.TokensInput, "tokens", value.Usage.Attestation, value.Usage.Source)
 	writeCSVMetric(w, "tokens_output", "", value.Usage.TokensOutput, "tokens", value.Usage.Attestation, value.Usage.Source)
 	writeCSVMetric(w, "usage_known_runs", "", int64Pointer(int64(value.Usage.KnownRuns)), "runs", value.Usage.Attestation, value.Usage.Source)
 	writeCSVMetric(w, "usage_unknown_runs", "", int64Pointer(int64(value.Usage.UnknownRuns)), "runs", value.Usage.Attestation, value.Usage.Source)
-	estimateValue := ""
-	if value.Usage.SubscriptionShareEstimate != nil {
-		estimateValue = fmt.Sprintf("%.6f", *value.Usage.SubscriptionShareEstimate)
-	}
-	_, _ = fmt.Fprintf(w, "subscription_share_estimate,%s,%s,%s,%s,%s,%s\n", csvField(""), estimateValue,
-		csvField(value.Usage.SubscriptionCurrency), csvField(csvEstimateAttestation(value.Usage.SubscriptionShareEstimate)),
-		csvField(value.Usage.EstimateSource), csvField(value.Usage.EstimateBasis))
+	writeCSVFloatMetric(w, "subscription_share_estimate", "", value.Usage.SubscriptionShareEstimate, value.Usage.SubscriptionCurrency,
+		csvEstimateAttestation(value.Usage.SubscriptionShareEstimate), value.Usage.EstimateSource, value.Usage.EstimateBasis)
+	writeCSVCounts(w, "override_count", value.Overrides)
+	writeCSVCounts(w, "skip_count", value.Skips)
+	writeCSVCounts(w, "return_count", value.Returns)
 }
 
 func csvEstimateAttestation(value *float64) string {
@@ -1520,13 +1723,37 @@ func csvEstimateAttestation(value *float64) string {
 	return "estimated"
 }
 
-func writeCSVMetric(w http.ResponseWriter, name, stage string, value *int64, unit, attestation, source string) {
+func writeCSVMetric(w http.ResponseWriter, name, stage string, value *int64, unit, attestation, source string, basisOverride ...string) {
 	valueString := ""
 	if value != nil {
 		valueString = strconv.FormatInt(*value, 10)
 	}
+	basis := ""
+	if len(basisOverride) > 0 {
+		basis = basisOverride[0]
+	}
 	_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%s\n", name, csvField(stage), valueString,
-		csvField(unit), csvField(attestation), csvField(source), csvField(""))
+		csvField(unit), csvField(attestation), csvField(source), csvField(basis))
+}
+
+func writeCSVFloatMetric(w http.ResponseWriter, name, stage string, value *float64, unit, attestation, source, basis string) {
+	valueString := ""
+	if value != nil {
+		valueString = fmt.Sprintf("%.6f", *value)
+	}
+	_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%s\n", name, csvField(stage), valueString,
+		csvField(unit), csvField(attestation), csvField(source), csvField(basis))
+}
+
+func writeCSVCounts(w http.ResponseWriter, name string, values map[string]int) {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		writeCSVMetric(w, name, key, int64Pointer(int64(values[key])), "events", "not_applicable", "sqlite")
+	}
 }
 
 func int64Pointer(value int64) *int64 { return &value }

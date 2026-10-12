@@ -11,6 +11,7 @@ import { Tasks } from './pages/Tasks';
 import { NewTask } from './pages/NewTask';
 import { EventFeed } from './pages/EventFeed';
 import { RunRedirect } from './pages/RunRedirect';
+import { TaskDetail } from './pages/TaskDetail';
 import { activateTeamInvitation, getAuthConfig, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }) {
@@ -20,6 +21,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
         { path: '/', element: <Dashboard /> },
         { path: '/tasks', element: <Tasks /> },
         { path: '/tasks/new', element: <NewTask /> },
+        { path: '/tasks/:runID', element: <TaskDetail /> },
         { path: '/events', element: <EventFeed /> },
         { path: '/runs/:runID', element: <RunRedirect /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },

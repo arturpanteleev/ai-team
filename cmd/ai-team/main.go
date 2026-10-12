@@ -753,6 +753,11 @@ func cmdSchedulerWorker() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if notificationRegistry, registryErr := newAgentRegistryWithPaths(target, workerAgentPaths); registryErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", registryErr)
+	} else {
+		defer startSchedulerNotifications(ctx, target, notificationRegistry, controllerRecorderStore, os.Getenv)()
+	}
 	for {
 		claimed, pollErr := poller.RunOnce(ctx, *workerID)
 		if pollErr != nil {
@@ -1334,9 +1339,17 @@ func cmdRun() {
 		warnIfAlreadyDelivered(*target, *feature)
 	}
 	opts := []pipeline.Option{pipeline.WithControllerReadDenyPaths(filepath.Join(*target, ".ai-team", "web.db"))}
-	if recorder, closeStore := openRecorder(*target); recorder != nil {
-		opts = append(opts, pipeline.WithRecorder(recorder))
+	var notifications *runNotifications
+	if recorderStore, closeStore := openRecorderStore(*target); recorderStore != nil {
 		defer closeStore()
+		recorder := web.NewStoreRecorder(recorderStore)
+		// Notifications use the same SQLite store as the dashboard projection:
+		// one delivery path and one deduplication key with `ai-team web`.
+		if notifications = startRunNotifications(cfg, recorderStore, os.Getenv, nil); notifications != nil {
+			opts = append(opts, pipeline.WithRecorder(notifications.recorder(recorder)))
+		} else {
+			opts = append(opts, pipeline.WithRecorder(recorder))
+		}
 	}
 
 	opts = append(opts, deployProviderOptions(cfg)...)
@@ -1362,6 +1375,9 @@ func cmdRun() {
 			ContainmentProfile: containmentProfile,
 		})
 	}
+	// A second interrupt during the notification flush terminates the process.
+	stop()
+	notifications.finish(notificationFlushTimeout)
 	if err != nil {
 		code := exitCodeFor(err)
 		stoppedRunID := runResult.RunID
@@ -1509,9 +1525,9 @@ func warnIfAlreadyDelivered(target, feature string) {
 		ui.Colorize("⚠", ui.ColorYellow), feature, delivered.RunID, ref)
 }
 
-// openRecorder открывает SQLite-store для записи запусков (web-дашборд).
-// Недоступность БД не мешает запуску.
-func openRecorder(target string) (pipeline.Recorder, func()) {
+// openRecorderStore открывает SQLite-store для записи запусков (web-дашборд)
+// и уведомлений. Недоступность БД не мешает запуску.
+func openRecorderStore(target string) (*webstore.Store, func()) {
 	dbPath := filepath.Join(target, ".ai-team", "web.db")
 	if _, err := safeio.ExistingDir(target, ".ai-team"); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ web store: %v — запись запусков отключена\n", err)
@@ -1527,7 +1543,7 @@ func openRecorder(target string) (pipeline.Recorder, func()) {
 		return nil, nil
 	}
 	// web store — best-effort проекция дашборда (выше уже есть degrade-путь): ошибка закрытия на выходе ни на что не влияет.
-	return web.NewStoreRecorder(s), func() { _ = s.Close() }
+	return s, func() { _ = s.Close() }
 }
 
 func cmdEval() {

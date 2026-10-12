@@ -9,6 +9,16 @@
 
 ### Added
 
+- **Уведомления из `ai-team run` и `scheduler-worker` (B-81).** Каналы из
+  раздела `notifications` теперь получают события не только от `ai-team web`:
+  локальный `ai-team run` и `ai-team scheduler-worker` отправляют их тем же
+  диспетчером из той же базы `.ai-team/web.db`, каждый по своему курсору.
+  Пара «канал — событие» атомарно захватывается в общем журнале
+  `notification_deliveries` до отправки, поэтому web и run на одной базе и
+  повторный run дублей не шлют. Сбой канала по-прежнему пишется как
+  `integration_error` и на исход run не влияет; без `notifications` поведение
+  не меняется.
+
 - **Вход через SSO (OIDC) и постоянные сессии дашборда (B-83).** В облачном
   режиме `ai-team web --oidc-issuer … --oidc-client-id … --oidc-redirect-url …`
   включает вход через OpenID Connect: authorization code + PKCE, проверка

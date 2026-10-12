@@ -91,23 +91,53 @@ of them.
 - **WHEN** a channel lists an event type that ai-team does not emit
 - **THEN** configuration validation MUST fail
 
+### Requirement: Notification delivery from every event writer
+
+Notifications MUST be delivered by every process that writes task events into
+the shared event store — the web server, a local `ai-team run` and the
+scheduler worker — through the same dispatcher, outside the task execution
+path, each with its own cursor. The web server and the scheduler
+worker MUST keep a durable cursor that starts at the event tail on first
+enable. A local run MUST start at the tail when it begins and MUST deliver only
+events of the runs it executes.
+
+#### Scenario: Local run sends a subscribed event
+
+- **WHEN** `ai-team run` records an event that a channel subscribes to
+- **THEN** the channel MUST receive the notification without `ai-team web` running
+
+#### Scenario: Local run without notifications
+
+- **WHEN** the template has no `notifications` section
+- **THEN** `ai-team run` MUST NOT start a notification worker
+
 ### Requirement: Durable, deduplicated notification delivery
 
-The web server MUST deliver notifications from the durable event store outside
-the task execution path, with its own cursor that starts at the event tail on
-first enable. It MUST record each handled channel and event pair durably and
-MUST NOT notify a channel again for an event already recorded, including after
-a reconnect, restart or cursor rewind. A delivery failure MUST be persisted as
-a warning `integration_error` with `integration=notifier` and the channel
-name, MUST NOT change the task outcome and MUST NOT be retried after it is
-persisted. Notifier `integration_error` events MUST NOT be dispatched. If the
-delivery record or the failure warning cannot be persisted, the event MUST
+Each channel and event pair MUST be claimed atomically in the shared delivery
+log before sending and recorded durably after it. No process MUST notify a
+channel again for an event already claimed or recorded, including after a
+reconnect, restart, cursor rewind or when the web server and a run share one
+database. A claim whose holder stopped before recording MUST expire after a
+bounded lease. If the delivery record cannot be persisted, the event MUST
 remain pending.
 
 #### Scenario: Replay after reconnect
 
 - **WHEN** the notifier re-reads events that it already delivered
 - **THEN** no channel MUST receive a second notification for them
+
+#### Scenario: Web server and local run share one database
+
+- **WHEN** `ai-team run` and `ai-team web` both read an event subscribed by a channel
+- **THEN** the channel MUST receive exactly one notification for it
+
+### Requirement: Notification failures do not affect tasks
+
+A delivery failure MUST be persisted as a warning `integration_error` with
+`integration=notifier` and the channel name, MUST NOT change the task outcome
+and MUST NOT be retried after it is persisted. Notifier `integration_error`
+events MUST NOT be dispatched. If the failure warning cannot be persisted, the
+event MUST remain pending.
 
 #### Scenario: Channel is unavailable
 

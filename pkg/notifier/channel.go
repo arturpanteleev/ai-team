@@ -148,11 +148,33 @@ const (
 	DeliveryFailed    = "failed"
 )
 
+// ClaimState is the result of claiming one channel/event delivery.
+type ClaimState int
+
+const (
+	// ClaimAcquired means the caller owns the delivery and must finish it with
+	// RecordNotification or give it back with ReleaseNotification.
+	ClaimAcquired ClaimState = iota
+	// ClaimHandled means the pair already has a final outcome.
+	ClaimHandled
+	// ClaimBusy means another process holds a live claim for the pair.
+	ClaimBusy
+)
+
+// ErrDeliveryInProgress keeps an event pending while another process (for
+// example `ai-team web` next to `ai-team run`) is sending the same
+// channel/event pair. It is an expected state, not a failure.
+var ErrDeliveryInProgress = errors.New("notification delivery is in progress in another process")
+
 // DeliveryLog durably records which channel already handled which event so a
-// replay after reconnect or restart does not notify twice.
+// replay after reconnect or restart, or a second process reading the same
+// event store, does not notify twice. ClaimNotification MUST be atomic across
+// processes sharing the log; a claim whose holder died expires after a lease
+// so the event is eventually delivered.
 type DeliveryLog interface {
-	NotificationRecorded(channel string, eventID int64) (bool, error)
+	ClaimNotification(channel string, eventID int64) (ClaimState, error)
 	RecordNotification(channel string, eventID int64, outcome string) error
+	ReleaseNotification(channel string, eventID int64) error
 }
 
 // FailureRecorder durably records a sanitized delivery failure. Returning an
@@ -209,7 +231,8 @@ func (d *Dispatcher) TaskURL(runID string) string {
 }
 
 // Dispatch sends n to every subscribed channel that has not already handled
-// it. A channel failure is passed to recordFailure and logged as handled, so
+// it. Each channel/event pair is claimed in the delivery log before sending, so
+// two processes sharing the log never send the same pair concurrently. A channel failure is passed to recordFailure and logged as handled, so
 // one broken destination neither blocks other channels nor retries forever.
 // A returned error means the delivery log or failure record could not be
 // persisted; the caller must keep the event pending and replay it later.
@@ -223,27 +246,36 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n Notification, log DeliveryL
 			continue
 		}
 		name := route.Channel.Name()
-		done, err := log.NotificationRecorded(name, n.EventID)
+		state, err := log.ClaimNotification(name, n.EventID)
 		if err != nil {
 			pending = append(pending, fmt.Errorf("notification log for %s: %w", name, err))
 			continue
 		}
-		if done {
+		switch state {
+		case ClaimHandled:
+			continue
+		case ClaimBusy:
+			pending = append(pending, fmt.Errorf("%s: %w", name, ErrDeliveryInProgress))
 			continue
 		}
 		outcome := DeliveryDelivered
 		if sendErr := route.Channel.Send(ctx, n); sendErr != nil {
 			if ctx.Err() != nil {
-				// Shutdown interrupted delivery; keep the event pending.
+				// Shutdown interrupted delivery; give the claim back and keep
+				// the event pending.
+				_ = log.ReleaseNotification(name, n.EventID)
 				return ctx.Err()
 			}
 			if err := recordFailure(name, sendErr.Error()); err != nil {
+				_ = log.ReleaseNotification(name, n.EventID)
 				pending = append(pending, fmt.Errorf("notification failure for %s: %w", name, err))
 				continue
 			}
 			outcome = DeliveryFailed
 		}
 		if err := log.RecordNotification(name, n.EventID, outcome); err != nil {
+			// The claim stays and expires after its lease; the replay then
+			// resends, which the channel's idempotency key covers.
 			pending = append(pending, fmt.Errorf("notification log for %s: %w", name, err))
 		}
 	}

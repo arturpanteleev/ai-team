@@ -20,20 +20,34 @@ func logKey(channel string, eventID int64) string {
 	return fmt.Sprintf("%s/%d", channel, eventID)
 }
 
-func (l *memoryLog) NotificationRecorded(channel string, eventID int64) (bool, error) {
+func (l *memoryLog) ClaimNotification(channel string, eventID int64) (ClaimState, error) {
 	if l.failRead != nil {
-		return false, l.failRead
+		return ClaimBusy, l.failRead
 	}
-	_, ok := l.outcomes[logKey(channel, eventID)]
-	return ok, nil
+	switch l.outcomes[logKey(channel, eventID)] {
+	case "":
+		l.outcomes[logKey(channel, eventID)] = "claimed"
+		return ClaimAcquired, nil
+	case "claimed":
+		return ClaimBusy, nil
+	default:
+		return ClaimHandled, nil
+	}
 }
 
 func (l *memoryLog) RecordNotification(channel string, eventID int64, outcome string) error {
 	if l.failSave != nil {
 		return l.failSave
 	}
-	if _, ok := l.outcomes[logKey(channel, eventID)]; !ok {
+	if current := l.outcomes[logKey(channel, eventID)]; current == "" || current == "claimed" {
 		l.outcomes[logKey(channel, eventID)] = outcome
+	}
+	return nil
+}
+
+func (l *memoryLog) ReleaseNotification(channel string, eventID int64) error {
+	if l.outcomes[logKey(channel, eventID)] == "claimed" {
+		delete(l.outcomes, logKey(channel, eventID))
 	}
 	return nil
 }
@@ -197,5 +211,20 @@ func TestNotificationSummaryHasNoControlCharacters(t *testing.T) {
 	}
 	if (Notification{Type: "run_started", RunID: "r1"}).Text() != "[ai-team] run_started · run r1" {
 		t.Fatalf("run summary=%q", (Notification{Type: "run_started", RunID: "r1"}).Text())
+	}
+}
+
+func TestDispatcherKeepsEventPendingWhileAnotherProcessHoldsTheClaim(t *testing.T) {
+	hook := &fakeChannel{name: "hook"}
+	dispatcher := NewDispatcher([]Route{{Channel: hook, Subscription: Subscription{Events: []string{"check_error"}}}}, nil, "")
+	log := newMemoryLog()
+	log.outcomes[logKey("hook", 6)] = "claimed" // held by another process
+	err := dispatcher.Dispatch(context.Background(), Notification{EventID: 6, Type: "check_error"}, log, noFailures(t))
+	if !errors.Is(err, ErrDeliveryInProgress) || len(hook.sent) != 0 {
+		t.Fatalf("busy claim: err=%v sent=%d", err, len(hook.sent))
+	}
+	log.outcomes[logKey("hook", 6)] = DeliveryDelivered // the other process finished
+	if err := dispatcher.Dispatch(context.Background(), Notification{EventID: 6, Type: "check_error"}, log, noFailures(t)); err != nil || len(hook.sent) != 0 {
+		t.Fatalf("handled elsewhere: err=%v sent=%d", err, len(hook.sent))
 	}
 }

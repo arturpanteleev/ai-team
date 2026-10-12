@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -467,25 +468,82 @@ func (s *Store) SetIntegrationCursor(integration string, cursor int64) error {
 	return err
 }
 
-// NotificationRecorded reports whether a notification channel already handled
-// the durable event, so replays after reconnect or restart do not notify twice.
-func (s *Store) NotificationRecorded(channel string, eventID int64) (bool, error) {
-	var found int
-	err := s.db.QueryRow(`SELECT 1 FROM notification_deliveries WHERE channel = ? AND event_id = ?`, channel, eventID).Scan(&found)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+// NotificationClaimLease bounds how long a claimed but unfinished
+// notification blocks other processes. It is well above the per-delivery
+// timeout, so it only expires when the claiming process died mid-delivery.
+const NotificationClaimLease = 2 * time.Minute
+
+const notificationClaimPrefix = "claimed:"
+
+// ClaimNotification atomically claims a channel/event delivery for this
+// process. Every process sharing the database (`ai-team web`, `ai-team run`,
+// `ai-team scheduler-worker`) uses the same channel/event key, so only one of
+// them sends a given notification.
+func (s *Store) ClaimNotification(channel string, eventID int64) (notifier.ClaimState, error) {
+	return s.ClaimNotificationAt(channel, eventID, time.Now().UTC())
+}
+
+// ClaimNotificationAt is ClaimNotification with an explicit clock.
+func (s *Store) ClaimNotificationAt(channel string, eventID int64, now time.Time) (notifier.ClaimState, error) {
+	if strings.TrimSpace(channel) == "" || eventID <= 0 {
+		return notifier.ClaimBusy, fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	return err == nil, err
+	claim := notificationClaimPrefix + strconv.FormatInt(now.Add(NotificationClaimLease).UnixNano(), 10)
+	result, err := s.db.Exec(`INSERT OR IGNORE INTO notification_deliveries(channel, event_id, outcome, recorded_at)
+		VALUES (?, ?, ?, ?)`, channel, eventID, claim, now)
+	if err != nil {
+		return notifier.ClaimBusy, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return notifier.ClaimBusy, err
+	} else if affected == 1 {
+		return notifier.ClaimAcquired, nil
+	}
+	var current string
+	if err := s.db.QueryRow(`SELECT outcome FROM notification_deliveries WHERE channel = ? AND event_id = ?`, channel, eventID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Released between the insert and the read; retry on the next pass.
+			return notifier.ClaimBusy, nil
+		}
+		return notifier.ClaimBusy, err
+	}
+	expiry, claimed := strings.CutPrefix(current, notificationClaimPrefix)
+	if !claimed {
+		return notifier.ClaimHandled, nil
+	}
+	if expires, parseErr := strconv.ParseInt(expiry, 10, 64); parseErr == nil && now.UnixNano() < expires {
+		return notifier.ClaimBusy, nil
+	}
+	// The holder's lease expired: take the claim over with compare-and-swap so
+	// two processes reclaiming at once cannot both win.
+	result, err = s.db.Exec(`UPDATE notification_deliveries SET outcome = ?, recorded_at = ?
+		WHERE channel = ? AND event_id = ? AND outcome = ?`, claim, now, channel, eventID, current)
+	if err != nil {
+		return notifier.ClaimBusy, err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return notifier.ClaimBusy, err
+	}
+	return notifier.ClaimAcquired, nil
 }
 
 // RecordNotification durably marks a channel/event pair as handled. The first
-// recorded outcome wins; later attempts for the same pair are ignored.
+// final outcome wins; later attempts for the same pair are ignored.
 func (s *Store) RecordNotification(channel string, eventID int64, outcome string) error {
-	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" {
+	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" || strings.HasPrefix(outcome, notificationClaimPrefix) {
 		return fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO notification_deliveries(channel, event_id, outcome, recorded_at)
-		VALUES (?, ?, ?, ?)`, channel, eventID, outcome, time.Now().UTC())
+	_, err := s.db.Exec(`INSERT INTO notification_deliveries(channel, event_id, outcome, recorded_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(channel, event_id) DO UPDATE SET outcome = excluded.outcome, recorded_at = excluded.recorded_at
+		WHERE notification_deliveries.outcome LIKE 'claimed:%'`, channel, eventID, outcome, time.Now().UTC())
+	return err
+}
+
+// ReleaseNotification drops an unfinished claim so the pair can be retried.
+func (s *Store) ReleaseNotification(channel string, eventID int64) error {
+	_, err := s.db.Exec(`DELETE FROM notification_deliveries
+		WHERE channel = ? AND event_id = ? AND outcome LIKE 'claimed:%'`, channel, eventID)
 	return err
 }
 

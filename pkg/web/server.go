@@ -168,6 +168,7 @@ type Server struct {
 	controller          RunController
 	trackerAdapter      tracker.Adapter
 	notifications       *notifier.Dispatcher
+	notificationWorker  *NotificationWorker
 	templateAgentLookup config.AgentLookup
 	templateMu          sync.Mutex
 	authenticator       IdentityVerifier
@@ -279,6 +280,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		go srv.consumeIntegrationEvents(eventContext, trackerIntegrationName, trackerCursor, srv.deliverTrackerEvent)
 	}
 	if srv.notifications != nil {
+		srv.notificationWorker = &NotificationWorker{store: s, dispatcher: srv.notifications}
 		notifierCursor := integrationStartCursor(s, notifierIntegrationName, eventCursor)
 		srv.eventWorkers.Add(1)
 		go srv.consumeIntegrationEvents(eventContext, notifierIntegrationName, notifierCursor, srv.deliverNotification)
@@ -663,6 +665,12 @@ func (s *Server) recordIntegrationError(source store.Event, integration, reason 
 }
 
 func (s *Server) recordIntegrationErrorDetails(source store.Event, integration, reason string, details map[string]any) error {
+	return recordIntegrationError(s.store, source, integration, reason, details)
+}
+
+// recordIntegrationError persists a sanitized adapter failure as a warning
+// event of the source run.
+func recordIntegrationError(st *store.Store, source store.Event, integration, reason string, details map[string]any) error {
 	payload := map[string]any{
 		"integration": integration, "source_cursor": source.ID,
 		"source_event": source.Type, "error": reason,
@@ -674,7 +682,7 @@ func (s *Server) recordIntegrationErrorDetails(source store.Event, integration, 
 	if err != nil {
 		return err
 	}
-	if err := s.store.AppendEventNext(&store.Event{
+	if err := st.AppendEventNext(&store.Event{
 		RunID: source.RunID, Type: "integration_error", Stage: source.Stage,
 		Severity: "warning", Timestamp: time.Now().UTC(), DataJSON: string(data),
 	}); err != nil {

@@ -66,6 +66,18 @@ tasks and renders each stage action only when its name is present in
 the task history and displays checker evidence, event details, and attempt log
 links alongside the run.
 
+When `allowed_actions` contains `results`, the page submits the stage's
+configured result type through `POST .../results`: a Markdown editor with
+preview and `.md` file upload (UTF-8, up to 10 MiB), a link form that uses the
+stage's pinned `link_kind` and accepts only HTTP(S) URLs without credentials,
+or an approve with optional text sent as `note`. An empty “Что сделано”
+(`description`) shows a warning but does not block submission; the server then
+records `description_missing`. The unsent form is kept as a draft in the
+browser's `localStorage` per run and stage, restored (and the form reopened)
+after a page reload, kept when the server rejects the submission, and removed
+once the server accepts it. Without usable storage the form still works and
+says the draft is not saved.
+
 Event endpoints share the persisted SQLite event-ID cursor. By default
 (`order=asc`) they return events with a cursor greater than `after`, oldest
 first; this is the replay contract for resuming a stream. With `order=desc`

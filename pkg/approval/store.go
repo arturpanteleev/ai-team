@@ -38,7 +38,24 @@ const (
 	KindQuestions     Kind   = "questions"
 	KindInput         Kind   = "input"
 	KindCheckDecision Kind   = "check_decision"
+	// KindGrillQuestions — вопросы агента-проверяющего в режиме grill (B-42).
+	// Отличается от KindQuestions (B-02): действия answer/new_version/done
+	// позволяют ответить текстом, исправить результат (новый раунд) или
+	// завершить грилл досрочно.
+	KindGrillQuestions Kind = "grill_questions"
 )
+
+// GrillTrigger идентифицирует approval, поднятый вопросами грилла (B-42).
+const GrillTrigger = "grill_questions"
+
+// Grill action: ответить на вопросы текстом (грилл завершается).
+const GrillActionAnswer = "answer"
+
+// Grill action: ответственный правит результат (новая версия → новый раунд).
+const GrillActionNewVersion = "new_version"
+
+// Grill action: «Готово, помощь не нужна» — досрочное завершение грилла.
+const GrillActionDone = "done"
 
 // MaxInputCommentBytes is also the maximum markdown payload accepted by a
 // human stage. Approval records hold the JSON-escaped payload, so their
@@ -65,6 +82,15 @@ type InputPayload struct {
 // результата этапа (B-40). Отдельный trigger защищает resume от смешения с
 // graph-переходами и delivery-планом.
 const StageCheckTrigger = "stage_check"
+
+// GrillQuestionsPayload — контракт запроса вопросов грилла (B-42). Markdown
+// содержит вопросы агента-проверяющего; Round — номер раунда грилла
+// (с единицы), чтобы ответственный и метрики видели, какой это раунд.
+type GrillQuestionsPayload struct {
+	Kind     string `json:"kind"`
+	Markdown string `json:"markdown"`
+	Round    int    `json:"round"`
+}
 
 // CheckDecisionPayload — контракт запроса решения по проваленной проверке
 // этапа. Действия new_version/override/return остаются в actions; семантика
@@ -340,6 +366,9 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if value.Kind == KindCheckDecision && decision.Action == "override" && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("обход проверки этапа требует причину")
 	}
+	if value.Kind == KindGrillQuestions && decision.Action == GrillActionAnswer && strings.TrimSpace(decision.Comment) == "" {
+		return PendingApproval{}, errors.New("ответ на вопросы грилла не может быть пустым")
+	}
 	if value.Kind == KindInput {
 		if len(decision.Comment) > MaxInputCommentBytes {
 			return PendingApproval{}, fmt.Errorf("human input exceeds maximum size of %d bytes", MaxInputCommentBytes)
@@ -485,6 +514,10 @@ func inferKind(payload json.RawMessage, actions []string) Kind {
 		request.Kind == string(KindCheckDecision) && contains(actions, "new_version") {
 		return KindCheckDecision
 	}
+	if len(payload) > 0 && json.Unmarshal(payload, &request) == nil &&
+		request.Kind == string(KindGrillQuestions) && contains(actions, GrillActionAnswer) {
+		return KindGrillQuestions
+	}
 	return KindApprove
 }
 
@@ -494,7 +527,7 @@ func validate(value PendingApproval) error {
 		!validSHA256(value.SubjectHash) || value.CreatedAt.IsZero() {
 		return errors.New("approval содержит недопустимые обязательные поля")
 	}
-	if value.Kind != KindApprove && value.Kind != KindQuestions && value.Kind != KindInput && value.Kind != KindCheckDecision {
+	if value.Kind != KindApprove && value.Kind != KindQuestions && value.Kind != KindInput && value.Kind != KindCheckDecision && value.Kind != KindGrillQuestions {
 		return fmt.Errorf("неподдерживаемый approval kind %q", value.Kind)
 	}
 	if value.Kind == KindQuestions {
@@ -562,6 +595,23 @@ func validate(value PendingApproval) error {
 		}
 		if payload.ReportSHA256 != "" && !validSHA256(payload.ReportSHA256) {
 			return errors.New("check_decision approval report hash is invalid")
+		}
+	}
+	if value.Kind == KindGrillQuestions {
+		var payload GrillQuestionsPayload
+		if json.Unmarshal(value.Payload, &payload) != nil || payload.Kind != string(KindGrillQuestions) ||
+			strings.TrimSpace(payload.Markdown) == "" || payload.Round < 1 ||
+			value.Trigger != GrillTrigger || value.Quorum != QuorumAny ||
+			value.ToStage != value.FromStage {
+			return errors.New("grill_questions approval must bind grill questions, a round and a same-stage route")
+		}
+		if !contains(value.Actions, GrillActionAnswer) || value.Targets[GrillActionAnswer] != value.FromStage {
+			return errors.New("grill_questions approval must offer an answer route on the source stage")
+		}
+		for _, action := range value.Actions {
+			if action != GrillActionAnswer && action != GrillActionNewVersion && action != GrillActionDone {
+				return fmt.Errorf("grill_questions approval action %q is unsupported", action)
+			}
 		}
 	}
 	if value.CandidateSHA256 != "" && !validSHA256(value.CandidateSHA256) {

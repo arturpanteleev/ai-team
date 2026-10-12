@@ -145,13 +145,6 @@ func WithLocalAuthenticator(verifier *LocalAuthenticator) ServerOption {
 	}
 }
 
-type browserSession struct {
-	CSRFToken    string
-	Principal    cloudidentity.Principal
-	SessionEpoch int64
-	ExpiresAt    time.Time
-}
-
 type Server struct {
 	store               *store.Store
 	humanArtifacts      *humanartifact.Store
@@ -171,8 +164,8 @@ type Server struct {
 	templateMu          sync.Mutex
 	authenticator       IdentityVerifier
 	localAuth           bool
-	sessions            map[string]browserSession
-	sessionMu           sync.Mutex
+	oidc                OIDCProvider
+	now                 func() time.Time
 	streamID            string
 	stallAfter          time.Duration
 	stallAfterOverride  bool
@@ -206,11 +199,14 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		hub:               hub,
 		streamID:          streamID[:16],
 		artifactRoot:      absRoot,
-		sessions:          make(map[string]browserSession),
 		stallPollInterval: time.Minute,
 	}
 	for _, option := range options {
 		option(srv)
+	}
+	if srv.oidc != nil && (srv.authenticator == nil || srv.localAuth) {
+		_ = s.Close()
+		return nil, errors.New("OIDC sign-in requires cloud authentication")
 	}
 	target := srv.targetDir
 	if target == "" {
@@ -280,6 +276,11 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
 	srv.router.Get("/api/session", srv.handleSession)
+	srv.router.Delete("/api/session", srv.handleLogout)
+	if srv.oidc != nil {
+		srv.router.Get(oidcLoginPath, srv.handleOIDCLogin)
+		srv.router.Get(oidcCallbackPath, srv.handleOIDCCallback)
+	}
 	srv.router.Post("/api/team/activate", srv.handleTeamActivation)
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.teamReadSecurity)

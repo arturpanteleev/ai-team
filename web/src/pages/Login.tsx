@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { SSO_LOGIN_URL } from '../api';
 import styles from './Login.module.css';
 
-export function Login({ allowActivation, onLogin, onActivate }: { allowActivation: boolean; onLogin: (token: string) => Promise<void>; onActivate: (token: string) => Promise<void> }) {
+export function Login({ allowActivation, ssoEnabled = false, onLogin, onActivate }: { allowActivation: boolean; ssoEnabled?: boolean; onLogin: (token: string) => Promise<void>; onActivate: (token: string) => Promise<void> }) {
   usePageTitle('Вход');
   const [token, setToken] = useState('');
   const [inviteToken, setInviteToken] = useState('');
@@ -32,6 +33,11 @@ export function Login({ allowActivation, onLogin, onActivate }: { allowActivatio
 
   return (
     <main className={styles.page}>
+      {ssoEnabled && <section className={styles.card}>
+        <h2>Корпоративный вход</h2>
+        <p>Вход через SSO. Функции в команде назначает администратор.</p>
+        <a className={styles.ssoLink} href={SSO_LOGIN_URL}>Войти через SSO</a>
+      </section>}
       <form className={styles.card} onSubmit={submit}>
         <h1>Войти в ai-team</h1>
         <p>Сессия истекла или отсутствует. Введите временный токен доступа.</p>

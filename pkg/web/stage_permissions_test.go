@@ -81,6 +81,7 @@ type functionPermissionFixture struct {
 	srv        *Server
 	controller *stageActionRecorder
 	target     string
+	dbPath     string
 }
 
 func newFunctionPermissionFixture(t *testing.T, forbidSelfApproval bool, approvals []approval.PendingApproval, runs map[string]lifecycle.State) functionPermissionFixture {
@@ -104,7 +105,8 @@ func newTemplateFixture(t *testing.T, template string, forbidSelfApproval bool, 
 		t.Fatal(err)
 	}
 	controller := &stageActionRecorder{fakeRunController: &fakeRunController{approvals: approvals}, calls: map[string]int{}}
-	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+	dbPath := filepath.Join(controlDir, "web.db")
+	srv, err := NewServer(dbPath, "", filepath.Join(controlDir, "artifacts"),
 		WithTargetDir(target), WithRunController(controller))
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +135,7 @@ func newTemplateFixture(t *testing.T, template string, forbidSelfApproval bool, 
 			t.Fatal(err)
 		}
 	}
-	return functionPermissionFixture{srv: srv, controller: controller, target: target}
+	return functionPermissionFixture{srv: srv, controller: controller, target: target, dbPath: dbPath}
 }
 
 // requestAs issues an authenticated request and replaces the session principal
@@ -151,11 +153,7 @@ func (f functionPermissionFixture) requestAs(t *testing.T, actorID string, roles
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.srv.sessionMu.Lock()
-		session := f.srv.sessions[cookie.Value]
-		session.Principal = principal
-		f.srv.sessions[cookie.Value] = session
-		f.srv.sessionMu.Unlock()
+		setSessionPrincipalForTest(t, f.srv, cookie, principal)
 	}
 	response := httptest.NewRecorder()
 	f.srv.router.ServeHTTP(response, request)
@@ -685,11 +683,7 @@ func (f functionPermissionFixture) sessionRequestAs(t *testing.T, actorID string
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.srv.sessionMu.Lock()
-	session := f.srv.sessions[cookie.Value]
-	session.Principal = principal
-	f.srv.sessions[cookie.Value] = session
-	f.srv.sessionMu.Unlock()
+	setSessionPrincipalForTest(t, f.srv, cookie, principal)
 	return request
 }
 
@@ -700,7 +694,7 @@ func TestAuthorshipRecordingFailuresFailClosed(t *testing.T) {
 		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
 			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
 		request := fixture.sessionRequestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/run-agent", `{"action":"run"}`)
-		_ = fixture.srv.store.Close()
+		breakTablesForTest(t, fixture.dbPath, "events")
 		response := httptest.NewRecorder()
 		fixture.srv.router.ServeHTTP(response, request)
 		if response.Code != http.StatusServiceUnavailable || fixture.controller.calls["run-agent"] != 0 {
@@ -712,7 +706,7 @@ func TestAuthorshipRecordingFailuresFailClosed(t *testing.T) {
 		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
 			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
 		request := fixture.sessionRequestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-confirm/resume", "")
-		_ = fixture.srv.store.Close()
+		breakTablesForTest(t, fixture.dbPath, "events")
 		response := httptest.NewRecorder()
 		fixture.srv.router.ServeHTTP(response, request)
 		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
@@ -724,7 +718,7 @@ func TestAuthorshipRecordingFailuresFailClosed(t *testing.T) {
 		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(time.Now().UTC())},
 			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"}})
 		request := fixture.sessionRequestAs(t, "c@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
-		_ = fixture.srv.store.Close()
+		breakTablesForTest(t, fixture.dbPath, "events")
 		response := httptest.NewRecorder()
 		fixture.srv.router.ServeHTTP(response, request)
 		if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 {

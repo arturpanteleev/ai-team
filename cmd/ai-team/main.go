@@ -37,6 +37,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
+	"github.com/arturpanteleev/ai-team/pkg/oidc"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -253,6 +254,14 @@ Exit-коды run: 0 — успех, 1 — ошибка или негативн�
   --dist <path>             Каталог собранного frontend (по умолчанию web/dist)
   --artifacts <path>        Корень артефактов (по умолчанию .ai-team/artifacts)
   --auth-secret-env <name>  Env с HMAC secret; если задан, включает cloud auth
+  --oidc-issuer <url>       OIDC issuer; включает вход через SSO в cloud mode
+                            (env AI_TEAM_OIDC_ISSUER)
+  --oidc-client-id <id>     OIDC client ID (env AI_TEAM_OIDC_CLIENT_ID)
+  --oidc-redirect-url <url> Callback …/api/auth/oidc/callback
+                            (env AI_TEAM_OIDC_REDIRECT_URL)
+  --oidc-client-secret-env <name>
+                            Env с client secret (по умолчанию
+                            AI_TEAM_OIDC_CLIENT_SECRET)
   --worker-command <path>   Запускать pipeline в отдельном worker process
   --scheduler-db <path>     Enqueue run в persistent scheduler вместо inline execution
 
@@ -2142,6 +2151,10 @@ func cmdWeb() {
 	artifacts := webFlags.String("artifacts", ".ai-team/artifacts", "Artifact root directory")
 	targetFlag := webFlags.String("target", ".", "Путь к целевому проекту")
 	authSecretEnv := webFlags.String("auth-secret-env", "AI_TEAM_AUTH_SECRET", "Env с cloud auth HMAC secret")
+	oidcIssuer := webFlags.String("oidc-issuer", os.Getenv("AI_TEAM_OIDC_ISSUER"), "OIDC issuer URL; включает вход через SSO (только cloud mode)")
+	oidcClientID := webFlags.String("oidc-client-id", os.Getenv("AI_TEAM_OIDC_CLIENT_ID"), "OIDC client ID")
+	oidcRedirectURL := webFlags.String("oidc-redirect-url", os.Getenv("AI_TEAM_OIDC_REDIRECT_URL"), "OIDC redirect URL (…/api/auth/oidc/callback)")
+	oidcSecretEnv := webFlags.String("oidc-client-secret-env", "AI_TEAM_OIDC_CLIENT_SECRET", "Env с OIDC client secret")
 	workerCommand := webFlags.String("worker-command", "", "Executable ai-team для disposable worker process")
 	schedulerDB := webFlags.String("scheduler-db", "", "Persistent scheduler SQLite (включает enqueue-only mode)")
 	schedulerMax := webFlags.Int("max-concurrent", 4, "Scheduler global concurrency")
@@ -2274,6 +2287,19 @@ func cmdWeb() {
 		}
 		serverOptions = append(serverOptions, web.WithLocalAuthenticator(localAuthenticator))
 		localWebToken, localWebTokenPath = token, tokenPath
+	}
+	if strings.TrimSpace(*oidcIssuer) != "" {
+		if !cloudAuthEnabled {
+			fatal("Вход через OIDC требует cloud authentication (%s)", *authSecretEnv)
+		}
+		provider, oidcErr := oidc.New(oidc.Config{
+			Issuer: *oidcIssuer, ClientID: *oidcClientID, RedirectURL: *oidcRedirectURL,
+			ClientSecret: os.Getenv(*oidcSecretEnv),
+		})
+		if oidcErr != nil {
+			fatal("Ошибка настройки OIDC: %v", oidcErr)
+		}
+		serverOptions = append(serverOptions, web.WithOIDC(provider))
 	}
 	srv, err := web.NewServer(*dbPath, *distDir, *artifacts, serverOptions...)
 	if err != nil {

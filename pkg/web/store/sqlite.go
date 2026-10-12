@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -802,7 +802,19 @@ func migrate(db *sql.DB) error {
 			scope TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
 			status_code INTEGER NOT NULL DEFAULT 0, response_headers TEXT NOT NULL DEFAULT '{}', response_body BLOB,
 			created_at DATETIME NOT NULL, PRIMARY KEY(scope, request_key))`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP)`,
+		// Version 10 (B-83): durable browser sessions and pending OIDC sign-ins.
+		// Binaries with SchemaVersion < 10 refuse to open the upgraded file, so
+		// an old server cannot silently ignore persisted sessions or revocations.
+		`CREATE TABLE IF NOT EXISTS web_sessions (
+			token_hash TEXT PRIMARY KEY, actor_id TEXT NOT NULL, roles_json TEXT NOT NULL,
+			session_epoch INTEGER NOT NULL DEFAULT 0, auth_method TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '',
+			csrf_token TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			absolute_expires_at INTEGER NOT NULL, revoked_at INTEGER)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS oidc_login_states (
+			state_hash TEXT PRIMARY KEY, nonce TEXT NOT NULL, code_verifier TEXT NOT NULL,
+			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {

@@ -416,6 +416,10 @@ ai-team web [--target <путь>] [--host 127.0.0.1] [--port 8080] [другие
 | `--dist` | `web/dist` | каталог собранного фронтенда; если его нет, используется фронтенд, встроенный в бинарник. Обычно флаг не нужен |
 | `--artifacts` | `.ai-team/artifacts` | корень артефактов |
 | `--auth-secret-env` | `AI_TEAM_AUTH_SECRET` | переменная с секретом; если она задана, включается облачная аутентификация |
+| `--oidc-issuer` | `$AI_TEAM_OIDC_ISSUER` | issuer OIDC-провайдера; включает вход через SSO (только в облачном режиме) |
+| `--oidc-client-id` | `$AI_TEAM_OIDC_CLIENT_ID` | client ID приложения у провайдера |
+| `--oidc-redirect-url` | `$AI_TEAM_OIDC_REDIRECT_URL` | зарегистрированный callback `https://<хост>/api/auth/oidc/callback` |
+| `--oidc-client-secret-env` | `AI_TEAM_OIDC_CLIENT_SECRET` | имя переменной окружения с client secret; сам секрет флагом не передаётся |
 | `--worker-command <путь>` | — | исполнять прогоны в отдельном процессе `ai-team worker` |
 | `--scheduler-db <путь>` | — | только ставить задания в постоянную очередь |
 | `--max-concurrent`, `--per-target` | `4`, `1` | лимиты параллельности очереди |
@@ -424,6 +428,38 @@ ai-team web [--target <путь>] [--host 127.0.0.1] [--port 8080] [другие
 
 В локальном режиме дашборд выдаёт случайную HttpOnly-cookie сессии и
 отдельный CSRF-токен; каждый пишущий запрос требует оба.
+
+Сессии хранятся в базе дашборда (`--db`), а не в памяти процесса, поэтому
+переживают перезапуск `ai-team web`. В базе лежит только SHA-256 cookie.
+Сессия истекает после 8 часов бездействия (активность продлевает её) и в любом
+случае через 7 дней. Кнопка «Выйти» (`DELETE /api/session` с CSRF-токеном)
+отзывает сессию. Сессия, созданная в локальном режиме, не действует в
+облачном, и наоборот.
+
+#### Вход через SSO (OIDC)
+
+В облачном режиме можно включить вход через OpenID Connect: authorization
+code с PKCE (S256), проверка `state` (привязан к браузеру cookie), `nonce`,
+подписи `id_token` по JWKS провайдера (RS256 или ES256), `iss`, `aud`/`azp`
+и срока действия. Discovery берётся из
+`<issuer>/.well-known/openid-configuration`; issuer в нём должен совпадать
+точно. Все адреса — только `https` (кроме loopback для разработки).
+
+```bash
+export AI_TEAM_AUTH_SECRET='<случайный-секрет-не-короче-32-байт>'
+export AI_TEAM_OIDC_ISSUER='https://login.example.com/realms/team'
+export AI_TEAM_OIDC_CLIENT_ID='ai-team'
+export AI_TEAM_OIDC_CLIENT_SECRET='<секрет клиента>'
+export AI_TEAM_OIDC_REDIRECT_URL='https://ai-team.example.com/api/auth/oidc/callback'
+ai-team web --host 0.0.0.0
+```
+
+Пользователь определяется по подтверждённому провайдером e-mail
+(`email_verified: true`). Функции берутся только из назначений участника в
+команде, а не из claims токена; войти через SSO может лишь активный участник.
+Первого администратора по-прежнему заводит токен `ai-team auth-token`, а
+участники активируют приглашение как раньше. Любой сбой провайдера, discovery
+или JWKS отклоняет вход: понижения до другого способа входа нет.
 
 ### ai-team auth-token
 

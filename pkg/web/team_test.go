@@ -355,3 +355,16 @@ func TestEmptyTeamRolesAreRejectedWithoutChangingInvitationOrMember(t *testing.T
 		t.Fatalf("rejected role edit revoked a valid member session: %d %s", me.Code, me.Body.String())
 	}
 }
+
+// setSessionPrincipalForTest rebinds a persisted browser session to another
+// principal, standing in for a full sign-in as that actor.
+func setSessionPrincipalForTest(t *testing.T, s *Server, cookie *http.Cookie, principal cloudidentity.Principal) {
+	t.Helper()
+	roles := make([]string, len(principal.Roles))
+	for i, role := range principal.Roles {
+		roles[i] = string(role)
+	}
+	if err := s.store.SetWebSessionIdentity(cookie.Value, principal.ActorID, roles); err != nil {
+		t.Fatal(err)
+	}
+}

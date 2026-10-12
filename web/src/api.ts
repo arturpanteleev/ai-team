@@ -66,7 +66,7 @@ export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = fa
 let csrfToken: string | null = null;
 let activePrincipal: Principal | null = null;
 
-export async function getAuthConfig(): Promise<{ authentication_required: boolean; team_management_enabled: boolean }> {
+export async function getAuthConfig(): Promise<{ authentication_required: boolean; team_management_enabled: boolean; sso_enabled?: boolean }> {
   const response = await fetch(`${API_BASE}/auth/config`, { credentials: 'same-origin' });
   if (!response.ok) throw new Error(`Auth config error: ${response.status}`);
   return response.json();
@@ -99,6 +99,20 @@ export async function openSession(bearerToken?: string): Promise<Principal | nul
   csrfToken = session.csrf_token;
   activePrincipal = session.principal ?? null;
   return activePrincipal;
+}
+
+export const SSO_LOGIN_URL = `${API_BASE}/auth/oidc/login`;
+
+// closeSession revokes the server-side session (sign-out). The CSRF token is
+// required, so another site cannot sign the user out.
+export async function closeSession(): Promise<void> {
+  const token = csrfToken;
+  if (token) {
+    await fetch(`${API_BASE}/session`, {
+      method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRF-Token': token },
+    });
+  }
+  expireSession();
 }
 
 export function getActivePrincipal(): Principal | null {

@@ -23,4 +23,13 @@ describe('Login invitation activation', () => {
     expect(screen.getByText('Есть код приглашения?')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Активировать приглашение' })).toBeInTheDocument();
   });
+
+  it('offers SSO sign-in only when the server enables it', () => {
+    const { unmount } = render(<Login allowActivation {...handlers} />);
+    expect(screen.queryByRole('link', { name: 'Войти через SSO' })).not.toBeInTheDocument();
+    unmount();
+
+    render(<Login allowActivation ssoEnabled {...handlers} />);
+    expect(screen.getByRole('link', { name: 'Войти через SSO' })).toHaveAttribute('href', '/api/auth/oidc/login');
+  });
 });

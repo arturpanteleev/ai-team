@@ -39,9 +39,12 @@ require `approver_function` when the stage declares one, otherwise `function`.
 A member without the required function receives `403 forbidden` before the
 controller is called. When the template sets `forbid_self_approval: true`,
 `confirm` and `POST /api/runs/{runID}/approvals/{approvalID}/decisions` reject
-a stage confirmation by the member who took the stage or submitted its result
-in the confirmed visit with `403` (code `self_approval_forbidden` on the stage
-route).
+a stage confirmation by any author of the confirmed visit (took the stage,
+submitted or edited its result or agent output, made grill or override
+decisions, launched the agent via `run-agent`, which records a
+`stage_agent_requested` event, or changed the executor) with `403` (code `self_approval_forbidden` on the stage
+route). Unverifiable authorship is refused; `return` is not subject to the
+policy.
 
 To edit a human stage result during a pending grill, post a new immutable
 revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,

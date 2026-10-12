@@ -52,6 +52,9 @@ func (c *stageActionRecorder) record(action string) error {
 	c.calls[action]++
 	return nil
 }
+func (c *stageActionRecorder) RunStageAgent(context.Context, string, string, string, bool) error {
+	return c.record("run-agent")
+}
 func (c *stageActionRecorder) ChangeStageExecutor(string, string, string, string) error {
 	return c.record("executor")
 }
@@ -82,6 +85,11 @@ type functionPermissionFixture struct {
 
 func newFunctionPermissionFixture(t *testing.T, forbidSelfApproval bool, approvals []approval.PendingApproval, runs map[string]lifecycle.State) functionPermissionFixture {
 	t.Helper()
+	return newTemplateFixture(t, functionPermissionsTemplate, forbidSelfApproval, approvals, runs)
+}
+
+func newTemplateFixture(t *testing.T, template string, forbidSelfApproval bool, approvals []approval.PendingApproval, runs map[string]lifecycle.State) functionPermissionFixture {
+	t.Helper()
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {
@@ -91,7 +99,7 @@ func newFunctionPermissionFixture(t *testing.T, forbidSelfApproval bool, approva
 	if forbidSelfApproval {
 		forbid = "true"
 	}
-	yamlData := strings.Replace(functionPermissionsTemplate, "%FORBID%", forbid, 1)
+	yamlData := strings.Replace(template, "%FORBID%", forbid, 1)
 	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), []byte(yamlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -393,4 +401,187 @@ func TestTeamFunctionAssignmentAcceptsTemplateAliases(t *testing.T) {
 	if rejected.Code != http.StatusBadRequest {
 		t.Fatalf("unknown function must be rejected: %d %s", rejected.Code, rejected.Body.String())
 	}
+}
+
+const agentStageTemplate = `schema_version: 5
+template: agent-permissions
+title: Agent permissions
+forbid_self_approval: %FORBID%
+stages:
+  - id: spec
+    title: Spec
+    function: po
+    result: md
+  - id: build
+    title: Build
+    function: developer
+    executor: agent
+    agent: coder
+    result: md
+    check:
+      kind: agent
+      agent: reviewer
+      mode: grill
+  - id: accept
+    title: Accept
+    function: bo
+    result: approve
+`
+
+func grillApproval(id string, created time.Time, decisions ...approval.Decision) approval.PendingApproval {
+	return approval.PendingApproval{
+		Kind: approval.KindGrillQuestions, ID: id, RunID: "run", AttemptID: "attempt-grill",
+		FromStage: "build", ToStage: "build", Trigger: approval.GrillTrigger, Status: approval.StatusResolved,
+		SubjectHash: testSubjectHash, RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny,
+		Actions:   []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, "done"},
+		CreatedAt: created, Decisions: decisions,
+	}
+}
+
+func agentConfirmApproval(created time.Time) approval.PendingApproval {
+	value := buildConfirmApproval(created)
+	value.RequiredRoles = []string{"developer"}
+	return value
+}
+
+func writeAttemptManifest(t *testing.T, fixture functionPermissionFixture, runID, attemptID, body string) {
+	t.Helper()
+	dir := filepath.Join(fixture.target, ".ai-team", "runs", runID, "attempts", attemptID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestForbidSelfApprovalCountsEveryStageContribution covers authorship beyond
+// the human input submitter: grill decisions, result edits, agent output
+// edits and agent launches in the confirmed visit.
+func TestForbidSelfApprovalCountsEveryStageContribution(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	base := time.Now().UTC().Add(-2 * time.Hour)
+	confirmRun := map[string]lifecycle.State{
+		"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+	}
+	const outputPath = "attempts/attempt-2/artifacts/build.md"
+	manifest := `{"run_id":"run-confirm","attempt_id":"attempt-2","outputs":[{"name":"build","evidence_path":"` + outputPath + `"}]}`
+
+	t.Run("agent stage grill new_version author cannot confirm", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{
+			grillApproval("grill-1", base, approval.Decision{ActorID: "b@example.test", ActorRole: "developer", Action: approval.GrillActionNewVersion}),
+			agentConfirmApproval(base.Add(time.Hour)),
+		}, confirmRun)
+		response := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 {
+			t.Fatalf("grill author confirmed own version: %d %s", response.Code, response.Body.String())
+		}
+		other := fixture.requestAs(t, "c@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if other.Code != http.StatusAccepted {
+			t.Fatalf("non-author must confirm: %d %s", other.Code, other.Body.String())
+		}
+	})
+
+	t.Run("grill answer and done authors cannot confirm", func(t *testing.T) {
+		for _, action := range []string{approval.GrillActionAnswer, "done"} {
+			fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{
+				grillApproval("grill-1", base, approval.Decision{ActorID: "b@example.test", ActorRole: "developer", Action: action}),
+				agentConfirmApproval(base.Add(time.Hour)),
+			}, confirmRun)
+			response := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("grill %s author confirmed: %d %s", action, response.Code, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("editor of a human result cannot confirm", func(t *testing.T) {
+		fixture := newFunctionPermissionFixture(t, true, []approval.PendingApproval{
+			buildInputApproval("input-1", approval.StatusResolved, base,
+				approval.Decision{ActorID: "a@example.test", ActorRole: "developer", Action: "submit"}),
+			buildConfirmApproval(base.Add(time.Hour)),
+		}, confirmRun)
+		if _, err := fixture.srv.humanArtifacts.Append("run-confirm", "stages/build/result.md", "", "", "# edited by B\n", "grill edit", "b@example.test"); err != nil {
+			t.Fatal(err)
+		}
+		response := fixture.requestAs(t, "b@example.test", both, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("result editor confirmed own edit: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("editor of agent output cannot confirm", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(base.Add(time.Hour))}, confirmRun)
+		writeAttemptManifest(t, fixture, "run-confirm", "attempt-2", manifest)
+		if _, err := fixture.srv.humanArtifacts.Append("run-confirm", outputPath, "", "", "agent output edited by B\n", "edit", "b@example.test"); err != nil {
+			t.Fatal(err)
+		}
+		response := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("agent output editor confirmed: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("agent launcher cannot confirm", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(base.Add(time.Hour))},
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		launch := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/run-agent", `{"action":"run"}`)
+		if launch.Code != http.StatusAccepted || fixture.controller.calls["run-agent"] != 1 {
+			t.Fatalf("run-agent: %d %s", launch.Code, launch.Body.String())
+		}
+		stateStore, err := lifecycle.NewStore(fixture.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previous, err := stateStore.Load("run-confirm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		running := previous
+		running.Phase = lifecycle.PhaseRunning
+		if err := stateStore.Save(previous, running); err != nil {
+			t.Fatal(err)
+		}
+		next := running
+		next.Phase, next.PendingApprovalID = lifecycle.PhaseWaiting, "gate-1"
+		if err := stateStore.Save(running, next); err != nil {
+			t.Fatal(err)
+		}
+		fixture.controller.approvals[0].CreatedAt = time.Now().UTC()
+		response := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("agent launcher confirmed: %d %s", response.Code, response.Body.String())
+		}
+		other := fixture.requestAs(t, "c@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if other.Code != http.StatusAccepted {
+			t.Fatalf("non-launcher must confirm: %d %s", other.Code, other.Body.String())
+		}
+	})
+
+	t.Run("author of a previous visit may confirm the new visit", func(t *testing.T) {
+		previousGate := buildConfirmApproval(base.Add(10 * time.Minute))
+		previousGate.ID, previousGate.Status, previousGate.ResolvedAt = "gate-0", approval.StatusResolved, base.Add(20*time.Minute)
+		fixture := newFunctionPermissionFixture(t, true, []approval.PendingApproval{
+			buildInputApproval("input-0", approval.StatusResolved, base,
+				approval.Decision{ActorID: "b@example.test", ActorRole: "developer", Action: "submit"}),
+			previousGate,
+			buildInputApproval("input-1", approval.StatusResolved, base.Add(30*time.Minute),
+				approval.Decision{ActorID: "a@example.test", ActorRole: "developer", Action: "submit"}),
+			buildConfirmApproval(base.Add(time.Hour)),
+		}, confirmRun)
+		response := fixture.requestAs(t, "b@example.test", both, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("previous-visit author must confirm the new visit: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("unreadable attempt evidence fails closed", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(base.Add(time.Hour))}, confirmRun)
+		writeAttemptManifest(t, fixture, "run-confirm", "attempt-2", "{not json")
+		response := fixture.requestAs(t, "c@example.test", developer, http.MethodPost, "/api/runs/run-confirm/stages/build/confirm", "")
+		if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 {
+			t.Fatalf("unverifiable authorship must be refused: %d %s", response.Code, response.Body.String())
+		}
+	})
 }

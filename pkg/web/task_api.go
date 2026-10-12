@@ -619,6 +619,14 @@ func (s *Server) handleTaskStageRunAgent(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "agent dispatch is not connected to the task controller", "controller_action_unavailable")
 		return
 	}
+	// Record the launching actor before dispatch: the launch counts as stage
+	// authorship for forbid_self_approval, so an unrecorded launch must not run.
+	if err := s.appendRunEventRequired(runID, stageAgentRequestedEvent, time.Now().UTC(), map[string]any{
+		"stage_id": stageID, "actor_id": actorID, "refine": command.Action == "refine",
+	}); err != nil {
+		writeJSONAPIError(w, http.StatusServiceUnavailable, "agent launch could not be recorded", "event_unavailable")
+		return
+	}
 	if err := controller.RunStageAgent(r.Context(), runID, stageID, actorID, command.Action == "refine"); err != nil {
 		s.taskConflict(w, runID, stageID, err.Error())
 		return

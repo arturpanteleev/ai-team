@@ -64,3 +64,11 @@ be re-checked on resume.
 - **WHEN** a human resumes the run
 - **THEN** the checker MUST run on the granted allowance
 - **AND** the stage attempt MUST NOT be repeated
+
+#### Scenario: Output changed before the pending check
+
+- **GIVEN** a run stopped before the checker of a finished attempt
+- **AND** the attempt output was edited before resume
+- **WHEN** a human resumes the run
+- **THEN** the checker MUST NOT run and the stage MUST NOT be repeated
+- **AND** the run MUST pause with reason `pending_check_output_changed`

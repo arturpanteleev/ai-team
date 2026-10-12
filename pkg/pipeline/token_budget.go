@@ -238,8 +238,11 @@ func (rs *runState) pendingCheckAfterBudgetStop(stage string) (notifier.StageRes
 		switch {
 		case event.Type == tokenbudget.EventBudgetExceeded && event.Stage == stage && event.Data["phase"] == budgetPhaseCheck:
 			attemptID, _ = event.Data["check_attempt_id"].(string)
-		case event.Type == "attempt_started" && event.Stage == stage, event.Type == "attempts_invalidated":
-			// Новая попытка или откат делают старую остановку неактуальной.
+		case event.Type == "attempt_started" && event.Stage == stage:
+			// Новая попытка этапа делает старую остановку неактуальной.
+			attemptID = ""
+		case event.Type == "attempts_invalidated" && attemptID != "" && invalidatesAttempt(event, attemptID):
+			// Откат, задевший именно эту попытку, тоже снимает привязку.
 			attemptID = ""
 		}
 	}
@@ -259,7 +262,85 @@ func (rs *runState) pendingCheckAfterBudgetStop(stage string) (notifier.StageRes
 		if result.Superseded || result.Status != notifier.StatusPassed || result.State.Outcome != workflow.OutcomePassed {
 			return notifier.StageResult{}, false, nil
 		}
+		if err := rs.verifyPendingCheckOutputs(stage, result, events); err != nil {
+			return notifier.StageResult{}, false, err
+		}
 		return result, true, nil
 	}
 	return notifier.StageResult{}, false, nil
+}
+
+func invalidatesAttempt(event evidence.Event, attemptID string) bool {
+	switch ids := event.Data["attempt_ids"].(type) {
+	case []any:
+		for _, id := range ids {
+			if id == attemptID {
+				return true
+			}
+		}
+	case []string:
+		for _, id := range ids {
+			if id == attemptID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ErrPendingCheckOutputChanged — выход попытки, чью проверку остановил
+// бюджет, изменился после записи попытки. Проверка такого выхода записала бы
+// вердикт на попытку с другим содержимым, поэтому run встаёт на паузу.
+var ErrPendingCheckOutputChanged = errors.New("выход попытки изменён после остановки по бюджету")
+
+// verifyPendingCheckOutputs сверяет попытку перед повтором её проверки:
+// манифест связан с attempt_finished, копия каждого выхода в evidence и файл
+// в рабочей директории совпадают с хешем и размером из манифеста.
+func (rs *runState) verifyPendingCheckOutputs(stage string, result notifier.StageResult, events []evidence.Event) error {
+	runDir := rs.evidence.RunDir()
+	_, manifest, err := evidence.ReadAttemptManifest(rs.p.attemptManifestSource, runDir, rs.runID, result.AttemptID)
+	if err != nil {
+		return fmt.Errorf("%w: read attempt %s manifest: %v", ErrPendingCheckOutputChanged, result.AttemptID, err)
+	}
+	if manifest.RunID != rs.runID || manifest.AttemptID != result.AttemptID || manifest.Stage != stage {
+		return fmt.Errorf("%w: attempt %s manifest identity mismatch", ErrPendingCheckOutputChanged, result.AttemptID)
+	}
+	digest, _, err := evidence.AttemptManifestDigest(rs.p.attemptManifestSource, runDir, rs.runID, result.AttemptID)
+	if err != nil {
+		return fmt.Errorf("%w: digest attempt %s manifest: %v", ErrPendingCheckOutputChanged, result.AttemptID, err)
+	}
+	bound := false
+	for _, event := range events {
+		if event.Type == "attempt_finished" && event.AttemptID == result.AttemptID && event.Stage == stage &&
+			event.Data["manifest_sha256"] == digest {
+			bound = true
+			break
+		}
+	}
+	if !bound {
+		return fmt.Errorf("%w: attempt %s manifest is not bound by attempt_finished", ErrPendingCheckOutputChanged, result.AttemptID)
+	}
+	for _, output := range manifest.Outputs {
+		evidencePath, err := confinedArtifactPath(runDir, output.EvidencePath)
+		if err != nil {
+			return fmt.Errorf("%w: output %s evidence path: %v", ErrPendingCheckOutputChanged, output.Name, err)
+		}
+		kind, size, sum, err := evidence.ArtifactDigest(evidencePath)
+		if err != nil || kind != output.Type || size != output.Size || sum != output.SHA256 {
+			return fmt.Errorf("%w: evidence copy of output %s does not match the attempt manifest", ErrPendingCheckOutputChanged, output.Name)
+		}
+		sourcePath, err := filepath.Abs(output.SourcePath)
+		if err != nil {
+			return fmt.Errorf("%w: output %s: %v", ErrPendingCheckOutputChanged, output.Name, err)
+		}
+		if err := validateExistingArtifactPath(rs.task.ArtifactRoot, sourcePath); err != nil {
+			return fmt.Errorf("%w: output %s is unsafe: %v", ErrPendingCheckOutputChanged, output.Name, err)
+		}
+		kind, size, sum, err = evidence.ArtifactDigest(sourcePath)
+		if err != nil || kind != output.Type || size != output.Size || sum != output.SHA256 {
+			return fmt.Errorf("%w: output %s changed after attempt %s was recorded; restore it or cancel the task",
+				ErrPendingCheckOutputChanged, output.Name, result.AttemptID)
+		}
+	}
+	return nil
 }

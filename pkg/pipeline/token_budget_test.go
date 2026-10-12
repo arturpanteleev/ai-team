@@ -17,8 +17,10 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 type staticLedger struct {
@@ -442,5 +444,136 @@ func TestInterruptedCheckerUsageIsUnknownOnResume(t *testing.T) {
 	daily, err := tokenbudget.FilesystemLedger{RunsRoot: filepath.Dir(runDir)}.TokensBetween(start, end)
 	if err != nil || !daily.Unknown {
 		t.Fatalf("daily ledger must see the reconciled interrupted checker as unknown: %+v err=%v", daily, err)
+	}
+}
+
+func checkerBudgetRuntime() *scriptedRuntime {
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "# Решение\n\nок\n"}
+	rt.content["verifier"] = map[string]string{"verification": "# Отчёт проверки\n\n**Verdict:** PASSED\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"tech":     {Attested: true, TokensInput: 7},
+		"verifier": {Attested: true, TokensInput: 1},
+	}
+	return rt
+}
+
+// Человек поправил выход попытки между остановкой и resume: проверка такого
+// файла записала бы вердикт на попытку с другим содержимым. Resume
+// отказывает явно: проверяющий не запускается, этап не перезапускается.
+func TestPendingCheckRejectsOutputChangedAfterBudgetStop(t *testing.T) {
+	dir := env(t)
+	rt := checkerBudgetRuntime()
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+	cfg.Budget = &config.BudgetConfig{MaxTaskTokens: 7}
+	p := New(cfg, stageCheckRegistry(true), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, first, err)
+	if err := os.WriteFile(filepath.Join(dir, ".ai-team", "artifacts", "feat", "tech.md"), []byte("# Решение\n\nправка руками\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+	if !errors.Is(err, ErrPendingCheckOutputChanged) || resumed.Outcome != "stopped" {
+		t.Fatalf("changed output must stop the resume: result=%+v err=%v", resumed, err)
+	}
+	if rt.calls["verifier"] != 0 || rt.calls["tech"] != 1 {
+		t.Fatalf("neither the checker nor the stage may run: %v", rt.calls)
+	}
+	if strings.Contains(readEvents(t, dir), `"type":"check_passed"`) {
+		t.Fatal("no check verdict may be recorded for the changed output")
+	}
+	state, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := state.Load(first.RunID); err != nil || loaded.Phase != lifecycle.PhaseResumable {
+		t.Fatalf("run must stay resumable for a human decision: %+v err=%v", loaded, err)
+	}
+}
+
+// Маркер начала существует до вызова модели проверяющим.
+func TestCheckerStartMarkerPrecedesModelCall(t *testing.T) {
+	dir := env(t)
+	rt := checkerBudgetRuntime()
+	markerSeen := false
+	rt.onExec = func(agentName string, _ []runtime.Artifact) {
+		if agentName != "verifier" {
+			return
+		}
+		matches, _ := filepath.Glob(filepath.Join(onlyRunDir(t, dir), tokenbudget.CheckerUsageDir, "*.started"))
+		finals, _ := filepath.Glob(filepath.Join(onlyRunDir(t, dir), tokenbudget.CheckerUsageDir, "*.json"))
+		markerSeen = len(matches) == 1 && len(finals) == 0
+	}
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+	if err := runStageCheckPipeline(t, dir, cfg, rt); err != nil {
+		t.Fatal(err)
+	}
+	if !markerSeen {
+		t.Fatal("start marker must be written before the checker calls the model")
+	}
+}
+
+// Маркер не записать — проверяющий не вызывается, проверка завершается
+// check_error, а не пропуском учёта.
+func TestCheckerNotCalledWhenMarkerCannotBeWritten(t *testing.T) {
+	dir := env(t)
+	rt := checkerBudgetRuntime()
+	rt.onExec = func(agentName string, _ []runtime.Artifact) {
+		if agentName == "tech" {
+			// Файл на месте каталога делает checker-usage недоступным.
+			if err := os.WriteFile(filepath.Join(onlyRunDir(t, dir), tokenbudget.CheckerUsageDir), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+	err := runStageCheckPipeline(t, dir, cfg, rt)
+	if !errors.Is(err, ErrUserStopped) || rt.calls["verifier"] != 0 {
+		t.Fatalf("checker must not run without its marker: err=%v calls=%v", err, rt.calls)
+	}
+	if !strings.Contains(readEvents(t, dir), `"type":"check_error"`) {
+		t.Fatal("marker failure must surface as check_error")
+	}
+}
+
+type staticEventLog struct{ events []evidence.Event }
+
+func (l staticEventLog) Read(string) ([]evidence.Event, error) { return l.events, nil }
+func (l staticEventLog) ReadBytes(string) ([]byte, error)      { return nil, nil }
+func (l staticEventLog) Append(string, evidence.Event, uint64, string) (evidence.Event, error) {
+	return evidence.Event{}, errors.New("read only")
+}
+
+// Привязка остановки к попытке снимается новой попыткой этапа и откатом,
+// задевшим эту попытку; откат других попыток её не снимает.
+func TestPendingCheckBindingResets(t *testing.T) {
+	stop := evidence.Event{Type: tokenbudget.EventBudgetExceeded, Stage: "tech",
+		Data: map[string]any{"phase": budgetPhaseCheck, "check_attempt_id": "A1"}}
+	result := notifier.StageResult{AttemptID: "A1", Name: "tech", Status: notifier.StatusPassed,
+		State: workflow.AttemptState{Outcome: workflow.OutcomePassed}}
+	cases := []struct {
+		name      string
+		after     []evidence.Event
+		wantBound bool
+	}{
+		{"new stage attempt", []evidence.Event{{Type: "attempt_started", Stage: "tech"}}, false},
+		{"loopback invalidates the attempt", []evidence.Event{{Type: "attempts_invalidated", Data: map[string]any{"attempt_ids": []any{"A1"}}}}, false},
+		{"loopback of other attempts", []evidence.Event{{Type: "attempts_invalidated", Data: map[string]any{"attempt_ids": []any{"B7"}}}}, true},
+		{"attempt of another stage", []evidence.Event{{Type: "attempt_started", Stage: "review"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(&config.Config{}, testRegistry())
+			p.eventLogSource = staticEventLog{events: append([]evidence.Event{stop}, tc.after...)}
+			rs := &runState{p: p, runID: "run-binding", results: []notifier.StageResult{result},
+				evidence: &appendOnlyEvidence{runDir: t.TempDir()}}
+			_, found, err := rs.pendingCheckAfterBudgetStop("tech")
+			// Сохранённая привязка доходит до сверки манифеста, которого в
+			// этой фикстуре нет, и даёт явный отказ — это и есть признак.
+			bound := errors.Is(err, ErrPendingCheckOutputChanged)
+			if found || bound != tc.wantBound || (!tc.wantBound && err != nil) {
+				t.Fatalf("found=%t err=%v, want bound=%t", found, err, tc.wantBound)
+			}
+		})
 	}
 }

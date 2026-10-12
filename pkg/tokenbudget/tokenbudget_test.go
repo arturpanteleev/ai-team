@@ -295,3 +295,41 @@ func TestCheckerUsageMarkersAndAtomicKeys(t *testing.T) {
 		}
 	}
 }
+
+// Нечитаемый маркер относится к суткам своего создания (mtime), а не к
+// суткам resume; записи создаются с правами 0644, как остальное evidence run.
+func TestReconcileUnreadableMarkerUsesItsMtimeAndRecordsAre0644(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "20261010T010000Z-ffffffff")
+	dir := filepath.Join(runDir, CheckerUsageDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "broken-001.started")
+	if err := os.WriteFile(marker, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 10, 10, 15, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(marker, created, created); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := ReconcileCheckerUsage(runDir); err != nil || count != 1 {
+		t.Fatalf("reconcile = %d err=%v", count, err)
+	}
+	ledger := FilesystemLedger{RunsRoot: root}
+	start, end := DayWindow(created)
+	if usage, err := ledger.TokensBetween(start, end); err != nil || !usage.Unknown {
+		t.Fatalf("interrupted checker must count on its own day: %+v err=%v", usage, err)
+	}
+	start, end = DayWindow(created.Add(48 * time.Hour))
+	if usage, err := ledger.TokensBetween(start, end); err != nil || usage.Unknown {
+		t.Fatalf("interrupted checker must not leak into the resume day: %+v err=%v", usage, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "broken-001.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("record mode = %v, want 0644", info.Mode().Perm())
+	}
+}

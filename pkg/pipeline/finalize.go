@@ -53,12 +53,17 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		}
 		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
 	}
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) || errors.Is(runErr, ErrTokenBudgetExceeded) {
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) || errors.Is(runErr, ErrTokenBudgetExceeded) ||
+		errors.Is(runErr, ErrPendingCheckOutputChanged) {
 		pauseData := map[string]any{"status": status, "next_stage": rs.lifecycleState.NextStage}
 		if errors.Is(runErr, ErrTokenBudgetExceeded) {
 			// Пауза по бюджету — остановка до решения человека, а не сбой.
 			status = string(workflow.RunStopped)
 			pauseData["status"], pauseData["reason"] = status, pauseReasonBudgetExceeded
+		}
+		if errors.Is(runErr, ErrPendingCheckOutputChanged) {
+			status = string(workflow.RunStopped)
+			pauseData["status"], pauseData["reason"] = status, "pending_check_output_changed"
 		}
 		if err := report.GenerateFinalReport(
 			rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime,

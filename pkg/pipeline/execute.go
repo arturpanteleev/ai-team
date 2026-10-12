@@ -70,6 +70,8 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		// визитов и попыток к ней не применяются.
 		pendingCheck, hasPendingCheck, pendingErr := rs.pendingCheckAfterBudgetStop(current)
 		if pendingErr != nil {
+			// Проверку изменённого выхода не запускаем и этап молча не
+			// перезапускаем: run встаёт на паузу с явной причиной.
 			return fmt.Errorf("budget stop replay for %s: %w", current, pendingErr)
 		}
 		if !hasPendingCheck && node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {

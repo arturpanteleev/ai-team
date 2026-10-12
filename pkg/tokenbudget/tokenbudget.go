@@ -311,7 +311,13 @@ func ReconcileCheckerUsage(runDir string) (int, error) {
 		}
 		var record CheckerUsageRecord
 		if err := json.Unmarshal(data, &record); err != nil || record.StartedAt.IsZero() {
-			record = CheckerUsageRecord{StartedAt: time.Now().UTC()}
+			// Нечитаемый маркер относится к суткам своего создания, а не к
+			// суткам resume.
+			info, statErr := os.Lstat(filepath.Join(dir, key+checkerStartedExt))
+			if statErr != nil {
+				return 0, statErr
+			}
+			record = CheckerUsageRecord{StartedAt: info.ModTime().UTC()}
 		}
 		record.FinishedAt = record.StartedAt
 		record.Usage = &workflow.AttemptUsage{}
@@ -340,6 +346,11 @@ func createFileAtomic(dir, name string, data []byte) error {
 	}
 	tempPath := temp.Name()
 	defer func() { _ = os.Remove(tempPath) }()
+	// Права как у остальных evidence-файлов run (0644), а не 0600 CreateTemp.
+	if err := temp.Chmod(0o644); err != nil {
+		_ = temp.Close()
+		return err
+	}
 	if _, err := temp.Write(data); err != nil {
 		_ = temp.Close()
 		return err

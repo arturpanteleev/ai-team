@@ -78,6 +78,61 @@ func TestBuiltInGrillUsesSpecChecker(t *testing.T) {
 	}
 }
 
+func TestJiraTrackerConfigValidatesAgainstTheSingleProjectTemplate(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tracker = &TrackerConfig{Jira: &JiraConfig{
+		BaseURL: "https://jira.example", Email: "bot@example.test", TokenEnv: "AI_TEAM_JIRA_TOKEN",
+		WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"implementation": "In Progress"},
+	}}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("valid Jira tracker config rejected: %v", err)
+	}
+	encoded, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ParseYAML(encoded)
+	if err != nil {
+		t.Fatalf("Jira config round-trip failed: %v", err)
+	}
+	if loaded.Tracker == nil || loaded.Tracker.Jira == nil || loaded.Tracker.Jira.StageStatuses["implementation"] != "In Progress" {
+		t.Fatalf("Jira config lost on round-trip: %+v", loaded.Tracker)
+	}
+
+	cfg.Tracker.Jira.StageStatuses = nil
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("comment-only Jira integration should allow no status mappings: %v", err)
+	}
+	cfg.Tracker.Jira.StageStatuses = map[string]string{"not-a-template-stage": "Done"}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "unknown") && !strings.Contains(err.Error(), "неизвестный этап") {
+		t.Fatalf("unknown mapped stage should be rejected, got %v", err)
+	}
+}
+
+func TestJiraTrackerConfigRejectsCredentialsInURLAndUnknownFields(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tracker = &TrackerConfig{Jira: &JiraConfig{
+		BaseURL: "http://jira.example", Email: "bot@example.test", TokenEnv: "AI_TEAM_JIRA_TOKEN",
+		WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"qa": "Done"},
+	}}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("non-HTTPS Jira URL should be rejected, got %v", err)
+	}
+	cfg.Tracker.Jira.BaseURL = "https://user:password@jira.example"
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "URL") {
+		t.Fatalf("credentials in Jira URL should be rejected, got %v", err)
+	}
+	if _, err := ParseYAML([]byte("schema_version: 5\ntemplate: x\ntitle: X\nstages: []\ntracker:\n  jira:\n    token: leaked\n")); err == nil {
+		t.Fatal("unknown token field should be rejected; credentials must come from environment")
+	}
+}
+
 func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
 	wantAgents := map[string]string{

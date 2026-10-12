@@ -25,6 +25,7 @@ pkg/
 ├── process/         process-group supervision и kill (Unix/Windows/plan9)
 ├── eval/             независимая LLM-оценка артефактов
 ├── notifier/         уведомления о событиях pipeline
+├── tracker/          one-way task tracker adapters
 ├── report/           HTML-отчёты по завершённым run
 ├── ui/               консольный вывод (цвет, progress bar)
 └── web/              HTTP API + SQLite store + StoreRecorder (дашборд)
@@ -147,6 +148,21 @@ evidence. Решения сериализуются in-process mutex и flock н
 поэтому конкурентные CLI/web-решения не теряются. События
 `approval_requested` и `approval_decided` входят и в immutable hash chain,
 и в SQLite/WebSocket projection.
+
+### Односторонние интеграции трекера
+
+`pkg/tracker` принимает события задач через injectable adapter interface. Web
+server читает новые события из durable SQLite cursor и передаёт
+`attempt_finished` вместе с `external_links` задачи. Встроенный Jira Cloud
+adapter извлекает issue key из внешней ссылки, при наличии stage mapping
+переходит к целевому статусу, затем добавляет комментарий со ссылкой на task
+detail и результат этапа. Отправка идёт в отдельном server worker и не входит
+в исход задачи. Ошибка записывается как durable `integration_error`, после чего
+курсор продолжает чтение. При первом включении курсор ставится на текущий край
+событий; затем он сохраняется per adapter, чтобы после перезапуска повторять
+необработанные события. Если Jira приняла комментарий, а процесс завершился до
+сохранения курсора, после restart возможен повтор комментария; общей транзакции
+между SQLite и Jira нет.
 
 Deferred-гейты (APF-1): для стандартного и fast профилей forward-gate рёбра
 помечаются `deferred: true` — переход не паузит и не решается по отдельности,

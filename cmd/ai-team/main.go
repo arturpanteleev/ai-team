@@ -42,6 +42,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/web"
 	webstore "github.com/arturpanteleev/ai-team/pkg/web/store"
@@ -2240,6 +2241,10 @@ func cmdWeb() {
 	}
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
+	}
+	if cfg.Tracker != nil && cfg.Tracker.Jira != nil {
+		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)
+		serverOptions = append(serverOptions, web.WithTrackerAdapter(jira))
 	}
 	cloudAuthEnabled := false
 	var localWebToken, localWebTokenPath string

@@ -45,6 +45,41 @@ func TestNewAppliesVersionedMigrations(t *testing.T) {
 	}
 }
 
+func TestIntegrationCursorIsDurableAndMonotonic(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "integrations.db")
+	s, err := New(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor, found, err := s.IntegrationCursor("tracker"); err != nil || found || cursor != 0 {
+		t.Fatalf("new integration cursor=(%d,%v,%v), want (0,false,nil)", cursor, found, err)
+	}
+	if err := s.SetIntegrationCursor("tracker", 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIntegrationCursor("tracker", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if cursor, found, err := reopened.IntegrationCursor("tracker"); err != nil || !found || cursor != 12 {
+		t.Fatalf("reopened integration cursor=(%d,%v,%v), want (12,true,nil)", cursor, found, err)
+	}
+	if err := reopened.SetIntegrationCursor("", 1); err == nil {
+		t.Fatal("empty integration name should be rejected")
+	}
+	if err := reopened.SetIntegrationCursor("tracker", -1); err == nil {
+		t.Fatal("negative cursor should be rejected")
+	}
+}
+
 func TestNewRejectsNewerSchemaVersion(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "future.db")
 	database, err := sql.Open("sqlite", databasePath)

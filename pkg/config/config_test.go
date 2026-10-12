@@ -41,6 +41,43 @@ func TestDefaultProfileWritesOneV5Template(t *testing.T) {
 	}
 }
 
+// TestBuiltInGrillUsesSpecChecker pins the B-42 contract: the built-in grill
+// must run an agent whose prompt emits exactly one `**Question:**` line or
+// `**Verdict:** PASSED`. The deploy-readiness verifier has no question
+// protocol, so selecting it turns every grill round into a blocking
+// check_error.
+func TestBuiltInGrillUsesSpecChecker(t *testing.T) {
+	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
+	for _, profile := range []string{ProfileStandard, ProfileFast, ProfileRegulated} {
+		cfg, err := DefaultProfile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grills := 0
+		for _, stage := range cfg.Stages {
+			if stage.Check == nil || stage.Check.Mode != "grill" {
+				continue
+			}
+			grills++
+			if stage.ID != "product_spec" || stage.Check.Kind != "agent" || stage.Check.Agent != "spec-checker" {
+				t.Fatalf("%s: grill stage %q check=%+v, want product_spec agent spec-checker", profile, stage.ID, *stage.Check)
+			}
+			loaded, err := registry.Load(stage.Check.Agent)
+			if err != nil {
+				t.Fatalf("%s: load grill agent: %v", profile, err)
+			}
+			for _, marker := range []string{"Режим grill", "**Question:** <вопрос>", "**Verdict:** PASSED"} {
+				if !strings.Contains(loaded.Prompt, marker) {
+					t.Fatalf("%s: grill agent %q prompt lacks the grill contract marker %q", profile, stage.Check.Agent, marker)
+				}
+			}
+		}
+		if grills != 1 {
+			t.Fatalf("%s: built-in template must declare exactly one grill check, got %d", profile, grills)
+		}
+	}
+}
+
 func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
 	wantAgents := map[string]string{
@@ -269,7 +306,7 @@ func TestTemplateValidationRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validAgents := fakeLookup{"analyst": true, "verifier": true, "architect": true, "design-reviewer": true, "reviewer": true, "coder": true, "tester": true, "observer": true}
+	validAgents := fakeLookup{"analyst": true, "verifier": true, "spec-checker": true, "architect": true, "design-reviewer": true, "reviewer": true, "coder": true, "tester": true, "observer": true}
 	if err := base.Validate(validAgents); err != nil {
 		t.Fatalf("built-in refs should exist: %v", err)
 	}

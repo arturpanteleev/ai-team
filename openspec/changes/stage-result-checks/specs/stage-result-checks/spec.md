@@ -96,6 +96,15 @@ verified decision evidence after a process crash.
 - **И** a changed revision MUST resolve the question while substituted source
   bytes MUST be rejected
 
+#### Scenario: Later grill rounds keep the agent output editable
+
+- **КОГДА** an earlier grill round for the same source attempt is resolved and
+  a later grill question for that attempt is pending
+- **ТОГДА** the resolved earlier rounds MUST NOT block a new revision of the
+  agent output pinned by the pending question
+- **И** an agent-output revision whose markdown results no longer contain a
+  required section of the pinned stage MUST be rejected before append
+
 #### Scenario: Resume after a resolved grill decision
 
 - **КОГДА** the process crashes after persisting the resolved grill approval

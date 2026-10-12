@@ -45,6 +45,14 @@ outputs:
   verification: '{feature}/verification.md'
 `)
 		files["verifier/prompt.md"] = def("test")
+		files["spec-checker/def.yaml"] = def(`name: spec-checker
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+outputs:
+  spec-check: '{feature}/spec-check.md'
+`)
+		files["spec-checker/prompt.md"] = def("test")
 	}
 	return agent.NewFS(files)
 }
@@ -57,6 +65,7 @@ func stageCheckConfig(check *config.TemplateCheck) *config.Config {
 		PipelineAgents: []config.AgentConfig{
 			{Name: "tech"},
 			{Name: "verifier"},
+			{Name: "spec-checker"},
 		},
 		Stages: []config.TemplateStage{
 			{ID: "tech", Title: "Техническое решение", Function: "architect", Result: "md", Executor: "agent", Agent: "tech", Confirm: "auto", Check: check},
@@ -121,8 +130,23 @@ func findCheckDecision(t *testing.T, dir string, kind string) *approval.PendingA
 	return nil
 }
 
+// grillStageCheckConfig reuses the built-in product_spec grill check so the
+// grill tests run the same checker agent as the shipped template. Scripted
+// output exists only for spec-checker: a template that wires grill to another
+// agent (for example the deploy-readiness verifier) fails these tests.
 func grillStageCheckConfig(maxRounds int) *config.Config {
-	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier", Mode: "grill", MaxRounds: maxRounds})
+	builtIn, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		panic(err)
+	}
+	var check config.TemplateCheck
+	for _, stage := range builtIn.Stages {
+		if stage.Check != nil && stage.Check.Mode == "grill" {
+			check = *stage.Check
+		}
+	}
+	check.MaxRounds = maxRounds
+	cfg := stageCheckConfig(&check)
 	cfg.Stages[0].Function = "product_owner"
 	return cfg
 }
@@ -286,15 +310,15 @@ func TestRun_GrillAnswerFeedsNextRoundAndPassedCompletes(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nКритерии не проверяемы.\n"}
-	rt.contentFn["verifier"] = func(call int) map[string]string {
+	rt.contentFn["spec-checker"] = func(call int) map[string]string {
 		if call == 1 {
-			return map[string]string{"verification": "**Question:** Как измерить критерий успеха?\n"}
+			return map[string]string{"spec-check": "**Question:** Как измерить критерий успеха?\n"}
 		}
-		return map[string]string{"verification": "Спецификация проверена после уточнения.\n**Verdict:** PASSED\n"}
+		return map[string]string{"spec-check": "Спецификация проверена после уточнения.\n**Verdict:** PASSED\n"}
 	}
 	answerWasPassedToChecker := false
 	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
-		if agentName != "verifier" {
+		if agentName != "spec-checker" {
 			return
 		}
 		for _, input := range inputs {
@@ -333,8 +357,8 @@ func TestRun_GrillAnswerFeedsNextRoundAndPassedCompletes(t *testing.T) {
 	if err := runGrillPipeline(t, p, dir, runID); err != nil {
 		t.Fatalf("passed second round should resume the run: %v", err)
 	}
-	if !answerWasPassedToChecker || rt.calls["verifier"] != 2 {
-		t.Fatalf("checker did not receive the answer on round two: answer=%v calls=%d", answerWasPassedToChecker, rt.calls["verifier"])
+	if !answerWasPassedToChecker || rt.calls["spec-checker"] != 2 {
+		t.Fatalf("checker did not receive the answer on round two: answer=%v calls=%d", answerWasPassedToChecker, rt.calls["spec-checker"])
 	}
 	events := readEvents(t, dir)
 	if !strings.Contains(events, `"type":"grill_completed"`) || !strings.Contains(events, `"open_questions":0`) {
@@ -346,11 +370,11 @@ func TestRun_GrillResolvedApprovalRecoversAfterCrashBeforeCheckerDispatch(t *tes
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nПроверяемый критерий.\n"}
-	rt.contentFn["verifier"] = func(call int) map[string]string {
+	rt.contentFn["spec-checker"] = func(call int) map[string]string {
 		if call == 1 {
-			return map[string]string{"verification": "**Question:** Как измерить критерий?\n"}
+			return map[string]string{"spec-check": "**Question:** Как измерить критерий?\n"}
 		}
-		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+		return map[string]string{"spec-check": "**Verdict:** PASSED\n"}
 	}
 	store, err := approval.NewStore(dir)
 	if err != nil {
@@ -370,7 +394,7 @@ func TestRun_GrillResolvedApprovalRecoversAfterCrashBeforeCheckerDispatch(t *tes
 	}
 	crashed := false
 	rt.onExec = func(agentName string, _ []runtime.Artifact) {
-		if agentName == "verifier" && !crashed {
+		if agentName == "spec-checker" && !crashed {
 			crashed = true
 			panic("simulated crash before grill checker dispatch")
 		}
@@ -407,7 +431,7 @@ func TestRun_GrillDoneRecordsOpenQuestionAndCompletes(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
-	rt.content["verifier"] = map[string]string{"verification": "**Question:** Как проверить критерий?\n"}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "**Question:** Как проверить критерий?\n"}
 	store, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +464,7 @@ func TestRun_GrillMaxRoundsCompletesAutomatically(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
-	rt.content["verifier"] = map[string]string{"verification": "**Question:** Как проверить критерий?\n"}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "**Question:** Как проверить критерий?\n"}
 	store, err := approval.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +492,7 @@ func TestRun_GrillRejectsMultipleQuestionsInOneRound(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
-	rt.content["verifier"] = map[string]string{"verification": "**Question:** Что значит быстро?\n**Question:** Как измерить надёжность?\n"}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "**Question:** Что значит быстро?\n**Question:** Как измерить надёжность?\n"}
 	err := runStageCheckPipeline(t, dir, grillStageCheckConfig(3), rt)
 	if err == nil || !errors.Is(err, ErrUserStopped) {
 		t.Fatalf("malformed grill output must fail closed for human review: %v", err)
@@ -486,10 +510,10 @@ func TestRun_GrillNewVersionUsesPinnedArtifactRevision(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nИсходный текст.\n"}
-	rt.content["verifier"] = map[string]string{"verification": "**Question:** Уточните критерий.\n"}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "**Question:** Уточните критерий.\n"}
 	var revisedArtifactSeen bool
 	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
-		if agentName != "verifier" {
+		if agentName != "spec-checker" {
 			return
 		}
 		for _, input := range inputs {
@@ -539,8 +563,8 @@ func TestRun_GrillNewVersionUsesPinnedArtifactRevision(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rt.contentFn["verifier"] = func(call int) map[string]string {
-		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+	rt.contentFn["spec-checker"] = func(call int) map[string]string {
+		return map[string]string{"spec-check": "**Verdict:** PASSED\n"}
 	}
 	if err := runGrillPipeline(t, p, dir, runID); err != nil {
 		values, _ := store.List(runID)
@@ -574,14 +598,14 @@ outputs:
   result: '{feature}/tech.md'
 `),
 		"tech/prompt.md": def("test"),
-		"verifier/def.yaml": def(`name: verifier
+		"spec-checker/def.yaml": def(`name: spec-checker
 runtime: agentcli
 prompt_file: prompt.md
 mutation: none
 outputs:
-  verification: '{feature}/verification.md'
+  spec-check: '{feature}/spec-check.md'
 `),
-		"verifier/prompt.md": def("test"),
+		"spec-checker/prompt.md": def("test"),
 		"reviewer/def.yaml": def(`name: reviewer
 runtime: agentcli
 prompt_file: prompt.md
@@ -600,17 +624,17 @@ outputs:
 	})
 	rt := newScripted()
 	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nИсходная версия.\n"}
-	rt.contentFn["verifier"] = func(call int) map[string]string {
+	rt.contentFn["spec-checker"] = func(call int) map[string]string {
 		if call == 1 {
-			return map[string]string{"verification": "**Question:** Уточните критерий.\n"}
+			return map[string]string{"spec-check": "**Question:** Уточните критерий.\n"}
 		}
-		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+		return map[string]string{"spec-check": "**Verdict:** PASSED\n"}
 	}
 	var checkerSawRevision, nextStageSawRevision bool
 	var nextStageRevisionPath, nextStageRevisionDigest string
 	var expectedRevision humanartifact.Revision
 	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
-		if agentName != "verifier" && agentName != "reviewer" {
+		if agentName != "spec-checker" && agentName != "reviewer" {
 			return
 		}
 		for _, input := range inputs {
@@ -623,7 +647,7 @@ outputs:
 				continue
 			}
 			if strings.Contains(string(data), "Новая версия с проверяемым критерием") {
-				if agentName == "verifier" {
+				if agentName == "spec-checker" {
 					checkerSawRevision = true
 				} else {
 					nextStageSawRevision = true

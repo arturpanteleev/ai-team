@@ -13,6 +13,8 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
@@ -294,9 +296,28 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "approval state unavailable", http.StatusInternalServerError)
 			return
 		}
+		grill, grillPending := pendingAttemptGrill(approvals, parts[1], command.ArtifactPath)
 		for _, pending := range approvals {
-			if pending.AttemptID == parts[1] && pending.Status == "resolved" {
-				http.Error(w, "этот handoff уже подтверждён; создайте новый цикл возврата для изменения артефакта", http.StatusConflict)
+			if pending.AttemptID != parts[1] || pending.Status != approval.StatusResolved {
+				continue
+			}
+			// Every grill round is bound to the same source attempt, so earlier
+			// resolved rounds must not freeze the output while the next round
+			// is still waiting for a new version.
+			if grillPending && pending.Kind == approval.KindGrillQuestions && pending.Trigger == approval.GrillTrigger {
+				continue
+			}
+			http.Error(w, "этот handoff уже подтверждён; создайте новый цикл возврата для изменения артефакта", http.StatusConflict)
+			return
+		}
+		if grillPending && command.Content != "" {
+			stage, err := s.pinnedTaskStage(chi.URLParam(r, "runID"), grill.FromStage)
+			if err != nil {
+				http.Error(w, "pinned stage contract unavailable", http.StatusConflict)
+				return
+			}
+			if err := s.validateGrillAttemptRevision(chi.URLParam(r, "runID"), parts[1], stage, command.ArtifactPath, command.Content); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
@@ -349,18 +370,104 @@ func (s *Server) pendingGrillIncludesArtifact(runID, stageID, artifactPath strin
 		return false
 	}
 	for _, pending := range approvals {
-		if pending.Kind != approval.KindGrillQuestions || pending.Trigger != approval.GrillTrigger ||
-			pending.FromStage != stageID || pending.ToStage != stageID || pending.Status != approval.StatusPending ||
-			!hasAction(pending.Actions, approval.GrillActionNewVersion) {
-			continue
-		}
-		var payload approval.GrillQuestionsPayload
-		if json.Unmarshal(pending.Payload, &payload) == nil && payload.Kind == string(approval.KindGrillQuestions) &&
-			(payload.ArtifactRevisions[artifactPath] != "" || payload.ArtifactContentSHA256[artifactPath] != "") {
+		if pending.FromStage == stageID && pendingGrillPinsArtifact(pending, artifactPath) {
 			return true
 		}
 	}
 	return false
+}
+
+// pendingGrillPinsArtifact reports whether a pending same-stage grill question
+// accepts a new version and pins artifactPath as part of the checked result.
+func pendingGrillPinsArtifact(pending approval.PendingApproval, artifactPath string) bool {
+	if pending.Kind != approval.KindGrillQuestions || pending.Trigger != approval.GrillTrigger ||
+		pending.FromStage != pending.ToStage || pending.Status != approval.StatusPending ||
+		!hasAction(pending.Actions, approval.GrillActionNewVersion) {
+		return false
+	}
+	var payload approval.GrillQuestionsPayload
+	return json.Unmarshal(pending.Payload, &payload) == nil && payload.Kind == string(approval.KindGrillQuestions) &&
+		(payload.ArtifactRevisions[artifactPath] != "" || payload.ArtifactContentSHA256[artifactPath] != "")
+}
+
+// pendingAttemptGrill returns the pending grill question raised for the source
+// attempt that produced artifactPath.
+func pendingAttemptGrill(approvals []approval.PendingApproval, attemptID, artifactPath string) (approval.PendingApproval, bool) {
+	for _, pending := range approvals {
+		if pending.AttemptID == attemptID && pendingGrillPinsArtifact(pending, artifactPath) {
+			return pending, true
+		}
+	}
+	return approval.PendingApproval{}, false
+}
+
+// validateGrillAttemptRevision applies the pinned stage result contract to an
+// edited agent output before it can become the next grill version. Markdown
+// stages are checked the way the pipeline reads agent results: the attempt's
+// markdown outputs together, with the edited file substituted, must carry the
+// required sections, so a multi-file agent result can still be edited file by
+// file.
+func (s *Server) validateGrillAttemptRevision(runID, attemptID string, stage config.TemplateStage, artifactPath, content string) error {
+	if stage.Result != "md" {
+		return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, content, stage.RequiredSections)
+	}
+	if !isMarkdownArtifact(artifactPath) {
+		return nil
+	}
+	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, content); err != nil {
+		return err
+	}
+	if len(stage.RequiredSections) == 0 {
+		return nil
+	}
+	runDir := filepath.Join(s.runRoot, runID)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, attemptID)
+	if err != nil || manifest.RunID != runID || manifest.AttemptID != attemptID {
+		return errors.New("source attempt manifest unavailable")
+	}
+	var combined strings.Builder
+	for _, output := range manifest.Outputs {
+		if !isMarkdownArtifact(output.EvidencePath) {
+			continue
+		}
+		if output.EvidencePath == artifactPath {
+			combined.WriteString(content)
+		} else {
+			current, err := s.currentAttemptOutput(runID, output.EvidencePath)
+			if err != nil {
+				return err
+			}
+			combined.WriteString(current)
+		}
+		combined.WriteString("\n\n")
+	}
+	return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, combined.String(), stage.RequiredSections)
+}
+
+// currentAttemptOutput returns the latest human revision of an agent output or
+// the immutable source bytes when the output was never edited.
+func (s *Server) currentAttemptOutput(runID, artifactPath string) (string, error) {
+	revisions, err := s.humanArtifacts.List(runID, artifactPath)
+	if err != nil {
+		return "", errors.New("artifact revision history unavailable")
+	}
+	if len(revisions) > 0 {
+		return revisions[len(revisions)-1].Content, nil
+	}
+	path, err := resolveArtifactPath(filepath.Join(s.runRoot, runID), artifactPath)
+	if err != nil {
+		return "", errors.New("source artifact unavailable")
+	}
+	data, err := safeio.ReadRegularFile(path, maxArtifactSize)
+	if err != nil {
+		return "", errors.New("source artifact unavailable")
+	}
+	return string(data), nil
+}
+
+func isMarkdownArtifact(artifactPath string) bool {
+	lower := strings.ToLower(artifactPath)
+	return strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".markdown")
 }
 
 func hasAction(actions []string, wanted string) bool {

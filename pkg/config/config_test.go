@@ -41,6 +41,98 @@ func TestDefaultProfileWritesOneV5Template(t *testing.T) {
 	}
 }
 
+// TestBuiltInGrillUsesSpecChecker pins the B-42 contract: the built-in grill
+// must run an agent whose prompt emits exactly one `**Question:**` line or
+// `**Verdict:** PASSED`. The deploy-readiness verifier has no question
+// protocol, so selecting it turns every grill round into a blocking
+// check_error.
+func TestBuiltInGrillUsesSpecChecker(t *testing.T) {
+	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
+	for _, profile := range []string{ProfileStandard, ProfileFast, ProfileRegulated} {
+		cfg, err := DefaultProfile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grills := 0
+		for _, stage := range cfg.Stages {
+			if stage.Check == nil || stage.Check.Mode != "grill" {
+				continue
+			}
+			grills++
+			if stage.ID != "product_spec" || stage.Check.Kind != "agent" || stage.Check.Agent != "spec-checker" {
+				t.Fatalf("%s: grill stage %q check=%+v, want product_spec agent spec-checker", profile, stage.ID, *stage.Check)
+			}
+			loaded, err := registry.Load(stage.Check.Agent)
+			if err != nil {
+				t.Fatalf("%s: load grill agent: %v", profile, err)
+			}
+			for _, marker := range []string{"Режим grill", "**Question:** <вопрос>", "**Verdict:** PASSED"} {
+				if !strings.Contains(loaded.Prompt, marker) {
+					t.Fatalf("%s: grill agent %q prompt lacks the grill contract marker %q", profile, stage.Check.Agent, marker)
+				}
+			}
+		}
+		if grills != 1 {
+			t.Fatalf("%s: built-in template must declare exactly one grill check, got %d", profile, grills)
+		}
+	}
+}
+
+func TestJiraTrackerConfigValidatesAgainstTheSingleProjectTemplate(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tracker = &TrackerConfig{Jira: &JiraConfig{
+		BaseURL: "https://jira.example", Email: "bot@example.test", TokenEnv: "AI_TEAM_JIRA_TOKEN",
+		WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"implementation": "In Progress"},
+	}}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("valid Jira tracker config rejected: %v", err)
+	}
+	encoded, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ParseYAML(encoded)
+	if err != nil {
+		t.Fatalf("Jira config round-trip failed: %v", err)
+	}
+	if loaded.Tracker == nil || loaded.Tracker.Jira == nil || loaded.Tracker.Jira.StageStatuses["implementation"] != "In Progress" {
+		t.Fatalf("Jira config lost on round-trip: %+v", loaded.Tracker)
+	}
+
+	cfg.Tracker.Jira.StageStatuses = nil
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("comment-only Jira integration should allow no status mappings: %v", err)
+	}
+	cfg.Tracker.Jira.StageStatuses = map[string]string{"not-a-template-stage": "Done"}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "unknown") && !strings.Contains(err.Error(), "неизвестный этап") {
+		t.Fatalf("unknown mapped stage should be rejected, got %v", err)
+	}
+}
+
+func TestJiraTrackerConfigRejectsCredentialsInURLAndUnknownFields(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tracker = &TrackerConfig{Jira: &JiraConfig{
+		BaseURL: "http://jira.example", Email: "bot@example.test", TokenEnv: "AI_TEAM_JIRA_TOKEN",
+		WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"qa": "Done"},
+	}}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("non-HTTPS Jira URL should be rejected, got %v", err)
+	}
+	cfg.Tracker.Jira.BaseURL = "https://user:password@jira.example"
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "URL") {
+		t.Fatalf("credentials in Jira URL should be rejected, got %v", err)
+	}
+	if _, err := ParseYAML([]byte("schema_version: 5\ntemplate: x\ntitle: X\nstages: []\ntracker:\n  jira:\n    token: leaked\n")); err == nil {
+		t.Fatal("unknown token field should be rejected; credentials must come from environment")
+	}
+}
+
 func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
 	wantAgents := map[string]string{
@@ -269,7 +361,7 @@ func TestTemplateValidationRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validAgents := fakeLookup{"analyst": true, "verifier": true, "architect": true, "design-reviewer": true, "reviewer": true, "coder": true, "tester": true, "observer": true}
+	validAgents := fakeLookup{"analyst": true, "verifier": true, "spec-checker": true, "architect": true, "design-reviewer": true, "reviewer": true, "coder": true, "tester": true, "observer": true}
 	if err := base.Validate(validAgents); err != nil {
 		t.Fatalf("built-in refs should exist: %v", err)
 	}

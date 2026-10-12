@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -286,6 +287,165 @@ func (c *Controller) Approvals(runID string) ([]approval.PendingApproval, error)
 	return c.approvals.List(runID)
 }
 
+// AnswerStageGrill resumes the checker with a human answer to its current
+// question. The response is stored in the approval decision and fed to the
+// checker as untrusted context on the next round.
+func (c *Controller) AnswerStageGrill(ctx context.Context, runID, stageID, answer, actorID, actorRole string) error {
+	if strings.TrimSpace(answer) == "" {
+		return errors.New("ответ на вопрос грилла не может быть пустым")
+	}
+	return c.resolveStageGrill(ctx, runID, stageID, approval.GrillActionAnswer, answer, actorID, actorRole)
+}
+
+// SubmitStageGrillVersion resumes the checker with the exact immutable human
+// revisions created while the grill approval was pending.
+func (c *Controller) SubmitStageGrillVersion(ctx context.Context, runID, stageID, comment, actorID, actorRole string) error {
+	return c.resolveStageGrill(ctx, runID, stageID, approval.GrillActionNewVersion, comment, actorID, actorRole)
+}
+
+// CompleteStageGrill records the responsible person's explicit decision that
+// no further assistance is needed; it does not mark the check as passed.
+func (c *Controller) CompleteStageGrill(ctx context.Context, runID, stageID, actorID, actorRole string) error {
+	return c.resolveStageGrill(ctx, runID, stageID, approval.GrillActionDone, "", actorID, actorRole)
+}
+
+func (c *Controller) resolveStageGrill(_ context.Context, runID, stageID, action, comment, actorID, actorRole string) error {
+	if strings.TrimSpace(actorID) == "" {
+		return errors.New("actor id is required to resolve a grill question")
+	}
+	state, err := c.loadLifecycle(runID)
+	if err != nil {
+		return err
+	}
+	if state.Phase != lifecycle.PhaseWaiting || state.NextStage != stageID || state.PendingApprovalID == "" {
+		return errors.New("grill action requires the current waiting stage")
+	}
+	value, err := c.approvals.Load(runID, state.PendingApprovalID)
+	if err != nil {
+		return err
+	}
+	if value.Kind != approval.KindGrillQuestions || value.Trigger != approval.GrillTrigger ||
+		value.FromStage != stageID || value.ToStage != stageID || value.Status != approval.StatusPending {
+		return errors.New("current stage has no pending grill question")
+	}
+	stage, err := c.pinnedStage(runID, stageID)
+	if err != nil {
+		return err
+	}
+	if !containsAction(value.Actions, action) || actorRole != stage.Function || !containsAction(value.RequiredRoles, actorRole) {
+		return errors.New("actor role or action is not allowed for this grill question")
+	}
+	decision := approval.Decision{
+		ActorID: actorID, ActorRole: actorRole, Action: action, Comment: comment,
+		SubjectHash: value.SubjectHash, ControllerAuthenticated: true,
+	}
+	if action == approval.GrillActionNewVersion {
+		var payload approval.GrillQuestionsPayload
+		if err := json.Unmarshal(value.Payload, &payload); err != nil {
+			return errors.New("grill question payload is invalid")
+		}
+		decision.ArtifactRevisions, err = c.reviewedRevisions(runID, value)
+		if err != nil {
+			return fmt.Errorf("resolve new grill result revisions: %w", err)
+		}
+		changed, err := c.grillResultContentChanged(runID, value.AttemptID, payload.ArtifactRevisions, payload.ArtifactContentSHA256, decision.ArtifactRevisions)
+		if err != nil {
+			return fmt.Errorf("verify changed grill result content: %w", err)
+		}
+		if !changed {
+			return errors.New("new_version requires result content to differ from the pinned revision")
+		}
+	}
+	if _, err := c.approvals.Decide(runID, value.ID, decision); err != nil {
+		return err
+	}
+	return c.Resume(runID)
+}
+
+func (c *Controller) grillResultContentChanged(runID, attemptID string, baseline, baselineSHA256, selected map[string]string) (bool, error) {
+	artifacts, err := humanartifact.New(c.target)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for artifactPath, revisionID := range selected {
+		baselineID := baseline[artifactPath]
+		var beforeSHA string
+		if baselineID != "" {
+			before, err := artifacts.Get(runID, artifactPath, baselineID)
+			if err != nil {
+				return false, fmt.Errorf("read pinned revision %q: %w", artifactPath, err)
+			}
+			beforeSHA = humanartifact.Digest([]byte(before.Content))
+			if before.RunID != runID || before.ArtifactPath != artifactPath || before.SHA256 != beforeSHA {
+				return false, fmt.Errorf("pinned revision content digest mismatch for %q", artifactPath)
+			}
+		} else if expectedSHA := baselineSHA256[artifactPath]; expectedSHA != "" {
+			beforeSHA, err = c.verifiedAttemptOutputSHA256(runID, attemptID, artifactPath, expectedSHA)
+			if err != nil {
+				return false, fmt.Errorf("verify immutable source output %q: %w", artifactPath, err)
+			}
+		} else {
+			return false, fmt.Errorf("selected revision %q has no pinned baseline for %q", revisionID, artifactPath)
+		}
+		after, err := artifacts.Get(runID, artifactPath, revisionID)
+		if err != nil {
+			return false, fmt.Errorf("read selected revision %q: %w", artifactPath, err)
+		}
+		afterSHA := humanartifact.Digest([]byte(after.Content))
+		if after.RunID != runID || after.ArtifactPath != artifactPath || after.SHA256 != afterSHA {
+			return false, fmt.Errorf("revision content digest mismatch for %q", artifactPath)
+		}
+		if beforeSHA != afterSHA {
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func (c *Controller) verifiedAttemptOutputSHA256(runID, attemptID, artifactPath, expectedSHA string) (string, error) {
+	if attemptID == "" || expectedSHA == "" {
+		return "", errors.New("attempt, path, and expected digest are required")
+	}
+	if len(expectedSHA) != 64 {
+		return "", errors.New("source output baseline digest is malformed")
+	}
+	if _, err := hex.DecodeString(expectedSHA); err != nil {
+		return "", errors.New("source output baseline digest is malformed")
+	}
+	runDir := filepath.Join(c.target, ".ai-team", "runs", runID)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, attemptID)
+	if err != nil {
+		return "", err
+	}
+	if manifest.RunID != runID || manifest.AttemptID != attemptID {
+		return "", errors.New("attempt manifest identity mismatch")
+	}
+	var output *evidence.ArtifactRecord
+	for i := range manifest.Outputs {
+		if manifest.Outputs[i].EvidencePath == artifactPath {
+			output = &manifest.Outputs[i]
+			break
+		}
+	}
+	if output == nil || output.Type != "file" || !strings.EqualFold(output.SHA256, expectedSHA) {
+		return "", errors.New("baseline digest is not pinned by the source attempt manifest")
+	}
+	cleanPath := filepath.Clean(filepath.FromSlash(output.EvidencePath))
+	if filepath.IsAbs(cleanPath) || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", errors.New("source output path is not local to the run")
+	}
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, cleanPath), humanartifact.MaxContentBytes)
+	if err != nil {
+		return "", err
+	}
+	actualSHA := humanartifact.Digest(data)
+	if !strings.EqualFold(actualSHA, output.SHA256) || int64(len(data)) != output.Size {
+		return "", errors.New("source output bytes do not match the pinned attempt manifest")
+	}
+	return actualSHA, nil
+}
+
 // ChangeStageExecutor persists a human-selected executor for the stage that is
 // currently ready. The override is bound to the pending approval visit, so the
 // pipeline applies it once and a later visit cannot inherit it. The
@@ -567,6 +727,19 @@ func (c *Controller) reviewedRevisions(runID string, value approval.PendingAppro
 		}
 		if len(revisions) > 0 {
 			selection[output.EvidencePath] = revisions[len(revisions)-1].ID
+		}
+	}
+	for _, artifactPath := range []string{
+		"stages/" + manifest.Stage + "/result.md",
+		"stages/" + manifest.Stage + "/result.link",
+		"stages/" + manifest.Stage + "/result.txt",
+	} {
+		revisions, listErr := store.List(runID, artifactPath)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(revisions) > 0 {
+			selection[artifactPath] = revisions[len(revisions)-1].ID
 		}
 	}
 	return selection, nil

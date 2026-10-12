@@ -627,16 +627,11 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 	if decision.Action == "skip" {
 		return nil, errors.New("skipped human stage has no result artifact")
 	}
-	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, decision.Comment); err != nil {
+	if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, decision.Comment, stage.RequiredSections); err != nil {
 		return nil, err
 	}
 	switch stage.Result {
 	case "md":
-		for _, section := range stage.RequiredSections {
-			if !strings.Contains(decision.Comment, section) {
-				return nil, fmt.Errorf("human markdown is missing required section %q", section)
-			}
-		}
 		return []byte(decision.Comment), nil
 	case "link":
 		return []byte(decision.Comment), nil

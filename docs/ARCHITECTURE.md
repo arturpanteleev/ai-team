@@ -25,6 +25,7 @@ pkg/
 ├── process/         process-group supervision и kill (Unix/Windows/plan9)
 ├── eval/             независимая LLM-оценка артефактов
 ├── notifier/         уведомления о событиях pipeline
+├── tracker/          one-way task tracker adapters
 ├── report/           HTML-отчёты по завершённым run
 ├── ui/               консольный вывод (цвет, progress bar)
 └── web/              HTTP API + SQLite store + StoreRecorder (дашборд)
@@ -147,6 +148,24 @@ evidence. Решения сериализуются in-process mutex и flock н
 поэтому конкурентные CLI/web-решения не теряются. События
 `approval_requested` и `approval_decided` входят и в immutable hash chain,
 и в SQLite/WebSocket projection.
+
+### Односторонние интеграции трекера
+
+`pkg/tracker` принимает события задач через injectable adapter interface. Web
+server читает новые события из durable SQLite cursor и передаёт
+`attempt_finished` вместе с `external_links` задачи. Встроенный Jira Cloud
+adapter извлекает issue key из внешней ссылки (только поле, целиком равное
+`KEY-N` после обрезки пробелов, или URL `<base_url>/browse/KEY-N` на хосте `base_url`; поиска по
+подстроке нет), при наличии stage mapping и только для успешной попытки
+(`status=passed`, `outcome=passed`, decision не `rejected`) переходит к
+целевому статусу, затем при любом исходе добавляет комментарий со ссылкой на
+task detail и результат этапа. Отправка идёт в отдельном server worker и не входит
+в исход задачи. Ошибка записывается как durable `integration_error`, после чего
+курсор продолжает чтение. При первом включении курсор ставится на текущий край
+событий; затем он сохраняется per adapter, чтобы после перезапуска повторять
+необработанные события. Если Jira приняла комментарий, а процесс завершился до
+сохранения курсора, после restart возможен повтор комментария; общей транзакции
+между SQLite и Jira нет.
 
 Deferred-гейты (APF-1): для стандартного и fast профилей forward-gate рёбра
 помечаются `deferred: true` — переход не паузит и не решается по отдельности,
@@ -402,47 +421,56 @@ parent, paths, modes и blob hashes с canonical plan — так что штат
 сверяет push URL remote с одобренным планом; каждый Git вызов отключает hooks,
 fsmonitor и commit signing.
 
-### Отложенная (deferred) delivery и Git trailers — V0-9
+### Deferred delivery и PR-stage delivery — V0-9 / B-35
 
-Git-история меняется ТОЛЬКО после terminal finalize run'а (commit, push, PR),
-когда attestation digest детерминирован.  Причины:
+Обычно deferred delivery выполняется после terminal finalize: это позволяет
+включить детерминированный attestation digest в commit trailers. Но стандартный
+граф требует `pr_exists`, `pr_open` и `pr_base_branch` до перехода к review и
+QA. Для agent stage с PR result и hard `pr_exists` controller поэтому
+выполняет одобренную delivery внутри run сразу после публикации immutable
+attempt manifest и до этих hard checks. Остальные delivery stages сохраняют
+post-terminal поведение.
 
-- attestation.json пишется в finalize ПОСЛЕ delivery-стадии; выполнить
-  in-run delivery и при этом вшить в commit честный digest было бы циклично;
-- попытка-манифесты immutable: `CommitSHA` заполнять внутри run нельзя, иначе
-  погибает доказательство «что именно одобрено» при переживании потери bundle.
+Stage-scoped вызов `delivery.stage.execute` принимает только run, attempt,
+manifest SHA-256, canonical plan hash и runtime identity. Контроллер сверяет
+их с pinned config, strict event replay, controller-owned approval и точным
+candidate digest, затем выполняет `delivery.Execute` с controller-derived
+trailers `ai-team-run` и `ai-team-runtime`. Worker не передаёт URL, plan body
+или receipt. Контроллер durably сохраняет self-digesting receipt, а затем
+публикует URL как `result.link` в project artifacts и candidate artifacts.
+Retry сначала читает receipt и чинит обе проекции; если удалённый PR создан,
+но receipt ещё не записан, delivery executor находит и проверяет PR по branch
+и commit до продолжения. Этот controller-owned `pull-request` artifact
+snapshot'ится как immutable input следующему review/QA stage, включая resume
+непосредственно на таком stage.
 
-Внутри run delivery-стадия делает `delivery.Prepare` (state на диске), затем
-`authorizeDelivery` (в интерактивном режиме run может встать в ожидание
-approval `delivery_plan`, в resume выполняется `--approve-plan <sha>`), а не
-`delivery.Execute`. Результат — deferred marker `{StatePath, PlanHash}` + event
-`delivery_deferred`. После финального `finalize` при outcome `completed` и
-наличии маркера post-terminal хук (`pkg/pipeline/delivery_deferred.go`):
+Без интерактивного подтверждения agent stage останавливается в `awaiting_plan`
+после coder, controller checks и `delivery.Prepare`. `run --resume <id>
+--approve-plan <sha256>` продолжает этот stage отдельной controller-only
+попыткой: runtime агента повторно не вызывается, guard требует неизменный
+candidate workspace, checks перезапускаются, план перестраивается из prepared
+state и авторизуется ровно по тому же SHA-256. Иначе новый прогон модели дал бы
+план, которого человек не видел.
 
-1. перегружает canonical plan из prepared state и сверяет `plan.Hash()` с
-   маркером стадии и с `approvedPlanHash`;
-2. читает `attestation.json` → `attest.Parse` → `attest.Digest`;
-3. вычисляет runtime identity = `sha256(run.json.Provenance)` (raw bytes);
-4. собирает controller-derived trailers:
-   - `ai-team-run: <run_id>`, `ai-team-runtime: <hex>`,
-     `ai-team-attestation: <digest>`;
-5. исполняет реальный `delivery.Execute(context.Background(), …)` рабочей
-   копии (workspace lock всё ещё удержан — хук внутри `RunWithResult`);
-6. записывает tamper-evident `{RunDir}/delivery.json` (self-integrity
-   `record_sha256`, строгая валидация, однократная запись, idempotent retry).
+Attempt manifests не переписываются после delivery. Terminal finalize позднее
+создаёт attestation и run-level terminal record, который ссылается на точный
+stage receipt, attempt manifest SHA-256, attestation digest и runtime identity.
+Так как PR уже проверен человеком, поздний attestation digest не добавляется в
+commit и не вызывает повторный delivery с изменёнными trailers.
 
-Трейлеры не входят в canonical plan и subject approval (они controller-derived,
-не из LLM). Commit message = plan.CommitMessage + trailers. Трейлеры персистятся
-в delivery state ДО commit, поэтому crash-recovery (retry после commit) сверяет
-message с `FullCommitMessage(plan.CommitMessage, savedTrailers)`. При расхождении
-траилей восстановленный commit отклоняется.
+Для delivery flows без stage-scoped PR проверки post-terminal hook сохраняет
+прежний контракт: он перегружает canonical plan из prepared state, проверяет
+attestation и runtime identity, выполняет `delivery.Execute` и записывает
+tamper-evident `{RunDir}/delivery.json`. Трейлеры персистятся в delivery state
+до commit, поэтому crash-recovery сверяет message с
+`FullCommitMessage(plan.CommitMessage, savedTrailers)`.
 
-`FindDelivered` (evidence/query) сначала читает `delivery.json` (канонический
-источник), при его отсутствии падает на attempt-манифесты. Если post-terminal
-хук упал (например, сетевой сбой push), доставка повторяема командой
-`ai-team deliver --run <run_id> [--target <dir>] [--feature <name>]`: enforcement
-детерминированный — run обязан быть терминальным `completed`, plan обязан
-совпасть с `delivery_deferred` event, запись `delivery.json` однократная.
+`FindDelivered` сначала читает controller terminal record, а при его отсутствии
+падает на attempt manifests. Если post-terminal hook упал, доставка повторяема
+командой `ai-team deliver --run <run_id> [--target <dir>] [--feature <name>]`;
+run должен быть терминальным `completed`, plan обязан совпасть с
+`delivery_deferred`, а существующий controller stage receipt переиспользуется
+без повторного commit или PR.
 
 ## Layered agent registry
 

@@ -219,7 +219,16 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if a == nil {
 		return fail(fmt.Errorf("human stage %s must execute through the typed input path", name))
 	}
-	modelAttempt = a.Kind != "delivery"
+	continuation, err := rs.deliveryApprovalContinuation(name, a)
+	if err != nil {
+		return fail(fmt.Errorf("агент %s: delivery approval continuation: %w", name, err))
+	}
+	if continuation {
+		rs.deliveryContinuationStage = name
+		defer func() { rs.deliveryContinuationStage = "" }()
+		logging.Printf("  ↻ %s: продолжение после ожидания delivery-плана, агент повторно не запускается\n", name)
+	}
+	modelAttempt = a.Kind != "delivery" && !continuation
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
 		agentCfg = &config.AgentConfig{Name: name}
@@ -288,7 +297,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var stageRuntime runtime.Runtime
 	var runtimeAgent *runtime.Agent
-	if a.Kind != "delivery" {
+	if a.Kind != "delivery" && !continuation {
 		stageRuntime, err = rs.p.newRuntime(a.RuntimeType)
 		if err != nil {
 			return fail(fmt.Errorf("ошибка создания runtime для %s: %w", name, err))
@@ -329,8 +338,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		defer cancel()
 	}
 
-	if err := rs.clearStageEphemeral(name, a); err != nil {
-		return fail(fmt.Errorf("агент %s: очистка stale control artifacts: %w", name, err))
+	// A delivery continuation keeps the outputs of the attempt whose candidate
+	// bytes the pending plan describes.
+	if !continuation {
+		if err := rs.clearStageEphemeral(name, a); err != nil {
+			return fail(fmt.Errorf("агент %s: очистка stale control artifacts: %w", name, err))
+		}
 	}
 
 	var workspaceBefore filesystemSnapshot
@@ -351,11 +364,14 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: не удалось снять artifact baseline: %w", name, err))
 	}
+	mutationGuardApplied := false
 	defer func() {
-		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
-			r.ValidationFailed = true
-			r.Err = errors.Join(r.Err, guardErr)
-			r.Status = notifier.StatusFailed
+		if !mutationGuardApplied {
+			if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
+				r.ValidationFailed = true
+				r.Err = errors.Join(r.Err, guardErr)
+				r.Status = notifier.StatusFailed
+			}
 		}
 		if rs.candidate != nil {
 			currentLive, liveErr := checks.WorkspaceDigest(rs.runCfg.TargetDir)
@@ -369,7 +385,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var execErr error
 	executionInvoked = true
-	if a.Kind == "delivery" {
+	if continuation {
+		// No model run: the controller only re-checks and re-authorizes.
+	} else if a.Kind == "delivery" {
 		execErr = rs.writeDeliveryPlan(stageCtx, a, preconditions)
 	} else {
 		stageTask := *rs.task
@@ -407,7 +425,16 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 	// BLOCKED имеет приоритет над ошибкой выполнения и проверкой выходов:
 	// заблокированный агент по контракту не создаёт обычных артефактов.
-	if blocked, reason := verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, name); blocked {
+	blockedStatusName := name
+	blocked, reason := verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, name)
+	if !blocked && a.Name != "" && a.Name != name {
+		// The runtime tells a template-stage agent to signal BLOCKED under its
+		// own agent name (see runtime service instructions).
+		if blocked, reason = verdict.ReadBlocked(rs.task.ArtifactRoot, rs.runCfg.Feature, a.Name); blocked {
+			blockedStatusName = a.Name
+		}
+	}
+	if blocked {
 		for outputName, outputPath := range a.Outputs {
 			fullPath := filepath.Join(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
 			if _, statErr := os.Lstat(fullPath); statErr == nil {
@@ -417,7 +444,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 				return fail(fmt.Errorf("агент %s: проверка output при BLOCKED: %w", name, statErr))
 			}
 		}
-		statusPath := verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, name)
+		statusPath := verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, blockedStatusName)
 		if statusInfo, statErr := os.Stat(statusPath); statErr == nil {
 			r.Outputs = []runtime.Artifact{{Name: "blocked-status", Path: statusPath, Size: statusInfo.Size(), ModTime: statusInfo.ModTime()}}
 		}
@@ -485,6 +512,18 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		return r
 	}
 
+	definitions := mergeChecks(a.Checks, agentCfg.Checks)
+	if len(definitions) > 0 {
+		r.Checks, err = (checks.Runner{TargetDir: rs.sourceDir()}).RunAll(stageCtx, definitions)
+		if err != nil {
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: детерминированные проверки: %w", name, err))
+		}
+		if stageCtx.Err() != nil {
+			return fail(stageCtx.Err())
+		}
+	}
+
 	if a.Kind == "delivery" {
 		plan, planErr := deliveryPlanFromOutputs(outputs)
 		if planErr != nil {
@@ -517,18 +556,6 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		}
 		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
 	}
-
-	definitions := mergeChecks(a.Checks, agentCfg.Checks)
-	if len(definitions) > 0 {
-		r.Checks, err = (checks.Runner{TargetDir: rs.sourceDir()}).RunAll(stageCtx, definitions)
-		if err != nil {
-			r.ValidationFailed = true
-			return fail(fmt.Errorf("агент %s: детерминированные проверки: %w", name, err))
-		}
-		if stageCtx.Err() != nil {
-			return fail(stageCtx.Err())
-		}
-	}
 	if err := verifyArtifactIdentities(outputs, outputIdentities); err != nil {
 		r.ValidationFailed = true
 		return fail(fmt.Errorf("агент %s: output изменён после controller checks: %w", name, err))
@@ -540,6 +567,57 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			err = fmt.Errorf("verdict изменился с %s на %s", r.Verdict, finalVerdict)
 		}
 		return fail(fmt.Errorf("агент %s: повторная валидация verdict: %w", name, err))
+	}
+	if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil {
+		// B-35: агентный этап с delivery.require_checks (FR-15). Только после
+		// проверки выходов и повторной проверки verdict контроллер связывает
+		// required checks с текущим workspace и готовит план. PR-result этап
+		// с hard pr_exists доставляется отдельной controller operation после
+		// публикации attempt и до проверки PR; остальные delivery остаются
+		// deferred до terminal finalize.
+		if guardErr := rs.enforceMutationGuard(a, name, workspaceBefore, gitBefore, gitAvailable, guardWorkspace, artifactBefore, &r); guardErr != nil {
+			mutationGuardApplied = true
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: mutation guard: %w", name, guardErr))
+		}
+		mutationGuardApplied = true
+		// The current attempt is not in rs.results yet. Mark its execution result
+		// successful for the current-attempt evidence validator; later plan or
+		// approval failures still pass through fail() and become failed/stopped.
+		r.Status = notifier.StatusPassed
+		if err := rs.validateDeliveryChecksFor(&r); err != nil {
+			return fail(fmt.Errorf("агент %s: %w", name, err))
+		}
+		plan, err := rs.buildDeliveryPlan(stageCtx, r)
+		if err != nil {
+			return fail(fmt.Errorf("агент %s: delivery plan: %w", name, err))
+		}
+		if err := stageCtx.Err(); err != nil {
+			return fail(err)
+		}
+		statePath, prepareErr := delivery.Prepare(rs.sourceDir(), rs.runCfg.Feature, plan)
+		if prepareErr != nil {
+			return fail(fmt.Errorf("агент %s: подготовка delivery state: %w", name, prepareErr))
+		}
+		if approvalErr := rs.authorizeDelivery(name, r, plan); approvalErr != nil {
+			r.ControlStopped = true
+			return fail(approvalErr)
+		}
+		planHash, hashErr := plan.Hash()
+		if hashErr != nil {
+			return fail(fmt.Errorf("агент %s: delivery plan hash: %w", name, hashErr))
+		}
+		rs.deferredDelivery = &deferredDelivery{
+			StatePath: statePath, PlanHash: planHash, StageID: name, AttemptID: r.AttemptID,
+		}
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "delivery_deferred", Stage: name, AttemptID: r.AttemptID, Timestamp: time.Now().UTC(),
+			Data: map[string]any{"plan_hash": planHash, "state_path": filepath.ToSlash(statePath)},
+		}); err != nil {
+			r.ValidationFailed = true
+			return fail(fmt.Errorf("агент %s: запись delivery_deferred event: %w", name, err))
+		}
+		r.Delivery = &delivery.Result{PlanHash: planHash, StatePath: statePath}
 	}
 	r.Status = notifier.StatusPassed
 	r.Duration = time.Since(stageStart)
@@ -625,12 +703,28 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", name+".md"),
 		filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-check", name+".md"),
 	}
+	if a != nil && a.Name != "" && a.Name != name {
+		paths = append(paths,
+			verdict.StatusFilePath(rs.task.ArtifactRoot, rs.runCfg.Feature, a.Name),
+			filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, ".stage-summary", a.Name+".md"))
+	}
 	if a != nil && a.AskQuestions {
 		paths = append(paths, stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))
 	}
 	if a != nil {
 		for _, outputPath := range a.Outputs {
 			fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, runtime.ReplaceVars(outputPath, rs.runCfg.Feature))
+			if err != nil {
+				return err
+			}
+			paths = append(paths, fullPath)
+		}
+		if stage, ok := rs.p.templateStage(name); ok && stage.Delivery != nil && stage.Result == "link" && stage.LinkKind == "pr" {
+			// The controller publishes this derived link only after terminal
+			// delivery. Clear the prior run's task-level projection before this
+			// stage starts; it is not a runtime output or attempt-manifest output.
+			relative := filepath.Join(rs.runCfg.Feature, "stages", stage.ID, "result.link")
+			fullPath, err := confinedArtifactPath(rs.task.ArtifactRoot, relative)
 			if err != nil {
 				return err
 			}

@@ -161,9 +161,9 @@ runtime: delivery
 kind: delivery
 mutation: external
 inputs:
-  review: '{feature}/review.md'
+  verdict:approver:review: '{feature}/review.md'
 preconditions:
-  review:
+  verdict:approver:review:
     required: true
     marker: Verdict
     values: [APPROVED]
@@ -215,7 +215,6 @@ func prepareCLIDelivery(t *testing.T, target string) string {
 		SourceRunID: "prepared-run", VerifiedWorkspaceDigest: check.WorkspaceDigestAfter,
 		CheckEvidenceDigest: check.EvidenceDigest,
 		Preconditions: map[string]delivery.PreconditionEvidence{
-			"review":                  {Type: "file", Size: 22, SHA256: fmt.Sprintf("%x", reviewDigest), Verdict: "APPROVED"},
 			"verdict:approver:review": {Type: "file", Size: 22, SHA256: fmt.Sprintf("%x", reviewDigest), Verdict: "APPROVED"},
 		},
 		CommitMessage: "feat change", PRTitle: "feat change", PRBody: "test delivery plan",

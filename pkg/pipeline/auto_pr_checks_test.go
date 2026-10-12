@@ -208,6 +208,15 @@ type fakePRStageChecks struct {
 	called             map[string]int
 	diffExpected       *prchecks.PullRequest
 	repositoryCaptures int
+	// url overrides the PR URL the fake reports (default example/project#9).
+	url string
+}
+
+func (f *fakePRStageChecks) prURL() string {
+	if f.url != "" {
+		return f.url
+	}
+	return "https://github.com/example/project/pull/9"
 }
 
 const fakeTaskRepository = "github.com/example/project"
@@ -225,19 +234,19 @@ func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, repositor
 		f.called = map[string]int{}
 	}
 	f.called[rule]++
-	identity := prchecks.PullRequest{URL: "https://github.com/example/project/pull/9", State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
+	identity := prchecks.PullRequest{URL: f.prURL(), State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
 	if expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
 		return "", "", prchecks.PullRequest{}, errors.New("identity mismatch")
 	}
 	return stagecheck.RulePassed, "test pass", identity, nil
 }
 
-func (*fakePRStageChecks) Diff(_ context.Context, _ string, repository string, _ string) ([]byte, prchecks.PullRequest, error) {
+func (f *fakePRStageChecks) Diff(_ context.Context, _ string, repository string, _ string) ([]byte, prchecks.PullRequest, error) {
 	if repository != fakeTaskRepository {
 		return nil, prchecks.PullRequest{}, errors.New("PR diff did not receive the captured task repository")
 	}
 	return []byte("diff --git a/main.go b/main.go\n+added\n"), prchecks.PullRequest{
-		URL: "https://github.com/example/project/pull/9", State: "OPEN",
+		URL: f.prURL(), State: "OPEN",
 		BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40),
 		HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40),
 	}, nil

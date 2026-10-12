@@ -60,6 +60,14 @@ func toRuntimeArtifacts(artifacts []evidence.Artifact) []runtime.Artifact {
 }
 
 func (rs *runState) validateDeliveryChecks() error {
+	return rs.validateDeliveryChecksFor(nil)
+}
+
+// validateDeliveryChecksFor проверяет delivery.require_checks для агентного
+// этапа с Delivery (B-35/FR-15). current — результат текущего этапа (ещё не
+// добавленный в rs.results); для delivery-агента current == nil, и проверки
+// ищутся в предыдущих этапах.
+func (rs *runState) validateDeliveryChecksFor(current *notifier.StageResult) error {
 	requirements, configured, err := rs.templateDeliveryRequirements()
 	if err != nil {
 		return err
@@ -73,6 +81,12 @@ func (rs *runState) validateDeliveryChecks() error {
 			return fmt.Errorf("delivery workspace digest: %w", digestErr)
 		}
 		for _, checkName := range requirements.Delivery.RequireChecks {
+			if current != nil {
+				if _, _, checkErr := rs.requiredControllerCheckIn(*requirements, checkName, workspaceDigest, *current); checkErr != nil {
+					return checkErr
+				}
+				continue
+			}
 			if _, _, checkErr := rs.requiredControllerCheck(*requirements, checkName, workspaceDigest); checkErr != nil {
 				return checkErr
 			}
@@ -81,8 +95,66 @@ func (rs *runState) validateDeliveryChecks() error {
 			return evidenceErr
 		}
 	}
+	// For a source stage, delivery verification is selected when the plan is
+	// built. A stage with no attributed source changes may reuse a prepared
+	// plan, whose exact check evidence is verified there; requiring this attempt
+	// to contain a test check would reject that valid path.
+	if current != nil {
+		return nil
+	}
 	_, err = rs.currentDeliveryVerification()
 	return err
+}
+
+// requiredControllerCheckIn проверяет required check в свежих результатах
+// текущего этапа (B-35): attempt manifest ещё не опубликован, поэтому  sources
+// of truth — r.Checks, которые контроллер только что выполнил через
+// checks.Runner. Требования строгие: policy required, status passed,
+// точный workspace digest до и после.
+func (rs *runState) requiredControllerCheckIn(stage config.TemplateStage, checkName, workspaceDigest string, result notifier.StageResult) (notifier.StageResult, checks.Result, error) {
+	if result.Status != notifier.StatusPassed || result.Err != nil {
+		return result, checks.Result{}, fmt.Errorf("delivery запрещён: этап %s с required check %s не завершился успешно", stage.ID, checkName)
+	}
+	for _, check := range result.Checks {
+		if check.Name != checkName {
+			continue
+		}
+		if check.Policy != checks.PolicyRequired || check.Status != checks.StatusPassed {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: required check %s должен иметь controller status passed и policy required", checkName)
+		}
+		if check.WorkspaceDigestBefore != workspaceDigest || check.WorkspaceDigestAfter != workspaceDigest {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: required check %s проверил другой workspace digest", checkName)
+		}
+		if check.EvidenceDigest == "" || !checks.VerifyResultDigest(check) {
+			return result, checks.Result{}, fmt.Errorf("delivery запрещён: required check %s имеет невалидный evidence digest", checkName)
+		}
+		return result, check, nil
+	}
+	return result, checks.Result{}, fmt.Errorf("delivery запрещён: controller evidence required check %s отсутствует в результате этапа %s", checkName, stage.ID)
+}
+
+// currentDeliveryVerificationFor строит delivery.Verification из свежих
+// результатов проверок текущего этапа (B-35): контрольная сумма evidence и
+// workspace digest берутся из r.Checks напрямую.
+func (rs *runState) currentDeliveryVerificationFor(result notifier.StageResult, requiredChecks []string) (delivery.Verification, error) {
+	workspaceDigest, err := checks.WorkspaceDigest(rs.sourceDir())
+	if err != nil {
+		return delivery.Verification{}, fmt.Errorf("delivery workspace digest: %w", err)
+	}
+	required := make(map[string]bool, len(requiredChecks))
+	for _, name := range requiredChecks {
+		required[name] = true
+	}
+	for checkIndex := len(result.Checks) - 1; checkIndex >= 0; checkIndex-- {
+		check := result.Checks[checkIndex]
+		if required[check.Name] && checks.IsTestEvidence(check) && checks.VerifyResultDigest(check) &&
+			check.WorkspaceDigestBefore == workspaceDigest && check.WorkspaceDigestAfter == workspaceDigest {
+			return delivery.Verification{
+				SourceRunID: rs.runID, WorkspaceDigest: workspaceDigest, CheckEvidenceDigest: check.EvidenceDigest,
+			}, nil
+		}
+	}
+	return delivery.Verification{}, fmt.Errorf("delivery запрещён: нет успешно выполненного required check класса unit/integration/e2e для точного текущего workspace digest %s", workspaceDigest)
 }
 
 func (rs *runState) currentDeliveryVerification() (delivery.Verification, error) {
@@ -579,12 +651,29 @@ func validateResolvedDeliveryApproval(value approval.PendingApproval, runID, sta
 // is controller-owned for cloud runs.
 func requireResolvedDeliveryOperationApproval(store ApprovalStore, source evidence.AttemptManifestSource,
 	runDir, runID, stage, planHash string, canonical []byte, candidateSHA, explicitPlanHash string) error {
+	_, err := ValidateResolvedDeliveryOperationApproval(store, source, runDir, runID, stage, planHash, canonical, candidateSHA, explicitPlanHash)
+	return err
+}
+
+// DeliveryApprovalReader is the read-only authority needed by the controller
+// delivery boundary. Worker API servers implement it with their controller
+// approval store; no worker-supplied approval or URL is accepted.
+type DeliveryApprovalReader interface {
+	Load(runID, approvalID string) (approval.PendingApproval, error)
+	List(runID string) ([]approval.PendingApproval, error)
+}
+
+// ValidateResolvedDeliveryOperationApproval validates the exact canonical
+// plan, candidate identity, stage attempt and human/controller decision. The
+// returned approval ID is suitable for binding a controller delivery receipt.
+func ValidateResolvedDeliveryOperationApproval(store DeliveryApprovalReader, source evidence.AttemptManifestSource,
+	runDir, runID, stage, planHash string, canonical []byte, candidateSHA, explicitPlanHash string) (string, error) {
 	if store == nil {
-		return errors.New("deferred delivery requires controller approval storage")
+		return "", errors.New("deferred delivery requires controller approval storage")
 	}
 	values, err := store.List(runID)
 	if err != nil {
-		return fmt.Errorf("list saved controller delivery approvals: %w", err)
+		return "", fmt.Errorf("list saved controller delivery approvals: %w", err)
 	}
 	var lastErr error
 	for _, value := range values {
@@ -604,12 +693,12 @@ func requireResolvedDeliveryOperationApproval(store ApprovalStore, source eviden
 			lastErr = err
 			continue
 		}
-		return nil
+		return value.ID, nil
 	}
 	if lastErr != nil {
-		return fmt.Errorf("no saved approval belongs to a controller-recorded delivery attempt: %w", lastErr)
+		return "", fmt.Errorf("no saved approval belongs to a controller-recorded delivery attempt: %w", lastErr)
 	}
-	return errors.New("no resolved release-manager approval matches this delivery plan and candidate")
+	return "", errors.New("no resolved release-manager approval matches this delivery plan and candidate")
 }
 
 func approvalAttemptMatchesStage(source evidence.AttemptManifestSource, runDir, runID, attemptID, stage string) error {
@@ -765,10 +854,78 @@ func (rs *runState) writeDeliveryPlan(ctx context.Context, a *agent.Agent, preco
 	return delivery.WritePlan(fullPath, plan)
 }
 
-func (rs *runState) attributedDeliveryFiles() []string {
+// buildDeliveryPlan формирует delivery-план контроллером для агентного этапа
+// с delivery.require_checks (B-35/FR-15). В отличие от writeDeliveryPlan не
+// требует output plan у агента: план формируется из результатов проверок и
+// мутаций этапа, затем записывается в artifacts как delivery-plan.json.
+func (rs *runState) buildDeliveryPlan(ctx context.Context, current notifier.StageResult) (delivery.Plan, error) {
+	requirements, configured, err := rs.templateDeliveryRequirements()
+	if err != nil {
+		return delivery.Plan{}, err
+	}
+	preconditions := map[string]delivery.PreconditionEvidence{}
+	if configured {
+		verdictEvidence, evidenceErr := rs.requiredDeliveryVerdictEvidence(*requirements)
+		if evidenceErr != nil {
+			return delivery.Plan{}, evidenceErr
+		}
+		for name, value := range verdictEvidence {
+			preconditions[name] = value
+		}
+	}
+	files := rs.attributedDeliveryFiles(&current)
+	var plan delivery.Plan
+	if len(files) == 0 {
+		var exists bool
+		var err error
+		plan, exists, err = delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature)
+		if err != nil {
+			return delivery.Plan{}, err
+		}
+		if !exists {
+			return delivery.Plan{}, fmt.Errorf("delivery planner: в текущем run нет атрибутированных изменений и prepared plan отсутствует")
+		}
+		workspaceDigest, digestErr := checks.WorkspaceDigest(rs.sourceDir())
+		if digestErr != nil {
+			return delivery.Plan{}, digestErr
+		}
+		if verifyErr := delivery.VerifyPreparedWorkspace(rs.sourceDir(), plan, workspaceDigest); verifyErr != nil {
+			return delivery.Plan{}, verifyErr
+		}
+		if verifyErr := evidence.VerifyCheckEvidence(filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs"), plan.SourceRunID, plan.CheckEvidenceDigest, workspaceDigest); verifyErr != nil {
+			return delivery.Plan{}, fmt.Errorf("prepared delivery provenance: %w", verifyErr)
+		}
+		if verifyErr := delivery.VerifyPreconditions(plan, preconditions); verifyErr != nil {
+			return delivery.Plan{}, verifyErr
+		}
+	} else {
+		verification, verificationErr := rs.currentDeliveryVerificationFor(current, requirements.Delivery.RequireChecks)
+		if verificationErr != nil {
+			return delivery.Plan{}, verificationErr
+		}
+		verification.Preconditions = preconditions
+		var err error
+		plan, err = delivery.BuildPlan(ctx, rs.sourceDir(), rs.runCfg.Feature, rs.runCfg.TaskDesc, files, verification)
+		if err != nil {
+			return delivery.Plan{}, err
+		}
+	}
+	planPath := filepath.Join(rs.task.ArtifactRoot, rs.runCfg.Feature, "delivery-plan.json")
+	if err := delivery.WritePlan(planPath, plan); err != nil {
+		return delivery.Plan{}, err
+	}
+	return plan, nil
+}
+
+func (rs *runState) attributedDeliveryFiles(current ...*notifier.StageResult) []string {
 	seen := make(map[string]bool)
 	var files []string
-	for _, result := range rs.results {
+	results := make([]notifier.StageResult, 0, len(rs.results)+1)
+	results = append(results, rs.results...)
+	if len(current) > 0 && current[0] != nil {
+		results = append(results, *current[0])
+	}
+	for _, result := range results {
 		if result.Err != nil {
 			continue
 		}

@@ -2603,6 +2603,10 @@ func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T
 	if _, err := loopback.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
 		t.Fatal("loopback API accepted controller-owned delivery write")
 	}
+	stageRequest := delivery.StageDeliveryRequest{RunID: job.RunID}
+	if _, err := loopback.dispatch("delivery.stage.execute", workerAPICall{StageDeliveryRequest: stageRequest}); err == nil {
+		t.Fatal("loopback API accepted controller-owned stage delivery")
+	}
 
 	socket := filepath.Join(socketDir, "cancel.sock")
 	cancelJob := job
@@ -2614,6 +2618,9 @@ func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T
 	defer cancelAPI.close()
 	if _, err := cancelAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: record}); err == nil {
 		t.Fatal("cancel API accepted terminal delivery write")
+	}
+	if _, err := cancelAPI.dispatch("delivery.stage.execute", workerAPICall{StageDeliveryRequest: stageRequest}); err == nil {
+		t.Fatal("cancel API accepted stage delivery")
 	}
 
 	unixJob := job
@@ -2627,6 +2634,14 @@ func TestWorkerTerminalDeliveryRecordDispatchRejectsUntrustedWrites(t *testing.T
 	invalid.SchemaVersion = -1
 	if _, err := unixAPI.dispatch("delivery.terminal_record.write", workerAPICall{TerminalRecord: invalid}); err == nil {
 		t.Fatal("Unix API accepted invalid terminal delivery record")
+	}
+	if _, err := unixAPI.dispatch("delivery.stage.execute", workerAPICall{StageDeliveryRequest: stageRequest}); err == nil {
+		t.Fatal("Unix API accepted an unbound stage delivery request")
+	}
+	clientPort := &workerAPIPort{address: "http://127.0.0.1:1234", scope: workerAPIScope{RunID: job.RunID}}
+	stageExecutor := NewWorkerAPIStageDeliveryExecutor(clientPort)
+	if _, err := stageExecutor.ExecuteStageDelivery(context.Background(), delivery.StageDeliveryRequest{RunID: job.RunID}); err == nil {
+		t.Fatal("worker stage-delivery client accepted loopback transport")
 	}
 
 	fileTarget, err := os.CreateTemp(target, "not-a-directory-")
@@ -5152,5 +5167,92 @@ func TestWorkerControllerAPIBriefAndJobBoundariesRejectUnsafeRunIDs(t *testing.T
 	}
 	if _, err := pipeline.NewFileBriefStore(target).CreateInitial("symlink-run", "intention"); err == nil {
 		t.Fatal("FileBriefStore followed a symlinked run directory")
+	}
+}
+
+func TestWorkerStageDeliveryUsesScopedUnixAPIAndRejectsUnboundRequests(t *testing.T) {
+	target := t.TempDir()
+	job := Job{SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "stage-delivery-api-run", TargetDir: target, ExecutionID: strings.Repeat("e", ExecutionIDBytes*2)}
+	socketDir, err := os.MkdirTemp("/tmp", "stage-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(socketDir) }()
+	socket := filepath.Join(socketDir, "controller.sock")
+	server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}}, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+	t.Setenv(WorkerAPIAddressEnv, "http://unix")
+	t.Setenv(WorkerAPISocketEnv, socket)
+	t.Setenv(WorkerAPITokenEnv, server.token)
+	port, err := NewWorkerAPIPort(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewWorkerAPIStageDeliveryExecutor(port)
+	if _, err := executor.ExecuteStageDelivery(context.Background(), delivery.StageDeliveryRequest{RunID: "other-run"}); err == nil {
+		t.Fatal("stage-delivery client accepted another run")
+	}
+	request := delivery.StageDeliveryRequest{
+		RunID: job.RunID, AttemptID: job.RunID + "-001-implementation",
+		AttemptManifestSHA256: strings.Repeat("a", 64), PlanHash: strings.Repeat("b", 64), RuntimeIdentity: strings.Repeat("c", 64),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = executor.ExecuteStageDelivery(ctx, request)
+	if err == nil {
+		t.Fatal("controller executed stage delivery without a published, approved attempt")
+	}
+	if _, statErr := os.Stat(filepath.Join(target, ".ai-team", "state", "stage-delivery-receipts")); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected stage delivery must not persist a receipt: %v", statErr)
+	}
+	if _, err := server.executeStageDelivery(ctx, delivery.StageDeliveryRequest{RunID: "other-run"}); err == nil {
+		t.Fatal("server accepted stage delivery for another run")
+	}
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team", "runs", job.RunID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.attemptManifests.Reserve(job.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.executeStageDelivery(ctx, request); err == nil || !strings.Contains(err.Error(), "attempt manifest") {
+		t.Fatalf("reserved controller store without the attempt manifest must reject delivery: %v", err)
+	}
+	unreserved := request
+	unreserved.RunID = "unreserved-stage-run"
+	server.scope.RunID = unreserved.RunID
+	if _, err := server.executeStageDelivery(ctx, unreserved); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("server accepted stage delivery without a reserved attempt-manifest store: %v", err)
+	}
+	server.scope.RunID = job.RunID
+	original := server.attemptManifests.TargetDir
+	server.attemptManifests.TargetDir = t.TempDir()
+	if _, err := server.executeStageDelivery(ctx, request); err == nil || !strings.Contains(err.Error(), "attempt-manifest authority") {
+		t.Fatalf("server accepted a target outside its attempt-manifest authority: %v", err)
+	}
+	server.attemptManifests.TargetDir = original
+	fileTarget := filepath.Join(target, "not-a-directory")
+	if err := os.WriteFile(fileTarget, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server.scope.TargetDir = fileTarget
+	if _, err := server.executeStageDelivery(ctx, request); err == nil {
+		t.Fatal("server accepted a non-directory target")
+	}
+	var nilServer *workerAPIServer
+	if _, err := nilServer.executeStageDelivery(ctx, request); err == nil {
+		t.Fatal("nil server accepted stage delivery")
+	}
+	if _, err := (&workerAPIStageDeliveryExecutor{}).ExecuteStageDelivery(ctx, request); err == nil {
+		t.Fatal("stage-delivery client without a port succeeded")
+	}
+	var absentContext context.Context
+	if err := port.callContext(absentContext, "unknown.method", workerAPICall{}, nil); err == nil {
+		t.Fatal("unknown worker API method succeeded")
+	}
+	if err := (&workerAPIPort{address: "http://unix"}).callContext(ctx, "delivery.stage.execute", workerAPICall{}, nil); err == nil {
+		t.Fatal("worker API call without an HTTP client succeeded")
 	}
 }

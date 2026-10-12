@@ -62,6 +62,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if !exists {
 			return fmt.Errorf("workflow graph: next node %q не существует", current)
 		}
+		if err := rs.prepareControllerPRInput(ctx, current); err != nil {
+			return err
+		}
 		if node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
 			return fmt.Errorf("workflow graph: max_visits=%d исчерпан для %s", node.MaxVisits, current)
 		}
@@ -100,7 +103,18 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
 			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
 			current == rs.runCfg.retryFrom
-		if overriddenByDecision {
+		if stageApproval != nil && stageApproval.Kind == approval.KindGrillQuestions && stageApproval.FromStage == current {
+			for _, previous := range rs.results {
+				if previous.Name == current && previous.AttemptID == stageApproval.AttemptID {
+					result = previous
+					replayedHumanAttempt = true
+					break
+				}
+			}
+			if !replayedHumanAttempt {
+				return fmt.Errorf("grill approval %s has no source result for attempt %s", stageApproval.ID, stageApproval.AttemptID)
+			}
+		} else if overriddenByDecision {
 			var overrideErr error
 			result, overrideErr = rs.applyCheckOverride(current)
 			if overrideErr != nil {
@@ -166,6 +180,21 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if !replayedHumanAttempt {
 			if err := rs.afterAttempt(ctx); err != nil {
 				return err
+			}
+		}
+		// Stage-scoped delivery is a controller operation after the immutable
+		// attempt manifest is published and before hard PR checks consume the
+		// stage result. The URL is projected separately and never added to that
+		// manifest.
+		if err := rs.executeStageDelivery(ctx, current, &result); err != nil {
+			return err
+		}
+		if result.AttemptID != "" {
+			for resultIndex := len(rs.results) - 1; resultIndex >= 0; resultIndex-- {
+				if rs.results[resultIndex].AttemptID == result.AttemptID {
+					rs.results[resultIndex] = result
+					break
+				}
 			}
 		}
 
@@ -285,6 +314,11 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 		if target == "" {
 			return fmt.Errorf("workflow graph: edge %s/%s выбрал пустой target", current, edge.Outcome)
+		}
+		if !workflow.IsTerminal(target) {
+			if err := rs.projectGrillRevisionInputs(rs.replayed, current, result.AttemptID, target); err != nil {
+				return fmt.Errorf("project approved grill revision to %s: %w", target, err)
+			}
 		}
 		transitionAt := time.Now().UTC()
 		transitionData := map[string]any{

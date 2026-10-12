@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskEvent, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 
 const API_BASE = '/api';
 
@@ -47,6 +47,19 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
 
 export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection }> {
   return fetchJson(`/pipelines/${id}`);
+}
+
+export async function getTaskRun(runID: string): Promise<{ run: PipelineRun; stages: Stage[] }> {
+  return fetchJson(`/runs/${encodeURIComponent(runID)}`);
+}
+
+// getGlobalEvents pages the global feed newest-first. `before` is the previous
+// page's next_cursor; 0 starts from the newest persisted event.
+export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = false): Promise<{ events: TaskEvent[]; next_cursor: number }> {
+  const query = new URLSearchParams({ order: 'desc', limit: String(limit) });
+  if (before > 0) query.set('before', String(before));
+  if (warningsOnly) query.set('warnings', 'true');
+  return fetchJson(`/events?${query.toString()}`);
 }
 
 let csrfToken: string | null = null;
@@ -251,6 +264,62 @@ export function getTaskRuns(filters: TaskRunFilters = {}): Promise<TaskRunsRespo
   if (!query.has('limit')) query.set('limit', '50');
   if (!query.has('offset')) query.set('offset', '0');
   return fetchJson(`/runs?${query.toString()}`);
+}
+
+export function getTaskRunDetails(runId: string): Promise<TaskRunDetails> {
+  return fetchJson(`/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getTaskRunEvents(runId: string, after = 0, limit = 1000): Promise<TaskRunEventsResponse> {
+  const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+  return fetchJson(`/runs/${encodeURIComponent(runId)}/events?${query.toString()}`);
+}
+
+export function takeTaskStage(runId: string, stageId: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/take`);
+}
+
+export function runTaskStageAgent(runId: string, stageId: string, action: 'run' | 'refine' = 'run'): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/run-agent`, { action });
+}
+
+export function setTaskStageExecutor(runId: string, stageId: string, executor: 'human' | 'agent'): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/executor`, { executor });
+}
+
+export function submitTaskStageResult(runId: string, stageId: string, value: {
+  result: 'md' | 'link' | 'approve'; content?: string; url?: string;
+  link_kind?: 'pr' | 'build' | 'other'; note?: string; description?: string;
+}): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/results`, value);
+}
+
+export function confirmTaskStage(runId: string, stageId: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/confirm`);
+}
+
+export function overrideTaskStageCheck(runId: string, stageId: string, reason: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/override`, { reason });
+}
+
+export function skipTaskStage(runId: string, stageId: string, reason: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/skip`, { reason });
+}
+
+export function returnTaskStage(runId: string, stageId: string, toStage: string, reason: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/return`, { to_stage: toStage, reason });
+}
+
+export function answerTaskGrill(runId: string, stageId: string, answer: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/grill/answer`, { answer });
+}
+
+export function finishTaskGrill(runId: string, stageId: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/grill/done`);
+}
+
+export function approveTaskDeliveryPlan(runId: string, planHash: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/plan/approve`, { plan_hash: planHash });
 }
 
 // GET /api/templates: активный шаблон проекта и его этапы для доски.

@@ -10,5 +10,9 @@
 - [x] Add `ai-team stage submit` for file/text, link, and approve results.
 - [x] Add regression coverage for approval/store concurrency, worker event
   boundaries, pipeline attempt evidence, Web API, and CLI.
+- [x] Validate grill result revisions with the SHA-verified pinned stage
+  contract before append, including typed result and required sections.
+- [x] Require new grill versions to change content SHA-256 from the pinned
+  baseline, and cover unchanged bytes, missing sections, and valid edits.
 - [x] Run `openspec validate --all --strict --no-interactive`.
 - [x] Run `make verify`.

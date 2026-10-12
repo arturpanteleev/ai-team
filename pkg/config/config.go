@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -67,6 +69,7 @@ type Config struct {
 	TreeHash        *TreeHashConfig    `yaml:"tree_hash,omitempty"`
 	Budget          *BudgetConfig      `yaml:"budget,omitempty"`
 	Usage           *UsageConfig       `yaml:"usage,omitempty"`
+	Tracker         *TrackerConfig     `yaml:"tracker,omitempty"`
 	Redaction       *RedactionConfig   `yaml:"redaction,omitempty"`
 	Retention       *RetentionConfig   `yaml:"retention,omitempty"`
 }
@@ -87,6 +90,107 @@ type UsageConfig struct {
 	MonthlySubscriptionAmount   float64 `yaml:"monthly_subscription_amount,omitempty"`
 	MonthlySubscriptionCurrency string  `yaml:"monthly_subscription_currency,omitempty"`
 }
+
+// TrackerConfig enables optional one-way integrations with external trackers.
+// Credentials are referenced by environment variable name and never stored in
+// the project template.
+type TrackerConfig struct {
+	Jira *JiraConfig `yaml:"jira,omitempty"`
+}
+
+// JiraConfig configures Jira Cloud synchronization for completed stages.
+type JiraConfig struct {
+	BaseURL       string            `yaml:"base_url"`
+	Email         string            `yaml:"email"`
+	TokenEnv      string            `yaml:"token_env"`
+	WebBaseURL    string            `yaml:"web_base_url"`
+	StageStatuses map[string]string `yaml:"stage_statuses,omitempty"`
+}
+
+func (tc *TrackerConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{"jira": true}, "config: tracker"); err != nil {
+		return err
+	}
+	type plain TrackerConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*tc = TrackerConfig(decoded)
+	return nil
+}
+
+func (jc *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"base_url": true, "email": true, "token_env": true, "web_base_url": true,
+		"stage_statuses": true,
+	}, "config: tracker jira"); err != nil {
+		return err
+	}
+	for index := 0; index < len(value.Content); index += 2 {
+		if value.Content[index].Value == "stage_statuses" {
+			if err := rejectDuplicateMappingKeys(value.Content[index+1], "config: tracker jira stage_statuses"); err != nil {
+				return err
+			}
+		}
+	}
+	type plain JiraConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*jc = JiraConfig(decoded)
+	return nil
+}
+
+func (tc *TrackerConfig) Validate(stageIDs map[string]bool) error {
+	if tc == nil {
+		return nil
+	}
+	if tc.Jira == nil {
+		return fmt.Errorf("tracker must configure jira")
+	}
+	return tc.Jira.Validate(stageIDs)
+}
+
+func (jc *JiraConfig) Validate(stageIDs map[string]bool) error {
+	if jc == nil {
+		return nil
+	}
+	var problems []string
+	for name, value := range map[string]string{
+		"base_url": jc.BaseURL, "web_base_url": jc.WebBaseURL,
+	} {
+		parsed, err := url.Parse(strings.TrimSpace(value))
+		if err != nil || parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			problems = append(problems, fmt.Sprintf("tracker.jira.%s должен быть абсолютным HTTP(S) URL без credentials, query и fragment", name))
+		}
+		if name == "base_url" && err == nil && parsed != nil && parsed.Scheme != "https" {
+			problems = append(problems, "tracker.jira.base_url должен использовать HTTPS для защиты API token")
+		}
+	}
+	if strings.TrimSpace(jc.Email) == "" || strings.ContainsAny(jc.Email, "\r\n\x00") {
+		problems = append(problems, "tracker.jira.email обязателен и не должен содержать управляющие символы")
+	}
+	if !envVariableName.MatchString(jc.TokenEnv) {
+		problems = append(problems, "tracker.jira.token_env должен быть именем переменной окружения")
+	}
+	for stage, status := range jc.StageStatuses {
+		if !stageIDs[stage] {
+			problems = append(problems, fmt.Sprintf("tracker.jira.stage_statuses содержит неизвестный этап %q", stage))
+		}
+		if strings.TrimSpace(status) == "" || strings.ContainsAny(status, "\r\n\x00") {
+			problems = append(problems, fmt.Sprintf("tracker.jira.stage_statuses.%s должен содержать имя статуса Jira", stage))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+var envVariableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (uc *UsageConfig) Validate() error {
 	if uc == nil {
@@ -417,7 +521,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
-		"tree_hash": true, "budget": true, "redaction": true, "retention": true,
+		"tree_hash": true, "budget": true, "tracker": true, "redaction": true, "retention": true,
 		"mcp_servers": true,
 	}, "config"); err != nil {
 		return err
@@ -440,6 +544,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		DeliveryTimeout  string                             `yaml:"delivery_timeout"`
 		Containment      *ContainmentConfig                 `yaml:"containment"`
 		Usage            *UsageConfig                       `yaml:"usage"`
+		Tracker          *TrackerConfig                     `yaml:"tracker"`
 		TreeHash         *TreeHashConfig                    `yaml:"tree_hash"`
 		Budget           *BudgetConfig                      `yaml:"budget"`
 		Redaction        *RedactionConfig                   `yaml:"redaction"`
@@ -469,6 +574,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
 	c.Usage = raw.Usage
+	c.Tracker = raw.Tracker
 	c.Redaction = raw.Redaction
 	c.Retention = raw.Retention
 
@@ -882,6 +988,15 @@ func (c *Config) Validate(reg AgentLookup) error {
 					errs = append(errs, fmt.Sprintf("workflow: роль approval %q недоступна в cloud", role))
 				}
 			}
+		}
+	}
+	if c.Tracker != nil {
+		stageIDs := make(map[string]bool, len(c.Stages))
+		for _, stage := range c.Stages {
+			stageIDs[stage.ID] = true
+		}
+		if err := c.Tracker.Validate(stageIDs); err != nil {
+			errs = append(errs, err.Error())
 		}
 	}
 	if c.Containment != nil {

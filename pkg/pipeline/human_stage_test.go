@@ -423,6 +423,13 @@ func (s *humanCrashEvidenceStore) Append(event evidence.Event) error {
 		s.factory.crashed = true
 		panic("simulated crash before transition_selected")
 	}
+	if !s.factory.crashed && s.factory.point == "after-transition" && event.Type == "transition_selected" {
+		if err := s.EvidenceStore.Append(event); err != nil {
+			return err
+		}
+		s.factory.crashed = true
+		panic("simulated crash after durable transition_selected")
+	}
 	if !s.factory.crashed && s.factory.point == "after-human-attempt-finished" && event.Type == "attempt_finished" &&
 		event.Data["executor"] == "human" {
 		if err := s.EvidenceStore.Append(event); err != nil {

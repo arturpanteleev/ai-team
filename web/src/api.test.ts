@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, getActivePrincipal, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
+import { decideApproval, getActivePrincipal, getGlobalEvents, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -101,6 +101,22 @@ describe('cloud authentication client', () => {
     expect(onExpired).toHaveBeenCalledTimes(2);
 
     window.removeEventListener(api.SESSION_EXPIRED_EVENT, onExpired);
+  });
+});
+
+describe('global event feed API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('pages newest-first before the persisted global cursor with the server-side warning filter', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ events: [], next_cursor: 23 }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getGlobalEvents(0, 100);
+    await getGlobalEvents(12, 50, true);
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/events?order=desc&limit=100');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/events?order=desc&limit=50&before=12&warnings=true');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: 'same-origin' });
   });
 });
 

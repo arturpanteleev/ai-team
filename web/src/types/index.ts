@@ -242,16 +242,23 @@ export interface ArtifactRevision {
   sha256: string;
 }
 
-export interface WsEvent {
+export interface TaskEvent {
   version: 1;
-  stream?: string;
   cursor: number;
   run_id: string;
   sequence: number;
-  type: 'run_started' | 'run_resumed' | 'run_paused' | 'run_canceled' | 'attempt_started' | 'attempt_finished' | 'attempts_invalidated' | 'approval_requested' | 'approval_decided' | 'transition_selected' | 'stage_taken' | 'run_finished';
+  type: string;
+  stage?: string;
+  actor?: string;
+  executor?: string;
+  severity?: string;
   attempt_id?: string;
   timestamp: string;
   data: Record<string, unknown>;
+}
+
+export interface WsEvent extends TaskEvent {
+  stream?: string;
 }
 
 // Элемент GET /api/runs: карточка доски/списка задач (B-70 task API).
@@ -280,6 +287,86 @@ export interface TaskRunsResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface TaskStageTemplate {
+  id: string;
+  title: string;
+  function: string;
+  result: 'md' | 'link' | 'approve';
+  executor: 'human' | 'agent';
+  agent?: string;
+  link_kind?: 'pr' | 'build' | 'other';
+  skippable?: boolean;
+  max_visits?: number;
+}
+
+export interface TaskTemplateReturn {
+  from: string;
+  to: string;
+  max_visits?: number;
+}
+
+export interface PinnedTaskTemplate {
+  valid: boolean;
+  template: string;
+  title: string;
+  version: string;
+  stages: TaskStageTemplate[];
+  returns: TaskTemplateReturn[];
+  graph?: WorkflowGraph;
+}
+
+export interface TaskLifecycleState {
+  run_id: string;
+  task: string;
+  phase: 'running' | 'waiting' | 'resumable' | 'terminal';
+  next_stage?: string;
+  pending_approval_id?: string;
+  attempt_ordinal: number;
+  executor_overrides?: Record<string, {
+    executor: 'human' | 'agent';
+    previous_executor: 'human' | 'agent';
+  }>;
+}
+
+export interface TaskResultRevision {
+  run_id: string;
+  artifact_path: string;
+  revision: number;
+  id: string;
+  base_revision?: string;
+  base_sha256?: string;
+  content?: string;
+  comment?: string;
+  description?: string;
+  actor_id: string;
+  stage_id?: string;
+  approval_id?: string;
+  result?: 'md' | 'link' | 'approve';
+  link_kind?: 'pr' | 'build' | 'other';
+  created_at: string;
+  sha256: string;
+}
+
+export interface TaskRunDetails {
+  run: PipelineRun;
+  task?: string;
+  mode?: 'manual' | 'auto';
+  external_links?: string[];
+  template?: PinnedTaskTemplate;
+  state?: TaskLifecycleState;
+  stages: Stage[];
+  approvals: Approval[];
+  stage_owners: Record<string, StageOwner>;
+  results: Record<string, TaskResultRevision[]>;
+  allowed_actions: string[];
+  delivery: DeliveryProjection;
+}
+
+export interface TaskRunEventsResponse {
+  events: TaskEvent[];
+  next_cursor: number;
 }
 
 export interface TaskRunFilters {

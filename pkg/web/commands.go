@@ -511,6 +511,24 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Grill actions carry stage-specific semantics. In particular, new_version
+	// must compare the selected result bytes with the pinned baseline before the
+	// approval is resolved; the generic decision endpoint accepts client-supplied
+	// artifact revisions and therefore cannot safely resolve grill approvals.
+	if s.controller != nil {
+		values, err := s.controller.Approvals(chi.URLParam(r, "runID"))
+		if err != nil {
+			http.Error(w, "approval state unavailable", http.StatusInternalServerError)
+			return
+		}
+		for _, pending := range values {
+			if pending.ID == chi.URLParam(r, "approvalID") &&
+				(pending.Kind == approval.KindGrillQuestions || pending.Trigger == approval.GrillTrigger) {
+				http.Error(w, "grill approvals must use the stage-scoped grill action endpoint", http.StatusConflict)
+				return
+			}
+		}
+	}
 	actorID := command.ActorID
 	actorRole := strings.TrimSpace(command.ActorRole)
 	authorizationRole := canonicalStageRole(actorRole)

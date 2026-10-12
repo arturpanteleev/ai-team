@@ -40,6 +40,8 @@ type templateStageView struct {
 	Result    string `json:"result"`
 	Executor  string `json:"executor"`
 	Agent     string `json:"agent,omitempty"`
+	LinkKind  string `json:"link_kind,omitempty"`
+	Skippable bool   `json:"skippable,omitempty"`
 	MaxVisits int    `json:"max_visits,omitempty"`
 }
 
@@ -184,7 +186,8 @@ func describeTemplate(result templateValidation, cfg *config.Config, graph workf
 		}
 		result.Stages = append(result.Stages, templateStageView{
 			ID: stage.ID, Title: stage.Title, Function: stage.Function, Result: stage.Result,
-			Executor: stage.Executor, Agent: stage.Agent, MaxVisits: visits,
+			Executor: stage.Executor, Agent: stage.Agent, LinkKind: stage.LinkKind,
+			Skippable: stage.Skippable, MaxVisits: visits,
 		})
 	}
 	for _, route := range cfg.Returns {

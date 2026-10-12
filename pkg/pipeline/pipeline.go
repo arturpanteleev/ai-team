@@ -87,6 +87,13 @@ type TerminalRecordWriter interface {
 	WriteTerminalRecord(delivery.TerminalRecord) error
 }
 
+// StageDeliveryExecutor delegates an approved stage delivery to the trusted
+// controller. Cloud workers use the scoped Worker API implementation; direct
+// local pipelines execute through their own trusted controller service.
+type StageDeliveryExecutor interface {
+	ExecuteStageDelivery(context.Context, delivery.StageDeliveryRequest) (delivery.StageDeliveryReceipt, error)
+}
+
 // AttestationWriter persists the worker-supplied terminal statement in
 // controller-owned storage for sandboxed workers.
 type AttestationWriter interface{ WriteAttestation(*attest.Statement) error }
@@ -115,6 +122,7 @@ type Pipeline struct {
 	newRuntime              runtime.Factory
 	recorder                Recorder
 	delivery                delivery.Service
+	stageDeliveryExecutor   StageDeliveryExecutor
 	approvals               ApprovalStore
 	lifecycle               lifecycle.StorePort
 	evidence                EvidenceStoreFactory
@@ -167,6 +175,10 @@ func WithRecorder(r Recorder) Option {
 
 func WithDeliveryService(service delivery.Service) Option {
 	return func(p *Pipeline) { p.delivery = service }
+}
+
+func WithStageDeliveryExecutor(executor StageDeliveryExecutor) Option {
+	return func(p *Pipeline) { p.stageDeliveryExecutor = executor }
 }
 
 // WithApprovalStore injects an ApprovalStore port. Local CLI runs default to
@@ -343,6 +355,7 @@ type runState struct {
 	reportsDir                string
 	names                     []string
 	results                   []notifier.StageResult
+	replayed                  evidence.ReplayedRun
 	extraInputs               map[string][]runtime.Artifact // loopback: выходы вердикт-агента → входы цели
 	selectedInputOverrides    map[string]map[string]runtime.Artifact
 	questionAnswerTargetStage string
@@ -372,6 +385,8 @@ type runState struct {
 	liveWorkspaceSHA          string
 	loopbackCycles            int
 	deferredDelivery          *deferredDelivery
+	stageDeliveryReceipt      *delivery.StageDeliveryReceipt
+	deliveryContinuationStage string
 	budgetConfig              *config.BudgetConfig
 	usageTotal                runtime.Usage
 	usageUnknown              bool
@@ -504,13 +519,16 @@ func (rs *runState) restoreClarificationReadBoundary(replayed evidence.ReplayedR
 	return nil
 }
 
-// deferredDelivery (V0-9) — подготовленный canonical plan, чей commit/push/PR
-// отложен до terminal finalize, когда attestation digest уже детерминирован.
-// Инициализируется в delivery-стадии после успешной авторизации плана; реальный
-// git-commit создаёт контроллер после finalize (см. executeDeferredDelivery).
+// deferredDelivery (V0-9) — подготовленный canonical plan, по которому
+// terminal finalize обязан записать run-level delivery evidence. Для PR-stage
+// с hard pr_exists фактический commit/push/PR уже создаётся отдельной
+// controller operation внутри графа; для остальных delivery он остаётся
+// post-terminal эффектом.
 type deferredDelivery struct {
 	StatePath string
 	PlanHash  string
+	StageID   string
+	AttemptID string
 }
 
 func (rs *runState) sourceDir() string {
@@ -861,10 +879,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				return RunResult{}, fmt.Errorf("resume human input approval: %w", err)
 			}
 		}
-		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil && resumedApproval.Kind == approval.KindInput {
-			// A crash can happen after a completed human attempt and its graph
-			// transition are durable but before lifecycle advances. Reconcile the
-			// exact transition and resume at its target without replaying the input.
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			(resumedApproval.Kind == approval.KindInput || resumedApproval.Kind == approval.KindGrillQuestions) {
+			// A crash can happen after a completed human/grill-gated attempt and its
+			// graph transition are durable but before lifecycle advances. Reconcile
+			// the exact transition and resume at its target without replaying the
+			// already-completed source attempt.
 			reconciledTo, reconciled, reconcileErr := ReconcileResumeNextStage(resumedState.NextStage, compiledGraph, replayedRun)
 			if reconcileErr != nil {
 				return RunResult{}, fmt.Errorf("resume human stage transition: %w", reconcileErr)
@@ -958,6 +978,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 						return RunResult{}, fmt.Errorf("active graph approval %s is not the verified handoff to %s", active.ID, runCfg.retryFrom)
 					}
 					resumedApproval = recoveredGraphApproval
+				case active.Kind == approval.KindGrillQuestions && active.Trigger == approval.GrillTrigger && active.FromStage == runCfg.retryFrom:
+					if err := validateRecordedGrillDecision(replayedRun, active); err != nil {
+						return RunResult{}, fmt.Errorf("resume active grill approval: %w", err)
+					}
+					resumedApproval = &active
 				default:
 					return RunResult{}, fmt.Errorf("active approval %s is not a stage dispatch approval", active.ID)
 				}
@@ -1078,6 +1103,13 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					Timestamp: approvalDecisionTimestamp(*resumedApproval), Data: approvalEventData(*resumedApproval),
 				}); err != nil {
 					return RunResult{}, fmt.Errorf("запись approval_decided: %w", err)
+				}
+				replayedRun, err = evidence.ReplayEventLogWithEventSourcesAndTarget(
+					filepath.Join(evidenceStore.RunDir(), "events.jsonl"), runID,
+					p.eventLogSource, p.attemptManifestSource, runCfg.TargetDir,
+				)
+				if err != nil {
+					return RunResult{}, fmt.Errorf("replay resolved approval evidence: %w", err)
 				}
 			}
 			if resumedTransitionData != nil && !transitionRecorded(replayedRun, resumedApproval.AttemptID) {
@@ -1294,6 +1326,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	rs := &runState{
 		p:                 p,
 		runCfg:            runCfg,
+		replayed:          replayedRun,
 		taskRepository:    taskRepository,
 		taskRepositoryErr: taskRepositoryErr,
 		task: &runtime.Task{
@@ -1512,6 +1545,19 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			}
 		}
 	}
+	// A grill-approved human revision belongs to the source result, but the
+	// attempt manifest remains immutable. If a process crashed after the
+	// transition to retryFrom was journaled, rebuild the downstream input from
+	// that transition's exact source attempt and the verified approval decision.
+	if runCfg.ResumeRunID != "" && runCfg.retryFrom != "" {
+		if incoming := latestInboundTransition(replayedRun.Transitions, runCfg.retryFrom); incoming != nil {
+			if err := rs.projectGrillRevisionInputs(replayedRun, incoming.From, incoming.AttemptID, runCfg.retryFrom); err != nil {
+				outcome, finalErr := rs.finalize(fmt.Errorf("resume grill revision input for %s: %w", runCfg.retryFrom, err))
+				return RunResult{RunID: runID, Outcome: outcome}, finalErr
+			}
+		}
+	}
+
 	graphInputApproval := recoveredGraphApproval
 	if graphInputApproval == nil && resumedApproval != nil && strings.HasPrefix(resumedApproval.Trigger, "graph_outcome:") {
 		graphInputApproval = resumedApproval
@@ -1581,12 +1627,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	if finalErr != nil {
 		return RunResult{RunID: runID, Outcome: outcome}, finalErr
 	}
-	// V0-9: отложенная (deferred) доставка — только после terminal finalize и
-	// только для полностью completed-ранна (включая completed_with_warnings:
-	// AUD-06 — warning не меняет delivery-контракт, пользователь ждёт
-	// commit/push/PR), когда attestation digest и runtime identity
-	// детерминированы. Enforcement: план перегружается из prepared state и
-	// должен совпасть с approvedPlanHash и маркером стадии.
+	// V0-9: terminal delivery evidence записывается после finalize и только для
+	// полностью completed-ранна (включая completed_with_warnings: AUD-06).
+	// В PR-stage пути он ссылается на уже созданный controller receipt; в прочих
+	// потоках здесь же исполняется отложенный commit/push/PR. Plan в обоих путях
+	// перепроверяется по prepared state, approval и delivery_deferred marker.
 	switch outcome {
 	case workflow.RunCompleted, workflow.RunCompletedWithWarnings:
 		if rs.deferredDelivery != nil {

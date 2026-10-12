@@ -56,7 +56,9 @@ func (rs *runState) enforceMutationGuard(
 					guardErrors = append(guardErrors, fmt.Errorf("агент %s изменил user-owned файлы, существовавшие до run: %s", name, strings.Join(dirtyTouched, ", ")))
 				}
 			}
-			if a.RequireDiff && len(changedPaths) == 0 {
+			if rs.deliveryContinuationStage == name && len(changedPaths) > 0 {
+				guardErrors = append(guardErrors, fmt.Errorf("агент %s: продолжение delivery не должно менять workspace: %s", name, strings.Join(changedPaths, ", ")))
+			} else if a.RequireDiff && len(changedPaths) == 0 && rs.deliveryContinuationStage != name {
 				guardErrors = append(guardErrors, fmt.Errorf("агент %s не создал изменений в коде", name))
 			}
 		}
@@ -95,6 +97,14 @@ func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative strin
 	allowedFiles := []string{
 		filepath.ToSlash(filepath.Join(rs.runCfg.Feature, "status", name+".md")),
 		filepath.ToSlash(filepath.Join(rs.runCfg.Feature, ".stage-summary", name+".md")),
+	}
+	if a != nil && a.Name != "" && a.Name != name {
+		// Template stages run a named agent under a different stage ID. The
+		// runtime instructs that agent to use its own name for these service
+		// files, so both spellings are the same controller-known contract.
+		allowedFiles = append(allowedFiles,
+			filepath.ToSlash(filepath.Join(rs.runCfg.Feature, "status", a.Name+".md")),
+			filepath.ToSlash(filepath.Join(rs.runCfg.Feature, ".stage-summary", a.Name+".md")))
 	}
 	if a.AskQuestions {
 		allowedFiles = append(allowedFiles, filepath.ToSlash(filepath.Join("tasks", rs.runCfg.Feature, "questions.md")))

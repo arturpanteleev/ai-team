@@ -42,6 +42,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/web"
 	webstore "github.com/arturpanteleev/ai-team/pkg/web/store"
@@ -346,6 +347,7 @@ func cmdWorker() {
 	var candidateMetadataStore candidate.MetadataStore
 	var usageEnvelopeWriter pipeline.UsageEnvelopeWriter
 	var terminalRecordWriter pipeline.TerminalRecordWriter
+	var stageDeliveryExecutor pipeline.StageDeliveryExecutor
 	var attestationWriter pipeline.AttestationWriter
 	var containmentReceiptWriter pipeline.ContainmentReceiptWriter
 	var candidateEvidenceStore pipeline.CandidateEvidenceStore
@@ -368,6 +370,7 @@ func cmdWorker() {
 			questionAnswerInputProvider = worker.NewWorkerAPIQuestionAnswerInputs(apiPort)
 			usageEnvelopeWriter = worker.NewWorkerAPIUsageEnvelopeWriter(apiPort)
 			terminalRecordWriter = worker.NewWorkerAPITerminalRecordWriter(apiPort)
+			stageDeliveryExecutor = worker.NewWorkerAPIStageDeliveryExecutor(apiPort)
 			attestationWriter = worker.NewWorkerAPIAttestationWriter(apiPort)
 			containmentReceiptWriter = worker.NewWorkerAPIContainmentReceiptWriter(apiPort)
 			candidateEvidenceStore = worker.NewWorkerAPICandidateEvidenceStore(apiPort)
@@ -458,6 +461,9 @@ func cmdWorker() {
 	}
 	if terminalRecordWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithTerminalRecordWriter(terminalRecordWriter))
+	}
+	if stageDeliveryExecutor != nil {
+		engineOptions = append(engineOptions, pipeline.WithStageDeliveryExecutor(stageDeliveryExecutor))
 	}
 	if attemptManifestSource != nil || attemptManifestWriter != nil {
 		engineOptions = append(engineOptions, pipeline.WithAttemptManifestStore(attemptManifestSource, attemptManifestWriter))
@@ -2240,6 +2246,10 @@ func cmdWeb() {
 	}
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
+	}
+	if cfg.Tracker != nil && cfg.Tracker.Jira != nil {
+		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)
+		serverOptions = append(serverOptions, web.WithTrackerAdapter(jira))
 	}
 	cloudAuthEnabled := false
 	var localWebToken, localWebTokenPath string

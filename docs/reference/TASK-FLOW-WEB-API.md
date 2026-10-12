@@ -24,17 +24,51 @@ fields.
 | `POST /api/runs/{runID}/stages/{stageID}/skip` | Skip a skippable stage with a reason |
 | `POST /api/runs/{runID}/stages/{stageID}/return` | Return to a configured earlier stage |
 | `POST /api/runs/{runID}/stages/{stageID}/grill/answer` | Answer a grill question |
+| `POST /api/runs/{runID}/stages/{stageID}/grill/new-version` | Re-check a pinned human result revision |
 | `POST /api/runs/{runID}/stages/{stageID}/grill/done` | Finish the grill without more help |
 | `POST /api/runs/{runID}/plan/approve` | Approve a pinned delivery plan hash |
-| `GET /api/runs/{runID}/events?after=&limit=&warnings=` | Run event feed |
-| `GET /api/events?after=&limit=&warnings=&run_id=` | Global event feed |
+| `GET /api/runs/{runID}/events?after=&limit=&warnings=&order=&before=` | Run event feed |
+| `GET /api/events?after=&limit=&warnings=&run_id=&order=&before=` | Global event feed |
 | `GET /api/metrics/flow?from=&to=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=` | Flow metrics CSV |
 
-Event endpoints share the persisted SQLite event-ID cursor. `from` and `to`
+To edit a human stage result during a pending grill, post a new immutable
+revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,
+the latest `base_revision` and `base_sha256`, and changed result content. The
+route validates the content against the run's SHA-256-verified pinned stage
+result type and required sections before appending. Comment-only submissions,
+unchanged bytes, and edits that remove a required section are rejected. It
+accepts stage result edits only while a matching grill question is pending;
+stale revisions and edits after the grill resolves are rejected. Then call
+`grill/new-version` to pin the edited revision. That action also verifies that
+at least one selected result's content SHA-256 differs from the grill's pinned
+baseline before starting the next check round.
+
+The browser opens a task at `/tasks/{runID}`. Run detail also returns the task
+text, mode, external links, and the immutable template description pinned when
+the run was created. The page uses that pinned stage graph for historical
+tasks and renders each stage action only when its name is present in
+`allowed_actions`. It keeps result revisions and resolved grill decisions in
+the task history and displays checker evidence, event details, and attempt log
+links alongside the run.
+
+Event endpoints share the persisted SQLite event-ID cursor. By default
+(`order=asc`) they return events with a cursor greater than `after`, oldest
+first; this is the replay contract for resuming a stream. With `order=desc`
+they return events newest first: without `before` the page starts at the newest
+persisted event, and `before=<next_cursor>` returns only older events.
+`next_cursor` is the last cursor examined in the requested direction. `before`
+requires `order=desc` and cannot be combined with `after`. `from` and `to`
 accept RFC3339 timestamps or `YYYY-MM-DD`; intervals are half-open `[from,to)`
 and default to the last 30 days. Pagination limits range from 1 to 100 for run
 lists and 1 to 1000 for event feeds.
+
+The `/events` page shows the newest events first (`order=desc`), puts new
+events from the WebSocket stream at the top, and offers a server-side
+warnings-only filter. Each event links by stable `run_id`; the UI resolves that
+ID to the existing task detail page. “Показать ещё” loads older events with
+`before=<next_cursor>`; the cursor also moves past non-warning events when the
+warning filter is selected.
 
 Write callers can send `Idempotency-Key` (or legacy `X-Request-Key`) to replay
 an exact prior response. Keys are scoped to the authenticated actor; reusing a

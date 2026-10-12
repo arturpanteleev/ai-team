@@ -47,6 +47,79 @@ SHA-256 and the status.
 - **КОГДА** stage declares `check.mode: grill`
 - **ТОГДА** B-40 mechanism MUST NOT run the check (handled by B-42)
 
+### Requirement: Advisory grill round lifecycle
+
+For `check.kind: agent` with `check.mode: grill`, the checker MUST return
+exactly one `**Question:**` marker or a passing `**Verdict:** PASSED`. A
+malformed response or checker execution error MUST fail closed through a
+human `check_decision`. A question MUST create a same-stage approval with
+answer, new-version, and done actions. An answer MUST be passed to the next
+checker round as untrusted context. A new-version action MUST pin an immutable
+human result revision whose content SHA-256 differs from the pinned baseline;
+a different revision ID with identical bytes or a comment-only revision MUST
+not resolve the question. When an agent attempt has no human revision yet, its
+output SHA-256 from the immutable attempt manifest MUST be the baseline; the
+controller MUST verify the output bytes against that manifest before comparing
+the first human revision. The revision MUST satisfy the SHA-256-verified pinned
+stage's typed-result and required-section contract before append, and the next
+checker round MUST read that exact revision. Done and `max_rounds` MUST complete
+the advisory grill without bypassing the stage's normal confirmation.
+When the stage advances, the latest checker-approved `new_version` revision
+MUST be materialized as the matching downstream input, bound by its immutable
+revision ID and content SHA-256. The source attempt manifest MUST remain
+unchanged. Resume after a durable transition but before the target attempt
+MUST reconstruct that same input from the verified transition and approval.
+`grill_completed` MUST record the round count, open-question count, and
+completion reason. A resolved grill approval checkpoint MUST recover from
+verified decision evidence after a process crash.
+
+#### Scenario: Human edits the stage result
+
+- **КОГДА** the responsible person submits a new immutable result revision for
+  the current human stage whose content SHA-256 differs from the pinned
+  baseline and chooses `new_version`
+- **ТОГДА** the checker MUST receive the exact pinned stage-scoped revision
+- **И** a later edit MUST NOT silently replace the pinned revision
+
+#### Scenario: Comment-only edit does not create a new grill version
+
+- **КОГДА** a new immutable revision ID has the same content SHA-256 as the
+  pinned result
+- **ТОГДА** `new_version` MUST be rejected and leave the grill approval pending
+
+#### Scenario: First edit of an agent output uses the immutable attempt baseline
+
+- **КОГДА** the agent output has no human revision and the responsible person
+  submits its first edited revision during a pending grill question
+- **ТОГДА** the controller MUST compare it with the source output bytes pinned
+  by the attempt manifest
+- **И** a changed revision MUST resolve the question while substituted source
+  bytes MUST be rejected
+
+#### Scenario: Later grill rounds keep the agent output editable
+
+- **КОГДА** an earlier grill round for the same source attempt is resolved and
+  a later grill question for that attempt is pending
+- **ТОГДА** the resolved earlier rounds MUST NOT block a new revision of the
+  agent output pinned by the pending question
+- **И** an agent-output revision whose markdown results no longer contain a
+  required section of the pinned stage MUST be rejected before append
+
+#### Scenario: Resume after a resolved grill decision
+
+- **КОГДА** the process crashes after persisting the resolved grill approval
+  as the active stage approval
+- **ТОГДА** resume MUST verify the approval decision and source attempt from
+  evidence, then continue the same checker round without losing the decision
+
+#### Scenario: Resume after a grill-approved result transitions downstream
+
+- **КОГДА** a crash occurs after the source transition is durable but before
+  the target stage starts
+- **ТОГДА** resume MUST materialize the exact `new_version` revision selected
+  by the verified grill decision as the target stage input
+- **И** the source attempt manifest MUST remain byte-for-byte unchanged
+
 ### Requirement: Failed check blocks the stage
 
 A `failed` or `error` check result MUST block the transition, persist the report,

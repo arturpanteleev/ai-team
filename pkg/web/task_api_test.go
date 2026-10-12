@@ -1005,6 +1005,9 @@ func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 	if flowMetricsRaceBuild || testing.CoverMode() != "" {
 		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")
 	}
+	if os.Getenv("CI") == "true" && os.Getenv("AI_TEAM_FLOW_METRICS_PERF") != "1" {
+		t.Skip("CI runs the wall-clock acceptance check separately after the unit and coverage suites")
+	}
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {

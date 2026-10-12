@@ -188,6 +188,7 @@ func (e *RequiredFailureError) Error() string {
 
 type Runner struct {
 	TargetDir string
+	Sandbox   CommandSandbox
 }
 
 func (r Runner) RunAll(ctx context.Context, definitions []Definition) ([]Result, error) {
@@ -295,8 +296,17 @@ func (r Runner) Run(ctx context.Context, definition Definition) (result Result, 
 	case AdapterJUnit:
 		junitReportPath = filepath.Join(workingDir, filepath.FromSlash(definition.ReportFile))
 	}
-	command := exec.Command(toolPath, definition.Command[1:]...)
-	command.Dir = workingDir
+	var command *exec.Cmd
+	if r.Sandbox != nil {
+		command, err = r.Sandbox.Command(checkCtx, workingDir, toolPath, definition.Command[1:]...)
+		if err != nil {
+			result.Status, result.Reason = StatusFailed, "sandbox setup: "+err.Error()
+			return result, err
+		}
+	} else {
+		command = exec.Command(toolPath, definition.Command[1:]...)
+		command.Dir = workingDir
+	}
 	command.Stdout, command.Stderr = stdoutWriter, stderr
 	result.StartedAt = time.Now().UTC()
 	runErr := process.Run(checkCtx, command)

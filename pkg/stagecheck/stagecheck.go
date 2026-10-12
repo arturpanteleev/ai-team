@@ -16,6 +16,8 @@ package stagecheck
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -53,12 +55,22 @@ type RuleResult struct {
 
 // Report — результат проверки одного этапа.
 type Report struct {
-	Stage   string       `json:"stage"`
-	Kind    string       `json:"kind"`
-	Status  string       `json:"status"`
-	Verdict string       `json:"verdict,omitempty"`
-	Rules   []RuleResult `json:"rules,omitempty"`
-	Notes   string       `json:"notes,omitempty"`
+	Stage      string       `json:"stage"`
+	Kind       string       `json:"kind"`
+	Status     string       `json:"status"`
+	Verdict    string       `json:"verdict,omitempty"`
+	Rules      []RuleResult `json:"rules,omitempty"`
+	PRIdentity *PRIdentity  `json:"pr_identity,omitempty"`
+	Notes      string       `json:"notes,omitempty"`
+}
+
+// PRIdentity pins the repository and commit pair that passed controller-side
+// project checks. It is carried into reviewer inputs so a later PR force-push
+// cannot silently change what the reviewer sees.
+type PRIdentity struct {
+	URL        string `json:"url"`
+	BaseRefOID string `json:"base_ref_oid"`
+	HeadRefOID string `json:"head_ref_oid"`
 }
 
 // PRCheckFunc прогоняет pr_* правила над ссылкой на pull request. Реализация
@@ -320,6 +332,13 @@ func (r Report) Markdown() []byte {
 		builder.WriteString("\n## Замечания\n\n")
 		builder.WriteString(strings.TrimSpace(r.Notes))
 		builder.WriteString("\n")
+	}
+	if r.PRIdentity != nil {
+		if encoded, err := json.Marshal(r.PRIdentity); err == nil {
+			builder.WriteString("\n<!-- pr-identity: ")
+			builder.WriteString(base64.RawURLEncoding.EncodeToString(encoded))
+			builder.WriteString(" -->\n")
+		}
 	}
 	return []byte(builder.String())
 }

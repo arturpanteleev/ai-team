@@ -18,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/prchecks"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/stagecheck"
@@ -491,6 +492,7 @@ func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStag
 		RequiredSections: stage.RequiredSections,
 		Rules:            stage.Check.Rules,
 	}
+	var pinnedPR *prchecks.PullRequest
 	for _, rule := range stage.Check.Rules {
 		switch rule {
 		case "pr_exists", "pr_open", "pr_base_branch":
@@ -498,10 +500,25 @@ func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStag
 			input.ExpectedBaseBranch = base
 			input.PRCheck = rs.prCheckClosure(baseErr, base)
 		case "project_checks", "pr_checks_green":
-			input.ProjectRuleCheck = rs.projectRuleCheck
+			input.ProjectRuleCheck = func(ctx context.Context, rule, reference string) (stagecheck.RuleResult, error) {
+				status, reason, identity, err := rs.p.prStageChecks.CheckIdentity(ctx, rs.runCfg.TargetDir, reference, rule, pinnedPR)
+				if err != nil {
+					return stagecheck.RuleResult{}, err
+				}
+				if pinnedPR == nil {
+					pinnedPR = &identity
+				} else if pinnedPR.URL != identity.URL || pinnedPR.BaseRefOID != identity.BaseRefOID || pinnedPR.HeadRefOID != identity.HeadRefOID {
+					return stagecheck.RuleResult{}, errors.New("PR rule returned an identity different from the first project check")
+				}
+				return stagecheck.RuleResult{Rule: rule, Status: status, Reason: reason}, nil
+			}
 		}
 	}
-	return stagecheck.RunHard(ctx, input)
+	report := stagecheck.RunHard(ctx, input)
+	if pinnedPR != nil {
+		report.PRIdentity = &stagecheck.PRIdentity{URL: pinnedPR.URL, BaseRefOID: pinnedPR.BaseRefOID, HeadRefOID: pinnedPR.HeadRefOID}
+	}
+	return report
 }
 
 func (rs *runState) prCheckClosure(baseErr error, base string) stagecheck.PRCheckFunc {

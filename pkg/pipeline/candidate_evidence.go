@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,11 +20,14 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
+	"github.com/arturpanteleev/ai-team/pkg/prchecks"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/stagecheck"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -492,6 +496,8 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 	}
 	var reference string
 	foundPRResult := false
+	var prStage config.TemplateStage
+	var prResult notifier.StageResult
 	for index := len(rs.results) - 1; index >= 0; index-- {
 		result := rs.results[index]
 		if result.Superseded || result.Status != notifier.StatusPassed || result.State.Outcome != workflow.OutcomePassed {
@@ -504,6 +510,7 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 		foundPRResult = true
 		_, reference = rs.stageCheckInputs(stage, result)
 		if strings.TrimSpace(reference) != "" {
+			prStage, prResult = stage, result
 			break
 		}
 	}
@@ -513,7 +520,11 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 		}
 		return fmt.Errorf("PR reviewer %s has no successful preceding PR result", reviewerStage)
 	}
-	diff, pull, err := rs.p.prStageChecks.Diff(ctx, rs.runCfg.TargetDir, reference)
+	expected, err := rs.prIdentityFromAcceptedChecks(prStage, prResult)
+	if err != nil {
+		return fmt.Errorf("load accepted PR identity for reviewer %s: %w", reviewerStage, err)
+	}
+	diff, pull, err := rs.p.prStageChecks.DiffIdentity(ctx, rs.runCfg.TargetDir, reference, expected)
 	if err != nil {
 		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
 	}
@@ -549,6 +560,72 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 		{Name: "pr-identity", Path: identityPath, Size: int64(len(identity)), ModTime: time.Unix(0, 0).UTC()},
 	}...)
 	return nil
+}
+
+func (rs *runState) prIdentityFromAcceptedChecks(stage config.TemplateStage, result notifier.StageResult) (*prchecks.PullRequest, error) {
+	if stage.Check == nil {
+		return nil, nil
+	}
+	projectRules := false
+	for _, rule := range stage.Check.Rules {
+		if rule == "project_checks" || rule == "pr_checks_green" {
+			projectRules = true
+			break
+		}
+	}
+	if !projectRules {
+		return nil, nil
+	}
+	if result.AttemptID == "" {
+		return nil, errors.New("PR stage with project checks has no attempt identity")
+	}
+	applied, found, err := rs.replayedStageCheck(stage.ID, result.AttemptID)
+	if err != nil {
+		return nil, err
+	}
+	if !found || applied.Status != stagecheck.StatusPassed {
+		return nil, errors.New("accepted PR stage has no passing durable project-check report")
+	}
+	path, err := safeCheckReportPath(rs.task.ArtifactRoot, applied.ReportPath)
+	if err != nil {
+		return nil, err
+	}
+	data, err := safeio.ReadRegularFile(path, maxCheckReportBytes)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != applied.ReportSHA {
+		return nil, errors.New("project-check report digest mismatch")
+	}
+	const marker = "<!-- pr-identity: "
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, marker) || !strings.HasSuffix(line, " -->") {
+			continue
+		}
+		encoded := strings.TrimSuffix(strings.TrimPrefix(line, marker), " -->")
+		payload, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil {
+			return nil, errors.New("project-check PR identity is malformed")
+		}
+		var identity stagecheck.PRIdentity
+		decoder := json.NewDecoder(strings.NewReader(string(payload)))
+		decoder.DisallowUnknownFields()
+		if decodeErr = decoder.Decode(&identity); decodeErr != nil || identity.URL == "" || len(identity.BaseRefOID) != 40 || len(identity.HeadRefOID) != 40 {
+			return nil, errors.New("project-check PR identity is invalid")
+		}
+		return &prchecks.PullRequest{URL: identity.URL, BaseRefOID: identity.BaseRefOID, HeadRefOID: identity.HeadRefOID}, nil
+	}
+	return nil, errors.New("project-check report is missing its PR identity")
+}
+
+func safeCheckReportPath(root, reportPath string) (string, error) {
+	relative := filepath.Clean(filepath.FromSlash(reportPath))
+	if reportPath == "" || filepath.IsAbs(relative) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.ToSlash(relative) != reportPath {
+		return "", errors.New("project-check report path is invalid")
+	}
+	return filepath.Join(root, relative), nil
 }
 
 func (rs *runState) consumePRReviewInputs(stageID string) {

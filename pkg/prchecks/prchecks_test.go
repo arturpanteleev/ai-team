@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 )
 
@@ -16,7 +17,8 @@ func TestProjectChecksUsesPinnedPRWorktreeAndStubGH(t *testing.T) {
 	target, baseSHA, headSHA, url, bin := makePRFixture(t, `[ {"bucket":"pass","name":"unit"} ]`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	status, reason, err := (Runner{}).Check(context.Background(), target, url, "project_checks")
+	runner := Runner{SandboxFactory: func() (checks.CommandSandbox, error) { return testCommandSandbox{}, nil }}
+	status, reason, err := runner.Check(context.Background(), target, url, "project_checks")
 	if err != nil || status != "passed" || !strings.Contains(reason, headSHA) {
 		t.Fatalf("project checks: status=%q reason=%q err=%v", status, reason, err)
 	}
@@ -30,6 +32,17 @@ func TestProjectChecksUsesPinnedPRWorktreeAndStubGH(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "main.go")); err != nil {
 		t.Fatalf("candidate checkout escaped into controller worktree: %v", err)
 	}
+}
+
+type testCommandSandbox struct{}
+
+func (testCommandSandbox) Enforced() bool { return true }
+func (testCommandSandbox) Close() error   { return nil }
+func (testCommandSandbox) Command(ctx context.Context, workingDir, executable string, args ...string) (*exec.Cmd, error) {
+	command := exec.CommandContext(ctx, executable, args...)
+	command.Dir = workingDir
+	command.Env = os.Environ()
+	return command, nil
 }
 
 func TestPRChecksGreenAndDiffRequireStablePRIdentity(t *testing.T) {
@@ -63,6 +76,28 @@ func TestPRReferenceRejectsArbitraryURLAndFlag(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsUntrustedHostBeforeCallingGH(t *testing.T) {
+	commands := &recordingCommandRunner{}
+	for _, reference := range []string{
+		"https://127.0.0.1:8443/acme/repo/pull/7",
+		"https://attacker.example/acme/repo/pull/7",
+	} {
+		if _, err := (Runner{Commands: commands}).Resolve(context.Background(), t.TempDir(), reference); err == nil {
+			t.Errorf("untrusted PR host %q was accepted", reference)
+		}
+	}
+	if commands.calls != 0 {
+		t.Fatalf("gh was invoked for rejected hosts: %d calls", commands.calls)
+	}
+}
+
+type recordingCommandRunner struct{ calls int }
+
+func (r *recordingCommandRunner) Run(context.Context, string, string, ...string) delivery.StepResult {
+	r.calls++
+	return delivery.StepResult{Status: delivery.StepFailed, ExitCode: 1}
+}
+
 func TestPRChecksGreenRejectsHeadMovingDuringCheckQuery(t *testing.T) {
 	url := "https://github.com/example/project/pull/7"
 	before := PullRequest{URL: url, State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("a", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("b", 40)}
@@ -74,6 +109,19 @@ func TestPRChecksGreenRejectsHeadMovingDuringCheckQuery(t *testing.T) {
 	status, _, err := runner.Check(context.Background(), t.TempDir(), url, "pr_checks_green")
 	if err == nil || status != "" || !strings.Contains(err.Error(), "changed while reading") {
 		t.Fatalf("moving PR head must error: status=%q err=%v", status, err)
+	}
+}
+
+func TestPRChecksGreenRejectsIdentityDifferentFromPriorProjectCheck(t *testing.T) {
+	url := "https://github.com/example/project/pull/7"
+	current := PullRequest{URL: url, State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("a", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("c", 40)}
+	view, _ := json.Marshal(current)
+	runner := Runner{Commands: &movingPRRunner{views: []string{string(view)}}}
+	expected := current
+	expected.HeadRefOID = strings.Repeat("b", 40)
+	status, _, identity, err := runner.CheckIdentity(context.Background(), t.TempDir(), url, "pr_checks_green", &expected)
+	if err == nil || status != "" || identity.URL != "" || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("green check must reject a different cross-rule identity: status=%q identity=%+v err=%v", status, identity, err)
 	}
 }
 

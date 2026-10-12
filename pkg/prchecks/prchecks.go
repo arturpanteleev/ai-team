@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/gate"
 	"gopkg.in/yaml.v3"
@@ -39,7 +41,15 @@ type PullRequest struct {
 
 // Runner uses gh and git through the same non-interactive command boundary as
 // delivery. A nil command runner uses delivery.ExecRunner.
-type Runner struct{ Commands delivery.CommandRunner }
+type Runner struct {
+	Commands delivery.CommandRunner
+	// AllowedHosts contains trusted GitHub or GitHub Enterprise host names.
+	// The default is github.com; callers must opt in to any enterprise host.
+	AllowedHosts []string
+	// SandboxFactory exists to inject a deterministic test sandbox. Production
+	// callers leave it nil and require the platform's enforced implementation.
+	SandboxFactory func() (checks.CommandSandbox, error)
+}
 
 func (r Runner) commands() delivery.CommandRunner {
 	if r.Commands != nil {
@@ -51,6 +61,10 @@ func (r Runner) commands() delivery.CommandRunner {
 // Resolve reads and validates the exact pull request identity from gh.
 func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullRequest, error) {
 	requestedNumber, err := pullNumber(reference)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	requestedHost, err := r.referenceHost(reference)
 	if err != nil {
 		return PullRequest{}, err
 	}
@@ -78,6 +92,13 @@ func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullR
 	if err := validateInfo(pull); err != nil {
 		return PullRequest{}, err
 	}
+	resolvedHost, err := r.trustedHost(pull.URL)
+	if err != nil {
+		return PullRequest{}, fmt.Errorf("gh pr view returned an untrusted pull request host: %w", err)
+	}
+	if requestedHost != "" && requestedHost != resolvedHost {
+		return PullRequest{}, errors.New("gh pr view returned a pull request on a different host than requested")
+	}
 	actualNumber, err := pullNumber(pull.URL)
 	if err != nil || actualNumber != requestedNumber {
 		return PullRequest{}, errors.New("gh pr view returned a different pull request than requested")
@@ -88,21 +109,36 @@ func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullR
 // Check evaluates one B-44 rule. A false condition returns status "failed";
 // transport, identity, or execution problems are returned as errors.
 func (r Runner) Check(ctx context.Context, targetDir, reference, rule string) (status, reason string, err error) {
-	switch rule {
-	case "project_checks":
-		return r.projectChecks(ctx, targetDir, reference)
-	case "pr_checks_green":
-		return r.prChecksGreen(ctx, targetDir, reference)
-	default:
-		return "", "", fmt.Errorf("unsupported PR check rule %q", rule)
-	}
+	status, reason, _, err = r.CheckIdentity(ctx, targetDir, reference, rule, nil)
+	return status, reason, err
 }
 
-func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string) (string, string, error) {
-	before, err := r.Resolve(ctx, targetDir, reference)
+// CheckIdentity evaluates a rule against an optional identity established by a
+// prior rule in the same review. It returns the identity actually checked so
+// callers can persist and bind later review stages to it.
+func (r Runner) CheckIdentity(ctx context.Context, targetDir, reference, rule string, expected *PullRequest) (status, reason string, identity PullRequest, err error) {
+	pull, err := r.Resolve(ctx, targetDir, reference)
 	if err != nil {
-		return "", "", err
+		return "", "", PullRequest{}, err
 	}
+	if expected != nil && !sameIdentity(*expected, pull) {
+		return "", "", PullRequest{}, errors.New("pull request identity changed between project checks and review; retry against stable head/base SHAs")
+	}
+	switch rule {
+	case "project_checks":
+		status, reason, err = r.projectChecks(ctx, targetDir, pull)
+	case "pr_checks_green":
+		status, reason, err = r.prChecksGreen(ctx, targetDir, reference, pull)
+	default:
+		err = fmt.Errorf("unsupported PR check rule %q", rule)
+	}
+	if err != nil {
+		return "", "", PullRequest{}, err
+	}
+	return status, reason, pull, nil
+}
+
+func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string, before PullRequest) (string, string, error) {
 	result := r.commands().Run(ctx, targetDir, "gh", "pr", "checks", reference, "--json", "bucket,name")
 	if result.Truncated {
 		return "", "", errors.New("gh pr checks output was truncated")
@@ -154,11 +190,7 @@ func (r Runner) prChecksGreen(ctx context.Context, targetDir, reference string) 
 	return "passed", "all PR checks are green for head " + before.HeadRefOID, nil
 }
 
-func (r Runner) projectChecks(ctx context.Context, targetDir, reference string) (status, reason string, err error) {
-	pull, err := r.Resolve(ctx, targetDir, reference)
-	if err != nil {
-		return "", "", err
-	}
+func (r Runner) projectChecks(ctx context.Context, targetDir string, pull PullRequest) (status, reason string, err error) {
 	if pull.State != "OPEN" {
 		return "failed", fmt.Sprintf("pull request state is %q, expected OPEN", pull.State), nil
 	}
@@ -241,16 +273,61 @@ func (r Runner) projectChecks(ctx context.Context, targetDir, reference string) 
 	if err != nil {
 		return "", "", err
 	}
+	sandbox, err := r.newSandbox()
+	if err != nil {
+		return "", "", fmt.Errorf("project checks blocked: %w", err)
+	}
+	if sandbox == nil || !sandbox.Enforced() {
+		if sandbox != nil {
+			_ = sandbox.Close()
+		}
+		return "", "", errors.New("project checks blocked: sandbox did not confirm OS enforcement")
+	}
 	result, exitCode, gateErr := gate.Run(ctx, gate.Options{
 		TargetDir: worktreePath, Base: baseOID, Candidate: "WORKTREE", Config: gateConfig,
+		AllowUntrusted: true, Receipt: strictSandboxReceipt(), CheckSandbox: sandbox,
 	})
+	closeErr := sandbox.Close()
+	if closeErr != nil {
+		gateErr = errors.Join(gateErr, fmt.Errorf("close PR check sandbox: %w", closeErr))
+	}
 	if gateErr != nil {
 		return "", "", gateErr
+	}
+	after, err := r.Resolve(ctx, targetDir, pull.URL)
+	if err != nil {
+		return "", "", err
+	}
+	if !sameIdentity(pull, after) {
+		return "", "", errors.New("pull request changed while project checks were running; retry against stable head/base SHAs")
 	}
 	if exitCode != gate.ExitPass || result.Status != "passed" {
 		return "failed", fmt.Sprintf("ai-team gate status=%s policy=%s", result.Status, result.PolicyVerdict), nil
 	}
 	return "passed", fmt.Sprintf("ai-team gate passed for head %s against base %s", headOID, baseOID), nil
+}
+
+func (r Runner) newSandbox() (checks.CommandSandbox, error) {
+	if r.SandboxFactory != nil {
+		return r.SandboxFactory()
+	}
+	return checks.NewUntrustedCommandSandbox()
+}
+
+func strictSandboxReceipt() *containment.Receipt {
+	return &containment.Receipt{
+		Profile: "strict",
+		Axes: map[containment.Axis]containment.Level{
+			containment.AxisFS: containment.LevelENFORCED, containment.AxisNet: containment.LevelENFORCED,
+			containment.AxisProc: containment.LevelENFORCED, containment.AxisEnv: containment.LevelENFORCED,
+		},
+		Details: map[containment.Axis]map[string]bool{
+			containment.AxisFS:   {"read_only_root": true, "writable_checkout_only": true, "private_home": true},
+			containment.AxisNet:  {"network_namespace": true},
+			containment.AxisProc: {"pid_namespace": true, "die_with_parent": true},
+			containment.AxisEnv:  {"secret_environment_stripped": true, "clean_inner_environment": true},
+		},
+	}
 }
 
 func worktreeIsRegistered(commands delivery.CommandRunner, target, worktree string) (bool, error) {
@@ -269,12 +346,21 @@ func worktreeIsRegistered(commands delivery.CommandRunner, target, worktree stri
 // Diff returns gh's PR diff only when the exact head SHA remains stable around
 // the network request. The result is then written as immutable attempt input.
 func (r Runner) Diff(ctx context.Context, targetDir, reference string) ([]byte, PullRequest, error) {
+	return r.DiffIdentity(ctx, targetDir, reference, nil)
+}
+
+// DiffIdentity reads the PR diff only if the exact identity still matches the
+// one accepted by the project's check rules.
+func (r Runner) DiffIdentity(ctx context.Context, targetDir, reference string, expected *PullRequest) ([]byte, PullRequest, error) {
 	before, err := r.Resolve(ctx, targetDir, reference)
 	if err != nil {
 		return nil, PullRequest{}, err
 	}
 	if before.State != "OPEN" {
 		return nil, PullRequest{}, fmt.Errorf("pull request state is %q, expected OPEN", before.State)
+	}
+	if expected != nil && !sameIdentity(*expected, before) {
+		return nil, PullRequest{}, errors.New("pull request identity differs from the identity accepted by project checks")
 	}
 	result := r.commands().Run(ctx, targetDir, "gh", "pr", "diff", reference)
 	if result.Status != delivery.StepPassed {
@@ -287,7 +373,7 @@ func (r Runner) Diff(ctx context.Context, targetDir, reference string) ([]byte, 
 	if err != nil {
 		return nil, PullRequest{}, err
 	}
-	if before.URL != after.URL || before.HeadRefOID != after.HeadRefOID || before.BaseRefOID != after.BaseRefOID {
+	if !sameIdentity(before, after) {
 		return nil, PullRequest{}, errors.New("pull request changed while reading its diff; retry review against stable SHAs")
 	}
 	return []byte(result.Stdout), before, nil
@@ -384,6 +470,36 @@ func validatePRURL(value string) error {
 		return fmt.Errorf("invalid pull request URL from gh: %w", err)
 	}
 	return nil
+}
+
+func (r Runner) referenceHost(reference string) (string, error) {
+	if positiveNumber.MatchString(strings.TrimSpace(reference)) {
+		return "", nil
+	}
+	host, err := r.trustedHost(reference)
+	if err != nil {
+		return "", fmt.Errorf("PR reference host is not trusted: %w", err)
+	}
+	return host, nil
+}
+
+func (r Runner) trustedHost(value string) (string, error) {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("expected an HTTPS GitHub pull request URL")
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Host, "."))
+	allowed := r.AllowedHosts
+	if len(allowed) == 0 {
+		allowed = []string{"github.com"}
+	}
+	for _, candidate := range allowed {
+		candidate = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(candidate), "."))
+		if candidate != "" && host == candidate {
+			return host, nil
+		}
+	}
+	return "", fmt.Errorf("host %q is not in the trusted PR host allowlist", host)
 }
 
 func commandError(label string, result delivery.StepResult) error {

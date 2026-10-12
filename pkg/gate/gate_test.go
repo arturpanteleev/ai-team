@@ -256,6 +256,35 @@ func TestBlockedOnNonGitTarget(t *testing.T) {
 	}
 }
 
+func TestUntrustedConfiguredChecksRequireAnExecutionSandbox(t *testing.T) {
+	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
+	marker := filepath.Join(repo, "should-not-run")
+	strict := containment.Receipt{
+		Profile: "strict",
+		Axes: map[containment.Axis]containment.Level{
+			containment.AxisFS: containment.LevelENFORCED, containment.AxisNet: containment.LevelENFORCED,
+			containment.AxisProc: containment.LevelENFORCED, containment.AxisEnv: containment.LevelENFORCED,
+		},
+	}
+	_, code, err := Run(context.Background(), Options{
+		TargetDir: repo, Base: "HEAD", Candidate: "HEAD", AllowUntrusted: true, Receipt: &strict,
+		Config: &Config{
+			SchemaVersion: SchemaVersion,
+			DiffPolicy:    DiffPolicy{TestModify: TestModifyOff},
+			Checks: []checks.Definition{{
+				Name: "must-stay-unexecuted", Class: "build", Policy: checks.PolicyRequired,
+				Command: []string{"sh", "-c", "touch " + marker},
+			}},
+		},
+	})
+	if code != ExitBlocked || err == nil || !strings.Contains(err.Error(), "command sandbox") {
+		t.Fatalf("untrusted checks must block without a sandbox: code=%d err=%v", code, err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("untrusted command executed without sandbox: stat err=%v", statErr)
+	}
+}
+
 func TestRequiredCheckFailure(t *testing.T) {
 	repo := newRepo(t, map[string]string{"src/app.go": "package app\n"})
 	cfg := &Config{

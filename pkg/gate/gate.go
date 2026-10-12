@@ -208,6 +208,9 @@ type Options struct {
 	// untrusted mode is blocked (fail-closed). Present + no UNAVAILABLE axes →
 	// untrusted allowed.
 	Receipt *containment.Receipt
+	// CheckSandbox is mandatory when checks are run in AllowUntrusted mode.
+	// It wraps each command in the OS-enforced boundary represented by Receipt.
+	CheckSandbox checks.CommandSandbox
 }
 
 // Result — детерминированный вердикт gate (за исключением FinishedAt).
@@ -278,6 +281,9 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 		// PARTIAL/UNAVAILABLE axis переводит режим в blocked.
 		if !opt.Receipt.IsEnforced() {
 			return nil, ExitBlocked, &BlockedError{Reason: "untrusted mode запрещён: containment оси не полностью ENFORCED"}
+		}
+		if opt.Config != nil && len(opt.Config.Checks) > 0 && opt.CheckSandbox == nil {
+			return nil, ExitBlocked, &BlockedError{Reason: "untrusted checks require an OS-enforced command sandbox"}
 		}
 	}
 	cfg := opt.Config
@@ -388,7 +394,7 @@ func Run(ctx context.Context, opt Options) (*Result, int, error) {
 	}
 
 	if len(cfg.Checks) > 0 {
-		results, checkErr := (checks.Runner{TargetDir: opt.TargetDir}).RunAll(ctx, cfg.Checks)
+		results, checkErr := (checks.Runner{TargetDir: opt.TargetDir, Sandbox: opt.CheckSandbox}).RunAll(ctx, cfg.Checks)
 		result.Checks = results
 		// AUD-01: workspace identity вычисляется в post-состоянии — ровно в том
 		// же виде, в котором каждый check записал WorkspaceDigestAfter

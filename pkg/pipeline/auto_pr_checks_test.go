@@ -162,6 +162,9 @@ func TestPRReviewReceivesDiffIdentitySpecsAndTechnicalDecision(t *testing.T) {
 	if checks.called["project_checks"] != 1 || checks.called["pr_checks_green"] != 1 {
 		t.Fatalf("project checks must run on the PR stage for agent results: %+v", checks.called)
 	}
+	if checks.diffExpected == nil || checks.diffExpected.URL != prURL || checks.diffExpected.HeadRefOID != strings.Repeat("a", 40) {
+		t.Fatalf("reviewer diff did not use identity accepted by project checks: %+v", checks.diffExpected)
+	}
 	if !strings.Contains(reviewInputs["pr-diff"], "diff --git a/main.go b/main.go") {
 		t.Fatalf("reviewer did not receive PR diff: %+v", reviewInputs)
 	}
@@ -191,21 +194,28 @@ func TestPRHardRulesRunForHumanAndAgentImplementations(t *testing.T) {
 			}
 			result := notifier.StageResult{Outputs: []runtime.Artifact{{Name: "pr-url", Path: path}}}
 			report := rs.runHardChecks(context.Background(), stage, result)
-			if report.Status != stagecheck.StatusPassed || checks.called["project_checks"] != 1 || checks.called["pr_checks_green"] != 1 {
+			if report.Status != stagecheck.StatusPassed || report.PRIdentity == nil || report.PRIdentity.HeadRefOID != strings.Repeat("a", 40) || checks.called["project_checks"] != 1 || checks.called["pr_checks_green"] != 1 {
 				t.Fatalf("PR checks for executor=%s: report=%+v calls=%+v", executor, report, checks.called)
 			}
 		})
 	}
 }
 
-type fakePRStageChecks struct{ called map[string]int }
+type fakePRStageChecks struct {
+	called       map[string]int
+	diffExpected *prchecks.PullRequest
+}
 
-func (f *fakePRStageChecks) Check(_ context.Context, _ string, _ string, rule string) (string, string, error) {
+func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, _ string, rule string, expected *prchecks.PullRequest) (string, string, prchecks.PullRequest, error) {
 	if f.called == nil {
 		f.called = map[string]int{}
 	}
 	f.called[rule]++
-	return stagecheck.RulePassed, "test pass", nil
+	identity := prchecks.PullRequest{URL: "https://github.com/example/project/pull/9", State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
+	if expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
+		return "", "", prchecks.PullRequest{}, errors.New("identity mismatch")
+	}
+	return stagecheck.RulePassed, "test pass", identity, nil
 }
 
 func (*fakePRStageChecks) Diff(_ context.Context, _ string, _ string) ([]byte, prchecks.PullRequest, error) {
@@ -214,6 +224,18 @@ func (*fakePRStageChecks) Diff(_ context.Context, _ string, _ string) ([]byte, p
 		BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40),
 		HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40),
 	}, nil
+}
+
+func (f *fakePRStageChecks) DiffIdentity(ctx context.Context, targetDir, reference string, expected *prchecks.PullRequest) ([]byte, prchecks.PullRequest, error) {
+	if expected != nil {
+		copy := *expected
+		f.diffExpected = &copy
+	}
+	diff, identity, err := f.Diff(ctx, targetDir, reference)
+	if err == nil && expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
+		return nil, prchecks.PullRequest{}, errors.New("identity mismatch")
+	}
+	return diff, identity, err
 }
 
 func autoCheckTemplate(t *testing.T) *config.Config {

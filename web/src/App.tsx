@@ -38,6 +38,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
 function App() {
   const [authState, setAuthState] = useState<'loading' | 'login' | 'ready'>('loading');
   const [teamManagementEnabled, setTeamManagementEnabled] = useState(false);
+  const [ssoEnabled, setSSOEnabled] = useState(false);
 
   useEffect(() => {
     const onSessionExpired = () => setAuthState('login');
@@ -46,6 +47,7 @@ function App() {
       try {
         const config = await getAuthConfig();
         setTeamManagementEnabled(config.team_management_enabled);
+        setSSOEnabled(config.sso_enabled === true);
       } catch {
         setTeamManagementEnabled(false);
       }
@@ -61,7 +63,7 @@ function App() {
 
   if (authState === 'loading') return <div>Загрузка…</div>;
   if (authState === 'login') {
-    return <Login allowActivation={teamManagementEnabled} onLogin={async (token) => {
+    return <Login allowActivation={teamManagementEnabled} ssoEnabled={ssoEnabled} onLogin={async (token) => {
       await openSession(token);
       setAuthState('ready');
     }} onActivate={async (token) => {

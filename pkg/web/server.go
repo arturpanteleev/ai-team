@@ -129,6 +129,12 @@ func NewLocalAuthenticator(token string) (*LocalAuthenticator, error) {
 	return &LocalAuthenticator{token: token, principal: principal}, nil
 }
 
+// SessionBinding fingerprints the local token so a new token invalidates
+// sessions created with the old one.
+func (a *LocalAuthenticator) SessionBinding(label string) string {
+	return cloudidentity.SessionBinding([]byte(a.token), label)
+}
+
 func (a *LocalAuthenticator) Verify(token string) (cloudidentity.Principal, error) {
 	if a == nil || !constantTimeEqual(token, a.token) {
 		return cloudidentity.Principal{}, errors.New("invalid local web token")
@@ -143,13 +149,6 @@ func WithLocalAuthenticator(verifier *LocalAuthenticator) ServerOption {
 		server.authenticator = verifier
 		server.localAuth = true
 	}
-}
-
-type browserSession struct {
-	CSRFToken    string
-	Principal    cloudidentity.Principal
-	SessionEpoch int64
-	ExpiresAt    time.Time
 }
 
 type Server struct {
@@ -171,8 +170,10 @@ type Server struct {
 	templateMu          sync.Mutex
 	authenticator       IdentityVerifier
 	localAuth           bool
-	sessions            map[string]browserSession
-	sessionMu           sync.Mutex
+	oidc                OIDCProvider
+	oidcMaxPending      int
+	processBindingKey   []byte
+	now                 func() time.Time
 	streamID            string
 	stallAfter          time.Duration
 	stallAfterOverride  bool
@@ -201,16 +202,26 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		_ = s.Close()
 		return nil, fmt.Errorf("stream identity: %w", tokenErr)
 	}
+	bindingKey, tokenErr := randomToken()
+	if tokenErr != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("session binding key: %w", tokenErr)
+	}
 	srv := &Server{
 		store:             s,
 		hub:               hub,
 		streamID:          streamID[:16],
 		artifactRoot:      absRoot,
-		sessions:          make(map[string]browserSession),
 		stallPollInterval: time.Minute,
+		oidcMaxPending:    oidcMaxPendingLogins,
+		processBindingKey: []byte(bindingKey),
 	}
 	for _, option := range options {
 		option(srv)
+	}
+	if srv.oidc != nil && (srv.authenticator == nil || srv.localAuth) {
+		_ = s.Close()
+		return nil, errors.New("OIDC sign-in requires cloud authentication")
 	}
 	target := srv.targetDir
 	if target == "" {
@@ -280,6 +291,11 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
 	srv.router.Get("/api/session", srv.handleSession)
+	srv.router.Delete("/api/session", srv.handleLogout)
+	if srv.oidc != nil {
+		srv.router.Get(oidcLoginPath, srv.handleOIDCLogin)
+		srv.router.Get(oidcCallbackPath, srv.handleOIDCCallback)
+	}
 	srv.router.Post("/api/team/activate", srv.handleTeamActivation)
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.teamReadSecurity)

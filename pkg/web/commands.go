@@ -33,8 +33,6 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
-const browserSessionTTL = 8 * time.Hour
-
 type sessionResponse struct {
 	CSRFToken string                   `json:"csrf_token"`
 	Principal *cloudidentity.Principal `json:"principal,omitempty"`
@@ -84,6 +82,7 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSONResponse(w, http.StatusOK, map[string]bool{
 		"authentication_required": s.authenticator != nil,
 		"team_management_enabled": s.authenticator != nil && !s.localAuth,
+		"sso_enabled":             s.oidc != nil,
 	})
 }
 
@@ -146,26 +145,16 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sessionToken, err := randomToken()
+	method := sessionMethodToken
+	if s.localAuth {
+		method = sessionMethodLocal
+	}
+	sessionToken, csrfToken, err := s.createBrowserSession(principal, sessionEpoch, method, "")
 	if err != nil {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	csrfToken, err := randomToken()
-	if err != nil {
-		http.Error(w, "session unavailable", http.StatusInternalServerError)
-		return
-	}
-	s.sessionMu.Lock()
-	s.sessions[sessionToken] = browserSession{
-		CSRFToken: csrfToken, Principal: principal, SessionEpoch: sessionEpoch, ExpiresAt: time.Now().UTC().Add(browserSessionTTL),
-	}
-	s.sessionMu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookieName, Value: sessionToken, Path: "/",
-		HttpOnly: true, Secure: requestScheme(r) == "https",
-		SameSite: http.SameSiteStrictMode,
-	})
+	s.setSessionCookie(w, r, sessionToken)
 	response := sessionResponse{CSRFToken: csrfToken}
 	if s.authenticator != nil {
 		response.Principal = &principal
@@ -223,24 +212,7 @@ func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
 	if err != nil || cookie.Value == "" {
 		return browserSession{}, false
 	}
-	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-	session, ok := s.sessions[cookie.Value]
-	if !ok {
-		return browserSession{}, false
-	}
-	if !session.ExpiresAt.After(time.Now().UTC()) {
-		delete(s.sessions, cookie.Value)
-		return browserSession{}, false
-	}
-	if s.authenticator != nil && !s.localAuth && session.Principal.ActorID != "" {
-		member, err := s.store.ValidateTeamSession(session.Principal.ActorID, session.SessionEpoch)
-		if err != nil || member == nil {
-			delete(s.sessions, cookie.Value)
-			return browserSession{}, false
-		}
-	}
-	return session, true
+	return s.lookupBrowserSession(cookie.Value)
 }
 
 func (s *Server) authorize(r *http.Request, permission cloudidentity.Permission, role cloudidentity.Role) error {

@@ -350,14 +350,20 @@ test('authenticated cookie session survives reload and a second window for write
     const runCard = second.locator('[class*="card"]').filter({ hasText: 'authenticated-after-reconnect' })
     await expect(runCard.getByText('в очереди', { exact: true })).toBeVisible({ timeout: 10_000 })
 
-    // Browser sessions are intentionally process-local. Restarting the server
-    // revokes that session while retaining the browser's HttpOnly cookie.
+    // Browser sessions are durable (B-83): a server restart over the same
+    // database keeps the HttpOnly cookie valid.
     await stop(webServer)
     webServer = start(binary, ['web', '--target', target, '--port', String(port), '--dist', path.join(webDir, 'dist'), '--scheduler-db', '.ai-team/scheduler.db'], {
       cwd: target,
       env: { ...process.env, AI_TEAM_AUTH_SECRET: secret },
     })
     await waitForServer(baseURL, webServer)
+    await second.reload()
+    await expect(second.getByRole('heading', { name: 'Задачи' })).toBeVisible()
+
+    // Sign-out revokes the session on the server, so a reload cannot reuse it.
+    await second.getByRole('button', { name: 'Выйти' }).click()
+    await expect(second.getByLabel('Токен доступа')).toBeVisible()
     await second.reload()
     await expect(second.getByLabel('Токен доступа')).toBeVisible()
     await expect(second.getByText(/Сессия истекла или отсутствует/)).toBeVisible()
@@ -636,10 +642,8 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     // Seeing its persisted event arrive on the app's WebSocket proves the new
     // connection completed and is delivering live server events.
     await page.goto(baseURL)
-    // Server sessions are process-local, so the restart above revoked this
-    // browser's cookie. Re-authenticate before sending the recovery probe.
-    await page.getByLabel('Токен доступа').fill(localToken)
-    await page.getByRole('button', { name: 'Войти' }).click()
+    // Server sessions are durable (B-83): the cookie survives the restart
+    // above, so no re-authentication is needed for the recovery probe.
     await expect(page.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await page.getByLabel('Название инициативы').fill('websocket-recovery-probe')
     await page.getByLabel('Какого результата хотите достичь?').fill('Проверить доставку события после восстановления WebSocket.')

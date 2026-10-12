@@ -49,6 +49,17 @@
   font-weight: 700;
 }
 
+.ssoLink {
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 700;
+  text-align: center;
+  text-decoration: none;
+}
+
 .error {
   color: var(--danger-fg);
 }

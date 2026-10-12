@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { NavLink } from '../router';
-import { getActivePrincipal } from '../api';
+import { closeSession, getActivePrincipal } from '../api';
 import { useTheme } from '../theme';
 import styles from './Layout.module.css';
 
@@ -42,6 +42,7 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           {teamManagementEnabled && principal?.roles.includes('product_owner') && <NavLink to="/team" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>Команда</NavLink>}
         </nav>
         {principal && <small>{principal.actor_id}<br />{principal.roles.map((role) => roleNames[role] ?? role).join(', ')}</small>}
+        {principal && <button className={styles.themeToggle} type="button" onClick={() => void closeSession()}>Выйти</button>}
       </aside>
       <main className={styles.main}>{children}</main>
     </div>

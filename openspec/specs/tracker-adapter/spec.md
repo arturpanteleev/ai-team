@@ -25,18 +25,43 @@ source input; the adapter MUST NOT write inbound tracker state into ai-team.
 
 ### Requirement: Jira maps configured stages and comments on the task
 
-The Jira adapter MUST find the issue key in the task's `external_links`. For an
-`attempt_finished` event it MUST post a comment containing the ai-team task URL
-and stage result. When `tracker.jira.stage_statuses` maps that stage, the
-adapter MUST transition the issue to the configured destination status before
-posting the comment. A stage without a status mapping still receives a result
-comment. No Jira response or webhook may mutate the ai-team task.
+The Jira adapter MUST find the issue key in the task's `external_links`. A key
+is recognized only when an external-link field is exactly `KEY-N`, or when it is
+an `http`/`https` URL whose host equals the `base_url` host (case-insensitive)
+and whose path is `<base_url path>/browse/KEY-N` (a trailing `/` and a query
+string are allowed). The adapter MUST NOT search for a key inside arbitrary
+text: a combined field such as `APP-12 https://example.atlassian.net/browse/APP-12`
+or a URL with a lowercase key is not recognized. For an `attempt_finished`
+event it MUST post a comment containing the ai-team task URL and stage result,
+whatever the outcome. When `tracker.jira.stage_statuses` maps that stage and
+the attempt succeeded (`status` is `passed`, `outcome` is `passed` and
+`decision` is not `rejected`), the adapter MUST transition the issue to the
+configured destination status before posting the comment. Any other outcome
+(failed, infra-failed, skipped, rejected or missing fields) MUST NOT transition
+the issue. A stage without a status mapping still receives a result comment.
+No Jira response or webhook may mutate the ai-team task.
 
-#### Scenario: Mapped stage finishes
+#### Scenario: Mapped stage finishes successfully
 
-- **WHEN** a task linked to Jira issue `APP-12` finishes a mapped stage
+- **WHEN** a task linked to Jira issue `APP-12` finishes a mapped stage with
+  `status=passed`, `outcome=passed` and a decision other than `rejected`
 - **THEN** Jira MUST transition to the configured target status when needed
 - **AND** receive a comment with the ai-team task link and stage result
+
+#### Scenario: Mapped stage fails or is rejected
+
+- **WHEN** a task linked to Jira issue `APP-12` finishes a mapped stage as
+  failed, infra-failed, skipped or rejected, or without outcome fields
+- **THEN** the adapter MUST NOT request a Jira transition
+- **AND** Jira MUST receive a comment with the ai-team task link and stage
+  result
+
+#### Scenario: External link is not a recognized key format
+
+- **WHEN** the only external link mentions a key inside other text, uses a
+  lowercase key, or points to a host other than the `base_url` host
+- **THEN** the adapter MUST make no Jira request and record no
+  `integration_error`
 
 #### Scenario: Task has no Jira key
 

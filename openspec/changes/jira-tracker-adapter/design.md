@@ -9,10 +9,13 @@ resume from the saved cursor.
 
 The Jira adapter uses an injected `http.Client`, Jira Cloud REST v3, and
 Basic auth from `email` plus a token read from the configured environment
-variable. It resolves the Jira issue key from external links, checks the
-current status, selects a currently available transition by destination status,
-then posts an ADF comment with the task detail URL and event result. A stage
-without a mapping still receives a comment. No inbound Jira path exists.
+variable. It resolves the Jira issue key from external links that are exactly
+`KEY-N` or a `<base_url>/browse/KEY-N` URL on the `base_url` host (never by
+substring search). For a successful attempt (`status=passed`, `outcome=passed`,
+decision not `rejected`) on a mapped stage it checks the current status and
+selects a currently available transition by destination status; other outcomes
+skip the transition. It then always posts an ADF comment with the task detail
+URL and event result. A stage without a mapping still receives a comment. No inbound Jira path exists.
 
 On adapter failure the web worker appends `integration_error` to SQLite with
 warning severity, then advances the source cursor. If warning persistence or

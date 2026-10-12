@@ -154,9 +154,12 @@ evidence. Решения сериализуются in-process mutex и flock н
 `pkg/tracker` принимает события задач через injectable adapter interface. Web
 server читает новые события из durable SQLite cursor и передаёт
 `attempt_finished` вместе с `external_links` задачи. Встроенный Jira Cloud
-adapter извлекает issue key из внешней ссылки, при наличии stage mapping
-переходит к целевому статусу, затем добавляет комментарий со ссылкой на task
-detail и результат этапа. Отправка идёт в отдельном server worker и не входит
+adapter извлекает issue key из внешней ссылки (только поле, целиком равное
+`KEY-N`, или URL `<base_url>/browse/KEY-N` на хосте `base_url`; поиска по
+подстроке нет), при наличии stage mapping и только для успешной попытки
+(`status=passed`, `outcome=passed`, decision не `rejected`) переходит к
+целевому статусу, затем при любом исходе добавляет комментарий со ссылкой на
+task detail и результат этапа. Отправка идёт в отдельном server worker и не входит
 в исход задачи. Ошибка записывается как durable `integration_error`, после чего
 курсор продолжает чтение. При первом включении курсор ставится на текущий край
 событий; затем он сохраняется per adapter, чтобы после перезапуска повторять

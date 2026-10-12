@@ -41,6 +41,7 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 | `observer` | готовит заготовку отчёта по предоставленным человеком данным | `observation.md` | только объявленный вход и результаты этапа | — |
 | `spec-checker`, `design-checker`, `qa-checker` | агенты-проверяющие для `check: kind: agent` в конфиге этапа: проверяют результат этапа по чек-листу и выносят заключение | `spec-check.md`, `design-check.md`, `qa-check.md` | ничего | `**Verdict:** PASSED` или `FAILED` |
 | `deployer` | не модель: контроллер строит delivery-план и после подтверждения доставляет | `delivery-plan.json` | коммит, push, PR | — |
+| `cicd-deploy` | не модель: контроллер ждёт мержа PR, проверяет его через Git, запускает CI/CD-сборку (TeamCity) вершины ветки и ждёт результата | `deploy/build.link` | сборка и выкладка во внешнем CI/CD | — |
 
 Документы этапов лежат в `.ai-team/artifacts/<feature>/`. Тестовыми файлами
 для `tester` считаются `**/*_test.go`, `**/testdata/**`, `test/**`,

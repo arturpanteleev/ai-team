@@ -14,6 +14,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/cicd"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -228,7 +229,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		defer func() { rs.deliveryContinuationStage = "" }()
 		logging.Printf("  ↻ %s: продолжение после ожидания delivery-плана, агент повторно не запускается\n", name)
 	}
-	modelAttempt = a.Kind != "delivery" && !continuation
+	modelAttempt = !a.ControllerOperation() && !continuation
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
 		agentCfg = &config.AgentConfig{Name: name}
@@ -297,7 +298,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var stageRuntime runtime.Runtime
 	var runtimeAgent *runtime.Agent
-	if a.Kind != "delivery" && !continuation {
+	if !a.ControllerOperation() && !continuation {
 		stageRuntime, err = rs.p.newRuntime(a.RuntimeType)
 		if err != nil {
 			return fail(fmt.Errorf("ошибка создания runtime для %s: %w", name, err))
@@ -328,7 +329,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}
 
 	stageCtx := ctx
-	timeout, terr := agentCfg.StageTimeoutFor()
+	timeout, terr := rs.stageTimeoutFor(a, agentCfg)
 	if terr != nil {
 		return fail(fmt.Errorf("невалидный timeout агента %s: %w", name, terr))
 	}
@@ -349,7 +350,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	var workspaceBefore filesystemSnapshot
 	var gitBefore gitMetadataSnapshot
 	var gitAvailable bool
-	guardWorkspace := a.Kind != "delivery"
+	// Controller operations do not run a model. Deploy fetches the deploy
+	// branch to prove the merge, which legitimately updates Git metadata.
+	guardWorkspace := !a.ControllerOperation()
 	if guardWorkspace {
 		workspaceBefore, err = captureWorkspaceSnapshot(rs.sourceDir())
 		if err != nil {
@@ -389,6 +392,11 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		// No model run: the controller only re-checks and re-authorizes.
 	} else if a.Kind == "delivery" {
 		execErr = rs.writeDeliveryPlan(stageCtx, a, preconditions)
+	} else if a.Kind == "deploy" {
+		execErr = rs.runControllerDeploy(stageCtx, name, attemptID, a)
+		if errors.Is(execErr, cicd.ErrDeployRejected) {
+			r.ValidationFailed = true
+		}
 	} else {
 		stageTask := *rs.task
 		stageTask.DeniedReadPaths, err = uniqueAbsoluteReadPaths(rs.questionAnswerDeniedPaths)

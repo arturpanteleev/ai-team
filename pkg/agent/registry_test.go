@@ -315,3 +315,31 @@ func TestRegistryValidatePipelineRejectsConflictingAndReservedOutputs(t *testing
 		}
 	})
 }
+
+func TestRegistryBuiltinDeployAgentIsControllerOperation(t *testing.T) {
+	definition, err := NewFS(os.DirFS("../../agents")).Load("cicd-deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.Kind != "deploy" || definition.RuntimeType != "deploy" || !definition.ControllerOperation() ||
+		definition.Outputs["link"] != "{feature}/deploy/build.link" || definition.Prompt != "" {
+		t.Fatalf("unexpected deploy agent: %+v", definition)
+	}
+}
+
+func TestRegistryRejectsInconsistentDeployDefinitions(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"deploy without external", "name: sample\nruntime: deploy\nkind: deploy\nmutation: none\noutputs:\n  link: x/build.link\n", "kind deploy требует mutation external"},
+		{"deploy with model runtime", "name: sample\nruntime: agentcli\nkind: deploy\nmutation: external\noutputs:\n  link: x/build.link\n", "deploy требует runtime deploy"},
+		{"deploy with prompt", "name: sample\nruntime: deploy\nkind: deploy\nmutation: external\nprompt_file: prompt.md\noutputs:\n  link: x/build.link\n", "без cli/prompt_file"},
+		{"deploy without link", "name: sample\nruntime: deploy\nkind: deploy\nmutation: external\noutputs:\n  report: x/report.md\n", "единственный output link"},
+		{"deploy with inputs", "name: sample\nruntime: deploy\nkind: deploy\nmutation: external\ninputs:\n  task: x/task.md\noutputs:\n  link: y/build.link\n", "не принимает inputs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewFS(fstest.MapFS{"sample/def.yaml": &fstest.MapFile{Data: []byte(tc.yaml)}}).Load("sample")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ожидалась ошибка %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}

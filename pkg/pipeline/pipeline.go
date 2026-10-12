@@ -18,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/cicd"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
@@ -123,6 +124,10 @@ type Pipeline struct {
 	recorder                Recorder
 	delivery                delivery.Service
 	stageDeliveryExecutor   StageDeliveryExecutor
+	deployProvider          cicd.Provider
+	deployClock             cicd.Clock
+	deployRunner            delivery.CommandRunner
+	deployGitRunner         delivery.CommandRunner
 	approvals               ApprovalStore
 	lifecycle               lifecycle.StorePort
 	evidence                EvidenceStoreFactory

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createTask, getActivePrincipal, getTemplatesList } from '../api';
+import { Link } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
 import type { TemplateValidation } from '../types';
 import styles from './NewTask.module.css';
@@ -28,6 +29,7 @@ export function NewTask() {
   const [idea, setIdea] = useState('');
   const [links, setLinks] = useState('');
   const [status, setStatus] = useState('');
+  const [createdRunID, setCreatedRunID] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   // Идемпотентный ключ живёт до первой правки после неудачной отправки:
@@ -73,6 +75,7 @@ export function NewTask() {
         mode: mode === 'auto' ? 'auto' : 'manual',
         external_links: externalLinks.length > 0 ? externalLinks : undefined,
       }, `create-task-${draftKey}`);
+      setCreatedRunID(result.run_id);
       setStatus(`Задача создана: ${result.run_id}`);
       setName('');
       setIdea('');
@@ -140,6 +143,7 @@ export function NewTask() {
             {submitting ? 'Создаём…' : 'Создать задачу'}
           </button>
           {status && <span className={styles.status} role="status">{status}</span>}
+          {createdRunID && <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть задачу</Link>}
         </div>
         {error && <p className={styles.error} role="alert">{error}</p>}
       </form>

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NewTask } from './NewTask';
+import { MemoryRouter } from '../router';
 import { createTask, getTemplatesList } from '../api';
 
 const session = vi.hoisted(() => ({ principal: { actor_id: 'product-1', roles: ['product_owner'] } }));
@@ -33,7 +34,7 @@ afterEach(cleanup);
 
 describe('New task screen', () => {
   it('создаёт задачу с шаблоном, режимом, идеей и внешними ссылками', async () => {
-    render(<NewTask />);
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
     await screen.findByLabelText('Шаблон');
 
     fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Онбординг' } });
@@ -60,7 +61,7 @@ describe('New task screen', () => {
 
   it('показывает ошибку сервера и сохраняет введённое', async () => {
     vi.mocked(createTask).mockRejectedValueOnce(new Error('auto mode не поддерживается этим режимом запуска'));
-    render(<NewTask />);
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
     await screen.findByLabelText('Шаблон');
 
     fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Онбординг' } });
@@ -73,7 +74,7 @@ describe('New task screen', () => {
 
   it('не показывает форму участникам без роли Product Owner', () => {
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
-    render(<NewTask />);
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
 
     expect(screen.getByText('Создавать задачи может Product Owner.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Название')).not.toBeInTheDocument();

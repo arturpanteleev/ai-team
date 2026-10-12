@@ -297,6 +297,9 @@ func TestTemplateValidationRules(t *testing.T) {
 			c.MaxVisits["product_spec"] = 3
 		}, "не совпадает с лимитом возврата"},
 		{"bad check agent", func(c *Config) { c.Stages[1].Check.Agent = "ghost" }, "агент проверки"},
+		{"project check requires PR link", func(c *Config) {
+			c.Stages[5].Check.Rules = []string{"project_checks"}
+		}, "допустимо только для result link с link_kind pr"},
 		{"invalid executor", func(c *Config) { c.Stages[0].Executor = "robot" }, "executor"},
 		{"delivery without PR", func(c *Config) { c.Stages[4].LinkKind = "build" }, "delivery допустим"},
 	}

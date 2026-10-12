@@ -71,6 +71,7 @@ func (e *stageTimeoutError) Is(target error) bool {
 }
 
 func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifier.StageResult) {
+	defer rs.consumeAutoCheckFeedback(name)
 	stageStart := time.Now()
 	rs.attemptOrdinal++
 	attemptID := rs.evidence.NewAttemptID(name, rs.attemptOrdinal)
@@ -543,6 +544,18 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	r.Status = notifier.StatusPassed
 	r.Duration = time.Since(stageStart)
 	return r
+}
+
+func (rs *runState) consumeAutoCheckFeedback(stageID string) {
+	runDir := filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID, "auto-check-feedback")
+	filtered := rs.extraInputs[stageID][:0]
+	for _, input := range rs.extraInputs[stageID] {
+		if input.Name == "check-feedback" && filepath.Dir(input.Path) == runDir {
+			continue
+		}
+		filtered = append(filtered, input)
+	}
+	rs.extraInputs[stageID] = filtered
 }
 
 func captureArtifactIdentities(artifacts []runtime.Artifact) (map[string]string, error) {

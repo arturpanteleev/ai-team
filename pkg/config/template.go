@@ -232,6 +232,12 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 				if len(check.Rules) == 0 {
 					add("%s: check kind hard требует rules", prefix)
 				}
+				for _, rule := range check.Rules {
+					if (rule == "project_checks" || rule == "pr_checks_green") &&
+						(stage.Result != "link" || stage.LinkKind != "pr") {
+						add("%s: check rule %q допустимо только для result link с link_kind pr", prefix, rule)
+					}
+				}
 				if check.Agent != "" || check.Mode != "" || check.MaxRounds != 0 {
 					add("%s: check agent/mode/max_rounds допустимы только для kind agent", prefix)
 				}

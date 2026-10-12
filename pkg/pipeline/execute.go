@@ -141,6 +141,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				cleanup()
 			}
 		}
+		rs.consumePRReviewInputs(current)
 		rs.clearExecutorOverride(current)
 		if skippedByConfig {
 			if result.State.Outcome != workflow.OutcomeSkipped {
@@ -252,6 +253,17 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if result.Status == notifier.StatusPassed && result.State.Outcome == workflow.OutcomePassed &&
 			!skippedByConfig && !overriddenByDecision {
 			if err := rs.runStageChecks(ctx, current, result); err != nil {
+				var retry *autoCheckRetryError
+				if errors.As(err, &retry) {
+					rs.extraInputs[current] = append(rs.extraInputs[current], retry.input)
+					// A check retry is another attempt of the same workflow visit;
+					// it must not consume the graph's loopback visit allowance.
+					if rs.visits[current] > 0 {
+						rs.visits[current]--
+					}
+					rs.ps.DoneAgent(current)
+					continue
+				}
 				return err
 			}
 		}

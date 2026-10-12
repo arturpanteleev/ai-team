@@ -4,7 +4,7 @@
 // B-40 вводит два вида проверок из §7 спецификации:
 //
 //   - hard: детерминированные правила над результатом
-//     (required_sections, verdict_marker, pr_exists/pr_open/pr_base_branch);
+//     (required_sections, verdict_marker, PR contract and project checks);
 //   - agent: прогон агента-проверяющего, который выдаёт md-отчёт с
 //     маркером `Verdict: PASSED | FAILED`.
 //
@@ -66,6 +66,10 @@ type Report struct {
 // gh pr view и не расходиться с delivery-предусловиями.
 type PRCheckFunc func(ctx context.Context, reference, expectedBaseBranch string) ([]RuleResult, error)
 
+// ProjectRuleCheckFunc executes one PR-scoped rule in the controller. It is
+// used for checks that need a verified PR identity or a detached PR checkout.
+type ProjectRuleCheckFunc func(ctx context.Context, rule, reference string) (RuleResult, error)
+
 // HardInput — вход детерминированной проверки.
 type HardInput struct {
 	Stage              string
@@ -76,6 +80,7 @@ type HardInput struct {
 	RequiredSections   []string
 	Rules              []string
 	PRCheck            PRCheckFunc
+	ProjectRuleCheck   ProjectRuleCheckFunc
 }
 
 // RunHard выполняет hard-правила и возвращает отчёт. Ошибки исполнения
@@ -104,6 +109,7 @@ func RunHard(ctx context.Context, in HardInput) Report {
 	}
 
 	prRequested := false
+	var projectRules []string
 	for _, rule := range in.Rules {
 		switch rule {
 		case "required_sections":
@@ -127,6 +133,8 @@ func RunHard(ctx context.Context, in HardInput) Report {
 			}
 		case "pr_exists", "pr_open", "pr_base_branch":
 			prRequested = true
+		case "project_checks", "pr_checks_green":
+			projectRules = append(projectRules, rule)
 		default:
 			report.Rules = append(report.Rules, RuleResult{
 				Rule: rule, Status: "error",
@@ -138,9 +146,34 @@ func RunHard(ctx context.Context, in HardInput) Report {
 	if prRequested {
 		report.Rules = append(report.Rules, runPRRules(ctx, in)...)
 	}
+	for _, rule := range projectRules {
+		report.Rules = append(report.Rules, runProjectRule(ctx, in, rule))
+	}
 
 	report.Status = aggregate(report.Rules)
 	return report
+}
+
+func runProjectRule(ctx context.Context, in HardInput, rule string) RuleResult {
+	if strings.TrimSpace(in.Reference) == "" {
+		return RuleResult{Rule: rule, Status: RuleFailed, Reason: "результат этапа не содержит ссылки на pull request"}
+	}
+	if in.ProjectRuleCheck == nil {
+		return RuleResult{Rule: rule, Status: "error", Reason: "проверка PR недоступна"}
+	}
+	result, err := in.ProjectRuleCheck(ctx, rule, in.Reference)
+	if err != nil {
+		return RuleResult{Rule: rule, Status: "error", Reason: err.Error()}
+	}
+	if result.Rule != rule {
+		return RuleResult{Rule: rule, Status: "error", Reason: "PR-проверка вернула результат для другого правила"}
+	}
+	switch result.Status {
+	case RulePassed, RuleFailed, RuleSkipped, "error":
+		return result
+	default:
+		return RuleResult{Rule: rule, Status: "error", Reason: "PR-проверка вернула неизвестный статус"}
+	}
 }
 
 func runPRRules(ctx context.Context, in HardInput) []RuleResult {

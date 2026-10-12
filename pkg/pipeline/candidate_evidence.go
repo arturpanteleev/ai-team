@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +16,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // candidate_evidence.go — controller-owned evidence о кандидате:
@@ -466,12 +470,112 @@ func (rs *runState) prepareControllerStageEvidence(ctx context.Context, stage st
 		resolved := filepath.ToSlash(runtime.ReplaceVars(declaredPath, rs.runCfg.Feature))
 		switch {
 		case inputName == "candidate" && strings.HasSuffix(resolved, "/.control/review-candidate.json"):
-			return rs.writeCandidateEvidence(ctx, "review-candidate.json", "semantic_code_review")
+			if err := rs.writeCandidateEvidence(ctx, "review-candidate.json", "semantic_code_review"); err != nil {
+				return err
+			}
 		case inputName == "reviewed-candidate" && strings.HasSuffix(resolved, "/.control/review-candidate.json"):
 			return rs.verifyCandidateEvidence("review-candidate.json", "semantic_code_review")
 		case inputName == "candidate" && strings.HasSuffix(resolved, "/.control/verification-candidate.json"):
 			return rs.writeCandidateEvidence(ctx, "verification-candidate.json", "final_verification")
 		}
+	}
+	stageDef, ok := rs.p.templateStage(stage)
+	if !ok || stageDef.Function != "reviewer" || stageDef.Result != "md" || definition.Name != "reviewer" {
+		return nil
+	}
+	return rs.preparePRDiffInput(ctx, stage)
+}
+
+func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string) error {
+	if rs.p.prStageChecks == nil {
+		return errors.New("controller PR checks are not configured")
+	}
+	var reference string
+	foundPRResult := false
+	for index := len(rs.results) - 1; index >= 0; index-- {
+		result := rs.results[index]
+		if result.Superseded || result.Status != notifier.StatusPassed || result.State.Outcome != workflow.OutcomePassed {
+			continue
+		}
+		stage, ok := rs.p.templateStage(result.Name)
+		if !ok || stage.Result != "link" || stage.LinkKind != "pr" {
+			continue
+		}
+		foundPRResult = true
+		_, reference = rs.stageCheckInputs(stage, result)
+		if strings.TrimSpace(reference) != "" {
+			break
+		}
+	}
+	if strings.TrimSpace(reference) == "" {
+		if !foundPRResult {
+			return nil
+		}
+		return fmt.Errorf("PR reviewer %s has no successful preceding PR result", reviewerStage)
+	}
+	diff, pull, err := rs.p.prStageChecks.Diff(ctx, rs.runCfg.TargetDir, reference)
+	if err != nil {
+		return fmt.Errorf("read PR diff for reviewer %s: %w", reviewerStage, err)
+	}
+	digest := sha256.Sum256(diff)
+	digestHex := hex.EncodeToString(digest[:])
+	directory, err := safeio.EnsureDir(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID, "pr-review")
+	if err != nil {
+		return fmt.Errorf("prepare PR review inputs: %w", err)
+	}
+	diffPath := filepath.Join(directory, digestHex+".patch")
+	if err := writeImmutablePRReviewFile(diffPath, diff, maxArtifactFileBytes); err != nil {
+		return fmt.Errorf("persist PR diff input: %w", err)
+	}
+	identity, err := json.MarshalIndent(pull, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode PR identity: %w", err)
+	}
+	identity = append(identity, '\n')
+	identityDigest := sha256.Sum256(identity)
+	identityPath := filepath.Join(directory, hex.EncodeToString(identityDigest[:])+".json")
+	if err := writeImmutablePRReviewFile(identityPath, identity, 64<<10); err != nil {
+		return fmt.Errorf("persist PR identity input: %w", err)
+	}
+	filtered := rs.extraInputs[reviewerStage][:0]
+	for _, artifact := range rs.extraInputs[reviewerStage] {
+		if artifact.Name != "pr-diff" && artifact.Name != "pr-identity" {
+			filtered = append(filtered, artifact)
+		}
+	}
+	rs.extraInputs[reviewerStage] = filtered
+	rs.extraInputs[reviewerStage] = append(rs.extraInputs[reviewerStage], []runtime.Artifact{
+		{Name: "pr-diff", Path: diffPath, Size: int64(len(diff)), ModTime: time.Unix(0, 0).UTC()},
+		{Name: "pr-identity", Path: identityPath, Size: int64(len(identity)), ModTime: time.Unix(0, 0).UTC()},
+	}...)
+	return nil
+}
+
+func (rs *runState) consumePRReviewInputs(stageID string) {
+	filtered := rs.extraInputs[stageID][:0]
+	for _, artifact := range rs.extraInputs[stageID] {
+		if artifact.Name != "pr-diff" && artifact.Name != "pr-identity" {
+			filtered = append(filtered, artifact)
+		}
+	}
+	rs.extraInputs[stageID] = filtered
+}
+
+func writeImmutablePRReviewFile(path string, data []byte, maxBytes int64) error {
+	if int64(len(data)) > maxBytes {
+		return fmt.Errorf("PR review input exceeds %d bytes", maxBytes)
+	}
+	if err := safeio.WriteRegularFileNoFollow(path, data, safeio.ReadOnlyFileMode); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	stored, err := safeio.ReadRegularFile(path, maxBytes)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(stored, data) {
+		return errors.New("existing immutable PR review input differs")
 	}
 	return nil
 }

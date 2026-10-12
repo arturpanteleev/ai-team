@@ -872,11 +872,12 @@ func (s *Store) Append(event Event) error {
 	return s.append(event, false)
 }
 
-// AppendControllerEvent records the one event that is derived from a trusted
-// resolved human submission. Remote workers use a separate, validated
-// controller API capability; they cannot submit this event through Append.
+// AppendControllerEvent records events derived from trusted controller
+// decisions. Remote workers use a separate, validated controller API
+// capability; they cannot submit these events through Append.
 func (s *Store) AppendControllerEvent(event Event) error {
-	if event.Type != "description_missing" {
+	if event.Type != "description_missing" && event.Type != "auto_check_retry" &&
+		!(event.Type == "run_started" && event.Data["mode"] == "auto") {
 		return fmt.Errorf("unsupported controller-only event type %q", event.Type)
 	}
 	return s.append(event, true)
@@ -888,8 +889,9 @@ func (s *Store) append(event Event, controllerOnly bool) error {
 	if s.eventLog == nil {
 		return errors.New("event log is unavailable")
 	}
-	if !controllerOnly && event.Type == "description_missing" {
-		return errors.New("description_missing can only be appended through AppendControllerEvent")
+	if !controllerOnly && (event.Type == "description_missing" || event.Type == "auto_check_retry" ||
+		(event.Type == "run_started" && event.Data != nil && event.Data["mode"] == "auto")) {
+		return fmt.Errorf("%s can only be appended through AppendControllerEvent", event.Type)
 	}
 	var appended Event
 	var err error

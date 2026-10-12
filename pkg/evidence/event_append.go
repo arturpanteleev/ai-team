@@ -75,9 +75,19 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 		if _, ok := candidate.Data["approval_id"].(string); !ok || candidate.Data["approval_id"] == "" {
 			return Event{}, false, errors.New("description_missing must bind its input approval")
 		}
+	} else if controllerOwned && candidate.Type == "auto_check_retry" {
+		if err := validateAutoCheckRetryEvent(events, candidate); err != nil {
+			return Event{}, false, err
+		}
 	} else if !controllerOwned || candidate.Type != "stage_skipped" {
 		if err := ValidateWorkerEventType(candidate.Type); err != nil {
 			return Event{}, false, err
+		}
+	}
+	if candidate.Type == "run_started" && candidate.Data != nil {
+		mode, modeErr := eventString(candidate.Data, "mode", false)
+		if modeErr != nil || (mode != "" && mode != "auto") || (mode != "" && !controllerOwned) || (mode == "" && len(candidate.Data) != 0) {
+			return Event{}, false, errors.New("run_started mode is invalid or not controller-owned")
 		}
 	}
 	// Raw worker appends cannot choose a human executor or claim skip authority.
@@ -204,6 +214,38 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 		}
 	}
 	return candidate, false, nil
+}
+
+func validateAutoCheckRetryEvent(events []Event, candidate Event) error {
+	if candidate.Stage == "" || !safeEventIdentifier(candidate.AttemptID) || len(candidate.Data) != 3 {
+		return errors.New("auto_check_retry identity is invalid")
+	}
+	path, pathErr := eventString(candidate.Data, "report_path", true)
+	digest, digestErr := eventString(candidate.Data, "report_sha256", true)
+	retry := candidate.Data["retry"]
+	retryIsOne := retry == 1 || retry == float64(1)
+	if pathErr != nil || digestErr != nil || !retryIsOne || !validSHA256(digest) {
+		return errors.New("auto_check_retry payload is invalid")
+	}
+	matchedFailure := false
+	for _, existing := range events {
+		if existing.Type == "auto_check_retry" && existing.Stage == candidate.Stage && existing.AttemptID == candidate.AttemptID {
+			return errors.New("auto_check_retry is duplicated for the failed attempt")
+		}
+		if existing.Stage != candidate.Stage || existing.AttemptID != candidate.AttemptID ||
+			(existing.Type != "check_failed" && existing.Type != "check_error") {
+			continue
+		}
+		previousPath, _ := existing.Data["report_path"].(string)
+		previousDigest, _ := existing.Data["report_sha256"].(string)
+		if previousPath == path && previousDigest == digest {
+			matchedFailure = true
+		}
+	}
+	if !matchedFailure {
+		return errors.New("auto_check_retry is not bound to a failed check report")
+	}
+	return nil
 }
 
 func validEventRelativePath(value string) bool {

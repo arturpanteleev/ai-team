@@ -244,7 +244,7 @@ tree_hash:
 | `mcp_servers` | имена серверов из верхнеуровневого allowlist; применяются только к этому этапу и только с `cli: codex` |
 | `link_kind` | для `result: link`: `pr`, `build` или `other` |
 | `required_sections` | обязательные заголовки, только для `result: md` |
-| `check` | проверка результата: `{kind: hard, rules: [...]}` или `{kind: agent, agent: ...}` |
+| `check` | проверка результата: `{kind: hard, rules: [...]}` или `{kind: agent, agent: ...}`; PR-правила `project_checks` и `pr_checks_green` допускаются только на `result: link` с `link_kind: pr` |
 | `confirm` | `required` или `auto`; по умолчанию `auto` для `approve`, иначе `required` |
 | `skippable` | можно ли пропустить этап с причиной; по умолчанию `false` |
 | `delivery` | требования delivery для PR-этапа с указанным `agent`: `require_checks` выбирает controller checks проекта, `require_verdicts` — дополнительные verdict stages |
@@ -260,6 +260,15 @@ Named `delivery.require_checks` запускаются контроллером 
 required verdict contract и immutable output snapshot входят в предусловия
 плана. Review, QA и verification artifacts не нужны, если эти этапы явно не
 перечислены в `require_verdicts`.
+
+Hard-правило `project_checks` запускает `ai-team gate` на закреплённых base/head
+SHA в отдельном detached worktree PR. Политика `gate.yaml` берётся из base SHA;
+изменение кандидатной ветки не может ослабить собственную gate-конфигурацию.
+`pr_checks_green` читает `gh pr checks` и завершается ошибкой, если PR изменился
+во время запроса. Когда перед этапом `function: reviewer` уже есть успешный PR
+результат, контроллер передаёт ревьюеру неизменяемый `gh pr diff` и JSON с PR,
+base и head SHA вместе с объявленными входами спецификации и технического
+решения. Если PR-ссылки нет, reviewer работает по обычным входам шаблона.
 
 Шаблон содержит возвраты между этапами. `to` должен быть раньше `from` в
 списке `stages`; для каждого этапа, в который ведёт возврат, действует лимит

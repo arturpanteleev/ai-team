@@ -110,6 +110,34 @@ func TestRunHardPullRequestError(t *testing.T) {
 	}
 }
 
+func TestRunHardProjectPRRules(t *testing.T) {
+	var calls []string
+	report := RunHard(context.Background(), HardInput{
+		Stage: "implementation", ResultType: "link", Reference: "https://github.com/example/repo/pull/7",
+		Rules: []string{"project_checks", "pr_checks_green"},
+		ProjectRuleCheck: func(_ context.Context, rule, reference string) (RuleResult, error) {
+			calls = append(calls, rule+":"+reference)
+			return RuleResult{Rule: rule, Status: RulePassed}, nil
+		},
+	})
+	if report.Status != StatusPassed || len(calls) != 2 || !strings.HasPrefix(calls[0], "project_checks:") || !strings.HasPrefix(calls[1], "pr_checks_green:") {
+		t.Fatalf("project PR rules were not evaluated: calls=%v report=%+v", calls, report)
+	}
+}
+
+func TestRunHardProjectPRRuleRejectsMismatchedResult(t *testing.T) {
+	report := RunHard(context.Background(), HardInput{
+		Stage: "implementation", ResultType: "link", Reference: "https://github.com/example/repo/pull/7",
+		Rules: []string{"pr_checks_green"},
+		ProjectRuleCheck: func(context.Context, string, string) (RuleResult, error) {
+			return RuleResult{Rule: "project_checks", Status: RulePassed}, nil
+		},
+	})
+	if report.Status != StatusError {
+		t.Fatalf("mismatched external rule result must fail closed, got %+v", report)
+	}
+}
+
 func TestRunAgentParsesCanonicalMarkers(t *testing.T) {
 	cases := map[string]string{
 		"**Verdict:** PASSED\n":            StatusPassed,

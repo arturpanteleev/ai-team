@@ -577,3 +577,101 @@ func TestPendingCheckBindingResets(t *testing.T) {
 		})
 	}
 }
+
+// stopBeforeChecker доводит задачу до остановки по бюджету перед
+// проверяющим и возвращает pipeline, run и манифест остановленной попытки.
+func stopBeforeChecker(t *testing.T, dir string, rt *scriptedRuntime) (*Pipeline, RunResult, string, evidence.AttemptManifest) {
+	t.Helper()
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+	cfg.Budget = &config.BudgetConfig{MaxTaskTokens: 7}
+	p := New(cfg, stageCheckRegistry(true), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, first, err)
+	runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+	entries, err := os.ReadDir(filepath.Join(runDir, "attempts"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one stopped attempt: %v %v", entries, err)
+	}
+	manifestPath := filepath.Join(runDir, "attempts", entries[0].Name(), "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest evidence.AttemptManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil || len(manifest.Outputs) == 0 {
+		t.Fatalf("manifest outputs: %+v err=%v", manifest.Outputs, err)
+	}
+	return p, first, manifestPath, manifest
+}
+
+func assertPendingCheckRefused(t *testing.T, p *Pipeline, dir string, first RunResult, rt *scriptedRuntime) {
+	t.Helper()
+	resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+	if !errors.Is(err, ErrPendingCheckOutputChanged) || resumed.Outcome != "stopped" {
+		t.Fatalf("tampered evidence must refuse the pending check: result=%+v err=%v", resumed, err)
+	}
+	if rt.calls["verifier"] != 0 || rt.calls["tech"] != 1 {
+		t.Fatalf("neither the checker nor the stage may run: %v", rt.calls)
+	}
+}
+
+// Подменённая копия выхода в evidence: файл в рабочей директории цел, но
+// копия попытки не совпадает с манифестом — проверку не запускать.
+func TestPendingCheckRejectsTamperedEvidenceCopy(t *testing.T) {
+	dir := env(t)
+	rt := checkerBudgetRuntime()
+	p, first, _, manifest := stopBeforeChecker(t, dir, rt)
+	runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+	copyPath, err := confinedArtifactPath(runDir, manifest.Outputs[0].EvidencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, []byte("# Решение\n\nподмена копии\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingCheckRefused(t, p, dir, first, rt)
+}
+
+// Манифест попытки не связан с attempt_finished: хеш манифеста расходится с
+// manifest_sha256 записанного завершения. Полный resume отвергает такой
+// манифест ещё при replay, поэтому сверка проверяется напрямую.
+func TestPendingCheckRejectsUnboundManifest(t *testing.T) {
+	dir := env(t)
+	rt := checkerBudgetRuntime()
+	p, first, _, manifest := stopBeforeChecker(t, dir, rt)
+	runDir := filepath.Join(dir, ".ai-team", "runs", first.RunID)
+	events, err := evidence.VerifyEventLog(filepath.Join(runDir, "events.jsonl"), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := &runState{p: p, runID: first.RunID, evidence: &appendOnlyEvidence{runDir: runDir},
+		task: &runtime.Task{ArtifactRoot: filepath.Join(canonical, ".ai-team", "artifacts")}}
+	result := notifier.StageResult{AttemptID: manifest.AttemptID, Name: "tech"}
+	if err := rs.verifyPendingCheckOutputs("tech", result, events); err != nil {
+		t.Fatalf("intact attempt must verify: %v", err)
+	}
+	unbound := make([]evidence.Event, len(events))
+	copy(unbound, events)
+	rebound := false
+	for index, event := range unbound {
+		if event.Type == "attempt_finished" && event.AttemptID == manifest.AttemptID {
+			data := make(map[string]any, len(event.Data))
+			for key, value := range event.Data {
+				data[key] = value
+			}
+			data["manifest_sha256"] = strings.Repeat("0", 64)
+			unbound[index].Data = data
+			rebound = true
+		}
+	}
+	if !rebound {
+		t.Fatal("fixture has no attempt_finished for the attempt")
+	}
+	if err := rs.verifyPendingCheckOutputs("tech", result, unbound); !errors.Is(err, ErrPendingCheckOutputChanged) {
+		t.Fatalf("manifest not bound by attempt_finished must be refused: %v", err)
+	}
+}

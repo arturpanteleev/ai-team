@@ -347,21 +347,49 @@ func (c *Controller) resolveStageGrill(_ context.Context, runID, stageID, action
 		if err != nil {
 			return fmt.Errorf("resolve new grill result revisions: %w", err)
 		}
-		changed := false
-		for artifactPath, revisionID := range decision.ArtifactRevisions {
-			if payload.ArtifactRevisions[artifactPath] != revisionID {
-				changed = true
-				break
-			}
+		changed, err := c.grillResultContentChanged(runID, payload.ArtifactRevisions, decision.ArtifactRevisions)
+		if err != nil {
+			return fmt.Errorf("verify changed grill result content: %w", err)
 		}
 		if !changed {
-			return errors.New("new_version requires at least one edited result artifact revision")
+			return errors.New("new_version requires result content to differ from the pinned revision")
 		}
 	}
 	if _, err := c.approvals.Decide(runID, value.ID, decision); err != nil {
 		return err
 	}
 	return c.Resume(runID)
+}
+
+func (c *Controller) grillResultContentChanged(runID string, baseline, selected map[string]string) (bool, error) {
+	artifacts, err := humanartifact.New(c.target)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for artifactPath, revisionID := range selected {
+		baselineID := baseline[artifactPath]
+		if baselineID == "" {
+			return false, fmt.Errorf("selected revision %q has no pinned baseline for %q", revisionID, artifactPath)
+		}
+		before, err := artifacts.Get(runID, artifactPath, baselineID)
+		if err != nil {
+			return false, fmt.Errorf("read pinned revision %q: %w", artifactPath, err)
+		}
+		after, err := artifacts.Get(runID, artifactPath, revisionID)
+		if err != nil {
+			return false, fmt.Errorf("read selected revision %q: %w", artifactPath, err)
+		}
+		beforeSHA, afterSHA := humanartifact.Digest([]byte(before.Content)), humanartifact.Digest([]byte(after.Content))
+		if before.RunID != runID || before.ArtifactPath != artifactPath || before.SHA256 != beforeSHA ||
+			after.RunID != runID || after.ArtifactPath != artifactPath || after.SHA256 != afterSHA {
+			return false, fmt.Errorf("revision content digest mismatch for %q", artifactPath)
+		}
+		if beforeSHA != afterSHA {
+			changed = true
+		}
+	}
+	return changed, nil
 }
 
 // ChangeStageExecutor persists a human-selected executor for the stage that is

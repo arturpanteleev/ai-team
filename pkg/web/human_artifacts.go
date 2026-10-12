@@ -257,6 +257,23 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "stage result can be revised only for a pending grill question", http.StatusConflict)
 			return
 		}
+		stage, err := s.pinnedTaskStage(chi.URLParam(r, "runID"), parts[1])
+		if err != nil {
+			http.Error(w, "pinned stage contract unavailable", http.StatusConflict)
+			return
+		}
+		if humanStageResultPath(stage.ID, stage.Result) != command.ArtifactPath {
+			http.Error(w, "artifact path does not match the pinned stage result type", http.StatusBadRequest)
+			return
+		}
+		if command.Content == "" {
+			http.Error(w, "stage result revision requires edited content", http.StatusBadRequest)
+			return
+		}
+		if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, command.Content, stage.RequiredSections); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		revisions, err := s.humanArtifacts.List(chi.URLParam(r, "runID"), command.ArtifactPath)
 		if err != nil {
 			http.Error(w, "stage result revision history unavailable", http.StatusInternalServerError)

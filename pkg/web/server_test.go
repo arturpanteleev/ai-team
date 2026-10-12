@@ -20,6 +20,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/control"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
@@ -226,11 +227,27 @@ func TestCreateArtifactRevisionForPendingGrillStage(t *testing.T) {
 	target := t.TempDir()
 	const runID, stageID = "run-grill-edit", "product_spec"
 	artifactPath := "stages/product_spec/result.md"
+	template, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateData, err := template.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateStore, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinDataForRun(runID, runID, templateData); err != nil {
+		t.Fatal(err)
+	}
 	humanStore, err := humanartifact.New(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	initial, err := humanStore.AppendSubmission(runID, stageID, "approval-human-input", "md", "", "# Initial spec\n", "spec", "", "alice")
+	initialContent := "# Initial spec\n\nКритерии приёмки\nИсходные критерии.\n"
+	initial, err := humanStore.AppendSubmission(runID, stageID, "approval-human-input", "md", "", initialContent, "spec", "", "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,20 +274,65 @@ func TestCreateArtifactRevisionForPendingGrillStage(t *testing.T) {
 
 	requestBody, err := json.Marshal(map[string]any{
 		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
-		"content": "# Revised spec\n\nКритерии приёмки\n", "comment": "Ответил на вопрос грилла",
+		"content": initialContent, "comment": "Комментарий без изменения результата",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(requestBody))
+	commentOnlyBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"comment": "This comment does not revise the result",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentOnly := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(commentOnlyBody))
+	commentOnlyResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(commentOnlyResponse, commentOnly)
+	if commentOnlyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("comment-only stage revision must be rejected: %d %s", commentOnlyResponse.Code, commentOnlyResponse.Body.String())
+	}
+	unchanged := httptest.NewRecorder()
+	srv.router.ServeHTTP(unchanged, request)
+	if unchanged.Code != http.StatusBadRequest {
+		t.Fatalf("same result bytes must not create a new revision: %d %s", unchanged.Code, unchanged.Body.String())
+	}
+	revisions, err := srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("unchanged grill edit mutated revision history: %+v err=%v", revisions, err)
+	}
+
+	missingSectionBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": "# Revised spec\n\nThe acceptance section was removed.\n", "comment": "Updated wording",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingSection := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(missingSectionBody))
+	rejected := httptest.NewRecorder()
+	srv.router.ServeHTTP(rejected, missingSection)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "required section") {
+		t.Fatalf("revision that removes a required section must fail validation: %d %s", rejected.Code, rejected.Body.String())
+	}
+
+	requestBody, err = json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": "# Revised spec\n\nКритерии приёмки\nНовые измеримые критерии.\n", "comment": "Ответил на вопрос грилла",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(requestBody))
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {
-		t.Fatalf("stage result revision during grill: %d %s", response.Code, response.Body.String())
+		t.Fatalf("valid stage result revision during grill: %d %s", response.Code, response.Body.String())
 	}
-	revisions, err := srv.humanArtifacts.List(runID, artifactPath)
+	revisions, err = srv.humanArtifacts.List(runID, artifactPath)
 	if err != nil || len(revisions) != 2 || revisions[1].BaseRevision != initial.ID ||
-		revisions[1].Content != "# Revised spec\n\nКритерии приёмки\n" {
+		revisions[1].Content != "# Revised spec\n\nКритерии приёмки\nНовые измеримые критерии.\n" {
 		t.Fatalf("grill edit was not stored as a new immutable revision: %+v err=%v", revisions, err)
 	}
 

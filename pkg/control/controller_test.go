@@ -623,6 +623,87 @@ func TestControllerGrillNewVersionRequiresEditedArtifact(t *testing.T) {
 	}
 }
 
+func TestControllerGrillNewVersionRequiresChangedPinnedContent(t *testing.T) {
+	const runID, stageID = "run-grill-content-change", "product_spec"
+	const attemptID, approvalID = "run-grill-content-change-001-product_spec", "approval-grill-content-change"
+	artifactPath := "stages/product_spec/result.md"
+	baselineContent := "# Product spec\n\nКритерии приёмки\nInitial criteria.\n"
+	baselineSHA := humanartifact.Digest([]byte(baselineContent))
+	baselineID := "rev-000001-" + baselineSHA[:16]
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Clarify acceptance criteria.", Round: 1,
+		ArtifactRevisions: map[string]string{artifactPath: baselineID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: approvalID, RunID: runID, AttemptID: attemptID, Status: approval.StatusPending,
+		Kind: approval.KindGrillQuestions, FromStage: stageID, ToStage: stageID, Trigger: approval.GrillTrigger,
+		SubjectHash: strings.Repeat("c", 64), RequiredRoles: []string{"po"}, Quorum: approval.QuorumAny,
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+		Targets: map[string]string{
+			approval.GrillActionAnswer: stageID, approval.GrillActionNewVersion: stageID, approval.GrillActionDone: stageID,
+		}, Payload: payload,
+	})
+	controller, _ := newStageActionFixture(t, stageActionState(runID, stageID, approvalID, lifecycle.PhaseWaiting), engine, store)
+	target := controller.target
+	artifacts, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := artifacts.Append(runID, artifactPath, "", "", baselineContent, "", "owner")
+	if err != nil || baseline.ID != baselineID {
+		t.Fatalf("create pinned baseline revision: %+v err=%v, want ID %s", baseline, err, baselineID)
+	}
+	commentOnlyRevision, err := artifacts.Append(runID, artifactPath, baseline.ID, "", baselineContent,
+		"Comment without content changes", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commentOnlyRevision.ID == baseline.ID || commentOnlyRevision.SHA256 != baseline.SHA256 {
+		t.Fatalf("fixture must represent a new revision with unchanged bytes: baseline=%+v candidate=%+v", baseline, commentOnlyRevision)
+	}
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID,
+		Stage: stageID, StageIndex: 1, StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(),
+		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success",
+	}
+	manifestPath := filepath.Join(target, ".ai-team", "runs", runID, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.SubmitStageGrillVersion(context.Background(), runID, stageID, "comment only", "owner", "po"); err == nil || !strings.Contains(err.Error(), "content to differ") {
+		t.Fatalf("new_version must reject a different revision ID with unchanged bytes: %v", err)
+	}
+	if len(store.decisions) != 0 {
+		t.Fatalf("unchanged content must not resolve the grill question: %+v", store.decisions)
+	}
+
+	updatedContent := "# Product spec\n\nКритерии приёмки\nUpdated measurable criteria.\n"
+	updated, err := artifacts.Append(runID, artifactPath, commentOnlyRevision.ID, "", updatedContent, "Actual edit", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.SubmitStageGrillVersion(context.Background(), runID, stageID, "updated", "owner", "po"); err != nil {
+		t.Fatalf("new_version should accept content changed from its pinned baseline: %v", err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].ArtifactRevisions[artifactPath] != updated.ID {
+		t.Fatalf("changed revision was not pinned on the grill decision: %+v", store.decisions)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, runID)
+}
+
 func TestControllerReviewedRevisionsIncludesStageScopedHumanResult(t *testing.T) {
 	target := t.TempDir()
 	const runID, attemptID = "run-grill-human-revision", "run-grill-human-revision-001-product_spec"

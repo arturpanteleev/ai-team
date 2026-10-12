@@ -34,10 +34,15 @@ fields.
 
 To edit a human stage result during a pending grill, post a new immutable
 revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,
-the latest `base_revision` and `base_sha256`, and the edited content. This route
+the latest `base_revision` and `base_sha256`, and changed result content. The
+route validates the content against the run's SHA-256-verified pinned stage
+result type and required sections before appending. Comment-only submissions,
+unchanged bytes, and edits that remove a required section are rejected. It
 accepts stage result edits only while a matching grill question is pending;
 stale revisions and edits after the grill resolves are rejected. Then call
-`grill/new-version` to pin the edited revision for the next check round.
+`grill/new-version` to pin the edited revision. That action also verifies that
+at least one selected result's content SHA-256 differs from the grill's pinned
+baseline before starting the next check round.
 
 Event endpoints share the persisted SQLite event-ID cursor. By default
 (`order=asc`) they return events with a cursor greater than `after`, oldest

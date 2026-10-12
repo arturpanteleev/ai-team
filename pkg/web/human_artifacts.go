@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -245,12 +246,32 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !allowedRunArtifactPath(command.ArtifactPath) {
+	stageResultPath := allowedStageSubmissionPath(command.ArtifactPath)
+	if !allowedRunArtifactPath(command.ArtifactPath) && !stageResultPath {
 		http.Error(w, "invalid artifact path", http.StatusBadRequest)
 		return
 	}
 	parts := strings.Split(command.ArtifactPath, "/")
-	if len(parts) >= 3 && parts[0] == "attempts" {
+	if stageResultPath {
+		if !s.pendingGrillIncludesArtifact(chi.URLParam(r, "runID"), parts[1], command.ArtifactPath) {
+			http.Error(w, "stage result can be revised only for a pending grill question", http.StatusConflict)
+			return
+		}
+		revisions, err := s.humanArtifacts.List(chi.URLParam(r, "runID"), command.ArtifactPath)
+		if err != nil {
+			http.Error(w, "stage result revision history unavailable", http.StatusInternalServerError)
+			return
+		}
+		if len(revisions) == 0 {
+			http.Error(w, "stage result has no submitted revision", http.StatusConflict)
+			return
+		}
+		latest := revisions[len(revisions)-1]
+		if command.BaseRevision != latest.ID || !strings.EqualFold(command.BaseSHA256, latest.SHA256) {
+			http.Error(w, "stage result changed; reload the latest revision before editing", http.StatusConflict)
+			return
+		}
+	} else if len(parts) >= 3 && parts[0] == "attempts" {
 		approvals, approvalErr := s.controller.Approvals(chi.URLParam(r, "runID"))
 		if approvalErr != nil {
 			http.Error(w, "approval state unavailable", http.StatusInternalServerError)
@@ -270,9 +291,9 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 	if actorID == "" {
 		actorID = "local-user"
 	}
-	// The first revision is anchored to the immutable source artifact. Later
-	// revisions are anchored to the preceding human revision by the store.
-	if command.BaseRevision == "" {
+	// Attempt outputs are anchored to their immutable source file. Stage result
+	// revisions above are anchored to the preceding submitted human revision.
+	if command.BaseRevision == "" && !stageResultPath {
 		path, err := resolveArtifactPath(filepath.Join(s.runRoot, chi.URLParam(r, "runID")), command.ArtifactPath)
 		if err != nil {
 			http.Error(w, "source artifact unavailable", http.StatusNotFound)
@@ -300,4 +321,36 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSONResponse(w, http.StatusCreated, value)
+}
+
+func (s *Server) pendingGrillIncludesArtifact(runID, stageID, artifactPath string) bool {
+	if s.controller == nil {
+		return false
+	}
+	approvals, err := s.controller.Approvals(runID)
+	if err != nil {
+		return false
+	}
+	for _, pending := range approvals {
+		if pending.Kind != approval.KindGrillQuestions || pending.Trigger != approval.GrillTrigger ||
+			pending.FromStage != stageID || pending.ToStage != stageID || pending.Status != approval.StatusPending ||
+			!hasAction(pending.Actions, approval.GrillActionNewVersion) {
+			continue
+		}
+		var payload approval.GrillQuestionsPayload
+		if json.Unmarshal(pending.Payload, &payload) == nil && payload.Kind == string(approval.KindGrillQuestions) &&
+			payload.ArtifactRevisions[artifactPath] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAction(actions []string, wanted string) bool {
+	for _, action := range actions {
+		if action == wanted {
+			return true
+		}
+	}
+	return false
 }

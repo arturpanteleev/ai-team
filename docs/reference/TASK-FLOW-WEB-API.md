@@ -32,6 +32,13 @@ fields.
 | `GET /api/metrics/flow?from=&to=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=` | Flow metrics CSV |
 
+To edit a human stage result during a pending grill, post a new immutable
+revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,
+the latest `base_revision` and `base_sha256`, and the edited content. This route
+accepts stage result edits only while a matching grill question is pending;
+stale revisions and edits after the grill resolves are rejected. Then call
+`grill/new-version` to pin the edited revision for the next check round.
+
 Event endpoints share the persisted SQLite event-ID cursor. By default
 (`order=asc`) they return events with a cursor greater than `after`, oldest
 first; this is the replay contract for resuming a stream. With `order=desc`

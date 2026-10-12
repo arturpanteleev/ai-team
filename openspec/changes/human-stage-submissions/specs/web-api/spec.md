@@ -29,8 +29,26 @@ mutate an existing revision.
 
 The Web API MUST return immutable submission history for a stage and result
 type at `GET /api/runs/{runID}/artifact-revisions?path=stages/{stageID}/result.{md|link|txt}`.
+It MUST accept a new immutable revision through
+`POST /api/runs/{runID}/artifact-revisions` only while that stage has a pending
+grill question whose pinned artifact revisions include the requested path.
+The edit MUST name the latest revision ID and SHA-256 as its base; stale edits
+and edits outside a pending grill MUST be rejected. The `grill/new-version`
+action then pins the new revision for the next check round.
 
 #### Scenario: Inspect stage result history
 
 - **WHEN** an authorized client requests a stage result history path
 - **THEN** the API MUST return the stored revisions in ascending version order
+
+#### Scenario: Edit a pinned human result during a pending grill
+
+- **WHEN** an authorized actor posts a stage result revision against the latest
+  revision while that stage has a pending grill question
+- **THEN** the API MUST append a new immutable revision and allow
+  `grill/new-version` to bind it to the next check round
+
+#### Scenario: Stale or out-of-window stage result edit
+
+- **WHEN** the base revision is stale or no matching grill question is pending
+- **THEN** the API MUST reject the edit without adding a revision

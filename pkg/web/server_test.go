@@ -222,6 +222,74 @@ func TestSubmitHumanStageEndpointPersistsVersionAndExposesHistory(t *testing.T) 
 	}
 }
 
+func TestCreateArtifactRevisionForPendingGrillStage(t *testing.T) {
+	target := t.TempDir()
+	const runID, stageID = "run-grill-edit", "product_spec"
+	artifactPath := "stages/product_spec/result.md"
+	humanStore, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := humanStore.AppendSubmission(runID, stageID, "approval-human-input", "md", "", "# Initial spec\n", "spec", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Which behavior is expected?",
+		Round: 1, ArtifactRevisions: map[string]string{artifactPath: initial.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := approval.PendingApproval{
+		ID: "approval-grill-question", RunID: runID, AttemptID: "attempt-product-spec",
+		Kind: approval.KindGrillQuestions, Trigger: approval.GrillTrigger, Status: approval.StatusPending,
+		FromStage: stageID, ToStage: stageID, Payload: payload,
+		Actions: []string{approval.GrillActionNewVersion},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{pending}}
+	srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"),
+		WithTargetDir(target), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	requestBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": initial.ID, "base_sha256": initial.SHA256,
+		"content": "# Revised spec\n\nКритерии приёмки\n", "comment": "Ответил на вопрос грилла",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(requestBody))
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("stage result revision during grill: %d %s", response.Code, response.Body.String())
+	}
+	revisions, err := srv.humanArtifacts.List(runID, artifactPath)
+	if err != nil || len(revisions) != 2 || revisions[1].BaseRevision != initial.ID ||
+		revisions[1].Content != "# Revised spec\n\nКритерии приёмки\n" {
+		t.Fatalf("grill edit was not stored as a new immutable revision: %+v err=%v", revisions, err)
+	}
+
+	controller.approvals[0].Status = approval.StatusResolved
+	lateEditBody, err := json.Marshal(map[string]any{
+		"artifact_path": artifactPath, "base_revision": revisions[1].ID, "base_sha256": revisions[1].SHA256,
+		"content": "# Late edit\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateEdit := authorizedRequest(t, srv, http.MethodPost, "/api/runs/"+runID+"/artifact-revisions", string(lateEditBody))
+	blocked := httptest.NewRecorder()
+	srv.router.ServeHTTP(blocked, lateEdit)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("stage result must not be revised after grill resolves: %d %s", blocked.Code, blocked.Body.String())
+	}
+}
+
 func TestDefaultHumanStageFunctionAliasesAuthorizeAndKeepConfiguredActorRole(t *testing.T) {
 	for _, stage := range []struct {
 		id, function, result, content string

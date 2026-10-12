@@ -33,6 +33,9 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           <NavLink to="/events" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>
             Лента
           </NavLink>
+          <NavLink to="/observability" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>
+            Наблюдаемость
+          </NavLink>
           <NavLink to="/template" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>
             Шаблон
           </NavLink>

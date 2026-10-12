@@ -1,0 +1,42 @@
+.container { width: min(100%, 1440px); padding: 24px; margin: 0 auto; }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.title { margin: 0; color: var(--text-primary); font-size: 24px; font-weight: 650; }
+.subtitle, .sectionHeader p { margin: 5px 0 0; color: var(--text-muted); font-size: 13px; }
+.export, .period button { min-height: 36px; padding: 6px 13px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent); color: var(--accent-contrast); cursor: pointer; font: inherit; font-size: 13px; }
+.export:disabled { opacity: .6; cursor: wait; }
+.period { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 18px; }
+.period label { display: grid; gap: 4px; color: var(--text-muted); font-size: 12px; }
+.period input { min-height: 36px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-primary); font: inherit; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.card, .usage, .stageSection { min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+.card { display: grid; align-content: start; gap: 8px; }
+.card span, .usageTotals span { color: var(--text-muted); font-size: 12px; }
+.card strong { color: var(--text-primary); font-size: 22px; font-weight: 650; }
+.card small, .usage small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.sectionHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sectionHeader h2 { margin: 0; color: var(--text-primary); font-size: 16px; font-weight: 650; }
+.usage, .stageSection { margin-bottom: 16px; }
+.usageTotals { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 10px; }
+.usageTotals div { display: grid; gap: 6px; padding: 12px; border-radius: 8px; background: var(--surface-muted); }
+.usageTotals strong { color: var(--text-primary); font-size: 18px; overflow-wrap: anywhere; }
+.badge { flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; background: var(--surface-muted); color: var(--text-secondary); font-size: 12px; }
+.stageSection h2 { margin: 0; color: var(--text-primary); font-size: 16px; }
+.tableWrap { max-width: 100%; overflow-x: auto; }
+.tableWrap table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tableWrap th, .tableWrap td { padding: 10px 9px; border-top: 1px solid var(--border); text-align: left; vertical-align: top; color: var(--text-secondary); }
+.tableWrap thead th { color: var(--text-muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.tableWrap tbody th { color: var(--text-primary); font-weight: 600; }
+.tableWrap td small { display: block; margin-top: 4px; color: var(--text-muted); }
+.usageDetail { display: grid; gap: 4px; min-width: 205px; }
+.usageDetail span { color: var(--text-secondary); white-space: nowrap; }
+.state { display: inline-flex; margin: 0 4px 4px 0; padding: 3px 6px; border-radius: 6px; background: var(--surface-muted); white-space: nowrap; }
+.muted { color: var(--text-muted) !important; }
+.notice { padding: 24px; color: var(--text-muted); text-align: center; }
+.error { margin: 0 0 12px; color: var(--danger-fg); }
+@media (max-width: 600px) {
+  .container { padding: 16px; }
+  .header { align-items: stretch; flex-direction: column; }
+  .export { align-self: flex-start; }
+  .period input { width: 100%; }
+  .period label { flex: 1 1 135px; }
+}

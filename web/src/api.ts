@@ -1,4 +1,5 @@
 import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskEvent, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { FlowMetrics } from './types/flowMetrics';
 
 const API_BASE = '/api';
 
@@ -331,4 +332,19 @@ export function getTemplatesList(): Promise<TemplatesResponse> {
 // создания при повторе сетевого сбоя — ключ передаёт вызывающий код.
 export function createTask(payload: CreateTaskRequest, idempotencyKey: string): Promise<{ run_id: string; template_version?: string }> {
   return command('/runs', payload, { 'Idempotency-Key': idempotencyKey });
+}
+
+function flowMetricsQuery(from: string, to: string): string {
+  const query = new URLSearchParams({ from, to });
+  return query.toString();
+}
+
+export function getFlowMetrics(from: string, to: string): Promise<FlowMetrics> {
+  return fetchJson(`/metrics/flow?${flowMetricsQuery(from, to)}`);
+}
+
+export async function downloadFlowMetricsCsv(from: string, to: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/metrics/flow.csv?${flowMetricsQuery(from, to)}`, { credentials: 'same-origin' });
+  if (!response.ok) throw await responseError(response, 'Не удалось экспортировать метрики');
+  return response.blob();
 }

@@ -105,7 +105,62 @@ func (r Runner) Resolve(ctx context.Context, targetDir, reference string) (PullR
 	if err != nil || actualNumber != requestedNumber {
 		return PullRequest{}, errors.New("gh pr view returned a different pull request than requested")
 	}
+	if err := r.requireTaskRepository(ctx, targetDir, pull.URL); err != nil {
+		return PullRequest{}, err
+	}
 	return pull, nil
+}
+
+// requireTaskRepository binds a PR to the task's own GitHub repository. A
+// trusted host alone is not enough: any green PR on github.com would otherwise
+// pass pr_checks_green and expose a foreign diff to the reviewer.
+func (r Runner) requireTaskRepository(ctx context.Context, targetDir, pullURL string) error {
+	result := r.commands().Run(ctx, targetDir, "gh", "repo", "view", "--json", "url")
+	if result.Status != delivery.StepPassed {
+		return commandError("gh repo view", result)
+	}
+	if result.Truncated {
+		return errors.New("gh repo view output was truncated")
+	}
+	var repository struct {
+		URL string `json:"url"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(result.Stdout))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&repository); err != nil {
+		return fmt.Errorf("invalid gh repo view JSON: %w", err)
+	}
+	taskHost, taskRepo, err := repositoryIdentity(repository.URL, false)
+	if err != nil {
+		return fmt.Errorf("gh repo view returned an invalid repository URL: %w", err)
+	}
+	pullHost, pullRepo, err := repositoryIdentity(pullURL, true)
+	if err != nil {
+		return err
+	}
+	if taskHost != pullHost || taskRepo != pullRepo {
+		return fmt.Errorf("pull request repository %s/%s does not match task repository %s/%s", pullHost, pullRepo, taskHost, taskRepo)
+	}
+	return nil
+}
+
+// repositoryIdentity returns the lower-cased host and owner/repo of a GitHub
+// repository URL, or of a pull request URL when pull is true.
+func repositoryIdentity(value string, pull bool) (host, repository string, err error) {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", errors.New("expected an HTTPS GitHub URL")
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	want := 2
+	if pull {
+		want = 4
+	}
+	if len(parts) != want || parts[0] == "" || parts[1] == "" || (pull && parts[2] != "pull") {
+		return "", "", fmt.Errorf("unexpected GitHub URL path %q", parsed.Path)
+	}
+	host = strings.ToLower(strings.TrimSuffix(parsed.Host, "."))
+	return host, strings.ToLower(parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")), nil
 }
 
 // Check evaluates one B-44 rule. A false condition returns status "failed";

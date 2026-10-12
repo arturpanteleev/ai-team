@@ -82,6 +82,25 @@ func TestPRChecksGreenAndDiffRequireStablePRIdentity(t *testing.T) {
 	})
 }
 
+func TestResolveRequiresPRFromTaskRepository(t *testing.T) {
+	target, _, _, url, bin := makePRFixture(t, `[{"bucket":"pass","name":"unit"}]`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	t.Setenv("GH_TEST_REPO_URL", "https://github.com/Example/Project")
+	if _, err := (Runner{}).Resolve(context.Background(), target, url); err != nil {
+		t.Fatalf("PR from the task repository (case-insensitive) must resolve: %v", err)
+	}
+
+	t.Setenv("GH_TEST_REPO_URL", "https://github.com/example/other-project")
+	status, _, err := (Runner{}).Check(context.Background(), target, url, "pr_checks_green")
+	if err == nil || status != "" || !strings.Contains(err.Error(), "does not match task repository") {
+		t.Fatalf("green PR from a foreign repository must be rejected: status=%q err=%v", status, err)
+	}
+	if _, _, err := (Runner{}).Diff(context.Background(), target, url); err == nil {
+		t.Fatal("diff of a foreign-repository PR must be rejected")
+	}
+}
+
 func TestPRReferenceRejectsArbitraryURLAndFlag(t *testing.T) {
 	for _, reference := range []string{"--repo", "http://github.com/a/b/pull/1", "https://example.com/a/b/issues/1"} {
 		if _, err := pullNumber(reference); err == nil {
@@ -146,10 +165,13 @@ func (r *movingPRRunner) Run(_ context.Context, _ string, name string, args ...s
 	if name != "gh" || len(args) < 2 {
 		return delivery.StepResult{Status: delivery.StepFailed, ExitCode: 2, Stderr: "unexpected command"}
 	}
+	if args[0] == "repo" && args[1] == "view" {
+		result.Stdout = `{"url":"https://github.com/example/project"}`
+		return result
+	}
 	switch args[1] {
 	case "view":
-		index := len(r.views) - 1
-		if index < 0 {
+		if len(r.views) == 0 {
 			return delivery.StepResult{Status: delivery.StepFailed, ExitCode: 2, Stderr: "missing view fixture"}
 		}
 		result.Stdout = r.views[0]
@@ -203,10 +225,11 @@ checks: []
 	url = "https://github.com/example/project/pull/7"
 	info, _ := json.Marshal(PullRequest{URL: url, State: "OPEN", BaseRefName: "main", BaseRefOID: baseSHA, HeadRefName: "feature", HeadRefOID: headSHA})
 	bin = t.TempDir()
-	ghScript := "#!/bin/sh\nset -eu\ncase \"$2\" in\n" +
-		"  view) printf '%s\\n' '" + string(info) + "' ;;\n" +
-		"  checks) printf '%s\\n' '" + checksJSON + "' ;;\n" +
-		"  diff) printf '%s\\n' 'diff --git a/main.go b/main.go' ;;\n" +
+	ghScript := "#!/bin/sh\nset -eu\ncase \"$1 $2\" in\n" +
+		"  'pr view') printf '%s\\n' '" + string(info) + "' ;;\n" +
+		"  'pr checks') printf '%s\\n' '" + checksJSON + "' ;;\n" +
+		"  'pr diff') printf '%s\\n' 'diff --git a/main.go b/main.go' ;;\n" +
+		"  'repo view') printf '{\"url\":\"%s\"}\\n' \"${GH_TEST_REPO_URL:-https://github.com/example/project}\" ;;\n" +
 		"  *) exit 2 ;;\nesac\n"
 	write(t, filepath.Join(bin, "gh"), ghScript)
 	if err := os.Chmod(filepath.Join(bin, "gh"), 0o755); err != nil {

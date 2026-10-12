@@ -13,7 +13,10 @@ MUST use `gh pr checks` and fail closed if the PR identity changes during the
 request. Both rules MUST be bound to one URL/base/head identity, and that exact
 identity MUST be retained for reviewer diff preparation. PR URLs MUST use a
 trusted GitHub host (github.com by default; enterprise hosts require explicit
-configuration).
+configuration). The PR MUST belong to the task's own repository (host and
+owner/repo compared case-insensitively with `gh repo view` in the task checkout);
+a PR from any other repository MUST be rejected by every rule and by reviewer diff
+preparation.
 
 Commands selected by the pinned base gate policy MUST run in an OS-enforced
 untrusted-code sandbox with a read-only host root, writable PR checkout and

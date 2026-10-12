@@ -5,7 +5,9 @@
 ### Requirement: Task and daily token budgets
 
 The pipeline MUST check a positive `budget.max_task_tokens` or
-`budget.max_daily_tokens` before every agent attempt that invokes a model.
+`budget.max_daily_tokens` before every agent attempt that invokes a model
+and before every checker-agent run, including grill rounds. Checker usage MUST
+be recorded durably and MUST count toward both budgets.
 Delivery stages MUST NOT be stopped by the token budget. A budget MUST count
 as exhausted when usage is equal to or greater than the limit. Usage MUST be
 recomputed from durable attempt manifests, not process memory; an attempt
@@ -45,3 +47,9 @@ be re-checked on resume.
 - **WHEN** a human resumes it
 - **THEN** the next agent attempt MUST run
 - **AND** the run MUST stop again once usage since the stop reaches the limit
+
+#### Scenario: Grill checker after the budget is spent
+
+- **GIVEN** a grill checker round consumed the rest of the task budget
+- **WHEN** a human answers and the run resumes in a new process
+- **THEN** the next checker round MUST NOT invoke the model

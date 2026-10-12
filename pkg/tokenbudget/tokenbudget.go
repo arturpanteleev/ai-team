@@ -31,6 +31,22 @@ const EventBudgetExceeded = "budget_exceeded"
 // maxManifestBytes ограничивает чтение одного attempt-манифеста.
 const maxManifestBytes = 1 << 20
 
+// CheckerUsageDir — каталог внутри run, где лежат записи расхода
+// агентов-проверяющих. У проверяющего нет собственного attempt-манифеста, а
+// модель он вызывает: без этой записи его токены шли бы мимо бюджетов.
+const CheckerUsageDir = "checker-usage"
+
+// CheckerUsageRecord — долговечная запись расхода одного запуска проверяющего.
+// Поля совпадают с attempt-манифестом, чтобы ledger читал их одинаково.
+type CheckerUsageRecord struct {
+	RunID      string                 `json:"run_id"`
+	Stage      string                 `json:"stage"`
+	Checker    string                 `json:"checker"`
+	StartedAt  time.Time              `json:"started_at"`
+	FinishedAt time.Time              `json:"finished_at"`
+	Usage      *workflow.AttemptUsage `json:"usage"`
+}
+
 // Usage — суммарный расход токенов. Unknown означает, что хотя бы одна
 // модельная попытка не сообщила подтверждённый расход: такую сумму нельзя
 // считать нижней границей и сравнивать с лимитом как точную.
@@ -138,12 +154,10 @@ func (l FilesystemLedger) TokensBetween(start, end time.Time) (Usage, error) {
 		if !run.IsDir() || evidence.ValidateRunID(run.Name()) != nil {
 			continue
 		}
-		attemptsDir := filepath.Join(l.RunsRoot, run.Name(), "attempts")
+		runDir := filepath.Join(l.RunsRoot, run.Name())
+		attemptsDir := filepath.Join(runDir, "attempts")
 		attempts, err := os.ReadDir(attemptsDir)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return Usage{}, fmt.Errorf("token ledger: run %s: %w", run.Name(), err)
 		}
 		for _, attempt := range attempts {
@@ -156,8 +170,59 @@ func (l FilesystemLedger) TokensBetween(start, end time.Time) (Usage, error) {
 			}
 			total = total.Add(usage)
 		}
+		checkers, err := checkerUsageBetween(runDir, start, end)
+		if err != nil {
+			return Usage{}, fmt.Errorf("token ledger: run %s: %w", run.Name(), err)
+		}
+		total = total.Add(checkers)
 	}
 	return total, nil
+}
+
+// RunCheckerUsage суммирует весь расход проверяющих одного run.
+func RunCheckerUsage(runDir string) (Usage, error) {
+	return checkerUsageBetween(runDir, time.Time{}, time.Unix(1<<62, 0))
+}
+
+func checkerUsageBetween(runDir string, start, end time.Time) (Usage, error) {
+	dir := filepath.Join(runDir, CheckerUsageDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Usage{}, nil
+	}
+	if err != nil {
+		return Usage{}, err
+	}
+	var total Usage
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		usage, err := manifestUsage(filepath.Join(dir, entry.Name()), start, end)
+		if err != nil {
+			return Usage{}, fmt.Errorf("checker usage %s: %w", entry.Name(), err)
+		}
+		total = total.Add(usage)
+	}
+	return total, nil
+}
+
+// WriteCheckerUsage сохраняет запись расхода проверяющего. Имя файла
+// уникально и запись не перезаписывается: повтор проверки — новая запись.
+func WriteCheckerUsage(runDir string, record CheckerUsageRecord) error {
+	dir, err := safeio.EnsureDir(runDir, CheckerUsageDir)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	name := fmt.Sprintf("%s-%s-%d.json", record.Stage, record.Checker, record.StartedAt.UTC().UnixNano())
+	if filepath.Base(name) != name {
+		return fmt.Errorf("checker usage record name %q is unsafe", name)
+	}
+	return safeio.WriteRegularFileNoFollow(filepath.Join(dir, name), data, 0o644)
 }
 
 func manifestUsage(path string, start, end time.Time) (Usage, error) {

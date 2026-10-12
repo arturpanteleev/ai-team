@@ -196,3 +196,39 @@ func TestFilesystemLedgerEmptyAndMisconfigured(t *testing.T) {
 		t.Fatal("unreadable runs root must be an error")
 	}
 }
+
+// Расход проверяющих лежит рядом с манифестами и входит в дневной итог и в
+// итог run.
+func TestCheckerUsageRecordsCountTowardLedger(t *testing.T) {
+	root := t.TempDir()
+	day := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	runDir := filepath.Join(root, "20261012T010000Z-dddddddd")
+	writeManifest(t, root, "20261012T010000Z-dddddddd", "d-1", manifestFixture{StartedAt: day, FinishedAt: day.Add(time.Hour), Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 3}})
+	records := []CheckerUsageRecord{
+		{Stage: "spec", Checker: "spec-checker", StartedAt: day.Add(2 * time.Hour), FinishedAt: day.Add(2 * time.Hour), Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 10, TokensOutput: 2}},
+		{Stage: "spec", Checker: "spec-checker", StartedAt: day.Add(25 * time.Hour), FinishedAt: day.Add(25 * time.Hour), Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 100}},
+	}
+	for _, record := range records {
+		if err := WriteCheckerUsage(runDir, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start, end := DayWindow(day)
+	daily, err := FilesystemLedger{RunsRoot: root}.TokensBetween(start, end)
+	if err != nil || daily != (Usage{Tokens: 15}) {
+		t.Fatalf("daily usage with checker = %+v err=%v", daily, err)
+	}
+	total, err := RunCheckerUsage(runDir)
+	if err != nil || total != (Usage{Tokens: 112}) {
+		t.Fatalf("run checker usage = %+v err=%v", total, err)
+	}
+	if err := WriteCheckerUsage(runDir, CheckerUsageRecord{Stage: "spec", Checker: "x", StartedAt: day.Add(3 * time.Hour), FinishedAt: day.Add(3 * time.Hour), Usage: &workflow.AttemptUsage{}}); err != nil {
+		t.Fatal(err)
+	}
+	if unknown, _ := RunCheckerUsage(runDir); !unknown.Unknown {
+		t.Fatal("checker without attested usage must make usage unknown")
+	}
+	if empty, err := RunCheckerUsage(t.TempDir()); err != nil || empty != (Usage{}) {
+		t.Fatalf("run without checker records = %+v err=%v", empty, err)
+	}
+}

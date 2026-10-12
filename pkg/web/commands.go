@@ -426,11 +426,31 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
 		return
 	}
+	budgetGrant := s.pendingBudgetStop(runID)
 	if err := s.controller.Resume(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Кто снял паузу — часть аудита: resume после остановки по бюджету задачи
+	// выдаёт ей ещё один бюджет того же размера.
+	s.appendRunEvent(runID, "run_resume_requested", time.Now().UTC(), map[string]any{
+		"actor_id": session.Principal.ActorID, "budget_allowance_granted": budgetGrant,
+	})
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
+}
+
+// pendingBudgetStop сообщает, стоит ли run на паузе по бюджету, ещё не
+// снятой человеком: последнее budget_exceeded новее последнего resume.
+func (s *Server) pendingBudgetStop(runID string) bool {
+	stop, err := s.store.LatestRunEvent(runID, "budget_exceeded")
+	if err != nil || stop == nil {
+		return false
+	}
+	resumed, err := s.store.LatestRunEvent(runID, "run_resume_requested")
+	if err != nil {
+		return false
+	}
+	return resumed == nil || resumed.Sequence < stop.Sequence
 }
 
 func (s *Server) handleRetryDelivery(w http.ResponseWriter, r *http.Request) {

@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // ErrTokenBudgetExceeded останавливает задачу перед модельной попыткой, когда
@@ -109,7 +111,8 @@ func (rs *runState) enforceTokenBudget(stage string) error {
 			return err
 		}
 		used := tokenbudget.Usage{Tokens: rs.usageTotal.TokensInput, Unknown: rs.usageUnknown}.
-			Add(tokenbudget.Usage{Tokens: rs.usageTotal.TokensOutput})
+			Add(tokenbudget.Usage{Tokens: rs.usageTotal.TokensOutput}).
+			Add(rs.checkerUsage)
 		allowance := used
 		if baseline > 0 && baseline <= used.Tokens {
 			allowance.Tokens = used.Tokens - baseline
@@ -172,4 +175,22 @@ func (rs *runState) enforceStageTokenBudget(stage string) error {
 		return nil
 	}
 	return rs.enforceTokenBudget(stage)
+}
+
+// recordCheckerUsage сохраняет расход агента-проверяющего: в счётчик задачи и
+// в долговечную запись run, которую видят resume и дневной ledger. Рантайм,
+// не сообщивший подтверждённый расход, делает расход неизвестным.
+func (rs *runState) recordCheckerUsage(stage, checker string, reporter any, startedAt, finishedAt time.Time) error {
+	usage := &workflow.AttemptUsage{}
+	if source, ok := reporter.(runtime.UsageReporter); ok {
+		if reported := source.Usage(); reported != nil && reported.Attested {
+			usage = &workflow.AttemptUsage{Attested: true, TokensInput: reported.TokensInput,
+				TokensOutput: reported.TokensOutput, CostUSD: reported.CostUSD}
+		}
+	}
+	rs.checkerUsage = rs.checkerUsage.Add(tokenbudget.AttemptUsage(usage))
+	return tokenbudget.WriteCheckerUsage(rs.evidence.RunDir(), tokenbudget.CheckerUsageRecord{
+		RunID: rs.runID, Stage: stage, Checker: checker,
+		StartedAt: startedAt.UTC(), FinishedAt: finishedAt.UTC(), Usage: usage,
+	})
 }

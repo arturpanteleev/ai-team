@@ -38,7 +38,10 @@ fields.
 The idea backlog is stored separately from tasks. Only an explicit human
 `ready` marks an item as available for auto pickup; `starting`, `started` and
 `failed` belong to the picker and cannot be set through the API. A `failed`
-item returns to the queue only when a human marks it `ready` again. See
+item returns to the queue only when a human marks it `ready` again.
+`POST /api/runs/{runID}/resume` records `run_resume_requested` with the
+resuming `actor_id` and `budget_allowance_granted`, which is true when the
+resume lifts a `budget_exceeded` stop and therefore grants a new task budget. See
 `auto_pickup` in the configuration reference for limits and events.
 
 Stage actions are authorized by the functions of the run's pinned template

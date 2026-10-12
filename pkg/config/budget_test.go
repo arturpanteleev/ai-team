@@ -155,6 +155,9 @@ func TestAutoPickupConfigLoadsAndRequiresTokenBudgets(t *testing.T) {
 		{"negative parallel limit", "auto_pickup:\n  max_parallel_tasks: -1\n", true},
 		{"bad poll interval", "auto_pickup:\n  poll_interval: soon\n", true},
 		{"negative daily budget", "budget:\n  max_daily_tokens: -5\n", true},
+		{"budget key typo", "budget:\n  max_daily_token: 1\n", true},
+		{"unknown auto_pickup key", "auto_pickup:\n  bogus: 1\n", true},
+		{"auto_pickup must be a mapping", "auto_pickup: true\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

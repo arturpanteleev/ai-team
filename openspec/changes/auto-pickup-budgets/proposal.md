@@ -39,4 +39,5 @@ per-day token budget that stop work instead of silently continuing.
 - Exactly at a limit the picker defers and the task stops; one below it
   proceeds.
 - The day boundary is 00:00 UTC; a restart does not reset the daily counter.
+- Checker agents (including grill rounds) are subject to the same budgets.
 - A budget stop is visible as an event and never continues on its own.

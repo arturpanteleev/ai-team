@@ -7,9 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/agent"
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
@@ -253,4 +257,150 @@ func TestDailyTokenBudgetWithoutLocalLedgerFailsClosed(t *testing.T) {
 	if ledger := rs.dailyLedger(); ledger != nil {
 		t.Fatalf("remote evidence must not fall back to a partial local ledger: %#v", ledger)
 	}
+}
+
+// Агент-проверяющий вызывает модель: перед ним бюджет проверяется так же,
+// как перед агентом этапа, а после resume проверка повторяется.
+func TestCheckerAgentStopsOnExhaustedTaskBudget(t *testing.T) {
+	cases := []struct {
+		name       string
+		limit      int64
+		checkerRun bool
+	}{
+		{"one below limit", 8, true},
+		{"exactly at limit", 7, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := env(t)
+			rt := newScripted()
+			rt.content["tech"] = map[string]string{"result": "# Решение\n\nок\n"}
+			rt.content["verifier"] = map[string]string{"verification": "# Отчёт проверки\n\n**Verdict:** PASSED\n"}
+			rt.usagePer = map[string]*runtime.Usage{
+				"tech":     {Attested: true, TokensInput: 5, TokensOutput: 2},
+				"verifier": {Attested: true, TokensInput: 3, TokensOutput: 1},
+			}
+			cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+			cfg.Budget = &config.BudgetConfig{MaxTaskTokens: tc.limit}
+			rt.onExec = func(agentName string, _ []runtime.Artifact) {
+				// Повтор этапа после resume расходует ноль токенов, чтобы
+				// выданного человеком бюджета хватило на проверяющего.
+				if agentName == "tech" {
+					rt.usagePer["tech"] = &runtime.Usage{Attested: true}
+				}
+			}
+			p := New(cfg, stageCheckRegistry(true), WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+			result, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+			if got := slices.Contains(rt.executed, "verifier"); got != tc.checkerRun {
+				t.Fatalf("checker executed=%t want %t (executed %v err %v)", got, tc.checkerRun, rt.executed, err)
+			}
+			runDir := filepath.Join(dir, ".ai-team", "runs", result.RunID)
+			if tc.checkerRun {
+				if err != nil {
+					t.Fatalf("run below budget: %v", err)
+				}
+				usage, usageErr := tokenbudget.RunCheckerUsage(runDir)
+				if usageErr != nil || usage != (tokenbudget.Usage{Tokens: 4}) {
+					t.Fatalf("checker usage must be durable: %+v err=%v", usage, usageErr)
+				}
+				return
+			}
+			assertBudgetPause(t, dir, result, err)
+			if strings.Contains(readEvents(t, dir), `"type":"check_started"`) {
+				t.Fatal("budget stop must precede check_started so the check reruns after resume")
+			}
+			resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: result.RunID, TargetDir: dir, ApproveGates: true})
+			// Resume повторяет этап с непройденной проверкой (обычная семантика
+			// resume), после чего проверяющий получает выданный бюджет.
+			if err != nil || rt.calls["verifier"] != 1 {
+				t.Fatalf("resume must run the pending check: result=%+v err=%v calls=%v", resumed, err, rt.calls)
+			}
+		})
+	}
+}
+
+// Пример из ревью: spec-checker в grill тратит токены каждым раундом. Его
+// расход входит в бюджет задачи, поэтому следующий раунд после исчерпания
+// не вызывает модель — и после рестарта процесса тоже.
+func TestGrillCheckerUsageCountsTowardTaskBudget(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nКритерии не проверяемы.\n"}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "**Question:** Как измерить критерий успеха?\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"tech":         {Attested: true, TokensInput: 2},
+		"spec-checker": {Attested: true, TokensInput: 10},
+	}
+	cfg := grillStageCheckConfig(3)
+	cfg.Budget = &config.BudgetConfig{MaxTaskTokens: 12}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runGrillPipeline(t, newGrillPipeline(cfg, rt, store), dir, ""); !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait for an answer: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionAnswer,
+		Comment: "Порог — рост конверсии на 20%.", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Новый Pipeline — модель рестарта: расход проверяющего читается с диска.
+	err = runGrillPipeline(t, newGrillPipeline(cfg, rt, store), dir, runID)
+	if !errors.Is(err, ErrTokenBudgetExceeded) || rt.calls["spec-checker"] != 1 {
+		t.Fatalf("second grill round must stop on the budget: err=%v checker calls=%d", err, rt.calls["spec-checker"])
+	}
+	events := budgetEvents(t, dir, runID)
+	if len(events) != 1 || events[0].Data["tokens_used"] != float64(12) {
+		t.Fatalf("budget_exceeded must include checker usage: %+v", events)
+	}
+}
+
+// Доставка и продолжение после delivery-плана модель не вызывают и бюджетом
+// не останавливаются.
+func TestDeliveryStageIgnoresExhaustedBudget(t *testing.T) {
+	cases := []struct {
+		name  string
+		agent string
+		def   string
+		want  bool
+	}{
+		{"delivery kind", "shipper", "name: shipper\nruntime: delivery\nkind: delivery\nmutation: external\noutputs: {}\n", false},
+		{"model agent", "shipper", "name: shipper\nruntime: agentcli\nprompt_file: prompt.md\nmutation: none\noutputs: {}\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := env(t)
+			cfg := &config.Config{Budget: &config.BudgetConfig{MaxTaskTokens: 1}}
+			p := New(cfg, agent.NewFS(fstest.MapFS{
+				tc.agent + "/def.yaml":  def(tc.def),
+				tc.agent + "/prompt.md": def("test"),
+			}))
+			store := &appendOnlyEvidence{runDir: filepath.Join(dir, ".ai-team", "runs", "run-budget")}
+			rs := &runState{p: p, runID: "run-budget", evidence: store, budgetConfig: cfg.Budget,
+				usageTotal: runtime.Usage{Attested: true, TokensInput: 5}}
+			got := rs.enforceStageTokenBudget(tc.agent)
+			if (got != nil) != tc.want || (len(store.events) == 1) != tc.want {
+				t.Fatalf("enforceStageTokenBudget = %v events=%v, want stop=%t", got, store.events, tc.want)
+			}
+		})
+	}
+}
+
+// appendOnlyEvidence — минимальный EvidenceStore для проверки решения бюджета
+// без полного run: остальные методы не вызываются.
+type appendOnlyEvidence struct {
+	EvidenceStore
+	runDir string
+	events []evidence.Event
+}
+
+func (e *appendOnlyEvidence) RunDir() string { return e.runDir }
+
+func (e *appendOnlyEvidence) Append(event evidence.Event) error {
+	e.events = append(e.events, event)
+	return nil
 }

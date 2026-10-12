@@ -97,6 +97,40 @@ type BudgetConfig struct {
 	MaxDailyTokens int64 `yaml:"max_daily_tokens,omitempty"`
 }
 
+// UnmarshalYAML отвергает неизвестные ключи: опечатка в имени лимита иначе
+// молча оставила бы задачу без бюджета.
+func (bc *BudgetConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"max_execution_time": true, "max_wall_time": true, "max_attempts": true,
+		"max_task_tokens": true, "max_daily_tokens": true,
+	}, "config: budget"); err != nil {
+		return err
+	}
+	type plain BudgetConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*bc = BudgetConfig(decoded)
+	return nil
+}
+
+// UnmarshalYAML отвергает неизвестные ключи секции auto_pickup.
+func (ac *AutoPickupConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"enabled": true, "max_parallel_tasks": true, "poll_interval": true,
+	}, "config: auto_pickup"); err != nil {
+		return err
+	}
+	type plain AutoPickupConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*ac = AutoPickupConfig(decoded)
+	return nil
+}
+
 // AutoPickupConfig включает автоматический подбор задач из бэклога: агент
 // берёт только элементы, явно помеченные человеком как готовые к автоподбору,
 // и запускает их в режиме auto. Включение требует обоих токен-бюджетов —

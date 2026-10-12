@@ -398,6 +398,7 @@ type runState struct {
 	budgetConfig              *config.BudgetConfig
 	usageTotal                runtime.Usage
 	usageUnknown              bool
+	checkerUsage              tokenbudget.Usage
 	attestationDigest         string
 }
 
@@ -1407,6 +1408,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume attempt manifests: %w", err)
 		}
 		rs.usageTotal = usage
+		// Расход проверяющих живёт в отдельных записях run и тоже
+		// восстанавливается с диска, а не из памяти прошлого процесса.
+		rs.checkerUsage, err = tokenbudget.RunCheckerUsage(evidenceStore.RunDir())
+		if err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume checker usage: %w", err)
+		}
 		// Preserve historical attempt pages across pauses and rebuild them from
 		// the immutable manifest, so report links remain populated after resume.
 		for _, previous := range rs.results {

@@ -368,3 +368,90 @@ func TestBacklogHTTPAPI(t *testing.T) {
 		t.Fatalf("write without session must be rejected: %d", unauthenticated.Code)
 	}
 }
+
+// N подборщиков (тиков или процессов на одной базе) на одном элементе:
+// захват выигрывает ровно один, задача создаётся ровно одна.
+func TestAutoPickupClaimRaceStartsExactlyOnce(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "web.db")
+	srv, controller := newPickupServer(t, dbPath, t.TempDir(), pickupPolicy(8, 100), &fixedLedger{}, pickupTestNow)
+	item := readyItem(t, srv, "Race")
+	const pickers = 8
+	results := make(chan bool, pickers)
+	start := make(chan struct{})
+	for index := 0; index < pickers; index++ {
+		go func() {
+			<-start
+			claimed, err := srv.store.ClaimBacklogItem(item.ID, pickupTestNow)
+			if err != nil {
+				t.Error(err)
+			}
+			results <- claimed
+		}()
+	}
+	close(start)
+	winners := 0
+	for index := 0; index < pickers; index++ {
+		if <-results {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners = %d, want exactly 1", winners)
+	}
+
+	// Тот же инвариант на полном шаге подборщика: параллельные тики
+	// запускают задачу один раз.
+	second := readyItem(t, srv, "RaceTick")
+	ticks := make(chan error, pickers)
+	begin := make(chan struct{})
+	for index := 0; index < pickers; index++ {
+		go func() {
+			<-begin
+			_, err := srv.runAutoPickup(context.Background())
+			ticks <- err
+		}()
+	}
+	close(begin)
+	for index := 0; index < pickers; index++ {
+		if err := <-ticks; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if controller.startCalls != 1 {
+		t.Fatalf("concurrent ticks started %d tasks, want 1", controller.startCalls)
+	}
+	if stored, _ := srv.store.GetBacklogItem(second.ID); stored.Status != autopickup.StatusStarted {
+		t.Fatalf("raced item = %+v", stored)
+	}
+}
+
+func TestResumeRecordsActorAndBudgetAllowance(t *testing.T) {
+	srv, controller := newPickupServer(t, ":memory:", t.TempDir(), autopickup.Policy{}, &fixedLedger{}, pickupTestNow)
+	if err := srv.store.CreatePipelineRun(&store.PipelineRun{RunID: "run-budget", Feature: "budget", Status: "stopped", StartedAt: pickupTestNow}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.AppendEventNext(&store.Event{RunID: "run-budget", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"task"}`}); err != nil {
+		t.Fatal(err)
+	}
+	resume := func() store.Event {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-budget/resume", ""))
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("resume: %d %s", response.Code, response.Body.String())
+		}
+		latest, err := srv.store.LatestRunEvent("run-budget", "run_resume_requested")
+		if err != nil || latest == nil {
+			t.Fatalf("run_resume_requested missing: %v", err)
+		}
+		return *latest
+	}
+	first := resume()
+	if controller.resumeRunID != "run-budget" || !strings.Contains(first.DataJSON, `"actor_id":"local-user"`) ||
+		!strings.Contains(first.DataJSON, `"budget_allowance_granted":true`) {
+		t.Fatalf("first resume after budget stop = %+v", first)
+	}
+	if second := resume(); !strings.Contains(second.DataJSON, `"budget_allowance_granted":false`) {
+		t.Fatalf("resume without a new budget stop must not claim a grant: %+v", second)
+	}
+}

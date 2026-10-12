@@ -916,6 +916,91 @@ func TestFlowMetricsBreaksDownStagesStatesAndSubscriptionShare(t *testing.T) {
 	}
 }
 
+func TestFlowMetricsJSONSubscriptionEstimatesStayFinite(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Usage = &config.UsageConfig{MonthlySubscriptionAmount: 1e308, MonthlySubscriptionCurrency: "USD"}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	startedAt := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(time.Hour)
+	const runID = "flow-huge-subscription"
+	run := &store.PipelineRun{RunID: runID, Feature: "large estimate", Status: "completed", StartedAt: startedAt, CompletedAt: &finishedAt}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for index, attemptID := range []string{"attempt-one", "attempt-two"} {
+		attemptFinished := startedAt.Add(time.Duration(index+1) * time.Minute)
+		stage := store.Stage{PipelineRunID: run.ID, AttemptID: attemptID, StageIndex: index + 1, AgentName: "implementation",
+			Status: "passed", Execution: "agent", Decision: "approved", Outcome: "passed", StartedAt: startedAt.Add(time.Duration(index) * time.Minute),
+			CompletedAt: &attemptFinished, DurationMs: 60_000}
+		if err := srv.store.CreateStage(&stage); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.store.UpdateStage(&stage); err != nil {
+			t.Fatal(err)
+		}
+		attemptDir := filepath.Join(srv.runRoot, runID, "attempts", attemptID)
+		if err := os.MkdirAll(attemptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest, marshalErr := json.Marshal(evidence.AttemptManifest{RunID: runID, AttemptID: attemptID,
+			Usage: &workflow.AttemptUsage{Attested: true, TokensInput: 12, TokensOutput: 8, CostUSD: 0.01}})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if err := os.WriteFile(filepath.Join(attemptDir, "manifest.json"), manifest, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	envelope := metrics.UsageEnvelope{SchemaVersion: metrics.SchemaVersion, RunID: runID, Feature: "large estimate", StartedAt: startedAt,
+		FinishedAt: finishedAt, UsageReported: true, TokensInput: 12, TokensOutput: 8, Outcome: "completed"}
+	runDir := filepath.Join(controlDir, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envelopeData, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "usage.json"), envelopeData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := newLoopbackRequest(http.MethodGet, "/api/metrics/flow?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", nil)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	var result flowMetricsResponse
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+		t.Fatalf("flow metrics JSON: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if result.Usage.SubscriptionShareEstimate == nil || *result.Usage.SubscriptionShareEstimate != 1e308 {
+		t.Fatalf("flow subscription estimate=%v; want finite 1e308", result.Usage.SubscriptionShareEstimate)
+	}
+	if len(result.ByStage) != 1 || result.ByStage[0].SubscriptionShareEstimate != nil {
+		t.Fatalf("overflowing stage estimate should be unavailable, got %+v", result.ByStage)
+	}
+}
+
 func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 	if flowMetricsRaceBuild || testing.CoverMode() != "" {
 		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")

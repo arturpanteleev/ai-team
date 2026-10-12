@@ -1468,7 +1468,12 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 					break
 				}
 				tokens := envelope.TokensInput + envelope.TokensOutput
-				totalEstimate += cfg.Usage.MonthlySubscriptionAmount * float64(tokens) / float64(denominator)
+				var estimateOK bool
+				totalEstimate, estimateOK = addSubscriptionShareEstimate(totalEstimate, cfg.Usage.MonthlySubscriptionAmount, tokens, denominator)
+				if !estimateOK {
+					estimateComplete = false
+					break
+				}
 			}
 			if estimateComplete {
 				response.Usage.SubscriptionShareEstimate = &totalEstimate
@@ -1486,7 +1491,12 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 						stageEstimateComplete = false
 						break
 					}
-					stageEstimate += cfg.Usage.MonthlySubscriptionAmount * float64(tokens) / float64(denominator)
+					var estimateOK bool
+					stageEstimate, estimateOK = addSubscriptionShareEstimate(stageEstimate, cfg.Usage.MonthlySubscriptionAmount, tokens, denominator)
+					if !estimateOK {
+						stageEstimateComplete = false
+						break
+					}
 				}
 				if stageEstimateComplete {
 					stage.SubscriptionShareEstimate = &stageEstimate
@@ -1503,6 +1513,18 @@ func (s *Server) buildFlowMetrics(from, to time.Time) (flowMetricsResponse, erro
 	}
 	sort.Slice(response.ByStage, func(i, j int) bool { return response.ByStage[i].Stage < response.ByStage[j].Stage })
 	return response, nil
+}
+
+func addSubscriptionShareEstimate(total, monthlyAmount float64, tokens, denominator int64) (float64, bool) {
+	if total < 0 || monthlyAmount < 0 || tokens < 0 || denominator <= 0 || math.IsNaN(total) || math.IsInf(total, 0) {
+		return total, false
+	}
+	share := float64(tokens) / float64(denominator)
+	contribution := monthlyAmount * share
+	if math.IsNaN(contribution) || math.IsInf(contribution, 0) || contribution > math.MaxFloat64-total {
+		return total, false
+	}
+	return total + contribution, true
 }
 
 func readTaskAttemptManifest(s *Server, runID, attemptID string) (evidence.AttemptManifest, error) {

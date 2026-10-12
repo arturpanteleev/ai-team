@@ -102,8 +102,8 @@ function allowedActions(template, stageID, phase, pending) {
     if (pending.kind === 'input' && pending.trigger === 'human_input') {
       actions.push('take', 'results')
       if (stage?.agent) actions.push('executor', 'run-agent')
-    } else if (pending.kind === 'questions') {
-      actions.push('grill/answer', 'grill/done')
+    } else if (pending.kind === 'grill_questions') {
+      actions.push('grill/answer', 'grill/new-version', 'grill/done')
     } else if (pending.trigger === 'delivery_plan') {
       actions.push('plan/approve')
     } else {
@@ -120,9 +120,9 @@ function allowedActions(template, stageID, phase, pending) {
 function pendingApproval(runID, currentStage, pending) {
   const base = { run_id: runID, quorum: 'any', status: 'pending' }
   switch (pending) {
-    case 'grill': return { ...base, id: 'grill-1', kind: 'questions', attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'analysis',
-      trigger: 'graph_outcome:blocked', subject_hash: 'd'.repeat(64), required_roles: ['product_owner'],
-      actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Какой сегмент проверяем первым?' } }
+    case 'grill': return { ...base, id: 'grill-1', kind: 'grill_questions', attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'analysis',
+      trigger: 'grill_questions', subject_hash: 'd'.repeat(64), required_roles: ['product_owner'],
+      actions: ['answer', 'new_version', 'done'], payload: { kind: 'grill_questions', round: 1, markdown: 'Какой сегмент проверяем первым?' } }
     case 'check': return { ...base, id: 'check-1', kind: 'approve', attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'qa',
       trigger: 'stage_check', subject_hash: 'c'.repeat(64), required_roles: ['architect'], actions: ['approve', 'override_approve'] }
     case 'plan': return { ...base, id: 'plan-1', kind: 'approve', attempt_id: 'delivery-attempt', from_stage: 'delivery', to_stage: 'delivery',

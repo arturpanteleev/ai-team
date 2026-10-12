@@ -24,6 +24,12 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           >
             Задачи
           </NavLink>
+          <NavLink
+            to="/tasks"
+            className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}
+          >
+            Доска
+          </NavLink>
           <NavLink to="/template" className={({ isActive }) => `${styles.navLink} ${isActive ? styles.active : ''}`}>
             Шаблон
           </NavLink>

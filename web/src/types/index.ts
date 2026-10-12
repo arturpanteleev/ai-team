@@ -253,3 +253,56 @@ export interface WsEvent {
   timestamp: string;
   data: Record<string, unknown>;
 }
+
+// Элемент GET /api/runs: карточка доски/списка задач (B-70 task API).
+export interface TaskRun {
+  id: number;
+  run_id: string;
+  feature: string;
+  task?: string;
+  status: PipelineStatus;
+  phase?: string;
+  current_stage?: string;
+  current_function?: string;
+  executor?: 'human' | 'agent';
+  executor_agent?: string;
+  mode?: 'manual' | 'auto';
+  allowed_actions: string[];
+  started_at: string;
+  completed_at?: string;
+  stage_entered_at?: string;
+  warnings: number;
+  external_links?: string[];
+}
+
+export interface TaskRunsResponse {
+  runs: TaskRun[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TaskRunFilters {
+  status?: string;
+  stage?: string;
+  function?: string;
+  mode?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TemplatesResponse {
+  templates: TemplateValidation[];
+  active_template: string;
+  versions: TemplateVersion[];
+}
+
+export interface CreateTaskRequest {
+  feature: string;
+  task?: string;
+  title?: string;
+  idea?: string;
+  template?: string;
+  mode?: 'manual' | 'auto';
+  external_links?: string[];
+}

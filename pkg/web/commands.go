@@ -391,7 +391,8 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 			writeJSONAPIError(w, http.StatusServiceUnavailable, "task create options are not connected to the task controller", "controller_action_unavailable")
 			return
 		}
-		runID, err = controller.StartTask(r.Context(), command, admit)
+		runID, err = controller.StartTask(r.Context(), command.Feature, command.Task, command.Title,
+			command.Idea, command.Mode, command.ExternalLinks, admit)
 	} else {
 		runID, err = s.controller.StartWithAdmission(command.Feature, command.Task, admit)
 	}

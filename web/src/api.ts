@@ -1,4 +1,4 @@
-import type { PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 
 const API_BASE = '/api';
 
@@ -11,7 +11,21 @@ function expireSession() {
 }
 
 async function responseError(response: Response, context = 'API error'): Promise<Error> {
-  const message = (await response.text()).trim();
+  const raw = (await response.text()).trim();
+  let message = raw;
+  if (response.headers.get('content-type')?.includes('application/json')) {
+    try {
+      const parsed = JSON.parse(raw) as { error?: string; allowed_actions?: string[] };
+      if (parsed.error) {
+        message = parsed.error;
+        if (Array.isArray(parsed.allowed_actions) && parsed.allowed_actions.length > 0) {
+          message += ` Доступные действия: ${parsed.allowed_actions.join(', ')}.`;
+        }
+      }
+    } catch {
+      // keep raw body
+    }
+  }
   if (response.status === 401) {
     expireSession();
     return new Error('Сессия истекла. Войдите снова.');
@@ -116,7 +130,7 @@ async function getCsrfToken(): Promise<string> {
   return csrfToken;
 }
 
-async function command<T>(url: string, body?: unknown): Promise<T> {
+async function command<T>(url: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
   const token = await getCsrfToken();
   const response = await fetch(`${API_BASE}${url}`, {
     method: 'POST',
@@ -124,6 +138,7 @@ async function command<T>(url: string, body?: unknown): Promise<T> {
     headers: {
       'Content-Type': 'application/json',
       'X-CSRF-Token': token,
+      ...extraHeaders,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -225,4 +240,26 @@ export function createArtifactRevision(
   value: { artifact_path: string; base_revision?: string; base_sha256: string; content: string; comment?: string },
 ): Promise<ArtifactRevision> {
   return command(`/runs/${encodeURIComponent(runId)}/artifact-revisions`, value);
+}
+
+// GET /api/runs: фильтрованный список задач (этап, функция, состояние, режим).
+export function getTaskRuns(filters: TaskRunFilters = {}): Promise<TaskRunsResponse> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  }
+  if (!query.has('limit')) query.set('limit', '50');
+  if (!query.has('offset')) query.set('offset', '0');
+  return fetchJson(`/runs?${query.toString()}`);
+}
+
+// GET /api/templates: активный шаблон проекта и его этапы для доски.
+export function getTemplatesList(): Promise<TemplatesResponse> {
+  return fetchJson('/templates');
+}
+
+// POST /api/runs: создание задачи. Idempotency-Key защищает от двойного
+// создания при повторе сетевого сбоя — ключ передаёт вызывающий код.
+export function createTask(payload: CreateTaskRequest, idempotencyKey: string): Promise<{ run_id: string; template_version?: string }> {
+  return command('/runs', payload, { 'Idempotency-Key': idempotencyKey });
 }

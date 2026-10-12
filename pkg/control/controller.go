@@ -116,7 +116,7 @@ func New(engine runEngine, target string, options ...Option) (*Controller, error
 }
 
 func (c *Controller) Start(feature, task string) (string, error) {
-	return c.start(feature, task, nil)
+	return c.start(feature, task, "", nil)
 }
 
 // StartWithAdmission persists the caller's visible admission record before a
@@ -126,10 +126,44 @@ func (c *Controller) StartWithAdmission(feature, task string, admit func(runID s
 	if admit == nil {
 		return "", errors.New("admission callback обязателен")
 	}
-	return c.start(feature, task, admit)
+	return c.start(feature, task, "", admit)
 }
 
-func (c *Controller) start(feature, task string, admit func(runID string) error) (string, error) {
+// runModeEngine is implemented by engines that own run-mode pinning (currently
+// pipeline.RunEngine). Controllers built on lighter engines keep auto mode
+// failing closed instead of silently running manual mode.
+type runModeEngine interface {
+	SupportsRunMode(mode string) bool
+}
+
+// StartTask admits a browser-created task with its metadata: the idea text
+// becomes the run description consumed by the intent stage brief, and auto
+// mode is handed to the engine only when it owns run-mode pinning.
+func (c *Controller) StartTask(_ context.Context, feature, task, _, idea, mode string, _ []string, admit func(runID string) error) (string, error) {
+	if mode != "" && mode != "manual" && mode != "auto" {
+		return "", fmt.Errorf("unsupported run mode %q", mode)
+	}
+	description := strings.TrimSpace(idea)
+	if description == "" {
+		description = task
+	}
+	runMode := mode
+	if runMode == "manual" {
+		runMode = ""
+	}
+	if runMode == "auto" {
+		engine, ok := c.engine.(runModeEngine)
+		if !ok || !engine.SupportsRunMode("auto") {
+			return "", errors.New("auto mode не поддерживается этим режимом запуска")
+		}
+	}
+	if admit == nil {
+		return "", errors.New("admission callback обязателен")
+	}
+	return c.start(feature, description, runMode, admit)
+}
+
+func (c *Controller) start(feature, task, mode string, admit func(runID string) error) (string, error) {
 	if !workflow.ValidFeature(feature) || strings.TrimSpace(task) == "" {
 		return "", errors.New("feature и непустой task обязательны")
 	}
@@ -162,7 +196,7 @@ func (c *Controller) start(feature, task string, admit func(runID string) error)
 	c.mu.Unlock()
 	go c.run(runID, ctx, lock, func(ctx context.Context) (pipeline.RunResult, error) {
 		return c.engine.Start(ctx, pipeline.RunConfig{
-			RunID: runID, Feature: feature, TaskDesc: task, TargetDir: c.target,
+			RunID: runID, Feature: feature, TaskDesc: task, TargetDir: c.target, Mode: mode,
 			WorkspaceLock: lock, CancelRequested: func() bool { return cancellationRequested(c.target, runID, active.cancelRequested) },
 		})
 	})

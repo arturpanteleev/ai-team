@@ -152,6 +152,144 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 	}
 }
 
+type taskCreateCapturingController struct {
+	*fakeRunController
+	feature, task, title, idea, mode string
+	externalLinks                    []string
+}
+
+func (f *taskCreateCapturingController) StartTask(_ context.Context, feature, task, title, idea, mode string,
+	externalLinks []string, admit func(string) error,
+) (string, error) {
+	f.feature, f.task, f.title, f.idea, f.mode, f.externalLinks = feature, task, title, idea, mode, externalLinks
+	if err := admit("run-created"); err != nil {
+		return "", err
+	}
+	return f.Start(feature, task)
+}
+
+func TestTaskCreateOptionsReachController(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &taskCreateCapturingController{fakeRunController: &fakeRunController{}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	body := `{"feature":"board-task","task":"legacy text","title":"Новая задача","idea":"Текст идеи","mode":"auto","external_links":["JIRA-1 https://tracker.example/JIRA-1"]}`
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", body)
+	request.Header.Set("Idempotency-Key", "create-full-task")
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || controller.startCalls != 1 {
+		t.Fatalf("task create with metadata: status=%d calls=%d body=%s", response.Code, controller.startCalls, response.Body.String())
+	}
+	if controller.title != "Новая задача" || controller.idea != "Текст идеи" || controller.mode != "auto" ||
+		len(controller.externalLinks) != 1 || controller.externalLinks[0] != "JIRA-1 https://tracker.example/JIRA-1" {
+		t.Fatalf("controller metadata: title=%q idea=%q mode=%q links=%v", controller.title, controller.idea, controller.mode, controller.externalLinks)
+	}
+	run := httptest.NewRecorder()
+	srv.router.ServeHTTP(run, authorizedRequest(t, srv, http.MethodGet, "/api/runs/run-created", ""))
+	if run.Code != http.StatusOK || !strings.Contains(run.Body.String(), `"config_snapshot"`) {
+		t.Fatalf("created task details: status=%d body=%s", run.Code, run.Body.String())
+	}
+}
+
+func TestTaskListCarriesStageWarningsAndLinks(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateYAML, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), templateYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun("run-board", "run-board"); err != nil {
+		t.Fatal(err)
+	}
+	recorder := NewStoreRecorder(srv.store)
+	recorder.RunStarted("run-board", "feature-board",
+		`{"task":"board idea","mode":"manual","external_links":["JIRA-7 https://tracker.example/JIRA-7"]}`, started)
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageEntered := started.Add(2 * time.Minute).Truncate(time.Second)
+	if err := stateStore.Create(lifecycle.State{
+		RunID: "run-board", Feature: "feature-board", TargetDir: target, Task: "board idea",
+		Phase: lifecycle.PhaseResumable, NextStage: "acceptance",
+		ConfigSHA256:   strings.Repeat("a", 64),
+		WorkflowSHA256: strings.Repeat("b", 64),
+		CreatedAt:      stageEntered,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	warningAt := stageEntered.Add(time.Minute)
+	if err := srv.store.AppendEventNext(&store.Event{RunID: "run-board", Type: "check_overridden",
+		Timestamp: warningAt, DataJSON: `{"severity":"warning"}`}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, newLoopbackRequest(http.MethodGet, "/api/runs?limit=10", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("task list: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Runs []taskRunListItem `json:"runs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var found *taskRunListItem
+	for index := range payload.Runs {
+		if payload.Runs[index].RunID == "run-board" {
+			found = &payload.Runs[index]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("run-board отсутствует в списке: %s", response.Body.String())
+	}
+	if found.ID == 0 || found.Warnings != 1 {
+		t.Fatalf("list item identity and warnings: id=%d warnings=%d", found.ID, found.Warnings)
+	}
+	if found.StageEnteredAt == nil || !found.StageEnteredAt.Equal(stageEntered) {
+		t.Fatalf("stage entry time: %v (want %v)", found.StageEnteredAt, stageEntered)
+	}
+	if len(found.ExternalLinks) != 1 || found.ExternalLinks[0] != "JIRA-7 https://tracker.example/JIRA-7" {
+		t.Fatalf("external links: %v", found.ExternalLinks)
+	}
+	if found.CurrentStage != "acceptance" {
+		t.Fatalf("current stage: %q", found.CurrentStage)
+	}
+}
+
 func TestTaskActionInvalidStateReturnsAllowedActions(t *testing.T) {
 	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
 	verifier, err := NewLocalAuthenticator(token)

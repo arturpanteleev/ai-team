@@ -1,0 +1,135 @@
+.container {
+  width: min(100%, 720px);
+  padding: 24px;
+  margin: 0 auto;
+}
+
+.state {
+  padding: 40px 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.header {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.header h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 24px;
+  font-weight: 650;
+}
+
+.header p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.form {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.form label:not(.modeOption) {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.form input,
+.form select,
+.form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+}
+
+.form textarea {
+  resize: vertical;
+}
+
+.modes {
+  display: grid;
+  gap: 8px;
+  margin: 6px 0 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.modes legend {
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.modeOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.modeOption input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.modeOption span {
+  display: grid;
+  gap: 2px;
+}
+
+.modeOption small {
+  color: var(--text-muted);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.actions button {
+  min-height: 40px;
+  padding: 8px 18px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.status {
+  color: var(--success-fg);
+  font-size: 13px;
+}
+
+.error {
+  margin: 4px 0 0;
+  color: var(--danger-fg);
+  font-size: 13px;
+}

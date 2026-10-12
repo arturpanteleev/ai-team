@@ -105,3 +105,8 @@ basis.
 
 The flow metrics calculation is expected to complete in 300 ms or less for
 1000 recorded runs.
+
+The `/observability` dashboard page reads these routes. Its period picker
+selects inclusive calendar days and sends `from=<first day>` and
+`to=<day after last day>` as `YYYY-MM-DD`, so the API window `[from, to)` covers
+whole UTC days. CSV export uses the same period as the displayed metrics.

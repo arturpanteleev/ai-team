@@ -31,6 +31,15 @@ fields.
 | `GET /api/events?after=&limit=&warnings=&run_id=&order=&before=` | Global event feed |
 | `GET /api/metrics/flow?from=&to=&run_id=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=&run_id=` | Flow metrics CSV |
+| `GET /api/backlog` | Draft idea backlog and the instance auto-pickup policy |
+| `POST /api/backlog` | Add an idea (`title`, `idea`, `feature`); always created as `draft` |
+| `POST /api/backlog/{itemID}/status` | Set `draft`, `ready` or `discarded` (human transitions only) |
+
+The idea backlog is stored separately from tasks. Only an explicit human
+`ready` marks an item as available for auto pickup; `starting`, `started` and
+`failed` belong to the picker and cannot be set through the API. A `failed`
+item returns to the queue only when a human marks it `ready` again. See
+`auto_pickup` in the configuration reference for limits and events.
 
 Stage actions are authorized by the functions of the run's pinned template
 (B-82). `take`, `executor`, `run-agent`, `results`/`submit`, `grill/*`,

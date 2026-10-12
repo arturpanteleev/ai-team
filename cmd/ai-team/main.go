@@ -24,6 +24,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/artifactstore"
+	"github.com/arturpanteleev/ai-team/pkg/autopickup"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
 	"github.com/arturpanteleev/ai-team/pkg/cicd"
 	"github.com/arturpanteleev/ai-team/pkg/ciimport"
@@ -2263,6 +2264,7 @@ func cmdWeb() {
 	}
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
+		web.WithAutoPickup(autopickup.PolicyFromConfig(cfg), cfg.AutoPickup.EffectivePollInterval(), nil),
 	}
 	if cfg.Tracker != nil && cfg.Tracker.Jira != nil {
 		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)

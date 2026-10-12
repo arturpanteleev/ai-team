@@ -150,6 +150,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 					return refineErr
 				}
 			}
+			if err := rs.enforceStageTokenBudget(current); err != nil {
+				if cleanup != nil {
+					cleanup()
+				}
+				return err
+			}
 			result = rs.runStage(ctx, index, current)
 			if cleanup != nil {
 				cleanup()

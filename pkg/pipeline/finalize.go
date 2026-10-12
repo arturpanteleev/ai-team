@@ -53,7 +53,13 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		}
 		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
 	}
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) {
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) || errors.Is(runErr, ErrTokenBudgetExceeded) {
+		pauseData := map[string]any{"status": status, "next_stage": rs.lifecycleState.NextStage}
+		if errors.Is(runErr, ErrTokenBudgetExceeded) {
+			// Пауза по бюджету — остановка до решения человека, а не сбой.
+			status = string(workflow.RunStopped)
+			pauseData["status"], pauseData["reason"] = status, pauseReasonBudgetExceeded
+		}
 		if err := report.GenerateFinalReport(
 			rs.reportsDir, rs.runCfg.Feature, rs.results, rs.startTime, endTime,
 			rs.task.ArtifactRoot, status,
@@ -61,8 +67,7 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 			runErr = errors.Join(runErr, fmt.Errorf("paused report: %w", err))
 		}
 		if err := rs.evidence.Append(evidence.Event{
-			Type: "run_paused", Timestamp: endTime.UTC(),
-			Data: map[string]any{"status": status, "next_stage": rs.lifecycleState.NextStage},
+			Type: "run_paused", Timestamp: endTime.UTC(), Data: pauseData,
 		}); err != nil {
 			runErr = errors.Join(runErr, err)
 		}

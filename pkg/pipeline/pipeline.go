@@ -32,6 +32,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
@@ -146,6 +147,8 @@ type Pipeline struct {
 	questionAnswerInputs    QuestionAnswerInputProvider
 	controllerReadDenyPaths []string
 	reportsDir              string
+	tokenLedger             tokenbudget.Ledger
+	now                     func() time.Time
 }
 
 type Option func(*Pipeline)

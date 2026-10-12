@@ -24,7 +24,7 @@ pkg/
 ├── safeio/          no-follow filesystem primitives (symlink rejection)
 ├── process/         process-group supervision и kill (Unix/Windows/plan9)
 ├── eval/             независимая LLM-оценка артефактов
-├── notifier/         уведомления о событиях pipeline
+├── notifier/         уведомления: консоль, webhook, Slack, e-mail
 ├── tracker/          one-way task tracker adapters
 ├── report/           HTML-отчёты по завершённым run
 ├── ui/               консольный вывод (цвет, progress bar)
@@ -166,6 +166,19 @@ task detail и результат этапа. Отправка идёт в от�
 необработанные события. Если Jira приняла комментарий, а процесс завершился до
 сохранения курсора, после restart возможен повтор комментария; общей транзакции
 между SQLite и Jira нет.
+
+### Уведомления
+
+`pkg/notifier` кроме консольного `Notifier` содержит внешние каналы
+(`Channel`: webhook, Slack incoming webhook, SMTP e-mail), подписки по типу
+события и функции этапа и `Dispatcher`. Web server читает события из того же
+durable SQLite cursor, что и трекер (отдельный курсор `notifier`), и передаёт
+их `Dispatcher`. Журнал `notification_deliveries` фиксирует пару «канал —
+событие» после отправки или после записи `integration_error`, поэтому replay
+после переподключения не дублирует уведомление, а сбой одного канала не
+блокирует остальные. Если не удалось сохранить журнал или предупреждение,
+событие остаётся непрочитанным и повторяется. Ошибки каналов не содержат URL и
+учётных данных.
 
 Deferred-гейты (APF-1): для стандартного и fast профилей forward-gate рёбра
 помечаются `deferred: true` — переход не паузит и не решается по отдельности,

@@ -221,7 +221,6 @@ export function TaskDetail() {
       result: currentStage.result,
       ...(currentStage.result === 'md' ? { content: resultContent } : {}),
       ...(currentStage.result === 'link' ? { url: resultURL, link_kind: currentStage.link_kind ?? resultLinkKind } : {}),
-      ...(currentStage.result === 'approve' ? {} : {}),
       ...(resultNote.trim() ? { note: resultNote.trim() } : {}),
       ...(resultDescription.trim() ? { description: resultDescription.trim() } : {}),
     }));
@@ -354,6 +353,7 @@ export function TaskDetail() {
             onDone={() => void perform('Грилл завершён', () => finishTaskGrill(run.run_id, currentStage.id))} />}
           {allowed.has('plan/approve') && pending?.trigger === 'delivery_plan' && <div className={styles.planApproval}>
             <p>План доставки ожидает подтверждения. Хеш: <code>{pending.subject_hash}</code></p>
+            <DeliveryPlanPayload payload={pending.payload} />
             <button type="button" disabled={working} onClick={() => void perform('План подтверждён', () =>
               approveTaskDeliveryPlan(run.run_id, pending.subject_hash))}>Подтвердить план</button>
           </div>}
@@ -538,4 +538,42 @@ function ResultValue({ revision }: { revision: TaskResultRevision }) {
     return <a href={revision.content} target="_blank" rel="noreferrer">{revision.content}</a>;
   }
   return <pre>{revision.content || 'Пустой результат'}</pre>;
+}
+
+const deliveryPlanFields: Array<[key: string, label: string]> = [
+  ['branch', 'Ветка'],
+  ['base_branch', 'Базовая ветка'],
+  ['remote', 'Remote'],
+  ['remote_url', 'Адрес remote'],
+  ['commit_message', 'Сообщение коммита'],
+  ['pr_title', 'Заголовок PR'],
+];
+
+function DeliveryPlanPayload({ payload }: { payload: unknown }) {
+  if (payload === undefined || payload === null) {
+    return <p role="alert">Содержимое плана недоступно: перед подтверждением проверьте план через CLI.</p>;
+  }
+  const plan = typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const text = (key: string) => (typeof plan[key] === 'string' ? plan[key] as string : '');
+  const files = Array.isArray(plan.files) ? plan.files.filter((file): file is string => typeof file === 'string') : [];
+  const fields = deliveryPlanFields.filter(([key]) => text(key));
+  return (
+    <section className={styles.planContent} aria-label="Содержимое плана доставки">
+      {fields.length > 0 && <dl>
+        {fields.map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{text(key)}</dd></div>)}
+      </dl>}
+      {files.length > 0 && <>
+        <h4>Файлы ({files.length})</h4>
+        <ul>{files.map((file) => <li key={file}><code>{file}</code></li>)}</ul>
+      </>}
+      {text('pr_body') && <>
+        <h4>Описание PR</h4>
+        <pre className={styles.planText}>{text('pr_body')}</pre>
+      </>}
+      <details open={fields.length === 0 && files.length === 0}>
+        <summary>План целиком (JSON)</summary>
+        <pre className={styles.planText}>{JSON.stringify(payload, null, 2)}</pre>
+      </details>
+    </section>
+  );
 }

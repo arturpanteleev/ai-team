@@ -66,34 +66,77 @@ function revision(id, content, revisionNumber) {
   }
 }
 
-function detail(mode, currentStage, allowed, status = 'waiting_for_approval', pending = null) {
-  const runID = mode === 'auto' ? 'run-auto' : 'run-manual'
-  const stageDefs = mode === 'auto' ? [
-    { id: 'build', title: 'Сборка', function: 'developer', result: 'md', executor: 'agent', agent: 'coder' },
-    { id: 'verify', title: 'Проверка', function: 'qa', result: 'md', executor: 'agent', agent: 'tester' },
-  ] : [
+const manualTemplate = {
+  stages: [
     { id: 'idea', title: 'Идея', function: 'product_owner', result: 'md', executor: 'human', skippable: true },
     { id: 'analysis', title: 'Анализ', function: 'analyst', result: 'md', executor: 'agent', agent: 'analyst' },
     { id: 'qa', title: 'Проверка', function: 'qa', result: 'md', executor: 'human', skippable: true },
     { id: 'delivery', title: 'План доставки', function: 'release_manager', result: 'approve', executor: 'human' },
-  ]
-  const approval = pending === 'grill' ? {
-    id: 'grill-1', run_id: runID, attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'analysis',
-    trigger: 'graph_outcome:blocked', subject_hash: 'd'.repeat(64), required_roles: ['product_owner'], quorum: 'any',
-    actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Какой сегмент проверяем первым?' }, status: 'pending',
-  } : pending === 'check' ? {
-    id: 'check-1', run_id: runID, attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'qa',
-    trigger: 'stage_check', subject_hash: 'c'.repeat(64), required_roles: ['architect'], quorum: 'any',
-    actions: ['approve', 'override_approve'], status: 'pending',
-  } : pending === 'plan' ? {
-    id: 'plan-1', run_id: runID, attempt_id: 'delivery-attempt', from_stage: 'delivery', to_stage: 'delivery',
-    trigger: 'delivery_plan', subject_hash: 'e'.repeat(64), required_roles: ['release_manager'], quorum: 'any',
-    actions: ['approve'], payload: { kind: 'delivery_plan', markdown: 'Выкладываем после подтверждения.' }, status: 'pending',
-  } : pending === 'input' ? {
-    id: 'input-1', run_id: runID, attempt_id: '', from_stage: currentStage, to_stage: currentStage,
-    trigger: 'human_input', subject_hash: 'a'.repeat(64), required_roles: ['product_owner'], quorum: 'any',
-    actions: ['submit'], status: 'pending',
-  } : null
+  ],
+  returns: [{ from: 'qa', to: 'idea' }],
+}
+
+const autoTemplate = {
+  stages: [
+    { id: 'build', title: 'Сборка', function: 'developer', result: 'md', executor: 'agent', agent: 'coder' },
+    { id: 'verify', title: 'Проверка', function: 'qa', result: 'md', executor: 'agent', agent: 'tester' },
+  ],
+  returns: [],
+}
+
+const deliveryPlan = {
+  schema_version: 1, branch: 'ai-team/run-manual', base_branch: 'main', remote: 'origin',
+  remote_url: 'https://git.example/team/product.git', files: ['docs/idea.md', 'docs/analysis.md'],
+  commit_message: 'docs: ручной маршрут', pr_title: 'Ручной маршрут', pr_body: 'Выкладываем после подтверждения.',
+}
+
+// Mirrors Server.taskAllowedActions (pkg/web/task_api.go). The same templates
+// and phase cases are pinned by TestTaskAllowedActionsByPhaseMatchesBrowserContract
+// in pkg/web/task_allowed_actions_test.go; change both together.
+function allowedActions(template, stageID, phase, pending) {
+  const actions = []
+  if (!stageID) return actions
+  const stage = template.stages.find((value) => value.id === stageID)
+  if (phase === 'resumable' && stage?.agent) actions.push('run-agent')
+  if (phase === 'waiting' && pending?.status === 'pending') {
+    if (pending.kind === 'input' && pending.trigger === 'human_input') {
+      actions.push('take', 'results')
+      if (stage?.agent) actions.push('executor', 'run-agent')
+    } else if (pending.kind === 'questions') {
+      actions.push('grill/answer', 'grill/done')
+    } else if (pending.trigger === 'delivery_plan') {
+      actions.push('plan/approve')
+    } else {
+      if (pending.actions.includes('approve')) actions.push('confirm')
+      if (pending.actions.includes('override_approve')) actions.push('override')
+      if (stage?.agent && pending.actions.includes('retry')) actions.push('run-agent')
+    }
+  }
+  if (stage?.skippable && (phase === 'waiting' || phase === 'resumable')) actions.push('skip')
+  if (stage && phase === 'waiting' && template.returns.some((route) => route.from === stageID)) actions.push('return')
+  return [...new Set(actions)]
+}
+
+function pendingApproval(runID, currentStage, pending) {
+  const base = { run_id: runID, quorum: 'any', status: 'pending' }
+  switch (pending) {
+    case 'grill': return { ...base, id: 'grill-1', kind: 'questions', attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'analysis',
+      trigger: 'graph_outcome:blocked', subject_hash: 'd'.repeat(64), required_roles: ['product_owner'],
+      actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Какой сегмент проверяем первым?' } }
+    case 'check': return { ...base, id: 'check-1', kind: 'approve', attempt_id: 'analysis-attempt', from_stage: 'analysis', to_stage: 'qa',
+      trigger: 'stage_check', subject_hash: 'c'.repeat(64), required_roles: ['architect'], actions: ['approve', 'override_approve'] }
+    case 'plan': return { ...base, id: 'plan-1', kind: 'approve', attempt_id: 'delivery-attempt', from_stage: 'delivery', to_stage: 'delivery',
+      trigger: 'delivery_plan', subject_hash: 'e'.repeat(64), required_roles: ['release_manager'], actions: ['approve', 'reject'], payload: deliveryPlan }
+    case 'input': return { ...base, id: `input-${currentStage}`, kind: 'input', attempt_id: '', from_stage: currentStage, to_stage: currentStage,
+      trigger: 'human_input', subject_hash: 'a'.repeat(64), required_roles: ['product_owner'], actions: ['submit'] }
+    default: return null
+  }
+}
+
+function detail(mode, { stage: currentStage, phase, status, pending, owners }) {
+  const runID = mode === 'auto' ? 'run-auto' : 'run-manual'
+  const pinned = mode === 'auto' ? autoTemplate : manualTemplate
+  const approval = pendingApproval(runID, currentStage, pending)
 
   const resolvedGrill = mode === 'manual' && ['analysis', 'qa', 'idea', 'delivery'].includes(currentStage) ? [{
     ...detailApproval(runID), status: 'resolved', resolved_action: 'answer_questions', resolved_at: now,
@@ -105,17 +148,17 @@ function detail(mode, currentStage, allowed, status = 'waiting_for_approval', pe
     run, task: 'Проверить маршрут целиком из браузера', mode,
     external_links: mode === 'manual' ? ['https://tracker.example/TASK-62'] : [],
     template: { valid: true, template: `${mode}-template`, title: mode === 'auto' ? 'Шаблон авто' : 'Шаблон ручной',
-      version: 'f'.repeat(64), stages: stageDefs, returns: mode === 'manual' ? [{ from: 'qa', to: 'idea' }] : [] },
-    state: { run_id: runID, task: 'Проверить маршрут целиком из браузера', phase: status === 'completed' ? 'terminal' : 'waiting',
-      next_stage: status === 'completed' ? '' : currentStage, pending_approval_id: approval?.id ?? '', attempt_ordinal: 2 },
+      version: 'f'.repeat(64), stages: pinned.stages, returns: pinned.returns },
+    state: { run_id: runID, task: 'Проверить маршрут целиком из браузера', phase,
+      next_stage: currentStage, pending_approval_id: approval?.id ?? '', attempt_ordinal: 2 },
     stages: mode === 'manual' && ['analysis', 'qa', 'idea', 'delivery'].includes(currentStage) ? [{
       id: 19, pipeline_run_id: 1, attempt_id: 'analysis-attempt', stage_index: 2, agent_name: 'analysis', status: 'passed',
       started_at: now, completed_at: now, duration_ms: 9000,
       checks_json: JSON.stringify([{ name: 'required-sections', class: 'content', command: ['ai-team', 'check'], policy: 'required', status: 'passed', exit_code: 0 }]),
     }] : [],
-    approvals: [...(approval ? [approval] : []), ...resolvedGrill], stage_owners: {},
+    approvals: [...(approval ? [approval] : []), ...resolvedGrill], stage_owners: owners,
     results: mode === 'manual' ? { idea: [revision('idea-v1', 'Первая версия идеи', 1), revision('idea-v2', 'Вторая версия идеи', 2)] } : {},
-    allowed_actions: allowed, delivery: { status: 'not_requested' },
+    allowed_actions: allowedActions(pinned, currentStage, phase, approval), delivery: { status: 'not_requested' },
   }
 }
 
@@ -128,8 +171,13 @@ function detailApproval(runID) {
 }
 
 function installController(page) {
-  const manual = { stage: 'idea', actions: ['take', 'results'], status: 'waiting_for_approval', pending: 'input' }
-  const auto = { stage: 'build', actions: ['run-agent'], status: 'running', pending: null }
+  // Server lifecycle phases: a human stage waits on a human_input approval, an
+  // agent stage that is not running yet is resumable (run status "stopped").
+  const waitingFor = (stage, pending) => ({ stage, phase: 'waiting', status: 'waiting_for_approval', pending })
+  const pausedAt = (stage) => ({ stage, phase: 'resumable', status: 'stopped', pending: null })
+  const finished = { stage: '', phase: 'terminal', status: 'completed', pending: null }
+  const manual = { ...waitingFor('idea', 'input'), owners: {} }
+  const auto = { ...pausedAt('build'), owners: {} }
   const actionsSeen = []
   page.route('**/api/runs/**', async (route) => {
     const request = route.request()
@@ -149,31 +197,31 @@ function installController(page) {
     const runID = pathname.split('/')[3]
     const state = runID === 'run-auto' ? auto : manual
     if (request.method() === 'GET' && pathname === `/api/runs/${runID}`) {
-      await route.fulfill({ json: detail(runID === 'run-auto' ? 'auto' : 'manual', state.stage, state.actions, state.status, state.pending) })
+      await route.fulfill({ json: detail(runID === 'run-auto' ? 'auto' : 'manual', state) })
       return
     }
     if (request.method() === 'POST') {
       const action = pathname.split('/').at(-1)
       actionsSeen.push(pathname)
       if (runID === 'run-auto') {
-        if (action === 'run-agent' && state.stage === 'build') Object.assign(state, { stage: 'verify', actions: ['run-agent'], pending: null })
-        else if (action === 'run-agent' && state.stage === 'verify') Object.assign(state, { stage: '', actions: [], status: 'completed', pending: null })
+        if (action === 'run-agent' && state.stage === 'build') Object.assign(state, pausedAt('verify'))
+        else if (action === 'run-agent' && state.stage === 'verify') Object.assign(state, finished)
       } else if (action === 'take') {
-        state.actions = ['results']
+        state.owners = { [state.stage]: { stage_id: state.stage, approval_id: `input-${state.stage}`, actor_id: 'local-user', actor_role: 'product_owner', taken_at: now } }
       } else if (action === 'results' && state.stage === 'idea') {
-        Object.assign(state, { stage: 'analysis', actions: ['run-agent'], status: 'running', pending: null })
+        Object.assign(state, pausedAt('analysis'), { owners: {} })
       } else if (action === 'run-agent') {
-        Object.assign(state, { stage: 'analysis', actions: ['grill/answer', 'grill/done'], status: 'waiting_for_approval', pending: 'grill' })
-      } else if (action === 'answer' || pathname.includes('/grill/answer')) {
-        Object.assign(state, { stage: 'analysis', actions: ['confirm', 'override'], pending: 'check' })
+        Object.assign(state, waitingFor('analysis', 'grill'))
+      } else if (pathname.endsWith('/grill/answer')) {
+        Object.assign(state, waitingFor('analysis', 'check'))
       } else if (action === 'override') {
-        Object.assign(state, { stage: 'qa', actions: ['take', 'results', 'skip', 'return'], pending: 'input' })
+        Object.assign(state, waitingFor('qa', 'input'))
       } else if (action === 'return') {
-        Object.assign(state, { stage: 'idea', actions: ['skip'], pending: null })
+        Object.assign(state, waitingFor('idea', 'input'))
       } else if (action === 'skip') {
-        Object.assign(state, { stage: 'delivery', actions: ['plan/approve'], pending: 'plan' })
+        Object.assign(state, waitingFor('delivery', 'plan'))
       } else if (pathname.endsWith('/plan/approve')) {
-        Object.assign(state, { stage: '', actions: [], status: 'completed', pending: null })
+        Object.assign(state, finished)
       }
       await route.fulfill({ json: { ok: true } })
       return
@@ -217,8 +265,8 @@ test('task detail traverses the manual and automatic templates using allowed act
 
     // Human input, then agent work and its question/check reviews.
     await page.getByRole('button', { name: 'Взять этап' }).click()
+    await expect(page.getByText('Ответственный: local-user')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Взять этап' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Сдать результат' }).click()
     await page.getByLabel('Результат в Markdown').fill('Идея подтверждена')
     await page.getByRole('button', { name: 'Отправить результат' }).click()
@@ -254,6 +302,10 @@ test('task detail traverses the manual and automatic templates using allowed act
     await page.getByRole('button', { name: 'Пропустить этап' }).click()
     await expect(page.getByRole('heading', { name: 'План доставки', level: 2 })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Подтвердить план' })).toBeVisible()
+    const planContent = page.getByRole('region', { name: 'Содержимое плана доставки' })
+    await expect(planContent.getByText('ai-team/run-manual', { exact: true })).toBeVisible()
+    await expect(planContent.getByText('docs/analysis.md', { exact: true })).toBeVisible()
+    await expect(planContent.getByText('Выкладываем после подтверждения.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Подтвердить план' }).click()
     await expect(page.getByText('завершена')).toBeVisible()

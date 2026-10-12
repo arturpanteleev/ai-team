@@ -179,6 +179,38 @@ describe('Task detail', () => {
     await waitFor(() => expect(api.answerTaskGrill).toHaveBeenCalledWith('run-detail-1', 'analysis', 'SMB'));
   });
 
+  it('shows the delivery plan content before it can be approved', async () => {
+    const planHash = 'e'.repeat(64);
+    const plan: TaskRunDetails = {
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'release', pending_approval_id: 'plan-1' },
+      approvals: [{
+        id: 'plan-1', run_id: 'run-detail-1', attempt_id: 'attempt-release', from_stage: 'release', to_stage: 'release',
+        trigger: 'delivery_plan', subject_hash: planHash, required_roles: ['release_manager'], quorum: 'any',
+        actions: ['approve', 'reject'], status: 'pending', created_at: '2026-10-12T09:04:00Z',
+        payload: {
+          schema_version: 1, branch: 'ai-team/run-detail-1', base_branch: 'main', remote: 'origin',
+          files: ['web/src/pages/TaskDetail.tsx', 'pkg/web/task_api.go'],
+          commit_message: 'feat: task detail', pr_title: 'Страница задачи', pr_body: 'Добавлена панель этапа.',
+        },
+      }],
+      allowed_actions: ['plan/approve'],
+    };
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(plan);
+    renderDetail();
+
+    const content = await screen.findByRole('region', { name: 'Содержимое плана доставки' });
+    expect(content).toHaveTextContent('ai-team/run-detail-1');
+    expect(content).toHaveTextContent('main');
+    expect(content).toHaveTextContent('web/src/pages/TaskDetail.tsx');
+    expect(content).toHaveTextContent('pkg/web/task_api.go');
+    expect(content).toHaveTextContent('Страница задачи');
+    expect(content).toHaveTextContent('Добавлена панель этапа.');
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить план' }));
+    await waitFor(() => expect(api.approveTaskDeliveryPlan).toHaveBeenCalledWith('run-detail-1', planHash));
+  });
+
   it('keeps resolved grill questions and decisions in task history', async () => {
     const resolved: TaskRunDetails = {
       ...baseDetails,

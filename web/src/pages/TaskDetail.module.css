@@ -210,6 +210,49 @@
   overflow-wrap: anywhere;
 }
 
+.planContent {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.planContent dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0 0 8px;
+}
+
+.planContent dl > div {
+  display: contents;
+}
+
+.planContent dt {
+  color: var(--text-muted);
+}
+
+.planContent dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.planContent h4 {
+  margin: 8px 0 4px;
+}
+
+.planContent ul {
+  margin: 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+.planText {
+  max-height: 320px;
+  margin: 4px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .answer {
   padding: 10px;
   border-left: 3px solid var(--accent);

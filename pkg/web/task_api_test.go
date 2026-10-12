@@ -798,6 +798,30 @@ func TestTaskGrillNewVersionActionReachesController(t *testing.T) {
 	}
 }
 
+func TestGenericDecisionCannotBypassGrillNewVersionValidation(t *testing.T) {
+	pending := approval.PendingApproval{
+		ID: "approval-grill-generic", RunID: "run-grill-generic", AttemptID: "attempt-product-spec",
+		Kind: approval.KindGrillQuestions, Trigger: approval.GrillTrigger, Status: approval.StatusPending,
+		FromStage: "product_spec", ToStage: "product_spec", SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"po"}, Actions: []string{approval.GrillActionNewVersion},
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{pending}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	request := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/run-grill-generic/approvals/approval-grill-generic/decisions",
+		`{"actor_role":"po","action":"new_version","comment":"comment-only","subject_hash":"`+testSubjectHash+`","artifact_revisions":{"stages/product_spec/result.md":"rev-older"}}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || controller.decisionCalls != 0 {
+		t.Fatalf("generic decision must not resolve a grill new_version or trust client revision IDs: status=%d calls=%d body=%s",
+			response.Code, controller.decisionCalls, response.Body.String())
+	}
+}
+
 func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {
 	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
 	verifier, err := NewLocalAuthenticator(token)

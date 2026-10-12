@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,8 +14,11 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/report"
+	"github.com/arturpanteleev/ai-team/pkg/runtime"
 )
 
 // stage_check_test.go — интегрированные проверки результата этапа (B-40).
@@ -115,6 +119,38 @@ func findCheckDecision(t *testing.T, dir string, kind string) *approval.PendingA
 	}
 	t.Fatalf("check_decision approval не найден: %+v", values)
 	return nil
+}
+
+func grillStageCheckConfig(maxRounds int) *config.Config {
+	cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier", Mode: "grill", MaxRounds: maxRounds})
+	cfg.Stages[0].Function = "product_owner"
+	return cfg
+}
+
+func grillApproval(t *testing.T, store *approval.Store, runID string) approval.PendingApproval {
+	t.Helper()
+	values, err := store.List(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if value.Kind == approval.KindGrillQuestions {
+			return value
+		}
+	}
+	t.Fatalf("grill approval not found in %+v", values)
+	return approval.PendingApproval{}
+}
+
+func newGrillPipeline(cfg *config.Config, rt *scriptedRuntime, store *approval.Store) *Pipeline {
+	return New(cfg, stageCheckRegistry(true),
+		WithRuntimeFactory(rt.factory), WithNotifier(&captureNotifier{}),
+		WithPrompter(&scriptedPrompter{}), WithApprovalStore(store))
+}
+
+func runGrillPipeline(t *testing.T, p *Pipeline, dir, runID string) error {
+	t.Helper()
+	return p.Run(context.Background(), RunConfig{Feature: "feat", TaskDesc: "test", TargetDir: dir, ResumeRunID: runID})
 }
 
 func TestRun_HardCheckPassAllowsTransition(t *testing.T) {
@@ -243,6 +279,301 @@ func TestRun_CheckerAgentErrorRaisesCheckError(t *testing.T) {
 	value := findCheckDecision(t, dir, approval.StageCheckTrigger)
 	if value.Payload == nil {
 		t.Fatal("check_decision должен содержать payload")
+	}
+}
+
+func TestRun_GrillAnswerFeedsNextRoundAndPassedCompletes(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nКритерии не проверяемы.\n"}
+	rt.contentFn["verifier"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"verification": "**Question:** Как измерить критерий успеха?\n"}
+		}
+		return map[string]string{"verification": "Спецификация проверена после уточнения.\n**Verdict:** PASSED\n"}
+	}
+	answerWasPassedToChecker := false
+	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
+		if agentName != "verifier" {
+			return
+		}
+		for _, input := range inputs {
+			if strings.HasPrefix(input.Name, "grill-round-") {
+				data, err := os.ReadFile(input.Path)
+				if err == nil && strings.Contains(string(data), "Порог — рост конверсии") {
+					answerWasPassedToChecker = true
+				}
+			}
+		}
+	}
+	cfg := grillStageCheckConfig(3)
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newGrillPipeline(cfg, rt, store)
+	if err := runGrillPipeline(t, p, dir, ""); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait for an answer: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	var payload approval.GrillQuestionsPayload
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != approval.StatusPending || payload.Round != 1 || !strings.Contains(payload.Markdown, "Как измерить") {
+		t.Fatalf("unexpected first grill approval: %+v payload=%+v", pending, payload)
+	}
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionAnswer,
+		Comment: "Порог — рост конверсии минимум на 20%.", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGrillPipeline(t, p, dir, runID); err != nil {
+		t.Fatalf("passed second round should resume the run: %v", err)
+	}
+	if !answerWasPassedToChecker || rt.calls["verifier"] != 2 {
+		t.Fatalf("checker did not receive the answer on round two: answer=%v calls=%d", answerWasPassedToChecker, rt.calls["verifier"])
+	}
+	events := readEvents(t, dir)
+	if !strings.Contains(events, `"type":"grill_completed"`) || !strings.Contains(events, `"open_questions":0`) {
+		t.Fatalf("passed grill completion must record zero open questions:\n%s", events)
+	}
+}
+
+func TestRun_GrillResolvedApprovalRecoversAfterCrashBeforeCheckerDispatch(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nПроверяемый критерий.\n"}
+	rt.contentFn["verifier"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"verification": "**Question:** Как измерить критерий?\n"}
+		}
+		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newGrillPipeline(grillStageCheckConfig(3), rt, store)
+	if err := runGrillPipeline(t, p, dir, ""); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionAnswer,
+		Comment: "Порог — рост конверсии минимум на 5%.", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	rt.onExec = func(agentName string, _ []runtime.Artifact) {
+		if agentName == "verifier" && !crashed {
+			crashed = true
+			panic("simulated crash before grill checker dispatch")
+		}
+	}
+	func() {
+		defer func() {
+			if recover() != nil {
+				crashed = true
+			}
+		}()
+		_ = runGrillPipeline(t, p, dir, runID)
+	}()
+	if !crashed {
+		t.Fatal("expected simulated crash during resumed grill check")
+	}
+	lifecycleStore, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := lifecycleStore.Load(runID)
+	if err != nil || checkpoint.Phase != lifecycle.PhaseRunning || checkpoint.ActiveApprovalID != pending.ID {
+		t.Fatalf("resolved grill approval checkpoint was not retained: state=%+v err=%v", checkpoint, err)
+	}
+	rt.onExec = nil
+	if err := runGrillPipeline(t, p, dir, runID); err != nil {
+		t.Fatalf("verified grill approval should recover and finish: %v", err)
+	}
+	if !strings.Contains(readEvents(t, dir), `"type":"grill_completed"`) {
+		t.Fatal("recovered grill should record completion")
+	}
+}
+
+func TestRun_GrillDoneRecordsOpenQuestionAndCompletes(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
+	rt.content["verifier"] = map[string]string{"verification": "**Question:** Как проверить критерий?\n"}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newGrillPipeline(grillStageCheckConfig(3), rt, store)
+	if err := runGrillPipeline(t, p, dir, ""); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionDone,
+		SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := store.Load(runID, pending.ID); err != nil || updated.Status != approval.StatusResolved {
+		t.Fatalf("done action was not durably resolved: approval=%+v err=%v", updated, err)
+	}
+	if err := runGrillPipeline(t, p, dir, runID); err != nil {
+		t.Fatalf("done action should finish grill and continue: %v", err)
+	}
+	events := readEvents(t, dir)
+	if !strings.Contains(events, `"type":"grill_completed"`) || !strings.Contains(events, `"open_questions":1`) || !strings.Contains(events, `"reason":"done"`) {
+		t.Fatalf("done completion must record the one unresolved question:\n%s", events)
+	}
+}
+
+func TestRun_GrillMaxRoundsCompletesAutomatically(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
+	rt.content["verifier"] = map[string]string{"verification": "**Question:** Как проверить критерий?\n"}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runGrillPipeline(t, newGrillPipeline(grillStageCheckConfig(1), rt, store), dir, ""); err != nil {
+		t.Fatalf("max_rounds should complete the advisory grill automatically: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	values, err := store.List(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if value.Kind == approval.KindGrillQuestions {
+			t.Fatalf("last question should not leave a pending approval at max_rounds: %+v", value)
+		}
+	}
+	events := readEvents(t, dir)
+	if !strings.Contains(events, `"reason":"max_rounds"`) || !strings.Contains(events, `"open_questions":1`) {
+		t.Fatalf("automatic grill completion must report its remaining question:\n%s", events)
+	}
+}
+
+func TestRun_GrillRejectsMultipleQuestionsInOneRound(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nТекст.\n"}
+	rt.content["verifier"] = map[string]string{"verification": "**Question:** Что значит быстро?\n**Question:** Как измерить надёжность?\n"}
+	err := runStageCheckPipeline(t, dir, grillStageCheckConfig(3), rt)
+	if err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("malformed grill output must fail closed for human review: %v", err)
+	}
+	if value := findCheckDecision(t, dir, approval.StageCheckTrigger); value.Status != approval.StatusPending {
+		t.Fatalf("malformed grill output should create a pending check decision: %+v", value)
+	}
+	events := readEvents(t, dir)
+	if !strings.Contains(events, "check_error") || strings.Contains(events, `"kind":"grill_questions"`) {
+		t.Fatalf("multiple questions must be rejected as a checker error, not offered together:\n%s", events)
+	}
+}
+
+func TestRun_GrillNewVersionUsesPinnedArtifactRevision(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Спецификация\n\nИсходный текст.\n"}
+	rt.content["verifier"] = map[string]string{"verification": "**Question:** Уточните критерий.\n"}
+	var revisedArtifactSeen bool
+	rt.onExec = func(agentName string, inputs []runtime.Artifact) {
+		if agentName != "verifier" {
+			return
+		}
+		for _, input := range inputs {
+			if input.Name == "result" {
+				data, err := os.ReadFile(input.Path)
+				if err == nil && strings.Contains(string(data), "Новая версия") {
+					revisedArtifactSeen = true
+				}
+			}
+		}
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newGrillPipeline(grillStageCheckConfig(3), rt, store)
+	if err := runGrillPipeline(t, p, dir, ""); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("first grill round should wait: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	pending := grillApproval(t, store, runID)
+	runDir := onlyRunDir(t, dir)
+	_, manifest, err := evidence.ReadAttemptManifest(nil, runDir, runID, pending.AttemptID)
+	if err != nil || len(manifest.Outputs) != 1 {
+		t.Fatalf("read source output manifest: outputs=%d err=%v", len(manifest.Outputs), err)
+	}
+	artifactPath := "stages/tech/result.md"
+	artifacts, err := humanartifact.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := artifacts.Append(runID, artifactPath, "", "", "## Спецификация\n\nНовая версия с измеримым критерием.\n", "", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(runID, pending.ID, approval.Decision{
+		ActorID: "owner", ActorRole: "product_owner", Action: approval.GrillActionNewVersion,
+		ArtifactRevisions: map[string]string{artifactPath: revision.ID}, SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt.contentFn["verifier"] = func(call int) map[string]string {
+		return map[string]string{"verification": "**Verdict:** PASSED\n"}
+	}
+	if err := runGrillPipeline(t, p, dir, runID); err != nil {
+		t.Fatalf("new version should be checked and accepted: %v\nreport: %s", err, checkReportFile(t, dir))
+	}
+	if !revisedArtifactSeen {
+		t.Fatal("checker did not receive the pinned human revision")
+	}
+}
+
+func TestValidateRecordedGrillDecisionRequiresVerifiedSourceAndDecision(t *testing.T) {
+	now := time.Now().UTC()
+	decision := approval.Decision{
+		ApprovalID: "grill-approval", ActorID: "owner", ActorRole: "product_owner",
+		Action: approval.GrillActionAnswer, SubjectHash: strings.Repeat("a", 64), DecidedAt: now,
+	}
+	value := approval.PendingApproval{
+		ID: decision.ApprovalID, RunID: "run-grill-recovery", AttemptID: "attempt-source",
+		Kind: approval.KindGrillQuestions, Status: approval.StatusResolved,
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: approval.GrillTrigger,
+		SubjectHash: decision.SubjectHash, ResolvedAction: approval.GrillActionAnswer,
+		Targets: map[string]string{approval.GrillActionAnswer: "product_spec"}, Decisions: []approval.Decision{decision},
+	}
+	digest, err := evidence.DecisionSetDigest(value.Decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := evidence.ReplayedRun{
+		RunID:    value.RunID,
+		Attempts: []evidence.ReplayedAttempt{{AttemptID: value.AttemptID, Stage: value.FromStage, FinishedAt: now}},
+		ApprovalDecisions: []evidence.ReplayedApprovalDecision{{
+			ID: value.ID, Kind: string(value.Kind), AttemptID: value.AttemptID, SubjectHash: value.SubjectHash,
+			FromStage: value.FromStage, ToStage: value.ToStage, Trigger: value.Trigger,
+			Action: value.ResolvedAction, DecisionSetSHA256: digest,
+		}},
+	}
+	if err := validateRecordedGrillDecision(replayed, value); err != nil {
+		t.Fatalf("verified grill approval should recover: %v", err)
+	}
+	replayed.ApprovalDecisions = nil
+	if err := validateRecordedGrillDecision(replayed, value); err == nil {
+		t.Fatal("grill approval without a verified decision event must not recover")
 	}
 }
 

@@ -243,6 +243,38 @@ func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
 	}
 }
 
+func TestStoreRecorderProjectsGrillOpenQuestionCount(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	started := time.Now().UTC()
+	recorder := NewStoreRecorder(srv.store)
+	recorder.RunStarted("run-grill-event", "feature", "{}", started)
+	recorder.RecordEvent("run-grill-event", "grill_completed", "attempt-grill", started.Add(time.Second), map[string]any{
+		"rounds": 2, "open_questions": 1, "reason": "done",
+	})
+	values, err := srv.store.GetRunEventsAfter("run-grill-event", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if value.Type != "grill_completed" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(value.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["open_questions"] != float64(1) || data["reason"] != "done" {
+			t.Fatalf("projected grill completion lost open-question metric: %+v", data)
+		}
+		return
+	}
+	t.Fatalf("grill completion was not projected: %+v", values)
+}
+
 func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
 	verifier, err := NewLocalAuthenticator(token)
@@ -675,6 +707,95 @@ func (c *actionRecordingController) SkipStage(_ context.Context, runID, stageID,
 	c.skipRunID, c.skipStageID, c.skipReason = runID, stageID, reason
 	c.skipActorID, c.skipActorRole = actorID, actorRole
 	return nil
+}
+
+type grillActionRecordingController struct {
+	*fakeRunController
+	action, answer, actorID, actorRole string
+}
+
+func (c *grillActionRecordingController) AnswerStageGrill(_ context.Context, _, _, answer, actorID, actorRole string) error {
+	c.action, c.answer, c.actorID, c.actorRole = approval.GrillActionAnswer, answer, actorID, actorRole
+	return nil
+}
+
+func (c *grillActionRecordingController) SubmitStageGrillVersion(_ context.Context, _, _, comment, actorID, actorRole string) error {
+	c.action, c.answer, c.actorID, c.actorRole = approval.GrillActionNewVersion, comment, actorID, actorRole
+	return nil
+}
+
+func (c *grillActionRecordingController) CompleteStageGrill(_ context.Context, _, _, actorID, actorRole string) error {
+	c.action, c.actorID, c.actorRole = approval.GrillActionDone, actorID, actorRole
+	return nil
+}
+
+func TestTaskGrillNewVersionActionReachesController(t *testing.T) {
+	const token = "test-local-web-token-0123456789abcdef0123456789abcdef"
+	verifier, err := NewLocalAuthenticator(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), yamlData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := approval.PendingApproval{
+		ID: "approval-grill-api", RunID: "run-grill-api", AttemptID: "attempt-grill-api",
+		Kind: approval.KindGrillQuestions, Status: approval.StatusPending,
+		FromStage: "product_spec", ToStage: "product_spec", Trigger: approval.GrillTrigger,
+		SubjectHash: testSubjectHash, RequiredRoles: []string{"po"},
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+	}
+	controller := &grillActionRecordingController{fakeRunController: &fakeRunController{approvals: []approval.PendingApproval{pending}}}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(controller), WithLocalAuthenticator(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := templateStore.PinCurrentForRun(pending.RunID, pending.RunID); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Create(lifecycle.State{
+		RunID: pending.RunID, Feature: "feature", TargetDir: target, Task: "task",
+		Phase: lifecycle.PhaseWaiting, NextStage: pending.FromStage, PendingApprovalID: pending.ID,
+		ConfigSHA256: strings.Repeat("0", 64), WorkflowSHA256: strings.Repeat("1", 64), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := authorizedRequest(t, srv, http.MethodPost,
+		"/api/runs/run-grill-api/stages/product_spec/grill/new-version", `{"answer":"обновил результат"}`)
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || controller.action != approval.GrillActionNewVersion ||
+		controller.actorID != "local-user" || controller.actorRole != "po" {
+		t.Fatalf("new-version grill action did not reach controller with stage identity: status=%d action=%q actor=%q role=%q body=%s",
+			response.Code, controller.action, controller.actorID, controller.actorRole, response.Body.String())
+	}
+	actions := srv.taskAllowedActions(pending.RunID, pending.FromStage, lifecycle.State{Phase: lifecycle.PhaseWaiting, PendingApprovalID: pending.ID})
+	if !actionAllowed(actions, "grill/new-version") || !actionAllowed(actions, "grill/answer") || !actionAllowed(actions, "grill/done") {
+		t.Fatalf("task projection omitted grill actions: %v", actions)
+	}
 }
 
 func TestTaskPlanApprovalUsesExistingControllerSemanticsAndIdempotency(t *testing.T) {

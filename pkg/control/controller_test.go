@@ -16,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -564,6 +565,101 @@ func TestControllerSkipPendingHumanStagePreservesActorAndReason(t *testing.T) {
 	<-engine.started
 	close(engine.release)
 	waitControllerIdle(t, controller, "run-skip-human")
+}
+
+func TestControllerAnswerStageGrillResolvesAndResumesCurrentQuestion(t *testing.T) {
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Уточните критерий.", Round: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-grill", RunID: "run-grill", AttemptID: "attempt-grill", Status: approval.StatusPending,
+		Kind: approval.KindGrillQuestions, FromStage: "product_spec", ToStage: "product_spec", Trigger: approval.GrillTrigger,
+		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"po"}, Quorum: approval.QuorumAny,
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+		Targets: map[string]string{
+			approval.GrillActionAnswer: "product_spec", approval.GrillActionNewVersion: "product_spec", approval.GrillActionDone: "product_spec",
+		}, Payload: payload,
+	})
+	controller, _ := newStageActionFixture(t, stageActionState("run-grill", "product_spec", "approval-grill", lifecycle.PhaseWaiting), engine, store)
+	if err := controller.AnswerStageGrill(context.Background(), "run-grill", "product_spec", "Критерий измеряется ростом на 20%.", "owner", "po"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].Action != approval.GrillActionAnswer ||
+		store.decisions[0].Comment != "Критерий измеряется ростом на 20%." || !store.decisions[0].ControllerAuthenticated {
+		t.Fatalf("grill answer did not preserve the authenticated decision: %+v", store.decisions)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, "run-grill")
+}
+
+func TestControllerGrillNewVersionRequiresEditedArtifact(t *testing.T) {
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "**Question:** Уточните критерий.", Round: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{}
+	store := newRecordingApprovalStore(approval.PendingApproval{
+		ID: "approval-grill-edit", RunID: "run-grill-edit", AttemptID: "missing-attempt", Status: approval.StatusPending,
+		Kind: approval.KindGrillQuestions, FromStage: "product_spec", ToStage: "product_spec", Trigger: approval.GrillTrigger,
+		SubjectHash: strings.Repeat("b", 64), RequiredRoles: []string{"po"}, Quorum: approval.QuorumAny,
+		Actions: []string{approval.GrillActionAnswer, approval.GrillActionNewVersion, approval.GrillActionDone},
+		Targets: map[string]string{
+			approval.GrillActionAnswer: "product_spec", approval.GrillActionNewVersion: "product_spec", approval.GrillActionDone: "product_spec",
+		}, Payload: payload,
+	})
+	controller, _ := newStageActionFixture(t, stageActionState("run-grill-edit", "product_spec", "approval-grill-edit", lifecycle.PhaseWaiting), engine, store)
+	if err := controller.SubmitStageGrillVersion(context.Background(), "run-grill-edit", "product_spec", "", "owner", "po"); err == nil {
+		t.Fatal("new_version must fail when no edited artifact revision exists")
+	}
+	if len(store.decisions) != 0 {
+		t.Fatalf("invalid new_version should not be decided: %+v", store.decisions)
+	}
+}
+
+func TestControllerReviewedRevisionsIncludesStageScopedHumanResult(t *testing.T) {
+	target := t.TempDir()
+	const runID, attemptID = "run-grill-human-revision", "run-grill-human-revision-001-product_spec"
+	runDir := filepath.Join(target, ".ai-team", "runs", runID)
+	manifest := evidence.AttemptManifest{
+		SchemaVersion: evidence.SchemaVersion, RunID: runID, AttemptID: attemptID,
+		Stage: "product_spec", StageIndex: 1, StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(),
+		Status: "completed", Execution: "success", Decision: "continue", Outcome: "success",
+		Outputs: []evidence.ArtifactRecord{{Name: "result", EvidencePath: "attempts/" + attemptID + "/artifacts/result.md"}},
+	}
+	manifestPath := filepath.Join(runDir, "attempts", attemptID, "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := humanartifact.New(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := artifacts.Append(runID, "stages/product_spec/result.md", "", "", "## Updated\nMeasurable criteria\n", "", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &Controller{target: target}
+	selection, err := controller.reviewedRevisions(runID, approval.PendingApproval{AttemptID: attemptID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection["stages/product_spec/result.md"] != revision.ID {
+		t.Fatalf("controller did not pin the stage-scoped human revision: got %v, want %s", selection, revision.ID)
+	}
 }
 
 func TestControllerSkipResumableAgentStageUsesEngine(t *testing.T) {

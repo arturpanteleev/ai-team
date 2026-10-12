@@ -35,6 +35,7 @@ func activeStageApprovalID(value *approval.PendingApproval, stageID string) stri
 		return ""
 	}
 	if (value.Kind == approval.KindInput && value.Trigger == humanInputTrigger) ||
+		(value.Kind == approval.KindGrillQuestions && value.Trigger == approval.GrillTrigger) ||
 		(value.Kind != approval.KindQuestions && strings.HasPrefix(value.Trigger, "graph_outcome:")) {
 		return value.ID
 	}

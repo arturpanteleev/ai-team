@@ -929,6 +929,11 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 						return RunResult{}, fmt.Errorf("active graph approval %s is not the verified handoff to %s", active.ID, runCfg.retryFrom)
 					}
 					resumedApproval = recoveredGraphApproval
+				case active.Kind == approval.KindGrillQuestions && active.Trigger == approval.GrillTrigger && active.FromStage == runCfg.retryFrom:
+					if err := validateRecordedGrillDecision(replayedRun, active); err != nil {
+						return RunResult{}, fmt.Errorf("resume active grill approval: %w", err)
+					}
+					resumedApproval = &active
 				default:
 					return RunResult{}, fmt.Errorf("active approval %s is not a stage dispatch approval", active.ID)
 				}

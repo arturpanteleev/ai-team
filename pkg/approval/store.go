@@ -87,9 +87,10 @@ const StageCheckTrigger = "stage_check"
 // содержит вопросы агента-проверяющего; Round — номер раунда грилла
 // (с единицы), чтобы ответственный и метрики видели, какой это раунд.
 type GrillQuestionsPayload struct {
-	Kind     string `json:"kind"`
-	Markdown string `json:"markdown"`
-	Round    int    `json:"round"`
+	Kind              string            `json:"kind"`
+	Markdown          string            `json:"markdown"`
+	Round             int               `json:"round"`
+	ArtifactRevisions map[string]string `json:"artifact_revisions,omitempty"`
 }
 
 // CheckDecisionPayload — контракт запроса решения по проваленной проверке
@@ -369,6 +370,28 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if value.Kind == KindGrillQuestions && decision.Action == GrillActionAnswer && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("ответ на вопросы грилла не может быть пустым")
 	}
+	if value.Kind == KindGrillQuestions && len(decision.Comment) > 16<<10 {
+		return PendingApproval{}, errors.New("grill answer or note exceeds 16384 bytes")
+	}
+	if value.Kind == KindGrillQuestions && decision.Action == GrillActionNewVersion && len(decision.ArtifactRevisions) == 0 {
+		return PendingApproval{}, errors.New("новая версия результата грилла должна содержать закреплённые версии артефактов")
+	}
+	if value.Kind == KindGrillQuestions && decision.Action == GrillActionNewVersion {
+		var payload GrillQuestionsPayload
+		if json.Unmarshal(value.Payload, &payload) != nil {
+			return PendingApproval{}, errors.New("grill question payload is invalid")
+		}
+		changed := false
+		for artifactPath, revisionID := range decision.ArtifactRevisions {
+			if payload.ArtifactRevisions[artifactPath] != revisionID {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return PendingApproval{}, errors.New("new_version requires an edited result artifact revision")
+		}
+	}
 	if value.Kind == KindInput {
 		if len(decision.Comment) > MaxInputCommentBytes {
 			return PendingApproval{}, fmt.Errorf("human input exceeds maximum size of %d bytes", MaxInputCommentBytes)
@@ -611,6 +634,12 @@ func validate(value PendingApproval) error {
 		for _, action := range value.Actions {
 			if action != GrillActionAnswer && action != GrillActionNewVersion && action != GrillActionDone {
 				return fmt.Errorf("grill_questions approval action %q is unsupported", action)
+			}
+		}
+		for artifactPath, revisionID := range payload.ArtifactRevisions {
+			clean := path.Clean(artifactPath)
+			if artifactPath == "" || path.IsAbs(artifactPath) || clean != artifactPath || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || !safeName(revisionID) {
+				return errors.New("grill_questions approval contains an invalid artifact revision binding")
 			}
 		}
 	}

@@ -47,6 +47,35 @@ SHA-256 and the status.
 - **КОГДА** stage declares `check.mode: grill`
 - **ТОГДА** B-40 mechanism MUST NOT run the check (handled by B-42)
 
+### Requirement: Advisory grill round lifecycle
+
+For `check.kind: agent` with `check.mode: grill`, the checker MUST return
+exactly one `**Question:**` marker or a passing `**Verdict:** PASSED`. A
+malformed response or checker execution error MUST fail closed through a
+human `check_decision`. A question MUST create a same-stage approval with
+answer, new-version, and done actions. An answer MUST be passed to the next
+checker round as untrusted context. A new-version action MUST pin a changed
+immutable human result revision, and the next checker round MUST read that
+exact revision. Done and `max_rounds` MUST complete the advisory grill without
+bypassing the stage's normal confirmation. `grill_completed` MUST record the
+round count, open-question count, and completion reason. A resolved grill
+approval checkpoint MUST recover from verified decision evidence after a
+process crash.
+
+#### Scenario: Human edits the stage result
+
+- **КОГДА** the responsible person submits a new immutable result revision for
+  the current human stage and chooses `new_version`
+- **ТОГДА** the checker MUST receive the exact pinned stage-scoped revision
+- **И** a later edit MUST NOT silently replace the pinned revision
+
+#### Scenario: Resume after a resolved grill decision
+
+- **КОГДА** the process crashes after persisting the resolved grill approval
+  as the active stage approval
+- **ТОГДА** resume MUST verify the approval decision and source attempt from
+  evidence, then continue the same checker round without losing the decision
+
 ### Requirement: Failed check blocks the stage
 
 A `failed` or `error` check result MUST block the transition, persist the report,

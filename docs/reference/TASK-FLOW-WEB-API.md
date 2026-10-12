@@ -24,6 +24,7 @@ fields.
 | `POST /api/runs/{runID}/stages/{stageID}/skip` | Skip a skippable stage with a reason |
 | `POST /api/runs/{runID}/stages/{stageID}/return` | Return to a configured earlier stage |
 | `POST /api/runs/{runID}/stages/{stageID}/grill/answer` | Answer a grill question |
+| `POST /api/runs/{runID}/stages/{stageID}/grill/new-version` | Re-check a pinned human result revision |
 | `POST /api/runs/{runID}/stages/{stageID}/grill/done` | Finish the grill without more help |
 | `POST /api/runs/{runID}/plan/approve` | Approve a pinned delivery plan hash |
 | `GET /api/runs/{runID}/events?after=&limit=&warnings=&order=&before=` | Run event feed |

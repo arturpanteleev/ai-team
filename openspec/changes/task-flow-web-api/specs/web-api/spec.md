@@ -24,8 +24,8 @@ revisions, and the allowed actions for the current stage.
 ### Requirement: Task stage and plan action routes
 
 The Web API MUST expose the §10 stage executor, take, run-agent, results,
-result-version, override, confirm, skip, return, grill answer/done, and delivery
-plan approval routes. Actor identity MUST come from the authenticated server
+result-version, override, confirm, skip, return, grill answer/new-version/done,
+and delivery plan approval routes. Actor identity MUST come from the authenticated server
 session. An action that is invalid for current lifecycle state MUST return JSON
 409 with an `allowed_actions` array. Writes MUST support exact request-key
 replay and reject key reuse with a different request fingerprint.

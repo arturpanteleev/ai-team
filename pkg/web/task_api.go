@@ -59,6 +59,7 @@ type StageReturnController interface {
 
 type StageGrillController interface {
 	AnswerStageGrill(context.Context, string, string, string, string, string) error
+	SubmitStageGrillVersion(context.Context, string, string, string, string, string) error
 	CompleteStageGrill(context.Context, string, string, string, string) error
 }
 
@@ -400,8 +401,8 @@ func (s *Server) taskAllowedActions(runID, stageID string, state lifecycle.State
 					if stageErr == nil && stage.Agent != "" {
 						actions = append(actions, "executor", "run-agent")
 					}
-				case pending.Kind == approval.KindQuestions:
-					actions = append(actions, "grill/answer", "grill/done")
+				case pending.Kind == approval.KindGrillQuestions:
+					actions = append(actions, "grill/answer", "grill/new-version", "grill/done")
 				case pending.Trigger == "delivery_plan":
 					actions = append(actions, "plan/approve")
 				default:
@@ -811,17 +812,42 @@ func (s *Server) taskReturnAllowed(runID, from, to string) bool {
 }
 
 func (s *Server) handleTaskGrillAnswer(w http.ResponseWriter, r *http.Request) {
+	s.handleTaskGrillAction(w, r, "")
+}
+
+func (s *Server) handleTaskGrillNewVersion(w http.ResponseWriter, r *http.Request) {
+	s.handleTaskGrillAction(w, r, approval.GrillActionNewVersion)
+}
+
+func (s *Server) handleTaskGrillAction(w http.ResponseWriter, r *http.Request, forcedAction string) {
 	runID, stageID := chi.URLParam(r, "runID"), chi.URLParam(r, "stageID")
 	state, stage, ok := s.taskStagePreconditions(w, runID, stageID)
 	if !ok {
 		return
 	}
-	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" {
+	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" || !s.pendingGrillApproval(runID, state.PendingApprovalID) {
 		s.taskConflict(w, runID, stageID, "grill answer requires a pending grill")
 		return
 	}
 	var command taskStageActionCommand
-	if err := decodeCommand(w, r, &command); err != nil || strings.TrimSpace(command.Answer) == "" {
+	if err := decodeCommand(w, r, &command); err != nil {
+		writeJSONAPIError(w, http.StatusBadRequest, "invalid grill action", "bad_answer")
+		return
+	}
+	if forcedAction != "" {
+		if command.Action != "" && command.Action != forcedAction {
+			writeJSONAPIError(w, http.StatusBadRequest, "action does not match grill route", "bad_answer")
+			return
+		}
+		command.Action = forcedAction
+	} else if command.Action == "" {
+		command.Action = approval.GrillActionAnswer
+	}
+	if command.Action != approval.GrillActionAnswer && command.Action != approval.GrillActionNewVersion {
+		writeJSONAPIError(w, http.StatusBadRequest, "action must be answer or new_version", "bad_answer")
+		return
+	}
+	if command.Action == approval.GrillActionAnswer && strings.TrimSpace(command.Answer) == "" {
 		writeJSONAPIError(w, http.StatusBadRequest, "answer is required", "bad_answer")
 		return
 	}
@@ -834,8 +860,14 @@ func (s *Server) handleTaskGrillAnswer(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "grill action is not connected to the task controller", "controller_action_unavailable")
 		return
 	}
-	if err := controller.AnswerStageGrill(r.Context(), runID, stageID, command.Answer, actorID, actorRole); err != nil {
-		s.taskConflict(w, runID, stageID, err.Error())
+	var actionErr error
+	if command.Action == approval.GrillActionNewVersion {
+		actionErr = controller.SubmitStageGrillVersion(r.Context(), runID, stageID, command.Answer, actorID, actorRole)
+	} else {
+		actionErr = controller.AnswerStageGrill(r.Context(), runID, stageID, command.Answer, actorID, actorRole)
+	}
+	if actionErr != nil {
+		s.taskConflict(w, runID, stageID, actionErr.Error())
 		return
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID, "actor_id": actorID})
@@ -847,7 +879,7 @@ func (s *Server) handleTaskGrillDone(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" {
+	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" || !s.pendingGrillApproval(runID, state.PendingApprovalID) {
 		s.taskConflict(w, runID, stageID, "grill completion requires a pending grill")
 		return
 	}
@@ -869,6 +901,22 @@ func (s *Server) handleTaskGrillDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID, "actor_id": actorID})
+}
+
+func (s *Server) pendingGrillApproval(runID, approvalID string) bool {
+	if s.controller == nil {
+		return false
+	}
+	values, err := s.controller.Approvals(runID)
+	if err != nil {
+		return false
+	}
+	for _, value := range values {
+		if value.ID == approvalID {
+			return value.Kind == approval.KindGrillQuestions && value.Trigger == approval.GrillTrigger && value.Status == approval.StatusPending
+		}
+	}
+	return false
 }
 
 func (s *Server) handleTaskPlanApprove(w http.ResponseWriter, r *http.Request) {

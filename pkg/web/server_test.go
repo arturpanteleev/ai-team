@@ -38,6 +38,7 @@ var (
 	_ StageAgentController    = (*control.Controller)(nil)
 	_ StageSkipController     = (*control.Controller)(nil)
 	_ StageReturnController   = (*control.Controller)(nil)
+	_ StageGrillController    = (*control.Controller)(nil)
 )
 
 type fakeRunController struct {

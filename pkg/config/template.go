@@ -247,6 +247,12 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 				if check.MaxRounds < 0 {
 					add("%s: check max_rounds не может быть отрицательным", prefix)
 				}
+				if check.Mode != "" && check.Mode != "grill" {
+					add("%s: check mode %q недопустим (grill)", prefix, check.Mode)
+				}
+				if check.MaxRounds > 0 && check.Mode != "grill" {
+					add("%s: check max_rounds допустим только для mode grill", prefix)
+				}
 			default:
 				add("%s: check kind %q недопустим (hard|agent)", prefix, check.Kind)
 			}

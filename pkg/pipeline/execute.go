@@ -100,7 +100,18 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
 			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
 			current == rs.runCfg.retryFrom
-		if overriddenByDecision {
+		if stageApproval != nil && stageApproval.Kind == approval.KindGrillQuestions && stageApproval.FromStage == current {
+			for _, previous := range rs.results {
+				if previous.Name == current && previous.AttemptID == stageApproval.AttemptID {
+					result = previous
+					replayedHumanAttempt = true
+					break
+				}
+			}
+			if !replayedHumanAttempt {
+				return fmt.Errorf("grill approval %s has no source result for attempt %s", stageApproval.ID, stageApproval.AttemptID)
+			}
+		} else if overriddenByDecision {
 			var overrideErr error
 			result, overrideErr = rs.applyCheckOverride(current)
 			if overrideErr != nil {

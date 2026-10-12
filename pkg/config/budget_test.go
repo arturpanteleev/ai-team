@@ -130,10 +130,68 @@ func TestBudgetConfigValidateRejects(t *testing.T) {
 		"bad-duration": {MaxExecutionTime: "-2h", MaxAttempts: 10},
 		"parse-fail":   {MaxWallTime: "xyz", MaxAttempts: 10},
 		"neg-attempts": {MaxExecutionTime: "1h", MaxAttempts: -5},
+		"neg-task":     {MaxTaskTokens: -1},
+		"neg-daily":    {MaxDailyTokens: -1},
 	}
 	for name, bc := range cases {
 		if err := bc.Validate(); err == nil {
 			t.Errorf("%s: должен быть отвергнут", name)
 		}
+	}
+}
+
+func TestAutoPickupConfigLoadsAndRequiresTokenBudgets(t *testing.T) {
+	base := "schema_version: 5\ntemplate: pickup-test\ntitle: Pickup test\nstages:\n  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\n"
+	cases := []struct {
+		name    string
+		extra   string
+		wantErr bool
+	}{
+		{"enabled with both budgets", "budget:\n  max_task_tokens: 500\n  max_daily_tokens: 5000\nauto_pickup:\n  enabled: true\n  max_parallel_tasks: 2\n  poll_interval: 30s\n", false},
+		{"disabled without budgets", "auto_pickup:\n  enabled: false\n", false},
+		{"enabled without budget section", "auto_pickup:\n  enabled: true\n", true},
+		{"enabled without daily budget", "budget:\n  max_task_tokens: 500\nauto_pickup:\n  enabled: true\n", true},
+		{"enabled without task budget", "budget:\n  max_daily_tokens: 500\nauto_pickup:\n  enabled: true\n", true},
+		{"negative parallel limit", "auto_pickup:\n  max_parallel_tasks: -1\n", true},
+		{"bad poll interval", "auto_pickup:\n  poll_interval: soon\n", true},
+		{"negative daily budget", "budget:\n  max_daily_tokens: -5\n", true},
+		{"budget key typo", "budget:\n  max_daily_token: 1\n", true},
+		{"unknown auto_pickup key", "auto_pickup:\n  bogus: 1\n", true},
+		{"auto_pickup must be a mapping", "auto_pickup: true\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(base+tc.extra), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err == nil {
+				err = cfg.Validate(nil)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("load/validate err=%v, wantErr=%t", err, tc.wantErr)
+			}
+			if tc.name == "enabled with both budgets" {
+				if !cfg.AutoPickup.Enabled || cfg.AutoPickup.EffectiveMaxParallelTasks() != 2 ||
+					cfg.AutoPickup.EffectivePollInterval() != 30*time.Second || cfg.Budget.MaxTaskTokens != 500 || cfg.Budget.MaxDailyTokens != 5000 {
+					t.Fatalf("auto_pickup loaded incorrectly: %+v budget=%+v", cfg.AutoPickup, cfg.Budget)
+				}
+			}
+		})
+	}
+}
+
+func TestAutoPickupConfigDefaults(t *testing.T) {
+	var missing *AutoPickupConfig
+	if missing.EffectiveMaxParallelTasks() != DefaultAutoPickupMaxParallelTasks || missing.EffectivePollInterval() != DefaultAutoPickupPollInterval {
+		t.Fatal("nil auto_pickup must use canonical defaults")
+	}
+	if err := missing.Validate(nil); err != nil {
+		t.Fatalf("absent auto_pickup is valid: %v", err)
+	}
+	malformed := &AutoPickupConfig{PollInterval: "-1m"}
+	if malformed.EffectivePollInterval() != DefaultAutoPickupPollInterval {
+		t.Fatal("non-positive poll interval must fall back to the default")
 	}
 }

@@ -314,9 +314,44 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	if session, ok := s.requestSession(r); ok && session.Principal.ActorID != "" {
 		actorID = session.Principal.ActorID
 	}
+	runID, version, admissionFailed, err := s.startTask(r.Context(), command, actorID, nil)
+	if errors.Is(err, errTaskCreateUnavailable) {
+		writeJSONAPIError(w, http.StatusServiceUnavailable, "task create options are not connected to the task controller", "controller_action_unavailable")
+		return
+	}
+	if err != nil {
+		status := http.StatusBadRequest
+		if admissionFailed {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	response := map[string]string{"run_id": runID}
+	if version != "" {
+		response["template_version"] = version
+	}
+	writeJSONResponse(w, http.StatusAccepted, response)
+}
+
+// errTaskCreateUnavailable — контроллер не поддерживает расширенное создание
+// задачи (режим, идея, ссылки); такой запрос не превращается молча в legacy.
+var errTaskCreateUnavailable = errors.New("task create options are not connected to the task controller")
+
+// startTask — единственный путь создания задачи для HTTP и автоподбора:
+// закрепление шаблона, видимая admission-запись и событие run_queued.
+// beforeAdmit выполняется первым внутри admission, до появления run в
+// проекции; его ошибка отменяет запуск.
+func (s *Server) startTask(ctx context.Context, command startRunCommand, actorID string, beforeAdmit func(runID string) error) (string, string, bool, error) {
 	now := time.Now().UTC()
 	admissionFailed := false
 	admit := func(runID string) error {
+		if beforeAdmit != nil {
+			if err := beforeAdmit(runID); err != nil {
+				admissionFailed = true
+				return err
+			}
+		}
 		s.templateMu.Lock()
 		defer s.templateMu.Unlock()
 		if templateStore, storeErr := s.templateStore(); storeErr != nil {
@@ -360,28 +395,18 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	if advancedRequest {
 		controller, ok := s.controller.(TaskCreateController)
 		if !ok {
-			writeJSONAPIError(w, http.StatusServiceUnavailable, "task create options are not connected to the task controller", "controller_action_unavailable")
-			return
+			return "", "", false, errTaskCreateUnavailable
 		}
-		runID, err = controller.StartTask(r.Context(), command.Feature, command.Task, command.Title,
+		runID, err = controller.StartTask(ctx, command.Feature, command.Task, command.Title,
 			command.Idea, command.Mode, command.ExternalLinks, admit)
 	} else {
 		runID, err = s.controller.StartWithAdmission(command.Feature, command.Task, admit)
 	}
 	if err != nil {
-		status := http.StatusBadRequest
-		if admissionFailed {
-			status = http.StatusServiceUnavailable
-		}
-		http.Error(w, err.Error(), status)
-		return
+		return "", "", admissionFailed, err
 	}
 	s.appendRunEvent(runID, "run_queued", now, map[string]any{"status": "queued", "actor_id": actorID, "template_version": command.TemplateVersion})
-	response := map[string]string{"run_id": runID}
-	if command.TemplateVersion != "" {
-		response["template_version"] = command.TemplateVersion
-	}
-	writeJSONResponse(w, http.StatusAccepted, response)
+	return runID, command.TemplateVersion, false, nil
 }
 
 func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
@@ -401,11 +426,38 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
 		return
 	}
+	budgetGrant := s.pendingBudgetStop(runID)
 	if err := s.controller.Resume(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Кто снял паузу — часть аудита: resume после остановки по бюджету задачи
+	// выдаёт ей ещё один бюджет того же размера.
+	s.appendRunEvent(runID, "run_resume_requested", time.Now().UTC(), map[string]any{
+		"actor_id": session.Principal.ActorID, "budget_allowance_granted": budgetGrant,
+	})
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
+}
+
+// pendingBudgetStop сообщает, снимает ли resume паузу по бюджету задачи:
+// последнее budget_exceeded со scope=task новее последнего resume. Только
+// такая пауза даёт задаче новый бюджет; дневной бюджет resume не выдаёт.
+func (s *Server) pendingBudgetStop(runID string) bool {
+	stop, err := s.store.LatestRunEvent(runID, "budget_exceeded")
+	if err != nil || stop == nil {
+		return false
+	}
+	var data struct {
+		Scope string `json:"scope"`
+	}
+	if json.Unmarshal([]byte(stop.DataJSON), &data) != nil || data.Scope != "task" {
+		return false
+	}
+	resumed, err := s.store.LatestRunEvent(runID, "run_resume_requested")
+	if err != nil {
+		return false
+	}
+	return resumed == nil || resumed.Sequence < stop.Sequence
 }
 
 func (s *Server) handleRetryDelivery(w http.ResponseWriter, r *http.Request) {

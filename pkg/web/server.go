@@ -21,6 +21,7 @@ import (
 
 	agentdata "github.com/arturpanteleev/ai-team"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/autopickup"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
@@ -28,6 +29,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
@@ -178,6 +180,9 @@ type Server struct {
 	stallAfter          time.Duration
 	stallAfterOverride  bool
 	stallPollInterval   time.Duration
+	autoPickup          autopickup.Policy
+	autoPickupInterval  time.Duration
+	tokenLedger         tokenbudget.Ledger
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -280,6 +285,16 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	}
 	srv.eventWorkers.Add(1)
 	go srv.monitorStalledStages(eventContext)
+	if err := srv.reconcileBacklogClaims(srv.clock().UTC()); err != nil {
+		cancelEvents()
+		srv.eventWorkers.Wait()
+		_ = s.Close()
+		return nil, fmt.Errorf("reconcile backlog claims: %w", err)
+	}
+	if srv.autoPickup.Enabled {
+		srv.eventWorkers.Add(1)
+		go srv.monitorAutoPickup(eventContext)
+	}
 
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
@@ -332,6 +347,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/template/versions", srv.handleGetTemplateVersions)
 		router.Get("/api/preflight", srv.handlePreflight)
 		router.Get("/api/auth/me", srv.handleCurrentIdentity)
+		router.Get("/api/backlog", srv.handleListBacklog)
 	})
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.apiJSONErrors)
@@ -340,6 +356,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 			return apiIdempotencyMiddleware{store: srv.store, next: next}
 		})
 		router.Post("/api/runs", srv.handleStartRun)
+		router.Post("/api/backlog", srv.handleCreateBacklogItem)
+		router.Post("/api/backlog/{itemID}/status", srv.handleSetBacklogItemStatus)
 		router.Post("/api/template/validate", srv.handleValidateTemplate)
 		router.Post("/api/template/publish", srv.handlePublishTemplate)
 		router.Post("/api/runs/{runID}/resume", srv.handleResumeRun)

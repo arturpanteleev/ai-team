@@ -71,6 +71,7 @@ type Config struct {
 	Containment     *ContainmentConfig   `yaml:"containment,omitempty"`
 	TreeHash        *TreeHashConfig      `yaml:"tree_hash,omitempty"`
 	Budget          *BudgetConfig        `yaml:"budget,omitempty"`
+	AutoPickup      *AutoPickupConfig    `yaml:"auto_pickup,omitempty"`
 	Usage           *UsageConfig         `yaml:"usage,omitempty"`
 	Tracker         *TrackerConfig       `yaml:"tracker,omitempty"`
 	CICD            *CICDConfig          `yaml:"cicd,omitempty"`
@@ -87,6 +88,110 @@ type BudgetConfig struct {
 	// MaxWallTime is a backwards-compatible alias for MaxExecutionTime.
 	MaxWallTime string `yaml:"max_wall_time,omitempty"`
 	MaxAttempts int    `yaml:"max_attempts,omitempty"`
+	// MaxTaskTokens — бюджет токенов (input + output) одной задачи. Ноль —
+	// без лимита. Превышение останавливает задачу перед следующей попыткой
+	// агента; продолжить её может только явное решение человека (resume).
+	MaxTaskTokens int64 `yaml:"max_task_tokens,omitempty"`
+	// MaxDailyTokens — бюджет токенов инстанса на сутки UTC по всем задачам.
+	// Ноль — без лимита. Сутки считаются по UTC, а не по локальному поясу.
+	MaxDailyTokens int64 `yaml:"max_daily_tokens,omitempty"`
+}
+
+// UnmarshalYAML отвергает неизвестные ключи: опечатка в имени лимита иначе
+// молча оставила бы задачу без бюджета.
+func (bc *BudgetConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"max_execution_time": true, "max_wall_time": true, "max_attempts": true,
+		"max_task_tokens": true, "max_daily_tokens": true,
+	}, "config: budget"); err != nil {
+		return err
+	}
+	type plain BudgetConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*bc = BudgetConfig(decoded)
+	return nil
+}
+
+// UnmarshalYAML отвергает неизвестные ключи секции auto_pickup.
+func (ac *AutoPickupConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{
+		"enabled": true, "max_parallel_tasks": true, "poll_interval": true,
+	}, "config: auto_pickup"); err != nil {
+		return err
+	}
+	type plain AutoPickupConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*ac = AutoPickupConfig(decoded)
+	return nil
+}
+
+// AutoPickupConfig включает автоматический подбор задач из бэклога: агент
+// берёт только элементы, явно помеченные человеком как готовые к автоподбору,
+// и запускает их в режиме auto. Включение требует обоих токен-бюджетов —
+// подбор без верхней границы расхода не запускается (fail-closed).
+type AutoPickupConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxParallelTasks — лимит незавершённых задач на инстанс. Задачи в
+	// ожидании человека тоже занимают слот: незавершённая задача — это работа,
+	// за которую кто-то отвечает.
+	MaxParallelTasks int `yaml:"max_parallel_tasks,omitempty"`
+	// PollInterval — как часто подборщик проверяет очередь.
+	PollInterval string `yaml:"poll_interval,omitempty"`
+}
+
+// Канонические дефолты автоподбора. Один параллельный слот совпадает с
+// workspace lock локального контроллера: два run одного target одновременно
+// он всё равно не исполнит.
+const (
+	DefaultAutoPickupMaxParallelTasks = 1
+	DefaultAutoPickupPollInterval     = time.Minute
+)
+
+// EffectiveMaxParallelTasks возвращает лимит параллельных задач: явный или дефолт.
+func (ac *AutoPickupConfig) EffectiveMaxParallelTasks() int {
+	if ac == nil || ac.MaxParallelTasks <= 0 {
+		return DefaultAutoPickupMaxParallelTasks
+	}
+	return ac.MaxParallelTasks
+}
+
+// EffectivePollInterval возвращает период опроса очереди: явный или дефолт.
+func (ac *AutoPickupConfig) EffectivePollInterval() time.Duration {
+	if ac == nil || strings.TrimSpace(ac.PollInterval) == "" {
+		return DefaultAutoPickupPollInterval
+	}
+	duration, err := time.ParseDuration(ac.PollInterval)
+	if err != nil || duration <= 0 {
+		return DefaultAutoPickupPollInterval
+	}
+	return duration
+}
+
+// Validate проверяет автоподбор вместе с бюджетом: включённый подбор без
+// обоих токен-лимитов отвергается.
+func (ac *AutoPickupConfig) Validate(budget *BudgetConfig) error {
+	if ac == nil {
+		return nil
+	}
+	if ac.MaxParallelTasks < 0 {
+		return fmt.Errorf("auto_pickup.max_parallel_tasks не может быть отрицательным")
+	}
+	if ac.PollInterval != "" {
+		duration, err := time.ParseDuration(ac.PollInterval)
+		if err != nil || duration <= 0 {
+			return fmt.Errorf("auto_pickup.poll_interval %q не парсится (пример: 1m)", ac.PollInterval)
+		}
+	}
+	if ac.Enabled && (budget == nil || budget.MaxTaskTokens <= 0 || budget.MaxDailyTokens <= 0) {
+		return fmt.Errorf("auto_pickup.enabled требует budget.max_task_tokens и budget.max_daily_tokens больше нуля")
+	}
+	return nil
 }
 
 // UsageConfig enables an explicitly approximate allocation of a monthly
@@ -337,6 +442,12 @@ func (bc *BudgetConfig) Validate() error {
 	if bc.MaxAttempts < 0 {
 		return fmt.Errorf("budget.max_attempts не может быть отрицательным")
 	}
+	if bc.MaxTaskTokens < 0 {
+		return fmt.Errorf("budget.max_task_tokens не может быть отрицательным")
+	}
+	if bc.MaxDailyTokens < 0 {
+		return fmt.Errorf("budget.max_daily_tokens не может быть отрицательным")
+	}
 	return nil
 }
 
@@ -526,7 +637,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"max_visits": true, "checks": true, "cli": true, "model": true,
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
-		"tree_hash": true, "budget": true, "tracker": true, "cicd": true, "notifications": true, "redaction": true, "retention": true,
+		"tree_hash": true, "budget": true, "auto_pickup": true, "tracker": true, "cicd": true, "notifications": true, "redaction": true, "retention": true,
 		"mcp_servers": true,
 	}, "config"); err != nil {
 		return err
@@ -555,6 +666,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Notifications      *NotificationsConfig               `yaml:"notifications"`
 		TreeHash           *TreeHashConfig                    `yaml:"tree_hash"`
 		Budget             *BudgetConfig                      `yaml:"budget"`
+		AutoPickup         *AutoPickupConfig                  `yaml:"auto_pickup"`
 		Redaction          *RedactionConfig                   `yaml:"redaction"`
 		Retention          *RetentionConfig                   `yaml:"retention"`
 	}
@@ -582,6 +694,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Containment = raw.Containment
 	c.TreeHash = raw.TreeHash
 	c.Budget = raw.Budget
+	c.AutoPickup = raw.AutoPickup
 	c.Usage = raw.Usage
 	c.Tracker = raw.Tracker
 	c.CICD = raw.CICD
@@ -1038,6 +1151,9 @@ func (c *Config) Validate(reg AgentLookup) error {
 		if err := c.Budget.Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
+	}
+	if err := c.AutoPickup.Validate(c.Budget); err != nil {
+		errs = append(errs, err.Error())
 	}
 	if c.Usage != nil {
 		if err := c.Usage.Validate(); err != nil {

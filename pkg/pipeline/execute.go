@@ -65,12 +65,21 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if err := rs.prepareControllerPRInput(ctx, current); err != nil {
 			return err
 		}
-		if node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
+		// Resume после остановки по бюджету перед проверяющим продолжает с
+		// проверки уже завершённой попытки: новой попытки нет, поэтому лимиты
+		// визитов и попыток к ней не применяются.
+		pendingCheck, hasPendingCheck, pendingErr := rs.pendingCheckAfterBudgetStop(current)
+		if pendingErr != nil {
+			// Проверку изменённого выхода не запускаем и этап молча не
+			// перезапускаем: run встаёт на паузу с явной причиной.
+			return fmt.Errorf("budget stop replay for %s: %w", current, pendingErr)
+		}
+		if !hasPendingCheck && node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
 			return fmt.Errorf("workflow graph: max_visits=%d исчерпан для %s", node.MaxVisits, current)
 		}
 		// P1-7: глобальный лимит попыток run'а (всегда, default 100). Проверка
 		// ДО исполнения: cap строгий, лишняя попытка не запускается.
-		if rs.attemptOrdinal >= rs.budgetConfig.EffectiveMaxAttempts() {
+		if !hasPendingCheck && rs.attemptOrdinal >= rs.budgetConfig.EffectiveMaxAttempts() {
 			return fmt.Errorf("run budget: превышен лимит попыток max_attempts=%d", rs.budgetConfig.EffectiveMaxAttempts())
 		}
 		index := rs.graph.Index(current)
@@ -103,7 +112,10 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
 			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
 			current == rs.runCfg.retryFrom
-		if stageApproval != nil && stageApproval.Kind == approval.KindGrillQuestions && stageApproval.FromStage == current {
+		if hasPendingCheck {
+			result = pendingCheck
+			replayedHumanAttempt = true
+		} else if stageApproval != nil && stageApproval.Kind == approval.KindGrillQuestions && stageApproval.FromStage == current {
 			for _, previous := range rs.results {
 				if previous.Name == current && previous.AttemptID == stageApproval.AttemptID {
 					result = previous
@@ -149,6 +161,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				if refineErr != nil {
 					return refineErr
 				}
+			}
+			if err := rs.enforceStageTokenBudget(current); err != nil {
+				if cleanup != nil {
+					cleanup()
+				}
+				return err
 			}
 			result = rs.runStage(ctx, index, current)
 			if cleanup != nil {

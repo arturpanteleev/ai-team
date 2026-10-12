@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 10
+const SchemaVersion = 11
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -590,6 +590,7 @@ func (s *Store) LatestEventCursor() (int64, error) {
 var WarningEventTypes = []string{
 	"check_overridden", "check_error", "description_missing",
 	"stage_skipped", "stage_stalled", "integration_error",
+	"budget_exceeded", "auto_pickup_deferred", "auto_pickup_failed",
 }
 
 // CountRunWarningEvents groups warning events by run for the given run IDs.
@@ -814,7 +815,13 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS oidc_login_states (
 			state_hash TEXT PRIMARY KEY, nonce TEXT NOT NULL, code_verifier TEXT NOT NULL,
 			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP)`,
+		// Version 11 (B-86): draft idea backlog for auto pickup.
+		`CREATE TABLE IF NOT EXISTS backlog_items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, idea TEXT NOT NULL, feature TEXT NOT NULL,
+			status TEXT NOT NULL, created_by TEXT NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+			ready_by TEXT NOT NULL DEFAULT '', ready_at DATETIME, run_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '')`,
+		`CREATE INDEX IF NOT EXISTS idx_backlog_queue ON backlog_items(status, ready_at, id)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {

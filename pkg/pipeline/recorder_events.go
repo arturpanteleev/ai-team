@@ -7,6 +7,7 @@ import (
 
 var taskWarningEventTypes = map[string]struct{}{
 	"check_error": {}, "check_overridden": {}, "description_missing": {}, "stage_skipped": {},
+	"budget_exceeded": {},
 }
 
 // eventRecorder is optional so external Recorder implementations retain

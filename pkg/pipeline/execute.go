@@ -62,6 +62,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if !exists {
 			return fmt.Errorf("workflow graph: next node %q не существует", current)
 		}
+		if err := rs.prepareControllerPRInput(ctx, current); err != nil {
+			return err
+		}
 		if node.MaxVisits > 0 && rs.visits[current] >= node.MaxVisits {
 			return fmt.Errorf("workflow graph: max_visits=%d исчерпан для %s", node.MaxVisits, current)
 		}
@@ -176,6 +179,21 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if !replayedHumanAttempt {
 			if err := rs.afterAttempt(ctx); err != nil {
 				return err
+			}
+		}
+		// Stage-scoped delivery is a controller operation after the immutable
+		// attempt manifest is published and before hard PR checks consume the
+		// stage result. The URL is projected separately and never added to that
+		// manifest.
+		if err := rs.executeStageDelivery(ctx, current, &result); err != nil {
+			return err
+		}
+		if result.AttemptID != "" {
+			for resultIndex := len(rs.results) - 1; resultIndex >= 0; resultIndex-- {
+				if rs.results[resultIndex].AttemptID == result.AttemptID {
+					rs.results[resultIndex] = result
+					break
+				}
 			}
 		}
 

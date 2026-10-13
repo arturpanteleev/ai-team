@@ -89,14 +89,15 @@ func validClaudeEffort(effort string) bool {
 // --disallowedTools (приоритет — merge deny).
 const claudeDisallowedTools = "Bash,PowerShell,WebFetch,WebSearch,Task,Agent,Skill,LSP,NotebookEdit"
 
-// claudeSettingsJSON — session policy, записываемая в изолированный
-// CLAUDE_CONFIG_DIR: path-deny секретов и служебных каталогов плюс
-// permission-mode.
+// claudeSettingsJSON — статическая часть session policy, записываемой в
+// изолированный CLAUDE_CONFIG_DIR: path-deny секретов и служебных каталогов
+// плюс permission-mode. Запись (Edit/Write) сюда не входит: её правила
+// строит claudeWriteRules по конкретным путям этапа.
 const claudeSettingsJSON = `{
   "permissionMode": "acceptEdits",
   "disallowedTools": ["Bash", "PowerShell", "WebFetch", "WebSearch", "Task", "Agent", "Skill", "LSP", "NotebookEdit"],
   "permissions": {
-    "allow": ["Read", "Edit", "Write", "Glob", "Grep"],
+    "allow": ["Read", "Glob", "Grep"],
     "deny": [
       "Bash(**)", "PowerShell(**)", "WebFetch(**)", "WebSearch", "Task(**)", "Agent(**)", "Skill(**)", "LSP(*)",
       "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)",
@@ -104,9 +105,7 @@ const claudeSettingsJSON = `{
       "Read(.env)", "Read(.env.*)", "Read(**/.git/**)", "Read(.git/**)",
       "Read(**/.ssh/**)", "Read(**/.aws/**)", "Read(**/.gnupg/**)",
       "Read(**/credentials)", "Read(**/credentials/**)",
-      "Edit(**/.git/**)", "Edit(.git/**)", "Edit(**/.ai-team/**)", "Edit(.ai-team/**)",
-      "Edit(//**)", "Write(//**)",
-      "Edit(~/**)", "Write(~/**)"
+      "Edit(**/.git/**)", "Edit(.git/**)"
     ]
   }
 }
@@ -163,6 +162,12 @@ func claudeSessionSettings(task *Task) ([]byte, error) {
 	if err := json.Unmarshal([]byte(claudeSettingsJSON), &settings); err != nil {
 		return nil, fmt.Errorf("claude: decode trusted session policy: %w", err)
 	}
+	allow, deny, err := claudeWriteRules(task)
+	if err != nil {
+		return nil, err
+	}
+	settings.Permissions.Allow = append(settings.Permissions.Allow, allow...)
+	settings.Permissions.Deny = append(settings.Permissions.Deny, deny...)
 	paths, err := exactDeniedReadPaths(task)
 	if err != nil {
 		return nil, err
@@ -179,6 +184,118 @@ func claudeSessionSettings(task *Task) ([]byte, error) {
 		return nil, fmt.Errorf("claude: encode stage session policy: %w", err)
 	}
 	return encoded, nil
+}
+
+// claudeWriteRules строит правила Edit/Write для этапа. Claude применяет
+// deny раньше allow, поэтому разрешить каталог артефактов внутри .ai-team
+// общим deny **/.ai-team/** нельзя: запрещённые соседние элементы
+// .ai-team перечисляются явно (на момент запуска этапа), а allow даётся
+// только рабочему каталогу цели и каталогу <ArtifactRoot>/<Feature>.
+func claudeWriteRules(task *Task) (allow, deny []string, err error) {
+	if task == nil {
+		return nil, nil, nil
+	}
+	if task.TargetDir != "" {
+		target, absErr := filepath.Abs(task.TargetDir)
+		if absErr != nil {
+			return nil, nil, fmt.Errorf("claude: путь цели: %w", absErr)
+		}
+		allow = append(allow, claudeWriteAllowRules(target)...)
+	}
+	artifactDir, aiTeam, layoutOK, err := stageArtifactLayout(task)
+	if err != nil {
+		return nil, nil, err
+	}
+	if artifactDir != "" {
+		allow = append(allow, claudeWriteAllowRules(artifactDir)...)
+	}
+	if !layoutOK {
+		// Нестандартная раскладка артефактов: запрещаем .ai-team целиком,
+		// как и раньше; карве-аут каталога этапа в этом случае не строится.
+		return allow, []string{"Edit(**/.ai-team/**)", "Edit(.ai-team/**)", "Write(**/.ai-team/**)", "Write(.ai-team/**)"}, nil
+	}
+	deny, err = aiTeamWriteDenyRules(aiTeam, filepath.Dir(artifactDir), filepath.Base(artifactDir))
+	if err != nil {
+		return nil, nil, err
+	}
+	return allow, deny, nil
+}
+
+// stageArtifactLayout возвращает каталог артефактов этапа
+// (<ArtifactRoot>/<Feature>), а при раскладке <target>/.ai-team/artifacts
+// также сам каталог .ai-team (layoutOK=true).
+func stageArtifactLayout(task *Task) (artifactDir, aiTeam string, layoutOK bool, err error) {
+	if task.ArtifactRoot == "" || !validStageFeatureSegment(task.Feature) {
+		return "", "", false, nil
+	}
+	root, err := filepath.Abs(task.ArtifactRoot)
+	if err != nil {
+		return "", "", false, fmt.Errorf("claude: путь артефактов: %w", err)
+	}
+	artifactDir = filepath.Join(root, task.Feature)
+	if filepath.Base(root) == "artifacts" && filepath.Base(filepath.Dir(root)) == ".ai-team" {
+		return artifactDir, filepath.Dir(root), true, nil
+	}
+	return artifactDir, "", false, nil
+}
+
+func validStageFeatureSegment(feature string) bool {
+	if feature == "" || feature == "." || feature == ".." {
+		return false
+	}
+	return !strings.ContainsAny(feature, `/\*?()[]{}`)
+}
+
+func claudeWriteAllowRules(absDir string) []string {
+	path := "//" + filepath.ToSlash(absDir)[1:] + "/**"
+	return []string{"Edit(" + path + ")", "Write(" + path + ")"}
+}
+
+// aiTeamWriteDenyRules запрещает запись в .ai-team, кроме каталога этапа:
+// каждый элемент .ai-team (кроме artifacts) и каждый элемент
+// artifacts (кроме каталога этапа) закрываются целиком, плюс прямые файлы
+// обоих каталогов.
+func aiTeamWriteDenyRules(aiTeam, artifactsDir, feature string) ([]string, error) {
+	var rules []string
+	for _, item := range []struct{ dir, keep string }{{aiTeam, "artifacts"}, {artifactsDir, feature}} {
+		if err := claudeCheckRulePath(item.dir); err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(item.dir)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("claude: список %s: %w", item.dir, err)
+		}
+		for _, entry := range entries {
+			if entry.Name() == item.keep {
+				continue
+			}
+			path := filepath.Join(item.dir, entry.Name())
+			if err := claudeCheckRulePath(path); err != nil {
+				return nil, err
+			}
+			rules = append(rules, claudeWriteDenyRules(path)...)
+		}
+		direct := "//" + filepath.ToSlash(item.dir)[1:] + "/*"
+		rules = append(rules, "Edit("+direct+")", "Write("+direct+")")
+	}
+	return rules, nil
+}
+
+func claudeWriteDenyRules(absPath string) []string {
+	path := "//" + filepath.ToSlash(absPath)[1:]
+	return []string{"Edit(" + path + ")", "Edit(" + path + "/**)", "Write(" + path + ")", "Write(" + path + "/**)"}
+}
+
+// claudeCheckRulePath отклоняет пути с символами грамматики правил Claude:
+// такой путь нельзя выразить точно, а расширение правила опасно.
+func claudeCheckRulePath(absPath string) error {
+	if !filepath.IsAbs(absPath) {
+		return fmt.Errorf("claude: путь правила должен быть абсолютным: %q", absPath)
+	}
+	if strings.ContainsAny(absPath, "*?()[]{}") {
+		return fmt.Errorf("claude: путь %q содержит символы, которые нельзя выразить правилом permissions", absPath)
+	}
+	return nil
 }
 
 // claudeResultLine — JSON result, который печатает `claude -p

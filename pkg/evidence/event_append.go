@@ -20,7 +20,7 @@ func ValidateWorkerEventType(eventType string) error {
 		"executor_changed", "agent_started", "agent_finished", "human_result_edited_agent",
 		"approval_requested", "approval_decided", "approval_reused", "transition_selected",
 		"delivery_deferred", "delivery_plan_approved", "deferred_gates_ratified",
-		"test_mutations", "resume_blocked", "budget_exceeded":
+		"test_mutations", "resume_blocked", "budget_exceeded", "budget_allowance_granted":
 		return nil
 	default:
 		return fmt.Errorf("event type %q is not allowed through worker API", eventType)

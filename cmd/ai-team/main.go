@@ -516,7 +516,7 @@ func cmdWorker() {
 	case worker.OperationResume:
 		result, err = engine.Resume(ctx, pipeline.ResumeConfig{
 			RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
-			ApprovePlanHash: job.ApprovePlanHash,
+			ApprovePlanHash: job.ApprovePlanHash, BudgetAllowance: job.BudgetAllowance(),
 		})
 	case worker.OperationRecover:
 		result, err = executeRecoveredJobWithSources(ctx, engine, target, job, eventLogSource, attemptManifestSource)
@@ -1281,11 +1281,12 @@ func cmdRun() {
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan (ratify-ит отложенные гейты run'а)")
 	templateID := runFlags.String("template", "", "ID активного шаблона проекта")
 	mode := runFlags.String("mode", "", "Режим выполнения: auto")
+	grantBudget := runFlags.String("grant-budget-allowance", "", "С --resume: явно выдать задаче ещё один бюджет max_task_tokens после остановки по бюджету задачи; значение — причина решения")
 
 	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
 	_ = runFlags.Parse(interspersedTaskArgs(os.Args[2:], map[string]bool{
 		"--feature": true, "--task": true, "--target": true, "--resume": true,
-		"--approve-plan": true, "--template": true, "--mode": true,
+		"--approve-plan": true, "--template": true, "--mode": true, "--grant-budget-allowance": true,
 	}))
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
@@ -1306,6 +1307,16 @@ func cmdRun() {
 	}
 	if *mode != "" && *mode != "auto" {
 		fatal("недопустимый режим %q (допустим auto)", *mode)
+	}
+	var budgetAllowance *pipeline.BudgetAllowanceGrant
+	if *grantBudget != "" {
+		if *resumeRunID == "" {
+			fatal("--grant-budget-allowance допустим только вместе с --resume")
+		}
+		budgetAllowance = &pipeline.BudgetAllowanceGrant{ActorID: "local-cli", Reason: *grantBudget}
+		if err := budgetAllowance.Validate(); err != nil {
+			fatal("%v", err)
+		}
 	}
 	if *resumeRunID != "" && (*templateID != "" || *mode != "") {
 		fatal("--resume нельзя сочетать с --template или --mode; настройки run уже закреплены")
@@ -1391,6 +1402,7 @@ func cmdRun() {
 	if *resumeRunID != "" {
 		runResult, err = engine.Resume(ctx, pipeline.ResumeConfig{
 			RunID: *resumeRunID, TargetDir: *target, ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
+			BudgetAllowance: budgetAllowance,
 		})
 	} else {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{

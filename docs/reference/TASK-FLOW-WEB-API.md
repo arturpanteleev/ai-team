@@ -40,8 +40,16 @@ The idea backlog is stored separately from tasks. Only an explicit human
 `failed` belong to the picker and cannot be set through the API. A `failed`
 item returns to the queue only when a human marks it `ready` again.
 `POST /api/runs/{runID}/resume` records `run_resume_requested` with the
-resuming `actor_id` and `budget_allowance_granted`, which is true when the
-resume lifts a `budget_exceeded` stop and therefore grants a new task budget. See
+resuming `actor_id` and `budget_allowance_granted`. A plain resume (empty body)
+never grants a new task budget: after a task-budget stop the run stops again
+before the next model call. A new allowance of the same size is granted only by
+an explicit human decision with a reason, sent as
+`{"grant_budget_allowance": true, "reason": "..."}`; then
+`budget_allowance_granted` is true, the event carries `reason`, and the
+pipeline records `budget_allowance_granted` in evidence. A grant without a
+reason (or a reason without a grant) is `400`; a grant with no uncovered
+task-budget stop, including after a daily stop, is `409`. The daily budget is
+never granted or reset. See
 `auto_pickup` in the configuration reference for limits and events.
 
 Stage actions are authorized by the functions of the run's pinned template

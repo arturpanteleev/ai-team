@@ -59,6 +59,34 @@ func TestQueuedLegacyJobIsUpgradedOnlyAtProcessSpawn(t *testing.T) {
 	}
 }
 
+func TestJobBudgetAllowanceOnlyForResumeWithReason(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	execution := strings.Repeat("a", ExecutionIDBytes*2)
+	resume := Job{SchemaVersion: SchemaVersion, Operation: OperationResume, RunID: "run-1", TargetDir: target, ExecutionID: execution}
+	if resume.BudgetAllowance() != nil {
+		t.Fatal("job without grant fields must not carry a grant")
+	}
+	granted := resume.WithBudgetAllowance(&pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"})
+	data, _ := json.Marshal(granted)
+	decoded, err := DecodeJob(bytes.NewReader(data), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant := decoded.BudgetAllowance(); grant == nil || grant.ActorID != "alice" || grant.Reason != "why" {
+		t.Fatalf("grant must survive the job protocol: %+v", grant)
+	}
+	for name, job := range map[string]Job{
+		"no reason": resume.WithBudgetAllowance(&pipeline.BudgetAllowanceGrant{ActorID: "alice"}),
+		"no actor":  resume.WithBudgetAllowance(&pipeline.BudgetAllowanceGrant{Reason: "why"}),
+		"start": {SchemaVersion: SchemaVersion, Operation: OperationStart, RunID: "run-1", TargetDir: target,
+			Feature: "feature", Task: "задача", ExecutionID: execution, BudgetAllowanceActor: "alice", BudgetAllowanceReason: "why"},
+	} {
+		if err := job.Validate(target); err == nil {
+			t.Fatalf("%s: invalid grant must be rejected", name)
+		}
+	}
+}
+
 type failedJobReader struct{}
 
 func (failedJobReader) Read([]byte) (int, error) { return 0, fmt.Errorf("read failed") }
@@ -90,6 +118,37 @@ func TestProcessEnginePassesStrictJob(t *testing.T) {
 	})
 	if err != nil || result.RunID != "run-1" {
 		t.Fatalf("process worker: result=%+v err=%v", result, err)
+	}
+}
+
+func TestProcessEngineResumePassesBudgetAllowance(t *testing.T) {
+	target := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "job.json")
+	t.Setenv("AI_TEAM_WORKER_TEST_MARKER", marker)
+	allowWorkerTestEnvironment(t, "AI_TEAM_WORKER_TEST_MARKER")
+	engine, err := NewProcessEngine(
+		[]string{os.Args[0], "-test.run=TestProcessEngineHelper", "--"},
+		target, filepath.Join(target, ".ai-team", "web.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Resume(context.Background(), pipeline.ResumeConfig{
+		RunID: "run-grant", TargetDir: target,
+		BudgetAllowance: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job Job
+	if err := json.Unmarshal(data, &job); err != nil {
+		t.Fatal(err)
+	}
+	if grant := job.BudgetAllowance(); job.Operation != OperationResume || grant == nil || grant.ActorID != "alice" || grant.Reason != "why" {
+		t.Fatalf("worker process must receive the explicit grant: %+v", job)
 	}
 }
 

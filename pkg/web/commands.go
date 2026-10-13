@@ -409,19 +409,71 @@ func (s *Server) startTask(ctx context.Context, command startRunCommand, actorID
 	return runID, command.TemplateVersion, false, nil
 }
 
+// resumeCommand — тело POST /api/runs/{runID}/resume. Пустое тело — resume
+// без выдачи бюджета. Новый бюджет задачи выдаётся только явным
+// grant_budget_allowance с причиной.
+type resumeCommand struct {
+	GrantBudgetAllowance bool   `json:"grant_budget_allowance"`
+	Reason               string `json:"reason"`
+}
+
+// budgetAllowanceResumer — контроллер, умеющий передать в pipeline явную
+// выдачу бюджета задачи при resume.
+type budgetAllowanceResumer interface {
+	ResumeWithBudgetAllowance(runID, actorID, reason string) error
+}
+
+func decodeResumeCommand(w http.ResponseWriter, r *http.Request) (resumeCommand, error) {
+	var command resumeCommand
+	r.Body = http.MaxBytesReader(w, r.Body, maxCommandBody)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return command, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return command, nil
+	}
+	if err := strictjson.Unmarshal(data, maxCommandBody, &command); err != nil {
+		return command, err
+	}
+	command.Reason = strings.TrimSpace(command.Reason)
+	if command.GrantBudgetAllowance && command.Reason == "" {
+		return command, errors.New("grant_budget_allowance требует непустую reason")
+	}
+	if !command.GrantBudgetAllowance && command.Reason != "" {
+		return command, errors.New("reason задаётся только вместе с grant_budget_allowance")
+	}
+	return command, nil
+}
+
 func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	if err := s.authorize(r, cloudidentity.PermissionResume, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := requireEmptyCommand(w, r); err != nil {
+	command, err := decodeResumeCommand(w, r)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	runID := chi.URLParam(r, "runID")
+	session, _ := s.requestSession(r)
+	var resumer budgetAllowanceResumer
+	if command.GrantBudgetAllowance {
+		// Выдача относится только к ещё не покрытой выдачей остановке по
+		// бюджету задачи. Дневной бюджет не выдаётся никогда.
+		if !s.pendingBudgetStop(runID) {
+			http.Error(w, "нет остановки по бюджету задачи, для которой можно выдать бюджет", http.StatusConflict)
+			return
+		}
+		var ok bool
+		if resumer, ok = s.controller.(budgetAllowanceResumer); !ok {
+			http.Error(w, "контроллер не поддерживает выдачу бюджета", http.StatusNotImplemented)
+			return
+		}
+	}
 	// Resuming an agent stage launches its agent: record the actor first so
 	// forbid_self_approval sees the launch; an unrecorded launch must not run.
-	session, _ := s.requestSession(r)
 	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); errors.Is(err, errResumeAwaitingDecision) || errors.Is(err, errResumeRunActive) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -429,22 +481,32 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
 		return
 	}
-	budgetGrant := s.pendingBudgetStop(runID)
-	if err := s.controller.Resume(runID); err != nil {
+	if resumer != nil {
+		err = resumer.ResumeWithBudgetAllowance(runID, session.Principal.ActorID, command.Reason)
+	} else {
+		err = s.controller.Resume(runID)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	// Кто снял паузу — часть аудита: resume после остановки по бюджету задачи
-	// выдаёт ей ещё один бюджет того же размера.
-	s.appendRunEvent(runID, "run_resume_requested", time.Now().UTC(), map[string]any{
-		"actor_id": session.Principal.ActorID, "budget_allowance_granted": budgetGrant,
-	})
+	// Кто снял паузу и выдал ли он бюджет — часть аудита. Resume без явной
+	// выдачи новый бюджет задачи не даёт: задача снова встанет на паузу,
+	// если бюджет исчерпан.
+	data := map[string]any{
+		"actor_id": session.Principal.ActorID, "budget_allowance_granted": command.GrantBudgetAllowance,
+	}
+	if command.GrantBudgetAllowance {
+		data["reason"] = command.Reason
+	}
+	s.appendRunEvent(runID, "run_resume_requested", time.Now().UTC(), data)
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
-// pendingBudgetStop сообщает, снимает ли resume паузу по бюджету задачи:
-// последнее budget_exceeded со scope=task новее последнего resume. Только
-// такая пауза даёт задаче новый бюджет; дневной бюджет resume не выдаёт.
+// pendingBudgetStop сообщает, есть ли у задачи остановка по бюджету задачи,
+// ещё не покрытая явной выдачей бюджета: последнее budget_exceeded имеет
+// scope=task и новее последней выдачи (run_resume_requested с
+// budget_allowance_granted=true или budget_allowance_granted из evidence).
 func (s *Server) pendingBudgetStop(runID string) bool {
 	stop, err := s.store.LatestRunEvent(runID, "budget_exceeded")
 	if err != nil || stop == nil {
@@ -456,11 +518,21 @@ func (s *Server) pendingBudgetStop(runID string) bool {
 	if json.Unmarshal([]byte(stop.DataJSON), &data) != nil || data.Scope != "task" {
 		return false
 	}
+	granted, err := s.store.LatestRunEvent(runID, "budget_allowance_granted")
+	if err != nil || (granted != nil && granted.Sequence > stop.Sequence) {
+		return false
+	}
 	resumed, err := s.store.LatestRunEvent(runID, "run_resume_requested")
 	if err != nil {
 		return false
 	}
-	return resumed == nil || resumed.Sequence < stop.Sequence
+	if resumed == nil || resumed.Sequence < stop.Sequence {
+		return true
+	}
+	var request struct {
+		Granted bool `json:"budget_allowance_granted"`
+	}
+	return json.Unmarshal([]byte(resumed.DataJSON), &request) == nil && !request.Granted
 }
 
 func (s *Server) handleRetryDelivery(w http.ResponseWriter, r *http.Request) {

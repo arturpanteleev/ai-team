@@ -213,6 +213,21 @@ func (c *Controller) Preflight(ctx context.Context) preflight.Report {
 }
 
 func (c *Controller) Resume(runID string) error {
+	return c.resume(runID, nil)
+}
+
+// ResumeWithBudgetAllowance продолжает задачу с явной выдачей нового бюджета
+// задачи: решение человека (автор и причина) уходит в pipeline и
+// записывается в evidence событием budget_allowance_granted.
+func (c *Controller) ResumeWithBudgetAllowance(runID, actorID, reason string) error {
+	grant := &pipeline.BudgetAllowanceGrant{ActorID: actorID, Reason: reason}
+	if err := grant.Validate(); err != nil {
+		return err
+	}
+	return c.resume(runID, grant)
+}
+
+func (c *Controller) resume(runID string, grant *pipeline.BudgetAllowanceGrant) error {
 	stateStore, err := lifecycle.NewStore(c.target)
 	if err != nil {
 		return err
@@ -234,7 +249,7 @@ func (c *Controller) Resume(runID string) error {
 		}
 	}
 	return c.launch(runID, func(ctx context.Context, cancelRequested <-chan struct{}) (pipeline.RunResult, error) {
-		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target,
+		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target, BudgetAllowance: grant,
 			CancelRequested: func() bool { return cancellationRequested(c.target, runID, cancelRequested) }})
 	})
 }

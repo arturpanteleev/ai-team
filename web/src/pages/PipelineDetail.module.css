@@ -216,6 +216,28 @@
   min-height: 44px;
 }
 
+.budgetGrant {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.budgetGrant p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.budgetGrant input {
+  flex: 1 1 240px;
+  min-height: 44px;
+}
+
+.budgetGrant button {
+  min-height: 44px;
+}
+
 .controlError {
   margin-top: 8px;
   color: var(--danger-fg);

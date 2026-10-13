@@ -42,6 +42,26 @@ type Job struct {
 	ApproveGates    bool      `json:"approve_gates,omitempty"`
 	ApprovePlanHash string    `json:"approve_plan_hash,omitempty"`
 	ExecutionID     string    `json:"execution_id,omitempty"`
+	// BudgetAllowanceActor и BudgetAllowanceReason — явная выдача бюджета
+	// задачи человеком при resume; задаются только вместе и только для resume.
+	BudgetAllowanceActor  string `json:"budget_allowance_actor,omitempty"`
+	BudgetAllowanceReason string `json:"budget_allowance_reason,omitempty"`
+}
+
+// BudgetAllowance возвращает явную выдачу бюджета задачи из job или nil.
+func (j Job) BudgetAllowance() *pipeline.BudgetAllowanceGrant {
+	if j.BudgetAllowanceActor == "" && j.BudgetAllowanceReason == "" {
+		return nil
+	}
+	return &pipeline.BudgetAllowanceGrant{ActorID: j.BudgetAllowanceActor, Reason: j.BudgetAllowanceReason}
+}
+
+// WithBudgetAllowance переносит выдачу бюджета из ResumeConfig в job.
+func (j Job) WithBudgetAllowance(grant *pipeline.BudgetAllowanceGrant) Job {
+	if grant != nil {
+		j.BudgetAllowanceActor, j.BudgetAllowanceReason = grant.ActorID, grant.Reason
+	}
+	return j
 }
 
 func DecodeJob(reader io.Reader, expectedTarget string) (Job, error) {
@@ -109,6 +129,14 @@ func (j Job) validateFields(expectedTarget string) error {
 		}
 		if expectedErr != nil || filepath.Clean(canonicalTarget) != filepath.Clean(expected) {
 			return errors.New("worker job: target_dir не совпадает с mounted target")
+		}
+	}
+	if grant := j.BudgetAllowance(); grant != nil {
+		if j.Operation != OperationResume {
+			return errors.New("worker job: выдача бюджета допустима только для resume")
+		}
+		if err := grant.Validate(); err != nil {
+			return fmt.Errorf("worker job: %w", err)
 		}
 	}
 	switch j.Operation {

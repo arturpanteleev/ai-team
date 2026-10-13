@@ -29,6 +29,11 @@ const (
 // EventBudgetExceeded — тип события остановки по бюджету.
 const EventBudgetExceeded = "budget_exceeded"
 
+// EventBudgetAllowanceGranted — явная выдача задаче нового бюджета человеком
+// после остановки по бюджету задачи. Только это событие сдвигает точку
+// отсчёта бюджета задачи; resume без него новый бюджет не выдаёт.
+const EventBudgetAllowanceGranted = "budget_allowance_granted"
+
 // maxManifestBytes ограничивает чтение одного attempt-манифеста.
 const maxManifestBytes = 1 << 20
 

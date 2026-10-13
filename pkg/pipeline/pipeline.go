@@ -334,6 +334,9 @@ type RunConfig struct {
 	resumeDecisionAction string
 	skipStageID          string
 	skipReason           string
+	// budgetAllowance — явная выдача бюджета задачи при resume (только через
+	// ResumeConfig); nil — без выдачи.
+	budgetAllowance *BudgetAllowanceGrant
 	// CancelRequested is polled only between stage attempts so cancellation
 	// never interrupts an agent while it is mutating its workspace.
 	CancelRequested func() bool
@@ -585,6 +588,14 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 		runCfg.skipReason = strings.TrimSpace(runCfg.skipReason)
 		if runCfg.skipReason == "" {
 			return RunResult{}, errors.New("пропуск этапа требует причину")
+		}
+	}
+	if runCfg.budgetAllowance != nil {
+		if runCfg.ResumeRunID == "" {
+			return RunResult{}, errors.New("budget allowance grant requires an existing run")
+		}
+		if err := runCfg.budgetAllowance.Validate(); err != nil {
+			return RunResult{}, err
 		}
 	}
 	if runCfg.ResumeRunID == "" && !workflow.ValidFeature(runCfg.Feature) {

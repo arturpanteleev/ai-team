@@ -32,6 +32,9 @@ import (
 
 func (rs *runState) execute(ctx context.Context) error {
 	rs.replayTypedEvents()
+	if err := rs.applyBudgetAllowanceGrant(); err != nil {
+		return err
+	}
 	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) {
 		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
 	}

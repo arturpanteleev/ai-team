@@ -29,6 +29,11 @@ type ResumeConfig struct {
 	ApproveGates    bool
 	ApprovePlanHash string
 	CancelRequested func() bool
+	// BudgetAllowance — явное решение человека выдать задаче новый бюджет
+	// после остановки по бюджету задачи. nil — resume без выдачи: задача
+	// продолжает считать расход от прежней точки отсчёта и снова встанет на
+	// паузу, если бюджет исчерпан. Дневной бюджет выдача не затрагивает.
+	BudgetAllowance *BudgetAllowanceGrant
 }
 
 type CancelConfig struct {
@@ -146,6 +151,7 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 		ApproveGates:    config.ApproveGates,
 		ApprovePlanHash: config.ApprovePlanHash,
 		CancelRequested: config.CancelRequested,
+		budgetAllowance: config.BudgetAllowance,
 	})
 }
 

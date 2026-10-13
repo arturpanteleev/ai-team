@@ -130,9 +130,53 @@ func TestTaskTokenBudgetBoundaries(t *testing.T) {
 	}
 }
 
-// Явный resume человеком после остановки выдаёт задаче следующий бюджет того
-// же размера, отсчитанный от расхода в момент остановки, — не бесконечный.
-func TestTaskTokenBudgetResumeGrantsOneMoreAllowance(t *testing.T) {
+func allowanceEvents(t *testing.T, dir, runID string) []evidence.Event {
+	t.Helper()
+	events, err := evidence.VerifyEventLog(filepath.Join(dir, ".ai-team", "runs", runID, "events.jsonl"), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matched []evidence.Event
+	for _, event := range events {
+		if event.Type == tokenbudget.EventBudgetAllowanceGranted {
+			matched = append(matched, event)
+		}
+	}
+	return matched
+}
+
+func grantAllowance(reason string) *BudgetAllowanceGrant {
+	return &BudgetAllowanceGrant{ActorID: "alice", Reason: reason}
+}
+
+// Resume без явного решения человека новый бюджет задачи не выдаёт: задача
+// снова встаёт на паузу перед моделью, сколько бы раз её ни продолжали.
+func TestTaskTokenBudgetResumeWithoutGrantStopsAgain(t *testing.T) {
+	dir := env(t)
+	rt := budgetRuntime()
+	p := New(budgetConfig(&config.BudgetConfig{MaxTaskTokens: 7}), testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, first, err)
+	for round := 0; round < 2; round++ {
+		resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+		if slices.Contains(rt.executed, "reviewer") {
+			t.Fatalf("resume without a grant must not run the next attempt: executed=%v", rt.executed)
+		}
+		assertBudgetPause(t, dir, resumed, err)
+	}
+	events := budgetEvents(t, dir, first.RunID)
+	if len(events) != 3 || events[2].Data["tokens_used"] != float64(7) || events[2].Data["baseline_tokens"] != float64(0) {
+		t.Fatalf("every ungranted resume must stop from the original baseline: %+v", events)
+	}
+	if grants := allowanceEvents(t, dir, first.RunID); len(grants) != 0 {
+		t.Fatalf("resume without a grant must not record an allowance: %+v", grants)
+	}
+}
+
+// Явная выдача с причиной даёт ровно один бюджет того же размера,
+// отсчитанный от расхода в момент остановки, и пишется в evidence.
+func TestTaskTokenBudgetExplicitGrantGivesOneMoreAllowance(t *testing.T) {
 	dir := env(t)
 	rt := budgetRuntime()
 	p := New(budgetConfig(&config.BudgetConfig{MaxTaskTokens: 7}), testRegistry(),
@@ -140,17 +184,114 @@ func TestTaskTokenBudgetResumeGrantsOneMoreAllowance(t *testing.T) {
 	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
 	assertBudgetPause(t, dir, first, err)
 
-	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+	second, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true,
+		budgetAllowance: grantAllowance("  нужен ещё один ревью  ")})
 	if !slices.Contains(rt.executed, "reviewer") {
-		t.Fatalf("human resume must allow the next attempt: executed=%v err=%v", rt.executed, err)
+		t.Fatalf("an explicit grant must allow the next attempt: executed=%v err=%v", rt.executed, err)
 	}
 	if slices.Contains(rt.executed, "deployer") {
-		t.Fatalf("one resume must grant exactly one more allowance: executed=%v", rt.executed)
+		t.Fatalf("one grant must give exactly one more allowance: executed=%v", rt.executed)
 	}
 	assertBudgetPause(t, dir, second, err)
 	events := budgetEvents(t, dir, first.RunID)
 	if len(events) != 2 || events[1].Data["tokens_used"] != float64(17) || events[1].Data["baseline_tokens"] != float64(7) {
-		t.Fatalf("second stop must count from the first stop: %+v", events)
+		t.Fatalf("second stop must count from the granted stop: %+v", events)
+	}
+	grants := allowanceEvents(t, dir, first.RunID)
+	if len(grants) != 1 || grants[0].Data["actor_id"] != "alice" || grants[0].Data["reason"] != "нужен ещё один ревью" ||
+		grants[0].Data["baseline_tokens"] != float64(7) {
+		t.Fatalf("grant must be recorded with actor, reason and baseline: %+v", grants)
+	}
+
+	// Выдача одноразовая: следующий resume без выдачи снова останавливается.
+	executedBefore := len(rt.executed)
+	third, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, third, err)
+	if len(rt.executed) != executedBefore {
+		t.Fatalf("a spent grant must not carry over: executed %v", rt.executed[executedBefore:])
+	}
+	// Новая выдача отсчитывается от последней остановки.
+	if _, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true,
+		budgetAllowance: grantAllowance("ещё раз")}); !slices.Contains(rt.executed[executedBefore:], "deployer") {
+		t.Fatalf("a second grant must allow the next attempt: executed=%v err=%v", rt.executed, err)
+	}
+	if grants := allowanceEvents(t, dir, first.RunID); len(grants) != 2 || grants[1].Data["baseline_tokens"] != float64(17) {
+		t.Fatalf("second grant baseline = %+v", grants)
+	}
+}
+
+type memoryBudgetEvidence struct {
+	EvidenceStore
+	events []evidence.Event
+}
+
+func (m *memoryBudgetEvidence) Append(event evidence.Event) error {
+	m.events = append(m.events, event)
+	return nil
+}
+
+func (m *memoryBudgetEvidence) ReadEvents() ([]evidence.Event, error) { return m.events, nil }
+
+// Выдача покрывает ровно одну остановку: повторная выдача на уже покрытую
+// остановку не пишется и точку отсчёта не меняет.
+func TestBudgetAllowanceGrantCoversOneStop(t *testing.T) {
+	store := &memoryBudgetEvidence{events: []evidence.Event{
+		{Type: tokenbudget.EventBudgetExceeded, Data: map[string]any{"scope": tokenbudget.ScopeTask, "tokens_used": float64(7)}},
+	}}
+	rs := &runState{p: New(budgetConfig(nil), testRegistry()), evidence: store}
+	for round := 0; round < 2; round++ {
+		rs.runCfg.budgetAllowance = grantAllowance("why")
+		if err := rs.applyBudgetAllowanceGrant(); err != nil {
+			t.Fatal(err)
+		}
+		if rs.runCfg.budgetAllowance != nil {
+			t.Fatal("a grant must be consumed by the resume that carried it")
+		}
+	}
+	baseline, pending, err := rs.taskBudgetLedger()
+	if err != nil || len(store.events) != 2 || baseline != 7 || pending != nil {
+		t.Fatalf("one stop must yield one grant: events=%+v baseline=%d pending=%v err=%v", store.events, baseline, pending, err)
+	}
+}
+
+func TestBudgetAllowanceGrantRequiresActorAndReason(t *testing.T) {
+	for _, grant := range []*BudgetAllowanceGrant{{ActorID: "alice", Reason: "  "}, {ActorID: " ", Reason: "why"}} {
+		dir := env(t)
+		rt := budgetRuntime()
+		p := New(budgetConfig(&config.BudgetConfig{MaxTaskTokens: 7}), testRegistry(),
+			WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+		first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+		assertBudgetPause(t, dir, first, err)
+		if _, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true,
+			budgetAllowance: grant}); err == nil || errors.Is(err, ErrTokenBudgetExceeded) {
+			t.Fatalf("incomplete grant %+v must be refused before the run: %v", grant, err)
+		}
+		if slices.Contains(rt.executed, "reviewer") || len(allowanceEvents(t, dir, first.RunID)) != 0 {
+			t.Fatalf("incomplete grant %+v must not grant: executed=%v", grant, rt.executed)
+		}
+	}
+	if _, err := New(budgetConfig(nil), testRegistry()).RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "budget", TargetDir: env(t), budgetAllowance: grantAllowance("why"),
+	}); err == nil {
+		t.Fatal("a grant on a new run must be refused")
+	}
+}
+
+// Дневной бюджет не выдаётся никогда: выдача после дневной остановки не
+// пишется и задача в те же сутки снова останавливается.
+func TestBudgetAllowanceGrantDoesNotResetDailyBudget(t *testing.T) {
+	dir := env(t)
+	rt := budgetRuntime()
+	ledger := &staticLedger{usage: tokenbudget.Usage{Tokens: 100}}
+	p := New(budgetConfig(&config.BudgetConfig{MaxTaskTokens: 1000, MaxDailyTokens: 100}), testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}), WithTokenLedger(ledger))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "budget", TargetDir: dir, ApproveGates: true})
+	assertBudgetPause(t, dir, first, err)
+	resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir, ApproveGates: true,
+		budgetAllowance: grantAllowance("сутки")})
+	assertBudgetPause(t, dir, resumed, err)
+	if len(rt.executed) != 0 || len(allowanceEvents(t, dir, first.RunID)) != 0 {
+		t.Fatalf("a grant must not lift a daily stop: executed=%v", rt.executed)
 	}
 }
 
@@ -304,7 +445,14 @@ func TestCheckerAgentStopsOnExhaustedTaskBudget(t *testing.T) {
 			if strings.Contains(readEvents(t, dir), `"type":"check_started"`) {
 				t.Fatal("budget stop must precede check_started so the check reruns after resume")
 			}
-			resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: result.RunID, TargetDir: dir, ApproveGates: true})
+			// Без явной выдачи resume проверку не запускает.
+			ungranted, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: result.RunID, TargetDir: dir, ApproveGates: true})
+			assertBudgetPause(t, dir, ungranted, err)
+			if rt.calls["verifier"] != 0 || rt.calls["tech"] != 1 {
+				t.Fatalf("resume without a grant must not run the check: calls=%v", rt.calls)
+			}
+			resumed, err := p.RunWithResult(context.Background(), RunConfig{ResumeRunID: result.RunID, TargetDir: dir, ApproveGates: true,
+				budgetAllowance: grantAllowance("проверить")})
 			// Этап съел весь бюджет; resume не повторяет оплаченную попытку, а
 			// запускает только проверку на выданный человеком бюджет.
 			if err != nil || rt.calls["verifier"] != 1 || rt.calls["tech"] != 1 {

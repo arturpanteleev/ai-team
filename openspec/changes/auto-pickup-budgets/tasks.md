@@ -12,3 +12,5 @@
 - [x] Table tests for limit boundaries, UTC day boundary, unknown markers,
       budget stops and restart persistence with an injected clock.
 - [x] Update configuration and Web API reference documentation.
+- [x] Resume without an explicit human grant does not give a new task budget;
+      the grant carries actor and reason and is recorded in evidence.

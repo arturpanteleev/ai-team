@@ -492,6 +492,32 @@ func TestQueueEngineAndPoller(t *testing.T) {
 	}
 }
 
+func TestQueueEngineResumeCarriesBudgetAllowance(t *testing.T) {
+	target := t.TempDir()
+	queue, err := Open(filepath.Join(t.TempDir(), "scheduler.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	engine, err := NewQueueEngine(queue, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Resume(context.Background(), pipeline.ResumeConfig{
+		RunID: "run-grant", TargetDir: target,
+		BudgetAllowance: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.ListRun("run-grant")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("queued resume job: jobs=%+v err=%v", jobs, err)
+	}
+	if grant := jobs[0].Job.BudgetAllowance(); grant == nil || grant.ActorID != "alice" || grant.Reason != "why" {
+		t.Fatalf("queued resume must carry the explicit grant: %+v", jobs[0].Job)
+	}
+}
+
 func TestPollerRequiresFixedWorkerTarget(t *testing.T) {
 	target := t.TempDir()
 	queue, err := Open(filepath.Join(t.TempDir(), "scheduler.db"), Options{})

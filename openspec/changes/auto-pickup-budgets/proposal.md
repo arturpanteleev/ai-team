@@ -24,7 +24,9 @@ per-day token budget that stop work instead of silently continuing.
   every model-invoking agent attempt. Usage is recomputed from attempt
   manifests on disk, never from process memory. Exceeding a budget appends
   `budget_exceeded` and pauses the run as resumable; only an explicit human
-  resume continues it.
+  resume continues it. A resume does not grant a new task budget by itself:
+  a new allowance requires an explicit human grant with a reason
+  (`budget_allowance_granted`); the daily budget is never granted.
 - Enabling auto pickup requires both token budgets (fail-closed).
 
 ## Out of scope

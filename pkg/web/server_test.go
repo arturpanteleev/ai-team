@@ -50,6 +50,9 @@ type fakeRunController struct {
 	startCalls     int
 	resumeRunID    string
 	resumeCalls    int
+	grantActor     string
+	grantReason    string
+	grantCalls     int
 	cancelRunID    string
 	cancelErr      error
 	decision       approval.Decision
@@ -985,6 +988,12 @@ func (f *fakeRunController) StartWithAdmission(feature, task string, admit func(
 func (f *fakeRunController) Resume(runID string) error {
 	f.resumeRunID = runID
 	f.resumeCalls++
+	return nil
+}
+func (f *fakeRunController) ResumeWithBudgetAllowance(runID, actorID, reason string) error {
+	f.resumeRunID = runID
+	f.grantCalls++
+	f.grantActor, f.grantReason = actorID, reason
 	return nil
 }
 func (f *fakeRunController) Cancel(runID string) error { f.cancelRunID = runID; return f.cancelErr }

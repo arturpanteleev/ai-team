@@ -1,15 +1,8 @@
 .container {
   width: min(100%, 1180px);
   min-width: 0;
-  padding: 32px 32px 48px;
+  padding: 16px 32px 48px;
   margin: 0 auto;
-}
-
-.back {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  margin-bottom: 12px;
 }
 
 .header {
@@ -463,7 +456,7 @@
 
 @media (max-width: 600px) {
   .container {
-    padding: 16px 12px;
+    padding: 12px 12px 32px;
   }
 
   .panel {
@@ -840,17 +833,18 @@
   }
 }
 
-/* Вступление: бизнес-намерение внутри шапки задачи. */
+/* Вступление: бизнес-идея под summary задачи. */
 .intent {
   min-width: 0;
   margin-top: 16px;
-  padding: 18px 20px;
-  border-radius: var(--radius-lg);
-  background: var(--surface-raised);
+  padding: 20px 24px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
 }
 
 .intent > h2 {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
@@ -917,4 +911,120 @@
   .stageCard {
     padding: 20px 18px;
   }
+}
+
+/* Раскладка: summary и бизнес-идея слева, текущий этап справа. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+
+.summary,
+.stage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.summary > *,
+.stage > * {
+  margin: 0;
+}
+
+.summary .hero {
+  margin: 0;
+}
+
+.details {
+  margin-top: 0;
+  padding: 2px 20px 6px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.routePanel {
+  padding: 16px 20px;
+}
+
+.routePanel > h2 {
+  font-size: 1rem;
+}
+
+.agentStatus {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.agentStatus > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.agentStatus p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.agentStatus[data-state='finished'] {
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
+.agentStatus[data-state='failed'] {
+  background: var(--warning-bg);
+}
+
+.agentTitle {
+  font-weight: 650;
+}
+
+.agentStatus a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.resultAccepted {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+  font-weight: 600;
+}
+
+@media (max-width: 899px) {
+  .layout {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* На узком экране текущий этап идёт сразу после шапки, а остальные блоки - ниже. */
+  .summary,
+  .stage {
+    display: contents;
+  }
+
+  .hero { order: 1; }
+  .stageCard { order: 2; }
+  .stageRest { order: 3; }
+  .intent { order: 4; }
+  .details { order: 5; }
+  .routePanel { order: 6; }
 }

@@ -68,11 +68,43 @@ build, wrong revision, misconfiguration) mark the attempt as validation failure;
 transport errors and timeouts are infra failures. Each failure is projected to
 the task event feed as `integration_error` with `integration: cicd`.
 
-Before a trigger the receipt records `trigger_pending`. Only a definite
-rejection (`HTTPStatusError` 4xx except 408/429) clears it; a lost, unreadable
-or 5xx response keeps it, and the next attempt refuses
-to trigger until an operator checks TeamCity and removes the receipt. Trigger
-failures are never treated as retryable.
+Before a trigger the receipt records `trigger_pending` and a fresh random
+128-bit `deploy_id`; the trigger sends it as the build parameter
+`env.AI_TEAM_DEPLOY_ID` next to `env.AI_TEAM_DEPLOY_COMMIT`. Only a definite
+rejection clears the marker: the allowlisted statuses 400, 401, 403, 404, 405
+and 415. Any other answer (lost, unreadable, 5xx, 408, 409, 429, other 4xx)
+keeps it. The next attempt never triggers again; a provider implementing
+`TriggeredBuildFinder` searches for builds carrying that ID (TeamCity:
+`/app/rest/builds` with `state:any`, `defaultFilter:false`,
+`branch:(default:any)`). The adapter ignores answers without the ID and
+fails the search when a build with the ID belongs to another build
+configuration or another revision or commit parameter; exactly one matching
+build resumes the deploy and is re-read like any recorded build. No build
+(the request may still be in flight), several builds, a provider without
+search or a receipt without a valid ID leave the decision to an operator, who
+checks TeamCity and removes the receipt. Trigger failures are never treated as
+retryable.
+
+Provider-reported revisions are bounded to 80 characters with a trailing
+"…" in builds, receipts, errors and events, so a shortened value can never
+equal a SHA. A build `webUrl` and every redirect must be https on the
+configured host (compared without case) and port (an omitted port is 443).
+
+Each merge check runs under its own `context.WithTimeout` (3 minutes,
+below the 5 minute stage margin); an expired check is transient and retried
+until `merge_timeout`. The isolated fetch also sets `http.lowSpeedLimit=1000`
+and `http.lowSpeedTime=60`. `git init` runs with `--template=` and
+`GIT_TEMPLATE_DIR` is removed from the Git environment. `gh` runs in a private
+empty temporary directory, never in the controller's working directory.
+
+Squash and single-commit rebase merges are proven by diff equality, so a squash
+whose content changed during the merge is rejected, and multi-commit rebase
+merges are not supported (fail-closed). ai-team never merges the pull request:
+the human decision before production is the merge itself. The template does
+not require a `confirm: required` stage before deploy, because
+`--approve-gates` and auto mode confirm such gates automatically and an agent
+shares the controller's OS user and gh login; the documented control is GitHub
+branch protection with a required approving review.
 
 A deploy stage does not use `stage_timeout`; its budget is
 `merge_timeout + timeout + 5m`, so a slow merge cannot cancel a running

@@ -284,6 +284,12 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 					return questionErr
 				}
 				if !hasQuestions {
+					transitionPayload, hasQuestions, questionErr = questionsPayloadFromPath(stageQuestionsPath(rs.task.ArtifactRoot, rs.runCfg.Feature))
+					if questionErr != nil {
+						return questionErr
+					}
+				}
+				if !hasQuestions {
 					return &BlockedError{Agent: current, Reason: result.Blocker}
 				}
 				questionRounds, roundsErr := countQuestionApprovals(rs.approvalStore, rs.runID, current)

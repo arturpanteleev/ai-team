@@ -48,6 +48,25 @@ func questionsPayload(resultOutputs []runtime.Artifact) (json.RawMessage, bool, 
 	return nil, false, nil
 }
 
+// questionsPayloadFromPath reads the questions file from its controller path
+// when the stage did not declare a "questions" output. Agents write
+// <ArtifactRoot>/tasks/<feature>/questions.md, and without this read a BLOCKED
+// stage ends terminal instead of asking Product Owner.
+func questionsPayloadFromPath(path string) (json.RawMessage, bool, error) {
+	data, err := safeio.ReadRegularFile(path, maxQuestionBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read stage questions: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil, false, errors.New("stage questions artifact is empty")
+	}
+	encoded, err := json.Marshal(questionPayload{Kind: "questions", Markdown: string(data)})
+	return encoded, true, err
+}
+
 func questionAnswer(decisions []approval.Decision) string {
 	for index := len(decisions) - 1; index >= 0; index-- {
 		if decisions[index].Action == "answer_questions" {

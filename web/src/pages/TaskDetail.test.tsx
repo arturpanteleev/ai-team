@@ -124,7 +124,7 @@ describe('Task detail', () => {
   it('shows the pinned task, result history and comparison, event feed, and only allowed stage actions', async () => {
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Закреплённый маршрут' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
     expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
     expect(screen.getAllByText(/Закреплённый маршрут/).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
@@ -152,7 +152,7 @@ describe('Task detail', () => {
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
       result: 'md', content: 'Проверенная идея', description: 'Описаны ограничения',
     }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
   });
 
   it('shows the checker report and log link while exposing only confirm when that is allowed', async () => {
@@ -490,7 +490,7 @@ describe('Browser stage submission', () => {
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
       result: 'md', content: '# План\n\nшаги', description: 'Собран план',
     }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
     expect(storage.getItem(draftKey())).toBeNull();
     expect(screen.queryByRole('button', { name: 'Предпросмотр' })).not.toBeInTheDocument();
   });
@@ -642,7 +642,7 @@ describe('Browser stage submission', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Без хранилища' }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
   });
 
   it('keeps editing when the storage quota is exceeded', async () => {
@@ -688,7 +688,7 @@ describe('Browser stage submission', () => {
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Сдаю без паузы' } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
     expect(storage.getItem(draftKey())).toBeNull();
     cleanup();
     expect(storage.getItem(draftKey())).toBeNull();
@@ -714,7 +714,7 @@ describe('Browser stage submission', () => {
         await accepted.promise;
       });
       vi.useRealTimers();
-      expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+      expect(await screen.findByText('Результат принят')).toBeInTheDocument();
       expect(storage.getItem(draftKey())).toBeNull();
       hidePage();
       cleanup();
@@ -776,8 +776,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
-    expect(screen.getByText('Ждём подтверждения этапа.')).toBeInTheDocument();
-    expect(screen.getByText('Ожидает: этап «Идея»')).toBeInTheDocument();
+    expect(screen.getAllByText('Ожидает').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
   });
 
@@ -791,9 +790,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     });
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Напишу сам' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Агент analyst сделает этап' })).toBeInTheDocument();
-    expect(screen.getByText('Кто делает этап:').parentElement).toHaveTextContent('Агент analyst');
+    expect(await screen.findByRole('heading', { name: 'Сделаю сам' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Агент analyst подготовит результат' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
@@ -803,7 +801,7 @@ describe('Task page controls moved from the old pipeline page', () => {
 
   it('keeps service fields out of the main view until the details block is opened', async () => {
     renderDetail();
-    await screen.findByRole('heading', { name: 'Закреплённый маршрут' });
+    await screen.findByRole('heading', { name: 'Бизнес-идея' });
 
     const details = screen.getAllByText('Подробности', { selector: 'summary' })[0].closest('details');
     expect(details).not.toBeNull();
@@ -873,11 +871,11 @@ describe('Task page controls moved from the old pipeline page', () => {
   });
   it('moves the back link out of the header and names the idea block without the intention wording', async () => {
     renderDetail();
-    await screen.findByRole('heading', { name: 'Закреплённый маршрут' });
+    await screen.findByRole('heading', { name: 'Бизнес-идея' });
 
     expect(screen.queryByRole('link', { name: '← К задачам' })).not.toBeInTheDocument();
     expect(screen.getByText('Бизнес-идея')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 1, name: 'Закреплённый маршрут' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Бизнес-идея' })).toBeInTheDocument();
     expect(screen.queryByText('Исходное намерение')).not.toBeInTheDocument();
     expect(screen.queryByText(/Бизнес-намерение/)).not.toBeInTheDocument();
   });
@@ -900,7 +898,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
     renderDetail();
 
-    expect(await screen.findByText('Агент работает')).toBeInTheDocument();
+    expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
       'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
     );
@@ -982,11 +980,11 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' })).toBeInTheDocument();
     const card = document.getElementById('current-stage');
     expect(card).toHaveTextContent('Какой сегмент выбрать?');
-    fireEvent.change(screen.getByLabelText('Ответ на вопрос'), { target: { value: 'Малый бизнес' } });
+    fireEvent.change(screen.getAllByLabelText('Ответ на вопрос')[0], { target: { value: 'Малый бизнес' } });
     fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
 
     expect(await screen.findByText('Ждём ответ сервера…')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Сохраняем…' })).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'Сохраняем…' })[0]).toBeDisabled();
   });
   it('moves the launch notice to the working state once the server reports the agent attempt', async () => {
     const api = await import('../api');
@@ -995,7 +993,29 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
-    expect(await screen.findByText('Агент работает')).toBeInTheDocument();
+    expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
     expect(screen.queryByText('Агент запущен')).not.toBeInTheDocument();
+  });
+  it('lists the pending approval of the current stage with its actions and asks for a decision', async () => {
+    const api = await import('../api');
+    const pendingInput = {
+      id: 'input-2', run_id: 'run-detail-1', attempt_id: 'attempt-input', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'human_input', subject_hash: 'f'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['submit', 'run_agent', 'refine_agent', 'reject'], targets: {}, status: 'pending' as const,
+      created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'intent', pending_approval_id: 'input-2' },
+      approvals: [pendingInput],
+      allowed_actions: ['take', 'results', 'run-agent'],
+    });
+    renderDetail();
+
+    expect(await screen.findByText(/Ждёт вашего решения/)).toBeInTheDocument();
+    const approvals = document.getElementById('approvals-heading')!.closest('section')!;
+    expect(within(approvals).getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(within(approvals).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(within(approvals).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
   });
 });

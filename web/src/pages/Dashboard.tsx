@@ -53,6 +53,13 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createdRunID, setCreatedRunID] = useState('');
+  const [createdName, setCreatedName] = useState('');
+  // Пузырь «задача создана» гаснет сам.
+  useEffect(() => {
+    if (!createdRunID) return undefined;
+    const timer = window.setTimeout(() => setCreatedRunID(''), 3500);
+    return () => window.clearTimeout(timer);
+  }, [createdRunID]);
   const [name, setName] = useState('');
   const [feature, setFeature] = useState('');
   // Пока пользователь не правил идентификатор вручную, он следует за названием.
@@ -132,6 +139,7 @@ export function Dashboard() {
     try {
       const result = await startRun(feature, task);
       setCreatedRunID(result.run_id);
+      setCreatedName(name.trim() || feature);
       setCommandStatus('');
       setCreating(false);
       setName('');
@@ -242,10 +250,20 @@ export function Dashboard() {
       <aside className={styles.side} aria-label="Создание и состояние">
         {canSubmitIntention ? (
           creating ? createForm : (
-            <button type="button" className={styles.createBig} onClick={() => setCreating(true)}>
-              <span aria-hidden="true" className={styles.plus}>+</span>
-              Создать задачу
-            </button>
+            <div className={styles.createWrap}>
+              <button type="button" className={styles.createBig} onClick={() => setCreating(true)}>
+                <span aria-hidden="true" className={styles.plus}>+</span>
+                Создать задачу
+              </button>
+              {createdRunID && (
+                <div className={styles.thought} role="status">
+                  <strong>{createdName}</strong>
+                  <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть</Link>
+                  <span className={styles.tailLg} aria-hidden="true" />
+                  <span className={styles.tailSm} aria-hidden="true" />
+                </div>
+              )}
+            </div>
           )
         ) : (
           <section className={styles.intakeNotice} aria-label="Создание задач">
@@ -254,12 +272,6 @@ export function Dashboard() {
           </section>
         )}
 
-        {createdRunID && !creating && (
-          <section className={styles.created} role="status">
-            <strong>Задача создана</strong>
-            <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть задачу →</Link>
-          </section>
-        )}
 
         {!creating && commandStatus && <p className={styles.commandError} role="alert">{commandStatus}</p>}
 

@@ -59,6 +59,11 @@ func TestTaskAllowedActionsByPhaseMatchesBrowserContract(t *testing.T) {
 		return &approval.PendingApproval{ID: id, FromStage: stage, ToStage: stage, Trigger: trigger,
 			Kind: kind, Actions: actions, Status: approval.StatusPending}
 	}
+	checkDecision := func(id, stage, overrideTarget string) *approval.PendingApproval {
+		value := pending(id, stage, approval.StageCheckTrigger, approval.KindCheckDecision, "new_version", "override", "return")
+		value.Targets = map[string]string{"new_version": stage, "override": overrideTarget, "return": stage}
+		return value
+	}
 	cases := []struct {
 		name    string
 		runID   string
@@ -81,6 +86,10 @@ func TestTaskAllowedActionsByPhaseMatchesBrowserContract(t *testing.T) {
 		{"stage check awaits decision", "run-manual", "analysis", lifecycle.PhaseWaiting,
 			pending("check-1", "analysis", approval.StageCheckTrigger, approval.KindApprove, "approve", "override_approve"),
 			[]string{"confirm", "override"}},
+		{"template stage check failed", "run-manual", "analysis", lifecycle.PhaseWaiting,
+			checkDecision("check-2", "analysis", "analysis"), []string{"override"}},
+		{"template stage check targets another stage", "run-manual", "analysis", lifecycle.PhaseWaiting,
+			checkDecision("check-3", "analysis", "idea"), []string{}},
 		{"returnable human stage", "run-manual", "qa", lifecycle.PhaseWaiting,
 			pending("input-2", "qa", humanInputTrigger, approval.KindInput, "submit"), []string{"take", "results", "skip", "return"}},
 		{"delivery plan awaits approval", "run-manual", "delivery", lifecycle.PhaseWaiting,

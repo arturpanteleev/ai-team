@@ -108,7 +108,9 @@ function allowedActions(template, stageID, phase, pending) {
       actions.push('plan/approve')
     } else {
       if (pending.actions.includes('approve')) actions.push('confirm')
-      if (pending.actions.includes('override_approve')) actions.push('override')
+      if (pending.actions.includes('override_approve') || (pending.kind === 'check_decision' &&
+        pending.trigger === 'stage_check' && pending.actions.includes('override') &&
+        pending.targets?.override === stageID)) actions.push('override')
       if (stage?.agent && pending.actions.includes('retry')) actions.push('run-agent')
     }
   }

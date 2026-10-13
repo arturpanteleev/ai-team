@@ -425,7 +425,12 @@ func (s *Server) taskAllowedActions(runID, stageID string, state lifecycle.State
 					if actionAllowed(pending.Actions, "approve") {
 						actions = append(actions, "confirm")
 					}
-					if actionAllowed(pending.Actions, "override_approve") {
+					// Template stage checks (check_decision) offer "override"
+					// targeting the stage; that is exactly what the controller's
+					// OverrideStageCheck accepts. override_approve is the legacy form.
+					if actionAllowed(pending.Actions, "override_approve") || pending.Kind == approval.KindCheckDecision &&
+						pending.Trigger == approval.StageCheckTrigger && actionAllowed(pending.Actions, "override") &&
+						pending.Targets["override"] == stageID {
 						actions = append(actions, "override")
 					}
 					if stageErr == nil && stage.Agent != "" && actionAllowed(pending.Actions, "retry") {

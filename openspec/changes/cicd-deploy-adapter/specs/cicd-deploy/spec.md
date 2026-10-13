@@ -72,16 +72,30 @@ deadline. A retried stage for the same run, stage and revision MUST resume or
 reuse the recorded build instead of triggering another one, and MUST re-read
 that build from the provider instead of trusting the stored receipt; a receipt
 of another run or stage MUST be rejected. The controller MUST record a pending
-trigger before triggering and clear it only when the provider explicitly
-refused the request (HTTP 4xx except 408 and 429). For any other outcome,
-including a 2xx answer that cannot be read, a retry MUST refuse to trigger again
-until an operator resolves it. Every failure MUST be recorded as an
+trigger with a fresh unique deploy ID before triggering, send that ID with the
+trigger, and clear the marker only when the provider explicitly refused the
+request (HTTP 400, 401, 403, 404, 405 or 415). For any other outcome,
+including other 4xx and a 2xx answer that cannot be read, a retry MUST NOT
+trigger again. It MAY continue with a build found by that deploy ID only when
+exactly one build carries it, belongs to the configured build configuration
+and was pinned to the recorded revision; otherwise it MUST refuse until an
+operator resolves it. Every failure MUST be recorded as an
 `integration_error` task event with `integration: cicd`.
 
 #### Scenario: Build succeeds
 
 - **WHEN** the build finishes with success for the expected revision
 - **THEN** the stage link output MUST contain the build URL
+
+#### Scenario: The answer to a trigger was lost
+
+- **WHEN** a trigger request queued a build but its answer was lost
+- **THEN** a retry MUST NOT trigger again
+- **AND** it MUST continue with the build only if exactly one build of the
+  configured build configuration carries the request's deploy ID and the
+  recorded revision
+- **AND** it MUST refuse when no such build, several builds, or a build with
+  that ID but another configuration or revision is found
 
 #### Scenario: A receipt was tampered with
 

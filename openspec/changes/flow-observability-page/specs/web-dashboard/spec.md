@@ -39,3 +39,7 @@ user-selected period and exports the same period as CSV.
 - **THEN** the UI MUST download `GET /api/metrics/flow.csv` for the currently
   displayed period
 - **AND** on failure MUST show the error without downloading a file
+- **AND** export MUST be unavailable while metrics load, after a load failure,
+  or when the displayed period has no data
+- **AND** text cells starting with `=`, `+`, `-`, `@`, tab or carriage return
+  MUST be prefixed with `'` so spreadsheets do not evaluate them

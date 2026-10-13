@@ -37,15 +37,19 @@ type Event struct {
 	// Stream — identity конкретного event stream (случайный ID на время
 	// жизни SQLite-базы сервера). Клиент сбрасывает cursor при смене stream,
 	// иначе после пересоздания БД новые события с меньшими ID игнорируются.
-	Stream    string         `json:"stream,omitempty"`
-	Cursor    int64          `json:"cursor"`
-	RunID     string         `json:"run_id"`
-	Sequence  int64          `json:"sequence"`
-	Type      string         `json:"type"`
-	Stage     string         `json:"stage,omitempty"`
-	Actor     string         `json:"actor,omitempty"`
-	Executor  string         `json:"executor,omitempty"`
-	Severity  string         `json:"severity,omitempty"`
+	Stream   string `json:"stream,omitempty"`
+	Cursor   int64  `json:"cursor"`
+	RunID    string `json:"run_id"`
+	Sequence int64  `json:"sequence"`
+	Type     string `json:"type"`
+	Stage    string `json:"stage,omitempty"`
+	Actor    string `json:"actor,omitempty"`
+	Executor string `json:"executor,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	// Warning is the server's classification (isTaskWarningEvent over
+	// store.WarningEventTypes and severity). The dashboard reads it instead of
+	// keeping its own copy of the warning event types.
+	Warning   bool           `json:"warning"`
 	AttemptID string         `json:"attempt_id,omitempty"`
 	Timestamp time.Time      `json:"timestamp"`
 	Data      map[string]any `json:"data"`
@@ -212,11 +216,13 @@ func wireEvent(event store.Event) (Event, error) {
 			event.Severity = "warning"
 		}
 	}
-	return Event{
+	wire := Event{
 		Version: 1, Cursor: event.ID, RunID: event.RunID, Sequence: event.Sequence,
 		Type: event.Type, Stage: event.Stage, Actor: event.Actor, Executor: event.Executor,
 		Severity: event.Severity, AttemptID: event.AttemptID, Timestamp: event.Timestamp, Data: data,
-	}, nil
+	}
+	wire.Warning = isTaskWarningEvent(wire)
+	return wire, nil
 }
 
 func stringValue(values map[string]any, keys ...string) string {

@@ -44,5 +44,8 @@ support `order=desc` with an optional `before` cursor for newest-first pages.
 - **THEN** the API MUST return up to N events from the newest persisted cursor
   downward, with `next_cursor` set to the last examined cursor
 - **AND** a request with `before=<next_cursor>` MUST return only older events
-- **AND** `before` without `order=desc`, or combined with `after`, MUST be
-  rejected with 400
+- **AND** `before` without `order=desc`, combined with `after`, or not a
+  positive cursor (including `before=0`), MUST be rejected with 400
+- **AND** the response MUST carry `has_more`, true only when at least one more
+  matching event exists past the page
+- **AND** each event MUST carry the server's `warning` classification

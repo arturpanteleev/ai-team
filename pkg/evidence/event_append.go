@@ -176,11 +176,8 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 	// allowed to leave those in-flight windows open while it is the last
 	// durable event; strict replay (below and at the read boundary) still
 	// fails closed on a genuinely missing event.
-	pendingAgentFinishedAttemptID := ""
-	if candidate.Type == "attempt_finished" {
-		pendingAgentFinishedAttemptID = candidate.AttemptID
-	}
-	appendReplay, err := replayEventsForAppendWithPending(proposal, runID, runDir, manifests, pendingAgentFinishedAttemptID)
+	pendingAgentFinishedAttemptID := trailingPendingAgentFinishedAttemptID(proposal)
+	appendReplay, err := replayEventsForAppend(proposal, runID, runDir, manifests)
 	if err != nil {
 		return Event{}, false, fmt.Errorf("event append fails lifecycle replay: %w", err)
 	}

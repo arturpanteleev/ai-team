@@ -138,3 +138,51 @@ func TestListRejectsTargetWithoutValue(t *testing.T) {
 		t.Fatalf("диагностика должна называть флаг target, получено: %q", stderr)
 	}
 }
+
+// TestListShowsEffectiveCLIFromProjectConfig — пункт 7 журнала: глобальный
+// `cli` проектного config.yaml перекрывает CLI встроенного агента в выводе
+// `list`, а без config.yaml показываются определения агентов.
+func TestListShowsEffectiveCLIFromProjectConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".ai-team")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "schema_version: 5\n" +
+		"template: test\n" +
+		"title: test\n" +
+		"cli: claude\n" +
+		"stages:\n" +
+		"  - id: implementation\n" +
+		"    title: Реализация\n" +
+		"    function: developer\n" +
+		"    result: md\n" +
+		"    executor: agent\n" +
+		"    agent: coder\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, code, stderr := runCLI(t, "list", "--target", dir)
+	if code != 0 {
+		t.Fatalf("ожидался exit 0, получен %d; stderr: %s", code, stderr)
+	}
+	cliOf := func(agentName string) string {
+		t.Helper()
+		for _, line := range strings.Split(stdout, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[0] == agentName {
+				return fields[2]
+			}
+		}
+		t.Fatalf("агент %q не найден в выводе:\n%s", agentName, stdout)
+		return ""
+	}
+	if got := cliOf("coder"); got != "claude" {
+		t.Fatalf("coder привязан к этапу с глобальным cli: claude, в выводе %q:\n%s", got, stdout)
+	}
+	// Агент без этапа в конфиге не исполняется пайплайном: остаётся своё определение.
+	if got := cliOf("tester"); got == "claude" {
+		t.Fatalf("tester не привязан к этапу, CLI не должен переопределяться, получено %q", got)
+	}
+}

@@ -24,6 +24,8 @@ const (
 	testToken = "tc-secret-token-7f3a"
 	testSHA   = "0123456789abcdef0123456789abcdef01234567"
 	otherSHA  = "fedcba9876543210fedcba9876543210fedcba98"
+	// testDeployID is a valid trigger identifier.
+	testDeployID = "00112233445566778899aabbccddeeff"
 )
 
 // fakeTeamCity is an in-memory TeamCity REST stub. Each GET of the build
@@ -43,6 +45,10 @@ type fakeTeamCity struct {
 	// triggerMode: "" queues, "drop" closes the connection without an answer,
 	// "reject" answers HTTP 400.
 	triggerMode string
+	// searchMode selects the answer to a build search by deploy ID: "" finds
+	// nothing; the other modes are described in searchAnswer.
+	searchMode string
+	searches   []string
 }
 
 func newFakeTeamCity(t *testing.T, states ...map[string]any) *fakeTeamCity {
@@ -94,6 +100,10 @@ func (f *fakeTeamCity) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.writeBuild(w, map[string]any{"state": "queued"})
+	case r.Method == http.MethodGet && r.URL.Path == "/app/rest/builds":
+		f.searches = append(f.searches, r.URL.Query().Get("locator"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"build": f.searchAnswer()})
 	case r.Method == http.MethodGet && r.URL.Path == "/app/rest/builds/id:42":
 		if f.unavailable > 0 {
 			f.unavailable--
@@ -109,6 +119,41 @@ func (f *fakeTeamCity) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// searchAnswer builds the answer to a search for the last trigger's deploy ID.
+// Caller holds f.mu.
+func (f *fakeTeamCity) searchAnswer() []map[string]any {
+	if f.searchMode == "" || len(f.triggers) == 0 {
+		return []map[string]any{}
+	}
+	trigger := f.triggers[len(f.triggers)-1]
+	revision := trigger["revisions"].(map[string]any)["revision"].([]any)[0].(map[string]any)["version"].(string)
+	properties := trigger["properties"]
+	build := func(id int, buildType, version string, props any) map[string]any {
+		return map[string]any{"id": id, "buildTypeId": buildType, "state": "queued",
+			"webUrl":    "https://" + f.webHost + "/buildConfiguration/Deploy/" + fmt.Sprint(id),
+			"revisions": map[string]any{"revision": []map[string]any{{"version": version}}}, "properties": props}
+	}
+	foreignID := map[string]any{"property": []map[string]any{
+		{"name": "env.AI_TEAM_DEPLOY_COMMIT", "value": revision},
+		{"name": "env.AI_TEAM_DEPLOY_ID", "value": strings.Repeat("f", 32)}}}
+	switch f.searchMode {
+	case "found":
+		// The locator was ignored: foreign builds (same configuration and
+		// revision, another or no deploy ID) come first and must be skipped.
+		return []map[string]any{build(41, "Project_Deploy", revision, foreignID), build(40, "Project_Deploy", revision, nil), build(42, "Project_Deploy", revision, properties)}
+	case "foreignOnly":
+		return []map[string]any{build(41, "Project_Deploy", revision, foreignID), build(40, "Project_Deploy", revision, nil)}
+	case "otherType":
+		return []map[string]any{build(42, "Other_Config", revision, properties)}
+	case "otherRevision":
+		return []map[string]any{build(42, "Project_Deploy", otherSHA, properties)}
+	case "twice":
+		return []map[string]any{build(42, "Project_Deploy", revision, properties), build(43, "Project_Deploy", revision, properties)}
+	}
+	f.t.Fatalf("unknown search mode %q", f.searchMode)
+	return nil
 }
 
 func (f *fakeTeamCity) writeBuild(w http.ResponseWriter, fields map[string]any) {
@@ -184,7 +229,7 @@ func assertNoSecret(t *testing.T, err error, fake *fakeTeamCity) {
 func TestTeamCityDeploySucceedsForExactRevision(t *testing.T) {
 	fake := newFakeTeamCity(t, map[string]any{"state": "running"}, finished("SUCCESS", testSHA))
 	provider := fake.provider(t)
-	build, err := provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main"})
+	build, err := provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main", DeployID: testDeployID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +248,8 @@ func TestTeamCityDeploySucceedsForExactRevision(t *testing.T) {
 		t.Fatalf("triggers=%v cancels=%v auth=%v", triggers, cancels, authOK)
 	}
 	encoded, _ := json.Marshal(triggers[0])
-	for _, want := range []string{`"id":"Project_Deploy"`, `"branchName":"main"`, `"version":"` + testSHA + `"`, `"vcsBranchName":"refs/heads/main"`} {
+	for _, want := range []string{`"id":"Project_Deploy"`, `"branchName":"main"`, `"version":"` + testSHA + `"`, `"vcsBranchName":"refs/heads/main"`,
+		`{"name":"env.AI_TEAM_DEPLOY_ID","value":"` + testDeployID + `"}`, `{"name":"env.AI_TEAM_DEPLOY_COMMIT","value":"` + testSHA + `"}`} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("trigger body %s lacks %s", encoded, want)
 		}
@@ -278,7 +324,7 @@ func TestTeamCityRejectsRedirectToForeignHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main"})
+	_, err = provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main", DeployID: testDeployID})
 	if err == nil || !strings.Contains(err.Error(), "redirect") {
 		t.Fatalf("foreign redirect must fail, got %v", err)
 	}
@@ -296,7 +342,7 @@ func TestTeamCityErrorsNeverContainToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main"})
+	_, err = provider.Trigger(context.Background(), TriggerRequest{CommitSHA: testSHA, Branch: "main", DeployID: testDeployID})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("expected HTTP 401, got %v", err)
 	}
@@ -363,6 +409,17 @@ func TestTeamCityRejectsBuildOfAnotherConfiguration(t *testing.T) {
 	}
 }
 
+// skipOutsideCI skips a test whose tool is missing on a developer machine but
+// fails it on CI (CI is set), where a silent skip would drop the isolation
+// proof from the required checks.
+func skipOutsideCI(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s; this test must run on CI", reason)
+	}
+	t.Skip(reason)
+}
+
 // gitRepo is a real local repository with a bare origin; gh is stubbed.
 type gitRepo struct {
 	t      *testing.T
@@ -373,7 +430,7 @@ type gitRepo struct {
 func newGitRepo(t *testing.T) *gitRepo {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is unavailable")
+		skipOutsideCI(t, "git is unavailable")
 	}
 	root := t.TempDir()
 	repo := &gitRepo{t: t, work: filepath.Join(root, "work"), remote: filepath.Join(root, "remote.git")}
@@ -580,7 +637,7 @@ func TestDeployReReadsRecordedBuildInsteadOfTrustingReceipt(t *testing.T) {
 	tamper := func(request DeployRequest, runID string, build Build) {
 		t.Helper()
 		request.RunID = runID
-		if err := writeReceipt(request, "teamcity", MergeProof{MergeCommit: tip, DeploySHA: tip}, build, false); err != nil {
+		if err := writeReceipt(request, "teamcity", MergeProof{MergeCommit: tip, DeploySHA: tip}, build, false, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -789,10 +846,14 @@ func TestDeployKeepsPendingTriggerAfterUnreadableAcceptedResponse(t *testing.T) 
 			}
 		})
 	}
-	for status, definite := range map[int]bool{400: true, 403: true, 404: true, 408: false, 429: false, 500: false, 503: false} {
+	for status, definite := range map[int]bool{
+		400: true, 401: true, 403: true, 404: true, 405: true, 415: true,
+		402: false, 406: false, 408: false, 409: false, 410: false, 412: false, 413: false, 422: false, 423: false,
+		425: false, 429: false, 499: false, 500: false, 502: false, 503: false, 301: false, 200: false,
+	} {
 		err := fmt.Errorf("teamcity %w", &HTTPStatusError{Method: "POST", Path: "/app/rest/buildQueue", StatusCode: status})
 		if IsDefiniteRejection(err) != definite {
-			t.Fatalf("HTTP %d definite=%v", status, !definite)
+			t.Fatalf("HTTP %d definite=%v, want %v", status, !definite, definite)
 		}
 	}
 	if IsDefiniteRejection(errors.New("decode teamcity response: invalid JSON")) {
@@ -824,11 +885,11 @@ func newAuthGitServer(t *testing.T, root string) *httptest.Server {
 	t.Helper()
 	execPath, err := exec.Command("git", "--exec-path").Output()
 	if err != nil {
-		t.Skip("git exec path is unavailable")
+		skipOutsideCI(t, "git exec path is unavailable")
 	}
 	backend := filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend")
 	if _, err := os.Stat(backend); err != nil {
-		t.Skip("git http-backend is unavailable")
+		skipOutsideCI(t, "git http-backend is unavailable")
 	}
 	handler := &cgi.Handler{Path: backend, Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

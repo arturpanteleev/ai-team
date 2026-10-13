@@ -49,12 +49,16 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
 
   const pendingDraft = useRef<StageResultDraft | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
+  // Set once the text was handed to onSubmit: the caller clears the stored
+  // draft after the server accepts it, so neither a pending debounced write nor
+  // the final write on close may bring it back. New input resets it.
+  const submitted = useRef(false);
   const flushDraft = useCallback(() => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = undefined;
     const value = pendingDraft.current;
-    if (!value) return;
     pendingDraft.current = null;
+    if (!value || submitted.current) return;
     setPersisted(saveStageResultDraft(runId, stage.id, value));
   }, [runId, stage.id]);
 
@@ -76,11 +80,13 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
     return () => {
       window.removeEventListener('pagehide', flushDraft);
       flushDraft();
+    submitted.current = true;
     };
   }, [flushDraft]);
 
   const update = (field: keyof typeof draft) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const value = event.target.value;
+    submitted.current = false;
     setDraft((current) => ({ ...current, [field]: value }));
   };
 
@@ -104,6 +110,7 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
     if (!file) return;
     try {
       const text = await readMarkdownFile(file);
+      submitted.current = false;
       setDraft((current) => ({ ...current, content: text }));
       setFileName(file.name);
       setFileError('');
@@ -120,6 +127,7 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
     // Persist the exact submitted text first: a rejected submission keeps it,
     // an accepted one is cleared by the caller without a late write behind it.
     flushDraft();
+    submitted.current = true;
     const note = draft.note.trim();
     const description = draft.description.trim();
     onSubmit({
@@ -167,13 +175,13 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
           ? <MarkdownPreview className={styles.preview} label="Предпросмотр результата" markdown={draft.content}
             emptyText="Пока пусто." />
           : <label>Результат в Markdown
-            <textarea value={draft.content} onChange={update('content')} rows={14} />
+            <textarea value={draft.content} onChange={update('content')} rows={14} disabled={working} />
           </label>}
       </section>}
 
       {kind === 'link' && <>
         <label>Ссылка на результат
-          <input type="url" inputMode="url" value={draft.url} onChange={update('url')} placeholder="https://"
+          <input type="url" inputMode="url" value={draft.url} onChange={update('url')} placeholder="https://" disabled={working}
             aria-invalid={urlError ? true : undefined} />
         </label>
         <p className={styles.info}>Вид ссылки: {stage.link_kind ? linkKindTitles[stage.link_kind] : 'не задан'}</p>
@@ -183,13 +191,13 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
       {kind === 'approve' && <p>Подтвердите завершение этапа. Текст подтверждения необязателен.</p>}
 
       <label>Что сделано
-        <textarea value={draft.description} onChange={update('description')} rows={3} />
+        <textarea value={draft.description} onChange={update('description')} rows={3} disabled={working} />
       </label>
       {descriptionMissing && <p className={styles.warning}>
         Поле «Что сделано» пустое. Результат можно сдать, но в задаче появится предупреждение «Нет описания результата».
       </p>}
       <label>{kind === 'approve' ? 'Текст подтверждения' : 'Заметка'}
-        <textarea value={draft.note} onChange={update('note')} rows={3} />
+        <textarea value={draft.note} onChange={update('note')} rows={3} disabled={working} />
       </label>
 
       {errors.length > 0 && <ul className={styles.error} role="alert">{errors.map((error) => <li key={error}>{error}</li>)}</ul>}

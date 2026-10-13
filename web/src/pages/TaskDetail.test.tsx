@@ -688,6 +688,48 @@ describe('Browser stage submission', () => {
     expect(storage.getItem(draftKey())).toBeNull();
   });
 
+  it('locks the form while sending and never writes the draft back after an accepted submission', async () => {
+    const api = await import('../api');
+    const accepted = deferred<unknown>();
+    vi.mocked(api.submitTaskStageResult).mockReturnValueOnce(accepted.promise);
+    await openResultForm();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Отправляемый текст' } });
+      fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Готово' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+      expect(screen.getByLabelText('Результат в Markdown')).toBeDisabled();
+      expect(screen.getByLabelText('Что сделано')).toBeDisabled();
+      expect(screen.getByLabelText('Заметка')).toBeDisabled();
+      expect(screen.getByLabelText('Загрузить файл .md')).toBeDisabled();
+
+      await act(async () => {
+        accepted.resolve({});
+        await accepted.promise;
+      });
+      vi.useRealTimers();
+      expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+      expect(storage.getItem(draftKey())).toBeNull();
+      hidePage();
+      cleanup();
+      expect(storage.getItem(draftKey())).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the form open and the draft stored after a rejected submission and saves new edits', async () => {
+    const api = await import('../api');
+    vi.mocked(api.submitTaskStageResult).mockRejectedValueOnce(new Error('rejected'));
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Первая попытка' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    expect(await screen.findByText('rejected')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Вторая попытка' } });
+    cleanup();
+    expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: 'Вторая попытка' });
+  });
+
   it('drops the stored older draft when the newer one cannot be written', async () => {
     storage.setItem(draftKey(), JSON.stringify({ content: 'Старая версия', url: '', note: '', description: '' }));
     await openResultForm();

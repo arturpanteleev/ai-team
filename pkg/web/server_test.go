@@ -232,6 +232,59 @@ func TestSubmitHumanStageEndpointPersistsVersionAndExposesHistory(t *testing.T) 
 	}
 }
 
+func TestHumanStageApproveFromWebResumesWaitingRun(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		active     bool
+		wantResume bool
+	}{
+		{name: "waiting run is resumed by the confirmation", wantResume: true},
+		{name: "active run is left to its worker", active: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := t.TempDir()
+			payload, err := json.Marshal(approval.InputPayload{Kind: string(approval.KindInput), StageID: "intent", Result: "approve"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller := &fakeRunController{
+				activeRuns: map[string]bool{"run-approve": tc.active},
+				approvals: []approval.PendingApproval{{
+					Kind: approval.KindInput, ID: "approval-approve", RunID: "run-approve", AttemptID: "attempt-intent",
+					FromStage: "intent", ToStage: "intent", Trigger: "human_input", SubjectHash: testSubjectHash,
+					RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny, Actions: []string{"approve"},
+					Status: approval.StatusPending, Payload: payload,
+				}},
+			}
+			srv, err := NewServer(":memory:", "", filepath.Join(target, ".ai-team", "artifacts"), WithTargetDir(target), WithRunController(controller))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = srv.Close() }()
+			request := authorizedRequest(t, srv, "POST", "/api/runs/run-approve/stages/intent/submit",
+				`{"result":"approve","note":"подтверждаю","actor_id":"bo-1","actor_role":"developer"}`)
+			response := httptest.NewRecorder()
+			srv.router.ServeHTTP(response, request)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("approve submit: %d %s", response.Code, response.Body.String())
+			}
+			if controller.decisionCalls != 1 {
+				t.Fatalf("controller decision calls = %d, want 1", controller.decisionCalls)
+			}
+			wantResumes := 0
+			if tc.wantResume {
+				wantResumes = 1
+			}
+			if controller.resumeCalls != wantResumes {
+				t.Fatalf("resume calls = %d, want %d", controller.resumeCalls, wantResumes)
+			}
+			if tc.wantResume && (controller.resumeRunID != "run-approve" || !strings.Contains(response.Body.String(), `"resumed":true`)) {
+				t.Fatalf("confirmation did not move the run on: resume=%q body=%s", controller.resumeRunID, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreateArtifactRevisionForPendingGrillStage(t *testing.T) {
 	target := t.TempDir()
 	const runID, stageID = "run-grill-edit", "product_spec"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
@@ -622,5 +624,34 @@ func runGitTest(t *testing.T, dir string, args ...string) {
 	command.Dir = dir
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
+type recordingRunStarter struct{ started *[]string }
+
+func (r recordingRunStarter) Start(_ context.Context, run pipeline.RunConfig) (pipeline.RunResult, error) {
+	*r.started = append(*r.started, run.RunID)
+	return pipeline.RunResult{RunID: run.RunID}, nil
+}
+
+func TestFreshConfigRunEngineAppliesConfigOnEachNewRun(t *testing.T) {
+	cli := "opencode"
+	var clis, started []string
+	engine := freshConfigRunEngine{
+		load: func() (*config.Config, error) { return &config.Config{CLI: cli}, nil },
+		build: func(cfg *config.Config) runStarter {
+			clis = append(clis, cfg.CLI)
+			return recordingRunStarter{started: &started}
+		},
+	}
+	if _, err := engine.Start(context.Background(), pipeline.RunConfig{RunID: "run-1"}); err != nil {
+		t.Fatal(err)
+	}
+	cli = "claude"
+	if _, err := engine.Start(context.Background(), pipeline.RunConfig{RunID: "run-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(clis, ",") != "opencode,claude" || strings.Join(started, ",") != "run-1,run-2" {
+		t.Fatalf("clis=%v started=%v, want the config read at each start", clis, started)
 	}
 }

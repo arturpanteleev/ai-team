@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/go-chi/chi/v5"
@@ -133,11 +136,47 @@ func (s *Server) handleSubmitHumanStage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), status)
 		return
 	}
-	writeJSONResponse(w, http.StatusCreated, map[string]any{
+	response := map[string]any{
 		"approval": result.Approval,
 		"submission": map[string]any{"version": result.Revision.Revision, "sha256": result.Revision.SHA256,
 			"id": result.Revision.ID, "artifact_path": result.Revision.ArtifactPath},
-	})
+	}
+	if result.Approval.Status == approval.StatusResolved {
+		resumed, resumeErr := s.resumeAfterHumanDecision(runID, actorID)
+		response["resumed"] = resumed
+		if resumeErr != nil {
+			response["resume_error"] = resumeErr.Error()
+		}
+	}
+	writeJSONResponse(w, http.StatusCreated, response)
+}
+
+// resumeAfterHumanDecision applies a resolved human-input decision to the run
+// waiting on it. The controller's Resume records approval_decided and moves the
+// run on, so a dashboard confirmation needs no separate resume action. The
+// submission is already durable; a failed resume is returned to the caller.
+func (s *Server) resumeAfterHumanDecision(runID, actorID string) (bool, error) {
+	if reporter, ok := s.controller.(activeRunReporter); ok && reporter.RunActive(runID) {
+		return false, nil
+	}
+	stateStore, err := lifecycle.NewStore(s.targetDir)
+	if err != nil {
+		return false, fmt.Errorf("lifecycle store: %w", err)
+	}
+	state, err := stateStore.Load(runID)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("lifecycle state: %w", err)
+	}
+	if err == nil && state.Phase != lifecycle.PhaseWaiting {
+		return false, nil
+	}
+	if err := s.recordResumeAgentLaunch(runID, actorID); err != nil {
+		return false, err
+	}
+	if err := s.controller.Resume(runID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // requiredHumanActorRole keeps the stage's configured function as the durable

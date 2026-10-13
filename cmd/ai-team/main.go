@@ -1197,6 +1197,50 @@ func loadValidatedConfig(target string, reg *agent.Registry) *config.Config {
 	return cfg
 }
 
+// loadRunConfig re-reads .ai-team/config.yaml for a new run. Unlike
+// loadValidatedConfig it returns errors instead of exiting, because the web
+// dashboard keeps serving when a run cannot start.
+func loadRunConfig(target string, reg *agent.Registry) (*config.Config, error) {
+	if cfg, overridden := e2eInMemoryLegacyConfig(target); overridden {
+		return cfg, nil
+	}
+	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
+	if err := safeio.RejectSymlink(cfgPath); err != nil {
+		return nil, fmt.Errorf("небезопасный config path: %w", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("загрузка конфига: %w", err)
+	}
+	if err := cfg.Validate(reg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// runStarter starts one run from a configuration snapshot.
+type runStarter interface {
+	Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error)
+}
+
+// freshConfigRunEngine re-reads the project config before every new run, so a
+// CLI or agent override takes effect on the next start without restarting the
+// dashboard. Resume, cancel and the other engine actions keep the engine built
+// at startup, because they continue runs pinned to their own template.
+type freshConfigRunEngine struct {
+	*pipeline.RunEngine
+	load  func() (*config.Config, error)
+	build func(*config.Config) runStarter
+}
+
+func (e freshConfigRunEngine) Start(ctx context.Context, run pipeline.RunConfig) (pipeline.RunResult, error) {
+	cfg, err := e.load()
+	if err != nil {
+		return pipeline.RunResult{RunID: run.RunID}, fmt.Errorf("перечитать конфиг перед запуском: %w", err)
+	}
+	return e.build(cfg).Start(ctx, run)
+}
+
 func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry) *config.Config {
 	if job.Operation == worker.OperationCancel {
 		return loadValidatedConfig(target, reg)
@@ -2287,12 +2331,15 @@ func cmdWeb() {
 	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
 		fatal("Не удалось безопасно перенести file approvals в web DB: %v", err)
 	}
-	localEngineOptions := append([]pipeline.Option{
-		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
-		pipeline.WithApprovalStore(approvalStore),
-		pipeline.WithControllerReadDenyPaths(*dbPath),
-	}, deployProviderOptions(cfg)...)
-	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg, localEngineOptions...))
+	buildLocalEngine := func(runCfg *config.Config) *pipeline.RunEngine {
+		localEngineOptions := append([]pipeline.Option{
+			pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
+			pipeline.WithApprovalStore(approvalStore),
+			pipeline.WithControllerReadDenyPaths(*dbPath),
+		}, deployProviderOptions(runCfg)...)
+		return pipeline.NewRunEngine(pipeline.New(runCfg, reg, localEngineOptions...))
+	}
+	localEngine := buildLocalEngine(cfg)
 	controllerOptions := []control.Option{
 		control.WithApprovalStore(approvalStore),
 		control.WithDeferredDelivery(localEngine.DeliverDeferred),
@@ -2335,7 +2382,11 @@ func cmdWeb() {
 		runController, err = control.New(processEngine, target, controllerOptions...)
 	} else {
 		controllerOptions = append(controllerOptions, control.WithPreflight(projectTemplatePreflight{target: target, reg: reg}))
-		runController, err = control.New(localEngine, target, controllerOptions...)
+		runController, err = control.New(freshConfigRunEngine{
+			RunEngine: localEngine,
+			load:      func() (*config.Config, error) { return loadRunConfig(target, reg) },
+			build:     func(runCfg *config.Config) runStarter { return buildLocalEngine(runCfg) },
+		}, target, controllerOptions...)
 	}
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)

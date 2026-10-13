@@ -1,6 +1,8 @@
 package delivery
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,4 +199,71 @@ func TestTerminalRecordStageReceiptReferenceValidation(t *testing.T) {
 	if err := rebound.Validate(); err == nil || !strings.Contains(err.Error(), "attestation trailer") {
 		t.Fatalf("stage-delivered commit rebound to attestation trailer: %v", err)
 	}
+}
+
+// BL-20: receipt storage must not follow planted symlinks. A sentinel outside
+// the controller state proves that neither the receipt file nor its run
+// directory can redirect a read or write.
+func TestStageDeliveryReceiptRejectsSymlinkedStorageWithSentinel(t *testing.T) {
+	receipt := testStageReceipt()
+	request := requestFor(receipt)
+	sealed, err := SealStageDeliveryReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := json.MarshalIndent(sealed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("receipt file", func(t *testing.T) {
+		target := t.TempDir()
+		path, err := stageReceiptPath(target, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The sentinel holds a valid receipt: following the link would make a
+		// file outside controller state the delivery authority.
+		sentinel := filepath.Join(t.TempDir(), "sentinel.json")
+		if err := os.WriteFile(sentinel, valid, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(sentinel, path); err != nil {
+			t.Fatal(err)
+		}
+		if stored, found, err := ReadControllerStageDeliveryReceipt(target, request); err == nil || found || stored != nil {
+			t.Fatalf("symlinked receipt was accepted: receipt=%+v found=%t err=%v", stored, found, err)
+		}
+		if err := WriteControllerStageDeliveryReceipt(target, receipt); err == nil {
+			t.Fatal("receipt write through a symlink was accepted")
+		}
+		if data, err := os.ReadFile(sentinel); err != nil || !bytes.Equal(data, valid) {
+			t.Fatalf("sentinel changed through the receipt symlink: %q err=%v", data, err)
+		}
+	})
+
+	t.Run("run directory", func(t *testing.T) {
+		target := t.TempDir()
+		path, err := stageReceiptPath(target, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Dir(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sentinelDir := t.TempDir()
+		if err := os.Symlink(sentinelDir, filepath.Dir(path)); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteControllerStageDeliveryReceipt(target, receipt); err == nil {
+			t.Fatal("receipt write through a symlinked run directory was accepted")
+		}
+		entries, err := os.ReadDir(sentinelDir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("sentinel directory received receipt files: %v err=%v", entries, err)
+		}
+	})
 }

@@ -173,12 +173,10 @@ func (s *bubblewrapSandbox) Command(ctx context.Context, targetDir, workingDir, 
 	// Hide controller state and custom scratch directories. The isolated
 	// candidate checkout has its own .git directory and does not need the
 	// controller's common gitdir.
-	privatePaths := []string{"/home", "/root", "/Users"}
-	if home, homeErr := os.UserHomeDir(); homeErr == nil && filepath.IsAbs(home) {
-		privatePaths = append(privatePaths, filepath.Clean(home))
+	privatePaths := sandboxMaskedPaths(s.protectedPaths)
+	if err := checkSandboxToolVisible(s.target, executable, append(append([]string(nil), privatePaths...), "/tmp")); err != nil {
+		return nil, err
 	}
-	privatePaths = append(privatePaths, s.protectedPaths...)
-	privatePaths = compactPaths(privatePaths)
 	for _, privatePath := range privatePaths {
 		if privatePath == "/tmp" || strings.HasPrefix(privatePath, "/tmp"+string(filepath.Separator)) {
 			// The private /tmp mount below hides every host path here.

@@ -286,3 +286,33 @@ func git(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v: %s", args, err, output)
 	}
 }
+
+// BL-20: an agent stage whose delivery block makes the controller push and
+// open a PR (B-35) needs gh and origin even without a delivery-kind agent.
+func TestStageDeliveryRequiresGitHubAndRemote(t *testing.T) {
+	checker := testChecker(t, false)
+	checker.config.Stages = []config.TemplateStage{{
+		ID: "implementation", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "worker",
+		Delivery: &config.TemplateDelivery{},
+	}}
+	checker.lookPath = func(name string) (string, error) {
+		if name == "gh" {
+			return "", exec.ErrNotFound
+		}
+		return name, nil
+	}
+	report := checker.Check(context.Background())
+	if report.Ready {
+		t.Fatal("stage delivery without gh and origin must not be ready")
+	}
+	statuses := map[string]Status{}
+	for _, check := range report.Checks {
+		statuses[check.ID] = check.Status
+	}
+	if statuses["delivery_remote"] != StatusFailed || statuses["github_auth"] != StatusFailed {
+		t.Fatalf("stage delivery must check origin and gh: %+v", report.Checks)
+	}
+	if _, skipped := statuses["delivery"]; skipped {
+		t.Fatalf("stage delivery was reported as absent: %+v", report.Checks)
+	}
+}

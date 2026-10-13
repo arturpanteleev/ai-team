@@ -359,3 +359,22 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(output))
 }
+
+// BL-21: the isolated checkout is verified against the pinned head SHA.
+func TestIsolatedPRCheckoutVerifiesPinnedHead(t *testing.T) {
+	target, baseSHA, headSHA, _, _ := makePRFixture(t, `[]`)
+	runIn(t, target, "git", "update-ref", "refs/test/base", baseSHA)
+	runIn(t, target, "git", "update-ref", "refs/test/head", headSHA)
+	checkout := filepath.Join(t.TempDir(), "checkout")
+	if err := createIsolatedPRCheckout(context.Background(), target, checkout, "refs/test/base", "refs/test/head", headSHA); err != nil {
+		t.Fatalf("pinned head checkout: %v", err)
+	}
+	if got := gitOutput(t, checkout, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("checkout HEAD = %s, want %s", got, headSHA)
+	}
+	other := filepath.Join(t.TempDir(), "checkout")
+	err := createIsolatedPRCheckout(context.Background(), target, other, "refs/test/base", "refs/test/head", baseSHA)
+	if err == nil || !strings.Contains(err.Error(), "differs from pinned PR head") {
+		t.Fatalf("checkout of a ref that does not match the pinned head was accepted: %v", err)
+	}
+}

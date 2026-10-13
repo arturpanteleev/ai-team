@@ -25,3 +25,28 @@ func TestSanitizedCheckEnvironmentDropsCredentials(t *testing.T) {
 		t.Fatalf("non-secret build environment was not preserved: %q", joined)
 	}
 }
+
+// BL-21: the check environment is an allowlist. Credentials whose names carry
+// no secret marker must not reach untrusted check commands either.
+func TestSanitizedCheckEnvironmentIsAllowlist(t *testing.T) {
+	got := sanitizedCheckEnvironment([]string{
+		"PATH=/usr/bin",
+		"LC_ALL=C",
+		"LC_TIME=C",
+		"LC_FORWARDED_BY_SSH=sentinel",
+		"GOFLAGS=-mod=mod",
+		"CGO_ENABLED=0",
+		"DATABASE_URL=postgres://user:sentinel@db/app",
+		"KUBECONFIG=/home/user/.kube/config",
+		"AWS_PROFILE=prod",
+		"SSH_AUTH_SOCK=/tmp/agent.sock",
+		"NPM_CONFIG_REGISTRY=https://user:sentinel@npm.example",
+		"HOME=/home/user",
+		"MALFORMED",
+		"=empty-key",
+	})
+	want := []string{"PATH=/usr/bin", "LC_ALL=C", "LC_TIME=C", "GOFLAGS=-mod=mod", "CGO_ENABLED=0"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("check environment = %q, want only %q", got, want)
+	}
+}

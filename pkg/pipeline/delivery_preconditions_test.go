@@ -355,11 +355,15 @@ func TestControllerStageDeliveryReconcilesRemoteCrashAndRepairsProjection(t *tes
 	if err := os.MkdirAll(filepath.Dir(linkPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "sentinel"), linkPath); err != nil {
+	sentinel := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.Symlink(sentinel, linkPath); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ExecuteControllerStageDelivery(context.Background(), deliveryInput); err == nil {
 		t.Fatal("projection failure after durable receipt was not surfaced")
+	}
+	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("projection followed the planted symlink and wrote the sentinel: %v", err)
 	}
 	if service.calls != 2 || service.created != 1 {
 		t.Fatalf("retry after the remote-create window duplicated the PR: calls=%d created=%d", service.calls, service.created)

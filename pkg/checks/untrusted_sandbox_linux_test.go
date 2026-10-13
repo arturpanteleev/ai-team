@@ -124,3 +124,31 @@ func gitOutputSandboxTest(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(output))
 }
+
+// BL-21: the sandbox command builder rejects a tool under the masked home
+// before bubblewrap runs, naming the tool and the hiding mount.
+func TestBubblewrapCommandRejectsToolUnderMaskedHome(t *testing.T) {
+	home := makeSandboxTestTempDir(t, "home")
+	t.Setenv("HOME", home)
+	goBin := filepath.Join(home, "go", "bin")
+	if err := os.MkdirAll(goBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := filepath.Join(goBin, "golangci-lint")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := makeSandboxTestTempDir(t, "candidate")
+	sandbox := &bubblewrapSandbox{bwrap: "/usr/bin/bwrap", root: makeSandboxTestTempDir(t, "root"), target: target}
+	if _, err := sandbox.Command(context.Background(), target, target, tool, "run"); err == nil ||
+		!strings.Contains(err.Error(), tool) || !strings.Contains(err.Error(), "hidden inside the untrusted-check sandbox") {
+		t.Fatalf("tool under masked HOME must fail explicitly: %v", err)
+	}
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sandbox.Command(context.Background(), target, target, shPath, "-c", "true"); err != nil {
+		t.Fatalf("system tool must remain usable: %v", err)
+	}
+}

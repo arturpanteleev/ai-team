@@ -48,7 +48,7 @@ func createInitialBriefAt(rootFD int, runID, intention string) (document BriefDo
 		return BriefDocument{}, err
 	}
 	defer deferBriefFDClose(runFD, "close run brief directory", &err)
-	content := []byte(intention + "\n")
+	content := []byte("# Исходное намерение\n\n" + intention + "\n")
 	version, err := createBriefVersionAt(runFD, "0001-intention.md", content, "intention", "", "")
 	return BriefDocument{Version: version, Content: content}, err
 }

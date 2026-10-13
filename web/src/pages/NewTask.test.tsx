@@ -29,6 +29,7 @@ const templatesResponse = {
 };
 
 beforeEach(() => {
+  vi.mocked(createTask).mockClear();
   session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
   session.authenticationRequired = true;
   vi.mocked(getTemplatesList).mockResolvedValue(templatesResponse);
@@ -52,7 +53,8 @@ describe('New task screen', () => {
 
     await waitFor(() => expect(createTask).toHaveBeenCalledWith(
       expect.objectContaining({
-        feature: 'Онбординг',
+        feature: 'onbording',
+        title: 'Онбординг',
         idea: 'Сократить путь до первой ценности',
         template: 'standard',
         mode: 'auto',
@@ -75,6 +77,34 @@ describe('New task screen', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('auto mode не поддерживается этим режимом запуска');
     expect(screen.getByLabelText('Название')).toHaveValue('Онбординг');
+  });
+
+  it('не отправляет задачу с недопустимым идентификатором и называет неверный символ', async () => {
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
+    await screen.findByLabelText('Шаблон');
+
+    fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Вход' } });
+    fireEvent.change(screen.getByLabelText('Идентификатор'), { target: { value: 'вход' } });
+    fireEvent.change(screen.getByLabelText('Текст идеи'), { target: { value: 'Идея' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Первый символ должен быть латинской буквой или цифрой, а не «в».');
+    expect(screen.getByLabelText('Идентификатор')).toHaveAttribute('aria-invalid', 'true');
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it('показывает ошибку сервера по feature у поля идентификатора', async () => {
+    vi.mocked(createTask).mockRejectedValueOnce(new Error('feature и непустой task обязательны'));
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
+    await screen.findByLabelText('Шаблон');
+
+    fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Вход' } });
+    fireEvent.change(screen.getByLabelText('Текст идеи'), { target: { value: 'Идея' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('feature и непустой task обязательны');
+    expect(screen.getByLabelText('Идентификатор')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Идентификатор')).toHaveValue('vkhod');
   });
 
   it('не показывает форму участникам без роли Product Owner', () => {

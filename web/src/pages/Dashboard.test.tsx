@@ -25,6 +25,19 @@ describe('Dashboard business intake', () => {
     expect(screen.getByRole('button', { name: 'Создать инициативу и передать аналитику' })).toBeInTheDocument();
   });
 
+  it('не отправляет инициативу с идентификатором не в формате slug', async () => {
+    session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
+    render(<Dashboard />);
+
+    fireEvent.change(screen.getByLabelText('Название инициативы'), { target: { value: 'Рост продаж' } });
+    fireEvent.change(screen.getByLabelText('Идентификатор'), { target: { value: 'рост продаж' } });
+    fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Цель' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Создать инициативу и передать аналитику' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Первый символ должен быть латинской буквой или цифрой, а не «р».');
+    expect(startRun).not.toHaveBeenCalled();
+  });
+
   it('направляет участника без роли Product Owner к владельцу бизнес-требований', () => {
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
     render(<Dashboard />);
@@ -63,7 +76,7 @@ describe('Dashboard business intake', () => {
     fireEvent.change(screen.getByLabelText('Название инициативы'), { target: { value: 'Mobile flow' } });
     fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Согласовать требования с телефона' } });
     fireEvent.click(screen.getByRole('button', { name: 'Создать инициативу и передать аналитику' }));
-    await waitFor(() => expect(startRun).toHaveBeenCalledWith('Mobile flow', 'Согласовать требования с телефона'));
+    await waitFor(() => expect(startRun).toHaveBeenCalledWith('mobile-flow', 'Согласовать требования с телефона'));
     await waitFor(() => expect(screen.getByText('Run принят: run-mobile-created')).toBeInTheDocument());
 
     const previousCalls = vi.mocked(getPipelineRuns).mock.calls.length;

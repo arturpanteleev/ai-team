@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { FormEvent } from 'react';
 import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
 import { cancelRun, getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import styles from './Dashboard.module.css';
 
 type Filter = 'all' | PipelineStatus;
@@ -45,7 +46,12 @@ export function Dashboard() {
   const [filter, setFilter] = useState<Filter>('all');
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [name, setName] = useState('');
   const [feature, setFeature] = useState('');
+  // Пока пользователь не правил идентификатор вручную, он следует за названием.
+  const [featureEdited, setFeatureEdited] = useState(false);
+  const [featureError, setFeatureError] = useState('');
+  const featureRef = useRef<HTMLInputElement>(null);
   const [task, setTask] = useState('');
   const [commandStatus, setCommandStatus] = useState('');
   const [preflight, setPreflight] = useState<PreflightReport | null>(null);
@@ -95,15 +101,30 @@ export function Dashboard() {
 
   const submitRun = async (event: FormEvent) => {
     event.preventDefault();
+    const idError = identifierError(feature);
+    if (idError) {
+      setFeatureError(idError);
+      featureRef.current?.focus();
+      return;
+    }
     setCommandStatus('Запускаю…');
     try {
       const result = await startRun(feature, task);
       setCommandStatus(`Run принят: ${result.run_id}`);
+      setName('');
       setFeature('');
+      setFeatureEdited(false);
+      setFeatureError('');
       setTask('');
       fetchRuns();
     } catch (err) {
-      setCommandStatus(err instanceof Error ? err.message : 'Команда не принята');
+      const message = err instanceof Error ? err.message : 'Команда не принята';
+      if (isIdentifierServerError(message)) {
+        setFeatureError(message);
+        featureRef.current?.focus();
+      } else {
+        setCommandStatus(message);
+      }
     }
   };
 
@@ -136,9 +157,21 @@ export function Dashboard() {
 
       {canSubmitIntention ? (
         <form className={styles.runForm} onSubmit={submitRun}>
-          <label htmlFor="feature-name">Название инициативы</label>
-          <input id="feature-name" value={feature} onChange={(event) => setFeature(event.target.value)}
-            placeholder="например, рост повторных продаж" required />
+          <label htmlFor="initiative-name">Название инициативы</label>
+          <input id="initiative-name" value={name} onChange={(event) => {
+            setName(event.target.value);
+            setFeatureError('');
+            if (!featureEdited) setFeature(identifierFromTitle(event.target.value));
+          }} placeholder="например, рост повторных продаж" required />
+          <label htmlFor="feature-name">Идентификатор</label>
+          <input id="feature-name" ref={featureRef} value={feature} onChange={(event) => {
+            setFeatureEdited(true);
+            setFeatureError('');
+            setFeature(event.target.value);
+          }} placeholder="google-auth" aria-invalid={featureError ? true : undefined}
+            aria-describedby="feature-name-hint feature-name-error" />
+          <small id="feature-name-hint">{identifierHint}</small>
+          {featureError && <span id="feature-name-error" role="alert" className={styles.fieldError}>{featureError}</span>}
           <label htmlFor="business-intention">Какого результата хотите достичь?</label>
           <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
             placeholder="Опишите бизнес-цель, ограничения и ожидаемый результат своими словами. Аналитик уточнит недостающие детали."

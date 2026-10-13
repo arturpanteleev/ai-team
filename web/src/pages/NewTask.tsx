@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createTask, getActivePrincipal, getTemplatesList, isAuthenticationRequired } from '../api';
 import { Link } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import type { TemplateValidation } from '../types';
 import styles from './NewTask.module.css';
 
@@ -28,6 +29,11 @@ export function NewTask() {
   const [templates, setTemplates] = useState<TemplateValidation[]>([]);
   const [template, setTemplate] = useState('');
   const [name, setName] = useState('');
+  const [identifier, setIdentifier] = useState('');
+  // Пока пользователь не правил идентификатор вручную, он следует за названием.
+  const [identifierEdited, setIdentifierEdited] = useState(false);
+  const [identifierErr, setIdentifierErr] = useState('');
+  const identifierRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState('manual');
   const [idea, setIdea] = useState('');
   const [links, setLinks] = useState('');
@@ -67,13 +73,19 @@ export function NewTask() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    const idError = identifierError(identifier);
+    if (idError) {
+      setIdentifierErr(idError);
+      identifierRef.current?.focus();
+      return;
+    }
     setSubmitting(true);
     setStatus('Создаём задачу…');
     setError('');
     try {
       const externalLinks = links.split('\n').map((line) => line.trim()).filter(Boolean);
       const result = await createTask({
-        feature: name.trim(),
+        feature: identifier,
         task: idea.trim(),
         title: name.trim(),
         idea: idea.trim(),
@@ -84,6 +96,9 @@ export function NewTask() {
       setCreatedRunID(result.run_id);
       setStatus(`Задача создана: ${result.run_id}`);
       setName('');
+      setIdentifier('');
+      setIdentifierEdited(false);
+      setIdentifierErr('');
       setIdea('');
       setLinks('');
       setFailed(false);
@@ -91,7 +106,13 @@ export function NewTask() {
     } catch (reason) {
       setStatus('');
       setFailed(true);
-      setError(reason instanceof Error ? reason.message : 'Не удалось создать задачу.');
+      const message = reason instanceof Error ? reason.message : 'Не удалось создать задачу.';
+      if (isIdentifierServerError(message)) {
+        setIdentifierErr(message);
+        identifierRef.current?.focus();
+      } else {
+        setError(message);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -106,8 +127,23 @@ export function NewTask() {
 
       <form className={styles.form} onSubmit={submit}>
         <label htmlFor="task-name">Название</label>
-        <input id="task-name" value={name} onChange={(event) => { touchDraft(); setName(event.target.value); }}
-          placeholder="например, онбординг для новых клиентов" required />
+        <input id="task-name" value={name} onChange={(event) => {
+          touchDraft();
+          setName(event.target.value);
+          setIdentifierErr('');
+          if (!identifierEdited) setIdentifier(identifierFromTitle(event.target.value));
+        }} placeholder="например, онбординг для новых клиентов" required />
+
+        <label htmlFor="task-identifier">Идентификатор</label>
+        <input id="task-identifier" ref={identifierRef} value={identifier} onChange={(event) => {
+          touchDraft();
+          setIdentifierEdited(true);
+          setIdentifierErr('');
+          setIdentifier(event.target.value);
+        }} placeholder="google-auth" aria-invalid={identifierErr ? true : undefined}
+          aria-describedby="task-identifier-hint task-identifier-error" />
+        <p id="task-identifier-hint" className={styles.hint}>{identifierHint}</p>
+        {identifierErr && <p id="task-identifier-error" role="alert" className={styles.error}>{identifierErr}</p>}
 
         <label htmlFor="task-template">Шаблон</label>
         <select id="task-template" value={template} onChange={(event) => { touchDraft(); setTemplate(event.target.value); }}

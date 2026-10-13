@@ -72,6 +72,44 @@ describe('Observability', () => {
     expect(screen.queryByText(/стоимость токенов/i)).not.toBeInTheDocument();
   });
 
+  it('shows the provider tariff cost with its tariff date, separately from the subscription estimate', async () => {
+    getFlowMetrics.mockResolvedValue({
+      ...metrics,
+      cost_by_tariff: {
+        amount: 12.5, currency: 'USD', priced_attempts: 3, unpriced_attempts: 0, tariff_dates: ['2026-09-01'],
+        tariff_sources: ['price list'], source: 'project_config.usage.tariffs+attempt_manifest', basis: 'attested_attempt_tokens_x_model_tariff_per_1m_tokens',
+      },
+    });
+    render(<Observability />);
+
+    const card = await screen.findByTestId('tariff-cost');
+    expect(card).toHaveTextContent('Стоимость по тарифу');
+    expect(card).toHaveTextContent(/12,50/);
+    expect(card).toHaveTextContent('по тарифу, дата тарифа: 01.09.2026');
+    expect(card).not.toHaveTextContent('≈');
+    expect(screen.getByText('Приблизительная доля подписки (оценка)').parentElement).toHaveTextContent(/≈.*4,50/);
+  });
+
+  it('shows no data instead of zero when the tariff is not set or the model is unknown', async () => {
+    getFlowMetrics.mockResolvedValue({
+      ...metrics,
+      by_stage: [{
+        ...metrics.by_stage[0],
+        cost_by_tariff: { amount: null, priced_attempts: 1, unpriced_attempts: 2, reason: 'tariff_missing_for_model', unpriced_models: ['model-z'],
+          source: 's', basis: 'b' },
+      }],
+      cost_by_tariff: { amount: null, priced_attempts: 0, unpriced_attempts: 3, reason: 'tariff_not_configured', source: 's', basis: 'b' },
+    });
+    render(<Observability />);
+
+    const card = await screen.findByTestId('tariff-cost');
+    expect(card).toHaveTextContent('нет данных');
+    expect(card).toHaveTextContent('тариф не задан');
+    expect(card).not.toHaveTextContent(/0,00/);
+    const stageCost = screen.getByText('По тарифу: нет данных');
+    expect(stageCost).toHaveAttribute('title', 'нет тарифа для модели: model-z (оценено 1 из 3)');
+  });
+
   it('applies the selected inclusive date range and exports that same period', async () => {
     const createObjectURL = vi.fn(() => 'blob:metrics');
     const revokeObjectURL = vi.fn();

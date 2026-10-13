@@ -88,6 +88,12 @@ project token denominator, summed across months. These values are subscription
 allocations, not provider token prices or runtime `cost_usd`. An estimate MUST
 be null when any required selected usage, stage manifest, or monthly
 denominator usage is missing, incomplete, invalid, or has a zero denominator.
+The report MUST also expose `cost_by_tariff` at the top level and per stage:
+attested agent-attempt tokens multiplied by the price of the attempt's model
+from `usage.tariffs`, using the entry with the latest effective date not after
+the attempt. Its amount MUST be null, with a reason, unless every agent attempt
+in scope is priced in one currency; it MUST list the tariff dates and sources
+used. Adding it MUST NOT change existing fields.
 
 #### Scenario: Unknown token usage
 

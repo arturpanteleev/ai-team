@@ -13,6 +13,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const attemptManifestReservationName = "reservation.json"
@@ -225,6 +226,9 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 		(!manifest.Usage.Attested && (manifest.Usage.TokensInput != 0 || manifest.Usage.TokensOutput != 0 || manifest.Usage.CostUSD != 0))) {
 		return errors.New("attempt manifest usage is invalid")
 	}
+	if manifest.Usage != nil && !validAttemptUsageTariffInputs(*manifest.Usage) {
+		return errors.New("attempt manifest usage tariff inputs are invalid")
+	}
 	for _, records := range [][]ArtifactRecord{manifest.Inputs, manifest.Outputs} {
 		for _, record := range records {
 			rel := filepath.Clean(filepath.FromSlash(record.EvidencePath))
@@ -325,4 +329,28 @@ func (s ReservedAttemptManifestSource) ReadAttemptManifest(runDir, runID, attemp
 		return store.ReadAttemptManifest(runDir, runID, attemptID)
 	}
 	return FilesystemAttemptManifestSource().ReadAttemptManifest(runDir, runID, attemptID)
+}
+
+// validAttemptUsageTariffInputs checks the B-66 model and cache breakdown:
+// counters are non-negative, absent without attestation, cache reads that are
+// part of the input do not exceed it, and the model is a short printable name.
+func validAttemptUsageTariffInputs(usage workflow.AttemptUsage) bool {
+	if usage.CacheReadTokens < 0 || usage.CacheWriteTokens < 0 {
+		return false
+	}
+	if !usage.Attested && (usage.Model != "" || usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 || usage.CacheReadIncludedInInput) {
+		return false
+	}
+	if usage.CacheReadIncludedInInput && usage.CacheReadTokens > usage.TokensInput {
+		return false
+	}
+	if len(usage.Model) > 200 {
+		return false
+	}
+	for _, char := range usage.Model {
+		if char < 0x20 || char == 0x7f {
+			return false
+		}
+	}
+	return true
 }

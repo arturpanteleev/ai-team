@@ -195,10 +195,31 @@ func (ac *AutoPickupConfig) Validate(budget *BudgetConfig) error {
 }
 
 // UsageConfig enables an explicitly approximate allocation of a monthly
-// subscription across recorded runs. It is never an API price estimate.
+// subscription across recorded runs (never an API price estimate) and,
+// separately, a per-model provider tariff table (B-66). The tariff table is
+// empty by default: ai-team ships no prices, the project records the
+// provider's published prices together with their date and source.
 type UsageConfig struct {
-	MonthlySubscriptionAmount   float64 `yaml:"monthly_subscription_amount,omitempty"`
-	MonthlySubscriptionCurrency string  `yaml:"monthly_subscription_currency,omitempty"`
+	MonthlySubscriptionAmount   float64        `yaml:"monthly_subscription_amount,omitempty"`
+	MonthlySubscriptionCurrency string         `yaml:"monthly_subscription_currency,omitempty"`
+	Tariffs                     []TariffConfig `yaml:"tariffs,omitempty"`
+}
+
+// TariffConfig is one provider price list entry for a model, in currency
+// units per one million tokens. EffectiveDate (YYYY-MM-DD, UTC) is the date
+// the prices were taken from the provider and from which they apply: an
+// attempt is priced by the entry for its model with the latest effective
+// date not after the attempt. CachedInputPerMTok and CacheWritePerMTok are
+// optional; an attempt with cache tokens and no matching price is unpriced.
+type TariffConfig struct {
+	Model              string   `yaml:"model"`
+	InputPerMTok       *float64 `yaml:"input_per_mtok"`
+	OutputPerMTok      *float64 `yaml:"output_per_mtok"`
+	CachedInputPerMTok *float64 `yaml:"cached_input_per_mtok,omitempty"`
+	CacheWritePerMTok  *float64 `yaml:"cache_write_per_mtok,omitempty"`
+	Currency           string   `yaml:"currency"`
+	EffectiveDate      string   `yaml:"effective_date"`
+	Source             string   `yaml:"source"`
 }
 
 // TrackerConfig enables optional one-way integrations with external trackers.
@@ -311,15 +332,67 @@ func (uc *UsageConfig) Validate() error {
 		return fmt.Errorf("usage.monthly_subscription_amount должен быть конечным неотрицательным числом")
 	}
 	currency := uc.MonthlySubscriptionCurrency
-	if currency != "" {
-		if len(currency) != 3 {
-			return fmt.Errorf("usage.monthly_subscription_currency должен быть ISO-кодом из трёх заглавных букв")
+	if currency != "" && !isCurrencyCode(currency) {
+		return fmt.Errorf("usage.monthly_subscription_currency должен быть ISO-кодом из трёх заглавных букв")
+	}
+	seen := map[string]bool{}
+	for index, tariff := range uc.Tariffs {
+		if err := tariff.validate(index); err != nil {
+			return err
 		}
-		for _, char := range currency {
-			if char < 'A' || char > 'Z' {
-				return fmt.Errorf("usage.monthly_subscription_currency должен быть ISO-кодом из трёх заглавных букв")
+		key := tariff.Model + "\x00" + tariff.EffectiveDate
+		if seen[key] {
+			return fmt.Errorf("usage.tariffs[%d]: тариф модели %q на дату %s задан дважды", index, tariff.Model, tariff.EffectiveDate)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func isCurrencyCode(currency string) bool {
+	if len(currency) != 3 {
+		return false
+	}
+	for _, char := range currency {
+		if char < 'A' || char > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func (tc TariffConfig) validate(index int) error {
+	prefix := fmt.Sprintf("usage.tariffs[%d]", index)
+	if strings.TrimSpace(tc.Model) == "" || tc.Model != strings.TrimSpace(tc.Model) || len(tc.Model) > 200 || strings.ContainsAny(tc.Model, "\r\n\x00") {
+		return fmt.Errorf("%s.model обязателен: имя модели, как оно задано в model агента", prefix)
+	}
+	for _, field := range []struct {
+		name     string
+		price    *float64
+		required bool
+	}{
+		{"input_per_mtok", tc.InputPerMTok, true}, {"output_per_mtok", tc.OutputPerMTok, true},
+		{"cached_input_per_mtok", tc.CachedInputPerMTok, false}, {"cache_write_per_mtok", tc.CacheWritePerMTok, false},
+	} {
+		name, price, required := field.name, field.price, field.required
+		if price == nil {
+			if required {
+				return fmt.Errorf("%s.%s обязателен", prefix, name)
 			}
+			continue
 		}
+		if math.IsNaN(*price) || math.IsInf(*price, 0) || *price < 0 {
+			return fmt.Errorf("%s.%s должен быть конечным неотрицательным числом", prefix, name)
+		}
+	}
+	if !isCurrencyCode(tc.Currency) {
+		return fmt.Errorf("%s.currency обязателен: ISO-код из трёх заглавных букв", prefix)
+	}
+	if _, err := time.Parse("2006-01-02", tc.EffectiveDate); err != nil {
+		return fmt.Errorf("%s.effective_date обязателен в формате YYYY-MM-DD", prefix)
+	}
+	if strings.TrimSpace(tc.Source) == "" || strings.ContainsAny(tc.Source, "\r\n\x00") {
+		return fmt.Errorf("%s.source обязателен: откуда взяты цены (ссылка на прайс провайдера)", prefix)
 	}
 	return nil
 }

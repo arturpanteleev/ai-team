@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { downloadFlowMetricsCsv, getFlowMetrics } from '../api';
 import { usePageTitle } from '../hooks/usePageTitle';
-import type { FlowMetrics, FlowStageStats } from '../types/flowMetrics';
+import type { FlowMetrics, FlowStageStats, FlowTariffCost } from '../types/flowMetrics';
 import styles from './Observability.module.css';
 
 function utcDate(date: Date): string {
@@ -47,6 +47,46 @@ function formatEstimate(value: number | null | undefined, currency?: string): st
   } catch {
     return `≈ ${value.toFixed(2)} ${currency || ''}`.trim();
   }
+}
+
+function formatMoney(value: number, currency?: string): string {
+  try {
+    return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: currency || 'USD', maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency || ''}`.trim();
+  }
+}
+
+const tariffReasons: Record<string, string> = {
+  tariff_not_configured: 'тариф не задан',
+  tariff_missing_for_model: 'нет тарифа для модели',
+  model_unknown: 'модель попытки неизвестна',
+  tariff_not_effective_at_attempt: 'тариф ещё не действовал на дату попытки',
+  cache_price_missing: 'нет цены кешированных токенов',
+  usage_unknown: 'нет подтверждённого usage',
+  usage_invalid: 'некорректный usage',
+  mixed_currency: 'тарифы в разных валютах',
+  no_agent_attempts: 'нет попыток агента',
+};
+
+// Стоимость по тарифу показывается только целиком: неизвестная модель или
+// незаданный тариф дают «нет данных», а не ноль.
+function formatTariffCost(cost: FlowTariffCost | undefined): string {
+  if (!cost || cost.amount === null || !Number.isFinite(cost.amount)) return 'нет данных';
+  return formatMoney(cost.amount, cost.currency);
+}
+
+function tariffCostNote(cost: FlowTariffCost | undefined): string {
+  if (!cost) return 'тариф не задан';
+  if (cost.amount !== null && Number.isFinite(cost.amount)) {
+    const dates = (cost.tariff_dates ?? []).map(formatDay).join(', ');
+    return dates ? `по тарифу, дата тарифа: ${dates}` : 'по тарифу';
+  }
+  const reason = tariffReasons[cost.reason ?? ''] ?? 'нет данных';
+  const models = cost.reason === 'tariff_missing_for_model' && cost.unpriced_models?.length ? `: ${cost.unpriced_models.join(', ')}` : '';
+  const total = cost.priced_attempts + cost.unpriced_attempts;
+  const counted = total > 0 && cost.priced_attempts > 0 ? ` (оценено ${cost.priced_attempts} из ${total})` : '';
+  return `${reason}${models}${counted}`;
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -108,7 +148,8 @@ function StageUsage({ stage }: { stage: FlowStageStats }) {
     <div className={styles.usageDetail}>
       <span>Вход: {formatTokens(stage.tokens_input)}</span>
       <span>Выход: {formatTokens(stage.tokens_output)}</span>
-      <span>Доля подписки: {formatEstimate(stage.subscription_share_estimate, stage.subscription_currency)}</span>
+      <span title={tariffCostNote(stage.cost_by_tariff)}>По тарифу: {formatTariffCost(stage.cost_by_tariff)}</span>
+      <span>Доля подписки (оценка): {formatEstimate(stage.subscription_share_estimate, stage.subscription_currency)}</span>
       {stage.usage_unknown_attempts > 0 && <span className={styles.muted}>Без usage: {stage.usage_unknown_attempts} этап(а)</span>}
     </div>
   );
@@ -223,13 +264,14 @@ export function Observability() {
 
           <section className={styles.usage} aria-labelledby="usage-title">
             <div className={styles.sectionHeader}>
-              <div><h2 id="usage-title">Токены и доля подписки</h2><p>Оценка распределена по attested-токенам; это не тарификация провайдера.</p></div>
+              <div><h2 id="usage-title">Токены и стоимость</h2><p>Стоимость по тарифу — подтверждённые токены попыток агента × цена модели из тарифов проекта. Доля подписки — отдельная приблизительная оценка, не тарификация провайдера.</p></div>
               {usage && usage.unknown_runs > 0 && <span className={styles.badge}>Без usage: {usage.unknown_runs}</span>}
             </div>
             <div className={styles.usageTotals}>
               <div><span>Входные токены</span><strong>{formatTokens(usage?.tokens_input)}</strong></div>
               <div><span>Выходные токены</span><strong>{formatTokens(usage?.tokens_output)}</strong></div>
-              <div><span>Приблизительная доля подписки</span><strong>{formatEstimate(usage?.subscription_share_estimate, usage?.subscription_currency)}</strong></div>
+              <div data-testid="tariff-cost"><span>Стоимость по тарифу</span><strong>{formatTariffCost(metrics.cost_by_tariff)}</strong><small className={styles.muted}>{tariffCostNote(metrics.cost_by_tariff)}</small></div>
+              <div><span>Приблизительная доля подписки (оценка)</span><strong>{formatEstimate(usage?.subscription_share_estimate, usage?.subscription_currency)}</strong></div>
             </div>
             {usage?.subscription_share_estimate !== null && usage?.subscription_share_estimate !== undefined && usage.estimate_basis &&
               <small className={styles.muted}>Основа оценки: месячная подписка проекта, распределённая пропорционально подтверждённым токенам.</small>}

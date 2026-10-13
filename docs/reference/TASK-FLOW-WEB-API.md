@@ -151,6 +151,25 @@ These are subscription estimates, not runtime `cost_usd`. JSON and CSV preserve
 attestation, configuration/envelope/manifest source, currency, and formula
 basis.
 
+`cost_by_tariff` (top level and in each stage) is the provider-tariff cost,
+added alongside the existing fields: attested agent-attempt tokens × the price
+of the attempt's model from `usage.tariffs` in `.ai-team/config.yaml`, per one
+million tokens. The tariff applied is the model's entry with the latest
+`effective_date` not after the attempt finished. Cache reads and writes are
+priced with the cached and cache-write prices; cache reads already counted in
+input tokens (codex) are not charged twice. It covers the same attempts as
+stage tokens (non-invalidated, non-skipped agent attempts of selected runs).
+`amount` is `null` unless every such attempt is priced in a single currency;
+`reason` then names why (`tariff_not_configured`, `model_unknown`,
+`tariff_missing_for_model`, `tariff_not_effective_at_attempt`,
+`cache_price_missing`, `usage_unknown`, `usage_invalid`, `mixed_currency`,
+`no_agent_attempts`), with `priced_attempts`, `unpriced_attempts` and
+`unpriced_models`. `tariff_dates` and `tariff_sources` list the tariff entries
+used. ai-team ships no prices: without configured tariffs the cost is unknown,
+never zero. The subscription estimate stays a separate field. The CSV adds
+`cost_by_tariff` and `stage_cost_by_tariff` rows whose attestation is `priced`
+or `unavailable:<reason>` and whose basis lists the tariff dates.
+
 The optional `run_id` restricts the selected runs to one task (400 for an
 unsafe ID, 404 for an unknown task, 500 when the store cannot be read). Without `from` and `to` it covers the
 whole task; monthly subscription denominators still use all project runs. The

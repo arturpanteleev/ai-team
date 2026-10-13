@@ -26,6 +26,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -1290,6 +1291,75 @@ type flowStageStats struct {
 	SubscriptionCurrency      string                `json:"subscription_currency,omitempty"`
 	EstimateSource            string                `json:"estimate_source,omitempty"`
 	EstimateBasis             string                `json:"estimate_basis,omitempty"`
+	CostByTariff              flowTariffCost        `json:"cost_by_tariff"`
+}
+
+// flowTariffCost is the provider-tariff cost of agent attempts (B-66):
+// attested attempt tokens × the configured price of the attempt's model.
+// Amount is null unless every agent attempt is priced in one currency; it is
+// never a subscription share and never the runtime-reported cost_usd.
+type flowTariffCost struct {
+	Amount           *float64 `json:"amount"`
+	Currency         string   `json:"currency,omitempty"`
+	PricedAttempts   int      `json:"priced_attempts"`
+	UnpricedAttempts int      `json:"unpriced_attempts"`
+	Reason           string   `json:"reason,omitempty"`
+	UnpricedModels   []string `json:"unpriced_models,omitempty"`
+	TariffDates      []string `json:"tariff_dates,omitempty"`
+	TariffSources    []string `json:"tariff_sources,omitempty"`
+	Source           string   `json:"source"`
+	Basis            string   `json:"basis"`
+}
+
+const (
+	flowTariffCostSource = "project_config.usage.tariffs+attempt_manifest"
+	flowTariffCostBasis  = "attested_attempt_tokens_x_model_tariff_per_1m_tokens"
+)
+
+func newFlowTariffCost(cost metrics.TariffCost) flowTariffCost {
+	summary := cost.Summary()
+	return flowTariffCost{Amount: summary.Amount, Currency: summary.Currency, PricedAttempts: summary.Priced,
+		UnpricedAttempts: summary.Unpriced, Reason: summary.Reason, UnpricedModels: summary.UnpricedModels,
+		TariffDates: summary.TariffDates, TariffSources: summary.TariffSources,
+		Source: flowTariffCostSource, Basis: flowTariffCostBasis}
+}
+
+// projectTariffs converts the validated tariff table of the project config.
+func projectTariffs(cfg *config.Config) []metrics.Tariff {
+	if cfg == nil || cfg.Usage == nil || cfg.Usage.Validate() != nil {
+		return nil
+	}
+	tariffs := make([]metrics.Tariff, 0, len(cfg.Usage.Tariffs))
+	for _, entry := range cfg.Usage.Tariffs {
+		effective, err := time.Parse("2006-01-02", entry.EffectiveDate)
+		if err != nil || entry.InputPerMTok == nil || entry.OutputPerMTok == nil {
+			continue
+		}
+		tariffs = append(tariffs, metrics.Tariff{Model: entry.Model, InputPerMTok: *entry.InputPerMTok, OutputPerMTok: *entry.OutputPerMTok,
+			CachedInputPerMTok: entry.CachedInputPerMTok, CacheWritePerMTok: entry.CacheWritePerMTok,
+			Currency: entry.Currency, EffectiveDate: effective.UTC(), Source: entry.Source})
+	}
+	return tariffs
+}
+
+// priceFlowAttempt adds one agent attempt to the stage and total tariff cost.
+func priceFlowAttempt(tariffs []metrics.Tariff, usage *workflow.AttemptUsage, at time.Time, accumulators ...*metrics.TariffCost) {
+	if usage == nil || !usage.Attested {
+		for _, accumulator := range accumulators {
+			accumulator.AddUnpriced("", "usage_unknown")
+		}
+		return
+	}
+	cost, tariff, reason := metrics.PriceAttempt(tariffs, metrics.TariffUsage{Model: usage.Model, InputTokens: usage.TokensInput,
+		OutputTokens: usage.TokensOutput, CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens,
+		CacheReadIncludedInInput: usage.CacheReadIncludedInInput, At: at})
+	for _, accumulator := range accumulators {
+		if reason != "" {
+			accumulator.AddUnpriced(usage.Model, reason)
+		} else {
+			accumulator.AddPriced(cost, tariff)
+		}
+	}
 }
 
 type flowStageStateStats struct {
@@ -1319,6 +1389,7 @@ type flowMetricsResponse struct {
 	AgentResults                 int               `json:"agent_results"`
 	AgentAcceptedWithoutEdit     int               `json:"agent_accepted_without_edit"`
 	AgentAcceptedWithoutEditRate *float64          `json:"agent_accepted_without_edit_rate,omitempty"`
+	CostByTariff                 flowTariffCost    `json:"cost_by_tariff"`
 }
 
 type flowUsageStats struct {
@@ -1447,6 +1518,13 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 	stageTokensByMonth := map[string]map[string]int64{}
 	stageUsageReady := map[string]bool{}
 	agentResults, agentAcceptedWithoutEdit := 0, 0
+	projectConfig, projectConfigErr := config.Load(filepath.Join(s.targetDir, ".ai-team", "config.yaml"))
+	if projectConfigErr != nil {
+		projectConfig = nil
+	}
+	tariffs := projectTariffs(projectConfig)
+	var totalTariffCost metrics.TariffCost
+	stageTariffCost := map[string]*metrics.TariffCost{}
 	runs := make([]store.PipelineRun, 0)
 	for offset := 0; ; offset += 100 {
 		page, err := s.store.GetPipelineRunsPage(100, offset)
@@ -1559,6 +1637,21 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 			} else if executor == "agent" {
 				stat.Agent++
 				manifest, manifestErr := readTaskAttemptManifest(s, run.RunID, stage.AttemptID)
+				if stageTariffCost[stageName] == nil {
+					stageTariffCost[stageName] = &metrics.TariffCost{}
+				}
+				var attemptUsage *workflow.AttemptUsage
+				pricedAt := stage.StartedAt
+				if stage.CompletedAt != nil {
+					pricedAt = *stage.CompletedAt
+				}
+				if manifestErr == nil {
+					attemptUsage = manifest.Usage
+					if !manifest.FinishedAt.IsZero() {
+						pricedAt = manifest.FinishedAt
+					}
+				}
+				priceFlowAttempt(tariffs, attemptUsage, pricedAt, stageTariffCost[stageName], &totalTariffCost)
 				if manifestErr == nil && manifest.Usage != nil && manifest.Usage.Attested {
 					stat.UsageKnownAttempts++
 					input, output := int64(0), int64(0)
@@ -1692,7 +1785,13 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 		if stage.Agent > 0 {
 			stage.UsageSource = "attempt_manifest"
 		}
+		var stageCost metrics.TariffCost
+		if accumulated := stageTariffCost[stage.Stage]; accumulated != nil {
+			stageCost = *accumulated
+		}
+		stage.CostByTariff = newFlowTariffCost(stageCost)
 	}
+	response.CostByTariff = newFlowTariffCost(totalTariffCost)
 	response.Usage.Source = "metrics.UsageEnvelope"
 	switch {
 	case response.Usage.KnownRuns == 0 && response.Usage.UnknownRuns == 0:
@@ -1709,7 +1808,7 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 		response.Usage.TokensOutput = &tokenOutputTotal
 	}
 	if requestedRuns > 0 {
-		if cfg, cfgErr := config.Load(filepath.Join(s.targetDir, ".ai-team", "config.yaml")); cfgErr == nil &&
+		if cfg := projectConfig; cfg != nil &&
 			cfg.Usage != nil && cfg.Usage.Validate() == nil && cfg.Usage.MonthlySubscriptionAmount > 0 {
 			currency := cfg.Usage.MonthlySubscriptionCurrency
 			if currency == "" {
@@ -2044,6 +2143,7 @@ func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request)
 		}
 		writeCSVFloatMetric(w, "stage_subscription_share_estimate", stage.Stage, stage.SubscriptionShareEstimate, stage.SubscriptionCurrency,
 			csvEstimateAttestation(stage.SubscriptionShareEstimate), stage.EstimateSource, stage.EstimateBasis)
+		writeCSVTariffCost(w, "stage_cost_by_tariff", stage.Stage, stage.CostByTariff)
 	}
 	writeCSVMetric(w, "tokens_input", "", value.Usage.TokensInput, "tokens", value.Usage.Attestation, value.Usage.Source)
 	writeCSVMetric(w, "tokens_output", "", value.Usage.TokensOutput, "tokens", value.Usage.Attestation, value.Usage.Source)
@@ -2051,9 +2151,24 @@ func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request)
 	writeCSVMetric(w, "usage_unknown_runs", "", int64Pointer(int64(value.Usage.UnknownRuns)), "runs", value.Usage.Attestation, value.Usage.Source)
 	writeCSVFloatMetric(w, "subscription_share_estimate", "", value.Usage.SubscriptionShareEstimate, value.Usage.SubscriptionCurrency,
 		csvEstimateAttestation(value.Usage.SubscriptionShareEstimate), value.Usage.EstimateSource, value.Usage.EstimateBasis)
+	writeCSVTariffCost(w, "cost_by_tariff", "", value.CostByTariff)
 	writeCSVCounts(w, "override_count", value.Overrides)
 	writeCSVCounts(w, "skip_count", value.Skips)
 	writeCSVCounts(w, "return_count", value.Returns)
+}
+
+// writeCSVTariffCost writes a tariff cost row: attestation is "priced" or
+// the reason it is unavailable, basis carries the tariff dates used.
+func writeCSVTariffCost(w http.ResponseWriter, name, stage string, cost flowTariffCost) {
+	attestation := "priced"
+	if cost.Amount == nil {
+		attestation = "unavailable:" + cost.Reason
+	}
+	basis := cost.Basis
+	if len(cost.TariffDates) > 0 {
+		basis += ";tariff_dates=" + strings.Join(cost.TariffDates, "|")
+	}
+	writeCSVFloatMetric(w, name, stage, cost.Amount, cost.Currency, attestation, cost.Source, basis)
 }
 
 func csvEstimateAttestation(value *float64) string {

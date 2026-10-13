@@ -382,3 +382,45 @@ func TestRun_AttemptUsageSurvivesTwoPausesWithoutDoubleCounting(t *testing.T) {
 		t.Fatalf("approval event times must match human decisions, got %v want %v, %v", decisionEvents, firstDecisionAt, secondDecisionAt)
 	}
 }
+
+// TestRun_AttemptUsageRecordsTariffInputs: the attempt manifest keeps the
+// configured model and the cache breakdown needed for the tariff cost (B-66).
+func TestRun_AttemptUsageRecordsTariffInputs(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	rt.usagePer = map[string]*runtime.Usage{
+		"analyst": {Attested: true, TokensInput: 100, TokensOutput: 20, CacheReadInputTokens: 40, CacheWriteInputTokens: 7},
+		// Cache reads larger than an input that includes them cannot be priced.
+		"reviewer": {Attested: true, TokensInput: 10, TokensOutput: 5, CacheReadInputTokens: 11, CacheReadIncludedInInput: true},
+	}
+	cfg := cfgFor(config.AgentConfig{Name: "analyst", Model: "model-a"}, config.AgentConfig{Name: "reviewer", Model: "model-b"})
+	if err, _ := runPipeline(t, dir, cfg, rt, &scriptedPrompter{}); err != nil {
+		t.Fatalf("ожидался успех, got: %v", err)
+	}
+	runDir := onlyRunDir(t, dir)
+	entries, err := os.ReadDir(filepath.Join(runDir, "attempts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]workflow.AttemptUsage{}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(runDir, "attempts", entry.Name(), "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var attempt evidence.AttemptManifest
+		if err := json.Unmarshal(data, &attempt); err != nil {
+			t.Fatal(err)
+		}
+		if attempt.Usage != nil {
+			seen[attempt.Stage] = *attempt.Usage
+		}
+	}
+	if got := seen["analyst"]; got.Model != "model-a" || got.CacheReadTokens != 40 || got.CacheWriteTokens != 7 || got.CacheReadIncludedInInput {
+		t.Fatalf("analyst usage=%+v; want model-a with cache 40/7", got)
+	}
+	if got := seen["reviewer"]; !got.Attested || got.Model != "" || got.CacheReadTokens != 0 || got.TokensInput != 10 {
+		t.Fatalf("reviewer usage=%+v; inconsistent cache must leave the model unknown", got)
+	}
+}

@@ -116,6 +116,15 @@ type Usage struct {
 	CostUSD           float64 `json:"cost_usd,omitempty"`
 	Currency          string  `json:"currency,omitempty"`
 	Attested          bool    `json:"attested"`
+	// CacheReadInputTokens / CacheWriteInputTokens — разбивка кэша для
+	// расчёта стоимости по тарифу (B-66): чтение из кэша и запись в кэш
+	// тарифицируются по своим ценам. CacheReadIncludedInInput сообщает
+	// конвенцию харнесса: true — чтения из кэша уже входят в TokensInput
+	// (OpenAI/codex), false — учтены отдельно от TokensInput (Anthropic/claude).
+	// Запись в кэш никогда не входит в TokensInput.
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
+	CacheWriteInputTokens    int64 `json:"cache_write_input_tokens,omitempty"`
+	CacheReadIncludedInInput bool  `json:"cache_read_included_in_input,omitempty"`
 }
 
 // UsageSource — опциональный интерфейс адаптера: разбирает usage из

@@ -189,6 +189,9 @@ func TestCodexParseUsageLastTurnWins(t *testing.T) {
 	if usage.CachedInputTokens != 60 {
 		t.Errorf("CachedInputTokens = %d, want 60 (не суммируется с TokensInput)", usage.CachedInputTokens)
 	}
+	if usage.CacheReadInputTokens != 60 || usage.CacheWriteInputTokens != 0 || !usage.CacheReadIncludedInInput {
+		t.Errorf("cache breakdown = read %d write %d included %v, want 60/0/true", usage.CacheReadInputTokens, usage.CacheWriteInputTokens, usage.CacheReadIncludedInInput)
+	}
 	if !usage.Attested {
 		t.Error("codex usage должен быть attested (токены из JSONL харнесса)")
 	}

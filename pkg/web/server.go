@@ -275,15 +275,14 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	srv.eventWorkers.Add(1)
 	go srv.tailEvents(eventContext, eventCursor)
 	if srv.trackerAdapter != nil {
-		trackerCursor := integrationStartCursor(s, trackerIntegrationName, eventCursor)
-		srv.eventWorkers.Add(1)
-		go srv.consumeIntegrationEvents(eventContext, trackerIntegrationName, trackerCursor, srv.deliverTrackerEvent)
+		srv.startIntegrationConsumer(eventContext, trackerIntegrationName, eventCursor, srv.deliverTrackerEvent)
 	}
 	if srv.notifications != nil {
 		srv.notificationWorker = &NotificationWorker{store: s, dispatcher: srv.notifications}
-		notifierCursor := integrationStartCursor(s, notifierIntegrationName, eventCursor)
+		srv.startIntegrationConsumer(eventContext, notifierIntegrationName, eventCursor, srv.deliverNotification)
+		srv.pruneNotificationDeliveries(srv.clock().UTC())
 		srv.eventWorkers.Add(1)
-		go srv.consumeIntegrationEvents(eventContext, notifierIntegrationName, notifierCursor, srv.deliverNotification)
+		go srv.monitorNotificationRetention(eventContext)
 	}
 	srv.eventWorkers.Add(1)
 	go srv.monitorStalledStages(eventContext)
@@ -580,6 +579,21 @@ func (s *Server) tailEvents(ctx context.Context, cursor int64) {
 	}
 }
 
+// startIntegrationConsumer starts an integration worker from its durable
+// cursor. When the cursor cannot be read or initialized the integration stays
+// off until the next start: the dashboard keeps working, and no past event is
+// sent to the external system again.
+func (s *Server) startIntegrationConsumer(ctx context.Context, integration string, tail int64, handle func(context.Context, store.Event) bool) bool {
+	cursor, err := integrationStartCursor(s.store, integration, tail)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s integration disabled until restart: %v\n", integration, err)
+		return false
+	}
+	s.eventWorkers.Add(1)
+	go s.consumeIntegrationEvents(ctx, integration, cursor, handle)
+	return true
+}
+
 // consumeIntegrationEvents wakes on the live bus and drains from SQLite's
 // durable per-integration cursor. The database remains authoritative if the
 // bounded live buffer drops a notification while an adapter is handling a
@@ -665,12 +679,13 @@ func (s *Server) recordIntegrationError(source store.Event, integration, reason 
 }
 
 func (s *Server) recordIntegrationErrorDetails(source store.Event, integration, reason string, details map[string]any) error {
-	return recordIntegrationError(s.store, source, integration, reason, details)
+	return recordIntegrationError(s.store, source, integration, reason, details, "")
 }
 
 // recordIntegrationError persists a sanitized adapter failure as a warning
-// event of the source run.
-func recordIntegrationError(st *store.Store, source store.Event, integration, reason string, details map[string]any) error {
+// event of the source run. A non-empty dedupeKey records at most one warning
+// per key, so a replay of an already reported failure does not add another.
+func recordIntegrationError(st *store.Store, source store.Event, integration, reason string, details map[string]any, dedupeKey string) error {
 	payload := map[string]any{
 		"integration": integration, "source_cursor": source.ID,
 		"source_event": source.Type, "error": reason,
@@ -682,10 +697,16 @@ func recordIntegrationError(st *store.Store, source store.Event, integration, re
 	if err != nil {
 		return err
 	}
-	if err := st.AppendEventNext(&store.Event{
+	event := &store.Event{
 		RunID: source.RunID, Type: "integration_error", Stage: source.Stage,
-		Severity: "warning", Timestamp: time.Now().UTC(), DataJSON: string(data),
-	}); err != nil {
+		Severity: "warning", Timestamp: time.Now().UTC(), DataJSON: string(data), DedupeKey: dedupeKey,
+	}
+	if dedupeKey != "" {
+		_, err = st.AppendEventNextIfAbsent(event)
+	} else {
+		err = st.AppendEventNext(event)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s integration error event could not be persisted for run %s: %v\n", integration, source.RunID, err)
 		return err
 	}

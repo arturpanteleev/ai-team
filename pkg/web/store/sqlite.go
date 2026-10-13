@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -478,73 +480,135 @@ const notificationClaimPrefix = "claimed:"
 // ClaimNotification atomically claims a channel/event delivery for this
 // process. Every process sharing the database (`ai-team web`, `ai-team run`,
 // `ai-team scheduler-worker`) uses the same channel/event key, so only one of
-// them sends a given notification.
-func (s *Store) ClaimNotification(channel string, eventID int64) (notifier.ClaimState, error) {
+// them sends a given notification. On ClaimAcquired the returned token
+// identifies this claim: only its holder can record or release it.
+func (s *Store) ClaimNotification(channel string, eventID int64) (notifier.ClaimState, string, error) {
 	return s.ClaimNotificationAt(channel, eventID, time.Now().UTC())
 }
 
 // ClaimNotificationAt is ClaimNotification with an explicit clock.
-func (s *Store) ClaimNotificationAt(channel string, eventID int64, now time.Time) (notifier.ClaimState, error) {
+func (s *Store) ClaimNotificationAt(channel string, eventID int64, now time.Time) (notifier.ClaimState, string, error) {
 	if strings.TrimSpace(channel) == "" || eventID <= 0 {
-		return notifier.ClaimBusy, fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
+		return notifier.ClaimBusy, "", fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	claim := notificationClaimPrefix + strconv.FormatInt(now.Add(NotificationClaimLease).UnixNano(), 10)
+	claim, err := newNotificationClaim(now.Add(NotificationClaimLease))
+	if err != nil {
+		return notifier.ClaimBusy, "", err
+	}
 	result, err := s.db.Exec(`INSERT OR IGNORE INTO notification_deliveries(channel, event_id, outcome, recorded_at)
 		VALUES (?, ?, ?, ?)`, channel, eventID, claim, now)
 	if err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
 	if affected, err := result.RowsAffected(); err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	} else if affected == 1 {
-		return notifier.ClaimAcquired, nil
+		return notifier.ClaimAcquired, claim, nil
 	}
 	var current string
 	if err := s.db.QueryRow(`SELECT outcome FROM notification_deliveries WHERE channel = ? AND event_id = ?`, channel, eventID).Scan(&current); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Released between the insert and the read; retry on the next pass.
-			return notifier.ClaimBusy, nil
+			return notifier.ClaimBusy, "", nil
 		}
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
-	expiry, claimed := strings.CutPrefix(current, notificationClaimPrefix)
+	expires, claimed := notificationClaimExpiry(current)
 	if !claimed {
-		return notifier.ClaimHandled, nil
+		return notifier.ClaimHandled, "", nil
 	}
-	if expires, parseErr := strconv.ParseInt(expiry, 10, 64); parseErr == nil && now.UnixNano() < expires {
-		return notifier.ClaimBusy, nil
+	if now.UnixNano() < expires {
+		return notifier.ClaimBusy, "", nil
 	}
 	// The holder's lease expired: take the claim over with compare-and-swap so
-	// two processes reclaiming at once cannot both win.
+	// two processes reclaiming at once cannot both win. The new token makes
+	// any late Record or Release of the previous holder a no-op.
 	result, err = s.db.Exec(`UPDATE notification_deliveries SET outcome = ?, recorded_at = ?
 		WHERE channel = ? AND event_id = ? AND outcome = ?`, claim, now, channel, eventID, current)
 	if err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
-	return notifier.ClaimAcquired, nil
+	return notifier.ClaimAcquired, claim, nil
 }
 
-// RecordNotification durably marks a channel/event pair as handled. The first
-// final outcome wins; later attempts for the same pair are ignored.
-func (s *Store) RecordNotification(channel string, eventID int64, outcome string) error {
-	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" || strings.HasPrefix(outcome, notificationClaimPrefix) {
+// newNotificationClaim builds a claim token "claimed:<expiry ns>:<nonce>".
+// The random nonce makes two claims with the same expiry distinct.
+func newNotificationClaim(expires time.Time) (string, error) {
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("notification claim nonce: %w", err)
+	}
+	return notificationClaimPrefix + strconv.FormatInt(expires.UnixNano(), 10) + ":" + hex.EncodeToString(nonce), nil
+}
+
+// notificationClaimExpiry parses a stored outcome. claimed is false for a
+// final outcome; an unparsable claim is treated as already expired.
+func notificationClaimExpiry(outcome string) (expires int64, claimed bool) {
+	rest, claimed := strings.CutPrefix(outcome, notificationClaimPrefix)
+	if !claimed {
+		return 0, false
+	}
+	expiry, _, _ := strings.Cut(rest, ":")
+	expires, err := strconv.ParseInt(expiry, 10, 64)
+	if err != nil {
+		return 0, true
+	}
+	return expires, true
+}
+
+// RecordNotification replaces the caller's claim with a final outcome. It
+// fails with notifier.ErrClaimLost when token no longer holds the pair: the
+// lease expired and another process took it over, or the pair is final.
+func (s *Store) RecordNotification(channel string, eventID int64, token, outcome string) error {
+	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" ||
+		strings.HasPrefix(outcome, notificationClaimPrefix) || !strings.HasPrefix(token, notificationClaimPrefix) {
 		return fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	_, err := s.db.Exec(`INSERT INTO notification_deliveries(channel, event_id, outcome, recorded_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(channel, event_id) DO UPDATE SET outcome = excluded.outcome, recorded_at = excluded.recorded_at
-		WHERE notification_deliveries.outcome LIKE 'claimed:%'`, channel, eventID, outcome, time.Now().UTC())
+	result, err := s.db.Exec(`UPDATE notification_deliveries SET outcome = ?, recorded_at = ?
+		WHERE channel = ? AND event_id = ? AND outcome = ?`, outcome, time.Now().UTC(), channel, eventID, token)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return notifier.ErrClaimLost
+	}
+	return nil
+}
+
+// ReleaseNotification drops the caller's unfinished claim so the pair can be
+// retried. A claim that was taken over or finished is left untouched.
+func (s *Store) ReleaseNotification(channel string, eventID int64, token string) error {
+	if !strings.HasPrefix(token, notificationClaimPrefix) {
+		return fmt.Errorf("invalid notification claim for %q/%d", channel, eventID)
+	}
+	_, err := s.db.Exec(`DELETE FROM notification_deliveries
+		WHERE channel = ? AND event_id = ? AND outcome = ?`, channel, eventID, token)
 	return err
 }
 
-// ReleaseNotification drops an unfinished claim so the pair can be retried.
-func (s *Store) ReleaseNotification(channel string, eventID int64) error {
-	_, err := s.db.Exec(`DELETE FROM notification_deliveries
-		WHERE channel = ? AND event_id = ? AND outcome LIKE 'claimed:%'`, channel, eventID)
-	return err
+// NotificationDeliveryRetention is how long final delivery records are kept.
+// A record only suppresses a replay of its event, and every cursor moves past
+// an event within seconds of a successful delivery, so a month is ample.
+const NotificationDeliveryRetention = 30 * 24 * time.Hour
+
+// PruneNotificationDeliveries deletes final delivery records older than
+// cutoff and returns how many were removed. Live claims are never removed,
+// whatever their age, so pruning cannot let a second process send an event
+// that is being delivered.
+func (s *Store) PruneNotificationDeliveries(cutoff time.Time) (int64, error) {
+	result, err := s.db.Exec(`DELETE FROM notification_deliveries
+		WHERE recorded_at < ? AND outcome NOT LIKE 'claimed:%'`, cutoff.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) publishEvent(event Event) {

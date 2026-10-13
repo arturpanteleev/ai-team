@@ -17,8 +17,10 @@ import (
 
 // notificationFlushTimeout bounds how long a finishing process waits for the
 // last notifications of its run. It covers a few deliveries at
-// notifier.DefaultDeliveryTimeout; anything left is picked up by `ai-team web`
-// if it runs on the same database.
+// notifier.DefaultDeliveryTimeout. What is left is delivered only by a process
+// with a durable notifier cursor on the same database (`ai-team web` or
+// `ai-team scheduler-worker`) whose cursor is still before those events, i.e.
+// one whose notifications were enabled before the run wrote them.
 const notificationFlushTimeout = 30 * time.Second
 
 // schedulerNotifierIntegration is the durable cursor of scheduler-worker. It
@@ -96,7 +98,7 @@ func (n *runNotifications) finish(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if !n.worker.Flush(ctx) {
-		fmt.Fprintf(os.Stderr, "⚠ не все уведомления отправлены за %s; их доставит ai-team web на той же базе\n", timeout)
+		fmt.Fprintf(os.Stderr, "⚠ не все уведомления отправлены за %s; их доставит ai-team web или scheduler-worker на той же базе, если уведомления там уже включены\n", timeout)
 	}
 }
 
@@ -123,28 +125,35 @@ func (r *trackingRecorder) RunAttached(runID string) {
 // startSchedulerNotifications delivers notifications for every run the
 // scheduler-worker writes into db, with its own durable cursor. A missing or
 // invalid config only disables notifications: the scheduler keeps working.
-func startSchedulerNotifications(ctx context.Context, target string, reg config.AgentLookup, s *webstore.Store, getenv func(string) string) func() {
+// The returned function stops delivery and flushes what is left; it first
+// calls stopSignals, which restores default signal handling, so a second
+// Ctrl-C during the flush terminates the process instead of being swallowed.
+// client may be nil.
+func startSchedulerNotifications(ctx context.Context, target string, reg config.AgentLookup, s *webstore.Store, getenv func(string) string, client *http.Client, stopSignals func()) func() {
+	disabled := func(reason error) func() {
+		if reason != nil {
+			fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", reason)
+		}
+		return stopSignals
+	}
 	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
 	if err := safeio.RejectSymlink(cfgPath); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", err)
-		return func() {}
+		return disabled(err)
 	}
 	cfg, err := config.Load(cfgPath)
 	if err == nil {
 		err = cfg.Validate(reg)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", err)
-		return func() {}
+		return disabled(err)
 	}
-	dispatcher := web.NotificationDispatcherFromConfig(cfg, getenv, nil)
+	dispatcher := web.NotificationDispatcherFromConfig(cfg, getenv, client)
 	if dispatcher == nil {
-		return func() {}
+		return disabled(nil)
 	}
 	worker, err := web.NewNotificationWorker(s, dispatcher, web.WithDurableNotificationCursor(schedulerNotifierIntegration))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", err)
-		return func() {}
+		return disabled(err)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -153,10 +162,13 @@ func startSchedulerNotifications(ctx context.Context, target string, reg config.
 		worker.Run(runCtx)
 	}()
 	return func() {
+		stopSignals()
 		cancel()
 		<-done
 		flushCtx, flushCancel := context.WithTimeout(context.Background(), notificationFlushTimeout)
 		defer flushCancel()
-		worker.Flush(flushCtx)
+		if !worker.Flush(flushCtx) {
+			fmt.Fprintf(os.Stderr, "⚠ не все уведомления scheduler-worker отправлены за %s; их доставит следующий запуск scheduler-worker или ai-team web\n", notificationFlushTimeout)
+		}
 	}
 }

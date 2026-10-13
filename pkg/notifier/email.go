@@ -19,8 +19,8 @@ import (
 
 // EmailChannel sends a plain-text e-mail through SMTP. The SMTP endpoint and
 // credentials come from one environment value:
-// smtp://user:password@host:587 (STARTTLS when offered) or
-// smtps://user:password@host:465 (implicit TLS).
+// smtp://user:password@host:587 (STARTTLS, mandatory for a non-loopback
+// host) or smtps://user:password@host:465 (implicit TLS).
 type EmailChannel struct {
 	name    string
 	smtpURL string
@@ -155,11 +155,16 @@ func (c *EmailChannel) deliver(ctx context.Context, endpoint smtpEndpoint, from 
 			if err := step("starttls", client.StartTLS(c.tlsConfig(endpoint.host))); err != nil {
 				return err
 			}
+		} else if !isLoopbackHost(endpoint.host) {
+			// Fail closed: without TLS the message body, recipients and task
+			// links would cross the network in plain text, and a stripped
+			// STARTTLS offer is indistinguishable from a server without TLS.
+			return errors.New("SMTP starttls refused: server does not offer TLS")
 		}
 	}
 	if endpoint.username != "" {
-		// smtp.PlainAuth refuses to send credentials without TLS except to
-		// a loopback server, so a missing STARTTLS cannot leak the password.
+		// smtp.PlainAuth also refuses to send credentials without TLS except
+		// to a loopback server.
 		if err := step("auth", client.Auth(smtp.PlainAuth("", endpoint.username, endpoint.password, endpoint.host))); err != nil {
 			return err
 		}
@@ -183,6 +188,16 @@ func (c *EmailChannel) deliver(ctx context.Context, endpoint smtpEndpoint, from 
 		return err
 	}
 	return step("quit", client.Quit())
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP, the only
+// SMTP servers that may be used without TLS.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // smtpStepError describes an SMTP failure by step and reply code only; server

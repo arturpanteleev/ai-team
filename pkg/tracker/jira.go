@@ -3,10 +3,12 @@ package tracker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -118,18 +120,46 @@ func issueKeyFromLink(link, baseURL string) string {
 		return ""
 	}
 	parsed, err := url.Parse(link)
-	if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, base.Host) {
+	if err != nil || parsed.Host == "" {
 		return ""
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return ""
 	}
+	if !sameHost(parsed, base) {
+		return ""
+	}
 	prefix := strings.TrimRight(base.Path, "/") + "/browse/"
 	key, ok := strings.CutPrefix(strings.TrimRight(parsed.Path, "/"), prefix)
-	if !ok || !issueKeyPattern.MatchString(key) {
+	if !ok {
+		return ""
+	}
+	// Jira resolves /browse/app-12 to APP-12. Case is folded only inside a
+	// browse URL on the configured host; a bare lowercase field such as
+	// "utf-8" stays unrecognized.
+	key = strings.ToUpper(key)
+	if !issueKeyPattern.MatchString(key) {
 		return ""
 	}
 	return key
+}
+
+// sameHost compares host names case-insensitively and treats a port equal to
+// the scheme's default as omitted, so https://jira.example and
+// https://jira.example:443 are the same Jira while :8443 is not.
+func sameHost(link, base *url.URL) bool {
+	return strings.EqualFold(link.Hostname(), base.Hostname()) &&
+		explicitPort(link) == explicitPort(base)
+}
+
+func explicitPort(u *url.URL) string {
+	port := u.Port()
+	switch {
+	case port == "80" && strings.EqualFold(u.Scheme, "http"),
+		port == "443" && strings.EqualFold(u.Scheme, "https"):
+		return ""
+	}
+	return port
 }
 
 func (a *JiraAdapter) taskURL(taskID int64) string {
@@ -187,11 +217,14 @@ func (a *JiraAdapter) transitionStatus(ctx context.Context, baseURL, issueKey, t
 	return a.requestJSON(ctx, http.MethodPost, baseURL+issuePath+"/transitions", body, nil)
 }
 
+// jiraCommentLookback is how many of the newest issue comments are checked
+// for an attempt marker before posting. A replay happens right after the
+// original comment, so it is among the newest ones.
+const jiraCommentLookback = 50
+
 func (a *JiraAdapter) addComment(ctx context.Context, baseURL, issueKey string, event TaskEvent, taskURL string) error {
 	result := stageResult(event)
-	body := struct {
-		Body adfDocument `json:"body"`
-	}{Body: adfDocument{Version: 1, Type: "doc", Content: []adfBlock{{
+	blocks := []adfBlock{{
 		Type: "paragraph",
 		Content: []adfText{
 			{Type: "text", Text: "ai-team task: " + taskURL},
@@ -199,9 +232,77 @@ func (a *JiraAdapter) addComment(ctx context.Context, baseURL, issueKey string, 
 	}, {
 		Type:    "paragraph",
 		Content: []adfText{{Type: "text", Text: result}},
-	}}}}
+	}}
 	path := "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment"
+	marker := attemptMarker(event.AttemptID)
+	if marker != "" {
+		// The marker makes the comment idempotent per attempt: a replay after
+		// a crash between Jira accepting the comment and the local cursor
+		// commit finds it and does not post a second one.
+		posted, err := a.hasRecentComment(ctx, baseURL+path, marker)
+		if err != nil {
+			return err
+		}
+		if posted {
+			return nil
+		}
+		blocks = append(blocks, adfBlock{Type: "paragraph", Content: []adfText{{Type: "text", Text: marker}}})
+	}
+	body := struct {
+		Body adfDocument `json:"body"`
+	}{Body: adfDocument{Version: 1, Type: "doc", Content: blocks}}
 	return a.requestJSON(ctx, http.MethodPost, baseURL+path, body, nil)
+}
+
+// attemptMarker is the text node that identifies the comment of one attempt.
+func attemptMarker(attemptID string) string {
+	attemptID = strings.TrimSpace(attemptID)
+	if attemptID == "" {
+		return ""
+	}
+	return "ai-team attempt: " + attemptID
+}
+
+type jiraCommentsResponse struct {
+	Comments []struct {
+		Body json.RawMessage `json:"body"`
+	} `json:"comments"`
+}
+
+func (a *JiraAdapter) hasRecentComment(ctx context.Context, endpoint, marker string) (bool, error) {
+	query := url.Values{"orderBy": {"-created"}, "maxResults": {fmt.Sprint(jiraCommentLookback)}}
+	var comments jiraCommentsResponse
+	if err := a.requestJSON(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil, &comments); err != nil {
+		return false, err
+	}
+	for _, comment := range comments.Comments {
+		var body any
+		if err := json.Unmarshal(comment.Body, &body); err != nil {
+			continue
+		}
+		if adfHasText(body, marker) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// adfHasText reports whether an ADF tree has a text node equal to want.
+func adfHasText(node any, want string) bool {
+	switch value := node.(type) {
+	case map[string]any:
+		if text, ok := value["text"].(string); ok && strings.TrimSpace(text) == want {
+			return true
+		}
+		return adfHasText(value["content"], want)
+	case []any:
+		for _, child := range value {
+			if adfHasText(child, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type adfDocument struct {
@@ -277,12 +378,28 @@ func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, 
 	return nil
 }
 
-// safeNetworkError avoids retaining URLs, which can contain deployment-specific
-// paths and query values, while preserving the transport failure for logs.
+// safeNetworkError reduces a transport failure to its class. The text of a
+// transport error is never kept: *url.Error prints the request URL, and a
+// proxy or custom transport may echo the URL or the Authorization header,
+// while the result is persisted as an integration_error visible in the UI.
 func safeNetworkError(err error) error {
-	var urlError *url.Error
-	if errors.As(err, &urlError) {
-		return fmt.Errorf("%s: %w", urlError.Op, urlError.Err)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New("request timed out")
+	case errors.Is(err, context.Canceled):
+		return errors.New("request canceled")
 	}
-	return err
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return errors.New("request timed out")
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return errors.New("TLS verification failed")
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op != "" {
+		return errors.New("connection failed (" + opErr.Op + ")")
+	}
+	return errors.New("transport error")
 }

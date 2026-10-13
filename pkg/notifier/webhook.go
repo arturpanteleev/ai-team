@@ -150,7 +150,7 @@ func postJSON(ctx context.Context, base *http.Client, timeout time.Duration, kin
 }
 
 // sameHostClient copies base and forbids redirects that leave the original
-// scheme and host. A redirect could otherwise forward the payload, or a
+// scheme, host or port. A redirect could otherwise forward the payload, or a
 // credential embedded in the path, to an unrelated server.
 func sameHostClient(base *http.Client, destination *url.URL) *http.Client {
 	var client http.Client
@@ -161,12 +161,29 @@ func sameHostClient(base *http.Client, destination *url.URL) *http.Client {
 		if len(via) >= 5 {
 			return errRedirectRejected
 		}
-		if request.URL.Scheme != "https" || !strings.EqualFold(request.URL.Host, destination.Host) {
+		if !sameHTTPSOrigin(request.URL, destination) {
 			return errRedirectRejected
 		}
 		return nil
 	}
 	return &client
+}
+
+// sameHTTPSOrigin reports whether target is an https URL on the same host
+// name (case-insensitive) and port as destination; an omitted port means 443.
+// A change of scheme or port is a different origin and is rejected.
+func sameHTTPSOrigin(target, destination *url.URL) bool {
+	if !strings.EqualFold(target.Scheme, "https") || !strings.EqualFold(target.Hostname(), destination.Hostname()) {
+		return false
+	}
+	return httpsPort(target) == httpsPort(destination)
+}
+
+func httpsPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	return "443"
 }
 
 // describeTransportError classifies a transport failure without including

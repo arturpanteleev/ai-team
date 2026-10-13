@@ -54,8 +54,11 @@ The system MUST provide webhook, Slack incoming-webhook and SMTP e-mail
 notification channels behind a common channel interface. Channel destinations
 and credentials MUST be read from environment variables named in the template
 and MUST NOT be stored in it. Webhook and Slack destinations MUST be absolute
-`https` URLs without credentials; a redirect to another host or scheme MUST be
-rejected before the payload is sent there. Every delivery MUST be bounded by a
+`https` URLs without credentials; a redirect to another host, another port or
+another scheme MUST be rejected before the payload is sent there (an omitted
+port equals 443). For `smtp://` the channel MUST use STARTTLS with any
+non-loopback host and MUST NOT send the message or credentials when the server
+does not offer it. Every delivery MUST be bounded by a
 timeout. Channel errors MUST NOT contain the destination URL, response body or
 credentials.
 
@@ -65,11 +68,17 @@ credentials.
 - **THEN** the foreign host MUST NOT receive the request
 - **AND** the delivery MUST fail with an error that does not include either URL
 
-#### Scenario: SMTP credentials without TLS
+#### Scenario: SMTP without TLS
 
-- **WHEN** the SMTP URL carries credentials for a non-loopback server that does
-  not offer TLS
+- **WHEN** the SMTP URL names a non-loopback server that does not offer
+  STARTTLS, with or without credentials
 - **THEN** the channel MUST NOT send the credentials or the message
+
+#### Scenario: A webhook redirects to another port or to http
+
+- **WHEN** the configured webhook redirects to the same host on another port,
+  or to `http`
+- **THEN** the redirect MUST NOT be followed
 
 ### Requirement: Subscriptions by event type and stage function
 
@@ -98,8 +107,13 @@ the shared event store — the web server, a local `ai-team run` and the
 scheduler worker — through the same dispatcher, outside the task execution
 path, each with its own cursor. The web server and the scheduler
 worker MUST keep a durable cursor that starts at the event tail on first
-enable. A local run MUST start at the tail when it begins and MUST deliver only
-events of the runs it executes.
+enable; if that cursor cannot be read or initialized, the process MUST NOT
+start notification delivery rather than replay from the beginning. A local run
+MUST start at the tail when it begins and MUST deliver only events of the runs
+it executes; its cursor is in memory. Events a run did not deliver before it
+exited are delivered only by a process on the same database whose durable
+cursor is still before them. The scheduler worker MUST restore default signal
+handling before its final flush, so a second interrupt ends the process.
 
 #### Scenario: Local run sends a subscribed event
 
@@ -118,8 +132,11 @@ log before sending and recorded durably after it. No process MUST notify a
 channel again for an event already claimed or recorded, including after a
 reconnect, restart, cursor rewind or when the web server and a run share one
 database. A claim whose holder stopped before recording MUST expire after a
-bounded lease. If the delivery record cannot be persisted, the event MUST
-remain pending.
+bounded lease. An acquired claim MUST carry an owner token; recording an
+outcome and releasing a claim MUST succeed only while that token still holds
+the pair. If the delivery record cannot be persisted, the event MUST remain
+pending. Final delivery records MAY be pruned after a retention period; live
+claims MUST NOT be pruned.
 
 #### Scenario: Replay after reconnect
 
@@ -131,11 +148,18 @@ remain pending.
 - **WHEN** `ai-team run` and `ai-team web` both read an event subscribed by a channel
 - **THEN** the channel MUST receive exactly one notification for it
 
+#### Scenario: Two processes race for one delivery
+
+- **WHEN** several workers on two connections to one database claim the same
+  channel and event at once
+- **THEN** exactly one of them MUST acquire the claim
+
 ### Requirement: Notification failures do not affect tasks
 
 A delivery failure MUST be persisted as a warning `integration_error` with
-`integration=notifier` and the channel name, MUST NOT change the task outcome
-and MUST NOT be retried after it is persisted. Notifier `integration_error`
+`integration=notifier` and the channel name, at most once per channel and
+event, MUST NOT change the task outcome and MUST NOT be retried after it is
+persisted. Notifier `integration_error`
 events MUST NOT be dispatched. If the failure warning cannot be persisted, the
 event MUST remain pending.
 

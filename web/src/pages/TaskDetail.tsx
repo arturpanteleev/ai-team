@@ -45,13 +45,13 @@ interface TaskDetailSnapshot {
   events: TaskEvent[];
 }
 
-type RouteState = 'passed' | 'current' | 'upcoming';
+type RouteState = 'passed' | 'current' | 'upcoming' | 'failed';
 type AgentLaunch = { phase: 'idle' | 'starting' | 'started'; at: number };
 
 const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'stopped'];
 const cancelableStatuses = ['queued', 'running', 'waiting_for_approval'];
 const finishedStatuses = ['completed', 'completed_with_warnings'];
-const routeLabels: Record<RouteState, string> = { passed: 'пройден', current: 'текущий', upcoming: 'впереди' };
+const routeLabels: Record<RouteState, string> = { passed: 'пройден', current: 'текущий', upcoming: 'впереди', failed: 'Упал' };
 const resultLabels: Record<string, string> = { md: 'текст', link: 'ссылка', approve: 'подтверждение' };
 
 async function loadRunEvents(runId: string): Promise<TaskEvent[]> {
@@ -108,6 +108,12 @@ function nextStageFromGraph(graph: WorkflowGraph | undefined, stageID: string): 
 
 function clockTime(value: string): string {
   return new Date(value).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+function shortError(value?: string): string {
+  if (!value) return '';
+  const head = value.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 2).join(' ');
+  return head.length > 240 ? `${head.slice(0, 237)}…` : head;
 }
 
 function briefLink(runID: string, path: string): string {
@@ -375,12 +381,23 @@ export function TaskDetail() {
   const pendingDecisions = details.approvals.filter((approval) => approval.status === 'pending' && !handledByStagePanel(approval));
   const decidedDecisions = details.approvals.filter((approval) => approval.status !== 'pending' && payloadMarkdown(approval.payload) === null);
   const runningAttempt = details.stages.find((stage) => stage.status === 'running' && stage.agent_name === currentStageID);
-  const lastAgentAttempt = [...details.stages.filter((stage) => stage.agent_name === currentStageID)]
+  const latestAttemptFor = (stageID: string) => [...details.stages.filter((stage) => stage.agent_name === stageID)]
     .sort((left, right) => left.stage_index - right.stage_index).at(-1);
+  const lastAgentAttempt = latestAttemptFor(currentStageID);
+  const latestFailedAttempt = [...details.stages.filter((stage) => stage.status === 'failed')]
+    .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at)).at(-1);
+  // The failure shown on the current stage: its own failed attempt first, then the latest failure of a failed run.
+  const failureAttempt = lastAgentAttempt?.status === 'failed'
+    ? lastAgentAttempt : run.status === 'failed' ? latestFailedAttempt : undefined;
+  const showFailure = run.status === 'failed' || failureAttempt !== undefined;
+  const failureTitle = failureAttempt ? `Этап «${stageTitle(failureAttempt.agent_name)}» упал` : 'Прогон завершился ошибкой';
+  const failureReason = shortError(failureAttempt?.error) || shortError(run.error)
+    || 'Причина в данных задачи не записана. Откройте лог этапа, чтобы увидеть подробности.';
 
   const nextStepText = (() => {
     if (finished) return 'задача завершена.';
     if (run.status === 'canceled') return 'задача отменена.';
+    if (run.status === 'failed') return failureAttempt ? `разобрать ошибку этапа «${stageTitle(failureAttempt.agent_name)}».` : 'разобрать ошибку задачи.';
     if (pending && grillAllowed) return `ответить на вопросы по этапу «${stageTitle(currentStageID)}».`;
     if (pending?.trigger === 'delivery_plan' && allowed.has('plan/approve')) return 'подтвердить план доставки.';
     if (allowed.has('confirm')) return `подтвердить этап «${stageTitle(currentStageID)}».`;
@@ -397,7 +414,8 @@ export function TaskDetail() {
     let state: RouteState = 'upcoming';
     if (finished || (currentIndex >= 0 && index < currentIndex)) state = 'passed';
     else if (index === currentIndex) state = 'current';
-    return { stage, state };
+    if (latestAttemptFor(stage.id)?.status === 'failed') state = 'failed';
+    return { stage, state, current: index === currentIndex };
   });
 
   const sendDecision = (value: Approval, role: string, action: string, comment?: string) => perform(
@@ -489,10 +507,10 @@ export function TaskDetail() {
           <section className={`${styles.panel} ${styles.routePanel}`} aria-labelledby="route-heading">
             <h2 id="route-heading">Маршрут процесса</h2>
             {route.length === 0 ? <p>Этапов нет.</p> : <ol className={styles.route}>
-              {route.map(({ stage, state }, index) => (
+              {route.map(({ stage, state, current }, index) => (
                 <li key={stage.id} className={styles.routeItem} data-state={state}
-                  aria-current={state === 'current' ? 'step' : undefined}>
-                  <span className={styles.routeDot} aria-hidden="true">{state === 'passed' ? '✓' : index + 1}</span>
+                  aria-current={current ? 'step' : undefined}>
+                  <span className={styles.routeDot} aria-hidden="true">{state === 'passed' ? '✓' : state === 'failed' ? '!' : index + 1}</span>
                   <span className={styles.routeTitle}>{stage.title}</span>
                   <span className={styles.routeState}>{routeLabels[state]}</span>
                 </li>
@@ -503,6 +521,7 @@ export function TaskDetail() {
 
         <div className={styles.stage}>
           <section className={`${styles.panel} ${styles.stageCard}`} aria-labelledby="current-stage-heading">
+            {showFailure && <FailureNotice runID={run.run_id} title={failureTitle} reason={failureReason} attempt={failureAttempt} />}
             <div className={styles.panelHeading}>
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
@@ -815,6 +834,20 @@ function safePullRequestURL(value?: string): string | null {
 }
 
 
+function FailureNotice({ runID, title, reason, attempt }: {
+  runID: string;
+  title: string;
+  reason: string;
+  attempt?: Stage;
+}) {
+  return <div className={styles.failure} role="status" data-testid="stage-failure">
+    <p className={styles.failureTitle}>{title}</p>
+    <p>{reason}</p>
+    {attempt && <a href={`/api/runs/${encodeURIComponent(runID)}/logs/${encodeURIComponent(attempt.attempt_id)}`}
+      target="_blank" rel="noreferrer">Открыть лог агента</a>}
+  </div>;
+}
+
 function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, launch }: {
   runID: string;
   stageTitle: string;
@@ -827,7 +860,7 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
   const current = launch.phase === 'started' && lastAttempt && Date.parse(lastAttempt.started_at) < launch.at
     ? undefined : lastAttempt;
   const attempt = runningAttempt ?? current;
-  let state: 'running' | 'starting' | 'started' | 'failed' | 'finished' | 'idle' = 'idle';
+  let state: 'running' | 'starting' | 'started' | 'finished' | 'idle' = 'idle';
   let title = '';
   let detail = '';
   if (runningAttempt) {
@@ -841,10 +874,6 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
     state = 'started';
     title = 'Агент запущен';
     detail = 'Ждём первого статуса от агента.';
-  } else if (current && (current.status === 'failed' || current.status === 'blocked')) {
-    state = 'failed';
-    title = 'Агент остановился с ошибкой';
-    detail = current.error || 'Причина в попытке не записана.';
   } else if (current && (current.status === 'passed' || current.status === 'warning')) {
     state = 'finished';
     title = 'Агент завершил, ждём проверки';

@@ -46,11 +46,22 @@ type MutationChange struct {
 // AttemptUsage contains attested model token and cost totals for one stage
 // invocation. A nil value means the runtime did not report usage; an attested
 // zero is represented by a non-nil value with zero counters.
+//
+// Model, CacheReadTokens, CacheWriteTokens and CacheReadIncludedInInput feed
+// the per-model tariff cost (B-66). Model is the configured model of the
+// attempt (empty when the harness default was used and is therefore unknown).
+// Cache reads are part of TokensInput only when CacheReadIncludedInInput is
+// set; cache writes are never part of TokensInput. Manifests written before
+// B-66 have no Model and are priced as unknown.
 type AttemptUsage struct {
-	Attested     bool    `json:"attested"`
-	TokensInput  int64   `json:"tokens_input,omitempty"`
-	TokensOutput int64   `json:"tokens_output,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	Attested                 bool    `json:"attested"`
+	TokensInput              int64   `json:"tokens_input,omitempty"`
+	TokensOutput             int64   `json:"tokens_output,omitempty"`
+	CostUSD                  float64 `json:"cost_usd,omitempty"`
+	Model                    string  `json:"model,omitempty"`
+	CacheReadTokens          int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens         int64   `json:"cache_write_tokens,omitempty"`
+	CacheReadIncludedInInput bool    `json:"cache_read_included_in_input,omitempty"`
 }
 
 // StageResult is the domain record of one immutable stage attempt.

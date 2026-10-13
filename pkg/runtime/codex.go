@@ -359,8 +359,11 @@ func (a *CodexAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 			usage = &Usage{
 				TokensInput:       event.Usage.InputTokens,
 				CachedInputTokens: event.Usage.CachedInputTokens,
-				TokensOutput:      event.Usage.OutputTokens,
-				Attested:          true,
+				// codex (конвенция OpenAI) включает чтения из кэша в input_tokens.
+				CacheReadInputTokens:     event.Usage.CachedInputTokens,
+				CacheReadIncludedInInput: true,
+				TokensOutput:             event.Usage.OutputTokens,
+				Attested:                 true,
 			}
 		}
 	}

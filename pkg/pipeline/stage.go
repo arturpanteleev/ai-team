@@ -415,6 +415,19 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			if u := reporter.Usage(); u != nil && u.Attested && u.TokensInput >= 0 && u.TokensOutput >= 0 &&
 				!math.IsNaN(u.CostUSD) && !math.IsInf(u.CostUSD, 0) && u.CostUSD >= 0 {
 				r.Usage = &workflow.AttemptUsage{Attested: true, TokensInput: u.TokensInput, TokensOutput: u.TokensOutput, CostUSD: u.CostUSD}
+				if runtimeAgent != nil {
+					r.Usage.Model = runtimeAgent.Model
+				}
+				if u.CacheReadInputTokens >= 0 && u.CacheWriteInputTokens >= 0 &&
+					(!u.CacheReadIncludedInInput || u.CacheReadInputTokens <= u.TokensInput) {
+					r.Usage.CacheReadTokens = u.CacheReadInputTokens
+					r.Usage.CacheWriteTokens = u.CacheWriteInputTokens
+					r.Usage.CacheReadIncludedInInput = u.CacheReadIncludedInInput
+				} else {
+					// An inconsistent cache breakdown cannot be priced: drop the
+					// model so the tariff cost reads unknown instead of wrong.
+					r.Usage.Model = ""
+				}
 				reported = true
 				rs.usageTotal.Attested = true
 				costTotal := rs.usageTotal.CostUSD + u.CostUSD

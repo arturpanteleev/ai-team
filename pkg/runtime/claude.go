@@ -234,6 +234,8 @@ func (a *ClaudeAdapter) ParseUsage(reader io.Reader) (*Usage, error) {
 	if result.Usage != nil {
 		usage.TokensInput = result.Usage.InputTokens
 		usage.CachedInputTokens = result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+		usage.CacheReadInputTokens = result.Usage.CacheReadInputTokens
+		usage.CacheWriteInputTokens = result.Usage.CacheCreationInputTokens
 		usage.TokensOutput = result.Usage.OutputTokens
 	}
 	if result.TotalCostUSD != nil {

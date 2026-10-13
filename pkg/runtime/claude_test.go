@@ -87,6 +87,9 @@ func TestClaudeParseUsageTokensAndCost(t *testing.T) {
 	if usage.CachedInputTokens != 150 {
 		t.Errorf("CachedInputTokens = %d, want 150 (не суммируется с TokensInput)", usage.CachedInputTokens)
 	}
+	if usage.CacheReadInputTokens != 50 || usage.CacheWriteInputTokens != 100 || usage.CacheReadIncludedInInput {
+		t.Errorf("cache breakdown = read %d write %d included %v, want 50/100/false", usage.CacheReadInputTokens, usage.CacheWriteInputTokens, usage.CacheReadIncludedInInput)
+	}
 	if usage.CostUSD != 0.42 || usage.Currency != "USD" {
 		t.Errorf("cost = %v %s, want 0.42 USD", usage.CostUSD, usage.Currency)
 	}

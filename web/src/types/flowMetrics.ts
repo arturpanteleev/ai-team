@@ -12,6 +12,22 @@ export interface FlowStageStateStats {
   duration_ms: number;
 }
 
+// Стоимость по тарифу провайдера (B-66): attested-токены попыток агента ×
+// цена модели из usage.tariffs конфигурации проекта. amount = null, если хотя
+// бы одна попытка не оценена (reason объясняет почему) — никогда не ноль.
+export interface FlowTariffCost {
+  amount: number | null;
+  currency?: string;
+  priced_attempts: number;
+  unpriced_attempts: number;
+  reason?: string;
+  unpriced_models?: string[];
+  tariff_dates?: string[];
+  tariff_sources?: string[];
+  source: string;
+  basis: string;
+}
+
 export interface FlowStageStats {
   stage: string;
   attempts: number;
@@ -32,6 +48,7 @@ export interface FlowStageStats {
   subscription_currency?: string;
   estimate_source?: string;
   estimate_basis?: string;
+  cost_by_tariff?: FlowTariffCost;
 }
 
 export interface FlowMetrics {
@@ -58,4 +75,5 @@ export interface FlowMetrics {
   agent_results: number;
   agent_accepted_without_edit: number;
   agent_accepted_without_edit_rate?: number | null;
+  cost_by_tariff?: FlowTariffCost;
 }

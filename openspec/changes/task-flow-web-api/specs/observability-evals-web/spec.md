@@ -25,13 +25,19 @@ metric set.
 Flow reports MUST preserve usage attestation and provenance. Run totals MUST
 use complete usage envelopes and stage totals MUST use attested attempt
 manifests. The monthly subscription amount and optional currency in
-`.ai-team/config.yaml` are the only price source; omitted currency defaults to
-USD. A configured monthly subscription amount MAY be allocated across runs and
-stages in proportion to their attested tokens divided by all complete project
-run tokens in the same UTC month. Reports MUST NOT infer a price per model
-token or expose runtime `cost_usd` as subscription cost. Missing or incomplete
-selected usage, stage manifests, or monthly denominators makes the estimate
-unknown rather than zero. A 1000-run metrics calculation MUST complete within
+`.ai-team/config.yaml` are the only source of the subscription estimate;
+omitted currency defaults to USD. A configured monthly subscription amount MAY
+be allocated across runs and stages in proportion to their attested tokens
+divided by all complete project run tokens in the same UTC month. Reports MUST
+NOT expose runtime `cost_usd` as subscription or tariff cost. Missing or
+incomplete selected usage, stage manifests, or monthly denominators makes the
+estimate unknown rather than zero. Separately, reports MUST show the provider
+tariff cost as attested agent-attempt tokens multiplied by the configured
+`usage.tariffs` price of the attempt's model effective at the attempt; each
+tariff entry MUST carry its currency, effective date and source, and ai-team
+MUST NOT ship or infer prices. An attempt without a recorded model, without a
+tariff for its model, or with cache tokens lacking a cache price makes the
+tariff cost unknown rather than zero. A 1000-run metrics calculation MUST complete within
 300 milliseconds.
 
 #### Scenario: No usage envelope

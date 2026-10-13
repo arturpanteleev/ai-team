@@ -62,7 +62,7 @@ func TestPreflightReportsClaudeAndCodexAuthenticationMethod(t *testing.T) {
 			name:   "claude key must be allowed",
 			cli:    "claude",
 			method: "способ входа: не найден",
-			status: StatusWarning,
+			status: StatusFailed,
 			setup: func(t *testing.T) {
 				t.Setenv("ANTHROPIC_API_KEY", "synthetic-api-key")
 			},
@@ -97,7 +97,7 @@ func TestPreflightReportsClaudeAndCodexAuthenticationMethod(t *testing.T) {
 			name:   "codex no auth",
 			cli:    "codex",
 			method: "способ входа: не найден",
-			status: StatusWarning,
+			status: StatusFailed,
 			setup:  func(*testing.T) {},
 		},
 	} {
@@ -129,6 +129,12 @@ func TestPreflightReportsClaudeAndCodexAuthenticationMethod(t *testing.T) {
 				}
 				if check.Status != test.status || check.Message != test.method {
 					t.Fatalf("credentials = %s %q, want %s %q", check.Status, check.Message, test.status, test.method)
+				}
+				if !check.Required {
+					t.Fatal("credentials должен быть required: без способа входа прогон не стартует")
+				}
+				if test.status == StatusFailed && report.Ready {
+					t.Fatal("отсутствие способа входа должно останавливать прогон (report.Ready=false)")
 				}
 				if strings.Contains(check.Message, "synthetic-") {
 					t.Fatal("preflight exposed credential contents")

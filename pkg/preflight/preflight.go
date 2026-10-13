@@ -181,15 +181,17 @@ func (c *Checker) Check(ctx context.Context) Report {
 
 	if cliName := filepath.Base(cli); cliName == "claude" || cliName == "codex" {
 		method := runtime.DetectAuthentication(cliName)
+		// Без способа входа рантайм падает на старте (изолированный
+		// CLAUDE_CONFIG_DIR не видит обычный логин), поэтому прогон не стартует.
 		message := "способ входа: не найден"
-		status := StatusWarning
+		status := StatusFailed
 		switch method {
 		case runtime.AuthenticationAPIKey:
 			message, status = "способ входа: API-ключ", StatusPassed
 		case runtime.AuthenticationSubscription:
 			message, status = "способ входа: подписка", StatusPassed
 		}
-		add(Check{ID: "credentials", Status: status, Message: message})
+		add(Check{ID: "credentials", Status: status, Required: true, Message: message})
 	} else {
 		allowed := allowedCredentialNames()
 		if len(allowed) == 0 {

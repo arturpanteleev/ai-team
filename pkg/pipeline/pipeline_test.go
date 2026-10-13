@@ -592,7 +592,7 @@ func TestRun_StageMCPAllowlistReachesOnlySelectedAgent(t *testing.T) {
 			{Name: "review", CLI: "codex"},
 		},
 		Stages: []config.TemplateStage{
-			{ID: "product_spec", Title: "Product spec", Function: "analyst", Result: "md", Executor: "agent", Agent: "analyst", Confirm: "auto", MCPServers: []string{"knowledge"}},
+			{ID: "product_spec", Title: "Product spec", Function: "po", Result: "md", Executor: "agent", Agent: "analyst", Confirm: "auto", MCPServers: []string{"knowledge"}},
 			{ID: "review", Title: "Review", Function: "reviewer", Result: "md", Executor: "agent", Agent: "reviewer", Confirm: "auto"},
 		},
 		MCPServers: map[string]runtime.MCPServerConfig{"knowledge": server},

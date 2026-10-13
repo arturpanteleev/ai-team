@@ -562,3 +562,99 @@ func TestUsageTextMatchesDispatcher(t *testing.T) {
 		t.Errorf("printUsage в cmd/ai-team/main.go: справка описывает команды, которых нет в диспетчере: %v", extra)
 	}
 }
+
+// Блок usage.tariffs из справочника цен провайдеров копируется в конфиг
+// проекта как есть, поэтому он обязан загружаться через config.Load и
+// проходить ту же валидацию, что и конфиг проекта, а цены в YAML — совпадать
+// с таблицами документа.
+func TestProviderTariffsBlockLoadsAndValidates(t *testing.T) {
+	const docPath = "reference/provider-tariffs.md"
+	doc := readRepoFile(t, docPath)
+	blocks := regexp.MustCompile("(?s)```yaml\n(usage:\n  tariffs:\n.*?)```").FindAllStringSubmatch(doc, -1)
+	if len(blocks) != 1 {
+		t.Fatalf("%s: ожидался ровно один yaml-блок usage.tariffs, найдено %d", docPath, len(blocks))
+	}
+	block := blocks[0][1]
+
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(base), "\nusage:") {
+		t.Fatal("профиль по умолчанию уже содержит usage: блок нельзя дописать в конец")
+	}
+	path := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(path, append(append(base, '\n'), block...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if err := loaded.Validate(nil); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	const (
+		anthropic = "https://claude.com/pricing"
+		openai    = "https://developers.openai.com/api/docs/pricing"
+		noPrice   = -1.0
+	)
+	want := []struct {
+		model                         string
+		input, output, cached, cWrite float64
+		source                        string
+	}{
+		{"claude-fable-5-1", 10, 50, 0.25, 12.50, anthropic},
+		{"claude-opus-5-5", 4, 20, 0.20, 5, anthropic},
+		{"claude-sonnet-5-5", 2, 10, 0.10, 2.50, anthropic},
+		{"gpt-6-astra", 10, 50, 1, noPrice, openai},
+		{"gpt-6.1-sol", 2, 10, 0.10, noPrice, openai},
+		{"gpt-6-luna", 0.10, 0.50, 0.01, noPrice, openai},
+		{"gpt-6-sol", 2, 10, 0.20, noPrice, openai},
+		{"gpt-5.6-sol", 4, 20, 0.40, noPrice, openai},
+		{"gpt-5.6-terra", 2, 12, 0.20, noPrice, openai},
+		{"gpt-5.6-luna", 0.20, 1.20, 0.02, noPrice, openai},
+		{"gpt-5.5", 5, 30, 0.50, noPrice, openai},
+		{"gpt-5.5-pro", 30, 180, noPrice, noPrice, openai},
+		{"gpt-5.4", 2.50, 15, 0.25, noPrice, openai},
+		{"gpt-5.4-mini", 0.75, 4.50, 0.075, noPrice, openai},
+		{"gpt-5.4-nano", 0.20, 1.25, 0.02, noPrice, openai},
+		{"gpt-5.4-pro", 30, 180, noPrice, noPrice, openai},
+		{"gpt-5.2", 1.75, 14, 0.175, noPrice, openai},
+		{"gpt-5.2-pro", 21, 168, noPrice, noPrice, openai},
+		{"gpt-5.1", 1.25, 10, 0.125, noPrice, openai},
+		{"gpt-5", 1.25, 10, 0.125, noPrice, openai},
+		{"gpt-5-mini", 0.25, 2, 0.025, noPrice, openai},
+		{"gpt-5-nano", 0.05, 0.40, 0.005, noPrice, openai},
+		{"gpt-5-pro", 15, 120, noPrice, noPrice, openai},
+	}
+	if loaded.Usage == nil || len(loaded.Usage.Tariffs) != len(want) {
+		t.Fatalf("usage.tariffs: ожидалось %d записей, получено %+v", len(want), loaded.Usage)
+	}
+	price := func(p *float64) float64 {
+		if p == nil {
+			return noPrice
+		}
+		return *p
+	}
+	for i, w := range want {
+		got := loaded.Usage.Tariffs[i]
+		t.Run(w.model, func(t *testing.T) {
+			if got.Model != w.model || price(got.InputPerMTok) != w.input || price(got.OutputPerMTok) != w.output ||
+				price(got.CachedInputPerMTok) != w.cached || price(got.CacheWritePerMTok) != w.cWrite ||
+				got.Currency != "USD" || got.EffectiveDate != "2026-10-13" || got.Source != w.source {
+				t.Errorf("tariffs[%d] = %+v (in=%v out=%v cached=%v write=%v), want %+v", i, got,
+					price(got.InputPerMTok), price(got.OutputPerMTok), price(got.CachedInputPerMTok), price(got.CacheWritePerMTok), w)
+			}
+		})
+	}
+	// Ступенчатый по длине промпта тариф Haiku 5.5 схема не выражает: в YAML его быть не должно.
+	if strings.Contains(block, "haiku") {
+		t.Errorf("%s: claude-haiku-5-5 не должен попадать в usage.tariffs", docPath)
+	}
+}

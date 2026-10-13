@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -181,33 +182,81 @@ func isStageConfirmation(pending approval.PendingApproval) bool {
 		pending.Trigger != "delivery_plan" && pending.FromStage != ""
 }
 
-// recordResumeAgentLaunch records the actor who is about to resume an agent
-// stage. It does nothing when the current stage is not a resumable
-// agent stage of a pinned task template.
+// recordResumeAgentLaunch records the actor who is about to resume a run
+// whose next step launches an agent stage of the pinned task template, so the
+// launch counts as stage authorship for forbid_self_approval. It covers every
+// phase Resume accepts: a resumable or interrupted running checkpoint resumes
+// at NextStage; a waiting checkpoint whose approval is resolved continues at
+// NextStage or at the target of the resolved action, and both are recorded.
+//
+// It fails closed: any error reading the lifecycle checkpoint, the pinned
+// template or the approval is returned, and the caller must not resume. A run
+// without a lifecycle checkpoint or a pinned template has nothing to record
+// (Resume itself refuses a run without a checkpoint).
 func (s *Server) recordResumeAgentLaunch(runID, actorID string) error {
 	stateStore, err := lifecycle.NewStore(s.targetDir)
 	if err != nil {
-		return nil
+		return fmt.Errorf("lifecycle store: %w", err)
 	}
 	state, err := stateStore.Load(runID)
-	if err != nil || state.Phase != lifecycle.PhaseResumable || state.NextStage == "" {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	_, found, err := s.pinnedTaskConfig(runID)
 	if err != nil {
-		return err
+		return fmt.Errorf("lifecycle state: %w", err)
+	}
+	stageIDs := []string{state.NextStage}
+	switch state.Phase {
+	case lifecycle.PhaseResumable, lifecycle.PhaseRunning:
+	case lifecycle.PhaseWaiting:
+		if s.controller == nil {
+			return errors.New("approval state unavailable")
+		}
+		values, err := s.controller.Approvals(runID)
+		if err != nil {
+			return fmt.Errorf("approval state: %w", err)
+		}
+		var pending *approval.PendingApproval
+		for index := range values {
+			if values[index].ID == state.PendingApprovalID {
+				pending = &values[index]
+				break
+			}
+		}
+		if pending == nil {
+			return fmt.Errorf("waiting approval %q not found", state.PendingApprovalID)
+		}
+		if pending.Status != approval.StatusResolved {
+			// Resume refuses a run that still waits for a decision.
+			return nil
+		}
+		stageIDs = append(stageIDs, pending.Targets[pending.ResolvedAction])
+	default:
+		return nil
+	}
+	cfg, found, err := s.pinnedTaskConfig(runID)
+	if err != nil {
+		return fmt.Errorf("pinned template: %w", err)
 	}
 	if !found {
 		return nil
 	}
-	stage, err := s.pinnedTaskStage(runID, state.NextStage)
-	if err != nil {
-		return err
+	recorded := map[string]bool{}
+	for _, stageID := range stageIDs {
+		if stageID == "" || recorded[stageID] {
+			continue
+		}
+		recorded[stageID] = true
+		for _, stage := range cfg.Stages {
+			if stage.ID != stageID || stage.Agent == "" {
+				continue
+			}
+			if err := s.appendRunEventRequired(runID, stageAgentRequestedEvent, time.Now().UTC(), map[string]any{
+				"stage_id": stageID, "actor_id": actorID, "via": "resume",
+			}); err != nil {
+				return err
+			}
+		}
 	}
-	if stage.Agent == "" {
-		return nil
-	}
-	return s.appendRunEventRequired(runID, stageAgentRequestedEvent, time.Now().UTC(), map[string]any{
-		"stage_id": state.NextStage, "actor_id": actorID, "via": "resume",
-	})
+	return nil
 }

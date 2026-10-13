@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes } from './router';
 import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
-import { PipelineDetail } from './pages/PipelineDetail';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
 import { Team } from './pages/Team';
@@ -10,7 +9,7 @@ import { TemplateEditor } from './pages/TemplateEditor';
 import { Tasks } from './pages/Tasks';
 import { NewTask } from './pages/NewTask';
 import { EventFeed } from './pages/EventFeed';
-import { RunRedirect } from './pages/RunRedirect';
+import { PipelineRedirect, RunRedirect } from './pages/RunRedirect';
 import { TaskDetail } from './pages/TaskDetail';
 import { Observability } from './pages/Observability';
 import { activateTeamInvitation, getAuthConfig, openSession, SESSION_EXPIRED_EVENT } from './api';
@@ -28,7 +27,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
         { path: '/runs/:runID', element: <RunRedirect /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },
         { path: '/template', element: <TemplateEditor /> },
-        { path: '/pipelines/:id', element: <PipelineDetail /> },
+        { path: '/pipelines/:id', element: <PipelineRedirect /> },
         { path: '/artifacts/*', element: <ArtifactViewer /> },
       ]} fallback={<main role="status">Страница не найдена.</main>} />
     </Layout>

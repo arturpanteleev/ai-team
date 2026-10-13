@@ -16,8 +16,14 @@ vi.mock('../api', () => ({
   approveTaskDeliveryPlan: vi.fn().mockResolvedValue({}),
   cancelRun: vi.fn().mockResolvedValue({}),
   confirmTaskStage: vi.fn().mockResolvedValue({}),
+  decideApproval: vi.fn().mockResolvedValue({}),
   finishTaskGrill: vi.fn().mockResolvedValue({}),
+  getActivePrincipal: vi.fn().mockReturnValue(null),
+  getArtifact: vi.fn().mockResolvedValue(''),
   getPipelineArtifacts: vi.fn().mockResolvedValue([]),
+  getPipelineRun: vi.fn().mockResolvedValue({ run: { id: 5, run_id: 'run-detail-1' }, stages: [] }),
+  resumeRun: vi.fn().mockResolvedValue({}),
+  retryDelivery: vi.fn().mockResolvedValue({}),
   getRunLog: vi.fn().mockResolvedValue({ content: 'agent log', truncated: false }),
   getTaskRunDetails: vi.fn(),
   getTaskRunEvents: vi.fn().mockResolvedValue({ events: [], next_cursor: 0 }),
@@ -754,5 +760,113 @@ describe('Browser stage submission', () => {
     await openResultForm();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
     expect(screen.queryByText(/Восстановлен черновик/)).not.toBeInTheDocument();
+  });
+});
+
+describe('Task page controls moved from the old pipeline page', () => {
+  it('shows what happens after confirmation and the next step in one line', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'running' },
+      state: { ...baseDetails.state!, phase: 'running', pending_approval_id: undefined },
+      approvals: [],
+      allowed_actions: ['confirm'],
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
+    expect(screen.getByText('Что дальше:').parentElement).toHaveTextContent('подтвердить этап «Идея».');
+    expect(screen.getByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
+  });
+
+  it('offers the manual path and the agent path as separate choices with the route states', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: undefined },
+      approvals: [],
+      allowed_actions: ['take', 'results', 'run-agent'],
+    });
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Сделать самому' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Отдать агенту' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.getAllByText('пройден')).toHaveLength(1);
+    expect(screen.getAllByText('текущий')).toHaveLength(1);
+    expect(screen.getAllByText('впереди')).toHaveLength(1);
+  });
+
+  it('keeps service fields out of the main view until the details block is opened', async () => {
+    renderDetail();
+    await screen.findByRole('heading', { name: 'Новый маршрут' });
+
+    const details = screen.getAllByText('Подробности', { selector: 'summary' })[0].closest('details');
+    expect(details).not.toBeNull();
+    expect(details).toHaveTextContent('run-detail-1');
+    expect(details).toHaveTextContent('Длительность');
+  });
+
+  it('shows the intention text on the page and not only as a file link', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue([
+      { name: '0001-intention.md', path: 'brief/0001-intention.md', run_id: 'run-detail-1', size: 10, mod_time: '2026-10-12T09:00:00Z' },
+    ]);
+    vi.mocked(api.getArtifact).mockResolvedValue('Клиенты входят через Google без пароля.');
+    renderDetail();
+
+    expect(await screen.findByText('Клиенты входят через Google без пароля.')).toBeInTheDocument();
+    expect(api.getArtifact).toHaveBeenCalledWith('run-detail-1', 'brief/0001-intention.md');
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue([]);
+  });
+
+  it('decides a plain approval through the task API and shows where it leads', async () => {
+    const api = await import('../api');
+    const approval = {
+      id: 'spec-1', run_id: 'run-detail-1', attempt_id: 'attempt-spec', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'stage_gate', subject_hash: 'f'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['approve', 'reject'], targets: { approve: 'analysis' }, status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, pending_approval_id: 'spec-1' },
+      approvals: [approval],
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Далее: Согласовать → Анализ')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Согласовать' }));
+    await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
+      action: 'approve', actor_role: 'product_owner', actor_id: 'local-user',
+    })));
+  });
+
+  it('resumes a stopped task and retries a failed delivery from the same page', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'stopped' },
+      approvals: [],
+      allowed_actions: [],
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Продолжить задачу' }));
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+    expect(screen.queryByRole('button', { name: 'Выдать бюджет и продолжить' })).not.toBeInTheDocument();
+
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'completed' },
+      approvals: [],
+      allowed_actions: [],
+      delivery: { status: 'failed', error: 'push rejected' },
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Повторить одобренную Git-доставку' }));
+    await waitFor(() => expect(api.retryDelivery).toHaveBeenCalledWith('run-detail-1'));
   });
 });

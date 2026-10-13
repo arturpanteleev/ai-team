@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -208,6 +209,9 @@ func claudeWriteRules(task *Task) (allow, deny []string, err error) {
 	}
 	if artifactDir != "" {
 		allow = append(allow, claudeWriteAllowRules(artifactDir)...)
+		// Протокольные файлы контроллера (tasks/<feature>/questions.md — вопросы
+		// к Product Owner при BLOCKED) лежат в каталоге tasks рядом с артефактами.
+		allow = append(allow, claudeWriteAllowRules(filepath.Join(filepath.Dir(artifactDir), "tasks", filepath.Base(artifactDir)))...)
 	}
 	if !layoutOK {
 		// Нестандартная раскладка артефактов: запрещаем .ai-team целиком,
@@ -257,7 +261,10 @@ func claudeWriteAllowRules(absDir string) []string {
 // обоих каталогов.
 func aiTeamWriteDenyRules(aiTeam, artifactsDir, feature string) ([]string, error) {
 	var rules []string
-	for _, item := range []struct{ dir, keep string }{{aiTeam, "artifacts"}, {artifactsDir, feature}} {
+	for _, item := range []struct {
+		dir  string
+		keep []string
+	}{{aiTeam, []string{"artifacts"}}, {artifactsDir, []string{feature, "tasks"}}} {
 		if err := claudeCheckRulePath(item.dir); err != nil {
 			return nil, err
 		}
@@ -266,7 +273,7 @@ func aiTeamWriteDenyRules(aiTeam, artifactsDir, feature string) ([]string, error
 			return nil, fmt.Errorf("claude: список %s: %w", item.dir, err)
 		}
 		for _, entry := range entries {
-			if entry.Name() == item.keep {
+			if slices.Contains(item.keep, entry.Name()) {
 				continue
 			}
 			path := filepath.Join(item.dir, entry.Name())
@@ -275,7 +282,15 @@ func aiTeamWriteDenyRules(aiTeam, artifactsDir, feature string) ([]string, error
 			}
 			rules = append(rules, claudeWriteDenyRules(path)...)
 		}
-		direct := "//" + filepath.ToSlash(item.dir)[1:] + "/*"
+		// Прямые файлы каталога: маска с расширением. Маска dir/* здесь
+		// недопустима: правила Claude следуют семантике gitignore, и запрет
+		// каталога закрывает всё его содержимое, включая каталог этапа.
+		// Каталог feature с точкой в имени под маску *.* попал бы целиком,
+		// поэтому для него прямое правило не строим.
+		if strings.Contains(feature, ".") && item.dir == artifactsDir {
+			continue
+		}
+		direct := "//" + filepath.ToSlash(item.dir)[1:] + "/*.*"
 		rules = append(rules, "Edit("+direct+")", "Write("+direct+")")
 	}
 	return rules, nil

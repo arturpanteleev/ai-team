@@ -402,11 +402,20 @@ func TestClaudeWritePolicyAllowsOnlyStageArtifactDirInsideAiTeam(t *testing.T) {
 		"Edit(//" + filepath.ToSlash(aiTeam)[1:] + "/state/**)",
 		"Write(//" + filepath.ToSlash(aiTeam)[1:] + "/state)",
 		"Edit(//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts", "other"))[1:] + "/**)",
-		"Edit(//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts"))[1:] + "/*)",
+		"Edit(//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts"))[1:] + "/*.*)",
 	} {
 		if !strings.Contains(deny, want) {
 			t.Fatalf("deny должен содержать %q: %s", want, deny)
 		}
+	}
+	// Протокольный каталог tasks (questions.md при BLOCKED) не запрещается
+	// и разрешается на запись именно для каталога feature.
+	tasksFeature := "//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts", "tasks", "feat"))[1:] + "/**"
+	if !strings.Contains(allow, "Write("+tasksFeature+")") {
+		t.Fatalf("allow должен содержать запись в tasks/<feature>: %s", allow)
+	}
+	if strings.Contains(deny, "artifacts/tasks") {
+		t.Fatalf("tasks не должен попадать в deny: %s", deny)
 	}
 	if strings.Contains(deny, "Edit(//"+filepath.ToSlash(artifactDir)[1:]+"/**)") {
 		t.Fatal("каталог этапа не должен попадать в deny")

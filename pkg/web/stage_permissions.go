@@ -37,6 +37,10 @@ func (s *Server) selfApprovalViolation(runID string, pending approval.PendingApp
 	return cloudidentity.CheckSelfApproval(true, actorID, authors)
 }
 
+// errResumeAwaitingDecision means the run still waits for a human decision;
+// resume is a conflict, not a storage failure.
+var errResumeAwaitingDecision = errors.New("run всё ещё ожидает human decision")
+
 // stageAgentRequestedEvent records the actor who launched a stage agent, so
 // the launch counts as authorship for forbid_self_approval.
 const stageAgentRequestedEvent = "stage_agent_requested"
@@ -227,8 +231,9 @@ func (s *Server) recordResumeAgentLaunch(runID, actorID string) error {
 			return fmt.Errorf("waiting approval %q not found", state.PendingApprovalID)
 		}
 		if pending.Status != approval.StatusResolved {
-			// Resume refuses a run that still waits for a decision.
-			return nil
+			// Nothing will launch: refuse here so Resume is never called for a
+			// run that still waits for a decision.
+			return errResumeAwaitingDecision
 		}
 		stageIDs = append(stageIDs, pending.Targets[pending.ResolvedAction])
 	default:

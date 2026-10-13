@@ -793,7 +793,11 @@ func TestResumeRecordsAgentLaunchInEveryResumablePhase(t *testing.T) {
 		gate.Status, gate.ResolvedAt = approval.StatusPending, time.Time{}
 		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{gate},
 			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "spec", PendingApprovalID: "gate-0"}})
-		fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusConflict || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("unresolved approval must be a conflict without Resume: %d calls=%d %s",
+				response.Code, fixture.controller.resumeCalls, response.Body.String())
+		}
 		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 0 {
 			t.Fatalf("pending approval does not launch the agent, got %d records", got)
 		}
@@ -947,6 +951,35 @@ func TestGrillEditRequiresStageExecutorFunction(t *testing.T) {
 	}
 	if response := fixture.requestAs(t, "d@example.test", both, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code != http.StatusCreated {
 		t.Fatalf("stage executor with artifact-edit must edit: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGrillAttemptOutputEditRequiresStageExecutorFunction(t *testing.T) {
+	reviewer := []cloudidentity.Role{cloudidentity.RoleReviewer}
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	const outputPath = "attempts/attempt-grill/artifacts/build.md"
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "question", Round: 1,
+		ArtifactContentSHA256: map[string]string{outputPath: strings.Repeat("a", 64)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grill := grillApproval("grill-1", time.Now().UTC())
+	grill.Status, grill.Payload = approval.StatusPending, payload
+	fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{grill},
+		map[string]lifecycle.State{"run-g": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "grill-1"}})
+	body, err := json.Marshal(map[string]string{"artifact_path": outputPath, "base_sha256": strings.Repeat("a", 64), "content": "# v2\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := fixture.requestAs(t, "r@example.test", reviewer, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code != http.StatusForbidden {
+		t.Fatalf("agent output edit without the stage function must be refused: %d %s", response.Code, response.Body.String())
+	}
+	// Control: the executor passes authorization (and then fails on the
+	// missing source attempt, not on permissions).
+	if response := fixture.requestAs(t, "d@example.test", both, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code == http.StatusForbidden {
+		t.Fatalf("stage executor must pass authorization: %d %s", response.Code, response.Body.String())
 	}
 }
 

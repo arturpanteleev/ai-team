@@ -591,6 +591,14 @@ func TestOIDCLoginIsRateLimitedPerAddressBeforeStorage(t *testing.T) {
 	if got := pending(); got != 2 {
 		t.Fatalf("a limited login must not be stored: %d pending", got)
 	}
+	// Forwarding headers are not trusted: the peer address decides.
+	spoofed := newLoopbackRequest(http.MethodGet, oidcLoginPath, nil)
+	spoofed.RemoteAddr = "203.0.113.7:4003"
+	spoofed.Header.Set("X-Forwarded-For", "192.0.2.200")
+	spoofed.Header.Set("X-Real-IP", "192.0.2.201")
+	if code := f.serve(spoofed).Code; code != http.StatusTooManyRequests {
+		t.Fatalf("X-Forwarded-For must not bypass the limit: %d", code)
+	}
 	// IPv6 clients are keyed by /64.
 	if code := login("[2001:db8::1]:1"); code != http.StatusFound {
 		t.Fatalf("ipv6 #1: %d", code)

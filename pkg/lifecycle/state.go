@@ -42,6 +42,20 @@ type State struct {
 	ExecutorOverrides map[string]ExecutorOverride `json:"executor_overrides,omitempty"`
 	CreatedAt         time.Time                   `json:"created_at"`
 	UpdatedAt         time.Time                   `json:"updated_at"`
+	// StageEnteredAt is when the run moved to NextStage. Unlike UpdatedAt it
+	// survives saves that keep the stage (phase flips, approvals, overrides).
+	// It is optional: checkpoints written before the field existed omit it and
+	// readers fall back to UpdatedAt via StageEnteredSince.
+	StageEnteredAt time.Time `json:"stage_entered_at,omitzero"`
+}
+
+// StageEnteredSince returns when the run entered its current stage. Legacy
+// checkpoints without StageEnteredAt fall back to UpdatedAt.
+func (s State) StageEnteredSince() time.Time {
+	if !s.StageEnteredAt.IsZero() {
+		return s.StageEnteredAt
+	}
+	return s.UpdatedAt
 }
 
 // ExecutorOverride records the human-selected executor for a stage that has
@@ -93,6 +107,7 @@ func (s *Store) Create(state State) error {
 		state.CreatedAt = time.Now().UTC()
 	}
 	state.UpdatedAt = state.CreatedAt
+	state.StageEnteredAt = state.CreatedAt
 	return s.write(path, state)
 }
 
@@ -139,6 +154,14 @@ func (s *Store) Save(previous, next State) error {
 	next.SchemaVersion = SchemaVersion
 	next.CreatedAt = previous.CreatedAt
 	next.UpdatedAt = time.Now().UTC()
+	// The store owns the stage-entry timestamp: a stage change stamps it, any
+	// other save carries the previous value. A legacy checkpoint without the
+	// field carries its last UpdatedAt, the best known bound for the entry.
+	if next.NextStage != previous.NextStage {
+		next.StageEnteredAt = next.UpdatedAt
+	} else {
+		next.StageEnteredAt = previous.StageEnteredSince()
+	}
 	if err := validate(next); err != nil {
 		return err
 	}

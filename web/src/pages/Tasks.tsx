@@ -12,6 +12,11 @@ import styles from './Tasks.module.css';
 type ViewMode = 'board' | 'list';
 
 const PAGE_SIZE = 50;
+// Длительность на этапе показывается с точностью до минуты — тиканья раз в
+// 30 секунд достаточно. Данные приходят по WebSocket; периодический рефетч
+// лишь страхует от пропущенных событий, поэтому он заметно реже.
+const STAGE_CLOCK_INTERVAL_MS = 30_000;
+const RECOVERY_REFETCH_INTERVAL_MS = 120_000;
 
 const statusOptions = [
   'queued',
@@ -82,12 +87,15 @@ export function Tasks() {
     },
   });
 
+  // Часы для «сколько на этапе»: только перерисовка, без запросов к API.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), STAGE_CLOCK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // Редкий recovery fallback; live source — durable WebSocket event stream.
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setNow(Date.now());
-      void fetchRuns(offset, filters);
-    }, 30000);
+    const timer = window.setInterval(() => void fetchRuns(offset, filters), RECOVERY_REFETCH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [fetchRuns, filters, offset]);
 

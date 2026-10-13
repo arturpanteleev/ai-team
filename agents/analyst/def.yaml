@@ -9,4 +9,3 @@ inputs:
   task: tasks/{feature}/task.md
 outputs:
   proposal: '{feature}/proposal.md'
-  spec: '{feature}/specs/product/spec.md'

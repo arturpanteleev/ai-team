@@ -63,7 +63,7 @@ runtime: agentcli
 prompt_file: prompt.md
 mutation: none
 inputs:
-  spec: '{feature}/specs/product/spec.md'
+  proposal: '{feature}/proposal.md'
 outputs: {}
 `
 	if err := os.WriteFile(filepath.Join(customAgentDir, "def.yaml"), []byte(definition), 0644); err != nil {
@@ -162,14 +162,14 @@ outputs: {}
 			t.Fatalf("implementation actor was not recorded: %+v", manifest)
 		}
 		if stageID == "product_spec" {
-			if len(manifest.Outputs) != 1 || !strings.Contains(manifest.Outputs[0].SourcePath, "specs/product/spec.md") {
+			if len(manifest.Outputs) != 1 || !strings.Contains(manifest.Outputs[0].SourcePath, "proposal.md") {
 				t.Fatalf("product_spec markdown is not its human attempt output: %+v", manifest.Outputs)
 			}
 		}
 		if stageID == "implementation" {
 			foundSpec := false
 			for _, input := range manifest.Inputs {
-				if input.Name == "spec" && strings.Contains(input.SourcePath, "specs/product/spec.md") {
+				if input.Name == "proposal" && strings.Contains(input.SourcePath, "proposal.md") {
 					foundSpec = true
 				}
 			}

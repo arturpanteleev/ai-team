@@ -5,7 +5,8 @@ cli: opencode
 prompt_file: prompt.md
 mutation: none
 inputs:
-  specs: '{feature}/specs'
+  proposal: '{feature}/proposal.md'
 outputs:
+  spec: '{feature}/specs/spec.md'
   design: '{feature}/design.md'
   tasks: '{feature}/tasks.md'

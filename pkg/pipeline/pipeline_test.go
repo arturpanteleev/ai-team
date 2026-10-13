@@ -1042,7 +1042,6 @@ inputs:
   task: tasks/{feature}/task.md
 outputs:
   proposal: '{feature}/proposal.md'
-  spec: '{feature}/specs/product/spec.md'
 `),
 		"architect/def.yaml": def(`name: architect
 runtime: agentcli
@@ -1077,7 +1076,7 @@ outputs:
 			if input.Name == "business-brief-version" {
 				architectBriefVersion = true
 			}
-			if input.Name == "approved-spec" {
+			if input.Name == "approved-proposal" {
 				architectSpec = true
 			}
 		}
@@ -1100,8 +1099,8 @@ outputs:
 	}
 	var payload approvedSpecPayload
 	if json.Unmarshal(pending.Payload, &payload) != nil || payload.Kind != "agreed_spec" ||
-		payload.BriefVersion.SHA256 == "" || payload.Artifacts["proposal"] == "" || payload.Artifacts["spec"] == "" {
-		t.Fatalf("approval должен связывать версии намерения и обоих артефактов: %+v", payload)
+		payload.BriefVersion.SHA256 == "" || payload.Artifacts["proposal"] == "" {
+		t.Fatalf("approval должен связывать версию намерения и согласованный proposal: %+v", payload)
 	}
 	if _, err := store.Decide(first.RunID, pending.ID, approval.Decision{
 		ActorID: "product-1", ActorRole: "product_owner", Action: "approve_spec", SubjectHash: pending.SubjectHash,

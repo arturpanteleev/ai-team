@@ -1560,7 +1560,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			for _, input := range inputs {
 				byName[input.Name] = input
 			}
-			for _, name := range []string{"proposal", "spec"} {
+			for _, name := range []string{"proposal"} {
 				input, ok := byName[name]
 				if !ok {
 					outcome, finalErr := rs.finalize(fmt.Errorf("approved stage artifact %s missing", name))

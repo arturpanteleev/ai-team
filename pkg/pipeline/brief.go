@@ -460,9 +460,9 @@ func briefInputs(version briefVersion) []runtime.Artifact {
 }
 
 func encodeApprovedSpec(version briefVersion, attemptID string, outputs []runtime.Artifact) (json.RawMessage, error) {
-	artifacts := make(map[string]string, 2)
+	artifacts := make(map[string]string, 1)
 	for _, output := range outputs {
-		if output.Name != "proposal" && output.Name != "spec" {
+		if output.Name != "proposal" {
 			continue
 		}
 		_, _, digest, err := evidenceDigest(output.Path)
@@ -471,14 +471,9 @@ func encodeApprovedSpec(version briefVersion, attemptID string, outputs []runtim
 		}
 		artifacts[output.Name] = digest
 	}
-	if artifacts["proposal"] == "" && artifacts["spec"] == "" {
-		// Compatibility for small/custom workflows that do not declare a
-		// product-spec contract. The bundled first stage declares both artifacts.
-		return nil, nil
-	}
-	if artifacts["proposal"] == "" || artifacts["spec"] == "" {
-		// Workflows without the two-artifact product-spec contract retain
-		// their custom approval payloads.
+	if artifacts["proposal"] == "" {
+		// Workflows without the proposal product-spec contract retain their
+		// custom approval payloads. The bundled first stage declares proposal.
 		return nil, nil
 	}
 	version.Path = filepath.ToSlash(filepath.Join("brief", filepath.Base(version.Path)))

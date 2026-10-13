@@ -2,12 +2,29 @@ TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
 
+# Локальный тулчейн Go — точный пин из .tool-versions (сейчас go1.26.9).
+# ПОЧЕМУ: go.mod задаёт только МИНИМУМ, поэтому без пина `make verify` берёт
+# любой более новый локальный Go, и govulncheck сканирует уже его stdlib —
+# локальный гейт расходится с CI (так было с 1.27.1: 13 уязвимостей stdlib
+# локально при зелёном CI). `?=` уважает GOTOOLCHAIN из окружения: CI задаёт
+# `GOTOOLCHAIN: auto` в workflow и этим пином не затрагивается; локально
+# пин отключается явным `GOTOOLCHAIN=auto make verify`.
+GO_TOOLCHAIN_PIN := $(shell awk '$$1 == "golang" { print "go" $$2 }' .tool-versions 2>/dev/null)
+ifneq ($(GO_TOOLCHAIN_PIN),)
+export GOTOOLCHAIN ?= $(GO_TOOLCHAIN_PIN)
+endif
+
 # Версия статического анализатора пинится здесь — единственный источник истины
 # для локального `make lint` и CI-job `lint` (.github/workflows/ci.yaml вызывает
 # ровно эту цель, чтобы локальный и CI-гейт не разъезжались).
 GOLANGCI_LINT_VERSION ?= v2.13.2
 
-.PHONY: build test test-short test-e2e test-coverage specs lint verify docs clean release-binaries
+.PHONY: go-toolchain build test test-short test-e2e test-coverage specs lint verify docs clean release-binaries
+
+# Показывает, каким тулчейном Go пойдут цели этого Makefile.
+go-toolchain:
+	@echo "GOTOOLCHAIN=$$GOTOOLCHAIN"
+	@go version
 
 build:
 	go build -o bin/ai-team ./cmd/ai-team

@@ -23,6 +23,7 @@ const snapshot: PipelineSnapshot = {
   graph: { schema_version: 1, entry: 'idea', nodes: [], edges: [] },
   nextStage: 'idea',
   stageOwners: {},
+  budgetAllowanceGrantable: false,
 };
 
 const event = (type: 'approval_requested' | 'attempt_finished') => ({

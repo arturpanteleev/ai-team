@@ -46,7 +46,7 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
   return fetchJson<PipelineRun[]>(`/pipelines?limit=${limit}&offset=${offset}`);
 }
 
-export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection }> {
+export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection; budget_allowance_grantable?: boolean }> {
   return fetchJson(`/pipelines/${id}`);
 }
 
@@ -191,7 +191,13 @@ export function startRun(feature: string, task: string): Promise<{ run_id: strin
   return command('/runs', { feature, task });
 }
 
-export function resumeRun(runId: string): Promise<{ run_id: string }> {
+// Resume без grant новый бюджет задачи не выдаёт: если бюджет задачи
+// исчерпан, задача снова остановится. Выдача — только явным решением с
+// причиной; дневной бюджет не выдаётся никогда.
+export function resumeRun(runId: string, grant?: { reason: string }): Promise<{ run_id: string }> {
+  if (grant) {
+    return command(`/runs/${encodeURIComponent(runId)}/resume`, { grant_budget_allowance: true, reason: grant.reason });
+  }
   return command(`/runs/${encodeURIComponent(runId)}/resume`);
 }
 

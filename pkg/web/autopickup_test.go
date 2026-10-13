@@ -436,35 +436,129 @@ func TestResumeRecordsActorAndBudgetAllowance(t *testing.T) {
 	if err := srv.store.CreatePipelineRun(&store.PipelineRun{RunID: "run-budget", Feature: "budget", Status: "stopped", StartedAt: pickupTestNow}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.AppendEventNext(&store.Event{RunID: "run-budget", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"task"}`}); err != nil {
-		t.Fatal(err)
-	}
-	resume := func() store.Event {
+	stop := func(scope string) {
 		t.Helper()
+		if err := srv.store.AppendEventNext(&store.Event{RunID: "run-budget", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"` + scope + `"}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resume := func(body string, want int) *store.Event {
+		t.Helper()
+		before, _ := srv.store.LatestRunEvent("run-budget", "run_resume_requested")
 		response := httptest.NewRecorder()
-		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-budget/resume", ""))
-		if response.Code != http.StatusAccepted {
-			t.Fatalf("resume: %d %s", response.Code, response.Body.String())
+		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-budget/resume", body))
+		if response.Code != want {
+			t.Fatalf("resume %q: %d %s, want %d", body, response.Code, response.Body.String(), want)
 		}
 		latest, err := srv.store.LatestRunEvent("run-budget", "run_resume_requested")
-		if err != nil || latest == nil {
-			t.Fatalf("run_resume_requested missing: %v", err)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return *latest
+		if want != http.StatusAccepted {
+			if (before == nil) != (latest == nil) || (latest != nil && latest.Sequence != before.Sequence) {
+				t.Fatalf("refused resume %q must not be recorded: %+v", body, latest)
+			}
+			return nil
+		}
+		if latest == nil || (before != nil && latest.Sequence == before.Sequence) {
+			t.Fatalf("run_resume_requested missing for %q", body)
+		}
+		return latest
 	}
-	first := resume()
-	if controller.resumeRunID != "run-budget" || !strings.Contains(first.DataJSON, `"actor_id":"local-user"`) ||
-		!strings.Contains(first.DataJSON, `"budget_allowance_granted":true`) {
-		t.Fatalf("first resume after budget stop = %+v", first)
+	const grant = `{"grant_budget_allowance":true,"reason":"  ревью важнее лимита  "}`
+	grantable := func() bool {
+		t.Helper()
+		run, err := srv.store.GetPipelineRunByRunID("run-budget")
+		if err != nil || run == nil {
+			t.Fatalf("run: %v", err)
+		}
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/pipelines/%d", run.ID), ""))
+		var body struct {
+			Grantable *bool `json:"budget_allowance_grantable"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Grantable == nil {
+			t.Fatalf("pipeline detail: %d %s", response.Code, response.Body.String())
+		}
+		return *body.Grantable
 	}
-	if second := resume(); !strings.Contains(second.DataJSON, `"budget_allowance_granted":false`) {
-		t.Fatalf("resume without a new budget stop must not claim a grant: %+v", second)
+	if grantable() {
+		t.Fatal("a run without a budget stop must not offer a grant")
 	}
-	// Дневной стоп resume новым бюджетом не снимает.
-	if err := srv.store.AppendEventNext(&store.Event{RunID: "run-budget", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"daily"}`}); err != nil {
+	stop("task")
+	if !grantable() {
+		t.Fatal("an uncovered task stop must offer a grant")
+	}
+
+	// Resume без явной выдачи бюджет не даёт: контроллер получает обычный
+	// resume, событие фиксирует false.
+	plain := resume("", http.StatusAccepted)
+	if controller.resumeCalls != 1 || controller.grantCalls != 0 || !strings.Contains(plain.DataJSON, `"actor_id":"local-user"`) ||
+		!strings.Contains(plain.DataJSON, `"budget_allowance_granted":false`) || strings.Contains(plain.DataJSON, `"reason"`) {
+		t.Fatalf("resume without a grant = %+v calls=%d grants=%d", plain, controller.resumeCalls, controller.grantCalls)
+	}
+	// Выдача без причины, с пустой причиной или причина без выдачи — 400.
+	for _, body := range []string{
+		`{"grant_budget_allowance":true}`, `{"grant_budget_allowance":true,"reason":"   "}`,
+		`{"reason":"why"}`, `{"grant_budget_allowance":true,"reason":"x","extra":1}`,
+	} {
+		resume(body, http.StatusBadRequest)
+	}
+	if controller.grantCalls != 0 || controller.resumeCalls != 1 {
+		t.Fatalf("refused requests must not reach the controller: resumes=%d grants=%d", controller.resumeCalls, controller.grantCalls)
+	}
+
+	// Явная выдача с причиной: контроллер получает автора и причину, событие — true.
+	granted := resume(grant, http.StatusAccepted)
+	if controller.grantCalls != 1 || controller.grantActor != "local-user" || controller.grantReason != "ревью важнее лимита" ||
+		!strings.Contains(granted.DataJSON, `"budget_allowance_granted":true`) ||
+		!strings.Contains(granted.DataJSON, `"reason":"ревью важнее лимита"`) {
+		t.Fatalf("explicit grant = %+v actor=%q reason=%q", granted, controller.grantActor, controller.grantReason)
+	}
+	// Повторная выдача на ту же остановку — 409: бюджет уже выдан.
+	if grantable() {
+		t.Fatal("a covered stop must not offer another grant")
+	}
+	resume(grant, http.StatusConflict)
+	if controller.grantCalls != 1 {
+		t.Fatalf("second grant for one stop reached the controller: %d", controller.grantCalls)
+	}
+	// Новая остановка по бюджету задачи снова допускает выдачу.
+	stop("task")
+	resume(grant, http.StatusAccepted)
+	if controller.grantCalls != 2 {
+		t.Fatalf("grant after a new task stop = %d", controller.grantCalls)
+	}
+	// Дневной бюджет не выдаётся никогда.
+	stop("daily")
+	resume(grant, http.StatusConflict)
+	if daily := resume("", http.StatusAccepted); !strings.Contains(daily.DataJSON, `"budget_allowance_granted":false`) {
+		t.Fatalf("daily stop resume = %+v", daily)
+	}
+	if controller.grantCalls != 2 {
+		t.Fatalf("daily stop must not be granted: %d", controller.grantCalls)
+	}
+}
+
+// Выдача, уже записанная pipeline в evidence (и спроецированная в store),
+// закрывает остановку для следующей выдачи даже без веб-события.
+func TestResumeGrantRefusedAfterRecordedAllowance(t *testing.T) {
+	srv, controller := newPickupServer(t, ":memory:", t.TempDir(), autopickup.Policy{}, &fixedLedger{}, pickupTestNow)
+	if err := srv.store.CreatePipelineRun(&store.PipelineRun{RunID: "run-cli", Feature: "budget", Status: "stopped", StartedAt: pickupTestNow}); err != nil {
 		t.Fatal(err)
 	}
-	if third := resume(); !strings.Contains(third.DataJSON, `"budget_allowance_granted":false`) {
-		t.Fatalf("daily budget stop must not report a task allowance grant: %+v", third)
+	for _, event := range []store.Event{
+		{RunID: "run-cli", Type: "budget_exceeded", Timestamp: pickupTestNow, DataJSON: `{"scope":"task"}`},
+		{RunID: "run-cli", Type: "budget_allowance_granted", Timestamp: pickupTestNow, DataJSON: `{"actor_id":"local-cli"}`},
+	} {
+		if err := srv.store.AppendEventNext(&event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-cli/resume",
+		`{"grant_budget_allowance":true,"reason":"again"}`))
+	if response.Code != http.StatusConflict || controller.grantCalls != 0 {
+		t.Fatalf("grant over a recorded allowance: %d %s grants=%d", response.Code, response.Body.String(), controller.grantCalls)
 	}
 }

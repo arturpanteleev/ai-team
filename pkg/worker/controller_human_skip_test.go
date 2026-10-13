@@ -12,6 +12,8 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/pipeline"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -651,4 +653,82 @@ func hasWorkerHumanSkipWarning(events []evidence.Event, attemptID string) bool {
 		}
 	}
 	return false
+}
+
+// Worker не может выдать задаче бюджет сам: budget_allowance_granted
+// принимается только в resume с явной выдачей в job, с тем же автором и
+// причиной, один раз и с baseline, равным расходу непокрытой остановки.
+func TestWorkerAPIBudgetAllowanceRequiresControllerGrant(t *testing.T) {
+	grantEvent := func(actor, reason string, baseline any) evidence.Event {
+		return evidence.Event{Type: tokenbudget.EventBudgetAllowanceGranted, Timestamp: time.Now().UTC().Add(time.Second),
+			Data: map[string]any{"actor_id": actor, "reason": reason, "baseline_tokens": baseline, "severity": "info"}}
+	}
+	for _, tc := range []struct {
+		name    string
+		grant   *pipeline.BudgetAllowanceGrant
+		stop    bool
+		event   evidence.Event
+		wantErr string
+	}{
+		{name: "no grant in job", stop: true, event: grantEvent("alice", "why", int64(7)), wantErr: "explicit grant"},
+		{name: "wrong baseline", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"}, stop: true,
+			event: grantEvent("alice", "why", int64(1_000_000)), wantErr: "baseline"},
+		{name: "fractional baseline", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"}, stop: true,
+			event: grantEvent("alice", "why", 7.5), wantErr: "baseline"},
+		{name: "no uncovered stop", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"},
+			event: grantEvent("alice", "why", int64(0)), wantErr: "baseline"},
+		{name: "forged actor", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"}, stop: true,
+			event: grantEvent("mallory", "why", int64(7)), wantErr: "does not match"},
+		{name: "forged reason", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"}, stop: true,
+			event: grantEvent("alice", "other", int64(7)), wantErr: "does not match"},
+		{name: "controller grant", grant: &pipeline.BudgetAllowanceGrant{ActorID: "alice", Reason: "why"}, stop: true,
+			event: grantEvent("alice", "why", int64(7))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Clean(t.TempDir())
+			const runID = "worker-budget-grant"
+			startServer, err := startWorkerAPIServerUnix(workerHumanSkipJob(OperationStart, runID, target), &apiRecorderSpy{},
+				&apiApprovalStore{values: map[string]approval.PendingApproval{}}, workerHumanSkipSocket("budget-start-"+tc.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runStore := workerHumanSkipEvidence(t, target, runID, startServer.eventLogs)
+			if tc.stop {
+				if err := runStore.Append(evidence.Event{Type: tokenbudget.EventBudgetExceeded, Stage: "optional", Timestamp: time.Now().UTC(),
+					Data: map[string]any{"scope": tokenbudget.ScopeTask, "tokens_used": int64(7), "limit": int64(7)}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			startServer.close()
+			job := workerHumanSkipJob(OperationResume, runID, target).WithBudgetAllowance(tc.grant)
+			server, err := startWorkerAPIServerUnix(job, &apiRecorderSpy{}, &apiApprovalStore{values: map[string]approval.PendingApproval{}},
+				workerHumanSkipSocket("budget-"+tc.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.close()
+			appendGrant := func() error {
+				events, err := server.eventLogs.Read(runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = server.dispatch("event_log.append", workerAPICall{RunID: runID, Event: tc.event,
+					ExpectedSequence: uint64(len(events)), ExpectedPreviousSHA256: events[len(events)-1].SHA256})
+				return err
+			}
+			err = appendGrant()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("forged grant must be refused with %q: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("controller grant must be accepted: %v", err)
+			}
+			if err := appendGrant(); err == nil || !strings.Contains(err.Error(), "already recorded") {
+				t.Fatalf("second grant in one operation must be refused: %v", err)
+			}
+		})
+	}
 }

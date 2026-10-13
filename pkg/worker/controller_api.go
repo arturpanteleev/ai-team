@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -173,7 +175,11 @@ type workerApprovalPort interface {
 	List(string) ([]approval.PendingApproval, error)
 }
 type workerAPIServer struct {
-	scope                      workerAPIScope
+	scope workerAPIScope
+	// budgetAllowance — явная выдача бюджета задачи из job контроллера; только
+	// она разрешает worker записать budget_allowance_granted, и только один раз.
+	budgetAllowance            *pipeline.BudgetAllowanceGrant
+	budgetAllowanceRecorded    bool
 	token                      string
 	listener                   net.Listener
 	socketPath                 string
@@ -306,6 +312,7 @@ func serveWorkerAPI(job Job, recorder pipeline.Recorder, approvals workerApprova
 	}
 	api := &workerAPIServer{scope: workerAPIScope{RunID: job.RunID, Operation: job.Operation, ExecutionID: job.ExecutionID, TargetDir: job.TargetDir}, token: hex.EncodeToString(nonce[:]), listener: listener, socketPath: socketPath, recorder: recorder, approvals: approvals, briefs: &taskBoundBriefStore{BriefStore: briefStore, expectedTask: expectedTask}, candidates: fileCandidateStore, absences: fileCandidateStore, briefTask: expectedTask, requestSlots: make(chan struct{}, 1), nonces: make(map[string]time.Time), stageDeliveryService: delivery.NewController()}
 	api.approvedPlanHash = strings.ToLower(strings.TrimSpace(job.ApprovePlanHash))
+	api.budgetAllowance = job.BudgetAllowance()
 	api.usageAllowed = socketPath != ""
 	if api.usageAllowed {
 		store := evidence.ControllerEventStore{TargetDir: canonicalTarget}
@@ -1086,6 +1093,9 @@ func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c 
 			if err := s.validateWorkerTerminalEvent(c.Event); err != nil {
 				return nil, err
 			}
+			if err := s.validateWorkerBudgetAllowanceEvent(c.Event, events); err != nil {
+				return nil, err
+			}
 		}
 		if !exactRetry {
 			c.Event = validated
@@ -1093,6 +1103,9 @@ func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c 
 		appended, err := s.eventLogs.Append(s.scope.RunID, c.Event, c.ExpectedSequence, c.ExpectedPreviousSHA256)
 		if err != nil {
 			return nil, err
+		}
+		if appended.Type == tokenbudget.EventBudgetAllowanceGranted {
+			s.budgetAllowanceRecorded = true
 		}
 		s.eventSnapshot = nil
 		s.eventSnapshotToken = ""
@@ -1857,6 +1870,55 @@ func (s *workerAPIServer) validateWorkerApprovalEvent(event evidence.Event) erro
 		}
 	}
 	return nil
+}
+
+// validateWorkerBudgetAllowanceEvent не даёт worker выдать задаче бюджет
+// самому: выдача принимается только в resume, если контроллер положил в job
+// явное решение человека, автор и причина события совпадают с ним, выдача в
+// операции первая, а baseline_tokens равен расходу последней непокрытой
+// остановки по бюджету задачи в проверенной цепочке.
+func (s *workerAPIServer) validateWorkerBudgetAllowanceEvent(event evidence.Event, prior []evidence.Event) error {
+	if event.Type != tokenbudget.EventBudgetAllowanceGranted {
+		return nil
+	}
+	grant := s.budgetAllowance
+	if s.scope.Operation != OperationResume || grant == nil {
+		return errors.New("budget_allowance_granted requires an explicit grant in the controller resume job")
+	}
+	if s.budgetAllowanceRecorded {
+		return errors.New("budget_allowance_granted is already recorded in this operation")
+	}
+	actor, _ := event.Data["actor_id"].(string)
+	reason, _ := event.Data["reason"].(string)
+	if actor != strings.TrimSpace(grant.ActorID) || reason != strings.TrimSpace(grant.Reason) {
+		return errors.New("budget_allowance_granted does not match the controller grant")
+	}
+	_, pending := tokenbudget.TaskAllowanceLedger(prior)
+	baseline, ok := exactEventTokens(event.Data["baseline_tokens"])
+	if pending == nil || !ok || baseline != *pending {
+		return errors.New("budget_allowance_granted baseline does not match the uncovered task budget stop")
+	}
+	return nil
+}
+
+// exactEventTokens читает целое неотрицательное число токенов из данных
+// события; дробные и нечисловые значения отвергаются.
+func exactEventTokens(value any) (int64, bool) {
+	switch number := value.(type) {
+	case float64:
+		if number < 0 || number != math.Trunc(number) || number > math.MaxInt64/2 {
+			return 0, false
+		}
+		return int64(number), true
+	case int64:
+		return number, number >= 0
+	case int:
+		return int64(number), number >= 0
+	case json.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil && parsed >= 0
+	}
+	return 0, false
 }
 
 func (s *workerAPIServer) validateWorkerTerminalEvent(event evidence.Event) error {

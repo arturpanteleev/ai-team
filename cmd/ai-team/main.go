@@ -45,6 +45,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/web"
@@ -514,10 +515,7 @@ func cmdWorker() {
 	case worker.OperationStart:
 		result, err = engine.Start(ctx, job.RunConfig())
 	case worker.OperationResume:
-		result, err = engine.Resume(ctx, pipeline.ResumeConfig{
-			RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
-			ApprovePlanHash: job.ApprovePlanHash,
-		})
+		result, err = engine.Resume(ctx, workerResumeConfig(job, target))
 	case worker.OperationRecover:
 		result, err = executeRecoveredJobWithSources(ctx, engine, target, job, eventLogSource, attemptManifestSource)
 	case worker.OperationCancel:
@@ -597,6 +595,31 @@ func executeRecoveredJobWithSources(ctx context.Context, engine recoveryEngine, 
 		RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
 		ApprovePlanHash: job.ApprovePlanHash,
 	})
+}
+
+// requireUncoveredTaskBudgetStop проверяет до запуска, что выдаче бюджета
+// есть что покрывать: иначе pipeline молча не записал бы выдачу.
+func requireUncoveredTaskBudgetStop(target, runID string) error {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return err
+	}
+	events, err := evidence.VerifyEventLog(filepath.Join(target, ".ai-team", "runs", runID, "events.jsonl"), runID)
+	if err != nil {
+		return fmt.Errorf("выдача бюджета: evidence задачи не прочитано: %w", err)
+	}
+	if _, pending := tokenbudget.TaskAllowanceLedger(events); pending == nil {
+		return errors.New("выдача бюджета не записана: нет остановки по бюджету задачи, не покрытой выдачей (дневной бюджет не выдаётся)")
+	}
+	return nil
+}
+
+// workerResumeConfig переносит resume-job контроллера в ResumeConfig, включая
+// явную выдачу бюджета задачи: без неё worker resume новый бюджет не даёт.
+func workerResumeConfig(job worker.Job, target string) pipeline.ResumeConfig {
+	return pipeline.ResumeConfig{
+		RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
+		ApprovePlanHash: job.ApprovePlanHash, BudgetAllowance: job.BudgetAllowance(),
+	}
 }
 
 func recoveredTerminalOutcome(target, runID string, state lifecycle.State) (string, int, error) {
@@ -1281,11 +1304,12 @@ func cmdRun() {
 	approvePlan := runFlags.String("approve-plan", "", "SHA-256 ранее показанного delivery plan (ratify-ит отложенные гейты run'а)")
 	templateID := runFlags.String("template", "", "ID активного шаблона проекта")
 	mode := runFlags.String("mode", "", "Режим выполнения: auto")
+	grantBudget := runFlags.String("grant-budget-allowance", "", "С --resume: явно выдать задаче ещё один бюджет max_task_tokens после остановки по бюджету задачи; значение — причина решения")
 
 	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
 	_ = runFlags.Parse(interspersedTaskArgs(os.Args[2:], map[string]bool{
 		"--feature": true, "--task": true, "--target": true, "--resume": true,
-		"--approve-plan": true, "--template": true, "--mode": true,
+		"--approve-plan": true, "--template": true, "--mode": true, "--grant-budget-allowance": true,
 	}))
 	absTarget, err := absoluteTarget(*target)
 	if err != nil {
@@ -1306,6 +1330,19 @@ func cmdRun() {
 	}
 	if *mode != "" && *mode != "auto" {
 		fatal("недопустимый режим %q (допустим auto)", *mode)
+	}
+	var budgetAllowance *pipeline.BudgetAllowanceGrant
+	if *grantBudget != "" {
+		if *resumeRunID == "" {
+			fatal("--grant-budget-allowance допустим только вместе с --resume")
+		}
+		budgetAllowance = &pipeline.BudgetAllowanceGrant{ActorID: "local-cli", Reason: *grantBudget}
+		if err := budgetAllowance.Validate(); err != nil {
+			fatal("%v", err)
+		}
+		if err := requireUncoveredTaskBudgetStop(*target, *resumeRunID); err != nil {
+			fatal("%v", err)
+		}
 	}
 	if *resumeRunID != "" && (*templateID != "" || *mode != "") {
 		fatal("--resume нельзя сочетать с --template или --mode; настройки run уже закреплены")
@@ -1391,6 +1428,7 @@ func cmdRun() {
 	if *resumeRunID != "" {
 		runResult, err = engine.Resume(ctx, pipeline.ResumeConfig{
 			RunID: *resumeRunID, TargetDir: *target, ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
+			BudgetAllowance: budgetAllowance,
 		})
 	} else {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{

@@ -51,7 +51,7 @@ func (e *QueueEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (p
 		SchemaVersion: worker.SchemaVersion, Operation: worker.OperationResume,
 		RunID: config.RunID, TargetDir: config.TargetDir,
 		ApproveGates: config.ApproveGates, ApprovePlanHash: config.ApprovePlanHash,
-	}
+	}.WithBudgetAllowance(config.BudgetAllowance)
 	if !sameTarget(config.TargetDir, e.target) {
 		return pipeline.RunResult{}, errors.New("scheduler resume target mismatch")
 	}

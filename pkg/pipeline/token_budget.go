@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -16,7 +17,8 @@ import (
 // ErrTokenBudgetExceeded останавливает задачу перед модельной попыткой, когда
 // исчерпан бюджет токенов задачи или суток. Run уходит в resumable-паузу:
 // продолжить его может только явный resume человеком, и при resume бюджет
-// проверяется заново.
+// проверяется заново. Новый бюджет задачи resume не выдаёт — только явное
+// решение человека (BudgetAllowanceGrant); дневной бюджет не выдаётся никогда.
 var ErrTokenBudgetExceeded = errors.New("бюджет токенов исчерпан")
 
 // TokenBudgetError несёт подробности исчерпанного бюджета.
@@ -67,33 +69,79 @@ func (rs *runState) dailyLedger() tokenbudget.Ledger {
 	return tokenbudget.FilesystemLedger{RunsRoot: filepath.Dir(rs.evidence.RunDir())}
 }
 
-// taskBudgetBaseline — расход задачи на момент последней остановки по
-// бюджету задачи. Run продолжается после такой остановки только явным resume
-// человеком; это решение выдаёт задаче следующий бюджет того же размера, а не
-// бесконечный. Значение берётся из долговечного evidence, а не из памяти.
-func (rs *runState) taskBudgetBaseline() (int64, error) {
+// BudgetAllowanceGrant — явное решение человека выдать задаче ещё один бюджет
+// размера max_task_tokens после остановки по бюджету задачи. Причина
+// обязательна: она попадает в evidence вместе с автором решения.
+type BudgetAllowanceGrant struct {
+	ActorID string
+	Reason  string
+}
+
+// Validate отвергает выдачу без автора или причины.
+func (g *BudgetAllowanceGrant) Validate() error {
+	if g == nil {
+		return nil
+	}
+	if strings.TrimSpace(g.ActorID) == "" {
+		return errors.New("выдача бюджета задачи требует автора решения")
+	}
+	if strings.TrimSpace(g.Reason) == "" {
+		return errors.New("выдача бюджета задачи требует причину")
+	}
+	return nil
+}
+
+// taskBudgetLedger читает долговечное evidence задачи и возвращает точку
+// отсчёта бюджета задачи и расход последней непокрытой выдачей остановки.
+func (rs *runState) taskBudgetLedger() (baseline int64, pendingStop *int64, err error) {
 	events, found, err := rs.readEvidenceEvents()
 	if err != nil {
-		return 0, fmt.Errorf("read budget evidence: %w", err)
+		return 0, nil, fmt.Errorf("read budget evidence: %w", err)
 	}
 	if !found {
-		return 0, nil
+		return 0, nil, nil
 	}
-	var baseline int64
-	for _, event := range events {
-		if event.Type != tokenbudget.EventBudgetExceeded || event.Data["scope"] != tokenbudget.ScopeTask {
-			continue
-		}
-		switch used := event.Data["tokens_used"].(type) {
-		case float64:
-			baseline = int64(used)
-		case int64:
-			baseline = used
-		case int:
-			baseline = int64(used)
-		}
+	baseline, pendingStop = tokenbudget.TaskAllowanceLedger(events)
+	return baseline, pendingStop, nil
+}
+
+// taskBudgetBaseline — расход задачи, от которого отсчитывается текущий
+// бюджет задачи. Сдвигается только явной выдачей бюджета человеком.
+func (rs *runState) taskBudgetBaseline() (int64, error) {
+	baseline, _, err := rs.taskBudgetLedger()
+	return baseline, err
+}
+
+// applyBudgetAllowanceGrant записывает явную выдачу бюджета при resume.
+// Выдача относится только к последней остановке по бюджету задачи, ещё не
+// покрытой выдачей; без такой остановки событие не пишется и бюджет не
+// меняется. Дневной бюджет выдача не затрагивает.
+func (rs *runState) applyBudgetAllowanceGrant() error {
+	grant := rs.runCfg.budgetAllowance
+	rs.runCfg.budgetAllowance = nil
+	if grant == nil {
+		return nil
 	}
-	return baseline, nil
+	// Автор и причина проверены в RunWithResult до любых записей resume.
+	_, pendingStop, err := rs.taskBudgetLedger()
+	if err != nil {
+		return err
+	}
+	if pendingStop == nil {
+		return nil
+	}
+	event := evidence.Event{
+		Type: tokenbudget.EventBudgetAllowanceGranted, Timestamp: rs.p.clock().UTC(),
+		Data: map[string]any{
+			"actor_id": strings.TrimSpace(grant.ActorID), "reason": strings.TrimSpace(grant.Reason),
+			"baseline_tokens": *pendingStop, "severity": "info",
+		},
+	}
+	if err := rs.evidence.Append(event); err != nil {
+		return fmt.Errorf("record budget_allowance_granted: %w", err)
+	}
+	rs.recordTypedEvent(event)
+	return nil
 }
 
 // enforceTokenBudget проверяет бюджеты перед модельной попыткой stage. При
@@ -131,8 +179,8 @@ func (rs *runState) enforceTokenBudgetFor(stage, checkAttemptID string) error {
 		}
 		if over := tokenbudget.Check(tokenbudget.ScopeTask, allowance, budget.MaxTaskTokens); over != nil {
 			exceeded = over
-			// Событие хранит полный расход задачи: следующий resume
-			// отсчитывает новый бюджет от этого значения.
+			// Событие хранит полный расход задачи: явная выдача бюджета
+			// человеком отсчитывает новый бюджет от этого значения.
 			exceeded.Used = used.Tokens
 			data["baseline_tokens"] = baseline
 		}

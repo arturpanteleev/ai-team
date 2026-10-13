@@ -31,6 +31,10 @@ type fakeEngine struct {
 	cancelCalls int
 	skipCalls   int
 	skipConfig  pipeline.SkipStageConfig
+	resumeGrant *pipeline.BudgetAllowanceGrant
+	// finished, если задан, закрывается после того, как Resume закончил
+	// обращаться к target: тест ждёт его до удаления TempDir.
+	finished chan struct{}
 }
 
 func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
@@ -45,6 +49,12 @@ func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeli
 	return pipeline.RunResult{RunID: config.RunID}, nil
 }
 func (f *fakeEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
+	f.mu.Lock()
+	f.resumeGrant = config.BudgetAllowance
+	f.mu.Unlock()
+	if f.finished != nil {
+		defer close(f.finished)
+	}
 	close(f.started)
 	<-f.release
 	if config.CancelRequested != nil && config.CancelRequested() {
@@ -395,6 +405,43 @@ func TestControllerRejectsDuplicateResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(engine.release)
+}
+
+func TestControllerResumeWithBudgetAllowancePassesGrant(t *testing.T) {
+	target := t.TempDir()
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("identity"))
+	if err := stateStore.Create(lifecycle.State{
+		RunID: "run-grant", Feature: "feature", TargetDir: filepath.Clean(target), Task: "задача",
+		Phase: lifecycle.PhaseResumable, NextStage: "analyst",
+		ConfigSHA256: stringHex(digest[:]), WorkflowSHA256: stringHex(digest[:]),
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	controller, err := New(engine, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.ResumeWithBudgetAllowance("run-grant", "alice", " "); err == nil {
+		t.Fatal("grant without a reason must be refused")
+	}
+	if err := controller.ResumeWithBudgetAllowance("run-grant", "alice", "why"); err != nil {
+		t.Fatal(err)
+	}
+	<-engine.started
+	engine.mu.Lock()
+	grant := engine.resumeGrant
+	engine.mu.Unlock()
+	close(engine.release)
+	<-engine.finished
+	if grant == nil || grant.ActorID != "alice" || grant.Reason != "why" {
+		t.Fatalf("engine resume grant = %+v", grant)
+	}
 }
 
 type recordingApprovalStore struct {

@@ -82,6 +82,17 @@
 
 ### Changed
 
+- **Resume после остановки по бюджету больше не выдаёт бюджет неявно (B-86).**
+  Обычный resume задачи, остановленной по бюджету задачи, новый бюджет не
+  даёт — задача снова встаёт на паузу перед вызовом модели. Ещё один бюджет
+  того же размера выдаётся только явным решением человека с причиной:
+  `POST /api/runs/{runID}/resume` с `{"grant_budget_allowance": true,
+  "reason": "..."}`, кнопка «Выдать бюджет и продолжить» или
+  `ai-team run --resume <id> --grant-budget-allowance "<причина>"`. Выдача
+  пишется в evidence (`budget_allowance_granted`) и в `run_resume_requested`
+  (`budget_allowance_granted: true`, `reason`). Дневной бюджет не выдаётся и
+  не сбрасывается никогда.
+
 - **Релизный гейт равен CI.** `.github/workflows/release.yaml` больше не
   повторяет урезанный набор проверок (`go build`/`go vet`/`go test`), а
   вызывает `ci.yaml` как reusable workflow против точного коммита тега — то

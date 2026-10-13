@@ -891,6 +891,9 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 			currentOwners[currentStage] = owner
 		}
 		response["stage_owners"] = currentOwners
+		// Выдать бюджет можно только на остановку по бюджету задачи, ещё не
+		// покрытую выдачей; UI показывает решение только тогда.
+		response["budget_allowance_grantable"] = s.pendingBudgetStop(run.RunID)
 	}
 	if s.controller != nil && run.RunID != "" {
 		approvals, approvalErr := s.controller.Approvals(run.RunID)

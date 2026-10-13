@@ -33,6 +33,7 @@ export function PipelineDetail() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [controlError, setControlError] = useState('');
+  const [budgetReason, setBudgetReason] = useState('');
   const [deliveryRetryError, setDeliveryRetryError] = useState('');
   const [deliveryRetrying, setDeliveryRetrying] = useState(false);
   const [templateVersion, setTemplateVersion] = useState('');
@@ -44,6 +45,7 @@ export function PipelineDetail() {
   const approvals = snapshot?.approvals ?? [];
   const graph = snapshot?.graph ?? null;
   const nextStage = snapshot?.nextStage ?? '';
+  const budgetAllowanceGrantable = snapshot?.budgetAllowanceGrantable ?? false;
   const delivery: DeliveryProjection = snapshot?.delivery ?? { status: 'not_requested' };
 
   usePageTitle(run ? run.feature : 'Задача');
@@ -129,11 +131,14 @@ export function PipelineDetail() {
     ? value.feedback_actions.includes(action)
     : action.startsWith('return_to_');
 
-  const sendRunCommand = async (kind: 'resume' | 'cancel') => {
+  const sendRunCommand = async (kind: 'resume' | 'grant' | 'cancel') => {
     setControlError('');
     try {
       if (kind === 'resume') await resumeRun(run.run_id);
-      else await cancelRun(run.run_id);
+      else if (kind === 'grant') {
+        await resumeRun(run.run_id, { reason: budgetReason.trim() });
+        setBudgetReason('');
+      } else await cancelRun(run.run_id);
       await fetchData();
     } catch (err) {
       setControlError(err instanceof Error ? err.message : 'Команда не принята');
@@ -239,11 +244,25 @@ export function PipelineDetail() {
             ? <span>{principal.actor_id}</span>
             : <input value={actor} onChange={(event) => setActor(event.target.value)}
               aria-label="Идентификатор участника" placeholder="Идентификатор участника" />}
-          {['waiting_for_approval', 'interrupted', 'blocked'].includes(run.status) &&
+          {['waiting_for_approval', 'interrupted', 'blocked', 'stopped'].includes(run.status) &&
             <button onClick={() => sendRunCommand('resume')}>Продолжить задачу</button>}
           {['queued', 'running', 'waiting_for_approval'].includes(run.status) &&
             <button onClick={() => sendRunCommand('cancel')}>Отменить задачу</button>}
         </div>
+        {run.status === 'stopped' && budgetAllowanceGrantable && (
+          <div className={styles.budgetGrant}>
+            <p>
+              Задачу остановил бюджет задачи. «Продолжить задачу» новый бюджет не выдаёт — задача снова
+              остановится. Выдать ещё один бюджет того же размера можно только явным решением с причиной.
+              Дневной бюджет не выдаётся.
+            </p>
+            <input value={budgetReason} onChange={(event) => setBudgetReason(event.target.value)}
+              aria-label="Причина выдачи бюджета" placeholder="Причина выдачи бюджета" />
+            <button disabled={budgetReason.trim() === ''} onClick={() => sendRunCommand('grant')}>
+              Выдать бюджет и продолжить
+            </button>
+          </div>
+        )}
         {controlError && <div className={styles.controlError}>{controlError}</div>}
         {approvals.length === 0 ? <p>Запросов на решение пока нет.</p> : approvals.map((value) => {
           const question = value.payload && typeof value.payload === 'object' &&

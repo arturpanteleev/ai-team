@@ -214,7 +214,7 @@ func (e *ProcessEngine) Resume(ctx context.Context, config pipeline.ResumeConfig
 		SchemaVersion: SchemaVersion, Operation: OperationResume,
 		RunID: config.RunID, TargetDir: config.TargetDir,
 		ApproveGates: config.ApproveGates, ApprovePlanHash: config.ApprovePlanHash,
-	}
+	}.WithBudgetAllowance(config.BudgetAllowance)
 	return e.execute(ctx, job)
 }
 

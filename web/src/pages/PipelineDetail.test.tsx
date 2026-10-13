@@ -200,6 +200,38 @@ describe('PipelineDetail graph', () => {
     await waitFor(() => expect(vi.mocked(getPipelineRun).mock.calls.length).toBeGreaterThanOrEqual(3));
   });
 
+  it('без непокрытой остановки по бюджету задачи выдачу не предлагает', async () => {
+    vi.mocked(getPipelineRun).mockResolvedValueOnce({
+      run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'stopped' as const, started_at: '2026-07-28T00:00:00Z' },
+      stages: [], approvals: [], budget_allowance_grantable: false,
+    });
+    renderDetail();
+
+    expect(await screen.findByRole('button', { name: 'Продолжить задачу' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Выдать бюджет и продолжить' })).not.toBeInTheDocument();
+  });
+
+  it('остановленная задача: resume без выдачи и явная выдача бюджета с причиной', async () => {
+    vi.mocked(resumeRun).mockClear();
+    const stopped = {
+      run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'stopped' as const, started_at: '2026-07-28T00:00:00Z' },
+      stages: [], approvals: [], budget_allowance_grantable: true,
+    };
+    vi.mocked(getPipelineRun).mockResolvedValueOnce(stopped).mockResolvedValueOnce(stopped).mockResolvedValueOnce(stopped);
+    renderDetail();
+
+    const grant = await screen.findByRole('button', { name: 'Выдать бюджет и продолжить' });
+    expect(screen.getByText(/новый бюджет не выдаёт/)).toBeInTheDocument();
+    expect(grant).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить задачу' }));
+    await waitFor(() => expect(vi.mocked(resumeRun)).toHaveBeenCalledWith('run-graph'));
+
+    fireEvent.change(screen.getByLabelText('Причина выдачи бюджета'), { target: { value: '  нужен ревью  ' } });
+    expect(grant).toBeEnabled();
+    fireEvent.click(grant);
+    await waitFor(() => expect(vi.mocked(resumeRun)).toHaveBeenCalledWith('run-graph', { reason: 'нужен ревью' }));
+  });
+
   it('показывает зафиксированные коммит и pull request в состоянии Git-доставки', async () => {
     vi.mocked(getPipelineRun).mockResolvedValue({
       run: { id: 7, run_id: 'run-graph', feature: 'graph-feature', status: 'completed', started_at: '2026-07-28T00:00:00Z' },

@@ -448,12 +448,12 @@ func TestConsumeConfiguredSkipClearsRequestForHumanAndAgentStages(t *testing.T) 
 	skipped := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomeSkipped}}
 	passed := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomePassed}}
 	for _, tc := range []struct {
-		name            string
-		current         string
-		requireSkipped  bool
-		result          notifier.StageResult
-		wantErr         bool
-		wantCleared     bool
+		name           string
+		current        string
+		requireSkipped bool
+		result         notifier.StageResult
+		wantErr        bool
+		wantCleared    bool
 	}{
 		{name: "human stage consumes skip via approval", current: "optional", requireSkipped: true, result: skipped, wantCleared: true},
 		{name: "human stage without recorded skip", current: "optional", requireSkipped: true, result: passed, wantErr: true},

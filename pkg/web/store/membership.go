@@ -12,6 +12,10 @@ var (
 	ErrTeamMemberNotFound      = errors.New("team member not found")
 	ErrLastTeamAdmin           = errors.New("cannot remove the last active Product Owner")
 	ErrTeamMemberRolesRequired = errors.New("team member must have at least one role")
+	// ErrOIDCAccountMismatch is returned when a provider account (iss, sub)
+	// does not match the account bound to the member, or is already bound to
+	// another member.
+	ErrOIDCAccountMismatch = errors.New("oidc account does not match the team member binding")
 )
 
 // TeamMember is the server-authoritative membership. Roles from access-token
@@ -247,7 +251,13 @@ func (s *Store) SetTeamMember(actorID string, roles []string, active bool, by, a
 	if !active {
 		status = "revoked"
 	}
-	result, err := tx.Exec(`UPDATE team_members SET roles_json=?,status=?,session_epoch=session_epoch+1,updated_at=? WHERE actor_id=?`, string(encoded), status, now, actorID)
+	// Revocation also clears the SSO account binding: restoring the member
+	// lets the next sign-in bind a new provider account (e.g. after the
+	// provider or the person's account changed).
+	result, err := tx.Exec(`UPDATE team_members SET roles_json=?,status=?,session_epoch=session_epoch+1,updated_at=?,
+		oidc_issuer=CASE WHEN ?='revoked' THEN '' ELSE oidc_issuer END,
+		oidc_subject=CASE WHEN ?='revoked' THEN '' ELSE oidc_subject END WHERE actor_id=?`,
+		string(encoded), status, now, status, status, actorID)
 	if err != nil {
 		return err
 	}
@@ -262,6 +272,77 @@ func (s *Store) SetTeamMember(actorID string, roles []string, active bool, by, a
 		return err
 	}
 	return tx.Commit()
+}
+
+// BindTeamMemberOIDC binds an active member to a provider account on the
+// first SSO sign-in and verifies the binding on every later one. The member
+// is found by verified e-mail; once bound, only the same (issuer, subject)
+// signs in as that member, so a provider that reassigns the address to
+// another account cannot take the membership over. An account already bound
+// to another member is refused. Revoking the member clears the binding.
+func (s *Store) BindTeamMemberOIDC(actorID, issuer, subject string, now time.Time) error {
+	if actorID == "" || issuer == "" || subject == "" {
+		return ErrOIDCAccountMismatch
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var boundIssuer, boundSubject, status string
+	err = tx.QueryRow(`SELECT oidc_issuer,oidc_subject,status FROM team_members WHERE actor_id=?`, actorID).
+		Scan(&boundIssuer, &boundSubject, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTeamMemberNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "active" {
+		return ErrTeamMemberNotFound
+	}
+	if boundSubject != "" {
+		if boundIssuer != issuer || boundSubject != subject {
+			return ErrOIDCAccountMismatch
+		}
+		return nil
+	}
+	var other int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM team_members WHERE oidc_issuer=? AND oidc_subject=? AND actor_id<>?`,
+		issuer, subject, actorID).Scan(&other); err != nil {
+		return err
+	}
+	if other != 0 {
+		return ErrOIDCAccountMismatch
+	}
+	result, err := tx.Exec(`UPDATE team_members SET oidc_issuer=?,oidc_subject=? WHERE actor_id=? AND oidc_subject=''`,
+		issuer, subject, actorID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return ErrOIDCAccountMismatch
+	}
+	details, err := json.Marshal(map[string]string{"issuer": issuer, "subject": subject})
+	if err != nil {
+		return err
+	}
+	if err = teamAudit(tx, actorID, "oidc_bind", actorID, string(details), now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// TeamMemberOIDC returns the provider account bound to the member, if any.
+func (s *Store) TeamMemberOIDC(actorID string) (string, string, error) {
+	var issuer, subject string
+	err := s.db.QueryRow(`SELECT oidc_issuer,oidc_subject FROM team_members WHERE actor_id=?`, actorID).Scan(&issuer, &subject)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrTeamMemberNotFound
+	}
+	return issuer, subject, err
 }
 
 func containsRole(roles []string, role string) bool {

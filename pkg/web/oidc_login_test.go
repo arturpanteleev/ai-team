@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -513,27 +514,144 @@ func TestOIDCSessionsEndWhenOIDCIsReconfigured(t *testing.T) {
 	}
 }
 
+// TestOIDCCallbackRevokesPreviousSession models real browser behaviour: the
+// SameSite=Strict session cookie accompanies the same-site login request but
+// not the provider's cross-site redirect to the callback.
 func TestOIDCCallbackRevokesPreviousSession(t *testing.T) {
 	f := newSSOFixture(t)
 	first := sessionCookieFrom(f.signIn())
-	location, stateCookie := f.beginLogin()
+	beginWithSession := func() (string, *http.Cookie) {
+		req := newLoopbackRequest(http.MethodGet, oidcLoginPath, nil)
+		req.AddCookie(first)
+		w := f.serve(req)
+		if w.Code != http.StatusFound {
+			t.Fatalf("login: %d %s", w.Code, w.Body.String())
+		}
+		for _, cookie := range w.Result().Cookies() {
+			if cookie.Name == oidcStateCookieName {
+				return w.Header().Get("Location"), cookie
+			}
+		}
+		t.Fatal("state cookie missing")
+		return "", nil
+	}
+
+	// An abandoned sign-in keeps the current session.
+	beginWithSession()
+	if w, _ := f.recoverSession(first); w.Code != http.StatusOK {
+		t.Fatalf("abandoned sign-in must not revoke: %d", w.Code)
+	}
+
+	location, stateCookie := beginWithSession()
 	code, state, err := f.idp.Authorize(location)
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := url.Values{"code": {code}, "state": {state}}
-	req := newLoopbackRequest(http.MethodGet, oidcCallbackPath+"?"+query.Encode(), nil)
-	req.AddCookie(stateCookie)
-	req.AddCookie(first)
-	second := sessionCookieFrom(f.serve(req))
+	callback := f.callback(code, state, stateCookie) // no session cookie, as from the provider
+	second := sessionCookieFrom(callback)
 	if second == nil || second.Value == first.Value {
-		t.Fatal("callback must issue a new session")
+		t.Fatalf("callback must issue a new session: %d %s", callback.Code, callback.Body.String())
 	}
 	if w, _ := f.recoverSession(first); w.Code != http.StatusUnauthorized {
 		t.Fatalf("replaced session must be revoked: %d", w.Code)
 	}
 	if w, _ := f.recoverSession(second); w.Code != http.StatusOK {
 		t.Fatalf("new session: %d", w.Code)
+	}
+}
+
+func TestOIDCLoginIsRateLimitedPerAddressBeforeStorage(t *testing.T) {
+	f := newSSOFixture(t)
+	f.srv.oidcLoginLimiter = newLoginRateLimiter(2, oidcStateTTL, 3)
+	login := func(remote string) int {
+		req := newLoopbackRequest(http.MethodGet, oidcLoginPath, nil)
+		req.RemoteAddr = remote
+		return f.serve(req).Code
+	}
+	pending := func() int {
+		db, err := sql.Open("sqlite", f.dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM oidc_login_states`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	for i := 0; i < 2; i++ {
+		if code := login("203.0.113.7:4000"); code != http.StatusFound {
+			t.Fatalf("login %d: %d", i, code)
+		}
+	}
+	if code := login("203.0.113.7:4001"); code != http.StatusTooManyRequests {
+		t.Fatalf("third login from the same address: %d", code)
+	}
+	if got := pending(); got != 2 {
+		t.Fatalf("a limited login must not be stored: %d pending", got)
+	}
+	// IPv6 clients are keyed by /64.
+	if code := login("[2001:db8::1]:1"); code != http.StatusFound {
+		t.Fatalf("ipv6 #1: %d", code)
+	}
+	if code := login("[2001:db8::2]:1"); code != http.StatusFound {
+		t.Fatalf("ipv6 #2: %d", code)
+	}
+	if code := login("[2001:db8::ffff]:1"); code != http.StatusTooManyRequests {
+		t.Fatalf("same /64 over the limit: %d", code)
+	}
+	// Another address is unaffected.
+	if code := login("198.51.100.9:1"); code != http.StatusFound {
+		t.Fatalf("other address: %d", code)
+	}
+	// All key slots hold live windows: a new address is refused.
+	if code := login("192.0.2.1:1"); code != http.StatusTooManyRequests {
+		t.Fatalf("full limiter must refuse a new address: %d", code)
+	}
+	f.now = f.now.Add(oidcStateTTL)
+	if code := login("203.0.113.7:4002"); code != http.StatusFound {
+		t.Fatalf("window must reset: %d", code)
+	}
+	if code := login("192.0.2.1:1"); code != http.StatusFound {
+		t.Fatalf("expired windows must free slots: %d", code)
+	}
+}
+
+func TestOIDCBindsMemberToProviderAccount(t *testing.T) {
+	f := newSSOFixture(t)
+	if w := f.signIn(); w.Code != http.StatusSeeOther {
+		t.Fatalf("first sign-in: %d %s", w.Code, w.Body.String())
+	}
+	issuer, subject, err := f.srv.store.TeamMemberOIDC("dev@example.test")
+	if err != nil || issuer != f.idp.Issuer || subject != "user-123" {
+		t.Fatalf("first sign-in must bind iss/sub: %q %q %v", issuer, subject, err)
+	}
+	if w := f.signIn(); w.Code != http.StatusSeeOther {
+		t.Fatalf("same account again: %d", w.Code)
+	}
+	// The provider reassigned the verified address to another account.
+	f.idp.Configure(func(p *oidctest.Provider) { p.Subject = "attacker-456" })
+	if w := f.signIn(); w.Code != http.StatusForbidden || sessionCookieFrom(w) != nil {
+		t.Fatalf("other account with the member's e-mail: %d", w.Code)
+	}
+	// A bound account cannot take over a second, unbound member.
+	f.addMember("ops@example.test", "developer")
+	f.idp.Configure(func(p *oidctest.Provider) { p.Subject = "user-123"; p.Email = "ops@example.test" })
+	if w := f.signIn(); w.Code != http.StatusForbidden || sessionCookieFrom(w) != nil {
+		t.Fatalf("account bound to another member: %d", w.Code)
+	}
+	// Revoking and restoring the member clears the binding.
+	now := f.now
+	if err := f.srv.store.SetTeamMember("dev@example.test", []string{"developer"}, false, "admin@example.test", "revoke", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.store.SetTeamMember("dev@example.test", []string{"developer"}, true, "admin@example.test", "restore", now); err != nil {
+		t.Fatal(err)
+	}
+	f.idp.Configure(func(p *oidctest.Provider) { p.Subject = "user-789"; p.Email = "dev@example.test" })
+	if w := f.signIn(); w.Code != http.StatusSeeOther {
+		t.Fatalf("restored member binds a new account: %d %s", w.Code, w.Body.String())
 	}
 }
 

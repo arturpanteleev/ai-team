@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
@@ -24,6 +27,13 @@ const (
 	// oidcMaxPendingLogins bounds unfinished sign-ins: the login endpoint is
 	// unauthenticated and each request stores one row.
 	oidcMaxPendingLogins = 1000
+	// oidcLoginsPerIP bounds sign-in starts from one client address (an IPv6
+	// /64) per oidcStateTTL, so one client cannot fill the global bound above
+	// and lock everybody else out of SSO.
+	oidcLoginsPerIP = 20
+	// oidcRateLimitKeys bounds the limiter's memory; when every slot holds an
+	// unexpired window, new addresses are refused (fail closed).
+	oidcRateLimitKeys = 10000
 )
 
 // OIDCProvider is the relying-party operations the server needs; *oidc.Provider
@@ -47,6 +57,12 @@ func WithOIDC(provider OIDCProvider) ServerOption {
 // stay on the server.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	// The per-address limit is checked before the provider call and before
+	// anything is written to the database.
+	if !s.oidcLoginLimiter.allow(clientAddressKey(r.RemoteAddr), s.clock()) {
+		http.Error(w, "слишком много входов с этого адреса, повторите позже", http.StatusTooManyRequests)
+		return
+	}
 	state, errState := oidc.RandomString()
 	nonce, errNonce := oidc.RandomString()
 	verifier, challenge, errPKCE := oidc.NewPKCE()
@@ -62,9 +78,17 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSO-провайдер недоступен", http.StatusServiceUnavailable)
 		return
 	}
+	// This request is a same-site navigation, so the SameSite=Strict session
+	// cookie is present here (unlike on the provider's redirect back). Keep
+	// only its digest; the callback revokes that session once the new one
+	// exists. An abandoned sign-in leaves the current session untouched.
+	previousSession := ""
+	if previous, err := r.Cookie(sessionCookieName); err == nil && previous.Value != "" {
+		previousSession = store.SessionDigest(previous.Value)
+	}
 	now := s.clock()
 	if err := s.store.SaveOIDCLoginState(state, store.OIDCLoginState{
-		Nonce: nonce, CodeVerifier: verifier, ExpiresAt: now.Add(oidcStateTTL),
+		Nonce: nonce, CodeVerifier: verifier, PreviousSessionHash: previousSession, ExpiresAt: now.Add(oidcStateTTL),
 	}, now, s.oidcMaxPending); err != nil {
 		if errors.Is(err, store.ErrTooManyPendingLogins) {
 			http.Error(w, "слишком много незавершённых входов, повторите позже", http.StatusTooManyRequests)
@@ -132,17 +156,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "участник команды не активен или доступ отозван", http.StatusForbidden)
 		return
 	}
+	// The e-mail finds the member; the provider account (iss, sub) bound on
+	// the first sign-in must match on every later one.
+	if err := s.store.BindTeamMemberOIDC(principal.ActorID, identity.Issuer, identity.Subject, s.clock()); err != nil {
+		if errors.Is(err, store.ErrOIDCAccountMismatch) || errors.Is(err, store.ErrTeamMemberNotFound) {
+			http.Error(w, "учётная запись SSO не совпадает с привязанной к участнику", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "session unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	sessionToken, _, err := s.createBrowserSession(principal, epoch, sessionMethodOIDC, identity.Issuer+" "+identity.Subject)
 	if err != nil {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	// The new session replaces any previous one in this browser; revoke it
-	// rather than leave it usable until it expires.
-	if previous, err := r.Cookie(sessionCookieName); err == nil && previous.Value != "" {
-		if err := s.store.RevokeWebSession(previous.Value, s.clock()); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠ OIDC sign-in: revoke previous session: %v\n", err)
-		}
+	// The new session replaces the one this browser had when it started
+	// sign-in; revoke it rather than leave it usable until it expires.
+	if err := s.store.RevokeWebSessionDigest(pending.PreviousSessionHash, s.clock()); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ OIDC sign-in: revoke previous session: %v\n", err)
 	}
 	s.setSessionCookie(w, r, sessionToken)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -165,6 +197,74 @@ func (s *Server) activeMemberPrincipal(actorID string) (cloudidentity.Principal,
 	}
 	principal, err := cloudidentity.NewPrincipal(member.ActorID, roles)
 	return principal, member.SessionEpoch, err
+}
+
+// loginRateLimiter is a fixed-window counter per client address.
+type loginRateLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	maxKeys int
+	entries map[string]loginRateWindow
+}
+
+type loginRateWindow struct {
+	start time.Time
+	count int
+}
+
+func newLoginRateLimiter(limit int, window time.Duration, maxKeys int) *loginRateLimiter {
+	return &loginRateLimiter{limit: limit, window: window, maxKeys: maxKeys, entries: map[string]loginRateWindow{}}
+}
+
+func (l *loginRateLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry, ok := l.entries[key]
+	if ok && !now.Before(entry.start.Add(l.window)) {
+		ok = false
+	}
+	if !ok {
+		if _, tracked := l.entries[key]; !tracked && len(l.entries) >= l.maxKeys {
+			for other, window := range l.entries {
+				if !now.Before(window.start.Add(l.window)) {
+					delete(l.entries, other)
+				}
+			}
+			if len(l.entries) >= l.maxKeys {
+				return false
+			}
+		}
+		entry = loginRateWindow{start: now}
+	}
+	if entry.count >= l.limit {
+		return false
+	}
+	entry.count++
+	l.entries[key] = entry
+	return true
+}
+
+// clientAddressKey returns the rate-limit key of the direct peer: the IPv4
+// address or the IPv6 /64. Forwarding headers are not trusted; behind a
+// reverse proxy every client shares the proxy's key.
+func clientAddressKey(remoteAddr string) string {
+	host := remoteAddr
+	if split, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = split
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return "unparsed:" + host
+	}
+	address = address.Unmap()
+	if address.Is6() {
+		prefix, err := address.Prefix(64)
+		if err == nil {
+			return prefix.String()
+		}
+	}
+	return address.String()
 }
 
 func isASCII(value string) bool {

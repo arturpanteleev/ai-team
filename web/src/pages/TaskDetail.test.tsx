@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter, Routes } from '../router';
-import type { TaskRunDetails } from '../types';
+import type { Stage, TaskRunDetails } from '../types';
 import { DRAFT_SAVE_DELAY_MS } from '../components/StageResultForm';
 import { TaskDetail } from './TaskDetail';
 
@@ -868,5 +868,57 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
     fireEvent.click(await screen.findByRole('button', { name: 'Повторить одобренную Git-доставку' }));
     await waitFor(() => expect(api.retryDelivery).toHaveBeenCalledWith('run-detail-1'));
+  });
+  it('moves the back link out of the header and names the idea block without the intention wording', async () => {
+    renderDetail();
+    await screen.findByRole('heading', { name: 'Новый маршрут' });
+
+    expect(screen.queryByRole('link', { name: '← К задачам' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
+    expect(screen.queryByText('Исходное намерение')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Бизнес-намерение/)).not.toBeInTheDocument();
+  });
+
+  const agentStage = (status: 'running' | 'failed', extra: Partial<Stage> = {}): Stage => ({
+    id: 9, pipeline_run_id: 5, attempt_id: 'agent-attempt-9', stage_index: 1, agent_name: 'analysis',
+    status, started_at: new Date().toISOString(), ...extra,
+  });
+  const agentOnStage = (stages: Stage[]): TaskRunDetails => ({
+    ...baseDetails,
+    state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: undefined,
+      executor_overrides: { analysis: { executor: 'agent', previous_executor: 'human' } } },
+    approvals: [],
+    stages,
+    allowed_actions: ['run-agent', 'take', 'results'],
+  });
+
+  it('shows the agent working state with a link to its log', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
+    renderDetail();
+
+    expect(await screen.findByText('Агент работает')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+      'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
+    );
+  });
+
+  it('shows the agent failure with its reason', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('failed', { error: 'Нет доступа к репозиторию' })]));
+    renderDetail();
+
+    expect(await screen.findByText('Агент остановился с ошибкой')).toBeInTheDocument();
+    expect(screen.getByText('Агент остановился с ошибкой').parentElement).toHaveTextContent('Нет доступа к репозиторию');
+  });
+
+  it('confirms the agent start at once, before the server reports the attempt', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...agentOnStage([]) });
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    expect(await screen.findByText('Агент запущен')).toBeInTheDocument();
+    expect(api.runTaskStageAgent).toHaveBeenCalledWith('run-detail-1', 'analysis', 'run');
   });
 });

@@ -40,7 +40,21 @@ const modeOptions = [
   { value: 'auto', label: 'Авто' },
 ];
 
-const boardQueueColumn = { id: '__queued__', title: 'В очереди' };
+// Служебные колонки доски: очередь (реально стоящие в очереди прогоны) и
+// прогоны, у которых этап не известен из данных (заблокированы/ждут решения).
+const QUEUE_COLUMN_ID = '__queued__';
+const WAITING_COLUMN_ID = '__waiting__';
+
+interface BoardColumn {
+  id: string;
+  title: string;
+  kind: 'queue' | 'stage' | 'waiting';
+}
+
+function boardColumnId(run: TaskRun): string {
+  if (run.status === 'queued') return QUEUE_COLUMN_ID;
+  return run.current_stage || WAITING_COLUMN_ID;
+}
 
 export function Tasks() {
   usePageTitle('Задачи');
@@ -116,16 +130,17 @@ export function Tasks() {
   }, [stages, runs]);
 
   const boardRuns = runs.filter((run) => activeStatuses.has(run.status));
-  const columns = useMemo(() => {
+  const columns = useMemo<BoardColumn[]>(() => {
     const known = new Set(stages.map((value) => value.id));
     const extra = new Set<string>();
     for (const run of boardRuns) {
-      if (run.current_stage && !known.has(run.current_stage)) extra.add(run.current_stage);
+      if (run.status !== 'queued' && run.current_stage && !known.has(run.current_stage)) extra.add(run.current_stage);
     }
     return [
-      boardQueueColumn,
-      ...stages.map((value) => ({ id: value.id, title: value.title })),
-      ...[...extra].map((id) => ({ id, title: id })),
+      { id: QUEUE_COLUMN_ID, title: 'В очереди', kind: 'queue' },
+      ...stages.map((value) => ({ id: value.id, title: value.title, kind: 'stage' as const })),
+      ...[...extra].map((id) => ({ id, title: id, kind: 'stage' as const })),
+      { id: WAITING_COLUMN_ID, title: 'Ожидает решения', kind: 'waiting' },
     ];
   }, [stages, boardRuns]);
 
@@ -205,21 +220,20 @@ export function Tasks() {
       ) : view === 'board' ? (
         <section className={styles.board} aria-label="Доска по этапам">
           {columns.map((column) => {
-            const columnRuns = column.id === boardQueueColumn.id
-              ? boardRuns.filter((run) => !run.current_stage)
-              : boardRuns.filter((run) => run.current_stage === column.id);
+            const columnRuns = boardRuns.filter((run) => boardColumnId(run) === column.id);
             return (
-              <section key={column.id} className={styles.column} aria-label={`Этап: ${column.title}`}>
+              <section key={column.id} className={styles.column} data-kind={column.kind}
+                aria-label={`Этап: ${column.title}`}>
                 <header className={styles.columnHeader}>
                   <strong>{column.title}</strong>
-                  <span>{columnRuns.length}</span>
+                  <span className={styles.columnCount}>{columnRuns.length}</span>
                 </header>
                 <div className={styles.columnBody}>
                   {columnRuns.length === 0
-                    ? <p className={styles.columnEmpty}>Пусто</p>
+                    ? <p className={styles.columnEmpty}>Нет задач</p>
                     : columnRuns.map((run) => (
-                      <TaskCard key={run.run_id} run={run} stageTitle={stageTitle} now={now}
-                        onCancel={() => void submitCancel(run)} />
+                      <TaskCard key={run.run_id} run={run} stageTitle={stageTitle} templateTitle={templates?.title}
+                        now={now} onCancel={() => void submitCancel(run)} />
                     ))}
                 </div>
               </section>
@@ -231,8 +245,8 @@ export function Tasks() {
       ) : (
         <div className={styles.list} aria-label="Список задач">
           {runs.map((run) => (
-            <TaskCard key={run.run_id} run={run} stageTitle={stageTitle} now={now}
-              onCancel={() => void submitCancel(run)} />
+            <TaskCard key={run.run_id} run={run} stageTitle={stageTitle} templateTitle={templates?.title}
+              now={now} onCancel={() => void submitCancel(run)} />
           ))}
         </div>
       )}

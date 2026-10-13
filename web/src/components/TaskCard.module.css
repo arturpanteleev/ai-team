@@ -1,37 +1,84 @@
+/* Карточка доски: статус-чип, название, два коротких поля и мелкий служебный блок. */
 .card {
   display: grid;
-  gap: 8px;
-  padding: 16px;
+  gap: 6px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--surface);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+.card:hover {
+  border-color: var(--border-strong);
 }
 
-.titleRow {
-  min-width: 0;
-  display: flex;
+.card:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chip {
+  justify-self: start;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-}
-
-.feature {
-  color: var(--text-primary);
+  max-width: 100%;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
   font-weight: 650;
-  overflow-wrap: anywhere;
+  line-height: 1.4;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
 }
 
-.task {
-  margin: 0;
+.chip::first-letter {
+  text-transform: uppercase;
+}
+
+.chip[data-tone='yellow'] {
+  background: var(--tint-yellow);
+  color: var(--ink-yellow);
+}
+
+.chip[data-tone='mustard'] {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.chip[data-tone='coral'] {
+  background: var(--tint-coral);
+  color: var(--ink-coral);
+}
+
+.chip[data-tone='green'] {
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.chip[data-tone='blue'] {
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+
+.chip[data-tone='danger'] {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.chip[data-tone='gray'] {
+  background: var(--surface-muted);
   color: var(--text-secondary);
-  font-size: 13px;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -42,64 +89,66 @@
 
 .meta {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.meta > div {
+.meta > div,
+.details > div {
   display: flex;
   gap: 6px;
+  min-width: 0;
 }
 
-.meta dt {
-  color: var(--text-muted);
+.meta dt,
+.details dt {
   flex: 0 0 auto;
+  color: var(--text-muted);
 }
 
-.meta dt::after {
+.meta dt::after,
+.details dt::after {
   content: ':';
 }
 
-.meta dd {
+.meta dd,
+.details dd {
   margin: 0;
-  color: var(--text-secondary);
   min-width: 0;
+  color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
 
-.footer {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  font-size: 12px;
+.service {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
   color: var(--text-muted);
 }
 
-.warningBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--text-muted);
+.details {
+  display: grid;
+  gap: 2px;
+  margin: 0;
 }
 
-.warningBadge[data-has-warnings='true'] {
-  background: var(--warning-bg);
-  color: var(--warning-fg);
-  font-weight: 650;
+.details code {
+  color: var(--text-secondary);
 }
 
-.started {
-  margin-left: auto;
+.ident {
+  font-size: 10.5px;
+  word-break: break-all;
 }
 
-.footer button {
-  min-height: 32px;
-  padding: 4px 10px;
+.cancel {
+  justify-self: start;
+  min-height: 28px;
+  padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-muted);
@@ -108,8 +157,8 @@
   font-size: 12px;
 }
 
-.footer button:hover {
-  border-color: var(--link);
+.cancel:hover {
+  border-color: var(--text-primary);
   color: var(--text-primary);
 }
 
@@ -119,11 +168,13 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .links a {
-  color: var(--link);
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
   overflow-wrap: anywhere;
 }
 

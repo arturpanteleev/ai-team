@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Tasks } from './Tasks';
@@ -68,17 +68,20 @@ describe('Tasks board', () => {
     expect((await screen.findAllByText('Аналитик')).length).toBeGreaterThan(0);
     expect(screen.getAllByText('Архитектор').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('Этап: Аналитик')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Задача Онбординг' })).toBeInTheDocument();
-    expect(screen.getByText('Идея роста')).toBeInTheDocument();
+    const card = screen.getByRole('link', { name: 'Задача Идея роста' });
+    expect(within(card).getByText('Идея роста')).toBeInTheDocument();
+    expect(within(card).getByText('в работе')).toBeInTheDocument();
     expect(screen.getByText('На этапе')).toBeInTheDocument();
-    expect(screen.getByTitle('Предупреждений: 2')).toBeInTheDocument();
+    expect(screen.getByText('2 предупреждения')).toBeInTheDocument();
     expect(screen.getByText('Участник')).toBeInTheDocument();
+    expect(screen.getByText('Онбординг')).toBeInTheDocument();
     expect(screen.getByLabelText('Внешние ссылки')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Копировать/ })).toBeNull();
   });
 
   it('фильтрует список запросом к task API и сбрасывает страницу', async () => {
     render(<Tasks />);
-    await screen.findByText('Онбординг');
+    await screen.findByText('Идея роста');
 
     fireEvent.change(screen.getByLabelText('Состояние'), { target: { value: 'waiting_for_approval' } });
 
@@ -88,7 +91,7 @@ describe('Tasks board', () => {
 
   it('обновляет данные по событию WebSocket без полной перезагрузки', async () => {
     render(<Tasks />);
-    await screen.findByText('Онбординг');
+    await screen.findByText('Идея роста');
     const calls = vi.mocked(getTaskRuns).mock.calls.length;
 
     ws.onEvent?.({ type: 'attempt_started' });
@@ -99,7 +102,7 @@ describe('Tasks board', () => {
   it('показывает список с пагинацией при большом числе задач', async () => {
     vi.mocked(getTaskRuns).mockResolvedValue({ runs: [boardRun], total: 120, limit: 50, offset: 0 });
     render(<Tasks />);
-    await screen.findByText('Онбординг');
+    await screen.findByText('Идея роста');
 
     fireEvent.click(screen.getByRole('button', { name: 'Список' }));
     expect(screen.getByLabelText('Список задач')).toBeInTheDocument();
@@ -111,12 +114,53 @@ describe('Tasks board', () => {
     expect(screen.getByText('51–100 из 120')).toBeInTheDocument();
   });
 
+  it('блокированные и ожидающие решения прогоны остаются на своём этапе или в «Ожидает решения»', async () => {
+    const blockedNoStage: TaskRun = { ...boardRun, run_id: 'run-blocked', status: 'blocked', current_stage: undefined, task: 'Блокер' };
+    const waitingOnStage: TaskRun = { ...boardRun, run_id: 'run-wait', status: 'waiting_for_approval', current_stage: 'architect', task: 'Ждёт решения' };
+    const queued: TaskRun = { ...boardRun, run_id: 'run-queued', status: 'queued', current_stage: undefined, task: 'Очередь' };
+    vi.mocked(getTaskRuns).mockResolvedValue({ runs: [blockedNoStage, waitingOnStage, queued], total: 3, limit: 50, offset: 0 });
+    render(<Tasks />);
+    await screen.findByText('Блокер');
+
+    const queue = screen.getByLabelText('Этап: В очереди');
+    expect(within(queue).getByText('Очередь')).toBeInTheDocument();
+    expect(within(queue).queryByText('Блокер')).toBeNull();
+    expect(within(screen.getByLabelText('Этап: Ожидает решения')).getByText('Блокер')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Этап: Архитектор')).getByText('Ждёт решения')).toBeInTheDocument();
+    expect(within(queue).queryByText('Этап: —')).toBeNull();
+  });
+
+  it('пустые колонки показывают короткий текст «Нет задач»', async () => {
+    render(<Tasks />);
+    await screen.findByText('Идея роста');
+
+    expect(screen.getByLabelText('Этап: В очереди')).toHaveTextContent('Нет задач');
+    expect(screen.getByLabelText('Этап: Архитектор')).toHaveTextContent('Нет задач');
+  });
+
+  it('заголовок карточки берёт идею из брифа без строки «# …»', async () => {
+    vi.mocked(getTaskRuns).mockResolvedValue({
+      runs: [{ ...boardRun, task: '# Бриф\n\nАвторизация форматов бота через Google' }], total: 1, limit: 50, offset: 0,
+    });
+    render(<Tasks />);
+
+    expect(await screen.findByRole('link', { name: 'Задача Авторизация форматов бота через Google' })).toBeInTheDocument();
+    expect(screen.queryByText('# Бриф')).toBeNull();
+  });
+
+  it('без идеи заголовок карточки — название шаблона', async () => {
+    vi.mocked(getTaskRuns).mockResolvedValue({ runs: [{ ...boardRun, task: undefined }], total: 1, limit: 50, offset: 0 });
+    render(<Tasks />);
+
+    expect(await screen.findByRole('link', { name: 'Задача Стандартный маршрут' })).toBeInTheDocument();
+  });
+
   it('отменяет задачу из карточки и показывает ошибку команды', async () => {
     const api = await import('../api');
     const queued: TaskRun = { ...boardRun, run_id: 'run-queued', status: 'queued', current_stage: undefined };
     vi.mocked(getTaskRuns).mockResolvedValue({ runs: [queued], total: 1, limit: 50, offset: 0 });
     render(<Tasks />);
-    await screen.findByText('Онбординг');
+    await screen.findByText('Идея роста');
 
     vi.mocked(api.cancelRun).mockRejectedValueOnce(new Error('нельзя отменить'));
     fireEvent.click(screen.getByRole('button', { name: 'Отменить' }));

@@ -702,7 +702,7 @@ func TestDeployReReadsRecordedBuildInsteadOfTrustingReceipt(t *testing.T) {
 
 func TestEnvFilteredRunnerDropsToken(t *testing.T) {
 	if _, err := exec.LookPath("env"); err != nil {
-		t.Skip("env is unavailable")
+		skipOutsideCI(t, "env is unavailable")
 	}
 	t.Setenv("AI_TEAM_TEST_TEAMCITY_TOKEN", testToken)
 	t.Setenv("AI_TEAM_TEST_KEEP", "kept")

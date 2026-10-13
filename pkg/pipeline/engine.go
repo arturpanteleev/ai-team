@@ -255,6 +255,7 @@ func (e *RunEngine) resolvePipelineForTask(runID, targetDir string, createPin, f
 	if err := pinned.Validate(registry); err != nil {
 		return nil, fmt.Errorf("pinned task template validation: %w", err)
 	}
+	markQuestionStages(pinned, e.pipeline.reg)
 	runPipeline := *e.pipeline
 	runPipeline.cfg = pinned
 	return &runPipeline, nil

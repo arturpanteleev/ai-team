@@ -1984,20 +1984,26 @@ func resumedTaskRepository(manifest evidence.RunManifest) (repository, reason st
 // markQuestionStages records which template stages run an agent with
 // ask_questions, so the compiled graph gets the BLOCKED → answer loop.
 func (p *Pipeline) markQuestionStages() {
-	if p.cfg == nil || p.reg == nil || len(p.cfg.Stages) == 0 {
+	markQuestionStages(p.cfg, p.reg)
+}
+
+// markQuestionStages is shared with runs that load a pinned template version:
+// the pinned config must carry the same question stages as the live one.
+func markQuestionStages(cfg *config.Config, reg *agent.Registry) {
+	if cfg == nil || reg == nil || len(cfg.Stages) == 0 {
 		return
 	}
-	for _, stage := range p.cfg.Stages {
+	for _, stage := range cfg.Stages {
 		if stage.Agent == "" {
 			continue
 		}
-		a, err := p.reg.Load(stage.Agent)
+		a, err := reg.Load(stage.Agent)
 		if err != nil || a == nil || !a.AskQuestions {
 			continue
 		}
-		if p.cfg.QuestionStages == nil {
-			p.cfg.QuestionStages = map[string]bool{}
+		if cfg.QuestionStages == nil {
+			cfg.QuestionStages = map[string]bool{}
 		}
-		p.cfg.QuestionStages[stage.ID] = true
+		cfg.QuestionStages[stage.ID] = true
 	}
 }

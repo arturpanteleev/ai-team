@@ -6,6 +6,8 @@ package cicd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -57,16 +59,30 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("%s %s returned HTTP %d", e.Method, e.Path, e.StatusCode)
 }
 
+// definiteRejectionStatuses are the HTTP answers that prove the provider
+// refused the request before acting on it: malformed request, missing or
+// insufficient credentials, unknown endpoint or build configuration, wrong
+// method or media type. Any other status (408, 409, 422, 429, 5xx, ...) may
+// come from a request that was partly or fully processed.
+var definiteRejectionStatuses = map[int]bool{
+	400: true, // Bad Request
+	401: true, // Unauthorized
+	403: true, // Forbidden
+	404: true, // Not Found
+	405: true, // Method Not Allowed
+	415: true, // Unsupported Media Type
+}
+
 // IsDefiniteRejection reports whether the provider explicitly refused the
-// request, so it had no effect: HTTP 4xx except 408 and 429. Everything else,
-// including a 2xx answer that could not be read, leaves the outcome unknown.
+// request, so it had no effect: only the allowlisted statuses 400, 401, 403,
+// 404, 405 and 415. Everything else, including any other 4xx and a 2xx answer
+// that could not be read, leaves the outcome unknown.
 func IsDefiniteRejection(err error) bool {
 	var status *HTTPStatusError
 	if !errors.As(err, &status) {
 		return false
 	}
-	return status.StatusCode >= 400 && status.StatusCode < 500 &&
-		status.StatusCode != 408 && status.StatusCode != 429
+	return definiteRejectionStatuses[status.StatusCode]
 }
 
 // IsTransient reports whether err may be retried by a status poll.
@@ -75,15 +91,37 @@ func IsTransient(err error) bool {
 	return errors.As(err, &transient)
 }
 
-var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+var (
+	commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+	deployIDPattern  = regexp.MustCompile(`^[0-9a-f]{32}$`)
+)
 
 // ValidCommitSHA accepts only a full lowercase SHA-1 or SHA-256 object name.
 func ValidCommitSHA(value string) bool { return commitSHAPattern.MatchString(value) }
 
+// ValidDeployID accepts the 128-bit lowercase hex identifier the controller
+// attaches to one trigger request.
+func ValidDeployID(value string) bool { return deployIDPattern.MatchString(value) }
+
+// NewDeployID returns a fresh random trigger identifier. It is unique per
+// trigger request, so a search by it can only find the build that request
+// queued, never an earlier or foreign build of the same revision.
+func NewDeployID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate deploy id: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
 // TriggerRequest identifies the exact merged commit to build and deploy.
+// DeployID is a unique identifier of this request, recorded before the
+// trigger, that the provider attaches to the build so a lost answer can be
+// recovered by search instead of a second trigger.
 type TriggerRequest struct {
 	CommitSHA string
 	Branch    string
+	DeployID  string
 }
 
 // Build is the provider-neutral view of one CI/CD build.
@@ -109,6 +147,16 @@ type Provider interface {
 	Cancel(ctx context.Context, build Build, reason string) error
 }
 
+// TriggeredBuildFinder is implemented by providers that can find the build a
+// trigger request queued when the answer to that request was lost.
+// Implementations MUST return only builds of the configured build
+// configuration that carry exactly request.DeployID and were pinned to
+// exactly request.CommitSHA; the caller re-checks all three. An empty result
+// does not prove that no build exists (the request may still be in flight).
+type TriggeredBuildFinder interface {
+	FindTriggered(ctx context.Context, request TriggerRequest) ([]Build, error)
+}
+
 // Clock is injected so tests drive timeouts without sleeping.
 type Clock interface {
 	Now() time.Time
@@ -131,6 +179,9 @@ type WaitOptions struct {
 	// CancelTimeout bounds the best-effort cancel request after timeout or
 	// cancellation of the parent context.
 	CancelTimeout time.Duration
+	// AttemptTimeout bounds one merge check in WaitForMerge
+	// (DefaultMergeCheckTimeout when zero).
+	AttemptTimeout time.Duration
 }
 
 // Wait polls the build until it finishes, the timeout elapses or ctx is
@@ -193,12 +244,26 @@ func finishedBuildError(build Build, expectedSHA string) error {
 		return fmt.Errorf("%w: build %s finished with status %s", ErrDeployRejected, build.ID, build.Status)
 	}
 	if build.Revision != expectedSHA {
-		return fmt.Errorf("%w: build %s used revision %q, expected %s", ErrDeployRejected, build.ID, build.Revision, expectedSHA)
+		return fmt.Errorf("%w: build %s used revision %q, expected %s", ErrDeployRejected, build.ID, displayRevision(build.Revision), expectedSHA)
 	}
 	if strings.TrimSpace(build.WebURL) == "" {
 		return fmt.Errorf("build %s has no web URL", build.ID)
 	}
 	return nil
+}
+
+// maxRevisionDisplay bounds a provider-reported revision in errors, receipts
+// and task events. The longest valid value is a 64-character SHA-256.
+const maxRevisionDisplay = 80
+
+// displayRevision bounds a provider-reported revision for errors and events.
+// A shortened value ends with "…", so it can never equal a valid SHA.
+func displayRevision(value string) string {
+	runes := []rune(value)
+	if len(runes) <= maxRevisionDisplay {
+		return value
+	}
+	return string(runes[:maxRevisionDisplay]) + "…"
 }
 
 func cancelBuild(ctx context.Context, provider Provider, build Build, reason string, timeout time.Duration) {

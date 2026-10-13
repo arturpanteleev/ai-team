@@ -607,3 +607,71 @@ outputs:
 		t.Fatalf("exactly one skip of the human stage must be recorded: skips=%+v err=%v", replayed.StageSkips, err)
 	}
 }
+
+// A skip requested for a human stage is honoured only when the human input
+// itself resolves with "skip". Resuming outside PhaseWaiting bypasses the
+// pending-input skip decision, so a recovered "submit" reaches executeGraph
+// and the visit must fail closed instead of silently clearing the request.
+func TestSkipRequestForHumanStageFailsWhenRecoveredInputWasSubmitted(t *testing.T) {
+	dir := env(t)
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "human-skip-after-submit-test",
+		Title:         "Human skip after submit test",
+		Stages: []config.TemplateStage{{
+			ID: "optional", Title: "Optional input", Function: "product_owner", Result: "md",
+			Executor: "human", Confirm: "auto", Skippable: true,
+		}},
+	}
+	registry := agent.NewFS(fstest.MapFS{})
+	p := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	started, runErr := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "submit optional input", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(runErr, &required) {
+		t.Fatalf("human stage should wait for input: result=%+v err=%v", started, runErr)
+	}
+	pending, err := store.Load(started.RunID, required.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Decide(started.RunID, pending.ID, approval.Decision{
+		ActorID: "alice", ActorRole: "product_owner", Action: "submit", Comment: "# Submitted document\n", SubjectHash: pending.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Crash inside the submitted attempt: the lifecycle is left in PhaseRunning
+	// at "optional" and the resolved submit is recovered from evidence.
+	factory := &humanCrashEvidenceFactory{point: "before-publish"}
+	crashing := New(cfg, registry, WithApprovalStore(store), WithEvidenceStoreFactory(factory),
+		WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	expectHumanCrash(t, func() {
+		_, _ = resumeHumanCrashRun(t, crashing, dir, started.RunID)
+	})
+	if !factory.crashed {
+		t.Fatal("crash was not injected inside the submitted human attempt")
+	}
+	lifecycles, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := lifecycles.Load(started.RunID)
+	if err != nil || state.Phase == lifecycle.PhaseWaiting || state.NextStage != "optional" {
+		t.Fatalf("fixture must resume outside PhaseWaiting at the human stage: state=%+v err=%v", state, err)
+	}
+
+	resumed := New(cfg, registry, WithApprovalStore(store), WithPrompter(&scriptedPrompter{}), WithNotifier(&captureNotifier{}))
+	result, err := resumed.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: started.RunID, TargetDir: dir,
+		skipStageID: "optional", skipReason: "No document is needed for this task.",
+	})
+	if err == nil || !strings.Contains(err.Error(), `stage "optional" did not record the requested skip`) {
+		t.Fatalf("a submitted human input must not satisfy a skip request: result=%+v err=%v", result, err)
+	}
+	if result.Outcome == workflow.RunCompleted {
+		t.Fatalf("run must not complete when the requested skip was not recorded: %+v", result)
+	}
+}

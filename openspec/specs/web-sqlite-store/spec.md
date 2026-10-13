@@ -25,6 +25,18 @@ Schema migrations MUST иметь номера в `schema_migrations` и при�
 - **КОГДА** открывается БД со старой таблицей pipeline_runs/stages
 - **ТОГДА** недостающие identity и evidence columns MUST быть добавлены идемпотентно
 
+#### Scenario: Already migrated database
+- **КОГДА** открывается БД, у которой `MAX(version)` в `schema_migrations` равна версии бинарника
+- **ТОГДА** store MUST только прочитать версию и MUST NOT брать write-lock, поэтому параллельные открытия занятой БД не получают `SQLITE_BUSY`
+
+#### Scenario: Migration required
+- **КОГДА** версия БД меньше версии бинарника
+- **ТОГДА** миграция MUST выполняться в `BEGIN IMMEDIATE`, а версия MUST перечитываться под блокировкой, чтобы параллельный процесс не мигрировал повторно
+
+#### Scenario: Newer database
+- **КОГДА** версия БД больше версии бинарника
+- **ТОГДА** store MUST отказаться открыть БД до любой записи в неё
+
 ### Requirement: SQLite concurrency policy
 Store MUST включать foreign keys, busy timeout и WAL для файловой БД.
 

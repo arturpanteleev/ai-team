@@ -193,12 +193,42 @@ func TestEmailRefusesCredentialsWithoutTLSToRemoteHost(t *testing.T) {
 		return dialer.DialContext(ctx, network, server.addr())
 	}
 	err := channel.Send(context.Background(), sampleNotification())
-	if err == nil || err.Error() != "email: SMTP auth refused: server does not offer TLS" {
+	if err == nil || err.Error() != "email: SMTP starttls refused: server does not offer TLS" {
 		t.Fatalf("error=%v", err)
 	}
 	select {
 	case transcript := <-server.transcripts:
 		t.Fatalf("message was sent without TLS: %+v", transcript)
 	default:
+	}
+}
+
+func TestEmailRequiresSTARTTLSForRemoteHostWithoutCredentials(t *testing.T) {
+	server := startFakeSMTP(t, nil)
+	_, port, _ := net.SplitHostPort(server.addr())
+	channel := NewEmailChannel("leads", "smtp://smtp.example.test:"+port, "bot@example.test", []string{"lead@example.test"})
+	channel.dialer = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, server.addr())
+	}
+	err := channel.Send(context.Background(), sampleNotification())
+	if err == nil || err.Error() != "email: SMTP starttls refused: server does not offer TLS" {
+		t.Fatalf("error=%v", err)
+	}
+	select {
+	case transcript := <-server.transcripts:
+		t.Fatalf("message was sent without TLS: %+v", transcript)
+	default:
+	}
+}
+
+func TestEmailAllowsPlainSMTPOnlyToLoopback(t *testing.T) {
+	for host, want := range map[string]bool{
+		"localhost": true, "LOCALHOST": true, "127.0.0.1": true, "127.10.0.1": true, "::1": true,
+		"smtp.example": false, "10.0.0.1": false, "localhost.example": false, "0.0.0.0": false,
+	} {
+		if got := isLoopbackHost(host); got != want {
+			t.Errorf("isLoopbackHost(%q)=%v, want %v", host, got, want)
+		}
 	}
 }

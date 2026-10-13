@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -216,4 +217,110 @@ func TestRunWithoutNotificationsConfigIsUnchanged(t *testing.T) {
 	var none *runNotifications
 	none.finish(time.Second) // a nil worker is a no-op
 	none.track("run")
+}
+
+func writeSchedulerNotificationConfig(t *testing.T, target string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "schema_version: 5\ntemplate: sched-test\ntitle: Scheduler notifications\nstages:\n" +
+		"  - id: analyst\n    title: Analyst\n    function: po\n    result: md\n    executor: human\n" +
+		"notifications:\n  channels:\n    - name: ops-hook\n      type: webhook\n      url_env: RUN_NOTIFY_URL\n      events: [stage_stalled]\n"
+	if err := os.WriteFile(filepath.Join(target, ".ai-team", "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// scheduler-worker reads the project config and delivers events of any run in
+// its database through its own durable cursor.
+func TestSchedulerWorkerDeliversNotificationsFromProjectConfig(t *testing.T) {
+	hook, hits := newRunHook(t, http.StatusNoContent)
+	target := t.TempDir()
+	writeSchedulerNotificationConfig(t, target)
+	registry, err := newAgentRegistryWithPaths(target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := openRunStore(t, filepath.Join(t.TempDir(), "web.db"))
+	stopped := false
+	cleanup := startSchedulerNotifications(context.Background(), target, registry, s, runHookEnv(hook), hook.Client(), func() { stopped = true })
+	if _, found, err := s.IntegrationCursor(schedulerNotifierIntegration); err != nil || !found {
+		t.Fatalf("scheduler-worker must establish its durable cursor at start: found=%v err=%v", found, err)
+	}
+	delivered := appendRunEvent(t, s, "queued-run", "stage_stalled")
+	appendRunEvent(t, s, "queued-run", "check_error") // not subscribed
+	cleanup()
+	if !stopped {
+		t.Fatal("cleanup must restore default signal handling")
+	}
+	if events, _ := hits.snapshot(); len(events) != 1 || events[0] != delivered {
+		t.Fatalf("scheduler hits=%v, want [%d]", events, delivered)
+	}
+	if cursor, _, err := s.IntegrationCursor(schedulerNotifierIntegration); err != nil || cursor < delivered {
+		t.Fatalf("cursor=%d err=%v, want at least %d", cursor, err, delivered)
+	}
+}
+
+// The flush runs after the first Ctrl-C. Signal handling must be restored
+// before it starts, so a second Ctrl-C can interrupt a slow flush: here the
+// channel answers only once stopSignals has been called.
+func TestSchedulerWorkerRestoresSignalsBeforeFlush(t *testing.T) {
+	released := make(chan struct{})
+	var deliveredOnce sync.Once
+	delivered := make(chan struct{})
+	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-released:
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		deliveredOnce.Do(func() { close(delivered) })
+	}))
+	defer hook.Close()
+	target := t.TempDir()
+	writeSchedulerNotificationConfig(t, target)
+	registry, err := newAgentRegistryWithPaths(target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := openRunStore(t, filepath.Join(t.TempDir(), "web.db"))
+	cleanup := startSchedulerNotifications(context.Background(), target, registry, s, runHookEnv(hook), hook.Client(), func() { close(released) })
+	appendRunEvent(t, s, "queued-run", "stage_stalled")
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		cleanup()
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush waited on the channel: signals were not restored before flushing")
+	}
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("flush must deliver the pending event")
+	}
+}
+
+func TestSchedulerWorkerWithoutNotificationsStillRestoresSignals(t *testing.T) {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, ".ai-team"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newAgentRegistryWithPaths(target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := openRunStore(t, filepath.Join(t.TempDir(), "web.db"))
+	stopped := false
+	startSchedulerNotifications(context.Background(), target, registry, s, func(string) string { return "" }, nil, func() { stopped = true })()
+	if !stopped {
+		t.Fatal("cleanup must call stopSignals even when notifications are disabled")
+	}
+	if _, found, _ := s.IntegrationCursor(schedulerNotifierIntegration); found {
+		t.Fatal("disabled notifications must not create a cursor")
+	}
 }

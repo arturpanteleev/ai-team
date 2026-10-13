@@ -756,7 +756,7 @@ func cmdSchedulerWorker() {
 	if notificationRegistry, registryErr := newAgentRegistryWithPaths(target, workerAgentPaths); registryErr != nil {
 		fmt.Fprintf(os.Stderr, "⚠ уведомления scheduler-worker отключены: %v\n", registryErr)
 	} else {
-		defer startSchedulerNotifications(ctx, target, notificationRegistry, controllerRecorderStore, os.Getenv)()
+		defer startSchedulerNotifications(ctx, target, notificationRegistry, controllerRecorderStore, os.Getenv, nil, stop)()
 	}
 	for {
 		claimed, pollErr := poller.RunOnce(ctx, *workerID)

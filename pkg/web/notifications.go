@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -58,24 +59,49 @@ func NotificationDispatcherFromConfig(cfg *config.Config, getenv func(string) st
 }
 
 // integrationStartCursor returns where an integration resumes. On first enable
-// the cursor starts at the current tail so old history is not replayed.
-func integrationStartCursor(s *store.Store, integration string, tail int64) int64 {
+// the cursor starts at the current tail so old history is not replayed. An
+// unreadable or unwritable cursor is an error: the caller must not start the
+// consumer, because replaying from the beginning would resend every past
+// comment and notification, and starting at the tail without a durable
+// position could skip events after a restart.
+func integrationStartCursor(s *store.Store, integration string, tail int64) (int64, error) {
 	storedCursor, found, err := s.IntegrationCursor(integration)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s cursor unavailable; replaying from the beginning: %v\n", integration, err)
-		return 0
+		return 0, fmt.Errorf("%s cursor unavailable: %w", integration, err)
 	}
 	if found {
-		return storedCursor
+		return storedCursor, nil
 	}
 	if err := s.SetIntegrationCursor(integration, tail); err != nil {
-		fmt.Fprintf(os.Stderr, "%s cursor could not be initialized: %v\n", integration, err)
-		// Until the initial position is durable, replay from the beginning.
-		// Starting at the tail here would permanently skip events if the
-		// process stopped before it could establish the subscription cursor.
-		return 0
+		return 0, fmt.Errorf("%s cursor could not be initialized: %w", integration, err)
 	}
-	return tail
+	return tail, nil
+}
+
+// notificationRetentionInterval is how often the web server prunes old
+// delivery records.
+const notificationRetentionInterval = 6 * time.Hour
+
+// pruneNotificationDeliveries removes final delivery records older than
+// store.NotificationDeliveryRetention. Live claims are kept.
+func (s *Server) pruneNotificationDeliveries(now time.Time) {
+	if _, err := s.store.PruneNotificationDeliveries(now.Add(-store.NotificationDeliveryRetention)); err != nil {
+		fmt.Fprintf(os.Stderr, "notification delivery retention: %v\n", err)
+	}
+}
+
+func (s *Server) monitorNotificationRetention(ctx context.Context) {
+	defer s.eventWorkers.Done()
+	ticker := time.NewTicker(notificationRetentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.pruneNotificationDeliveries(now.UTC())
+		}
+	}
 }
 
 // deliverNotification sends one durable event to subscribed channels for the
@@ -96,6 +122,7 @@ type NotificationWorker struct {
 	include    func(store.Event) bool
 	ack        func(int64) error
 	poll       time.Duration
+	initErr    error
 
 	mu     sync.Mutex // serializes drains and guards cursor
 	cursor int64
@@ -112,14 +139,16 @@ func WithNotificationFilter(include func(store.Event) bool) NotificationWorkerOp
 
 // WithDurableNotificationCursor persists the worker's position under the
 // given integration name. On first enable the position starts at the current
-// event tail, as for the web server.
+// event tail, as for the web server. If the cursor cannot be read or
+// initialized, NewNotificationWorker fails instead of replaying history.
 func WithDurableNotificationCursor(integration string) NotificationWorkerOption {
 	return func(w *NotificationWorker) {
-		tail, err := w.store.LatestEventCursor()
+		cursor, err := integrationStartCursor(w.store, integration, w.cursor)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s cursor unavailable; starting at the beginning: %v\n", integration, err)
+			w.initErr = err
+			return
 		}
-		w.cursor = integrationStartCursor(w.store, integration, tail)
+		w.cursor = cursor
 		w.ack = func(cursor int64) error { return w.store.SetIntegrationCursor(integration, cursor) }
 	}
 }
@@ -139,6 +168,9 @@ func NewNotificationWorker(s *store.Store, dispatcher *notifier.Dispatcher, opti
 	worker := &NotificationWorker{store: s, dispatcher: dispatcher, cursor: tail, poll: 250 * time.Millisecond}
 	for _, option := range options {
 		option(worker)
+	}
+	if worker.initErr != nil {
+		return nil, worker.initErr
 	}
 	return worker, nil
 }
@@ -252,7 +284,10 @@ func (w *NotificationWorker) Deliver(ctx context.Context, stored store.Event) bo
 		notification.TaskID = run.ID
 	}
 	err := w.dispatcher.Dispatch(ctx, notification, w.store, func(channel, reason string) error {
-		return recordIntegrationError(w.store, stored, notifierIntegrationName, reason, map[string]any{"channel": channel})
+		// One warning per channel/event: if the delivery record cannot be
+		// written after the warning, the replay must not repeat it.
+		dedupe := "integration_error:" + notifierIntegrationName + ":" + channel + ":" + strconv.FormatInt(stored.ID, 10)
+		return recordIntegrationError(w.store, stored, notifierIntegrationName, reason, map[string]any{"channel": channel}, dedupe)
 	})
 	if err != nil {
 		if ctx.Err() == nil && !errors.Is(err, notifier.ErrDeliveryInProgress) {

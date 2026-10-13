@@ -2,8 +2,11 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -74,7 +77,7 @@ func TestTrackerConsumerReplaysDurableEventsAfterRestart(t *testing.T) {
 }
 
 func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
-	requests := make(chan trackerHTTPRequest, 4)
+	requests := make(chan trackerHTTPRequest, 5)
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		username, password, _ := r.BasicAuth()
@@ -87,6 +90,8 @@ func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
 			_, _ = w.Write([]byte(`{"transitions":[{"id":"44","name":"Complete","to":{"name":"Done"}}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-19/transitions":
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-19/comment":
+			_, _ = w.Write([]byte(`{"comments":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-19/comment":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":"comment-19"}`))
@@ -115,19 +120,20 @@ func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := make([]trackerHTTPRequest, 0, 4)
-	for len(got) < 4 {
+	got := make([]trackerHTTPRequest, 0, 5)
+	for len(got) < 5 {
 		select {
 		case request := <-requests:
 			got = append(got, request)
 		case <-time.After(5 * time.Second):
-			t.Fatalf("Jira requests from attempt_finished event=%+v, want 4 requests", got)
+			t.Fatalf("Jira requests from attempt_finished event=%+v, want 5 requests", got)
 		}
 	}
 	wantPaths := []string{
 		"GET /rest/api/3/issue/APP-19",
 		"GET /rest/api/3/issue/APP-19/transitions",
 		"POST /rest/api/3/issue/APP-19/transitions",
+		"GET /rest/api/3/issue/APP-19/comment",
 		"POST /rest/api/3/issue/APP-19/comment",
 	}
 	for index, request := range got {
@@ -141,9 +147,9 @@ func TestTaskEventDrivesJiraStatusAndComment(t *testing.T) {
 	if !strings.Contains(got[2].Body, `"id":"44"`) {
 		t.Fatalf("transition body=%s", got[2].Body)
 	}
-	for _, want := range []string{"https://ai-team.example/pipelines/", "Stage result: qa", "status=passed", "outcome=passed"} {
-		if !strings.Contains(got[3].Body, want) {
-			t.Errorf("Jira comment missing %q: %s", want, got[3].Body)
+	for _, want := range []string{"https://ai-team.example/pipelines/", "Stage result: qa", "status=passed", "outcome=passed", "ai-team attempt: attempt-qa"} {
+		if !strings.Contains(got[4].Body, want) {
+			t.Errorf("Jira comment missing %q: %s", want, got[4].Body)
 		}
 	}
 }
@@ -238,4 +244,56 @@ func createJiraTask(t *testing.T, srv *Server, runID string, links []string) *st
 		t.Fatal(err)
 	}
 	return run
+}
+
+// echoingTransport fails like a misbehaving proxy whose error echoes the
+// request URL and Authorization header.
+type echoingTransport struct{}
+
+func (echoingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("proxy refused %s (%s)", request.URL, request.Header.Get("Authorization"))}
+}
+
+func TestJiraTransportErrorDoesNotLeakTokenIntoIntegrationError(t *testing.T) {
+	const token = "jira-secret-token-456"
+	target := t.TempDir()
+	adapter := tracker.NewJiraAdapter(config.JiraConfig{
+		BaseURL: "https://jira.example/secret-context", Email: "bot@example.test", TokenEnv: "JIRA_TOKEN",
+		WebBaseURL: "https://ai-team.example",
+	}, token, &http.Client{Transport: echoingTransport{}})
+	srv, err := NewServer(":memory:", "", target, WithTargetDir(target), WithTrackerAdapter(adapter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	run := createJiraTask(t, srv, "jira-transport-run", []string{"APP-30"})
+	events := srv.store.SubscribeEvents(context.Background(), 8)
+	if err := srv.store.AppendEventNext(&store.Event{
+		RunID: run.RunID, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-transport",
+		Timestamp: time.Now().UTC(), DataJSON: `{"status":"passed","outcome":"passed"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var integrationError string
+	deadline := time.After(5 * time.Second)
+	for integrationError == "" {
+		select {
+		case event := <-events:
+			if event.Type == "integration_error" {
+				encoded, _ := json.Marshal(event.Data)
+				integrationError = string(encoded)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for integration_error")
+		}
+	}
+	basic := base64.StdEncoding.EncodeToString([]byte("bot@example.test:" + token))
+	for _, secret := range []string{token, basic, "secret-context", "jira.example"} {
+		if strings.Contains(integrationError, secret) {
+			t.Fatalf("integration_error leaks %q: %s", secret, integrationError)
+		}
+	}
+	if !strings.Contains(integrationError, "connection failed") {
+		t.Fatalf("integration_error lost the failure class: %s", integrationError)
+	}
 }

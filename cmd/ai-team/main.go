@@ -2152,15 +2152,59 @@ func cmdList() {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
 
+	cfg := loadListConfig(target)
+
 	logging.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
 	agents, failures := reg.List()
 	for _, a := range agents {
-		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
+		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, effectiveAgentCLI(cfg, a.Name, a.CLI), a.Source, a.Description)
 	}
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
 	}
+}
+
+// loadListConfig читает проектный .ai-team/config.yaml целевого каталога, чтобы
+// `list` показывал рантайм с учётом переопределений. Отсутствие файла — законный
+// случай (nil). Битый файл не валит список: выводится предупреждение, а CLI
+// показываются по определениям агентов.
+func loadListConfig(target string) *config.Config {
+	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
+	if _, err := os.Lstat(cfgPath); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s config.yaml недоступен: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		}
+		return nil
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s config.yaml не загружен, CLI показаны по определениям агентов: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		return nil
+	}
+	return cfg
+}
+
+// effectiveAgentCLI повторяет разрешение рантайма из пайплайна: CLI, заданный
+// в конфиге для этапа, который исполняет агент (или для проверки, адресованной
+// агенту по имени), перекрывает CLI из определения агента. Глобальный `cli`
+// конфига подставляется в AgentConfig, поэтому учитывается автоматически.
+func effectiveAgentCLI(cfg *config.Config, agentName, definedCLI string) string {
+	if cfg == nil {
+		return definedCLI
+	}
+	candidates := []string{agentName}
+	for _, stage := range cfg.Stages {
+		if stage.ID != "" && cfg.RegistryAgentName(stage.ID) == agentName {
+			candidates = append(candidates, stage.ID)
+		}
+	}
+	for _, name := range candidates {
+		if ac := cfg.AgentConfig(name); ac != nil && ac.CLI != "" {
+			return ac.CLI
+		}
+	}
+	return definedCLI
 }
 
 // cmdVerify проверяет tamper-evident evidence терминального run или

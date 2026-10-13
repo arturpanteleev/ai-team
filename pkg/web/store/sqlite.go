@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -1011,7 +1011,7 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS oidc_login_states (
 			state_hash TEXT PRIMARY KEY, nonce TEXT NOT NULL, code_verifier TEXT NOT NULL,
-			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
+			previous_session_hash TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
 		// Version 11 (B-86): draft idea backlog for auto pickup.
 		`CREATE TABLE IF NOT EXISTS backlog_items (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, idea TEXT NOT NULL, feature TEXT NOT NULL,
@@ -1023,7 +1023,7 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		// SQLite walks the whole events table for every page. IF NOT EXISTS
 		// keeps reopening an upgraded file a no-op.
 		`CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_uid, id)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {
@@ -1046,6 +1046,29 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return err
 		}
+	}
+	return migrateV13(ctx, tx)
+}
+
+// migrateV13 (BL-31) adds the SSO account binding of team members, the
+// previous-session digest of pending sign-ins and, for local databases
+// created by an early version 10 build, web_sessions.credential_binding. The
+// empty credential_binding default never matches a server binding, so such
+// sessions are rejected (fail closed). Every statement is idempotent.
+func migrateV13(ctx context.Context, tx schemaQuerier) error {
+	for _, column := range []struct{ table, name, declaration string }{
+		{"web_sessions", "credential_binding", "TEXT NOT NULL DEFAULT ''"},
+		{"oidc_login_states", "previous_session_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"team_members", "oidc_issuer", "TEXT NOT NULL DEFAULT ''"},
+		{"team_members", "oidc_subject", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.declaration); err != nil {
+			return err
+		}
+	}
+	// One provider account binds to at most one team member.
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_team_members_oidc ON team_members(oidc_issuer, oidc_subject) WHERE oidc_subject <> ''`); err != nil {
+		return err
 	}
 	return nil
 }

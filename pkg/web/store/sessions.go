@@ -44,7 +44,12 @@ type WebSession struct {
 type OIDCLoginState struct {
 	Nonce        string
 	CodeVerifier string
-	ExpiresAt    time.Time
+	// PreviousSessionHash is the digest of the session cookie the browser sent
+	// when it started sign-in, or empty. The callback revokes that session: the
+	// SameSite=Strict session cookie is not sent on the cross-site navigation
+	// back from the provider, so the callback cannot read it itself.
+	PreviousSessionHash string
+	ExpiresAt           time.Time
 }
 
 // SessionDigest returns the storage key for a raw session or state token.
@@ -119,15 +124,23 @@ func (s *Store) ExtendWebSession(rawToken string, expiresAt time.Time) error {
 	return err
 }
 
+// RevokeWebSessionDigest marks the session stored under digest revoked.
+func (s *Store) RevokeWebSessionDigest(digest string, now time.Time) error {
+	if digest == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE web_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`,
+		now.UnixMilli(), digest)
+	return err
+}
+
 // RevokeWebSession marks a session revoked. Revoking an unknown session is
 // not an error: the outcome (no usable session) is the same.
 func (s *Store) RevokeWebSession(rawToken string, now time.Time) error {
 	if rawToken == "" {
 		return nil
 	}
-	_, err := s.db.Exec(`UPDATE web_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`,
-		now.UnixMilli(), SessionDigest(rawToken))
-	return err
+	return s.RevokeWebSessionDigest(SessionDigest(rawToken), now)
 }
 
 // SaveOIDCLoginState stores a pending sign-in under the digest of state. At
@@ -152,8 +165,8 @@ func (s *Store) SaveOIDCLoginState(state string, value OIDCLoginState, now time.
 	if maxPending <= 0 || pending >= maxPending {
 		return ErrTooManyPendingLogins
 	}
-	if _, err = tx.Exec(`INSERT INTO oidc_login_states(state_hash,nonce,code_verifier,created_at,expires_at) VALUES(?,?,?,?,?)`,
-		SessionDigest(state), value.Nonce, value.CodeVerifier, now.UnixMilli(), value.ExpiresAt.UnixMilli()); err != nil {
+	if _, err = tx.Exec(`INSERT INTO oidc_login_states(state_hash,nonce,code_verifier,previous_session_hash,created_at,expires_at) VALUES(?,?,?,?,?,?)`,
+		SessionDigest(state), value.Nonce, value.CodeVerifier, value.PreviousSessionHash, now.UnixMilli(), value.ExpiresAt.UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -168,8 +181,8 @@ func (s *Store) ConsumeOIDCLoginState(state string, now time.Time) (OIDCLoginSta
 	var value OIDCLoginState
 	var expires int64
 	// DELETE ... RETURNING consumes the row atomically: a state is usable once.
-	err := s.db.QueryRow(`DELETE FROM oidc_login_states WHERE state_hash=? RETURNING nonce,code_verifier,expires_at`,
-		SessionDigest(state)).Scan(&value.Nonce, &value.CodeVerifier, &expires)
+	err := s.db.QueryRow(`DELETE FROM oidc_login_states WHERE state_hash=? RETURNING nonce,code_verifier,previous_session_hash,expires_at`,
+		SessionDigest(state)).Scan(&value.Nonce, &value.CodeVerifier, &value.PreviousSessionHash, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OIDCLoginState{}, ErrOIDCLoginStateNotFound
 	}

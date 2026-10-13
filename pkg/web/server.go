@@ -175,6 +175,7 @@ type Server struct {
 	localAuth           bool
 	oidc                OIDCProvider
 	oidcMaxPending      int
+	oidcLoginLimiter    *loginRateLimiter
 	processBindingKey   []byte
 	now                 func() time.Time
 	streamID            string
@@ -220,6 +221,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		artifactRoot:      absRoot,
 		stallPollInterval: time.Minute,
 		oidcMaxPending:    oidcMaxPendingLogins,
+		oidcLoginLimiter:  newLoginRateLimiter(oidcLoginsPerIP, oidcStateTTL, oidcRateLimitKeys),
 		processBindingKey: []byte(bindingKey),
 	}
 	for _, option := range options {

@@ -718,3 +718,323 @@ func TestAuthorshipRecordingFailuresFailClosed(t *testing.T) {
 		}
 	})
 }
+
+// stageAgentRequests counts recorded agent launches of stageID by actorID.
+func stageAgentRequests(t *testing.T, fixture functionPermissionFixture, runID, stageID, actorID string) int {
+	t.Helper()
+	events, err := fixture.srv.allRunEvents(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Type == stageAgentRequestedEvent && event.Stage == stageID && event.Actor == actorID {
+			count++
+		}
+	}
+	return count
+}
+
+func resolvedGate(id, from string, targets map[string]string, action string, created time.Time) approval.PendingApproval {
+	actions := make([]string, 0, len(targets))
+	for name := range targets {
+		actions = append(actions, name)
+	}
+	return approval.PendingApproval{
+		ID: id, RunID: "run", AttemptID: "attempt-0", FromStage: from, ToStage: targets[action],
+		Trigger: "stage_completed", Status: approval.StatusResolved, ResolvedAction: action, SubjectHash: testSubjectHash,
+		RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny, Actions: actions, Targets: targets,
+		CreatedAt: created, ResolvedAt: created.Add(time.Minute),
+	}
+}
+
+func TestResumeRecordsAgentLaunchInEveryResumablePhase(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	const resumePath = "/api/runs/run-r/resume"
+	base := time.Now().UTC().Add(-time.Hour)
+
+	t.Run("interrupted running checkpoint of an agent stage", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseRunning, NextStage: "build"}})
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("resume: %d %s", response.Code, response.Body.String())
+		}
+		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 1 {
+			t.Fatalf("running resume must record the launcher, got %d", got)
+		}
+	})
+
+	t.Run("waiting checkpoint resolved into the agent stage", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true,
+			[]approval.PendingApproval{resolvedGate("gate-0", "spec", map[string]string{"approve": "build"}, "approve", base)},
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "spec", PendingApprovalID: "gate-0"}})
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("resume: %d %s", response.Code, response.Body.String())
+		}
+		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 1 {
+			t.Fatalf("resolved target agent stage must record the launcher, got %d", got)
+		}
+	})
+
+	t.Run("waiting checkpoint at the agent stage", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true,
+			[]approval.PendingApproval{resolvedGate("gate-0", "build", map[string]string{"approve": "accept"}, "approve", base)},
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-0"}})
+		if response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("resume: %d %s", response.Code, response.Body.String())
+		}
+		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 1 {
+			t.Fatalf("waiting NextStage agent stage must record the launcher, got %d", got)
+		}
+	})
+
+	t.Run("unresolved waiting approval records nothing", func(t *testing.T) {
+		gate := resolvedGate("gate-0", "spec", map[string]string{"approve": "build"}, "", base)
+		gate.Status, gate.ResolvedAt = approval.StatusPending, time.Time{}
+		fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{gate},
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "spec", PendingApprovalID: "gate-0"}})
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusConflict || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("unresolved approval must be a conflict without Resume: %d calls=%d %s",
+				response.Code, fixture.controller.resumeCalls, response.Body.String())
+		}
+		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 0 {
+			t.Fatalf("pending approval does not launch the agent, got %d records", got)
+		}
+	})
+}
+
+func TestResumeLaunchRecordingFailsClosed(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	const resumePath = "/api/runs/run-r/resume"
+
+	t.Run("unreadable lifecycle checkpoint", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		statePath := filepath.Join(fixture.target, ".ai-team", "state", "runs", "run-r.json")
+		if err := os.WriteFile(statePath, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("unreadable lifecycle must refuse resume: %d calls=%d %s", response.Code, fixture.controller.resumeCalls, response.Body.String())
+		}
+	})
+
+	t.Run("unreadable approvals of a waiting run", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-0"}})
+		fixture.controller.approvalsErr = os.ErrPermission
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("unreadable approvals must refuse resume: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("waiting approval missing", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-0"}})
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("missing approval must refuse resume: %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("corrupt pinned template", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseResumable, NextStage: "build"}})
+		corruptPinnedTemplate(t, fixture, "run-r")
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusServiceUnavailable || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("corrupt template must refuse resume: %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestTaskExecutorSwitchFailsClosedWithoutEvent(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	fixture := newTemplateFixture(t, agentStageTemplate, true,
+		[]approval.PendingApproval{buildInputApproval("input-1", approval.StatusPending, time.Now().UTC())},
+		map[string]lifecycle.State{"run-x": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "input-1"}})
+	request := fixture.sessionRequestAs(t, "a@example.test", developer, http.MethodPost, "/api/runs/run-x/stages/build/executor", `{"executor":"agent"}`)
+	breakTablesForTest(t, fixture.dbPath, "events")
+	response := httptest.NewRecorder()
+	fixture.srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || fixture.controller.calls["executor"] != 0 {
+		t.Fatalf("unrecorded executor switch must not reach the controller: %d calls=%v %s", response.Code, fixture.controller.calls, response.Body.String())
+	}
+}
+
+// TestSelfApprovalVisitBoundary pins the visit start to the resolution time of
+// the previous confirmation: an authorship event at that instant belongs to
+// the previous visit, one a millisecond later to the confirmed visit.
+func TestSelfApprovalVisitBoundary(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	confirmPath := "/api/runs/run-confirm/stages/build/confirm"
+	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Millisecond)
+	for _, test := range []struct {
+		name   string
+		offset time.Duration
+		want   int
+	}{
+		{"event at the previous resolution belongs to the previous visit", 0, http.StatusAccepted},
+		{"event before the previous resolution belongs to the previous visit", -time.Millisecond, http.StatusAccepted},
+		{"event after the previous resolution belongs to the confirmed visit", time.Millisecond, http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previous := agentConfirmApproval(base)
+			previous.ID, previous.Status, previous.ResolvedAction = "gate-0", approval.StatusResolved, "approve"
+			previous.ResolvedAt = base.Add(10 * time.Minute)
+			fixture := newTemplateFixture(t, agentStageTemplate, true,
+				[]approval.PendingApproval{previous, agentConfirmApproval(base.Add(time.Hour))},
+				map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"}})
+			if err := fixture.srv.appendRunEventRequired("run-confirm", stageAgentRequestedEvent, previous.ResolvedAt.Add(test.offset),
+				map[string]any{"stage_id": "build", "actor_id": "b@example.test"}); err != nil {
+				t.Fatal(err)
+			}
+			response := fixture.requestAs(t, "b@example.test", developer, http.MethodPost, confirmPath, "")
+			if response.Code != test.want {
+				t.Fatalf("status %d, want %d: %s", response.Code, test.want, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestUnreadableRunEventsRefuseOtherwiseValidConfirmation(t *testing.T) {
+	developer := []cloudidentity.Role{cloudidentity.RoleDeveloper}
+	confirmPath := "/api/runs/run-confirm/stages/build/confirm"
+	setup := func() functionPermissionFixture {
+		return newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{agentConfirmApproval(time.Now().UTC())},
+			map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"}})
+	}
+	// Control: the same non-author confirms when events are readable.
+	if response := setup().requestAs(t, "c@example.test", developer, http.MethodPost, confirmPath, ""); response.Code != http.StatusAccepted {
+		t.Fatalf("control confirmation: %d %s", response.Code, response.Body.String())
+	}
+	fixture := setup()
+	request := fixture.sessionRequestAs(t, "c@example.test", developer, http.MethodPost, confirmPath, "")
+	breakTablesForTest(t, fixture.dbPath, "events")
+	response := httptest.NewRecorder()
+	fixture.srv.router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || fixture.controller.decisionCalls != 0 ||
+		!strings.Contains(response.Body.String(), errSelfApprovalUnverifiable.Error()) {
+		t.Fatalf("unreadable events must refuse as unverifiable: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGrillEditRequiresStageExecutorFunction(t *testing.T) {
+	reviewer := []cloudidentity.Role{cloudidentity.RoleReviewer}
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	const resultPath = "stages/build/result.md"
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "question", Round: 1,
+		ArtifactRevisions: map[string]string{resultPath: "rev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grill := grillApproval("grill-1", time.Now().UTC())
+	grill.Status, grill.Payload = approval.StatusPending, payload
+	fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{grill},
+		map[string]lifecycle.State{"run-g": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "grill-1"}})
+	latest, err := fixture.srv.humanArtifacts.Append("run-g", resultPath, "", "", "# v1\n", "submit", "a@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]string{"artifact_path": resultPath, "base_revision": latest.ID,
+		"base_sha256": latest.SHA256, "content": "# v2\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := fixture.requestAs(t, "r@example.test", reviewer, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code != http.StatusForbidden {
+		t.Fatalf("artifact-edit without the stage function must be refused: %d %s", response.Code, response.Body.String())
+	}
+	if response := fixture.requestAs(t, "d@example.test", both, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code != http.StatusCreated {
+		t.Fatalf("stage executor with artifact-edit must edit: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGrillAttemptOutputEditRequiresStageExecutorFunction(t *testing.T) {
+	reviewer := []cloudidentity.Role{cloudidentity.RoleReviewer}
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	const outputPath = "attempts/attempt-grill/artifacts/build.md"
+	payload, err := json.Marshal(approval.GrillQuestionsPayload{
+		Kind: string(approval.KindGrillQuestions), Markdown: "question", Round: 1,
+		ArtifactContentSHA256: map[string]string{outputPath: strings.Repeat("a", 64)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grill := grillApproval("grill-1", time.Now().UTC())
+	grill.Status, grill.Payload = approval.StatusPending, payload
+	fixture := newTemplateFixture(t, agentStageTemplate, true, []approval.PendingApproval{grill},
+		map[string]lifecycle.State{"run-g": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "grill-1"}})
+	body, err := json.Marshal(map[string]string{"artifact_path": outputPath, "base_sha256": strings.Repeat("a", 64), "content": "# v2\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := fixture.requestAs(t, "r@example.test", reviewer, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code != http.StatusForbidden {
+		t.Fatalf("agent output edit without the stage function must be refused: %d %s", response.Code, response.Body.String())
+	}
+	// Control: the executor passes authorization (and then fails on the
+	// missing source attempt, not on permissions).
+	if response := fixture.requestAs(t, "d@example.test", both, http.MethodPost, "/api/runs/run-g/artifact-revisions", string(body)); response.Code == http.StatusForbidden {
+		t.Fatalf("stage executor must pass authorization: %d %s", response.Code, response.Body.String())
+	}
+}
+
+// corruptPinnedTemplate replaces the pinned template bytes so the pin no
+// longer verifies.
+func corruptPinnedTemplate(t *testing.T, fixture functionPermissionFixture, runID string) {
+	t.Helper()
+	path := filepath.Join(fixture.target, ".ai-team", "task-template-pins", runID+".yaml")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("tampered: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCloudDecisionRouteRefusesUnassignedRoleBeforeStore covers the generic
+// decision route in cloud mode: the stage executor who claims its own role
+// for a confirmation assigned to approver_function gets 403 before the
+// approval store sees the decision.
+func TestCloudDecisionRouteRefusesUnassignedRoleBeforeStore(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("d", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeRunController{approvals: []approval.PendingApproval{buildConfirmApproval(time.Now().UTC())}}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithAuthenticator(manager), WithRunController(controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	decide := func(actor, role string, roles ...cloudidentity.Role) *httptest.ResponseRecorder {
+		names := make([]string, len(roles))
+		for i, value := range roles {
+			names[i] = string(value)
+		}
+		hash := store.SessionDigest("activation-" + actor)
+		now := time.Now().UTC()
+		if err := srv.store.InviteTeamMember(actor, actor, names, hash, now.Add(time.Hour), now, "admin@example.test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := srv.store.ActivateTeamInvitation(hash, now, nil); err != nil {
+			t.Fatal(err)
+		}
+		cookie, csrf := cloudSessionForTest(t, srv, manager, actor, roles...)
+		return teamRequest(srv, cookie, csrf, http.MethodPost, "/api/runs/run/approvals/gate-1/decisions",
+			`{"action":"approve","actor_role":"`+role+`","subject_hash":"`+testSubjectHash+`"}`)
+	}
+	if response := decide("dev@example.test", "developer", cloudidentity.RoleDeveloper); response.Code != http.StatusForbidden || controller.decisionCalls != 0 {
+		t.Fatalf("executor role on an approver confirmation: %d calls=%d %s", response.Code, controller.decisionCalls, response.Body.String())
+	}
+	if response := decide("dev2@example.test", "reviewer", cloudidentity.RoleDeveloper); response.Code != http.StatusForbidden || controller.decisionCalls != 0 {
+		t.Fatalf("claimed role the member lacks: %d %s", response.Code, response.Body.String())
+	}
+	if response := decide("rev@example.test", "reviewer", cloudidentity.RoleReviewer); response.Code != http.StatusOK || controller.decisionCalls != 1 {
+		t.Fatalf("assigned approver must decide: %d %s", response.Code, response.Body.String())
+	}
+}

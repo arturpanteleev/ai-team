@@ -186,3 +186,81 @@ func TestOIDCLoginStatesAreBounded(t *testing.T) {
 		t.Fatalf("expired states must be purged first: %v", err)
 	}
 }
+
+// TestEarlyV10DatabaseGainsLateColumns opens a database created by an early
+// version 10 build: web_sessions without credential_binding, sign-in states
+// without previous_session_hash and members without an SSO binding. The
+// migration adds the columns; a pre-existing session carries the empty
+// binding (never valid) and the existing member keeps working and can bind.
+func TestEarlyV10DatabaseGainsLateColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "web.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	if err := s.InviteTeamMember("dev@example.test", "dev@example.test", []string{"developer"}, "h", now.Add(time.Hour), now, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateTeamInvitation("h", now, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM schema_migrations WHERE version > 10`,
+		`DROP INDEX idx_team_members_oidc`,
+		`ALTER TABLE team_members DROP COLUMN oidc_subject`,
+		`ALTER TABLE team_members DROP COLUMN oidc_issuer`,
+		`DROP TABLE web_sessions`,
+		`CREATE TABLE web_sessions (
+			token_hash TEXT PRIMARY KEY, actor_id TEXT NOT NULL, roles_json TEXT NOT NULL,
+			session_epoch INTEGER NOT NULL DEFAULT 0, auth_method TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '',
+			csrf_token TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			absolute_expires_at INTEGER NOT NULL, revoked_at INTEGER)`,
+		`DROP TABLE oidc_login_states`,
+		`CREATE TABLE oidc_login_states (state_hash TEXT PRIMARY KEY, nonce TEXT NOT NULL, code_verifier TEXT NOT NULL,
+			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
+	} {
+		if _, err := s.db.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if _, err := s.db.Exec(`INSERT INTO web_sessions(token_hash,actor_id,roles_json,auth_method,csrf_token,created_at,expires_at,absolute_expires_at)
+		VALUES(?,?,?,?,?,?,?,?)`, SessionDigest("old-cookie"), "dev@example.test", `["developer"]`, "token", "csrf",
+		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), now.Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	s, err = New(path)
+	if err != nil {
+		t.Fatalf("early v10 database must migrate: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	old, err := s.WebSession("old-cookie", now)
+	if err != nil || old.CredentialBinding != "" {
+		t.Fatalf("pre-existing session must load with an empty binding: %+v %v", old, err)
+	}
+	if err := s.CreateWebSession("new-cookie", testSession(now)); err != nil {
+		t.Fatalf("new session after migration: %v", err)
+	}
+	if err := s.SaveOIDCLoginState("state", OIDCLoginState{Nonce: "n", CodeVerifier: "v", PreviousSessionHash: "p",
+		ExpiresAt: now.Add(time.Minute)}, now, 10); err != nil {
+		t.Fatal(err)
+	}
+	if consumed, err := s.ConsumeOIDCLoginState("state", now); err != nil || consumed.PreviousSessionHash != "p" {
+		t.Fatalf("previous session digest must round-trip: %+v %v", consumed, err)
+	}
+	member, err := s.TeamMember("dev@example.test")
+	if err != nil || member == nil || member.Status != "active" {
+		t.Fatalf("existing member must survive: %+v %v", member, err)
+	}
+	if err := s.BindTeamMemberOIDC("dev@example.test", "https://idp", "sub-1", now); err != nil {
+		t.Fatalf("existing member binds on first SSO sign-in: %v", err)
+	}
+	if err := s.BindTeamMemberOIDC("dev@example.test", "https://idp", "sub-2", now); !errors.Is(err, ErrOIDCAccountMismatch) {
+		t.Fatalf("different subject must be refused: %v", err)
+	}
+	if err := s.BindTeamMemberOIDC("dev@example.test", "https://other-idp", "sub-1", now); !errors.Is(err, ErrOIDCAccountMismatch) {
+		t.Fatalf("different issuer must be refused: %v", err)
+	}
+}

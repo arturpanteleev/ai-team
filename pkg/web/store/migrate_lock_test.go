@@ -255,3 +255,99 @@ func TestNewerSchemaRefusedWithoutWriting(t *testing.T) {
 		t.Fatalf("newer schema open error = %v, want %q", err, want)
 	}
 }
+
+// TestVersion12DatabaseMigratesTo13WithData opens a database exactly as a
+// version 12 binary left it (no SSO binding columns, no previous-session
+// digest): the version 13 step adds them, keeps runs, events, members and
+// sessions, and the existing member can bind on the next SSO sign-in.
+func TestVersion12DatabaseMigratesTo13WithData(t *testing.T) {
+	if SchemaVersion != 13 {
+		t.Fatalf("test written for the 12 -> 13 step, SchemaVersion=%d", SchemaVersion)
+	}
+	path := filepath.Join(t.TempDir(), "web.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	if err := s.CreatePipelineRun(&PipelineRun{RunID: "run-kept", Feature: "kept", Status: "completed", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(&Event{RunID: "run-kept", Sequence: 1, Type: "stage_started", Timestamp: now, DataJSON: `{"stage":"code"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InviteTeamMember("dev@example.test", "dev@example.test", []string{"developer"}, "h", now.Add(time.Hour), now, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateTeamInvitation("h", now, nil); err != nil {
+		t.Fatal(err)
+	}
+	session := WebSession{ActorID: "dev@example.test", Roles: []string{"developer"}, SessionEpoch: 1, AuthMethod: "oidc",
+		CSRFToken: "csrf", CredentialBinding: "binding", CreatedAt: now, ExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
+	if err := s.CreateWebSession("cookie-kept", session); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`DROP INDEX idx_team_members_oidc`,
+		`ALTER TABLE team_members DROP COLUMN oidc_subject`,
+		`ALTER TABLE team_members DROP COLUMN oidc_issuer`,
+		`ALTER TABLE oidc_login_states DROP COLUMN previous_session_hash`,
+		`DELETE FROM schema_migrations WHERE version > 12`,
+	} {
+		if _, err := s.db.Exec(query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = New(path)
+	if err != nil {
+		t.Fatalf("v12 database must migrate: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var latest int64
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 13 {
+		t.Fatalf("schema version after migration = %d (%v), want 13", latest, err)
+	}
+	var runs, events int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pipeline_runs WHERE run_uid = 'run-kept'), (SELECT COUNT(*) FROM events WHERE run_uid = 'run-kept')`).Scan(&runs, &events); err != nil || runs != 1 || events != 1 {
+		t.Fatalf("data lost in migration: runs=%d events=%d err=%v", runs, events, err)
+	}
+	if kept, err := s.WebSession("cookie-kept", now); err != nil || kept.CredentialBinding != "binding" {
+		t.Fatalf("session lost in migration: %+v %v", kept, err)
+	}
+	if member, err := s.TeamMember("dev@example.test"); err != nil || member == nil || member.Status != "active" {
+		t.Fatalf("member lost in migration: %+v %v", member, err)
+	}
+	if issuer, subject, err := s.TeamMemberOIDC("dev@example.test"); err != nil || issuer != "" || subject != "" {
+		t.Fatalf("migrated member must start unbound: %q %q %v", issuer, subject, err)
+	}
+	if err := s.BindTeamMemberOIDC("dev@example.test", "https://idp", "sub-1", now); err != nil {
+		t.Fatalf("migrated member must bind: %v", err)
+	}
+	if err := s.SaveOIDCLoginState("state", OIDCLoginState{Nonce: "n", CodeVerifier: "v", PreviousSessionHash: "p",
+		ExpiresAt: now.Add(time.Minute)}, now, 10); err != nil {
+		t.Fatalf("sign-in state after migration: %v", err)
+	}
+}
+
+// TestVersion13DatabaseRefusedByVersion12Binary pins the policy: a version 12
+// binary compares MAX(version) with its own SchemaVersion and refuses the
+// migrated file, so it cannot ignore SSO bindings or session digests.
+func TestVersion13DatabaseRefusedByVersion12Binary(t *testing.T) {
+	path := migratedDatabase(t)
+	db := openRawWithoutBusyWait(t, path)
+	version, err := storedSchemaVersion(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 13 {
+		t.Fatalf("migrated database version = %d, want 13", version)
+	}
+	const previousBinarySchemaVersion = 12
+	if version <= previousBinarySchemaVersion {
+		t.Fatalf("a v%d binary would open the v%d database", previousBinarySchemaVersion, version)
+	}
+}

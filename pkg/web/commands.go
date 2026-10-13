@@ -422,7 +422,10 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// Resuming an agent stage launches its agent: record the actor first so
 	// forbid_self_approval sees the launch; an unrecorded launch must not run.
 	session, _ := s.requestSession(r)
-	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); err != nil {
+	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); errors.Is(err, errResumeAwaitingDecision) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	} else if err != nil {
 		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
 		return
 	}
@@ -546,8 +549,10 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// must compare the selected result bytes with the pinned baseline before the
 	// approval is resolved; the generic decision endpoint accepts client-supplied
 	// artifact revisions and therefore cannot safely resolve grill approvals.
+	var values []approval.PendingApproval
 	if s.controller != nil {
-		values, err := s.controller.Approvals(chi.URLParam(r, "runID"))
+		var err error
+		values, err = s.controller.Approvals(chi.URLParam(r, "runID"))
 		if err != nil {
 			http.Error(w, "approval state unavailable", http.StatusInternalServerError)
 			return
@@ -584,6 +589,15 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		session, _ := s.requestSession(r)
 		actorID = session.Principal.ActorID
+		// The approval store accepts only its required roles. A member who holds
+		// the claimed role but is not an assigned approver (e.g. the stage
+		// executor when approver_function is set) is refused here with 403,
+		// before the store is touched, instead of a store conflict.
+		if pending, found := approvalByID(values, chi.URLParam(r, "approvalID")); found && !pending.Deferred &&
+			!containsApprovalRole(pending.RequiredRoles, actorRole) {
+			http.Error(w, "cloud RBAC: роль "+actorRole+" не назначена этому подтверждению", http.StatusForbidden)
+			return
+		}
 	}
 	if command.Action == "answer_questions" || command.Action == "approve_spec" || command.Action == "approve" || command.Action == "reject" {
 		approvals, listErr := s.controller.Approvals(chi.URLParam(r, "runID"))
@@ -735,6 +749,16 @@ func (s *Server) latestAttemptRevisions(runID, attemptID string) (map[string]str
 		}
 	}
 	return selection, nil
+}
+
+// approvalByID returns the approval with id from values.
+func approvalByID(values []approval.PendingApproval, id string) (approval.PendingApproval, bool) {
+	for _, value := range values {
+		if value.ID == id {
+			return value, true
+		}
+	}
+	return approval.PendingApproval{}, false
 }
 
 func containsApprovalRole(roles []string, expected string) bool {

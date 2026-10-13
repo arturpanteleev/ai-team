@@ -264,3 +264,59 @@ func TestEarlyV10DatabaseGainsLateColumns(t *testing.T) {
 		t.Fatalf("different issuer must be refused: %v", err)
 	}
 }
+
+// activeTestMember invites and activates a member with the given id/e-mail.
+func activeTestMember(t *testing.T, s *Store, actorID string, now time.Time) {
+	t.Helper()
+	if err := s.InviteTeamMember(actorID, actorID, []string{"developer"}, "invite-"+actorID, now.Add(time.Hour), now, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateTeamInvitation("invite-"+actorID, now, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// BL-35 (#292): idx_team_members_oidc is the last line against two members
+// bound to one provider account: a direct write past BindTeamMemberOIDC's
+// check must fail on the constraint.
+func TestTeamMemberOIDCUniqueIndexRejectsSecondBinding(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	activeTestMember(t, s, "first@example.test", now)
+	activeTestMember(t, s, "second@example.test", now)
+	if err := s.BindTeamMemberOIDC("first@example.test", "https://idp", "sub-1", now); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.db.Exec(`UPDATE team_members SET oidc_issuer=?,oidc_subject=? WHERE actor_id=?`, "https://idp", "sub-1", "second@example.test")
+	if !isUniqueConstraint(err) {
+		t.Fatalf("second member bound to the same (iss, sub) must violate the unique index: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE team_members SET oidc_issuer=?,oidc_subject=? WHERE actor_id=?`, "https://other-idp", "sub-1", "second@example.test"); err != nil {
+		t.Fatalf("the same subject at another issuer is another account: %v", err)
+	}
+}
+
+// BL-35 (#292): when a concurrent first sign-in binds the account to another
+// member between the check and the update, the unique index refuses the
+// update; the caller must see ErrOIDCAccountMismatch (403), not a store
+// failure (503). A trigger reproduces that interleaving deterministically.
+func TestBindTeamMemberOIDCMapsUniqueViolationToMismatch(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	activeTestMember(t, s, "first@example.test", now)
+	activeTestMember(t, s, "second@example.test", now)
+	if _, err := s.db.Exec(`CREATE TRIGGER concurrent_first_bind BEFORE UPDATE OF oidc_subject ON team_members
+		WHEN NEW.actor_id = 'second@example.test'
+		BEGIN
+			UPDATE team_members SET oidc_issuer = NEW.oidc_issuer, oidc_subject = NEW.oidc_subject
+			WHERE actor_id = 'first@example.test';
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindTeamMemberOIDC("second@example.test", "https://idp", "sub-1", now); !errors.Is(err, ErrOIDCAccountMismatch) {
+		t.Fatalf("a lost race for the same account must be a mismatch: %v", err)
+	}
+	if issuer, subject, err := s.TeamMemberOIDC("second@example.test"); err != nil || issuer != "" || subject != "" {
+		t.Fatalf("the refused member must stay unbound: %q %q %v", issuer, subject, err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,20 +23,29 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
-// waitingStageEngine — run engine, который ведёт себя как pipeline на первом
-// этапе: проецирует run_started/attempt_* в SQLite через отдельное соединение
-// (как recorderStore в `ai-team web`), открывает человеческий запрос на
-// подтверждение этапа и паркует run в фазе waiting. done закрывается, когда
-// вся durable-запись сделана, — тест ждёт его вместо time.Sleep.
+// waitingStageEngine — тестовый run engine, который ЗАМЕНЯЕТ настоящий
+// pipeline: агенты, проверки и граф этапов здесь не исполняются. Он только
+// воспроизводит durable-след первого этапа: проецирует run_started/attempt_* в
+// SQLite через отдельное соединение (как recorderStore в `ai-team web`),
+// открывает человеческий запрос на подтверждение этапа и паркует run в фазе
+// waiting. Тест поэтому проверяет персистентность web-сервера, контроллера и
+// SQLite, а не исполнение pipeline. done закрывается, когда вся durable-запись
+// сделана, — тест ждёт его вместо time.Sleep. rejectStart помечает движок
+// процесса после перезапуска: любой его Start — ошибка теста.
 type waitingStageEngine struct {
-	t        *testing.T
-	target   string
-	recorder *StoreRecorder
-	stageID  string
-	done     chan struct{}
+	t           *testing.T
+	target      string
+	recorder    *StoreRecorder
+	stageID     string
+	done        chan struct{}
+	rejectStart bool
 }
 
 func (e *waitingStageEngine) Start(_ context.Context, cfg pipeline.RunConfig) (pipeline.RunResult, error) {
+	if e.rejectStart {
+		e.t.Error("после перезапуска задача не должна запускаться повторно")
+		return pipeline.RunResult{}, errors.New("unexpected start after restart")
+	}
 	defer close(e.done)
 	started := time.Now().UTC().Truncate(time.Second)
 	e.recorder.RunStarted(cfg.RunID, cfg.Feature, `{"task":"`+cfg.TaskDesc+`"}`, started)
@@ -193,7 +203,7 @@ func TestServerRestartKeepsTasksRequestsAndEvents(t *testing.T) {
 	}
 
 	// Процесс 2: новый сервер и новый контроллер над той же базой и target.
-	second := &waitingStageEngine{t: t, target: target, done: make(chan struct{})}
+	second := &waitingStageEngine{t: t, target: target, rejectStart: true}
 	restarted := restartServer(t, dbPath, target, second)
 	t.Cleanup(func() { _ = restarted.Close() })
 
@@ -219,11 +229,6 @@ func TestServerRestartKeepsTasksRequestsAndEvents(t *testing.T) {
 	if replayed.Code != created.Code || replayed.Body.String() != created.Body.String() {
 		t.Fatalf("повтор create после перезапуска должен быть точным replay: first=%d %s retry=%d %s",
 			created.Code, created.Body.String(), replayed.Code, replayed.Body.String())
-	}
-	select {
-	case <-second.done:
-		t.Fatal("повтор create после перезапуска запустил задачу второй раз")
-	default:
 	}
 	var runs struct {
 		Runs []json.RawMessage `json:"runs"`

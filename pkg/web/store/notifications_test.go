@@ -205,3 +205,50 @@ func TestPruneNotificationDeliveriesKeepsLiveClaimsAndRecentRecords(t *testing.T
 		t.Fatalf("kept=%v, want [2 3]", kept)
 	}
 }
+
+// BL-35 (#293): a notifier cursor that lagged longer than the retention period
+// may still replay events above it. Their delivery records must survive
+// pruning, otherwise the replay would notify the channel a second time.
+func TestPruneNotificationDeliveriesKeepsRecordsAboveLaggingNotifierCursor(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	old := now.Add(-NotificationDeliveryRetention - time.Hour)
+	if _, err := s.db.Exec(`INSERT INTO notification_deliveries(channel, event_id, outcome, recorded_at) VALUES
+		('hook', 1, ?, ?), ('hook', 2, ?, ?), ('hook', 3, ?, ?)`,
+		notifier.DeliveryDelivered, old, notifier.DeliveryDelivered, old, notifier.DeliveryFailed, old); err != nil {
+		t.Fatal(err)
+	}
+	// The web cursor is ahead; the scheduler-worker cursor lags at event 1.
+	// A cursor of another integration does not protect notifier records.
+	for integration, cursor := range map[string]int64{"notifier": 3, "notifier:scheduler-worker": 1, "github": 0} {
+		if err := s.SetIntegrationCursor(integration, cursor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := s.PruneNotificationDeliveries(now.Add(-NotificationDeliveryRetention))
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d err=%v, want only the record at the lowest notifier cursor", removed, err)
+	}
+	var kept []int64
+	rows, err := s.db.Query(`SELECT event_id FROM notification_deliveries ORDER BY event_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		kept = append(kept, id)
+	}
+	if len(kept) != 2 || kept[0] != 2 || kept[1] != 3 {
+		t.Fatalf("kept=%v, want [2 3] above the lagging cursor", kept)
+	}
+	if err := s.SetIntegrationCursor("notifier:scheduler-worker", 3); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := s.PruneNotificationDeliveries(now.Add(-NotificationDeliveryRetention)); err != nil || removed != 2 {
+		t.Fatalf("after the cursor caught up removed=%d err=%v, want 2", removed, err)
+	}
+}

@@ -101,6 +101,38 @@ func TestDeployLostTriggerRecoveryNeverAdoptsAForeignBuild(t *testing.T) {
 // manual resolution of a pending trigger.
 type noFinderProvider struct{ Provider }
 
+// stubFinderProvider is a provider whose search returns fixed builds, so the
+// re-check inside recoverPendingTrigger is exercised without trusting the
+// provider-side filter.
+type stubFinderProvider struct {
+	Provider
+	builds   []Build
+	requests []TriggerRequest
+}
+
+func (p *stubFinderProvider) FindTriggered(_ context.Context, request TriggerRequest) ([]Build, error) {
+	p.requests = append(p.requests, request)
+	return p.builds, nil
+}
+
+func TestRecoverPendingTriggerRejectsBuildWithOtherRevision(t *testing.T) {
+	recorded := strings.Repeat("a", 40)
+	previous := Receipt{CommitSHA: recorded, Branch: "main", DeployID: testDeployID, TriggerPending: true}
+	receiptPath := filepath.Join(t.TempDir(), "receipt.json")
+	other := &stubFinderProvider{builds: []Build{{ID: "42", Revision: strings.Repeat("b", 40)}}}
+	if build, err := recoverPendingTrigger(context.Background(), other, previous, receiptPath); !errors.Is(err, ErrDeployRejected) ||
+		!strings.Contains(err.Error(), "does not match the recorded revision") || build.ID != "" {
+		t.Fatalf("a found build on another revision must be refused: build=%+v err=%v", build, err)
+	}
+	if len(other.requests) != 1 || other.requests[0].CommitSHA != recorded || other.requests[0].DeployID != testDeployID {
+		t.Fatalf("search must ask for the recorded revision and deploy id: %+v", other.requests)
+	}
+	same := &stubFinderProvider{builds: []Build{{ID: "42", Revision: recorded}}}
+	if build, err := recoverPendingTrigger(context.Background(), same, previous, receiptPath); err != nil || build.ID != "42" {
+		t.Fatalf("the build on the recorded revision must be recovered: build=%+v err=%v", build, err)
+	}
+}
+
 func TestDeployPendingTriggerWithoutFinderOrIDStillRefuses(t *testing.T) {
 	repo, prHead, tip := mergedRepo(t)
 	fake := newFakeTeamCity(t, finished("SUCCESS", tip))

@@ -39,17 +39,20 @@ func (rs *runState) execute(ctx context.Context) error {
 }
 
 // consumeConfiguredSkip clears the one-shot skip request once its stage has
-// executed. An agent stage skipped by config must have recorded OutcomeSkipped.
-// A human stage consumes the same request through its skip-resolved input
-// approval (skippedByConfig is false there because the human executor owns the
-// skip), and it must clear the request as well: otherwise a later visit of the
-// same stage — for example after a loopback that switched it to an agent
-// executor — would be skipped again with a stale reason.
-func (rs *runState) consumeConfiguredSkip(current string, skippedByConfig bool, result notifier.StageResult) error {
+// executed. requireSkipped is true when the stage actually executed in this
+// visit (an agent stage skipped by config, or a human stage that consumed the
+// skip through its skip-resolved input approval): such a stage must have
+// recorded OutcomeSkipped, otherwise the request fails closed. It is false for
+// replays (a pending check after a budget stop, a grill answer, a check
+// override), which do not execute the stage and cannot record the skip.
+// In every case the request is cleared: otherwise a later visit of the same
+// stage — for example after a loopback that switched it to an agent executor —
+// would be skipped again with a stale reason.
+func (rs *runState) consumeConfiguredSkip(current string, requireSkipped bool, result notifier.StageResult) error {
 	if rs.runCfg.skipStageID == "" || rs.runCfg.skipStageID != current {
 		return nil
 	}
-	if skippedByConfig && result.State.Outcome != workflow.OutcomeSkipped {
+	if requireSkipped && result.State.Outcome != workflow.OutcomeSkipped {
 		return fmt.Errorf("stage %q did not record the requested skip", current)
 	}
 	rs.runCfg.skipStageID = ""
@@ -127,6 +130,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 		var result notifier.StageResult
 		replayedHumanAttempt := false
+		// requireSkipped: the visit executed the stage itself, so a configured
+		// skip of this stage must end with OutcomeSkipped.
+		requireSkipped := false
 		skippedByConfig := rs.runCfg.skipStageID == current && executor != "human"
 		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
 			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
@@ -154,6 +160,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			rs.runCfg.resumeDecisionAction = ""
 			rs.resumedApproval = nil
 		} else if skippedByConfig {
+			requireSkipped = true
 			var found bool
 			var skipErr error
 			result, found, skipErr = rs.replayedSkippedStage(current, rs.runCfg.skipReason)
@@ -167,6 +174,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				}
 			}
 		} else if executor == "human" {
+			requireSkipped = true
 			var humanErr error
 			result, humanErr = rs.runHumanStage(ctx, index, current)
 			if humanErr != nil {
@@ -194,7 +202,7 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		}
 		rs.consumePRReviewInputs(current)
 		rs.clearExecutorOverride(current)
-		if err := rs.consumeConfiguredSkip(current, skippedByConfig, result); err != nil {
+		if err := rs.consumeConfiguredSkip(current, requireSkipped, result); err != nil {
 			return err
 		}
 		for _, previous := range rs.results {

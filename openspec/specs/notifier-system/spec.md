@@ -136,7 +136,16 @@ bounded lease. An acquired claim MUST carry an owner token; recording an
 outcome and releasing a claim MUST succeed only while that token still holds
 the pair. If the delivery record cannot be persisted, the event MUST remain
 pending. Final delivery records MAY be pruned after a retention period; live
-claims MUST NOT be pruned.
+claims MUST NOT be pruned. A final record MUST NOT be pruned while its event is
+above the lowest durable notifier cursor in the shared database, so a cursor
+that lagged longer than the retention period still cannot replay a delivered
+event. The in-memory cursor of an `ai-team run` process is not durable and
+does not hold records back; it covers only the lifetime of that process.
+
+#### Scenario: Pruning keeps records above a lagging cursor
+
+- **WHEN** a durable notifier cursor lags behind delivery records older than the retention period
+- **THEN** pruning MUST keep every record whose event is above that cursor
 
 #### Scenario: Replay after reconnect
 

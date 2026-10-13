@@ -304,6 +304,11 @@ func TestWebServerPrunesOldNotificationDeliveriesOnStart(t *testing.T) {
 		('ops-hook', 1, 'delivered', ?), ('ops-hook', 2, 'delivered', ?)`, old, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+	// The web notifier cursor is already past both events: only age decides.
+	// Records above a lagging notifier cursor are kept (see the store test).
+	if _, err := raw.Exec(`INSERT INTO integration_cursors(integration, cursor) VALUES ('notifier', 2)`); err != nil {
+		t.Fatal(err)
+	}
 	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	defer hook.Close()
 	target := t.TempDir()

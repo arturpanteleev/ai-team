@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -282,6 +283,14 @@ func TestVersion12DatabaseMigratesTo13WithData(t *testing.T) {
 	if _, err := s.ActivateTeamInvitation("h", now, nil); err != nil {
 		t.Fatal(err)
 	}
+	// A second member without SSO: after the step both carry an empty binding,
+	// which the partial unique index must not treat as a duplicate.
+	if err := s.InviteTeamMember("qa@example.test", "qa@example.test", []string{"tester"}, "h2", now.Add(time.Hour), now, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateTeamInvitation("h2", now, nil); err != nil {
+		t.Fatal(err)
+	}
 	session := WebSession{ActorID: "dev@example.test", Roles: []string{"developer"}, SessionEpoch: 1, AuthMethod: "oidc",
 		CSRFToken: "csrf", CredentialBinding: "binding", CreatedAt: now, ExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
 	if err := s.CreateWebSession("cookie-kept", session); err != nil {
@@ -318,14 +327,22 @@ func TestVersion12DatabaseMigratesTo13WithData(t *testing.T) {
 	if kept, err := s.WebSession("cookie-kept", now); err != nil || kept.CredentialBinding != "binding" {
 		t.Fatalf("session lost in migration: %+v %v", kept, err)
 	}
-	if member, err := s.TeamMember("dev@example.test"); err != nil || member == nil || member.Status != "active" {
-		t.Fatalf("member lost in migration: %+v %v", member, err)
-	}
-	if issuer, subject, err := s.TeamMemberOIDC("dev@example.test"); err != nil || issuer != "" || subject != "" {
-		t.Fatalf("migrated member must start unbound: %q %q %v", issuer, subject, err)
+	for _, actorID := range []string{"dev@example.test", "qa@example.test"} {
+		if member, err := s.TeamMember(actorID); err != nil || member == nil || member.Status != "active" {
+			t.Fatalf("member %s lost in migration: %+v %v", actorID, member, err)
+		}
+		if issuer, subject, err := s.TeamMemberOIDC(actorID); err != nil || issuer != "" || subject != "" {
+			t.Fatalf("migrated member %s must start unbound: %q %q %v", actorID, issuer, subject, err)
+		}
 	}
 	if err := s.BindTeamMemberOIDC("dev@example.test", "https://idp", "sub-1", now); err != nil {
 		t.Fatalf("migrated member must bind: %v", err)
+	}
+	if err := s.BindTeamMemberOIDC("qa@example.test", "https://idp", "sub-1", now); !errors.Is(err, ErrOIDCAccountMismatch) {
+		t.Fatalf("second migrated member must not take the first one's account: %v", err)
+	}
+	if err := s.BindTeamMemberOIDC("qa@example.test", "https://idp", "sub-2", now); err != nil {
+		t.Fatalf("second migrated member must bind its own account: %v", err)
 	}
 	if err := s.SaveOIDCLoginState("state", OIDCLoginState{Nonce: "n", CodeVerifier: "v", PreviousSessionHash: "p",
 		ExpiresAt: now.Add(time.Minute)}, now, 10); err != nil {

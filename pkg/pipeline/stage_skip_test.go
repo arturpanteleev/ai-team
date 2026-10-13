@@ -8,7 +8,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
+	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -436,28 +439,32 @@ func TestTemplateReturnHonorsMaxVisitsBeforeStartingTarget(t *testing.T) {
 }
 
 // BL-06: a configured skip is a one-shot request. It must be cleared after the
-// requested stage executes for both agent and human executors, and an agent
-// stage that did not record OutcomeSkipped must fail closed.
+// requested stage executes for both agent and human executors, and a stage
+// that executed in this visit (agent or human) without recording
+// OutcomeSkipped must fail closed. Replays (pending check, grill, override)
+// only clear the request.
 func TestConsumeConfiguredSkipClearsRequestForHumanAndAgentStages(t *testing.T) {
 	const reason = "Not needed for this task."
 	skipped := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomeSkipped}}
 	passed := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomePassed}}
 	for _, tc := range []struct {
-		name            string
-		current         string
-		skippedByConfig bool
-		result          notifier.StageResult
-		wantErr         bool
-		wantCleared     bool
+		name           string
+		current        string
+		requireSkipped bool
+		result         notifier.StageResult
+		wantErr        bool
+		wantCleared    bool
 	}{
-		{name: "human stage consumes skip via approval", current: "optional", skippedByConfig: false, result: skipped, wantCleared: true},
-		{name: "agent stage skipped by config", current: "optional", skippedByConfig: true, result: skipped, wantCleared: true},
-		{name: "agent stage without recorded skip", current: "optional", skippedByConfig: true, result: passed, wantErr: true},
-		{name: "other stage keeps request", current: "setup", skippedByConfig: false, result: passed},
+		{name: "human stage consumes skip via approval", current: "optional", requireSkipped: true, result: skipped, wantCleared: true},
+		{name: "human stage without recorded skip", current: "optional", requireSkipped: true, result: passed, wantErr: true},
+		{name: "agent stage skipped by config", current: "optional", requireSkipped: true, result: skipped, wantCleared: true},
+		{name: "agent stage without recorded skip", current: "optional", requireSkipped: true, result: passed, wantErr: true},
+		{name: "replay clears request without recorded skip", current: "optional", requireSkipped: false, result: passed, wantCleared: true},
+		{name: "other stage keeps request", current: "setup", requireSkipped: true, result: passed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rs := &runState{runCfg: RunConfig{skipStageID: "optional", skipReason: reason}}
-			err := rs.consumeConfiguredSkip(tc.current, tc.skippedByConfig, tc.result)
+			err := rs.consumeConfiguredSkip(tc.current, tc.requireSkipped, tc.result)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("consumeConfiguredSkip error = %v; wantErr %v", err, tc.wantErr)
 			}
@@ -472,5 +479,131 @@ func TestConsumeConfiguredSkipClearsRequestForHumanAndAgentStages(t *testing.T) 
 	empty := &runState{}
 	if err := empty.consumeConfiguredSkip("optional", false, passed); err != nil || empty.runCfg.skipStageID != "" {
 		t.Fatalf("no skip request must be a no-op: err=%v cfg=%+v", err, empty.runCfg)
+	}
+}
+
+// loopbackExecutorSwitchStore simulates an operator who switched the stage
+// executor to an agent while the loopback approval was open: once armed, every
+// running checkpoint of the target stage carries an agent executor override
+// bound to that visit, until the run moves past the stage.
+type loopbackExecutorSwitchStore struct {
+	store *lifecycle.Store
+	stage string
+	armed bool
+}
+
+func (s *loopbackExecutorSwitchStore) Create(state lifecycle.State) error {
+	return s.store.Create(state)
+}
+
+func (s *loopbackExecutorSwitchStore) Load(runID string) (lifecycle.State, error) {
+	return s.store.Load(runID)
+}
+
+func (s *loopbackExecutorSwitchStore) Save(previous, next lifecycle.State) error {
+	if s.armed && next.NextStage != s.stage {
+		s.armed = false
+	}
+	if s.armed && next.Phase == lifecycle.PhaseRunning {
+		const visitID = "loopback-executor-switch"
+		next.ActiveApprovalID = visitID
+		next.ExecutorOverrides = map[string]lifecycle.ExecutorOverride{s.stage: {
+			Executor: "agent", PreviousExecutor: "human", ActorID: "alice",
+			ApprovalID: visitID, VisitID: visitID, ChangedAt: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC),
+		}}
+	}
+	return s.store.Save(previous, next)
+}
+
+// BL-35 (#299): a human stage skipped by request, then reached again through a
+// loopback that switched it to an agent executor, must run the agent on the
+// second visit instead of being skipped again with the stale reason.
+func TestSkippedHumanStageIsNotSkippedAgainAfterLoopbackSwitchesToAgent(t *testing.T) {
+	dir := env(t)
+	registry := agent.NewFS(fstest.MapFS{
+		"analyst/def.yaml": def(`name: analyst
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  spec: '{feature}/spec.md'
+`),
+		"analyst/prompt.md": def("test agent"),
+		"checker/def.yaml": def(`name: checker
+runtime: agentcli
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  review: '{feature}/review.md'
+`),
+		"checker/prompt.md": def("test checker"),
+	})
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Template:      "skip-then-loopback-test",
+		Title:         "Skip then loopback test",
+		Stages: []config.TemplateStage{
+			{ID: "optional", Title: "Optional input", Function: "product_owner", Result: "md", Executor: "human", Agent: "analyst", Confirm: "auto", Skippable: true},
+			{ID: "qa", Title: "QA", Function: "reviewer", Result: "md", Executor: "agent", Agent: "checker", Confirm: "auto"},
+		},
+		Returns: []config.TemplateReturn{{From: "qa", To: "optional", MaxVisits: 2}},
+	}
+	lifecycleStore, err := lifecycle.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switchStore := &loopbackExecutorSwitchStore{store: lifecycleStore, stage: "optional"}
+	rt := newScripted()
+	rt.content["analyst"] = map[string]string{"spec": "# Agent result\n"}
+	rt.contentFn["checker"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"review": "**Verdict:** CHANGES_REQUESTED\n"}
+		}
+		return map[string]string{"review": "**Verdict:** APPROVED\n"}
+	}
+	rt.onExec = func(name string, _ []runtime.Artifact) {
+		switch {
+		case name == "checker" && rt.calls["checker"] == 1:
+			switchStore.armed = true
+		case name == "analyst":
+			switchStore.armed = false
+		}
+	}
+	prompter := &scriptedPrompter{}
+	p := New(cfg, registry, WithRuntimeFactory(rt.factory), WithPrompter(prompter),
+		WithLifecycleStore(switchStore), WithNotifier(&captureNotifier{}))
+	engine := NewRunEngine(p)
+	started, startErr := engine.Start(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "skip, return and switch to an agent", TargetDir: dir,
+	})
+	var required *ApprovalRequiredError
+	if !errors.As(startErr, &required) || started.RunID == "" {
+		t.Fatalf("human stage should pause for typed input: result=%+v err=%v", started, startErr)
+	}
+
+	// The loopback approval is decided in-process so that the second visit of
+	// the skipped stage happens inside the same skip invocation.
+	prompter.interactive = true
+	prompter.answers = []string{"return_to_optional", "Run the agent on the optional input.", "approve"}
+	result, err := engine.SkipStage(context.Background(), SkipStageConfig{
+		RunID: started.RunID, TargetDir: dir, StageID: "optional", Reason: "No document is needed for this task.",
+	})
+	if err != nil || result.Outcome != workflow.RunCompleted {
+		t.Fatalf("run should complete after the agent revisit: result=%+v err=%v asked=%q", result, err, prompter.asked)
+	}
+	if rt.calls["analyst"] != 1 || rt.calls["checker"] != 2 {
+		t.Fatalf("second visit must run the agent instead of repeating the skip: calls=%+v", rt.calls)
+	}
+	replayed, err := evidence.ReplayEventLog(filepath.Join(dir, ".ai-team", "runs", started.RunID, "events.jsonl"), started.RunID)
+	if err != nil || len(replayed.StageSkips) != 1 || replayed.StageSkips[0].Stage != "optional" {
+		t.Fatalf("exactly one skip of the human stage must be recorded: skips=%+v err=%v", replayed.StageSkips, err)
 	}
 }

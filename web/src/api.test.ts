@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, openSession, startRun } from './api';
+import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -47,6 +47,18 @@ describe('write API client', () => {
 describe('cloud authentication client', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('getAuthConfig запоминает облачный режим для isAuthenticationRequired', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ authentication_required: true, team_management_enabled: false }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ authentication_required: false, team_management_enabled: false }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getAuthConfig();
+    expect(isAuthenticationRequired()).toBe(true);
+    await getAuthConfig();
+    expect(isAuthenticationRequired()).toBe(false);
   });
 
   it('передаёт Bearer только при login и сохраняет trusted principal', async () => {

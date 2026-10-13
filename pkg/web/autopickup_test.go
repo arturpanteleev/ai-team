@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,13 +19,18 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
+// fixedLedger — фейковый ledger; параллельные тики подборщика зовут его
+// конкурентно, поэтому запись calls защищена мьютексом.
 type fixedLedger struct {
 	usage tokenbudget.Usage
 	err   error
+	mu    sync.Mutex
 	calls []time.Time
 }
 
 func (l *fixedLedger) TokensBetween(start, _ time.Time) (tokenbudget.Usage, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.calls = append(l.calls, start)
 	return l.usage, l.err
 }

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
@@ -317,6 +320,13 @@ func (s *Store) BindTeamMemberOIDC(actorID, issuer, subject string, now time.Tim
 	}
 	result, err := tx.Exec(`UPDATE team_members SET oidc_issuer=?,oidc_subject=? WHERE actor_id=? AND oidc_subject=''`,
 		issuer, subject, actorID)
+	if isUniqueConstraint(err) {
+		// Another member took the same account between the check above and
+		// this update (a concurrent first sign-in): idx_team_members_oidc
+		// refuses it. That is the same refusal as the check, not a store
+		// failure, so the caller answers 403 rather than 503.
+		return ErrOIDCAccountMismatch
+	}
 	if err != nil {
 		return err
 	}
@@ -371,4 +381,11 @@ func (s *Store) ValidateTeamSession(actorID string, epoch int64) (*TeamMember, e
 func teamAudit(tx *sql.Tx, actor, action, target, details string, at time.Time) error {
 	_, err := tx.Exec(`INSERT INTO team_audit(actor_id,action,target_actor_id,detail_json,created_at) VALUES(?,?,?,?,?)`, actor, action, target, details, at)
 	return err
+}
+
+// isUniqueConstraint reports whether err is a SQLite UNIQUE constraint
+// violation.
+func isUniqueConstraint(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 }

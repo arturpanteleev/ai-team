@@ -248,7 +248,16 @@ func (c *Checker) git(ctx context.Context, args ...string) (string, error) {
 	return c.command(ctx, resolved, args...)
 }
 
+// hasDelivery reports whether the workflow publishes through the controller
+// delivery path: either a delivery-kind agent or a template stage with a
+// delivery block (for example an agent implementation stage whose controller
+// creates the PR before review). Both push to origin and call gh.
 func (c *Checker) hasDelivery() bool {
+	for _, stage := range c.config.Stages {
+		if stage.Delivery != nil {
+			return true
+		}
+	}
 	for _, configured := range c.config.PipelineAgents {
 		definition, err := c.registry.Load(configured.Name)
 		if err == nil && definition.Kind == "delivery" {

@@ -108,19 +108,19 @@ func (rs *runState) executeStageDelivery(ctx context.Context, stageID string, re
 			return fmt.Errorf("controller stage delivery: %w", annotateDeliveryFailure(stageCtx, ctx, timeout, err))
 		}
 	} else {
+		// The in-process controller applies the same approval authority as the
+		// worker-facing controller path before it reuses a receipt or performs
+		// delivery: the exact canonical plan, candidate digest, approving
+		// attempt and human/--approve-plan decision are re-validated.
+		plan, err := rs.validateLocalStageDeliveryApproval(stageID, request, approvalIdentity)
+		if err != nil {
+			return err
+		}
 		if existing, found, readErr := delivery.ReadControllerStageDeliveryReceipt(rs.runCfg.TargetDir, request); readErr != nil {
 			return readErr
 		} else if found {
 			receipt = *existing
 		} else {
-			plan, found, planErr := delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature)
-			if planErr != nil || !found {
-				return fmt.Errorf("load prepared stage delivery plan: found=%t: %w", found, planErr)
-			}
-			planHash, hashErr := plan.Hash()
-			if hashErr != nil || planHash != request.PlanHash || plan.SourceRunID != rs.runID {
-				return errors.Join(errors.New("prepared stage delivery plan identity mismatch"), hashErr)
-			}
 			result, executeErr := rs.p.delivery.Execute(ctx, delivery.Request{
 				TargetDir: rs.sourceDir(), Feature: rs.runCfg.Feature, Plan: plan,
 				Trailers: stageDeliveryTrailers(rs.runID, request.RuntimeIdentity),
@@ -172,6 +172,85 @@ func (rs *runState) executeStageDelivery(ctx context.Context, stageID string, re
 	result.Outputs = append(result.Outputs, runtime.Artifact{Name: "link", Path: path, Size: info.Size(), ModTime: info.ModTime()})
 	rs.stageDeliveryReceipt = &receipt
 	return nil
+}
+
+// validateLocalStageDeliveryApproval loads the prepared plan for the local
+// (in-process) controller stage delivery and validates it with
+// ValidateResolvedDeliveryOperationApproval, the authority used by the
+// worker-facing controller path. The approval it resolves must be the one the
+// run's evidence names for this attempt.
+func (rs *runState) validateLocalStageDeliveryApproval(stageID string, request delivery.StageDeliveryRequest, approvalIdentity string) (delivery.Plan, error) {
+	plan, found, err := delivery.LoadPreparedPlan(rs.sourceDir(), rs.runCfg.Feature)
+	if err != nil || !found {
+		return delivery.Plan{}, fmt.Errorf("load prepared stage delivery plan: found=%t: %w", found, err)
+	}
+	planHash, err := plan.Hash()
+	if err != nil || planHash != request.PlanHash || plan.SourceRunID != rs.runID {
+		return delivery.Plan{}, errors.Join(errors.New("prepared stage delivery plan identity mismatch"), err)
+	}
+	canonical, err := plan.CanonicalJSON()
+	if err != nil {
+		return delivery.Plan{}, fmt.Errorf("canonical prepared stage delivery plan: %w", err)
+	}
+	candidateSHA := plan.VerifiedWorkspaceDigest
+	if current, digestErr := checks.WorkspaceDigest(rs.sourceDir()); digestErr != nil || current != candidateSHA {
+		return delivery.Plan{}, errors.Join(errors.New("stage delivery workspace differs from the approved candidate digest"), digestErr)
+	}
+	// Explicitness: an operator-supplied hash wins; otherwise the in-process
+	// controller's own authorization (rs.approvedPlanHash) or, after resume,
+	// the plan hash of the hash-chained delivery_plan_approved event that
+	// stageDeliveryApprovalIdentity already required. The local file store has
+	// no authenticated-decision authority, unlike the worker-facing path.
+	explicit := rs.p.deliveryApprovalHash
+	if explicit == "" {
+		explicit = rs.approvedPlanHash
+	}
+	if explicit == "" {
+		explicit = request.PlanHash
+	}
+	if rs.approvalStore == nil {
+		return delivery.Plan{}, errors.New("stage delivery requires controller approval storage")
+	}
+	// Validate exactly the approval named by the run's evidence. A continuation
+	// attempt may hold several valid approvals for the same plan (the earlier
+	// awaiting-plan attempt and the continuation), and the validator returns
+	// the first one it accepts.
+	approvalID, err := ValidateResolvedDeliveryOperationApproval(singleApprovalReader{store: rs.approvalStore, id: approvalIdentity},
+		rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, stageID, planHash, canonical, candidateSHA, explicit)
+	if err != nil {
+		return delivery.Plan{}, fmt.Errorf("stage delivery approval: %w", err)
+	}
+	if approvalID != approvalIdentity {
+		return delivery.Plan{}, errors.New("stage delivery evidence approval identity does not match controller approval")
+	}
+	return plan, nil
+}
+
+// singleApprovalReader exposes one approval ID from a store to
+// ValidateResolvedDeliveryOperationApproval.
+type singleApprovalReader struct {
+	store ApprovalStore
+	id    string
+}
+
+func (r singleApprovalReader) Load(runID, approvalID string) (approval.PendingApproval, error) {
+	if approvalID != r.id {
+		return approval.PendingApproval{}, fmt.Errorf("approval %s is not the evidence-named stage delivery approval", approvalID)
+	}
+	return r.store.Load(runID, approvalID)
+}
+
+func (r singleApprovalReader) List(runID string) ([]approval.PendingApproval, error) {
+	values, err := r.store.List(runID)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range values {
+		if value.ID == r.id {
+			return []approval.PendingApproval{value}, nil
+		}
+	}
+	return nil, nil
 }
 
 // stageRequiresControllerPRDelivery opts a stage into pre-review delivery only

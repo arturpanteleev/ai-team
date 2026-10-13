@@ -8,6 +8,11 @@ When an agent stage declares a PR result, delivery configuration, and hard `pr_e
 - **ТОГДА** the controller MUST create or recover the PR and publish its URL before evaluating `pr_exists`, `pr_open`, and `pr_base_branch`
 - **И** MUST preserve those configured checks and allow later code review and QA stages to consume the controller-owned PR result
 
+#### Scenario: In-process controller applies the same approval validation
+- **КОГДА** a local run delivers the stage in-process instead of through the worker-facing controller API
+- **ТОГДА** it MUST validate the exact canonical plan, candidate digest, approving attempt and resolved approval the same way before reusing a receipt or performing delivery
+- **И** MUST stop without side effects when that validation fails
+
 #### Scenario: Untrusted stage request
 - **КОГДА** a worker submits a mismatched manifest digest, plan hash, runtime identity, or approval
 - **ТОГДА** the controller MUST reject the request before any git or remote PR side effect

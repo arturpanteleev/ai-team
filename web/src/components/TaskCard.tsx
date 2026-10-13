@@ -3,6 +3,8 @@ import { formatStageDuration } from '../duration';
 import { useNavigate } from '../router';
 import { CopyableHash } from './CopyableHash';
 import { StatusBadge } from './StatusBadge';
+import { Bubble } from './Bubble';
+import type { BubbleTone } from './Bubble';
 import styles from './TaskCard.module.css';
 
 interface TaskCardProps {
@@ -19,6 +21,12 @@ function executorLabel(run: TaskRun): string {
   if (run.executor === 'human') return 'Участник';
   return '—';
 }
+
+const statusTone: Record<string, BubbleTone> = {
+  running: 'yellow', queued: 'lilac', waiting_for_approval: 'lilac', completed: 'mint',
+  completed_with_warnings: 'mint', failed: 'coral', blocked: 'coral', interrupted: 'coral',
+  stopped: 'coral', canceled: 'blue',
+};
 
 function modeLabel(run: TaskRun): string {
   if (run.mode === 'auto') return 'Авто';
@@ -61,7 +69,14 @@ export function TaskCard({ run, stageTitle, now, onCancel }: TaskCardProps) {
       tabIndex={0}
     >
       <div className={styles.header}>
-        <span className={styles.feature}>{run.feature}</span>
+        <div className={styles.titleRow}>
+          <Bubble tone={statusTone[run.status] ?? 'lilac'} size="sm">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="4" width="14" height="16" rx="4" /><path d="M9 12l2 2 4-4" />
+            </svg>
+          </Bubble>
+          <span className={styles.feature}>{run.feature}</span>
+        </div>
         <StatusBadge status={run.status} />
       </div>
       {run.task && <p className={styles.task}>{run.task}</p>}

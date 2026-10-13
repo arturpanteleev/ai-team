@@ -1,23 +1,23 @@
 /*
- * Светлая тема: тёплый фон, белые карточки, цветные «плашки» акцентов.
- * Имена переменных сохранены, поэтому старые модули подхватывают новую палитру.
+ * Тёплая светлая тема: кремовый фон, белые карточки с мягким объёмом,
+ * основной жёлтый и вторичный фиолетовый. Имена переменных сохранены.
  */
 :root,
 :root[data-theme='light'] {
   color-scheme: light;
-  --canvas: #f7f5f2;
+  --canvas: #fbf8f3;
   --surface: #ffffff;
-  --surface-raised: #faf8f5;
-  --surface-muted: #efebe5;
-  --text-primary: #1f2024;
-  --text-secondary: #3d3f46;
-  --text-muted: #6e6a64;
-  --border: #e8e4dd;
-  --border-strong: #cfc9bf;
-  --link: #0f6b7a;
-  --accent: #1f2024;
-  --accent-contrast: #ffffff;
-  --focus: #0f6b7a;
+  --surface-raised: #fdfbf7;
+  --surface-muted: #f3eee6;
+  --text-primary: #1f1d24;
+  --text-secondary: #3f3b46;
+  --text-muted: #716b63;
+  --border: #ece6db;
+  --border-strong: #d8d0c2;
+  --link: #6a5ae6;
+  --accent: #ffd84d;
+  --accent-contrast: #2a2200;
+  --focus: #6a5ae6;
   --success-bg: #d9f5e8;
   --success-fg: #17663f;
   --warning-bg: #fff1c2;
@@ -26,11 +26,18 @@
   --danger-fg: #a8321f;
   --info-bg: #d9f2f5;
   --info-fg: #0c5560;
-  --shadow: 0 6px 24px rgb(40 32 20 / 7%);
-  --shadow-soft: 0 2px 10px rgb(40 32 20 / 5%);
-  --executor-agent: #0f6b7a;
+  /* Объём: светлый блик сверху и два мягких слоя тени тёплого тона. */
+  --shadow: inset 0 1px 0 rgb(255 255 255 / 85%), 0 2px 6px rgb(60 44 20 / 5%), 0 14px 32px rgb(60 44 20 / 8%);
+  --shadow-soft: inset 0 1px 0 rgb(255 255 255 / 85%), 0 2px 6px rgb(60 44 20 / 4%), 0 10px 24px rgb(60 44 20 / 6%);
+  --button-shadow: inset 0 1px 0 rgb(255 255 255 / 75%), 0 2px 6px rgb(60 44 20 / 6%);
+  --executor-agent: #5a4bd1;
   --executor-human: #9a4a1c;
-  --executor-unknown: #6e6a64;
+  --executor-unknown: #716b63;
+
+  /* Вторичный акцент (ссылки, активный пункт меню). */
+  --violet: #7b6cf6;
+  --violet-gradient: linear-gradient(135deg, #8d80fb 0%, #6a5ae6 100%);
+  --violet-shadow: 0 8px 18px rgb(106 90 230 / 30%);
 
   /* Цветные акценты-плашки: фон и цвет текста на нём. */
   --tint-teal: #d4f3ee;
@@ -45,43 +52,56 @@
   /* Текст на жёлтых кнопках и активных пунктах: одинаков в обеих темах. */
   --on-yellow: #2a2200;
 
-  /* Геометрия */
-  --radius-xl: 24px;
-  --radius-lg: 18px;
-  --radius-md: 12px;
+  /* Пастельные «пузыри» под иконками: градиент от светлого к насыщенному. */
+  --bubble-yellow: linear-gradient(145deg, #fff8cf 0%, #ffd84d 100%);
+  --bubble-mint: linear-gradient(145deg, #e3fbf2 0%, #7fdcbc 100%);
+  --bubble-coral: linear-gradient(145deg, #ffe6df 0%, #ff9f8a 100%);
+  --bubble-lilac: linear-gradient(145deg, #f1edff 0%, #b5a8fb 100%);
+  --bubble-blue: linear-gradient(145deg, #e4f1ff 0%, #9ccaff 100%);
+  --bubble-glyph: #2a2530;
+
+  /* Геометрия: карточки 20-28px, пилюли 999px. */
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
   --radius-pill: 999px;
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --canvas: #0b1220;
-  --surface: #111c2e;
-  --surface-raised: #1e293b;
-  --surface-muted: #263449;
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
-  --text-muted: #94a3b8;
-  --border: #334155;
-  --border-strong: #475569;
-  --link: #93c5fd;
-  --accent: #1d4ed8;
-  --accent-contrast: #ffffff;
-  --focus: #60a5fa;
+  --canvas: #120f1c;
+  --surface: #1b1828;
+  --surface-raised: #242036;
+  --surface-muted: #2d2841;
+  --text-primary: #f4f1fb;
+  --text-secondary: #d4cfe3;
+  --text-muted: #a09ab5;
+  --border: #35304a;
+  --border-strong: #4a4462;
+  --link: #b3a9ff;
+  --accent: #ffd84d;
+  --accent-contrast: #2a2200;
+  --focus: #b3a9ff;
   --success-bg: #14532d;
   --success-fg: #bbf7d0;
-  --warning-bg: #713f12;
+  --warning-bg: #5b3d10;
   --warning-fg: #fde68a;
-  --danger-bg: #7f1d1d;
+  --danger-bg: #5c2320;
   --danger-fg: #fecaca;
   --info-bg: #0c4a6e;
   --info-fg: #bae6fd;
-  --shadow: 0 8px 24px rgb(0 0 0 / 24%);
-  --shadow-soft: 0 2px 10px rgb(0 0 0 / 18%);
-  --executor-agent: #60a5fa;
+  --shadow: inset 0 1px 0 rgb(255 255 255 / 6%), 0 2px 6px rgb(0 0 0 / 30%), 0 14px 32px rgb(0 0 0 / 34%);
+  --shadow-soft: inset 0 1px 0 rgb(255 255 255 / 6%), 0 2px 6px rgb(0 0 0 / 26%), 0 10px 24px rgb(0 0 0 / 28%);
+  --button-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 2px 6px rgb(0 0 0 / 30%);
+  --executor-agent: #b3a9ff;
   --executor-human: #fdba74;
-  --executor-unknown: #94a3b8;
+  --executor-unknown: #a09ab5;
 
-  --tint-teal: #0f3d39;
+  --violet: #9b8cff;
+  --violet-gradient: linear-gradient(135deg, #9b8cff 0%, #7a68ef 100%);
+  --violet-shadow: 0 8px 20px rgb(0 0 0 / 40%);
+
+  --tint-teal: #15382f;
   --ink-teal: #9ff0e2;
   --tint-yellow: #4a3b00;
   --ink-yellow: #ffe98a;
@@ -91,6 +111,13 @@
   --ink-lilac: #d6ccff;
   --create-yellow: #ffd84d;
   --on-yellow: #2a2200;
+
+  --bubble-yellow: linear-gradient(145deg, #6b5a14 0%, #c9a52a 100%);
+  --bubble-mint: linear-gradient(145deg, #1f5b4b 0%, #3fa98a 100%);
+  --bubble-coral: linear-gradient(145deg, #6a3328 0%, #d9735e 100%);
+  --bubble-lilac: linear-gradient(145deg, #3d3470 0%, #7f70e0 100%);
+  --bubble-blue: linear-gradient(145deg, #23476e 0%, #4f8fd6 100%);
+  --bubble-glyph: #fbf9ff;
 }
 
 * {
@@ -127,8 +154,9 @@ button {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
   background: var(--surface);
+  box-shadow: var(--button-shadow);
   cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s, transform 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
 
 button:hover:not(:disabled) {

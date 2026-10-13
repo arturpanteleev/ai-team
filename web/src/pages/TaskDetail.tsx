@@ -29,6 +29,7 @@ import {
 import type { Approval, Artifact, Stage, TaskEvent, TaskResultRevision, TaskRunDetails, WorkflowGraph } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { Bubble } from '../components/Bubble';
 import { CopyableHash } from '../components/CopyableHash';
 import { StageResultForm } from '../components/StageResultForm';
 import { hasHttpPrefix } from '../stageResultValidation';
@@ -886,7 +887,12 @@ function FailureNotice({ runID, title, reason, attempt }: {
   attempt?: Stage;
 }) {
   return <div className={styles.failure} role="status" data-testid="stage-failure">
-    <p className={styles.failureTitle}>{title}</p>
+    <div className={styles.failureHead}>
+      <Bubble tone="coral" size="sm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 7v6M12 17h.01" /></svg>
+      </Bubble>
+      <p className={styles.failureTitle}>{title}</p>
+    </div>
     <p>{reason}</p>
     {attempt && <a href={`/api/runs/${encodeURIComponent(runID)}/logs/${encodeURIComponent(attempt.attempt_id)}`}
       target="_blank" rel="noreferrer">Открыть лог агента</a>}
@@ -924,8 +930,15 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
     title = 'Агент завершил, ждём проверки';
   }
   if (state === 'idle') return null;
+  const tone = state === 'finished' ? 'mint' : state === 'running' ? 'yellow' : 'lilac';
   return <div className={styles.agentStatus} role="status" data-state={state}>
-    {state === 'running' && <span className={styles.spinner} aria-hidden="true" />}
+    {state === 'running'
+      ? <span className={styles.spinner} aria-hidden="true" />
+      : <Bubble tone={tone} size="sm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d={state === 'finished' ? 'M6 12.5l4 4 8-9' : 'M6 12h12M13 7l5 5-5 5'} />
+        </svg>
+      </Bubble>}
     <div>
       <p className={styles.agentTitle}>{title}</p>
       {detail && <p>{detail}</p>}

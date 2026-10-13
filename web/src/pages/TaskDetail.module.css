@@ -1060,6 +1060,12 @@
   font-weight: 750;
 }
 
+.failureHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .failure a {
   display: inline-flex;
   min-height: 32px;

@@ -1,0 +1,26 @@
+.bubble {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--bubble-glyph);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 75%), inset 0 -4px 8px rgb(0 0 0 / 6%), 0 6px 14px rgb(60 44 20 / 12%);
+}
+
+.bubble svg {
+  width: 60%;
+  height: 60%;
+}
+
+.sm {
+  width: 30px;
+  height: 30px;
+}
+
+.yellow { background: var(--bubble-yellow); }
+.mint { background: var(--bubble-mint); }
+.coral { background: var(--bubble-coral); }
+.lilac { background: var(--bubble-lilac); }
+.blue { background: var(--bubble-blue); }

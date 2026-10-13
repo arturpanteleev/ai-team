@@ -1,11 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
 import type { TaskStageTemplate } from '../types';
-import { emptyStageResultDraft, loadStageResultDraft, saveStageResultDraft } from '../stageResultDraft';
+import {
+  clearStageResultDraft, emptyStageResultDraft, isEmptyStageResultDraft, loadStageResultDraft, saveStageResultDraft,
+} from '../stageResultDraft';
+import type { StageResultDraft } from '../stageResultDraft';
+import { MarkdownPreview } from './MarkdownPreview';
 import { MAX_MARKDOWN_BYTES, MAX_TEXT_BYTES, formatBytes, linkError, linkHint, linkKindTitles, utf8Length } from '../stageResultValidation';
 import type { StageResultSubmission } from '../stageResultValidation';
 import styles from './StageResultForm.module.css';
+
+// Draft writes serialise the whole form, which is slow for multi-megabyte
+// Markdown; they are batched while the person types and flushed when the page
+// is hidden, the form closes or the result is sent.
+export const DRAFT_SAVE_DELAY_MS = 400;
 
 async function readMarkdownFile(file: File): Promise<string> {
   if (file.size > MAX_MARKDOWN_BYTES) {
@@ -39,12 +47,46 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
   const [fileError, setFileError] = useState('');
   const [fileName, setFileName] = useState('');
 
+  const pendingDraft = useRef<StageResultDraft | null>(null);
+  const saveTimer = useRef<number | undefined>(undefined);
+  // Set once the text was handed to onSubmit: the caller clears the stored
+  // draft after the server accepts it, so neither a pending debounced write nor
+  // the final write on close may bring it back. New input resets it.
+  const submitted = useRef(false);
+  const flushDraft = useCallback(() => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = undefined;
+    const value = pendingDraft.current;
+    pendingDraft.current = null;
+    if (!value || submitted.current) return;
+    setPersisted(saveStageResultDraft(runId, stage.id, value));
+  }, [runId, stage.id]);
+
+  // The draft on mount is already what storage holds (or nothing); only edits
+  // are scheduled for writing.
+  const loadedDraft = useRef(true);
   useEffect(() => {
-    setPersisted(saveStageResultDraft(runId, stage.id, draft));
-  }, [runId, stage.id, draft]);
+    if (loadedDraft.current) {
+      loadedDraft.current = false;
+      return;
+    }
+    pendingDraft.current = draft;
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(flushDraft, DRAFT_SAVE_DELAY_MS);
+  }, [draft, flushDraft]);
+
+  useEffect(() => {
+    window.addEventListener('pagehide', flushDraft);
+    return () => {
+      window.removeEventListener('pagehide', flushDraft);
+      flushDraft();
+    submitted.current = true;
+    };
+  }, [flushDraft]);
 
   const update = (field: keyof typeof draft) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const value = event.target.value;
+    submitted.current = false;
     setDraft((current) => ({ ...current, [field]: value }));
   };
 
@@ -68,6 +110,7 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
     if (!file) return;
     try {
       const text = await readMarkdownFile(file);
+      submitted.current = false;
       setDraft((current) => ({ ...current, content: text }));
       setFileName(file.name);
       setFileError('');
@@ -81,6 +124,10 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (working || missingValue || errors.length > 0) return;
+    // Persist the exact submitted text first: a rejected submission keeps it,
+    // an accepted one is cleared by the caller without a late write behind it.
+    flushDraft();
+    submitted.current = true;
     const note = draft.note.trim();
     const description = draft.description.trim();
     onSubmit({
@@ -93,6 +140,11 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
   };
 
   const discard = () => {
+    if (!isEmptyStageResultDraft(draft) &&
+      !window.confirm('Очистить черновик? Введённый текст будет удалён из формы и из этого браузера.')) return;
+    window.clearTimeout(saveTimer.current);
+    pendingDraft.current = null;
+    clearStageResultDraft(runId, stage.id);
     setDraft(emptyStageResultDraft);
     setRestored(false);
     setFileName('');
@@ -120,17 +172,16 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
         {fileName && !fileError && <p className={styles.info}>Загружен файл: {fileName}</p>}
         {fileError && <p className={styles.error} role="alert">{fileError}</p>}
         {preview
-          ? <div className={styles.preview} aria-label="Предпросмотр результата">
-            {draft.content.trim() ? <ReactMarkdown>{draft.content}</ReactMarkdown> : <p>Пока пусто.</p>}
-          </div>
+          ? <MarkdownPreview className={styles.preview} label="Предпросмотр результата" markdown={draft.content}
+            emptyText="Пока пусто." />
           : <label>Результат в Markdown
-            <textarea value={draft.content} onChange={update('content')} rows={14} />
+            <textarea value={draft.content} onChange={update('content')} rows={14} disabled={working} />
           </label>}
       </section>}
 
       {kind === 'link' && <>
         <label>Ссылка на результат
-          <input type="url" inputMode="url" value={draft.url} onChange={update('url')} placeholder="https://"
+          <input type="url" inputMode="url" value={draft.url} onChange={update('url')} placeholder="https://" disabled={working}
             aria-invalid={urlError ? true : undefined} />
         </label>
         <p className={styles.info}>Вид ссылки: {stage.link_kind ? linkKindTitles[stage.link_kind] : 'не задан'}</p>
@@ -140,13 +191,13 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
       {kind === 'approve' && <p>Подтвердите завершение этапа. Текст подтверждения необязателен.</p>}
 
       <label>Что сделано
-        <textarea value={draft.description} onChange={update('description')} rows={3} />
+        <textarea value={draft.description} onChange={update('description')} rows={3} disabled={working} />
       </label>
       {descriptionMissing && <p className={styles.warning}>
         Поле «Что сделано» пустое. Результат можно сдать, но в задаче появится предупреждение «Нет описания результата».
       </p>}
       <label>{kind === 'approve' ? 'Текст подтверждения' : 'Заметка'}
-        <textarea value={draft.note} onChange={update('note')} rows={3} />
+        <textarea value={draft.note} onChange={update('note')} rows={3} disabled={working} />
       </label>
 
       {errors.length > 0 && <ul className={styles.error} role="alert">{errors.map((error) => <li key={error}>{error}</li>)}</ul>}

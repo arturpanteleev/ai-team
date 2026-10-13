@@ -41,6 +41,15 @@ export function formatBytes(bytes: number): string {
   return `${bytes} Б`;
 }
 
+const HTTP_PREFIX = /^https?:\/\/[^\s/?#]/i;
+const OTHER_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+// hasHttpPrefix reports whether value literally starts with http:// or https://
+// followed by a host.
+export function hasHttpPrefix(value: string): boolean {
+  return HTTP_PREFIX.test(value);
+}
+
 // linkError returns why a URL cannot be submitted, matching the server's
 // HTTP(S)-only rule; credentials in the URL are rejected so they never land in
 // task history.
@@ -48,6 +57,13 @@ export function linkError(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
   if (utf8Length(trimmed) > MAX_URL_BYTES) return `Ссылка длиннее ${MAX_URL_BYTES} байт.`;
+  // new URL() alone accepts forms like "https:host" or "http:/host"; the
+  // literal prefix keeps the stored link exactly as people will click it.
+  if (!hasHttpPrefix(trimmed)) {
+    return OTHER_SCHEME.test(trimmed) && !/^https?:/i.test(trimmed)
+      ? 'Ссылка должна начинаться с http:// или https://.'
+      : 'Введите полный адрес, начиная с https://.';
+  }
   let parsed: URL;
   try {
     parsed = new URL(trimmed);

@@ -27,12 +27,12 @@ describe('Layout team navigation', () => {
     expect(screen.queryByRole('link', { name: 'Команда' })).not.toBeInTheDocument();
   });
 
-  it('оставляет в меню только рабочие разделы: без ленты, наблюдаемости и отдельного «Шаблон»', () => {
+  it('показывает рабочие разделы с понятными подписями и без дубля «Шаблон»', () => {
     renderLayout(false);
 
     expect(screen.getByRole('link', { name: 'Шаблоны' })).toHaveAttribute('href', '/template');
-    expect(screen.queryByRole('link', { name: 'Лента' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Наблюдаемость' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Лента' })).toHaveAttribute('href', '/events');
+    expect(screen.getByRole('link', { name: 'Наблюдаемость' })).toHaveAttribute('href', '/observability');
     expect(screen.queryByRole('link', { name: 'Шаблон' })).not.toBeInTheDocument();
   });
 
@@ -42,11 +42,11 @@ describe('Layout team navigation', () => {
     expect(screen.getByRole('link', { name: 'Команда' })).toBeInTheDocument();
   });
 
-  it('ведёт на дашборд и на доску задач разными пунктами без дубля «Задачи»', () => {
+  it('ведёт на главную «Задачи» и на доску разными пунктами', () => {
     renderLayout(false);
 
-    expect(screen.getByRole('link', { name: 'Дашборд' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'Задачи' })).toHaveAttribute('href', '/');
     expect(screen.getByRole('link', { name: 'Доска' })).toHaveAttribute('href', '/tasks');
-    expect(screen.queryByRole('link', { name: 'Задачи' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Дашборд' })).not.toBeInTheDocument();
   });
 });

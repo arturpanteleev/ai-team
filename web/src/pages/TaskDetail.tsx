@@ -421,7 +421,7 @@ export function TaskDetail() {
   return (
     <main className={styles.container}>
       <Link to="/tasks" className={styles.back}>← К задачам</Link>
-      <header className={styles.header}>
+      <header className={styles.hero}>
         <div className={styles.headingLine}>
           <h1>{run.feature}</h1>
           <StatusBadge status={run.status} />
@@ -438,6 +438,20 @@ export function TaskDetail() {
             ))}
           </ul>
         )}
+        <section className={styles.intent} aria-labelledby="intention-heading">
+          <h2 id="intention-heading">Бизнес-намерение</h2>
+          {intentText !== null
+            ? <div className={styles.markdown}><ReactMarkdown>{intentText}</ReactMarkdown></div>
+            : details.task
+              ? <p className={styles.task}>{details.task}</p>
+              : <p>Текст намерения пока не записан.</p>}
+          {briefArtifacts.length > 0 && <div className={styles.briefLinks}>
+            <span>Файлы намерения:</span>
+            {briefArtifacts.map((artifact) => (
+              <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>{artifact.path.replace('brief/', '')}</Link>
+            ))}
+          </div>}
+        </section>
         <details className={styles.details}>
           <summary>Подробности</summary>
           <dl>
@@ -453,9 +467,10 @@ export function TaskDetail() {
       <section className={styles.panel} aria-labelledby="route-heading">
         <h2 id="route-heading">Маршрут процесса</h2>
         {route.length === 0 ? <p>Этапов нет.</p> : <ol className={styles.route}>
-          {route.map(({ stage, state }) => (
+          {route.map(({ stage, state }, index) => (
             <li key={stage.id} className={styles.routeItem} data-state={state}
               aria-current={state === 'current' ? 'step' : undefined}>
+              <span className={styles.routeDot} aria-hidden="true">{state === 'passed' ? '✓' : index + 1}</span>
               <span className={styles.routeTitle}>{stage.title}</span>
               <span className={styles.routeState}>{routeLabels[state]}</span>
             </li>
@@ -463,7 +478,7 @@ export function TaskDetail() {
         </ol>}
       </section>
 
-      <section className={styles.panel} aria-labelledby="current-stage-heading">
+      <section className={`${styles.panel} ${styles.stageCard}`} aria-labelledby="current-stage-heading">
         <div className={styles.panelHeading}>
           <div>
             <p className={styles.eyebrow}>Текущий этап</p>
@@ -472,11 +487,14 @@ export function TaskDetail() {
             {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
               {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
                 {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
-            {runningAttempt && currentStage && <p role="status">
-              {currentExecutor === 'agent'
-                ? `Агент ${currentStage.agent ?? ''} работает над «${currentStage.title}», запущено ${clockTime(runningAttempt.started_at)}`
-                : `Этап «${currentStage.title}» выполняется, запущено ${clockTime(runningAttempt.started_at)}`}
-            </p>}
+            {runningAttempt && currentStage && <div className={styles.working} role="status">
+              <span className={styles.spinner} aria-hidden="true" />
+              <p>
+                {currentExecutor === 'agent'
+                  ? `Агент ${currentStage.agent ?? ''} работает над «${currentStage.title}», запущено ${clockTime(runningAttempt.started_at)}`
+                  : `Этап «${currentStage.title}» выполняется, запущено ${clockTime(runningAttempt.started_at)}`}
+              </p>
+            </div>}
           </div>
         </div>
 
@@ -571,6 +589,7 @@ export function TaskDetail() {
             </form>}
           </details>
         )}
+        {/* Слот под текущим этапом: сюда встаёт блок вопросов агента (AgentQuestions). Не удалять. */}
       </section>
 
       <section className={styles.panel} aria-labelledby="approvals-heading">
@@ -641,21 +660,6 @@ export function TaskDetail() {
             </small>)}
           </article>)}
         </details>}
-      </section>
-
-      <section className={styles.panel} aria-labelledby="intention-heading">
-        <h2 id="intention-heading">Бизнес-намерение</h2>
-        {intentText !== null
-          ? <div className={styles.markdown}><ReactMarkdown>{intentText}</ReactMarkdown></div>
-          : details.task
-            ? <p className={styles.task}>{details.task}</p>
-            : <p>Текст намерения пока не записан.</p>}
-        {briefArtifacts.length > 0 && <div className={styles.briefLinks}>
-          <span>Файлы намерения:</span>
-          {briefArtifacts.map((artifact) => (
-            <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>{artifact.path.replace('brief/', '')}</Link>
-          ))}
-        </div>}
       </section>
 
       {details.delivery.status !== 'not_requested' && (
@@ -730,6 +734,8 @@ export function TaskDetail() {
         />
       </section>
 
+      <details className={styles.techGroup}>
+        <summary className={styles.techSummary}>Журнал задачи: таймлайн, этапы, логи и лента событий</summary>
       <section className={styles.panel} aria-labelledby="timeline-heading">
         <h2 id="timeline-heading">Таймлайн задачи</h2>
         <TaskTimeline details={details} events={visibleSnapshot.events} eventTitle={eventTitle} />
@@ -768,6 +774,7 @@ export function TaskDetail() {
           </li>)}
         </ol>}
       </section>
+      </details>
     </main>
   );
 }

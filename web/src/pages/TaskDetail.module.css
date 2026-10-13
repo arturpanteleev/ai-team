@@ -1,7 +1,7 @@
 .container {
   width: min(100%, 1180px);
   min-width: 0;
-  padding: 24px;
+  padding: 32px 32px 48px;
   margin: 0 auto;
 }
 
@@ -28,7 +28,11 @@
 
 .headingLine h1 {
   margin: 0;
-  font-size: clamp(1.35rem, 4vw, 1.8rem);
+  color: var(--text-primary);
+  font-size: clamp(1.6rem, 3.6vw, 2.2rem);
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
   overflow-wrap: anywhere;
 }
 
@@ -63,12 +67,22 @@
 
 .panel {
   min-width: 0;
-  margin: 16px 0;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  margin: 18px 0;
+  padding: 22px 24px;
+  border: 0;
+  border-radius: var(--radius-xl);
   background: var(--surface);
+  box-shadow: var(--shadow-soft);
   color: var(--text-secondary);
+}
+
+.hero {
+  min-width: 0;
+  margin-bottom: 18px;
+  padding: 28px 28px 22px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
 }
 
 .panel > h2,
@@ -477,15 +491,27 @@
 }
 
 .nextStep {
-  margin: 14px 0 0;
-  color: var(--text-primary);
+  margin: 16px 0 0;
+  padding: 14px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--tint-teal);
+  color: var(--ink-teal);
   font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .nextLabel {
-  color: var(--text-muted);
-  font-size: 0.95rem;
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-teal);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .details {
@@ -528,40 +554,84 @@
 
 .route {
   display: flex;
-  gap: 8px;
+  gap: 0;
   margin: 0;
-  padding: 0 0 4px;
+  padding: 4px 0 6px;
   list-style: none;
   overflow-x: auto;
 }
 
 .routeItem {
-  flex: 0 0 auto;
+  position: relative;
+  flex: 1 0 128px;
   display: grid;
-  gap: 2px;
-  min-width: 140px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-raised);
+  justify-items: start;
+  gap: 4px;
+  min-width: 128px;
+  padding: 0 10px 0 0;
+  color: var(--text-muted);
+}
+
+/* Линия между этапами: проходит через точки. */
+.routeItem::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  left: 34px;
+  right: 6px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+}
+
+.routeItem:last-child::before {
+  display: none;
+}
+
+.routeItem[data-state='passed']::before {
+  background: var(--tint-teal);
+}
+
+.routeDot {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .routeItem[data-state='passed'] {
   color: var(--text-muted);
 }
 
+.routeItem[data-state='passed'] .routeDot {
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
 .routeItem[data-state='current'] {
-  border-color: var(--accent);
   color: var(--text-primary);
 }
 
+.routeItem[data-state='current'] .routeDot {
+  background: var(--create-yellow);
+  color: var(--on-yellow);
+  box-shadow: 0 0 0 4px var(--tint-yellow);
+}
+
 .routeItem[data-state='upcoming'] {
-  border-style: dashed;
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
 .routeTitle {
-  font-weight: 600;
+  font-weight: 650;
+  font-size: 14px;
   overflow-wrap: anywhere;
 }
 
@@ -581,11 +651,20 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 8px;
+  padding: 18px;
+  border: 0;
+  border-radius: var(--radius-lg);
   background: var(--surface-raised);
+}
+
+.modeCard:first-child {
+  background: var(--tint-lilac);
+  color: var(--ink-lilac);
+}
+
+.modeCard:first-child p {
+  color: var(--ink-lilac);
 }
 
 .modeCard h3 {
@@ -700,4 +779,142 @@
 .budgetGrant p {
   margin: 0;
   font-size: 13px;
+}
+
+/* Текущий этап: главная карточка страницы. */
+.stageCard {
+  padding: 26px 26px 24px;
+  box-shadow: var(--shadow);
+}
+
+.stageCard .panelHeading h2 {
+  font-size: 1.5rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.stageCard .actions > button:first-child:not(:disabled),
+.modeCard button:first-of-type:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.working {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
+.working p {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border: 3px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0.85;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+/* Вступление: бизнес-намерение внутри шапки задачи. */
+.intent {
+  min-width: 0;
+  margin-top: 16px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+}
+
+.intent > h2 {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.intent > .task,
+.intent > .markdown,
+.intent > p {
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* Журнал задачи: служебные таблицы свёрнуты по умолчанию. */
+.techGroup {
+  margin-top: 18px;
+}
+
+.techSummary {
+  display: flex;
+  align-items: center;
+  min-height: 56px;
+  padding: 0 24px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-primary);
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+
+.techSummary::-webkit-details-marker {
+  display: none;
+}
+
+.techSummary::after {
+  content: '+';
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 20px;
+}
+
+.techGroup[open] > .techSummary::after {
+  content: '−';
+}
+
+.techGroup[open] > .techSummary {
+  margin-bottom: 4px;
+}
+
+@media (max-width: 600px) {
+  .hero {
+    padding: 20px 18px 18px;
+  }
+
+  .routeItem {
+    flex-basis: 112px;
+    min-width: 112px;
+  }
+
+  .stageCard {
+    padding: 20px 18px;
+  }
 }

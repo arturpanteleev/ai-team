@@ -1,31 +1,55 @@
+/*
+ * Светлая тема: тёплый фон, белые карточки, цветные «плашки» акцентов.
+ * Имена переменных сохранены, поэтому старые модули подхватывают новую палитру.
+ */
 :root,
 :root[data-theme='light'] {
   color-scheme: light;
-  --canvas: #f8fafc;
+  --canvas: #f7f5f2;
   --surface: #ffffff;
-  --surface-raised: #f1f5f9;
-  --surface-muted: #e2e8f0;
-  --text-primary: #172033;
-  --text-secondary: #334155;
-  --text-muted: #475569;
-  --border: #cbd5e1;
-  --border-strong: #94a3b8;
-  --link: #1d4ed8;
-  --accent: #1d4ed8;
+  --surface-raised: #faf8f5;
+  --surface-muted: #efebe5;
+  --text-primary: #1f2024;
+  --text-secondary: #3d3f46;
+  --text-muted: #6e6a64;
+  --border: #e8e4dd;
+  --border-strong: #cfc9bf;
+  --link: #0f6b7a;
+  --accent: #1f2024;
   --accent-contrast: #ffffff;
-  --focus: #1d4ed8;
-  --success-bg: #dcfce7;
-  --success-fg: #166534;
-  --warning-bg: #fef3c7;
-  --warning-fg: #854d0e;
-  --danger-bg: #fee2e2;
-  --danger-fg: #b91c1c;
-  --info-bg: #e0f2fe;
-  --info-fg: #075985;
-  --shadow: 0 8px 24px rgb(15 23 42 / 10%);
-  --executor-agent: #1d4ed8;
-  --executor-human: #9a3412;
-  --executor-unknown: #475569;
+  --focus: #0f6b7a;
+  --success-bg: #d9f5e8;
+  --success-fg: #17663f;
+  --warning-bg: #fff1c2;
+  --warning-fg: #6b4d00;
+  --danger-bg: #ffe0da;
+  --danger-fg: #a8321f;
+  --info-bg: #d9f2f5;
+  --info-fg: #0c5560;
+  --shadow: 0 6px 24px rgb(40 32 20 / 7%);
+  --shadow-soft: 0 2px 10px rgb(40 32 20 / 5%);
+  --executor-agent: #0f6b7a;
+  --executor-human: #9a4a1c;
+  --executor-unknown: #6e6a64;
+
+  /* Цветные акценты-плашки: фон и цвет текста на нём. */
+  --tint-teal: #d4f3ee;
+  --ink-teal: #0d5f55;
+  --tint-yellow: #ffe98a;
+  --ink-yellow: #3b2f00;
+  --tint-coral: #ffd9d1;
+  --ink-coral: #9c3a26;
+  --tint-lilac: #e4dcff;
+  --ink-lilac: #4b3a9a;
+  --create-yellow: #ffd84d;
+  /* Текст на жёлтых кнопках и активных пунктах: одинаков в обеих темах. */
+  --on-yellow: #2a2200;
+
+  /* Геометрия */
+  --radius-xl: 24px;
+  --radius-lg: 18px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
 }
 
 :root[data-theme='dark'] {
@@ -52,9 +76,21 @@
   --info-bg: #0c4a6e;
   --info-fg: #bae6fd;
   --shadow: 0 8px 24px rgb(0 0 0 / 24%);
+  --shadow-soft: 0 2px 10px rgb(0 0 0 / 18%);
   --executor-agent: #60a5fa;
   --executor-human: #fdba74;
   --executor-unknown: #94a3b8;
+
+  --tint-teal: #0f3d39;
+  --ink-teal: #9ff0e2;
+  --tint-yellow: #4a3b00;
+  --ink-yellow: #ffe98a;
+  --tint-coral: #4a1f18;
+  --ink-coral: #ffc2b5;
+  --tint-lilac: #2f2650;
+  --ink-lilac: #d6ccff;
+  --create-yellow: #ffd84d;
+  --on-yellow: #2a2200;
 }
 
 * {
@@ -86,16 +122,22 @@ select {
 }
 
 button {
-  min-height: 36px;
-  padding: 7px 12px;
+  min-height: 38px;
+  padding: 8px 18px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface-raised);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
   cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.15s;
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--link);
+  border-color: var(--text-primary);
+  background: var(--surface-raised);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 button:disabled {

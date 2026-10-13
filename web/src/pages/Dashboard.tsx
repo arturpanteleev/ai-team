@@ -4,6 +4,8 @@ import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
 import { cancelRun, getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
+import { Link } from '../router';
+import { statusLabels } from '../statusLabels';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import styles from './Dashboard.module.css';
@@ -38,14 +40,19 @@ const filterLabels: Record<Filter, string> = {
   interrupted: 'Прервана',
 };
 
+const activeStatuses: PipelineStatus[] = ['queued', 'running', 'waiting_for_approval'];
+
 export function Dashboard() {
   usePageTitle('Задачи');
   const principal = getActivePrincipal();
   const canSubmitIntention = !principal || principal.roles.includes('product_owner');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
+  const [query, setQuery] = useState('');
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [createdRunID, setCreatedRunID] = useState('');
   const [name, setName] = useState('');
   const [feature, setFeature] = useState('');
   // Пока пользователь не правил идентификатор вручную, он следует за названием.
@@ -96,8 +103,22 @@ export function Dashboard() {
     };
   }, [fetchRuns]);
 
-  const filtered = filter === 'all' ? runs : runs.filter((r) => r.status === filter);
+  const needle = query.trim().toLowerCase();
+  const filtered = runs
+    .filter((r) => filter === 'all' || r.status === filter)
+    .filter((r) => !needle || r.feature.toLowerCase().includes(needle) || r.run_id.toLowerCase().includes(needle));
+  const activeRuns = runs.filter((r) => activeStatuses.includes(r.status));
+  const sideRuns = (activeRuns.length > 0 ? activeRuns : runs).slice(0, 5);
   const readiness = preflight?.readiness ?? (preflight?.unknown ? 'unknown' : preflight?.ready ? 'ready' : preflight ? 'blocked' : 'unknown');
+  const checks = preflight?.checks ?? [];
+  const failedCheck = checks.find((check) => check.status === 'failed' && check.required);
+
+  const readinessTitle = readiness === 'ready' ? 'Окружение готово' : readiness === 'blocked' ? 'Есть проблемы' : 'Статус неизвестен';
+  const readinessText = readiness === 'ready'
+    ? 'Можно запускать задачи.'
+    : readiness === 'blocked'
+      ? failedCheck?.message || 'Исправьте блокеры, иначе задачи не стартуют.'
+      : 'Проверка окружения не вернула результат. Задача может подождать worker.';
 
   const submitRun = async (event: FormEvent) => {
     event.preventDefault();
@@ -107,10 +128,12 @@ export function Dashboard() {
       featureRef.current?.focus();
       return;
     }
-    setCommandStatus('Запускаю…');
+    setCommandStatus('Создаём задачу…');
     try {
       const result = await startRun(feature, task);
-      setCommandStatus(`Run принят: ${result.run_id}`);
+      setCreatedRunID(result.run_id);
+      setCommandStatus('');
+      setCreating(false);
       setName('');
       setFeature('');
       setFeatureEdited(false);
@@ -128,90 +151,154 @@ export function Dashboard() {
     }
   };
 
+  const createForm = (
+    <form className={styles.createCard} onSubmit={submitRun} aria-labelledby="create-heading">
+      <div className={styles.createHead}>
+        <h2 id="create-heading">Новая задача</h2>
+        <button type="button" className={styles.cancelCreate} onClick={() => { setCreating(false); setCommandStatus(''); }}>Отмена</button>
+      </div>
+      <label htmlFor="initiative-name">Название задачи</label>
+      <input id="initiative-name" value={name} onChange={(event) => {
+        setName(event.target.value);
+        setFeatureError('');
+        if (!featureEdited) setFeature(identifierFromTitle(event.target.value));
+      }} placeholder="например, вход через Google" required />
+      <label htmlFor="feature-name">Короткий идентификатор</label>
+      <input id="feature-name" ref={featureRef} value={feature} onChange={(event) => {
+        setFeatureEdited(true);
+        setFeatureError('');
+        setFeature(event.target.value);
+      }} placeholder="google-auth" aria-invalid={featureError ? true : undefined}
+        aria-describedby="feature-name-hint feature-name-error" />
+      <small id="feature-name-hint">{identifierHint}</small>
+      {featureError && <span id="feature-name-error" role="alert" className={styles.fieldError}>{featureError}</span>}
+      <label htmlFor="business-intention">Какого результата хотите достичь?</label>
+      <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
+        placeholder="Опишите цель, ограничения и ожидаемый результат. Аналитик уточнит недостающие детали."
+        rows={5} required />
+      <button type="submit" className={styles.createSubmit} disabled={readiness === 'blocked'}>Создать задачу</button>
+      <small>Намерение и уточнения сохраняются в истории задачи. До технического планирования Product Owner согласует спецификацию.</small>
+      {commandStatus && <span role="status">{commandStatus}</span>}
+    </form>
+  );
+
   return (
     <div className={styles.container}>
-      <div className={styles.header}>
-        <h1 className={styles.title}>Задачи</h1>
-        <button
-          type="button"
-          className={styles.filtersToggle}
-          aria-expanded={filtersExpanded}
-          aria-controls="pipeline-status-filters"
-          onClick={() => setFiltersExpanded((expanded) => !expanded)}
-        >
-          Статус: {filterLabels[filter]} · Фильтры
-        </button>
-        <div id="pipeline-status-filters" className={styles.filters} data-expanded={filtersExpanded} aria-label="Фильтр по статусу">
-          {filters.map((f) => (
-            <button
-              key={f}
-              className={`${styles.filterBtn} ${filter === f ? styles.active : ''}`}
-              aria-pressed={filter === f}
-              onClick={() => { setFilter(f); setFiltersExpanded(false); }}
-            >
-              {filterLabels[f]}
-            </button>
-          ))}
+      <div className={styles.main}>
+        <header className={styles.header}>
+          <div>
+            <h1 className={styles.title}>Задачи</h1>
+            <p className={styles.subtitle}>Что в работе и что ждёт вашего решения.</p>
+          </div>
+        </header>
+
+        <div className={styles.toolbar}>
+          <label className={styles.search}>
+            <span className={styles.visuallyHidden}>Поиск задач</span>
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+              placeholder="Поиск задач" />
+          </label>
+          <button
+            type="button"
+            className={styles.filtersToggle}
+            aria-expanded={filtersExpanded}
+            aria-controls="pipeline-status-filters"
+            onClick={() => setFiltersExpanded((expanded) => !expanded)}
+          >
+            Статус: {filterLabels[filter]} · Фильтры
+          </button>
+          <div id="pipeline-status-filters" className={styles.filters} data-expanded={filtersExpanded} role="group" aria-label="Фильтр по статусу">
+            {filters.map((f) => (
+              <button
+                key={f}
+                className={`${styles.filterBtn} ${filter === f ? styles.active : ''}`}
+                aria-pressed={filter === f}
+                onClick={() => { setFilter(f); setFiltersExpanded(false); }}
+              >
+                {filterLabels[f]}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {loading ? (
+          <div className={styles.loading}>Загружаем задачи…</div>
+        ) : filtered.length === 0 ? (
+          <div className={styles.empty}>
+            {runs.length === 0 ? 'Задач пока нет. Создайте первую справа.' : 'Ничего не найдено по этим условиям.'}
+          </div>
+        ) : (
+          <div className={styles.pipelines}>
+            {filtered.map((run) => (
+              <PipelineCard key={run.id} run={run} onCancel={async () => {
+                try { await cancelRun(run.run_id); await fetchRuns(); }
+                catch (err) { setCommandStatus(err instanceof Error ? err.message : 'Не удалось отменить'); }
+              }} />
+            ))}
+          </div>
+        )}
       </div>
 
-      {canSubmitIntention ? (
-        <form className={styles.runForm} onSubmit={submitRun}>
-          <label htmlFor="initiative-name">Название инициативы</label>
-          <input id="initiative-name" value={name} onChange={(event) => {
-            setName(event.target.value);
-            setFeatureError('');
-            if (!featureEdited) setFeature(identifierFromTitle(event.target.value));
-          }} placeholder="например, рост повторных продаж" required />
-          <label htmlFor="feature-name">Идентификатор</label>
-          <input id="feature-name" ref={featureRef} value={feature} onChange={(event) => {
-            setFeatureEdited(true);
-            setFeatureError('');
-            setFeature(event.target.value);
-          }} placeholder="google-auth" aria-invalid={featureError ? true : undefined}
-            aria-describedby="feature-name-hint feature-name-error" />
-          <small id="feature-name-hint">{identifierHint}</small>
-          {featureError && <span id="feature-name-error" role="alert" className={styles.fieldError}>{featureError}</span>}
-          <label htmlFor="business-intention">Какого результата хотите достичь?</label>
-          <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
-            placeholder="Опишите бизнес-цель, ограничения и ожидаемый результат своими словами. Аналитик уточнит недостающие детали."
-            rows={4} required />
-          <button type="submit" disabled={readiness === 'blocked'}>Создать инициативу и передать аналитику</button>
-          <small>Ваше намерение и все последующие уточнения сохраняются в истории задачи. До начала технического планирования Product Owner согласует спецификацию.</small>
-          {commandStatus && <span>{commandStatus}</span>}
-        </form>
-      ) : (
-        <section className={styles.intakeNotice}>
-          <strong>Создать инициативу может Product Owner.</strong>
-          <span>Передайте бизнес-цель Product Owner. После уточнения требований он согласует спецификацию до старта архитектора.</span>
-        </section>
-      )}
+      <aside className={styles.side} aria-label="Создание и состояние">
+        {canSubmitIntention ? (
+          creating ? createForm : (
+            <button type="button" className={styles.createBig} onClick={() => setCreating(true)}>
+              <span aria-hidden="true" className={styles.plus}>+</span>
+              Создать задачу
+            </button>
+          )
+        ) : (
+          <section className={styles.intakeNotice} aria-label="Создание задач">
+            <strong>Создать задачу может Product Owner.</strong>
+            <span>Передайте бизнес-цель Product Owner. После уточнения требований он согласует спецификацию до старта архитектора.</span>
+          </section>
+        )}
 
-      <section className={styles.preflight}>
-        <strong>Готовность окружения: {readiness === 'ready' ? 'готово' : readiness === 'blocked' ? 'есть блокеры' : 'неизвестна · задача может ждать worker'}</strong>
-        {(preflight?.checks ?? []).map((check) => (
-          <div key={check.id} data-status={check.status}>
-            <code>{check.id}</code>
-            <span>{check.status}{check.required ? ' · required' : ''}</span>
-            <span>{check.message}</span>
+        {createdRunID && !creating && (
+          <section className={styles.created} role="status">
+            <strong>Задача создана</strong>
+            <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть задачу →</Link>
+          </section>
+        )}
+
+        {!creating && commandStatus && <p className={styles.commandError} role="alert">{commandStatus}</p>}
+
+        <section className={styles.readiness} data-state={readiness} aria-labelledby="readiness-heading">
+          <div className={styles.readinessHead}>
+            <span className={styles.dot} aria-hidden="true" />
+            <h2 id="readiness-heading">{readinessTitle}</h2>
           </div>
-        ))}
-      </section>
+          <p>{readinessText}</p>
+          {checks.length > 0 && (
+            <details className={styles.checks}>
+              <summary>Проверки окружения ({checks.length})</summary>
+              {checks.map((check) => (
+                <div key={check.id} data-status={check.status}>
+                  <code>{check.id}</code>
+                  <span>{check.status}{check.required ? ' · обязательно' : ''}</span>
+                  <span>{check.message}</span>
+                </div>
+              ))}
+            </details>
+          )}
+        </section>
 
-      {loading ? (
-        <div className={styles.loading}>Загружаем задачи…</div>
-      ) : filtered.length === 0 ? (
-        <div className={styles.empty}>Задач с таким статусом пока нет.</div>
-      ) : (
-        <div className={styles.pipelines}>
-          {filtered.map((run) => (
-            <PipelineCard key={run.id} run={run} onCancel={async () => {
-              try { await cancelRun(run.run_id); await fetchRuns(); }
-              catch (err) { setCommandStatus(err instanceof Error ? err.message : 'Не удалось отменить'); }
-            }} />
-          ))}
-        </div>
-      )}
+        <section className={styles.recent} aria-labelledby="recent-heading">
+          <h2 id="recent-heading">{activeRuns.length > 0 ? 'Сейчас в работе' : 'Последние задачи'}</h2>
+          {sideRuns.length === 0 ? (
+            <p className={styles.muted}>Пока пусто.</p>
+          ) : (
+            <ul className={styles.recentList}>
+              {sideRuns.map((run) => (
+                <li key={run.id}>
+                  <Link to={`/tasks/${encodeURIComponent(run.run_id)}`}>{run.feature}</Link>
+                  <span className={styles.muted} data-status={run.status}>{statusLabels[run.status] ?? run.status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </aside>
     </div>
   );
 }

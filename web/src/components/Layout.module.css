@@ -223,11 +223,18 @@
 
   .themeToggle {
     width: auto;
-    min-height: 40px;
+    min-height: 44px;
   }
 
   .user {
     flex: 1 1 auto;
+  }
+
+  .logout {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
   }
 
   .tooltip {

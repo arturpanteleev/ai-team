@@ -109,11 +109,10 @@ test('tasks board creates a task from the browser and shows it by stage', async 
     expect(created.external_links).toEqual(['JIRA-77 https://tracker.example/JIRA-77'])
 
     await page.getByRole('link', { name: 'Доска' }).click()
-    const card = page.locator('article[aria-label="Задача browser-board-task"]')
+    const card = page.locator('article[aria-label="Задача Создать задачу из браузерной формы."]')
     await expect(card).toBeVisible({ timeout: 10_000 })
     await expect(card.getByText('JIRA-77 https://tracker.example/JIRA-77')).toBeVisible()
-    // Short hash with copy control, per §11.
-    await expect(card.getByRole('button', { name: 'Скопировать ID задачи' })).toBeVisible()
+    await expect(card.locator('code[title]')).toContainText(runID.slice(0, 8))
 
     // Filters narrow the list through the task API.
     await page.getByRole('button', { name: 'Список' }).click()

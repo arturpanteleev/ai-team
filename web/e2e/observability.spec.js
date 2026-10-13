@@ -75,7 +75,7 @@ test('observability page shows an empty period and blocks CSV export for it', as
     await page.getByLabel('Токен доступа').fill(localToken)
     await page.getByRole('button', { name: 'Войти' }).click()
 
-    await page.goto('/observability')
+    await page.goto(`${baseURL}/observability`)
     await expect(page).toHaveURL(/\/observability$/)
     await expect(page.getByRole('heading', { name: 'Наблюдаемость' })).toBeVisible()
 
@@ -152,7 +152,7 @@ test('observability page shows a recorded stage attempt and exports it as CSV', 
     }, { timeout: 60_000, message: `web server output:\n${webServer.outputText()}` }).toBeGreaterThan(0)
     const stage = flow.by_stage[0].stage
 
-    await page.goto('/observability')
+    await page.goto(`${baseURL}/observability`)
     await expect(page.getByRole('heading', { name: 'Разложение по этапам' })).toBeVisible()
     await expect(page.getByText('За выбранный период задач и попыток этапов нет.')).toHaveCount(0)
     const stageTable = page.getByRole('heading', { name: 'Разложение по этапам' }).locator('xpath=ancestor::section[1]')

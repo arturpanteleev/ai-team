@@ -483,6 +483,20 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			Approval: generatedApproval(stageFunction(c.Stages, source), targets[0], actions),
 		})
 	}
+	// Этап, чей агент задаёт вопросы, при BLOCKED ждёт ответа Product Owner:
+	// переход blocked → этот же этап с согласованием answer_questions.
+	for _, stage := range c.Stages {
+		if !c.QuestionStages[stage.ID] || hasBlockedEdge(graph.Edges, stage.ID) {
+			continue
+		}
+		graph.Edges = append(graph.Edges, workflow.Edge{
+			From: stage.ID, Outcome: workflow.OutcomeBlocked, To: stage.ID,
+			Approval: generatedApproval(stage.Function, stage.ID, map[string]string{
+				"answer_questions": stage.ID,
+				"stop":             workflow.TerminalStop,
+			}),
+		})
+	}
 	// Schema v5 controls confirmation per stage. Forward transitions with
 	// confirm:auto and no return routes are valid without an edge approval;
 	// required stages and stages with explicit return actions compile a gate,
@@ -557,4 +571,13 @@ func (c *Config) templateAgentNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func hasBlockedEdge(edges []workflow.Edge, from string) bool {
+	for _, edge := range edges {
+		if edge.From == from && edge.Outcome == workflow.OutcomeBlocked {
+			return true
+		}
+	}
+	return false
 }

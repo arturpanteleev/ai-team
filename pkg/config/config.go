@@ -35,6 +35,11 @@ type AgentConfig struct {
 }
 
 type Config struct {
+	// QuestionStages — этапы шаблона, чей агент умеет задавать вопросы
+	// (ask_questions). Заполняется пайплайном из реестра агентов; по нему
+	// шаблон добавляет переход blocked → тот же этап с согласованием ответа.
+	QuestionStages map[string]bool `yaml:"-" json:"-"`
+
 	SchemaVersion int    `yaml:"schema_version"`
 	Template      string `yaml:"template"`
 	Title         string `yaml:"title"`

@@ -857,3 +857,25 @@ func cloneConfig(t *testing.T, source *Config) *Config {
 type fakeLookup map[string]bool
 
 func (f fakeLookup) Exists(name string) bool { return f[name] }
+
+func TestTemplateGraphAddsBlockedAnswerLoopForQuestionStages(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.QuestionStages = map[string]bool{"product_spec": true}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, ok := graph.Edge("product_spec", "blocked")
+	if !ok || edge.To != "product_spec" {
+		t.Fatalf("product_spec должен получить blocked → product_spec: %+v ok=%v", edge, ok)
+	}
+	if edge.Approval == nil || edge.Approval.Actions["answer_questions"] != "product_spec" {
+		t.Fatalf("согласование должно принимать answer_questions на этом же этапе: %+v", edge.Approval)
+	}
+	if _, ok := graph.Edge("tech_design", "blocked"); ok {
+		t.Fatal("этап без вопросов не должен получать blocked-петлю")
+	}
+}

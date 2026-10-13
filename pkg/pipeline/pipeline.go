@@ -291,6 +291,7 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 		cfg = config.Default()
 	}
 	p := &Pipeline{cfg: cfg, reg: reg}
+	p.markQuestionStages()
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -1978,4 +1979,25 @@ func resumedTaskRepository(manifest evidence.RunManifest) (repository, reason st
 	return "", "run " + manifest.RunID + " was started without a captured GitHub task repository " +
 		"(started before repository capture existed, or origin was not an accepted GitHub URL); " +
 		"the identity is never recomputed on resume — start a new run (ai-team run without --resume) to use PR checks"
+}
+
+// markQuestionStages records which template stages run an agent with
+// ask_questions, so the compiled graph gets the BLOCKED → answer loop.
+func (p *Pipeline) markQuestionStages() {
+	if p.cfg == nil || p.reg == nil || len(p.cfg.Stages) == 0 {
+		return
+	}
+	for _, stage := range p.cfg.Stages {
+		if stage.Agent == "" {
+			continue
+		}
+		a, err := p.reg.Load(stage.Agent)
+		if err != nil || a == nil || !a.AskQuestions {
+			continue
+		}
+		if p.cfg.QuestionStages == nil {
+			p.cfg.QuestionStages = map[string]bool{}
+		}
+		p.cfg.QuestionStages[stage.ID] = true
+	}
 }

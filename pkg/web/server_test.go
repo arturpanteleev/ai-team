@@ -57,6 +57,7 @@ type fakeRunController struct {
 	approvalID     string
 	runID          string
 	approvals      []approval.PendingApproval
+	approvalsErr   error
 	deliveryRunID  string
 	deliveryRecord delivery.TerminalRecord
 	deliveryErr    error
@@ -990,7 +991,7 @@ func (f *fakeRunController) Decide(runID, approvalID string, decision approval.D
 	return approval.PendingApproval{ID: approvalID, RunID: runID, Status: approval.StatusResolved, ResolvedAction: decision.Action}, nil
 }
 func (f *fakeRunController) Approvals(string) ([]approval.PendingApproval, error) {
-	return f.approvals, nil
+	return f.approvals, f.approvalsErr
 }
 func (f *fakeRunController) DeliverDeferred(_ context.Context, runID string) (delivery.TerminalRecord, error) {
 	f.deliveryCalls++

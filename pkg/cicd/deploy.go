@@ -29,10 +29,14 @@ type Receipt struct {
 	MergeCommit   string `json:"merge_commit"`
 	Branch        string `json:"branch"`
 	// TriggerPending is set before a trigger and cleared once the provider
-	// answered. A pending receipt without a build blocks automatic retries.
-	TriggerPending bool      `json:"trigger_pending,omitempty"`
-	Build          Build     `json:"build"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	// answered. A pending receipt without a build blocks a second trigger; the
+	// build may only be recovered by a search for DeployID.
+	TriggerPending bool `json:"trigger_pending,omitempty"`
+	// DeployID is the unique identifier sent with the trigger request that
+	// started (or may have started) Build.
+	DeployID  string    `json:"deploy_id,omitempty"`
+	Build     Build     `json:"build"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // DeployRequest describes one controller-initiated deployment.
@@ -74,11 +78,17 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 	}
 	if found && previous.TriggerPending && previous.Build.ID == "" {
 		// A previous trigger may have queued a build whose response was lost.
-		// Triggering again could deploy twice; an operator must check TeamCity.
-		return Build{}, fmt.Errorf("%w: the previous deploy trigger for %s has an unknown outcome; check the CI/CD system and remove %s to retry",
-			ErrDeployRejected, previous.CommitSHA, filepath.Base(request.ReceiptPath))
+		// Triggering again could deploy twice: only a build found by the
+		// request's unique deploy ID may continue, otherwise an operator must
+		// check the CI/CD system.
+		recovered, err := recoverPendingTrigger(ctx, provider, previous, request.ReceiptPath)
+		if err != nil {
+			return Build{}, err
+		}
+		previous.Build, previous.TriggerPending = recovered, false
 	}
 	var build Build
+	deployID := ""
 	if found && previous.Build.ID != "" {
 		// Never trust the stored status, link or build type: re-read the build.
 		current, readErr := provider.Build(ctx, previous.Build.ID)
@@ -95,21 +105,26 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 				cancelBuild(ctx, provider, current, "ai-team deploys a newer branch tip", request.Wait.CancelTimeout)
 			}
 		case current.Finished() && finishedBuildError(current, proof.DeploySHA) == nil:
-			if err := writeReceipt(request, provider.Name(), proof, current, false); err != nil {
+			if err := writeReceipt(request, provider.Name(), proof, current, false, previous.DeployID); err != nil {
 				return current, err
 			}
 			return current, nil
 		case !current.Finished():
-			build = current
+			build, deployID = current, previous.DeployID
 		}
 	}
 	if build.ID == "" {
-		// Record the intent before the side effect: a crash or a lost response
-		// after this point leaves a pending marker instead of a silent retry.
-		if err := writeReceipt(request, provider.Name(), proof, Build{}, true); err != nil {
+		deployID, err = NewDeployID()
+		if err != nil {
 			return Build{}, err
 		}
-		build, err = provider.Trigger(ctx, TriggerRequest{CommitSHA: proof.DeploySHA, Branch: request.Merge.Branch})
+		// Record the intent and the request's unique ID before the side
+		// effect: a crash or a lost response after this point leaves a pending
+		// marker that only a search by this ID can resolve.
+		if err := writeReceipt(request, provider.Name(), proof, Build{}, true, deployID); err != nil {
+			return Build{}, err
+		}
+		build, err = provider.Trigger(ctx, TriggerRequest{CommitSHA: proof.DeploySHA, Branch: request.Merge.Branch, DeployID: deployID})
 		if err != nil {
 			if !IsDefiniteRejection(err) {
 				// No explicit refusal (network error, 5xx, 408/429, or a 2xx
@@ -118,22 +133,65 @@ func Deploy(ctx context.Context, provider Provider, request DeployRequest) (Buil
 				return Build{}, fmt.Errorf("deploy trigger outcome unknown: %v", err)
 			}
 			// TeamCity explicitly refused the request: nothing was queued.
-			if clearErr := writeReceipt(request, provider.Name(), proof, Build{}, false); clearErr != nil {
+			if clearErr := writeReceipt(request, provider.Name(), proof, Build{}, false, ""); clearErr != nil {
 				return Build{}, errors.Join(err, clearErr)
 			}
 			return Build{}, err
 		}
 	}
-	if err := writeReceipt(request, provider.Name(), proof, build, false); err != nil {
+	if err := writeReceipt(request, provider.Name(), proof, build, false, deployID); err != nil {
 		// The build exists; stop it rather than leave an untracked deployment.
 		cancelBuild(ctx, provider, build, "ai-team could not record the deploy build", request.Wait.CancelTimeout)
 		return build, err
 	}
 	final, waitErr := Wait(ctx, provider, build, proof.DeploySHA, request.Wait)
-	if err := writeReceipt(request, provider.Name(), proof, final, false); err != nil {
+	if err := writeReceipt(request, provider.Name(), proof, final, false, deployID); err != nil {
 		return final, errors.Join(waitErr, err)
 	}
 	return final, waitErr
+}
+
+// recoverPendingTrigger resolves a trigger whose answer was lost by searching
+// the provider for the build that carries the request's unique deploy ID. It
+// returns a build only when exactly one build of the configured build
+// configuration carries that ID and was pinned to the recorded revision.
+// Every other outcome (no finder, no ID, no build, several builds, a search
+// failure) refuses, because triggering again could deploy twice. An empty
+// search does not prove that nothing was queued: the request may still be in
+// flight.
+func recoverPendingTrigger(ctx context.Context, provider Provider, previous Receipt, receiptPath string) (Build, error) {
+	unknown := func(detail string) error {
+		return fmt.Errorf("%w: the previous deploy trigger for %s has an unknown outcome (%s); check the CI/CD system and remove %s to retry",
+			ErrDeployRejected, previous.CommitSHA, detail, filepath.Base(receiptPath))
+	}
+	finder, ok := provider.(TriggeredBuildFinder)
+	if !ok {
+		return Build{}, unknown("the provider cannot search for it")
+	}
+	if !ValidDeployID(previous.DeployID) || !ValidCommitSHA(previous.CommitSHA) {
+		return Build{}, unknown("the receipt has no valid deploy id")
+	}
+	builds, err := finder.FindTriggered(ctx, TriggerRequest{CommitSHA: previous.CommitSHA, Branch: previous.Branch, DeployID: previous.DeployID})
+	if err != nil {
+		if errors.Is(err, ErrDeployRejected) {
+			return Build{}, err
+		}
+		return Build{}, fmt.Errorf("search for the build of the previous deploy trigger: %w", err)
+	}
+	switch len(builds) {
+	case 0:
+		return Build{}, unknown("no build with its deploy id was found")
+	case 1:
+	default:
+		return Build{}, unknown(fmt.Sprintf("%d builds carry its deploy id", len(builds)))
+	}
+	recovered := builds[0]
+	// The provider filtered by ID, build configuration and revision; re-check
+	// what is visible here before the build stands in for the lost answer.
+	if strings.TrimSpace(recovered.ID) == "" || recovered.Revision != previous.CommitSHA {
+		return Build{}, unknown("the found build does not match the recorded revision")
+	}
+	return recovered, nil
 }
 
 // ReadReceipt reads a deploy receipt; a missing file is not an error.
@@ -155,9 +213,9 @@ func ReadReceipt(path string) (Receipt, bool, error) {
 	return receipt, true, nil
 }
 
-func writeReceipt(request DeployRequest, providerName string, proof MergeProof, build Build, triggerPending bool) error {
+func writeReceipt(request DeployRequest, providerName string, proof MergeProof, build Build, triggerPending bool, deployID string) error {
 	data, err := json.MarshalIndent(Receipt{
-		SchemaVersion: receiptSchemaVersion, RunID: request.RunID, Stage: request.Stage, TriggerPending: triggerPending,
+		SchemaVersion: receiptSchemaVersion, RunID: request.RunID, Stage: request.Stage, TriggerPending: triggerPending, DeployID: deployID,
 		Provider: providerName, CommitSHA: proof.DeploySHA, MergeCommit: proof.MergeCommit,
 		Branch: request.Merge.Branch, Build: build, UpdatedAt: time.Now().UTC(),
 	}, "", "  ")

@@ -264,6 +264,10 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "pinned stage contract unavailable", http.StatusConflict)
 			return
 		}
+		if err := s.authorizeGrillEdit(r, stage); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		if humanStageResultPath(stage.ID, stage.Result) != command.ArtifactPath {
 			http.Error(w, "artifact path does not match the pinned stage result type", http.StatusBadRequest)
 			return
@@ -310,15 +314,21 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "этот handoff уже подтверждён; создайте новый цикл возврата для изменения артефакта", http.StatusConflict)
 			return
 		}
-		if grillPending && command.Content != "" {
+		if grillPending {
 			stage, err := s.pinnedTaskStage(chi.URLParam(r, "runID"), grill.FromStage)
 			if err != nil {
 				http.Error(w, "pinned stage contract unavailable", http.StatusConflict)
 				return
 			}
-			if err := s.validateGrillAttemptRevision(chi.URLParam(r, "runID"), parts[1], stage, command.ArtifactPath, command.Content); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+			if err := s.authorizeGrillEdit(r, stage); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
 				return
+			}
+			if command.Content != "" {
+				if err := s.validateGrillAttemptRevision(chi.URLParam(r, "runID"), parts[1], stage, command.ArtifactPath, command.Content); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 		}
 	}
@@ -359,6 +369,19 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSONResponse(w, http.StatusCreated, value)
+}
+
+// authorizeGrillEdit requires the stage executor function for an edit made
+// while a grill question of that stage is pending: the edit becomes the next
+// grill version, which only the executor may submit. artifact-edit alone is
+// not enough.
+func (s *Server) authorizeGrillEdit(r *http.Request, stage config.TemplateStage) error {
+	session, ok := s.requestSession(r)
+	if !ok || session.Principal.ActorID == "" {
+		return errors.New("требуется web session")
+	}
+	_, err := cloudidentity.AuthorizeStageAction(session.Principal, cloudidentity.StageActionSubmit, stageFunctions(stage))
+	return err
 }
 
 func (s *Server) pendingGrillIncludesArtifact(runID, stageID, artifactPath string) bool {

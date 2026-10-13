@@ -64,7 +64,7 @@ func NewTeamCity(settings TeamCitySettings, token string, client *http.Client) (
 		if len(via) >= maxTeamCityRedirects {
 			return errors.New("teamcity redirect limit exceeded")
 		}
-		if request.URL.Scheme != "https" || !strings.EqualFold(request.URL.Host, base.Host) {
+		if !sameHTTPSOrigin(request.URL, base) {
 			return errForeignRedirect
 		}
 		return nil
@@ -85,7 +85,35 @@ func ValidateHTTPSBaseURL(value string) (*url.URL, error) {
 	return parsed, nil
 }
 
+// sameHTTPSOrigin reports whether candidate is an https URL on the host and
+// port of base. Host names compare without case and an omitted port means
+// 443, so "https://TC.example:443" and "https://tc.example" are the same
+// origin while any other port or host is not.
+func sameHTTPSOrigin(candidate, base *url.URL) bool {
+	if candidate == nil || base == nil || candidate.Scheme != "https" || candidate.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(candidate.Hostname(), base.Hostname()) && httpsPort(candidate) == httpsPort(base)
+}
+
+func httpsPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	return "443"
+}
+
 func (t *TeamCity) Name() string { return "teamcity" }
+
+// TeamCity build parameters set on every deploy trigger. The deploy ID makes
+// the queued build findable after a lost trigger answer.
+const (
+	teamCityDeployCommitProperty = "env.AI_TEAM_DEPLOY_COMMIT"
+	teamCityDeployIDProperty     = "env.AI_TEAM_DEPLOY_ID"
+	// maxTeamCityFoundBuilds bounds a search by deploy ID. A unique ID matches
+	// at most one build; more answers make the search ambiguous.
+	maxTeamCityFoundBuilds = 5
+)
 
 type teamCityBuild struct {
 	ID           int64  `json:"id"`
@@ -102,6 +130,7 @@ type teamCityBuild struct {
 			Version string `json:"version"`
 		} `json:"revision"`
 	} `json:"revisions"`
+	Properties *teamCityProperties `json:"properties"`
 }
 
 type teamCityTriggerBody struct {
@@ -136,8 +165,8 @@ type teamCityProperty struct {
 
 // Trigger queues the configured build type pinned to the exact commit.
 func (t *TeamCity) Trigger(ctx context.Context, request TriggerRequest) (Build, error) {
-	if !ValidCommitSHA(request.CommitSHA) || !ValidBranch(request.Branch) {
-		return Build{}, fmt.Errorf("%w: teamcity trigger requires a full commit SHA and a valid branch", ErrDeployRejected)
+	if !ValidCommitSHA(request.CommitSHA) || !ValidBranch(request.Branch) || !ValidDeployID(request.DeployID) {
+		return Build{}, fmt.Errorf("%w: teamcity trigger requires a full commit SHA, a valid branch and a deploy id", ErrDeployRejected)
 	}
 	body := teamCityTriggerBody{
 		BuildType:  teamCityBuildType{ID: t.buildType},
@@ -145,10 +174,13 @@ func (t *TeamCity) Trigger(ctx context.Context, request TriggerRequest) (Build, 
 		Revisions: teamCityRevisions{FailOnMissingRevisions: true, Revision: []teamCityRevision{{
 			Version: request.CommitSHA, VCSBranchName: "refs/heads/" + request.Branch,
 		}}},
-		Properties: teamCityProperties{Property: []teamCityProperty{{Name: "env.AI_TEAM_DEPLOY_COMMIT", Value: request.CommitSHA}}},
+		Properties: teamCityProperties{Property: []teamCityProperty{
+			{Name: teamCityDeployCommitProperty, Value: request.CommitSHA},
+			{Name: teamCityDeployIDProperty, Value: request.DeployID},
+		}},
 	}
 	var response teamCityBuild
-	if err := t.requestJSON(ctx, http.MethodPost, "/app/rest/buildQueue", body, &response); err != nil {
+	if err := t.requestJSON(ctx, http.MethodPost, "/app/rest/buildQueue", nil, body, &response); err != nil {
 		return Build{}, err
 	}
 	return t.convert(response)
@@ -161,10 +193,72 @@ func (t *TeamCity) Build(ctx context.Context, id string) (Build, error) {
 	}
 	var response teamCityBuild
 	path := "/app/rest/builds/id:" + id
-	if err := t.requestJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+	if err := t.requestJSON(ctx, http.MethodGet, path, nil, nil, &response); err != nil {
 		return Build{}, err
 	}
 	return t.convert(response)
+}
+
+// FindTriggered searches the configured build configuration for the build a
+// trigger request with request.DeployID queued (queued, running or finished,
+// any branch, canceled included). The server-side locator only narrows the
+// answer: every returned build is checked here, and a build that carries the
+// deploy ID with another build configuration, revision or commit parameter
+// fails the whole search instead of being skipped, because the ID is unique
+// to one request.
+func (t *TeamCity) FindTriggered(ctx context.Context, request TriggerRequest) ([]Build, error) {
+	if !ValidCommitSHA(request.CommitSHA) || !ValidDeployID(request.DeployID) {
+		return nil, fmt.Errorf("%w: teamcity build search requires a full commit SHA and a deploy id", ErrDeployRejected)
+	}
+	// The build type, property name and deploy ID are validated identifiers
+	// ([A-Za-z0-9_.]), so they cannot break out of the locator syntax.
+	query := url.Values{}
+	query.Set("locator", fmt.Sprintf("buildType:(id:%s),property:(name:%s,value:%s,matchType:equals),state:any,defaultFilter:false,branch:(default:any),count:%d",
+		t.buildType, teamCityDeployIDProperty, request.DeployID, maxTeamCityFoundBuilds+1))
+	query.Set("fields", "build(id,buildTypeId,state,status,statusText,webUrl,canceledInfo(text),revisions(revision(version)),properties(property(name,value)))")
+	var response struct {
+		Build []teamCityBuild `json:"build"`
+	}
+	if err := t.requestJSON(ctx, http.MethodGet, "/app/rest/builds", query, nil, &response); err != nil {
+		return nil, err
+	}
+	var found []Build
+	for _, candidate := range response.Build {
+		if !candidate.hasProperty(teamCityDeployIDProperty, request.DeployID) {
+			// Not this request's build: the locator was not applied.
+			continue
+		}
+		build, err := t.convert(candidate)
+		if err != nil {
+			return nil, err
+		}
+		if build.Revision != request.CommitSHA || !candidate.hasProperty(teamCityDeployCommitProperty, request.CommitSHA) {
+			return nil, fmt.Errorf("%w: teamcity build %s carries the deploy id but not revision %s", ErrDeployRejected, build.ID, request.CommitSHA)
+		}
+		found = append(found, build)
+	}
+	if len(found) > maxTeamCityFoundBuilds {
+		return nil, fmt.Errorf("%w: teamcity returned too many builds for one deploy id", ErrDeployRejected)
+	}
+	return found, nil
+}
+
+// hasProperty reports whether the build carries exactly one parameter name
+// and its value is exactly value.
+func (b teamCityBuild) hasProperty(name, value string) bool {
+	if b.Properties == nil {
+		return false
+	}
+	matches := 0
+	for _, property := range b.Properties.Property {
+		if property.Name == name {
+			if property.Value != value {
+				return false
+			}
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 // Cancel stops a queued or running build without re-adding it to the queue.
@@ -180,7 +274,7 @@ func (t *TeamCity) Cancel(ctx context.Context, build Build, reason string) error
 		Comment        string `json:"comment"`
 		ReaddIntoQueue bool   `json:"readdIntoQueue"`
 	}{Comment: reason}
-	return t.requestJSON(ctx, http.MethodPost, path, body, nil)
+	return t.requestJSON(ctx, http.MethodPost, path, nil, body, nil)
 }
 
 func (t *TeamCity) convert(response teamCityBuild) (Build, error) {
@@ -223,7 +317,9 @@ func (t *TeamCity) convert(response teamCityBuild) (Build, error) {
 				break
 			}
 		}
-		build.Revision = revision
+		// A bounded value: a shortened revision ends with "…" and can never
+		// equal the expected SHA.
+		build.Revision = displayRevision(revision)
 	}
 	if response.WebURL != "" {
 		webURL, err := t.validateWebURL(response.WebURL)
@@ -240,13 +336,15 @@ func (t *TeamCity) convert(response teamCityBuild) (Build, error) {
 // arbitrary link.
 func (t *TeamCity) validateWebURL(value string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !strings.EqualFold(parsed.Host, t.base.Host) || parsed.Fragment != "" {
+	if err != nil || parsed.User != nil || parsed.Fragment != "" || parsed.Opaque != "" || !sameHTTPSOrigin(parsed, t.base) {
 		return "", errors.New("build web URL is not an https URL on the configured TeamCity host")
 	}
 	return parsed.String(), nil
 }
 
-func (t *TeamCity) requestJSON(ctx context.Context, method, path string, requestBody, responseBody any) error {
+// requestJSON sends one API request. path is the only request detail that may
+// appear in errors; query (for example a build locator) never does.
+func (t *TeamCity) requestJSON(ctx context.Context, method, path string, query url.Values, requestBody, responseBody any) error {
 	var body io.Reader
 	if requestBody != nil {
 		encoded, err := json.Marshal(requestBody)
@@ -257,6 +355,7 @@ func (t *TeamCity) requestJSON(ctx context.Context, method, path string, request
 	}
 	endpoint := *t.base
 	endpoint.Path = t.base.Path + path
+	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return fmt.Errorf("create teamcity request: %w", t.redact(err))

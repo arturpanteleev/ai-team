@@ -59,7 +59,7 @@ func TestSchemaTwelveAddsRunEventIndexIdempotently(t *testing.T) {
 	if _, err := s.db.Exec(`DROP INDEX idx_events_run_id`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM schema_migrations WHERE version = 12`); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM schema_migrations WHERE version >= 12`); err != nil {
 		t.Fatal(err)
 	}
 	_ = s.Close()
@@ -80,8 +80,8 @@ func TestSchemaTwelveAddsRunEventIndexIdempotently(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = reopened.Close()
-		if indexes != 1 || latest != 12 || events != 1 {
-			t.Fatalf("reopen: index=%d version=%d events=%d, want 1/12/1", indexes, latest, events)
+		if indexes != 1 || latest != SchemaVersion || events != 1 {
+			t.Fatalf("reopen: index=%d version=%d events=%d, want 1/%d/1", indexes, latest, events, SchemaVersion)
 		}
 	}
 }

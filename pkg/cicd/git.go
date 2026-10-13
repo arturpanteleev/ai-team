@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -92,7 +93,23 @@ var inheritedGitVariables = []string{
 	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_COUNT", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_REPLACE_REF_BASE",
+	// A template directory could plant hooks or configuration into the
+	// private repository at init time.
+	"GIT_TEMPLATE_DIR",
 }
+
+// Fetch stall limits: a transfer slower than gitLowSpeedLimit bytes per
+// second for gitLowSpeedTime seconds is aborted instead of hanging until the
+// stage budget ends.
+const (
+	gitLowSpeedLimit = "1000"
+	gitLowSpeedTime  = "60"
+)
+
+// DefaultMergeCheckTimeout bounds one merge check (gh calls, fetch and the Git
+// proof). It is below config.DeployStageMargin, so the last check started
+// before merge_timeout cannot eat the build wait.
+const DefaultMergeCheckTimeout = 3 * time.Minute
 
 // isolatedGitEnv runs Git against a private bare repository: no system,
 // global or checkout configuration, no replace refs or grafts, no
@@ -104,6 +121,8 @@ func isolatedGitEnv(gitDir, credentialHelper string) []string {
 		{"credential.helper", credentialHelper},
 		{"core.commitGraph", "false"},
 		{"core.hooksPath", os.DevNull},
+		{"http.lowSpeedLimit", gitLowSpeedLimit},
+		{"http.lowSpeedTime", gitLowSpeedTime},
 	}
 	env := []string{
 		"GIT_DIR=" + gitDir, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull,
@@ -166,7 +185,23 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 		return MergeProof{}, fmt.Errorf("%w: pull request URL is not in the task repository", ErrDeployRejected)
 	}
 	pullNumber := prPath[3]
-	view := runner.Run(ctx, "", "gh", "pr", "view", request.PRURL, "--json", "state,baseRefName,headRefOid,mergeCommit")
+	// Every child process runs in a private empty directory, never in the
+	// controller's working directory, which may be the agent-writable checkout
+	// whose Git configuration gh would otherwise read.
+	workDir, err := os.MkdirTemp("", "ai-team-deploy-*")
+	if err != nil {
+		return MergeProof{}, fmt.Errorf("deploy verification directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(workDir) }()
+	gitDir := filepath.Join(workDir, "repo.git")
+	if err := os.Mkdir(gitDir, 0o700); err != nil {
+		return MergeProof{}, fmt.Errorf("deploy verification repository: %w", err)
+	}
+	ghDir := filepath.Join(workDir, "gh")
+	if err := os.Mkdir(ghDir, 0o700); err != nil {
+		return MergeProof{}, fmt.Errorf("deploy verification directory: %w", err)
+	}
+	view := runner.Run(ctx, ghDir, "gh", "pr", "view", request.PRURL, "--json", "state,baseRefName,headRefOid,mergeCommit")
 	if view.Status != delivery.StepPassed || view.Truncated {
 		if err := ctx.Err(); err != nil {
 			return MergeProof{}, err
@@ -197,27 +232,21 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 	}
 	mergeCommit := strings.ToLower(pr.MergeCommit.OID)
 
-	tip, err := githubBranchTip(ctx, runner, repoParts, request.Branch)
+	tip, err := githubBranchTip(ctx, runner, ghDir, repoParts, request.Branch)
 	if err != nil {
 		return MergeProof{}, err
 	}
 
-	gitDir, err := os.MkdirTemp("", "ai-team-deploy-*.git")
-	if err != nil {
-		return MergeProof{}, fmt.Errorf("deploy verification repository: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(gitDir) }()
 	gitRunner := request.GitRunner
 	if gitRunner == nil {
 		helper := request.CredentialHelper
 		if helper == "" {
 			helper = DefaultCredentialHelper
 		}
-		gitRunner = EnvFilteredRunner{Drop: append(append([]string(nil), request.DropEnv...), inheritedGitVariables...),
-			Env: isolatedGitEnv(gitDir, helper)}
+		gitRunner = isolatedGitRunner(gitDir, helper, request.DropEnv)
 	}
 	git := gitQuery{ctx: ctx, runner: gitRunner, dir: gitDir}
-	if _, err := git.run("init", "--bare", "--quiet"); err != nil {
+	if _, err := git.run(isolatedInitArgs...); err != nil {
 		return MergeProof{}, fmt.Errorf("deploy verification repository: %w", err)
 	}
 	fetch := gitRunner.Run(ctx, gitDir, "git", "fetch", "--no-tags", "--quiet", "--end-of-options", request.FetchURL,
@@ -252,12 +281,23 @@ func ResolveMergedDeploy(ctx context.Context, runner delivery.CommandRunner, req
 	return MergeProof{MergeCommit: mergeCommit, DeploySHA: tip}, nil
 }
 
+// isolatedInitArgs create the private repository without any template: no
+// hooks, info files or configuration are copied from a template directory.
+var isolatedInitArgs = []string{"init", "--bare", "--quiet", "--template="}
+
+// isolatedGitRunner runs Git with the isolated environment and without the
+// controller's Git location, configuration and template variables.
+func isolatedGitRunner(gitDir, credentialHelper string, dropEnv []string) EnvFilteredRunner {
+	return EnvFilteredRunner{Drop: append(append([]string(nil), dropEnv...), inheritedGitVariables...),
+		Env: isolatedGitEnv(gitDir, credentialHelper)}
+}
+
 // githubBranchTip asks the GitHub API for the branch head of the captured
 // repository. Unlike a fetched ref it does not depend on the checkout's Git
 // configuration.
-func githubBranchTip(ctx context.Context, runner delivery.CommandRunner, repo []string, branch string) (string, error) {
+func githubBranchTip(ctx context.Context, runner delivery.CommandRunner, dir string, repo []string, branch string) (string, error) {
 	endpoint := "repos/" + url.PathEscape(repo[1]) + "/" + url.PathEscape(repo[2]) + "/branches/" + url.PathEscape(branch)
-	result := runner.Run(ctx, "", "gh", "api", "--hostname", repo[0], endpoint)
+	result := runner.Run(ctx, dir, "gh", "api", "--hostname", repo[0], endpoint)
 	if result.Status != delivery.StepPassed || result.Truncated {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -281,7 +321,9 @@ func githubBranchTip(ctx context.Context, runner delivery.CommandRunner, repo []
 }
 
 // WaitForMerge polls ResolveMergedDeploy while the pull request is open or a
-// transient gh/git failure occurs, until timeout or cancellation.
+// transient gh/git failure occurs, until timeout or cancellation. Each check
+// has its own deadline (options.AttemptTimeout, DefaultMergeCheckTimeout when
+// zero); a check that exceeds it is a transient failure, not a hang.
 func WaitForMerge(ctx context.Context, runner delivery.CommandRunner, request MergeRequest, options WaitOptions) (MergeProof, error) {
 	clock := options.Clock
 	if clock == nil {
@@ -291,9 +333,13 @@ func WaitForMerge(ctx context.Context, runner delivery.CommandRunner, request Me
 	if poll <= 0 {
 		poll = 15 * time.Second
 	}
+	attemptTimeout := options.AttemptTimeout
+	if attemptTimeout <= 0 {
+		attemptTimeout = DefaultMergeCheckTimeout
+	}
 	deadline := clock.Now().Add(options.Timeout)
 	for {
-		proof, err := ResolveMergedDeploy(ctx, runner, request)
+		proof, err := resolveMergedDeployWithin(ctx, runner, request, attemptTimeout)
 		if err == nil || (!errors.Is(err, ErrNotMerged) && !IsTransient(err)) {
 			return proof, err
 		}
@@ -306,6 +352,19 @@ func WaitForMerge(ctx context.Context, runner delivery.CommandRunner, request Me
 		case <-clock.After(poll):
 		}
 	}
+}
+
+// resolveMergedDeployWithin runs one merge check under its own deadline. When
+// only that deadline (not the parent context) expired, the check is reported
+// as a transient failure so the merge wait can try again.
+func resolveMergedDeployWithin(ctx context.Context, runner delivery.CommandRunner, request MergeRequest, timeout time.Duration) (MergeProof, error) {
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	proof, err := ResolveMergedDeploy(checkCtx, runner, request)
+	if err != nil && ctx.Err() == nil && checkCtx.Err() != nil {
+		return MergeProof{}, &TransientError{Err: fmt.Errorf("merge check exceeded %s", timeout)}
+	}
+	return proof, err
 }
 
 type gitQuery struct {

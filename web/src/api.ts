@@ -330,6 +330,13 @@ export function answerTaskGrill(runId: string, stageId: string, answer: string):
   return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/grill/answer`, { answer });
 }
 
+// grill/new-version hands the checker the artifact revisions created while the
+// grill question was pending; the comment is optional.
+export function submitTaskGrillVersion(runId: string, stageId: string, comment: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/grill/new-version`,
+    comment ? { answer: comment } : {});
+}
+
 export function finishTaskGrill(runId: string, stageId: string): Promise<unknown> {
   return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/grill/done`);
 }

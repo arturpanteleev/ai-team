@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Tasks } from './Tasks';
@@ -122,5 +122,32 @@ describe('Tasks board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отменить' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('нельзя отменить'));
     expect(api.cancelRun).toHaveBeenCalledWith('run-queued');
+  });
+});
+
+describe('Tasks polling', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('тикает часами каждые 30 с без запросов и делает recovery-рефетч раз в 2 минуты', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(new Date('2026-10-12T10:06:00Z'));
+    render(<Tasks />);
+    await vi.waitFor(() => expect(screen.getByText('Онбординг')).toBeInTheDocument());
+    const initialCalls = vi.mocked(getTaskRuns).mock.calls.length;
+    expect(screen.getByText('1 мин')).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(90_000);
+    });
+    expect(vi.mocked(getTaskRuns).mock.calls.length).toBe(initialCalls);
+    // Часы обновили «сколько на этапе» без сетевого запроса.
+    expect(screen.getByText('2 мин')).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(vi.mocked(getTaskRuns).mock.calls.length).toBe(initialCalls + 1);
   });
 });

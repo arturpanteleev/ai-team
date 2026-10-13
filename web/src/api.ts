@@ -66,17 +66,27 @@ export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = fa
 
 let csrfToken: string | null = null;
 let activePrincipal: Principal | null = null;
+// Облачный режим (сервер требует аутентификацию): отсутствие principal здесь
+// означает «сессии нет», а не «локальный режим без ролей».
+let authenticationRequired = false;
 
 export async function getAuthConfig(): Promise<{ authentication_required: boolean; team_management_enabled: boolean; sso_enabled?: boolean }> {
   const response = await fetch(`${API_BASE}/auth/config`, { credentials: 'same-origin' });
   if (!response.ok) throw new Error(`Auth config error: ${response.status}`);
-  return response.json();
+  const config = await response.json() as { authentication_required: boolean; team_management_enabled: boolean; sso_enabled?: boolean };
+  authenticationRequired = config.authentication_required === true;
+  return config;
+}
+
+export function isAuthenticationRequired(): boolean {
+  return authenticationRequired;
 }
 
 export async function getCurrentIdentity(): Promise<{ authentication_required: boolean; principal?: Principal }> {
   const response = await fetch(`${API_BASE}/auth/me`, { credentials: 'same-origin' });
   if (!response.ok) throw new Error(`Identity error: ${response.status}`);
   const value = await response.json() as { authentication_required: boolean; principal?: Principal };
+  authenticationRequired = value.authentication_required === true;
   activePrincipal = value.principal ?? null;
   return value;
 }

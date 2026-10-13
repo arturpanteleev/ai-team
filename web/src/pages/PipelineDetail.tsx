@@ -170,7 +170,7 @@ export function PipelineDetail() {
 
   return (
     <div className={styles.container}>
-      <Link to="/" className={styles.back}>← К задачам</Link>
+      <Link to="/" className={styles.back}>← К дашборду</Link>
 
       <div className={styles.header}>
         <h1 className={styles.title}>{run.feature}</h1>

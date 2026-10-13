@@ -368,11 +368,13 @@ func cmdWorker() {
 	var questionAnswerInputProvider pipeline.QuestionAnswerInputProvider
 	var recorder pipeline.Recorder
 	var lifecycleStore lifecycle.StorePort
+	controllerDelivery := false
 	if controllerAPI {
 		apiPort, apiErr := worker.NewWorkerAPIPort(job)
 		if apiErr != nil {
 			fatal("Worker controller API: %v", apiErr)
 		}
+		controllerDelivery = workerControllerDelivers(apiPort)
 		recorder = worker.NewWorkerAPIRecorder(apiPort)
 		approvalStore = worker.NewWorkerAPIApprovals(apiPort)
 		businessBriefStore = worker.NewWorkerAPIBriefs(apiPort)
@@ -437,7 +439,7 @@ func cmdWorker() {
 	}
 	cfg := loadWorkerTemplateConfig(target, job, reg)
 	if job.Operation != worker.OperationCancel {
-		report := workerPreflight(cfg, reg, target, controllerAPI).Check(context.Background())
+		report := workerPreflight(cfg, reg, target, controllerDelivery).Check(context.Background())
 		if !report.Ready {
 			if recorderStore != nil {
 				_ = recorderStore.Close()
@@ -1213,12 +1215,23 @@ func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry
 	return cfg
 }
 
-// workerPreflight builds the disposable worker's preflight. With the
-// controller API the controller performs stage and terminal delivery, so the
-// sandboxed worker (no GitHub token, no network) does not check gh/origin.
-func workerPreflight(cfg *config.Config, reg *agent.Registry, target string, controllerAPI bool) *preflight.Checker {
+// workerControllerDelivers reports whether the controller, not the worker,
+// performs stage and terminal delivery. That holds only for the Unix-socket
+// controller API reachable from the bubblewrap worker namespace: only there the
+// stage delivery executor and terminal record writer are routed to the
+// controller. The loopback TCP compatibility transport (non-bubblewrap launch)
+// leaves delivery to the worker itself.
+func workerControllerDelivers(port *worker.WorkerAPIPort) bool {
+	return port != nil && port.SupportsControllerUsageStore()
+}
+
+// workerPreflight builds the disposable worker's preflight. controllerDelivery
+// must come from workerControllerDelivers: only when the controller performs
+// stage and terminal delivery (Unix-socket API with bubblewrap) may the
+// sandboxed worker (no GitHub token, no network) skip the gh/origin checks.
+func workerPreflight(cfg *config.Config, reg *agent.Registry, target string, controllerDelivery bool) *preflight.Checker {
 	var options []preflight.Option
-	if controllerAPI {
+	if controllerDelivery {
 		options = append(options, preflight.WithControllerDelivery())
 	}
 	return preflight.New(cfg, reg, target, options...)

@@ -34,4 +34,12 @@ describe('Layout team navigation', () => {
 
     expect(screen.getByRole('link', { name: 'Команда' })).toBeInTheDocument();
   });
+
+  it('ведёт на дашборд и на доску задач разными пунктами без дубля «Задачи»', () => {
+    renderLayout(false);
+
+    expect(screen.getByRole('link', { name: 'Дашборд' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'Доска' })).toHaveAttribute('href', '/tasks');
+    expect(screen.queryByRole('link', { name: 'Задачи' })).not.toBeInTheDocument();
+  });
 });

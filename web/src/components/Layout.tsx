@@ -22,7 +22,7 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
               `${styles.navLink} ${isActive ? styles.active : ''}`
             }
           >
-            Задачи
+            Дашборд
           </NavLink>
           <NavLink
             to="/tasks"

@@ -86,6 +86,18 @@ function stageActions(metrics: FlowMetrics): StageActions[] {
     .filter((row) => row.overrides + row.skips + row.returns > 0);
 }
 
+function formatDay(date: string): string {
+  const [year, month, day] = date.split('-');
+  return year && month && day ? `${day}.${month}.${year}` : date;
+}
+
+// Подпись состояния: исполнение, решение и результат попыток — без «unknown».
+function stateLabel(state: { execution: string; decision: string; outcome: string }): string {
+  return [state.execution, state.decision, state.outcome]
+    .filter((value) => value && value !== 'unknown')
+    .join(' → ') || 'нет данных';
+}
+
 function isEmptyPeriod(metrics: FlowMetrics): boolean {
   return metrics.lead_time.count === 0 && metrics.cycle_time.count === 0 && metrics.by_stage.length === 0 &&
     stageActions(metrics).length === 0 && metrics.agent_results === 0;
@@ -174,6 +186,8 @@ export function Observability() {
   const skipCount = sumCounts(metrics?.skips_by_stage);
   const returnCount = sumCounts(metrics?.returns_by_stage);
   const actions = metrics ? stageActions(metrics) : [];
+  // Экспорт только для успешно загруженного непустого периода.
+  const canExport = !loading && !exporting && metrics !== null && !isEmptyPeriod(metrics);
 
   return (
     <div className={styles.container}>
@@ -182,16 +196,19 @@ export function Observability() {
           <h1 className={styles.title}>Наблюдаемость</h1>
           <p className={styles.subtitle}>Сводка по задачам проекта и выбранному периоду.</p>
         </div>
-        <button type="button" className={styles.export} onClick={() => void exportCsv()} disabled={loading || exporting}>
+        <button type="button" className={styles.export} onClick={() => void exportCsv()} disabled={!canExport}
+          title={canExport ? undefined : 'Нет загруженных данных за период'}>
           {exporting ? 'Готовим CSV…' : 'Экспорт CSV'}
         </button>
       </header>
 
       <form className={styles.period} onSubmit={applyPeriod} aria-label="Период метрик">
-        <label>С<input type="date" value={draftFrom} onChange={(event) => setDraftFrom(event.currentTarget.value)} /></label>
-        <label>По<input type="date" value={draftTo} onChange={(event) => setDraftTo(event.currentTarget.value)} /></label>
+        <label>С<input type="date" value={draftFrom} aria-describedby="period-utc-hint" onChange={(event) => setDraftFrom(event.currentTarget.value)} /></label>
+        <label>По<input type="date" value={draftTo} aria-describedby="period-utc-hint" onChange={(event) => setDraftTo(event.currentTarget.value)} /></label>
         <button type="submit">Применить</button>
+        <small id="period-utc-hint" className={styles.muted}>Даты в UTC, обе границы включительно.</small>
       </form>
+      <p className={styles.muted} data-testid="applied-period">Показан период: {formatDay(period.from)} — {formatDay(period.to)} (UTC)</p>
 
       {error && <p className={styles.error} role="alert">{error}</p>}
       {loading ? <p className={styles.notice} role="status">Загружаем метрики…</p> : metrics && (
@@ -219,7 +236,7 @@ export function Observability() {
           </section>
 
           <section className={styles.stageSection} aria-labelledby="stage-title">
-            <div className={styles.sectionHeader}><div><h2 id="stage-title">Разложение по этапам</h2><p>Доля агента считается среди непогашенных попыток.</p></div></div>
+            <div className={styles.sectionHeader}><div><h2 id="stage-title">Разложение по этапам</h2><p>Доля агента считается среди непогашенных попыток без пропусков.</p></div></div>
             {!metrics.by_stage.length ? <p className={styles.notice}>За этот период данных по этапам нет.</p> : (
               <div className={styles.tableWrap}>
                 <table>
@@ -227,12 +244,13 @@ export function Observability() {
                   <tbody>{metrics.by_stage.map((stage) => (
                     <tr key={stage.stage}>
                       <th scope="row">{stage.stage}</th>
-                      <td>{stage.attempts}<small>{stage.agent_attempts} агент · {stage.human_attempts} человек</small></td>
+                      <td>{stage.attempts}<small>{stage.agent_attempts} агент · {stage.human_attempts} человек{
+                        stage.skipped_attempts ? ` · ${stage.skipped_attempts} пропуск` : ''}</small></td>
                       <td>{formatDuration(stage.duration_ms)}</td>
                       <td>{formatPercent(stage.agent_share)}</td>
                       <td>{stage.by_state.length ? stage.by_state.map((state) => (
                         <span className={styles.state} key={`${state.execution}:${state.decision}:${state.outcome}`}>
-                          {state.outcome || state.decision || state.execution}: {state.attempts} · {formatDuration(state.duration_ms)}
+                          {stateLabel(state)}: {state.attempts} · {formatDuration(state.duration_ms)}
                         </span>
                       )) : <span className={styles.muted}>нет данных</span>}</td>
                       <td><StageUsage stage={stage} /></td>

@@ -8,11 +8,6 @@ import styles from './EventFeed.module.css';
 
 const PAGE_SIZE = 100;
 
-const warningTypes = new Set([
-  'check_overridden', 'check_error', 'description_missing', 'stage_skipped',
-  'stage_stalled', 'integration_error',
-]);
-
 const eventLabels: Record<string, string> = {
   run_started: 'Задача создана',
   run_resumed: 'Задача возобновлена',
@@ -36,10 +31,11 @@ const eventLabels: Record<string, string> = {
   integration_error: 'Ошибка интеграции',
 };
 
-function isWarningEvent(event: Pick<TaskEvent, 'type' | 'severity' | 'data'>): boolean {
-  return event.severity?.toLowerCase() === 'warning' ||
-    (typeof event.data.severity === 'string' && event.data.severity.toLowerCase() === 'warning') ||
-    warningTypes.has(event.type);
+// Предупреждение определяет сервер (поле warning, источник —
+// store.WarningEventTypes в pkg/web/store/sqlite.go). Без поля — только явный
+// severity, своего списка типов клиент не держит.
+function isWarningEvent(event: Pick<TaskEvent, 'warning' | 'severity'>): boolean {
+  return event.warning ?? event.severity?.toLowerCase() === 'warning';
 }
 
 // The feed is newest-first: live events land on top, older pages below.
@@ -91,7 +87,7 @@ export function EventFeed() {
         const pageEvents = page.events ?? [];
         setEvents((current) => mergeEvents(current, pageEvents));
         setCursor(page.next_cursor ?? 0);
-        setHasMore(pageEvents.length === PAGE_SIZE);
+        setHasMore(page.has_more === true);
       })
       .catch(() => {
         if (generation === requestGeneration.current) setError('Не удалось загрузить события. Попробуйте обновить ленту.');
@@ -133,7 +129,7 @@ export function EventFeed() {
         const next = page.next_cursor ?? current;
         return current > 0 && next > 0 ? Math.min(current, next) : next || current;
       });
-      setHasMore(pageEvents.length === PAGE_SIZE);
+      setHasMore(page.has_more === true);
     } catch {
       if (generation === requestGeneration.current) setError('Не удалось загрузить следующие события. Попробуйте ещё раз.');
     } finally {

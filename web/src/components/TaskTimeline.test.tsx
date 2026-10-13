@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TaskEvent, TaskRunDetails } from '../types';
 import type { FlowMetrics } from '../types/flowMetrics';
@@ -110,5 +110,62 @@ describe('TaskTimeline', () => {
     fireEvent.keyDown(screen.getByRole('button', { name: 'Закрыть карточку' }), { key: 'Escape' });
     expect(screen.queryByRole('region', { name: 'Этап «Релиз»' })).not.toBeInTheDocument();
     expect(release).toHaveFocus();
+  });
+
+  it('marks partially attested stage tokens with how many attempts are known', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskFlowMetrics).mockResolvedValueOnce({
+      by_stage: [{ stage: 'analysis', tokens_input: null, tokens_output: null, usage_attestation: 'partial',
+        usage_known_attempts: 1, usage_unknown_attempts: 2, subscription_share_estimate: null }],
+    } as unknown as FlowMetrics);
+    renderTimeline();
+    fireEvent.click(screen.getByRole('button', { name: /Анализ/ }));
+    const card = screen.getByRole('region', { name: 'Этап «Анализ»' });
+    expect(await within(card).findByText('нет данных / нет данных — частично (1 из 3)')).toBeInTheDocument();
+  });
+
+  it('keeps complete stage tokens without a partial note', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskFlowMetrics).mockResolvedValueOnce({
+      by_stage: [{ stage: 'analysis', tokens_input: 10, tokens_output: 5, usage_attestation: 'complete',
+        usage_known_attempts: 2, usage_unknown_attempts: 0, subscription_share_estimate: null }],
+    } as unknown as FlowMetrics);
+    renderTimeline();
+    fireEvent.click(screen.getByRole('button', { name: /Анализ/ }));
+    expect(await within(screen.getByRole('region', { name: 'Этап «Анализ»' })).findByText('10 / 5')).toBeInTheDocument();
+  });
+
+  it('advances the open interval of a running task on each clock tick', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let now = Date.parse('2026-10-12T09:05:00Z');
+      const clock = () => now;
+      const running = { ...details, run: { ...details.run, status: 'running', completed_at: undefined } } as TaskRunDetails;
+      render(<TaskTimeline details={running} events={events.slice(0, 1)} eventTitle={(type) => type} clock={clock} tickMs={30_000} />);
+      const table = screen.getByRole('table', { name: 'Интервалы и отметки по этапам' });
+      expect(within(table).getByText('идёт')).toBeInTheDocument();
+      expect(within(table).getByText('5 мин')).toBeInTheDocument();
+
+      now = Date.parse('2026-10-12T09:07:00Z');
+      act(() => { vi.advanceTimersByTime(29_999); });
+      expect(within(table).getByText('5 мин')).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(within(table).getByText('7 мин')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick for a finished task', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const clock = vi.fn(() => Date.parse('2026-10-12T12:00:00Z'));
+      render(<TaskTimeline details={details} events={events} eventTitle={(type) => type} clock={clock} tickMs={30_000} />);
+      const calls = clock.mock.calls.length;
+      act(() => { vi.advanceTimersByTime(120_000); });
+      expect(clock.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { getTaskFlowMetrics } from '../api';
 import { formatStageDuration } from '../duration';
+import { stageTokensText } from '../stageUsage';
 import type { TaskEvent, TaskRunDetails } from '../types';
 import type { FlowMetrics, FlowStageStats } from '../types/flowMetrics';
 import {
@@ -20,12 +21,6 @@ const markSymbols: Record<TimelineMark['kind'], string> = { return: '↩', overr
 
 function formatTime(value: number | undefined): string {
   return value === undefined ? 'нет данных' : new Date(value).toLocaleString('ru-RU');
-}
-
-function formatTokens(value: number | null | undefined): string {
-  return value === null || value === undefined || !Number.isFinite(value)
-    ? 'нет данных'
-    : new Intl.NumberFormat('ru-RU').format(value);
 }
 
 function formatEstimate(value: number | null | undefined, currency?: string): string {
@@ -61,13 +56,27 @@ function laneSummary(lane: TimelineLane): string {
   return `${lane.title}: ${[...parts, ...marks].join(', ') || 'нет интервалов'}`;
 }
 
-export function TaskTimeline({ details, events, eventTitle }: {
+// Идущий интервал перерисовывается раз в 30 с: без этого его конец застывает
+// на моменте последнего рендера.
+const TIMELINE_TICK_MS = 30_000;
+
+export function TaskTimeline({ details, events, eventTitle, clock = Date.now, tickMs = TIMELINE_TICK_MS }: {
   details: TaskRunDetails;
   events: TaskEvent[];
   eventTitle: (type: string) => string;
+  // Источник «сейчас» и период тика; тесты подставляют свои.
+  clock?: () => number;
+  tickMs?: number;
 }) {
   const run = details.run;
   const finished = finishedStatuses.has(run.status);
+  const [now, setNow] = useState(clock);
+  useEffect(() => {
+    if (finished) return undefined;
+    setNow(clock());
+    const timer = window.setInterval(() => setNow(clock()), tickMs);
+    return () => window.clearInterval(timer);
+  }, [clock, finished, tickMs]);
   const [selected, setSelected] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<FlowMetrics | null>(null);
   const [metricsError, setMetricsError] = useState(false);
@@ -76,12 +85,12 @@ export function TaskTimeline({ details, events, eventTitle }: {
   const timeline = useMemo(() => {
     const lastEventAt = events.reduce((latest, event) => Math.max(latest, Date.parse(event.timestamp) || 0), 0);
     const completedAt = run.completed_at ? Date.parse(run.completed_at) : Number.NaN;
-    const now = finished ? (Number.isFinite(completedAt) ? completedAt : lastEventAt) : Date.now();
+    const end = finished ? (Number.isFinite(completedAt) ? completedAt : lastEventAt) : now;
     return buildTaskTimeline({
       events, templateStages: details.template?.stages ?? [], attempts: details.stages,
-      executorOverrides: details.state?.executor_overrides, now, finished,
+      executorOverrides: details.state?.executor_overrides, now: end, finished,
     });
-  }, [details.stages, details.state?.executor_overrides, details.template?.stages, events, finished, run.completed_at]);
+  }, [details.stages, details.state?.executor_overrides, details.template?.stages, events, finished, now, run.completed_at]);
 
   // Токены меняются только с завершением попыток — по ним и перезапрашиваем.
   const finishedAttempts = events.filter((event) => event.type === 'attempt_finished').length;
@@ -236,8 +245,7 @@ function StageCard({ lane, details, events, eventTitle, titleOf, stats, metrics,
             <a href={`/api/runs/${encodeURIComponent(details.run.run_id)}/logs/${encodeURIComponent(attemptId)}`} target="_blank" rel="noreferrer">
               лог <code>{attemptId}</code></a></li>)}
         </ul> : 'нет данных'}</dd></div>
-        <div><dt>Токены (вход / выход)</dt><dd>{usageNote ||
-          `${formatTokens(stats?.tokens_input)} / ${formatTokens(stats?.tokens_output)}`}</dd></div>
+        <div><dt>Токены (вход / выход)</dt><dd>{usageNote || stageTokensText(stats)}</dd></div>
         <div><dt>Стоимость</dt><dd>{usageNote ||
           `${formatEstimate(stats?.subscription_share_estimate, stats?.subscription_currency)}${
             stats?.subscription_share_estimate != null ? ' — приблизительная доля подписки' : ''}`}</dd></div>

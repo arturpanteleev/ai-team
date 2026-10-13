@@ -100,8 +100,19 @@ jobs:
           COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
           awk -v coverage="$COVERAGE" 'BEGIN { if (coverage < 60.0) { printf "coverage %.1f%% is below 60.0%%\n", coverage; exit 1 } }'
           bash scripts/coverage-gate.sh coverage.out
-      # Measure the 1000-run wall-clock budget after the broad suites finish, so
-      # unrelated package tests do not distort the 300 ms acceptance threshold.
+
+  # The 1000-run / 300 ms flow metrics budget (B-66) is a wall-clock
+  # acceptance check. It runs in its own job on an idle runner, so neither the
+  # unit/coverage suites nor their failures are entangled with it.
+  flow-metrics-perf:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.6'
+          check-latest: true
       - name: Flow metrics performance acceptance
         run: AI_TEAM_FLOW_METRICS_PERF=1 go test ./pkg/web -run '^TestFlowMetrics1000RunsUnder300ms$' -count=1
 

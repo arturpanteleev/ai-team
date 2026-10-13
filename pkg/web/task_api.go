@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1047,73 +1048,98 @@ func (s *Server) handleGetRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.GetPipelineRunByRunID(runID); err != nil {
-		writeJSONAPIError(w, http.StatusNotFound, "run not found", "not_found")
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSONAPIError(w, http.StatusNotFound, "run not found", "not_found")
+		} else {
+			writeJSONAPIError(w, http.StatusInternalServerError, "run lookup failed", "store_unavailable")
+		}
 		return
 	}
-	events, next, err := s.taskEventPage(runID, r)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_event_query")
-		return
-	}
-	writeJSONResponse(w, http.StatusOK, map[string]any{"events": events, "next_cursor": next})
+	s.writeTaskEventPage(w, r, runID)
 }
 
 func (s *Server) handleGetGlobalEvents(w http.ResponseWriter, r *http.Request) {
-	if runID := strings.TrimSpace(r.URL.Query().Get("run_id")); runID != "" {
-		if !safeIdentity(runID) {
-			writeJSONAPIError(w, http.StatusBadRequest, "invalid run id", "bad_identity")
-			return
-		}
-	}
-	events, next, err := s.taskEventPage(strings.TrimSpace(r.URL.Query().Get("run_id")), r)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_event_query")
+	runID := strings.TrimSpace(r.URL.Query().Get("run_id"))
+	if runID != "" && !safeIdentity(runID) {
+		writeJSONAPIError(w, http.StatusBadRequest, "invalid run id", "bad_identity")
 		return
 	}
-	writeJSONResponse(w, http.StatusOK, map[string]any{"events": events, "next_cursor": next})
+	s.writeTaskEventPage(w, r, runID)
 }
 
-func (s *Server) taskEventPage(runID string, r *http.Request) ([]Event, int64, error) {
+// errEventQuery marks a client error in event feed parameters; any other
+// error from taskEventPage comes from the store.
+type errEventQuery string
+
+func (e errEventQuery) Error() string { return string(e) }
+
+func (s *Server) writeTaskEventPage(w http.ResponseWriter, r *http.Request, runID string) {
+	page, err := s.taskEventPage(runID, r)
+	if err != nil {
+		var queryErr errEventQuery
+		if errors.As(err, &queryErr) {
+			writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_event_query")
+		} else {
+			writeJSONAPIError(w, http.StatusInternalServerError, "events unavailable", "store_unavailable")
+		}
+		return
+	}
+	writeJSONResponse(w, http.StatusOK, map[string]any{"events": page.events, "next_cursor": page.next, "has_more": page.hasMore})
+}
+
+type taskEventPageResult struct {
+	events  []Event
+	next    int64
+	hasMore bool
+}
+
+func (s *Server) taskEventPage(runID string, r *http.Request) (taskEventPageResult, error) {
 	cursor, limit := int64(0), 100
 	var err error
-	if raw := r.URL.Query().Get("after"); raw != "" {
+	query := r.URL.Query()
+	if raw := query.Get("after"); raw != "" {
 		cursor, err = strconv.ParseInt(raw, 10, 64)
 		if err != nil || cursor < 0 {
-			return nil, cursor, errors.New("after must be a non-negative event cursor")
+			return taskEventPageResult{}, errEventQuery("after must be a non-negative event cursor")
 		}
 	}
-	if raw := r.URL.Query().Get("limit"); raw != "" {
+	if raw := query.Get("limit"); raw != "" {
 		limit, err = strconv.Atoi(raw)
 		if err != nil || limit < 1 || limit > 1000 {
-			return nil, cursor, errors.New("limit must be between 1 and 1000")
+			return taskEventPageResult{}, errEventQuery("limit must be between 1 and 1000")
 		}
 	}
 	descending := false
-	switch order := r.URL.Query().Get("order"); order {
+	switch order := query.Get("order"); order {
 	case "", "asc":
 	case "desc":
 		descending = true
 	default:
-		return nil, cursor, errors.New("order must be asc or desc")
+		return taskEventPageResult{}, errEventQuery("order must be asc or desc")
 	}
-	if raw := r.URL.Query().Get("before"); raw != "" {
+	if raw := query.Get("before"); raw != "" {
 		if !descending {
-			return nil, cursor, errors.New("before requires order=desc")
+			return taskEventPageResult{}, errEventQuery("before requires order=desc")
 		}
-		if r.URL.Query().Get("after") != "" {
-			return nil, cursor, errors.New("after and before cannot be combined")
+		if query.Get("after") != "" {
+			return taskEventPageResult{}, errEventQuery("after and before cannot be combined")
 		}
+		// Event cursors start at 1, so before=0 would name an empty range; it
+		// is rejected rather than silently read as "start from the newest".
+		// Omit before to start from the newest event.
 		cursor, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || cursor < 0 {
-			return nil, cursor, errors.New("before must be a non-negative event cursor")
+		if err != nil || cursor < 1 {
+			return taskEventPageResult{}, errEventQuery("before must be a positive event cursor; omit it to start from the newest event")
 		}
-	} else if descending && r.URL.Query().Get("after") != "" {
-		return nil, cursor, errors.New("order=desc pages with before, not after")
+	} else if descending && query.Get("after") != "" {
+		return taskEventPageResult{}, errEventQuery("order=desc pages with before, not after")
 	}
-	warningsOnly := strings.EqualFold(r.URL.Query().Get("warnings"), "true")
-	values := make([]Event, 0, limit)
-	for len(values) < limit {
-		batchSize := limit
+	warningsOnly := strings.EqualFold(query.Get("warnings"), "true")
+	// Collect one matching event past the page to report has_more exactly,
+	// so the client does not offer a "load more" that returns nothing.
+	values := make([]Event, 0, limit+1)
+	for len(values) <= limit {
+		batchSize := min(1000, limit+1-len(values))
 		if warningsOnly {
 			batchSize = 1000
 		}
@@ -1127,27 +1153,31 @@ func (s *Server) taskEventPage(runID string, r *http.Request) ([]Event, int64, e
 			batch, err = s.store.GetRunEventsAfter(runID, cursor, batchSize)
 		}
 		if err != nil {
-			return nil, cursor, err
+			return taskEventPageResult{}, err
 		}
 		for _, value := range batch {
 			cursor = value.ID
 			event, wireErr := wireEvent(value)
 			if wireErr != nil {
-				return nil, cursor, wireErr
+				return taskEventPageResult{}, wireErr
 			}
-			if warningsOnly && !isTaskWarningEvent(event) {
+			if warningsOnly && !event.Warning {
 				continue
 			}
 			values = append(values, event)
-			if len(values) == limit {
+			if len(values) > limit {
 				break
 			}
 		}
-		if len(batch) < batchSize || len(values) == limit {
+		if len(batch) < batchSize {
 			break
 		}
 	}
-	return values, cursor, nil
+	if len(values) > limit {
+		values = values[:limit]
+		return taskEventPageResult{events: values, next: values[limit-1].Cursor, hasMore: true}, nil
+	}
+	return taskEventPageResult{events: values, next: cursor}, nil
 }
 
 func isTaskWarningEvent(event Event) bool {
@@ -1177,6 +1207,7 @@ type flowStageStats struct {
 	DurationMS                int64                 `json:"duration_ms"`
 	Human                     int                   `json:"human_attempts"`
 	Agent                     int                   `json:"agent_attempts"`
+	Skipped                   int                   `json:"skipped_attempts"`
 	AgentShare                *float64              `json:"agent_share"`
 	ByState                   []flowStageStateStats `json:"by_state"`
 	TokensInput               *int64                `json:"tokens_input"`
@@ -1275,8 +1306,12 @@ func (s *Server) parseFlowSelection(w http.ResponseWriter, r *http.Request) (flo
 			return selection, false
 		}
 		run, err := s.store.GetPipelineRunByRunID(runID)
-		if err != nil || run == nil {
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && run == nil) {
 			writeJSONAPIError(w, http.StatusNotFound, "run not found", "not_found")
+			return selection, false
+		}
+		if err != nil {
+			writeJSONAPIError(w, http.StatusInternalServerError, "flow metrics unavailable", "metrics_unavailable")
 			return selection, false
 		}
 		if !explicitPeriod {
@@ -1441,6 +1476,13 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 			}
 			stateStat.Attempts++
 			stateStat.DurationMS += stage.DurationMs
+			// A skipped attempt did no work: it stays in attempts, duration and
+			// by_state, but counts toward neither executor, the agent share,
+			// usage attestation nor agent results.
+			if taskStageSkipped(stage) {
+				stat.Skipped++
+				continue
+			}
 			executor := stageExecutor(stage, executors)
 			if executor == "human" {
 				stat.Human++
@@ -1548,8 +1590,8 @@ func (s *Server) buildFlowMetricsFor(selection flowSelection) (flowMetricsRespon
 	}
 	for index := range response.ByStage {
 		stage := &response.ByStage[index]
-		if stage.Attempts > 0 {
-			agentShare := float64(stage.Agent) / float64(stage.Attempts)
+		if executed := stage.Attempts - stage.Skipped; executed > 0 {
+			agentShare := float64(stage.Agent) / float64(executed)
 			stage.AgentShare = &agentShare
 		}
 		for _, stateStat := range stageStates[stage.Stage] {
@@ -1735,6 +1777,10 @@ func readTaskUsageEnvelope(s *Server, runID string) (metrics.UsageEnvelope, erro
 	return envelope, nil
 }
 
+func taskStageSkipped(stage store.Stage) bool {
+	return strings.EqualFold(stage.Outcome, "skipped") || strings.EqualFold(stage.Status, "skipped")
+}
+
 func taskStageSucceeded(stage store.Stage) bool {
 	return strings.EqualFold(stage.Outcome, "passed") || strings.EqualFold(stage.Status, "passed") ||
 		strings.EqualFold(stage.Status, "success") || strings.EqualFold(stage.Status, "completed")
@@ -1915,7 +1961,8 @@ func (s *Server) handleGetFlowMetricsCSV(w http.ResponseWriter, r *http.Request)
 		writeCSVMetric(w, "stage_duration", stage.Stage, int64Pointer(stage.DurationMS), "ms", "not_applicable", "sqlite")
 		writeCSVMetric(w, "stage_human_attempts", stage.Stage, int64Pointer(int64(stage.Human)), "attempts", "not_applicable", "sqlite")
 		writeCSVMetric(w, "stage_agent_attempts", stage.Stage, int64Pointer(int64(stage.Agent)), "attempts", "not_applicable", "sqlite")
-		writeCSVFloatMetric(w, "stage_agent_share", stage.Stage, stage.AgentShare, "ratio", "complete", "sqlite", "agent_attempts / all_non_invalidated_attempts")
+		writeCSVMetric(w, "stage_skipped_attempts", stage.Stage, int64Pointer(int64(stage.Skipped)), "attempts", "not_applicable", "sqlite")
+		writeCSVFloatMetric(w, "stage_agent_share", stage.Stage, stage.AgentShare, "ratio", "complete", "sqlite", "agent_attempts / (non_invalidated_attempts - skipped_attempts)")
 		writeCSVMetric(w, "stage_tokens_input", stage.Stage, stage.TokensInput, "tokens", stage.UsageAttestation, stage.UsageSource)
 		writeCSVMetric(w, "stage_tokens_output", stage.Stage, stage.TokensOutput, "tokens", stage.UsageAttestation, stage.UsageSource)
 		writeCSVMetric(w, "stage_usage_known_attempts", stage.Stage, int64Pointer(int64(stage.UsageKnownAttempts)), "attempts", stage.UsageAttestation, stage.UsageSource)
@@ -1981,6 +2028,12 @@ func writeCSVCounts(w http.ResponseWriter, name string, values map[string]int) {
 
 func int64Pointer(value int64) *int64 { return &value }
 
+// csvField quotes a text cell and neutralizes spreadsheet formulas: a value
+// starting with =, +, -, @, tab or carriage return gets a leading apostrophe,
+// so a stage name such as "=HYPERLINK(...)" is shown as text, not evaluated.
 func csvField(value string) string {
+	if value != "" && strings.ContainsRune("=+-@\t\r", rune(value[0])) {
+		value = "'" + value
+	}
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }

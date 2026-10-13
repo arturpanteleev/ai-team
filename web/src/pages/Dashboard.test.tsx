@@ -89,8 +89,8 @@ describe('Dashboard business intake', () => {
     fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Согласовать требования с телефона' } });
     fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
     await waitFor(() => expect(startRun).toHaveBeenCalledWith('mobile-flow', 'Согласовать требования с телефона'));
-    await waitFor(() => expect(screen.getByText('Задача создана')).toBeInTheDocument());
-    expect(screen.getByRole('link', { name: 'Открыть задачу →' })).toHaveAttribute('href', '/tasks/run-mobile-created');
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Mobile flow'));
+    expect(screen.getByRole('link', { name: 'Открыть' })).toHaveAttribute('href', '/tasks/run-mobile-created');
 
     const previousCalls = vi.mocked(getPipelineRuns).mock.calls.length;
     fireEvent(document, new Event('visibilitychange'));

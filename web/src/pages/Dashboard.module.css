@@ -462,3 +462,78 @@
     min-height: 50px;
   }
 }
+
+/* Пузырь мысли рядом с кнопкой «Создать задачу»: гаснет сам через несколько секунд. */
+.createWrap {
+  position: relative;
+}
+
+.thought {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 30px);
+  z-index: 5;
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  min-width: 220px;
+  max-width: 280px;
+  padding: 14px 20px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text-primary);
+  text-align: center;
+  overflow-wrap: anywhere;
+  transform: translateX(-50%);
+  animation: thoughtPulse 1.8s ease-in-out infinite;
+}
+
+.thought strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.thought a {
+  font-weight: 650;
+  color: var(--link);
+}
+
+.tailLg,
+.tailSm {
+  position: absolute;
+  left: 50%;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  transform: translateX(-50%);
+}
+
+.tailLg {
+  top: calc(100% + 4px);
+  width: 18px;
+  height: 18px;
+}
+
+.tailSm {
+  top: calc(100% + 26px);
+  width: 9px;
+  height: 9px;
+}
+
+@keyframes thoughtPulse {
+  0%,
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+  50% {
+    transform: translateX(-50%) scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thought {
+    animation: none;
+  }
+}
+

@@ -20,7 +20,6 @@ import {
   retryDelivery,
   returnTaskStage,
   runTaskStageAgent,
-  setTaskStageExecutor,
   skipTaskStage,
   submitTaskGrillVersion,
   submitTaskStageResult,
@@ -329,7 +328,7 @@ export function TaskDetail() {
     const actionStillTargetsCurrentRun = () => activeRunID.current === actionRunID;
     setActionError('');
     setErrorScope('stage');
-    setActionStatus(`${label}…`);
+    setActionStatus(key === 'run-agent' ? '' : `${label}…`);
     setWorking(true);
     setActiveKey(key);
     try {
@@ -337,7 +336,7 @@ export function TaskDetail() {
       if (!actionStillTargetsCurrentRun()) return false;
       await refresh();
       if (!actionStillTargetsCurrentRun()) return false;
-      setActionStatus(`${label} выполнено.`);
+      setActionStatus('');
       return true;
     } catch (reason) {
       if (!actionStillTargetsCurrentRun()) return false;
@@ -422,13 +421,12 @@ export function TaskDetail() {
     (grillAllowed)
     || (approval.trigger === 'delivery_plan' && allowed.has('plan/approve'))
     || (approval.trigger === 'stage_check' && allowed.has('confirm'))
-    || (approval.trigger === 'human_input' && allowed.has('results'))
   );
   const pendingDecisions = details.approvals.filter((approval) => approval.status === 'pending' && !handledByStagePanel(approval));
   // Approvals that ask for an answer are answered in the current stage card, not in the approvals list.
   const questionDecisions = details.approvals.filter((approval) => approval.status === 'pending'
     && (approval.actions.includes('answer_questions') || approval.kind === 'questions') && !(grillAllowed && approval.id === pending?.id));
-  const otherDecisions = pendingDecisions.filter((approval) => !questionDecisions.some((question) => question.id === approval.id));
+  const otherDecisions = pendingDecisions;
   const decidedDecisions = details.approvals.filter((approval) => approval.status !== 'pending' && payloadMarkdown(approval.payload) === null);
   const runningAttempt = details.stages.find((stage) => stage.status === 'running' && stage.agent_name === currentStageID);
   const latestAttemptFor = (stageID: string) => [...details.stages.filter((stage) => stage.agent_name === stageID)]
@@ -464,6 +462,8 @@ export function TaskDetail() {
 
   function approvalLabel(action: string): string {
     if (action === 'answer_questions') return 'Ответить и продолжить';
+    if (action === 'run_agent') return 'Запустить агента';
+    if (action === 'refine_agent') return 'Попросить агента доработать';
     if (action === 'approve_spec') return 'Согласовать ТЗ и передать архитектору';
     if (action === 'approve') return 'Согласовать';
     if (action === 'reject') return 'Отклонить';
@@ -492,9 +492,6 @@ export function TaskDetail() {
     (details.delivery.status === 'pending' || details.delivery.status === 'failed');
   const prURL = safePullRequestURL(details.delivery.record?.pr_url);
 
-  const taskTitle = template?.title || (details.task ?? '').split('\n')[0].trim() || run.feature;
-
-  const stageName = currentStage?.title ?? currentStageID;
   const stageState = (() => {
     if (questionDecisions.length > 0 || otherDecisions.length > 0) return 'Ждёт решения';
     if (runningAttempt) return 'В работе';
@@ -504,16 +501,14 @@ export function TaskDetail() {
     if (finishedStatuses.includes(run.status)) return 'Завершена';
     return 'Ожидает';
   })();
-  const stageLine = stageName ? `${stageState}: этап «${stageName}»` : stageState;
-  const expectation = questionDecisions.length > 0 ? 'Ждём ваш ответ на вопросы: без него этап не продолжится.'
-    : otherDecisions.length > 0 ? 'Ждём решения по согласованию ниже.'
-    : runningAttempt ? 'Агент работает, ждать ответа от вас не нужно.'
-    : allowed.has('confirm') ? 'Ждём подтверждения этапа.'
-    : allowed.has('take') || allowed.has('results') || allowed.has('run-agent') ? 'Ждём: сделайте этап сами или отдайте его агенту.'
-    : undefined;
   const half = Math.ceil(route.length / 2);
   const routeRows = route.length > 6 ? [route.slice(0, half), route.slice(half)] : [route];
   const rowStarts = routeRows.length > 1 ? [0, half] : [0];
+
+  // "submit" and "approve" of a human input go through the stage result form, not the approvals list.
+  const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
+    ? approval.actions.filter((action) => action !== 'submit' && action !== 'approve')
+    : approval.actions);
 
   const renderDecision = (approval: Approval) => {
     const markdown = payloadMarkdown(approval.payload);
@@ -527,7 +522,7 @@ export function TaskDetail() {
       <strong>{approval.from_stage === approval.to_stage
         ? `Этап «${stageTitle(approval.from_stage)}»`
         : `«${stageTitle(approval.from_stage)}» → «${stageTitle(approval.to_stage)}»`}</strong>
-      <span>ожидает решения · роли: {approval.required_roles.join(', ') || '—'}
+      <span>Ждёт вашего решения · роли: {approval.required_roles.join(', ') || '—'}
         {approval.quorum === 'all' ? ' · нужны все участники' : ''}</span>
       {markdown !== null && <div className={styles.markdown}><ReactMarkdown>{markdown || 'Текст вопроса находится в артефакте этапа.'}</ReactMarkdown></div>}
       {needsAnswer && <label className={styles.questionLabel}>Ответ на вопрос
@@ -542,7 +537,7 @@ export function TaskDetail() {
       <div className={styles.actions}>
         {approval.required_roles
           .filter((role) => canAct(role))
-          .flatMap((role) => approval.actions.map((action) => (
+          .flatMap((role) => decisionActions(approval).map((action) => (
             <button key={`${role}:${action}`} type="button" disabled={working ||
               (action === 'answer_questions' && !answer.trim()) ||
               (requiresReturnReason(approval, action) && !reason.trim())}
@@ -573,8 +568,10 @@ export function TaskDetail() {
       <div className={styles.layout}>
         <div className={styles.summary}>
           <section className={`${styles.intent} ${styles.ideaCard}`} aria-labelledby="idea-heading">
-            <h1 id="idea-heading">{taskTitle}</h1>
-            <p className={styles.stageLine}>{stageLine}</p>
+            <div className={styles.ideaTop}>
+              <h2 id="idea-heading">Бизнес-идея</h2>
+              <span className={styles.stageLine} data-state={stageState}>{stageState}</span>
+            </div>
             {(details.external_links ?? []).length > 0 && (
               <ul className={styles.externalLinks} aria-label="Внешние ссылки">
                 {details.external_links?.map((value) => (
@@ -584,7 +581,6 @@ export function TaskDetail() {
                 ))}
               </ul>
             )}
-            <p className={styles.eyebrow}>Бизнес-идея</p>
             {intentText !== null
               ? <div className={styles.markdown}><ReactMarkdown>{stripLeadingHeading(intentText)}</ReactMarkdown></div>
               : details.task
@@ -617,13 +613,12 @@ export function TaskDetail() {
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
                 <h2 id="current-stage-heading">{currentStage?.title ?? currentStageID ?? 'Этапов нет'}</h2>
-                {currentStage && <p>Кто делает этап: <strong>{currentExecutor === 'agent' ? `Агент ${currentStage.agent ?? ''}` : 'Вы'}</strong></p>}
-                {expectation && <p className={styles.expect}>{expectation}</p>}
+                {currentStage && <p className={styles.stageState} data-state={stageState}>{stageState}</p>}
                 {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
                   {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
                     {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
                 {currentStage && (currentExecutor === 'agent' || agentLaunch.phase !== 'idle') && <AgentStatus runID={run.run_id}
-                  stageTitle={currentStage.title} agent={currentStage.agent} runningAttempt={runningAttempt}
+                  runningAttempt={runningAttempt}
                   lastAttempt={lastAgentAttempt} launch={agentLaunch} />}
                 {currentStage && currentExecutor !== 'agent' && agentLaunch.phase === 'idle' && runningAttempt && <div className={styles.working} role="status">
                   <span className={styles.spinner} aria-hidden="true" />
@@ -647,8 +642,7 @@ export function TaskDetail() {
 
             {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && <div className={styles.modes}>
               {(allowed.has('take') || allowed.has('results')) && <article className={styles.modeCard}>
-                <h3>Напишу сам</h3>
-                <p>Возьмите этап себе и сдайте результат текстом или ссылкой.</p>
+                <h3>Сделаю сам</h3>
                 <div className={styles.actions}>
                   {allowed.has('take') && <button type="button" disabled={working}
                     onClick={() => void perform('Этап взят', () => takeTaskStage(run.run_id, currentStage.id), 'take')}><BusyLabel busy={working && activeKey === 'take'} text="Сохраняем…">Взять этап</BusyLabel></button>}
@@ -657,8 +651,7 @@ export function TaskDetail() {
                 </div>
               </article>}
               {allowed.has('run-agent') && currentStage.agent && <article className={styles.modeCard}>
-                <h3>Агент {currentStage.agent} сделает этап</h3>
-                <p>Агент {currentStage.agent} подготовит результат. Вы проверите его и подтвердите или вернёте на доработку.</p>
+                <h3>Агент {currentStage.agent} подготовит результат</h3>
                 <div className={styles.actions}>
                   <button type="button" disabled={working}
                     onClick={() => void startAgent(pending?.actions.includes('retry') ? 'refine' : 'run')}>
@@ -669,15 +662,6 @@ export function TaskDetail() {
             </div>}
 
             {currentStage && allowed.size > 0 && <div className={styles.actions}>
-              {allowed.has('executor') && currentStage.agent && (
-                <label className={styles.inlineSelect}>Кто делает этап
-                  <select disabled={working} value={currentExecutor}
-                    onChange={(event) => void perform('Исполнитель изменён', () => setTaskStageExecutor(
-                      run.run_id, currentStage.id, event.currentTarget.value as 'human' | 'agent'), 'executor')}>
-                    <option value="human">Вы</option><option value="agent">Агент {currentStage.agent}</option>
-                  </select>
-                </label>
-              )}
               {allowed.has('confirm') && <button type="button" disabled={working}
                 onClick={() => void perform('Этап подтверждён', () => confirmTaskStage(run.run_id, currentStage.id), 'confirm')}><BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">Подтвердить этап</BusyLabel></button>}
               {(allowed.has('grill/answer') || allowed.has('grill/new-version') || allowed.has('grill/done')) && pending &&
@@ -942,10 +926,8 @@ function FailureNotice({ runID, title, reason, attempt }: {
   </div>;
 }
 
-function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, launch }: {
+function AgentStatus({ runID, runningAttempt, lastAttempt, launch }: {
   runID: string;
-  stageTitle: string;
-  agent?: string;
   runningAttempt?: Stage;
   lastAttempt?: Stage;
   launch: AgentLaunch;
@@ -955,21 +937,18 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
   const attempt = runningAttempt ?? current;
   let state: 'running' | 'starting' | 'started' | 'finished' | 'idle' = 'idle';
   let title = '';
-  let detail = '';
   if (runningAttempt) {
     state = 'running';
-    title = 'Агент работает';
-    detail = `${agent ? `Агент ${agent} ` : 'Агент '}над «${stageTitle}», запущено ${clockTime(runningAttempt.started_at)}`;
+    title = 'Агент работает…';
   } else if (launch.phase === 'starting') {
     state = 'starting';
     title = 'Запускаем агента…';
   } else if (launch.phase === 'started' && !current) {
     state = 'started';
     title = 'Агент запущен';
-    detail = 'Ждём первого статуса от агента.';
   } else if (current && (current.status === 'passed' || current.status === 'warning')) {
     state = 'finished';
-    title = 'Агент завершил, ждём проверки';
+    title = 'Агент завершил';
   }
   if (state === 'idle') return null;
   const tone = state === 'finished' ? 'mint' : state === 'running' ? 'yellow' : 'mustard';
@@ -983,7 +962,6 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
       </Bubble>}
     <div>
       <p className={styles.agentTitle}>{title}</p>
-      {detail && <p>{detail}</p>}
       {attempt && <a href={`/api/runs/${encodeURIComponent(runID)}/logs/${encodeURIComponent(attempt.attempt_id)}`}
         target="_blank" rel="noreferrer">Открыть лог агента</a>}
     </div>

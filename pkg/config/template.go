@@ -489,6 +489,11 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		if !c.QuestionStages[stage.ID] || hasBlockedEdge(graph.Edges, stage.ID) {
 			continue
 		}
+		// Петля добавляется только для функции с известной ролью облака:
+		// иначе валидация отклонит весь конфиг из-за одного этапа.
+		if _, known := cloudidentity.FunctionRole(stage.Function); !known {
+			continue
+		}
 		graph.Edges = append(graph.Edges, workflow.Edge{
 			From: stage.ID, Outcome: workflow.OutcomeBlocked, To: stage.ID,
 			Approval: generatedApproval(stage.Function, stage.ID, map[string]string{

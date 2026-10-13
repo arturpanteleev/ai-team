@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter, Routes } from '../router';
 import type { TaskRunDetails } from '../types';
+import { DRAFT_SAVE_DELAY_MS } from '../components/StageResultForm';
 import { TaskDetail } from './TaskDetail';
 
 const live = vi.hoisted(() => ({ onEvent: undefined as ((event: { run_id: string }) => void) | undefined }));
@@ -26,6 +27,7 @@ vi.mock('../api', () => ({
   runTaskStageAgent: vi.fn().mockResolvedValue({}),
   setTaskStageExecutor: vi.fn().mockResolvedValue({}),
   skipTaskStage: vi.fn().mockResolvedValue({}),
+  submitTaskGrillVersion: vi.fn().mockResolvedValue({}),
   submitTaskStageResult: vi.fn().mockResolvedValue({}),
   takeTaskStage: vi.fn().mockResolvedValue({}),
 }));
@@ -231,6 +233,7 @@ describe('Task detail', () => {
     expect(content).toHaveTextContent('pkg/web/task_api.go');
     expect(content).toHaveTextContent('Страница задачи');
     expect(content).toHaveTextContent('Добавлена панель этапа.');
+    expect(content).not.toHaveTextContent('В плане нет ни ветки');
     fireEvent.click(screen.getByRole('button', { name: 'Подтвердить план' }));
     await waitFor(() => expect(api.approveTaskDeliveryPlan).toHaveBeenCalledWith('run-detail-1', planHash));
   });
@@ -253,6 +256,114 @@ describe('Task detail', () => {
     expect(await screen.findByRole('heading', { name: 'История грилла' })).toBeInTheDocument();
     expect(screen.getByText('Что проверить перед релизом?')).toBeInTheDocument();
     expect(screen.getByText('Проверить миграцию базы')).toBeInTheDocument();
+  });
+
+  it('submits a new grill version with an optional comment when the API allows it', async () => {
+    const grill: TaskRunDetails = {
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: 'grill-2' },
+      approvals: [{
+        id: 'grill-2', run_id: 'run-detail-1', attempt_id: 'attempt-grill', from_stage: 'analysis', to_stage: 'analysis',
+        trigger: 'grill', subject_hash: 'd'.repeat(64), required_roles: ['analyst'], quorum: 'any',
+        actions: ['answer', 'new_version', 'done'], payload: { kind: 'grill_questions', markdown: 'Нет раздела рисков' },
+        status: 'pending', created_at: '2026-10-12T09:02:00Z',
+      }],
+      allowed_actions: ['grill/new-version'],
+    };
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(grill);
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Грилл: вопросы и ответы' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Ответить и продолжить' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить новую версию' }));
+    await waitFor(() => expect(api.submitTaskGrillVersion).toHaveBeenLastCalledWith('run-detail-1', 'analysis', ''));
+    fireEvent.change(screen.getByLabelText('Комментарий к новой версии'), { target: { value: ' Добавил риски ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить новую версию' }));
+    await waitFor(() => expect(api.submitTaskGrillVersion).toHaveBeenLastCalledWith('run-detail-1', 'analysis', 'Добавил риски'));
+
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...grill, allowed_actions: ['grill/answer', 'grill/done'] });
+    renderDetail();
+    expect(await screen.findByRole('button', { name: 'Ответить и продолжить' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Отправить новую версию' })).not.toBeInTheDocument();
+  });
+
+  it('returns to the first route of the current stage and forgets a target picked on a previous stage', async () => {
+    const stages = [
+      ...baseDetails.template!.stages,
+      { id: 'qa', title: 'Проверка', function: 'qa', result: 'md' as const, executor: 'human' as const },
+    ];
+    const atStage = (stage: string): TaskRunDetails => ({
+      ...baseDetails,
+      template: { ...baseDetails.template!, stages, returns: [
+        { from: 'release', to: 'intent' }, { from: 'release', to: 'analysis' },
+        { from: 'qa', to: 'intent' }, { from: 'qa', to: 'analysis' },
+      ] },
+      state: { ...baseDetails.state!, next_stage: stage },
+      allowed_actions: ['return'],
+    });
+    const api = await import('../api');
+    vi.mocked(api.returnTaskStage).mockClear();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(atStage('release'));
+    renderDetail();
+
+    fireEvent.change(await screen.findByLabelText('Причина возврата'), { target: { value: 'Не тот объём' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Вернуть этап' }));
+    await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'release', 'intent', 'Не тот объём'));
+
+    fireEvent.change(screen.getByLabelText('Вернуть на этап'), { target: { value: 'analysis' } });
+    expect(screen.getByLabelText('Вернуть на этап')).toHaveValue('analysis');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(atStage('qa'));
+    await act(async () => {
+      live.onEvent?.({ run_id: 'run-detail-1' });
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole('heading', { name: 'Проверка', level: 2 })).toBeInTheDocument();
+    expect(screen.getByLabelText('Вернуть на этап')).toHaveValue('intent');
+    fireEvent.change(screen.getByLabelText('Причина возврата'), { target: { value: 'Повторить' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Вернуть этап' }));
+    await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'qa', 'intent', 'Повторить'));
+  });
+
+  it('shows when the responsible person took the stage', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      stage_owners: { intent: { stage_id: 'intent', approval_id: 'input-1', actor_id: 'alice', actor_role: 'product_owner', taken_at: '2026-10-12T09:05:00Z' } },
+    });
+    renderDetail();
+
+    const owner = await screen.findByText(/Ответственный: alice/);
+    expect(owner).toHaveTextContent('взял этап');
+    expect(owner.querySelector('time')).toHaveAttribute('dateTime', '2026-10-12T09:05:00Z');
+  });
+
+  it('does not turn a scheme-only external link into a clickable link', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, external_links: ['https:tracker.example/JIRA-52'] });
+    renderDetail();
+
+    expect(await screen.findByText('https:tracker.example/JIRA-52')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'https:tracker.example/JIRA-52' })).not.toBeInTheDocument();
+  });
+
+  it('warns when the delivery plan payload is an empty object', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'release', pending_approval_id: 'plan-empty' },
+      approvals: [{
+        id: 'plan-empty', run_id: 'run-detail-1', attempt_id: 'attempt-release', from_stage: 'release', to_stage: 'release',
+        trigger: 'delivery_plan', subject_hash: 'e'.repeat(64), required_roles: ['release_manager'], quorum: 'any',
+        actions: ['approve', 'reject'], status: 'pending', created_at: '2026-10-12T09:04:00Z', payload: {},
+      }],
+      allowed_actions: ['plan/approve'],
+    });
+    renderDetail();
+
+    const content = await screen.findByRole('region', { name: 'Содержимое плана доставки' });
+    expect(content).toHaveTextContent('В плане нет ни ветки, ни файлов, ни описания PR');
   });
 
   it('ignores a late previous-run refresh and clears all draft inputs on route change', async () => {
@@ -347,6 +458,10 @@ function detailsAt(stage: TaskRunDetails['template'] extends infer T ? T extends
 
 const draftKey = (stage = 'intent') => `ai-team:stage-result-draft:v1:run-detail-1:${stage}`;
 
+function hidePage() {
+  act(() => { window.dispatchEvent(new Event('pagehide')); });
+}
+
 async function openResultForm() {
   renderDetail();
   fireEvent.click(await screen.findByRole('button', { name: 'Сдать результат' }));
@@ -357,6 +472,7 @@ describe('Browser stage submission', () => {
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: '# План\n\nшаги' } });
     fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Собран план' } });
+    hidePage();
     expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: '# План\n\nшаги', description: 'Собран план' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр' }));
@@ -482,9 +598,17 @@ describe('Browser stage submission', () => {
     expect(screen.getByLabelText('Заметка')).toHaveValue('Вернуться после обеда');
     expect(screen.getByText('Восстановлен черновик, сохранённый в этом браузере.')).toBeInTheDocument();
 
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     fireEvent.click(screen.getByRole('button', { name: 'Очистить черновик' }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Черновик идеи');
+    expect(storage.getItem(draftKey())).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Очистить черновик' }));
+    expect(confirm).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
     expect(storage.getItem(draftKey())).toBeNull();
+    confirm.mockRestore();
   });
 
   it('keeps the draft when the server rejects the submission', async () => {
@@ -507,6 +631,7 @@ describe('Browser stage submission', () => {
     useStorage(() => { throw new DOMException('blocked', 'SecurityError'); });
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Без хранилища' } });
+    hidePage();
     expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
     const api = await import('../api');
@@ -518,8 +643,68 @@ describe('Browser stage submission', () => {
     storage.failWrites = true;
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Большой текст' } });
+    hidePage();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Большой текст');
     expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
+  });
+
+  it('batches draft writes while typing and flushes them when the page is hidden', async () => {
+    await openResultForm();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const editor = screen.getByLabelText('Результат в Markdown');
+      fireEvent.change(editor, { target: { value: 'Первый' } });
+      act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DELAY_MS - 1); });
+      expect(storage.getItem(draftKey())).toBeNull();
+
+      fireEvent.change(editor, { target: { value: 'Первый абзац' } });
+      act(() => { vi.advanceTimersByTime(DRAFT_SAVE_DELAY_MS - 1); });
+      expect(storage.getItem(draftKey())).toBeNull();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: 'Первый абзац' });
+
+      fireEvent.change(editor, { target: { value: 'Первый абзац и второй' } });
+      hidePage();
+      expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: 'Первый абзац и второй' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the latest text when the form is collapsed before the debounce fires', async () => {
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Свернул сразу' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Свернуть' }));
+    expect(JSON.parse(storage.getItem(draftKey())!)).toMatchObject({ content: 'Свернул сразу' });
+  });
+
+  it('does not write the draft back after an accepted submission', async () => {
+    await openResultForm();
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Сдаю без паузы' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(storage.getItem(draftKey())).toBeNull();
+    cleanup();
+    expect(storage.getItem(draftKey())).toBeNull();
+  });
+
+  it('drops the stored older draft when the newer one cannot be written', async () => {
+    storage.setItem(draftKey(), JSON.stringify({ content: 'Старая версия', url: '', note: '', description: '' }));
+    await openResultForm();
+    expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Старая версия');
+    storage.failWrites = true;
+    fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Новая версия' } });
+    hidePage();
+    expect(storage.getItem(draftKey())).toBeNull();
+    expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
+  });
+
+  it('clears an empty draft without asking for confirmation', async () => {
+    const confirm = vi.spyOn(window, 'confirm');
+    await openResultForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Очистить черновик' }));
+    expect(confirm).not.toHaveBeenCalled();
+    confirm.mockRestore();
   });
 
   it('ignores a corrupted stored draft', async () => {

@@ -25,7 +25,7 @@ function storage(): Storage | null {
   }
 }
 
-function isEmpty(draft: StageResultDraft): boolean {
+export function isEmptyStageResultDraft(draft: StageResultDraft): boolean {
   return !draft.content && !draft.url && !draft.note && !draft.description;
 }
 
@@ -36,23 +36,30 @@ export function loadStageResultDraft(runId: string, stageId: string): StageResul
     const parsed = JSON.parse(raw) as Partial<Record<keyof StageResultDraft, unknown>>;
     const text = (value: unknown) => (typeof value === 'string' ? value : '');
     const draft = { content: text(parsed.content), url: text(parsed.url), note: text(parsed.note), description: text(parsed.description) };
-    return isEmpty(draft) ? null : draft;
+    return isEmptyStageResultDraft(draft) ? null : draft;
   } catch {
     return null;
   }
 }
 
 // saveStageResultDraft reports whether the draft is persisted in the browser.
-// An empty draft removes the stored entry.
+// An empty draft removes the stored entry. When a write fails (quota, blocked
+// storage) the previously stored version is removed too: otherwise a reload
+// would silently restore an older draft than the one on screen.
 export function saveStageResultDraft(runId: string, stageId: string, draft: StageResultDraft): boolean {
   const store = storage();
   if (!store) return false;
+  const key = stageResultDraftKey(runId, stageId);
   try {
-    const key = stageResultDraftKey(runId, stageId);
-    if (isEmpty(draft)) store.removeItem(key);
+    if (isEmptyStageResultDraft(draft)) store.removeItem(key);
     else store.setItem(key, JSON.stringify(draft));
     return true;
   } catch {
+    try {
+      store.removeItem(key);
+    } catch {
+      // Nothing more can be done; loadStageResultDraft tolerates any leftover.
+    }
     return false;
   }
 }

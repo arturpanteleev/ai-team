@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, useSearchParams } from '../router';
-import ReactMarkdown from 'react-markdown';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
+import { MarkdownPreview } from '../components/MarkdownPreview';
 import { createArtifactRevision, getArtifact, getArtifactRevisions } from '../api';
 import type { ArtifactRevision } from '../types';
 import styles from './ArtifactViewer.module.css';
@@ -122,9 +122,7 @@ export function ArtifactViewer() {
             <button disabled={saving} onClick={() => setEditing(false)}>Отмена</button>
           </div>
         ) : isRendered ? (
-          <div className={styles.markdown}>
-            <ReactMarkdown>{content}</ReactMarkdown>
-          </div>
+          <MarkdownPreview className={styles.markdown} markdown={content} />
         ) : (
           <pre className={styles.raw}>{content}</pre>
         )}

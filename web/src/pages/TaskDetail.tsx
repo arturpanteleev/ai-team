@@ -16,6 +16,7 @@ import {
   runTaskStageAgent,
   setTaskStageExecutor,
   skipTaskStage,
+  submitTaskGrillVersion,
   submitTaskStageResult,
   takeTaskStage,
 } from '../api';
@@ -24,6 +25,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
 import { StageResultForm } from '../components/StageResultForm';
+import { hasHttpPrefix } from '../stageResultValidation';
 import type { StageResultSubmission } from '../stageResultValidation';
 import { StageRow } from '../components/StageRow';
 import { StatusBadge } from '../components/StatusBadge';
@@ -50,6 +52,7 @@ async function loadRunEvents(runId: string): Promise<TaskEvent[]> {
 }
 
 function httpLink(value: string): boolean {
+  if (!hasHttpPrefix(value)) return false;
   try {
     const url = new URL(value);
     return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password;
@@ -189,7 +192,11 @@ export function TaskDetail() {
       setShowResultForm(true);
     }
   }, [currentRunID, currentStageID, resultsAllowed]);
+  // The chosen return target belongs to the stage it was picked on.
+  useEffect(() => { setReturnTarget(''); }, [currentStageID]);
   const returnOptions = template?.returns.filter((route) => route.from === currentStageID) ?? [];
+  const effectiveReturnTarget = returnOptions.some((route) => route.to === returnTarget)
+    ? returnTarget : returnOptions[0]?.to ?? '';
   const duration = run?.completed_at
     ? Math.max(0, new Date(run.completed_at).getTime() - new Date(run.started_at).getTime())
     : null;
@@ -239,7 +246,7 @@ export function TaskDetail() {
     } else if (action === 'override') {
       if (await perform('Проверка обойдена', () => overrideTaskStageCheck(run.run_id, currentStage.id, overrideReason.trim()))) setOverrideReason('');
     } else {
-      if (await perform('Возврат отправлен', () => returnTaskStage(run.run_id, currentStage.id, returnTarget, returnReason.trim()))) setReturnReason('');
+      if (await perform('Возврат отправлен', () => returnTaskStage(run.run_id, currentStage.id, effectiveReturnTarget, returnReason.trim()))) setReturnReason('');
     }
   };
 
@@ -290,7 +297,9 @@ export function TaskDetail() {
             {currentStage && <p>{currentStage.function} · {currentExecutor === 'agent'
               ? `агент ${currentStage.agent ?? ''}` : 'участник'} · результат: {currentStage.result}</p>}
             {details.state && <p className={styles.phase}>Фаза: {details.state.phase}</p>}
-            {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}</p>}
+            {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
+              {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
+                {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
           </div>
           {runCancelable && <button type="button" disabled={working}
             onClick={() => void perform('Задача отменена', () => cancelRun(run.run_id))}>Отменить задачу</button>}
@@ -333,7 +342,7 @@ export function TaskDetail() {
           </form>}
           {allowed.has('return') && returnOptions.length > 0 && <form className={styles.reasonForm} onSubmit={submitReason('return')}>
             <label>Вернуть на этап
-              <select value={returnTarget || returnOptions[0].to} onChange={(event) => setReturnTarget(event.target.value)}>
+              <select value={effectiveReturnTarget} onChange={(event) => setReturnTarget(event.target.value)}>
                 {returnOptions.map((route) => <option key={route.to} value={route.to}>
                   {template?.stages.find((stage) => stage.id === route.to)?.title ?? route.to}
                 </option>)}
@@ -344,10 +353,12 @@ export function TaskDetail() {
             </label>
             <button disabled={working || !returnReason.trim()}>Вернуть этап</button>
           </form>}
-          {(allowed.has('grill/answer') || allowed.has('grill/done')) && pending && <GrillPanel approval={pending} answer={grillAnswer}
-            setAnswer={setGrillAnswer} disabled={working}
-            canAnswer={allowed.has('grill/answer')} canDone={allowed.has('grill/done')}
+          {(allowed.has('grill/answer') || allowed.has('grill/new-version') || allowed.has('grill/done')) && pending &&
+            <GrillPanel approval={pending} answer={grillAnswer} setAnswer={setGrillAnswer} disabled={working}
+            canAnswer={allowed.has('grill/answer')} canNewVersion={allowed.has('grill/new-version')} canDone={allowed.has('grill/done')}
             onAnswer={() => void perform('Ответ отправлен', () => answerTaskGrill(run.run_id, currentStage.id, grillAnswer.trim()))}
+            onNewVersion={() => void perform('Новая версия отправлена', () =>
+              submitTaskGrillVersion(run.run_id, currentStage.id, grillAnswer.trim()))}
             onDone={() => void perform('Грилл завершён', () => finishTaskGrill(run.run_id, currentStage.id))} />}
           {allowed.has('plan/approve') && pending?.trigger === 'delivery_plan' && <div className={styles.planApproval}>
             <p>План доставки ожидает подтверждения. Хеш: <code>{pending.subject_hash}</code></p>
@@ -422,14 +433,16 @@ export function TaskDetail() {
   );
 }
 
-function GrillPanel({ approval, answer, setAnswer, disabled, canAnswer, canDone, onAnswer, onDone }: {
+function GrillPanel({ approval, answer, setAnswer, disabled, canAnswer, canNewVersion, canDone, onAnswer, onNewVersion, onDone }: {
   approval: Approval;
   answer: string;
   setAnswer: (value: string) => void;
   disabled: boolean;
   canAnswer: boolean;
+  canNewVersion: boolean;
   canDone: boolean;
   onAnswer: () => void;
+  onNewVersion: () => void;
   onDone: () => void;
 }) {
   const payload = approval.payload && typeof approval.payload === 'object'
@@ -443,11 +456,14 @@ function GrillPanel({ approval, answer, setAnswer, disabled, canAnswer, canDone,
       <strong>{decision.actor_id} · {decision.action}</strong>
       {decision.comment && <p>{decision.comment}</p>}
     </article>)}
-    {canAnswer && <label>Ваш ответ
+    {(canAnswer || canNewVersion) && <label>{canAnswer ? 'Ваш ответ' : 'Комментарий к новой версии'}
       <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={4} maxLength={16 * 1024} />
     </label>}
+    {canNewVersion && <p>Чтобы исправить результат, откройте артефакт этапа и нажмите «Предложить изменение»,
+      затем отправьте новую версию на проверку. Текст выше уйдёт как комментарий к ней.</p>}
     <div className={styles.actions}>
       {canAnswer && <button type="button" disabled={disabled || !answer.trim()} onClick={onAnswer}>Ответить и продолжить</button>}
+      {canNewVersion && <button type="button" disabled={disabled} onClick={onNewVersion}>Отправить новую версию</button>}
       {canDone && <button type="button" disabled={disabled} onClick={onDone}>Завершить грилл без ответа</button>}
     </div>
   </section>;
@@ -533,8 +549,10 @@ function DeliveryPlanPayload({ payload }: { payload: unknown }) {
   const text = (key: string) => (typeof plan[key] === 'string' ? plan[key] as string : '');
   const files = Array.isArray(plan.files) ? plan.files.filter((file): file is string => typeof file === 'string') : [];
   const fields = deliveryPlanFields.filter(([key]) => text(key));
+  const empty = fields.length === 0 && files.length === 0 && !text('pr_body');
   return (
     <section className={styles.planContent} aria-label="Содержимое плана доставки">
+      {empty && <p role="alert">В плане нет ни ветки, ни файлов, ни описания PR: перед подтверждением проверьте план через CLI.</p>}
       {fields.length > 0 && <dl>
         {fields.map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{text(key)}</dd></div>)}
       </dl>}

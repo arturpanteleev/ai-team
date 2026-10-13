@@ -601,10 +601,17 @@ const NotificationDeliveryRetention = 30 * 24 * time.Hour
 // PruneNotificationDeliveries deletes final delivery records older than
 // cutoff and returns how many were removed. Live claims are never removed,
 // whatever their age, so pruning cannot let a second process send an event
-// that is being delivered.
+// that is being delivered. A record is removed only when its event is at or
+// below the lowest durable notifier cursor (`notifier` and `notifier:*` in
+// integration_cursors): a cursor that lagged longer than the retention period
+// may still replay events above it, and their records must keep suppressing
+// a second notification. Without any durable notifier cursor nothing can
+// replay old events (a new cursor starts at the tail), so age alone decides.
 func (s *Store) PruneNotificationDeliveries(cutoff time.Time) (int64, error) {
 	result, err := s.db.Exec(`DELETE FROM notification_deliveries
-		WHERE recorded_at < ? AND outcome NOT LIKE 'claimed:%'`, cutoff.UTC())
+		WHERE recorded_at < ? AND outcome NOT LIKE 'claimed:%'
+		AND event_id <= COALESCE((SELECT MIN(cursor) FROM integration_cursors
+			WHERE integration = 'notifier' OR integration LIKE 'notifier:%'), 9223372036854775807)`, cutoff.UTC())
 	if err != nil {
 		return 0, err
 	}

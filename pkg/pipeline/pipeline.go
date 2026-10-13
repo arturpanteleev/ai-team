@@ -1113,6 +1113,34 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				attempt.Status = attempt.State.LegacyStatus()
 			}
 		}
+		// Инфра-попытка прошлого запуска — последняя в run (run останавливается на
+		// ней, а не ретраит). После resume она не должна определять итоговый
+		// статус: повтор этапа заменяет её, как abandoned-попытки выше.
+		var infraFailedAttemptIDs []string
+		for index := range replayedRun.Attempts {
+			attempt := &replayedRun.Attempts[index]
+			if attempt.Superseded || attempt.FinishedAt.IsZero() || attempt.State.Execution != workflow.ExecutionInfraFailed {
+				continue
+			}
+			infraFailedAttemptIDs = append(infraFailedAttemptIDs, attempt.AttemptID)
+		}
+		if len(infraFailedAttemptIDs) > 0 {
+			if err := evidenceStore.Append(evidence.Event{
+				Type: "attempts_invalidated", Timestamp: runStartedAt,
+				Data: map[string]any{"attempt_ids": infraFailedAttemptIDs, "reason": "infra_failure_retry"},
+			}); err != nil {
+				return RunResult{}, err
+			}
+			for index := range replayedRun.Attempts {
+				attempt := &replayedRun.Attempts[index]
+				if !containsString(infraFailedAttemptIDs, attempt.AttemptID) {
+					continue
+				}
+				attempt.Superseded = true
+				attempt.State = workflow.Invalidate(attempt.State)
+				attempt.Status = attempt.State.LegacyStatus()
+			}
+		}
 		if resumedApproval != nil {
 			if !approvalDecisionRecorded(replayedRun, resumedApproval.ID) {
 				if err := evidenceStore.Append(evidence.Event{

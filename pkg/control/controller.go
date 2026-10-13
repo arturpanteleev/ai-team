@@ -165,8 +165,11 @@ func (c *Controller) StartTask(_ context.Context, feature, task, _, idea, mode s
 }
 
 func (c *Controller) start(feature, task, mode string, admit func(runID string) error) (string, error) {
-	if !workflow.ValidFeature(feature) || strings.TrimSpace(task) == "" {
-		return "", errors.New("feature и непустой task обязательны")
+	if !workflow.ValidFeature(feature) {
+		return "", fmt.Errorf("поле feature %q не подходит: %s", feature, workflow.FeatureRule)
+	}
+	if strings.TrimSpace(task) == "" {
+		return "", errors.New("поле task пустое: укажите описание задачи")
 	}
 	if c.preflight != nil {
 		if report := c.Preflight(context.Background()); !report.Ready && !report.Unknown {

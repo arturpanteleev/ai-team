@@ -4191,6 +4191,42 @@ func TestRun_StageTimeout(t *testing.T) {
 	}
 }
 
+func TestRun_InfraFailureStaysResumableWithSameRunID(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.execErr["analyst"] = errors.New("claude: Not logged in")
+
+	cfg := cfgFor(config.AgentConfig{Name: "analyst"})
+	first := New(cfg, testRegistry(),
+		WithRuntimeFactory(rt.factory), WithPrompter(&scriptedPrompter{}))
+	firstResult, err := first.RunWithResult(context.Background(), RunConfig{
+		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ApproveGates: true,
+	})
+	if err == nil || firstResult.RunID == "" {
+		t.Fatalf("инфра-сбой должен оставить resumable run с identity: result=%+v err=%v", firstResult, err)
+	}
+	stateStore, _ := lifecycle.NewStore(dir)
+	state, loadErr := stateStore.Load(firstResult.RunID)
+	if loadErr != nil || state.Phase != lifecycle.PhaseResumable {
+		t.Fatalf("инфра-сбой должен перевести run в resumable: %+v err=%v", state, loadErr)
+	}
+
+	second := New(cfg, testRegistry(),
+		WithRuntimeFactory(newScripted().factory), WithPrompter(&scriptedPrompter{}))
+	secondResult, err := second.RunWithResult(context.Background(), RunConfig{
+		ResumeRunID: firstResult.RunID, TargetDir: dir, ApproveGates: true,
+	})
+	if err != nil {
+		t.Fatalf("resume после инфра-сбоя должен завершиться: %v", err)
+	}
+	if secondResult.RunID != firstResult.RunID {
+		t.Fatalf("run identity изменилась: %s != %s", secondResult.RunID, firstResult.RunID)
+	}
+	if secondResult.Outcome != workflow.RunCompleted {
+		t.Fatalf("resume после инфра-сбоя должен завершиться completed, got %s", secondResult.Outcome)
+	}
+}
+
 // --- Git diff guard ---------------------------------------------------------------
 
 func gitInit(t *testing.T, dir string) {

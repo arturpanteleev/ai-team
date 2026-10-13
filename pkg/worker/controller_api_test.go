@@ -4236,6 +4236,24 @@ func TestWorkerControllerAPILifecycleScopedCreateResumeCheckpointRoundTrip(t *te
 	if err != nil || !sameLifecycleState(afterForgery, terminal) {
 		t.Fatalf("forged previous checkpoint changed persisted terminal state: state=%+v err=%v", afterForgery, err)
 	}
+	// A previous checkpoint that differs from the controller state only in
+	// stage_entered_at is stale too: the field is part of the compared state.
+	statePath := filepath.Join(target, ".ai-team", "state", "runs", job.RunID+".json")
+	beforeStageEntered, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageEnteredPrevious := afterForgery
+	stageEnteredPrevious.StageEnteredAt = afterForgery.StageEnteredAt.Add(time.Second)
+	stageEnteredNext := stageEnteredPrevious
+	stageEnteredNext.Phase, stageEnteredNext.NextStage = lifecycle.PhaseResumable, "coder"
+	if _, err := server.dispatch("lifecycle.save", workerAPICall{Previous: stageEnteredPrevious, Lifecycle: stageEnteredNext}); err == nil || !strings.Contains(err.Error(), "stale lifecycle state") {
+		t.Fatalf("controller must reject a previous checkpoint with another stage_entered_at as stale: %v", err)
+	}
+	afterStageEntered, err := os.ReadFile(statePath)
+	if err != nil || !bytes.Equal(afterStageEntered, beforeStageEntered) {
+		t.Fatalf("stale stage_entered_at changed the persisted state file: err=%v", err)
+	}
 	if _, err := checkpoints.Load("another-run"); err == nil {
 		t.Fatal("worker port loaded another run")
 	}

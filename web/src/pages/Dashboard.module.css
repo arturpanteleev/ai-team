@@ -140,6 +140,10 @@
   overflow-wrap: anywhere;
 }
 
+.runForm .fieldError {
+  color: var(--danger-fg);
+}
+
 .preflight {
   display: flex;
   flex-direction: column;

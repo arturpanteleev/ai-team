@@ -466,7 +466,29 @@ func TestResumeRecordsActorAndBudgetAllowance(t *testing.T) {
 		return latest
 	}
 	const grant = `{"grant_budget_allowance":true,"reason":"  ревью важнее лимита  "}`
+	grantable := func() bool {
+		t.Helper()
+		run, err := srv.store.GetPipelineRunByRunID("run-budget")
+		if err != nil || run == nil {
+			t.Fatalf("run: %v", err)
+		}
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/pipelines/%d", run.ID), ""))
+		var body struct {
+			Grantable *bool `json:"budget_allowance_grantable"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Grantable == nil {
+			t.Fatalf("pipeline detail: %d %s", response.Code, response.Body.String())
+		}
+		return *body.Grantable
+	}
+	if grantable() {
+		t.Fatal("a run without a budget stop must not offer a grant")
+	}
 	stop("task")
+	if !grantable() {
+		t.Fatal("an uncovered task stop must offer a grant")
+	}
 
 	// Resume без явной выдачи бюджет не даёт: контроллер получает обычный
 	// resume, событие фиксирует false.
@@ -494,6 +516,9 @@ func TestResumeRecordsActorAndBudgetAllowance(t *testing.T) {
 		t.Fatalf("explicit grant = %+v actor=%q reason=%q", granted, controller.grantActor, controller.grantReason)
 	}
 	// Повторная выдача на ту же остановку — 409: бюджет уже выдан.
+	if grantable() {
+		t.Fatal("a covered stop must not offer another grant")
+	}
 	resume(grant, http.StatusConflict)
 	if controller.grantCalls != 1 {
 		t.Fatalf("second grant for one stop reached the controller: %d", controller.grantCalls)

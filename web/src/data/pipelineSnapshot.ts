@@ -23,6 +23,7 @@ export interface PipelineSnapshot {
   graph: WorkflowGraph | null;
   nextStage: string;
   stageOwners: Record<string, StageOwner>;
+  budgetAllowanceGrantable: boolean;
 }
 
 export async function loadPipelineSnapshot(id: number): Promise<PipelineSnapshot> {
@@ -40,6 +41,7 @@ export async function loadPipelineSnapshot(id: number): Promise<PipelineSnapshot
     graph: workflow?.graph ?? null,
     nextStage: pipelineData.next_stage ?? '',
     stageOwners: pipelineData.stage_owners ?? {},
+    budgetAllowanceGrantable: pipelineData.budget_allowance_grantable ?? false,
   };
 }
 
@@ -64,6 +66,7 @@ export async function refreshPipelineSnapshot(
     delivery: pipelineData.delivery ?? { status: 'not_requested' },
     nextStage: pipelineData.next_stage ?? '',
     stageOwners: pipelineData.stage_owners ?? {},
+    budgetAllowanceGrantable: pipelineData.budget_allowance_grantable ?? false,
     artifacts,
   };
 }

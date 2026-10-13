@@ -48,7 +48,10 @@ grant MUST be recorded in evidence as `budget_allowance_granted` with the actor,
 the reason and the baseline, and MUST cover only that one stop. The web resume
 MUST record `run_resume_requested` with `budget_allowance_granted` true only for
 an explicit grant, MUST reject a grant without a reason, and MUST reject a grant
-when no task-budget stop is left uncovered. The daily budget MUST NOT be granted
+when no task-budget stop is left uncovered. The controller worker API MUST
+accept `budget_allowance_granted` only in a resume job that carries the explicit
+grant, with the same actor and reason, at most once per operation, and with a
+baseline equal to the uncovered task-budget stop. The daily budget MUST NOT be granted
 or reset by a resume and MUST be re-checked on resume.
 
 #### Scenario: Resume after a task budget stop without a grant
@@ -70,6 +73,12 @@ or reset by a resume and MUST be re-checked on resume.
 
 - **WHEN** a web resume requests a budget grant without a reason
 - **THEN** the request MUST be rejected with `400` and the run MUST NOT resume
+
+#### Scenario: Worker forges a grant
+
+- **GIVEN** a resume job without an explicit budget grant
+- **WHEN** the worker appends `budget_allowance_granted` through the worker API
+- **THEN** the controller MUST reject the event
 
 #### Scenario: Grant after a daily stop
 

@@ -45,6 +45,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/scheduler"
+	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
 	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/web"
@@ -514,10 +515,7 @@ func cmdWorker() {
 	case worker.OperationStart:
 		result, err = engine.Start(ctx, job.RunConfig())
 	case worker.OperationResume:
-		result, err = engine.Resume(ctx, pipeline.ResumeConfig{
-			RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
-			ApprovePlanHash: job.ApprovePlanHash, BudgetAllowance: job.BudgetAllowance(),
-		})
+		result, err = engine.Resume(ctx, workerResumeConfig(job, target))
 	case worker.OperationRecover:
 		result, err = executeRecoveredJobWithSources(ctx, engine, target, job, eventLogSource, attemptManifestSource)
 	case worker.OperationCancel:
@@ -597,6 +595,31 @@ func executeRecoveredJobWithSources(ctx context.Context, engine recoveryEngine, 
 		RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
 		ApprovePlanHash: job.ApprovePlanHash,
 	})
+}
+
+// requireUncoveredTaskBudgetStop проверяет до запуска, что выдаче бюджета
+// есть что покрывать: иначе pipeline молча не записал бы выдачу.
+func requireUncoveredTaskBudgetStop(target, runID string) error {
+	if err := evidence.ValidateRunID(runID); err != nil {
+		return err
+	}
+	events, err := evidence.VerifyEventLog(filepath.Join(target, ".ai-team", "runs", runID, "events.jsonl"), runID)
+	if err != nil {
+		return fmt.Errorf("выдача бюджета: evidence задачи не прочитано: %w", err)
+	}
+	if _, pending := tokenbudget.TaskAllowanceLedger(events); pending == nil {
+		return errors.New("выдача бюджета не записана: нет остановки по бюджету задачи, не покрытой выдачей (дневной бюджет не выдаётся)")
+	}
+	return nil
+}
+
+// workerResumeConfig переносит resume-job контроллера в ResumeConfig, включая
+// явную выдачу бюджета задачи: без неё worker resume новый бюджет не даёт.
+func workerResumeConfig(job worker.Job, target string) pipeline.ResumeConfig {
+	return pipeline.ResumeConfig{
+		RunID: job.RunID, TargetDir: target, ApproveGates: job.ApproveGates,
+		ApprovePlanHash: job.ApprovePlanHash, BudgetAllowance: job.BudgetAllowance(),
+	}
 }
 
 func recoveredTerminalOutcome(target, runID string, state lifecycle.State) (string, int, error) {
@@ -1315,6 +1338,9 @@ func cmdRun() {
 		}
 		budgetAllowance = &pipeline.BudgetAllowanceGrant{ActorID: "local-cli", Reason: *grantBudget}
 		if err := budgetAllowance.Validate(); err != nil {
+			fatal("%v", err)
+		}
+		if err := requireUncoveredTaskBudgetStop(*target, *resumeRunID); err != nil {
 			fatal("%v", err)
 		}
 	}

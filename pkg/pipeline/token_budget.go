@@ -91,10 +91,8 @@ func (g *BudgetAllowanceGrant) Validate() error {
 	return nil
 }
 
-// taskBudgetLedger разбирает долговечное evidence задачи: точку отсчёта
-// бюджета (расход на момент последней остановки, по которой человек явно
-// выдал новый бюджет) и расход последней ещё не покрытой выдачей остановки
-// по бюджету задачи. Resume сам по себе точку отсчёта не сдвигает.
+// taskBudgetLedger читает долговечное evidence задачи и возвращает точку
+// отсчёта бюджета задачи и расход последней непокрытой выдачей остановки.
 func (rs *runState) taskBudgetLedger() (baseline int64, pendingStop *int64, err error) {
 	events, found, err := rs.readEvidenceEvents()
 	if err != nil {
@@ -103,29 +101,8 @@ func (rs *runState) taskBudgetLedger() (baseline int64, pendingStop *int64, err 
 	if !found {
 		return 0, nil, nil
 	}
-	for _, event := range events {
-		switch {
-		case event.Type == tokenbudget.EventBudgetExceeded && event.Data["scope"] == tokenbudget.ScopeTask:
-			used := eventTokens(event.Data["tokens_used"])
-			pendingStop = &used
-		case event.Type == tokenbudget.EventBudgetAllowanceGranted:
-			baseline = eventTokens(event.Data["baseline_tokens"])
-			pendingStop = nil
-		}
-	}
+	baseline, pendingStop = tokenbudget.TaskAllowanceLedger(events)
 	return baseline, pendingStop, nil
-}
-
-func eventTokens(value any) int64 {
-	switch used := value.(type) {
-	case float64:
-		return int64(used)
-	case int64:
-		return used
-	case int:
-		return int64(used)
-	}
-	return 0
 }
 
 // taskBudgetBaseline — расход задачи, от которого отсчитывается текущий

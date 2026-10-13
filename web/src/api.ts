@@ -46,7 +46,7 @@ export async function getPipelineRuns(limit = 100, offset = 0): Promise<Pipeline
   return fetchJson<PipelineRun[]>(`/pipelines?limit=${limit}&offset=${offset}`);
 }
 
-export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection }> {
+export async function getPipelineRun(id: number): Promise<{ run: PipelineRun; stages: Stage[]; approvals?: Approval[]; next_stage?: string; stage_owners?: Record<string, StageOwner>; delivery?: DeliveryProjection; budget_allowance_grantable?: boolean }> {
   return fetchJson(`/pipelines/${id}`);
 }
 

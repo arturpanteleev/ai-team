@@ -45,6 +45,7 @@ export function PipelineDetail() {
   const approvals = snapshot?.approvals ?? [];
   const graph = snapshot?.graph ?? null;
   const nextStage = snapshot?.nextStage ?? '';
+  const budgetAllowanceGrantable = snapshot?.budgetAllowanceGrantable ?? false;
   const delivery: DeliveryProjection = snapshot?.delivery ?? { status: 'not_requested' };
 
   usePageTitle(run ? run.feature : 'Задача');
@@ -248,10 +249,10 @@ export function PipelineDetail() {
           {['queued', 'running', 'waiting_for_approval'].includes(run.status) &&
             <button onClick={() => sendRunCommand('cancel')}>Отменить задачу</button>}
         </div>
-        {run.status === 'stopped' && (
+        {run.status === 'stopped' && budgetAllowanceGrantable && (
           <div className={styles.budgetGrant}>
             <p>
-              Если задачу остановил бюджет задачи, «Продолжить задачу» новый бюджет не выдаёт — задача снова
+              Задачу остановил бюджет задачи. «Продолжить задачу» новый бюджет не выдаёт — задача снова
               остановится. Выдать ещё один бюджет того же размера можно только явным решением с причиной.
               Дневной бюджет не выдаётся.
             </p>

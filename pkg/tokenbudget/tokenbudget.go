@@ -34,6 +34,36 @@ const EventBudgetExceeded = "budget_exceeded"
 // отсчёта бюджета задачи; resume без него новый бюджет не выдаёт.
 const EventBudgetAllowanceGranted = "budget_allowance_granted"
 
+// TaskAllowanceLedger разбирает проверенную цепочку событий задачи: точку
+// отсчёта бюджета задачи (baseline_tokens последней явной выдачи) и расход
+// последней остановки по бюджету задачи, ещё не покрытой выдачей (nil — такой
+// остановки нет). Resume сам по себе точку отсчёта не сдвигает.
+func TaskAllowanceLedger(events []evidence.Event) (baseline int64, pendingStop *int64) {
+	for _, event := range events {
+		switch {
+		case event.Type == EventBudgetExceeded && event.Data["scope"] == ScopeTask:
+			used := eventTokens(event.Data["tokens_used"])
+			pendingStop = &used
+		case event.Type == EventBudgetAllowanceGranted:
+			baseline = eventTokens(event.Data["baseline_tokens"])
+			pendingStop = nil
+		}
+	}
+	return baseline, pendingStop
+}
+
+func eventTokens(value any) int64 {
+	switch used := value.(type) {
+	case float64:
+		return int64(used)
+	case int64:
+		return used
+	case int:
+		return int64(used)
+	}
+	return 0
+}
+
 // maxManifestBytes ограничивает чтение одного attempt-манифеста.
 const maxManifestBytes = 1 << 20
 

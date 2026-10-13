@@ -49,7 +49,11 @@ an explicit human decision with a reason, sent as
 pipeline records `budget_allowance_granted` in evidence. A grant without a
 reason (or a reason without a grant) is `400`; a grant with no uncovered
 task-budget stop, including after a daily stop, is `409`. The daily budget is
-never granted or reset. See
+never granted or reset. `GET /api/pipelines/{id}` returns
+`budget_allowance_grantable`, true while an uncovered task-budget stop exists.
+A disposable worker may append `budget_allowance_granted` only in a resume job
+that carries the controller grant, with the same actor and reason, once, and
+with `baseline_tokens` equal to the uncovered stop. See
 `auto_pickup` in the configuration reference for limits and events.
 
 Stage actions are authorized by the functions of the run's pinned template

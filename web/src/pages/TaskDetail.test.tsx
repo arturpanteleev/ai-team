@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter, Routes } from '../router';
 import type { Stage, TaskRunDetails } from '../types';
@@ -908,8 +908,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('failed', { error: 'Нет доступа к репозиторию' })]));
     renderDetail();
 
-    expect(await screen.findByText('Агент остановился с ошибкой')).toBeInTheDocument();
-    expect(screen.getByText('Агент остановился с ошибкой').parentElement).toHaveTextContent('Нет доступа к репозиторию');
+    expect(await screen.findByText('Этап «Анализ» упал')).toBeInTheDocument();
+    expect(screen.getByTestId('stage-failure')).toHaveTextContent('Нет доступа к репозиторию');
   });
 
   it('confirms the agent start at once, before the server reports the attempt', async () => {
@@ -920,5 +920,43 @@ describe('Task page controls moved from the old pipeline page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
     expect(await screen.findByText('Агент запущен')).toBeInTheDocument();
     expect(api.runTaskStageAgent).toHaveBeenCalledWith('run-detail-1', 'analysis', 'run');
+  });
+  it('marks the failed stage in the route and shows its short reason with the agent log on the current stage', async () => {
+    const api = await import('../api');
+    const failed = agentStage('failed', {
+      error: 'Не найден файл спецификации\nНужен docs/spec.md в ветке\nхвост трассировки, которого не должно быть на странице',
+    });
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...agentOnStage([failed]),
+      run: { ...baseDetails.run, status: 'failed' },
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    const banner = await screen.findByTestId('stage-failure');
+    expect(banner).toHaveTextContent('Этап «Анализ» упал');
+    expect(banner).toHaveTextContent('Не найден файл спецификации Нужен docs/spec.md в ветке');
+    expect(banner).not.toHaveTextContent('хвост трассировки');
+    expect(within(banner).getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+      'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
+    );
+    expect(screen.getByText('Упал')).toBeInTheDocument();
+    expect(screen.getByText('Упал').closest('li')).toHaveAttribute('data-state', 'failed');
+  });
+
+  it('shows the run error when a failed run has no stage attempt to point at', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'failed', error: 'Сборка упала на шаге проверки' },
+      stages: [],
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    const banner = await screen.findByTestId('stage-failure');
+    expect(banner).toHaveTextContent('Прогон завершился ошибкой');
+    expect(banner).toHaveTextContent('Сборка упала на шаге проверки');
+    expect(within(banner).queryByRole('link')).not.toBeInTheDocument();
   });
 });

@@ -1028,3 +1028,49 @@
   .details { order: 5; }
   .routePanel { order: 6; }
 }
+
+/* Упавший этап: красный в полосе маршрута и в карточке текущего этапа. */
+.routeItem[data-state='failed'] {
+  color: var(--danger-fg);
+}
+
+.routeItem[data-state='failed']::before {
+  background: var(--danger-bg);
+}
+
+.routeItem[data-state='failed'] .routeDot {
+  background: var(--danger-fg);
+  color: var(--danger-bg);
+}
+
+.failure {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin: 0 0 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: 14px;
+}
+
+.failure p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.failureTitle {
+  font-size: 1.05rem;
+  font-weight: 750;
+}
+
+.failure a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  color: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+}

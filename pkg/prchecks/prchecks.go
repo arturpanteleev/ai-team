@@ -293,7 +293,7 @@ func (r Runner) projectChecks(ctx context.Context, targetDir, repository string,
 	if baseOID != pull.BaseRefOID || headOID != pull.HeadRefOID {
 		return "", "", errors.New("pull request changed while preparing project checks; retry against stable head/base SHAs")
 	}
-	if err := createIsolatedPRCheckout(ctx, targetDir, worktreePath, baseRef, headRef); err != nil {
+	if err := createIsolatedPRCheckout(ctx, targetDir, worktreePath, baseRef, headRef, headOID); err != nil {
 		return "", "", fmt.Errorf("create isolated PR checkout: %w", err)
 	}
 	gateConfig, err := loadTrustedBaseGateConfig(ctx, commands, targetDir, baseOID)
@@ -345,7 +345,9 @@ func (r Runner) newSandbox(targetDir, trustedRepoDir string) (checks.CommandSand
 // pinned base/head commits. A linked Git worktree would point its .git file at
 // the controller's common gitdir, exposing controller configuration to an
 // untrusted check even when the checkout itself is mounted separately.
-func createIsolatedPRCheckout(ctx context.Context, sourceDir, checkoutDir, baseRef, headRef string) error {
+// The checked-out HEAD is compared with the pinned head SHA so the gate never
+// runs against commits other than the identity bound by the PR checks.
+func createIsolatedPRCheckout(ctx context.Context, sourceDir, checkoutDir, baseRef, headRef, headOID string) error {
 	if err := runIsolatedGit(ctx, filepath.Dir(checkoutDir), "init", "--quiet", checkoutDir); err != nil {
 		return fmt.Errorf("git init: %w", err)
 	}
@@ -356,22 +358,36 @@ func createIsolatedPRCheckout(ctx context.Context, sourceDir, checkoutDir, baseR
 	if err := runIsolatedGit(ctx, checkoutDir, "checkout", "--detach", "refs/ai-team/pr-checks/head"); err != nil {
 		return fmt.Errorf("git checkout pinned head: %w", err)
 	}
+	head, err := isolatedGitOutput(ctx, checkoutDir, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return fmt.Errorf("verify checked-out head: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(head), headOID) {
+		return fmt.Errorf("checked-out head %s differs from pinned PR head %s", strings.TrimSpace(head), headOID)
+	}
 	return nil
 }
 
 func runIsolatedGit(ctx context.Context, dir string, args ...string) error {
+	_, err := isolatedGitOutput(ctx, dir, args...)
+	return err
+}
+
+func isolatedGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		return fmt.Errorf("locate git: %w", err)
+		return "", fmt.Errorf("locate git: %w", err)
 	}
 	command := exec.CommandContext(ctx, gitPath, args...)
 	command.Dir = dir
 	command.Env = isolatedGitEnvironment(os.Environ())
-	output, err := command.CombinedOutput()
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()+string(output)))
 	}
-	return nil
+	return string(output), nil
 }
 
 func isolatedGitEnvironment(environment []string) []string {
@@ -402,7 +418,9 @@ func strictSandboxReceipt() *containment.Receipt {
 			containment.AxisFS:   {"read_only_root": true, "writable_checkout_only": true, "private_home": true},
 			containment.AxisNet:  {"network_namespace": true},
 			containment.AxisProc: {"pid_namespace": true, "die_with_parent": true},
-			containment.AxisEnv:  {"secret_environment_stripped": true, "clean_inner_environment": true},
+			// Backed by bubblewrap --clearenv plus the allowlist in
+			// checks.sanitizedCheckEnvironment (BL-21).
+			containment.AxisEnv: {"secret_environment_stripped": true, "clean_inner_environment": true},
 		},
 	}
 }

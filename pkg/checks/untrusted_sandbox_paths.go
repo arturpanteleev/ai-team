@@ -155,3 +155,49 @@ func compactPaths(paths []string) []string {
 	}
 	return result
 }
+
+// sandboxMaskedPaths lists host directories replaced by empty tmpfs mounts in
+// the untrusted-check sandbox: every home root, the controller's own HOME and
+// the trusted repository paths. Host /tmp is also replaced (by the private
+// scratch directory) and is added by visibleSandboxTool's callers.
+func sandboxMaskedPaths(protectedPaths []string) []string {
+	privatePaths := []string{"/home", "/root", "/Users"}
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && filepath.IsAbs(home) {
+		privatePaths = append(privatePaths, filepath.Clean(home))
+	}
+	privatePaths = append(privatePaths, protectedPaths...)
+	return compactPaths(privatePaths)
+}
+
+// checkSandboxToolVisible fails with an actionable error when a check tool
+// resolved on the host lives in a directory the sandbox hides (for example
+// ~/go/bin under a masked home). Without it, bubblewrap reports only a bare
+// "No such file or directory" for the tool. Tools inside the PR checkout are
+// mapped into the sandbox and always visible.
+func checkSandboxToolVisible(target, executable string, hidden []string) error {
+	absolute, err := filepath.Abs(executable)
+	if err != nil {
+		return fmt.Errorf("resolve sandbox executable: %w", err)
+	}
+	if pathWithin(target, absolute) {
+		return nil
+	}
+	candidates := []string{absolute}
+	if resolved, resolveErr := filepath.EvalSymlinks(absolute); resolveErr == nil && resolved != absolute {
+		candidates = append(candidates, resolved)
+	}
+	for _, candidate := range candidates {
+		for _, masked := range hidden {
+			if masked != "" && pathWithin(masked, candidate) {
+				return fmt.Errorf("check tool %s resolves to %s, which is hidden inside the untrusted-check sandbox (%s is masked); install the tool outside home and temporary directories (for example /usr/local/bin) or invoke it from the repository", executable, candidate, masked)
+			}
+		}
+	}
+	return nil
+}
+
+// pathWithin reports whether child equals parent or lies below it.
+func pathWithin(parent, child string) bool {
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
+}

@@ -868,10 +868,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			runCfg.Mode = replayedRun.Mode
 		}
 		taskCreatedAt = manifest.StartedAt
-		taskRepository = manifest.TaskRepository
-		if taskRepository == "" {
-			taskRepositoryErr = "run was started without a captured GitHub task repository"
-		}
+		taskRepository, taskRepositoryErr = resumedTaskRepository(manifest)
 		if taskCreatedAt.IsZero() || taskCreatedAt.After(runStartedAt) {
 			return RunResult{}, fmt.Errorf("resume evidence run: invalid task creation time")
 		}
@@ -1928,4 +1925,18 @@ func publishCandidateMetadata(runDir string, metadata candidate.Metadata) error 
 		return err
 	}
 	return writeControllerJSON(path, metadata)
+}
+
+// resumedTaskRepository returns the PR-check repository identity recorded in
+// run.json. A resumed run never recomputes it from the (agent-writable) Git
+// configuration. A run without the value was started by a version that did
+// not capture it, or its origin was not an accepted GitHub URL; only a new run
+// can capture it, so the reason says so.
+func resumedTaskRepository(manifest evidence.RunManifest) (repository, reason string) {
+	if manifest.TaskRepository != "" {
+		return manifest.TaskRepository, ""
+	}
+	return "", "run " + manifest.RunID + " was started without a captured GitHub task repository " +
+		"(started before repository capture existed, or origin was not an accepted GitHub URL); " +
+		"the identity is never recomputed on resume — start a new run (ai-team run without --resume) to use PR checks"
 }

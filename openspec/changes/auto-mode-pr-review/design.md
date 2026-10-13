@@ -23,6 +23,17 @@ The PR must also belong to the task repository: the controller reads the single
 hints and URL rewrites), records host/owner/repo in `run.json`, and resumed runs
 reuse the recorded value, so later changes to the agent-writable checkout
 configuration cannot redirect the comparison.
+
+Invariant: the common `.git/config` of the task repository (shared by the
+controller checkout and every linked worktree) is operator-owned and does not
+change between runs. Capture trusts it at run start and does not enforce it:
+the fail-closed rules only catch redirections that are visible in the
+configuration itself (`gh-resolved`, URL rewrites, several origins). A plain
+`origin` change between runs is taken as the repository of the next new run;
+a resumed run never recomputes the identity and keeps the value from
+`run.json`. A run recorded without the value (started before capture existed,
+or with a non-GitHub origin) cannot gain one on resume; its PR rules fail with
+a hint to start a new run.
 `project_checks` fetches the base/head refs into unique temporary refs, verifies
 that Git resolved the same SHAs, then runs `gate.Run` in a fresh temporary
 repository that contains only the pinned base/head commits and is checked out
@@ -33,8 +44,13 @@ commands run under Linux bubblewrap with network disabled, a read-only host
 root, a writable isolated checkout and private home/temp paths. The controller
 checkout, its gitdir and common gitdir (including the parent repository of a
 linked worktree) and any custom `TMPDIR`/`TMP`/`TEMP` directory are masked with
-empty tmpfs mounts. Credential-bearing variables are removed from both the
-wrapper and child environments.
+empty tmpfs mounts. The wrapper and child environments contain only an
+allowlist of non-secret variables (`PATH`, locale, terminal, time zone and Go
+toolchain/target settings); the sandbox sets its own `HOME`, temporary and Go
+cache paths. A check tool resolved on the host inside a masked directory (for
+example `~/go/bin` under the private home) is rejected with an explicit error
+naming the tool and the mount, instead of failing inside bubblewrap. After
+checkout the isolated repository's `HEAD` is compared with the pinned head SHA.
 If bubblewrap is unavailable or cannot initialize, the check blocks before an
 untrusted command runs. The isolated repository, temporary refs and temporary directory
 are removed on success and error. `pr_checks_green` reads `gh pr checks`

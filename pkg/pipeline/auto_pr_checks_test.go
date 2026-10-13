@@ -377,3 +377,78 @@ func TestPRRulesFailClosedWithoutCapturedTaskRepository(t *testing.T) {
 		t.Fatalf("PR rules must not run without a captured task repository: report=%+v calls=%+v", report, checks.called)
 	}
 }
+
+// BL-21: a resumed run reuses the repository identity recorded in run.json and
+// never asks Git again: the agent-writable checkout configuration cannot
+// redirect PR checks between the original start and the resume.
+func TestResumeReusesCapturedTaskRepositoryWithoutRecapture(t *testing.T) {
+	dir := env(t)
+	artifactRoot := filepath.Join(dir, ".ai-team", "artifacts", "feat")
+	if err := os.MkdirAll(filepath.Join(artifactRoot, "specs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactRoot, "design.md"), []byte("# Technical decision\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := newScripted()
+	rt.content["prauthor"] = map[string]string{"pr-url": "https://github.com/example/project/pull/9"}
+	rt.content["reviewer"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
+	cfg := prReviewTemplate(t)
+	cfg.Stages[0].Confirm = "required"
+	checks := &fakePRStageChecks{}
+	p := New(cfg, prReviewRegistry(), WithRuntimeFactory(rt.factory), WithPRStageChecks(checks), WithPrompter(&scriptedPrompter{}))
+	first, err := p.RunWithResult(context.Background(), RunConfig{Feature: "feat", TaskDesc: "resume PR review", TargetDir: dir})
+	var required *ApprovalRequiredError
+	if !errors.As(err, &required) {
+		t.Fatalf("first run must stop for confirmation: result=%+v err=%v", first, err)
+	}
+	if checks.repositoryCaptures != 1 {
+		t.Fatalf("first run must capture the repository once, got %d", checks.repositoryCaptures)
+	}
+	manifest, err := readRunManifest(filepath.Join(dir, ".ai-team", "runs", first.RunID))
+	if err != nil || manifest.TaskRepository != fakeTaskRepository {
+		t.Fatalf("run.json must record the captured repository: manifest=%+v err=%v", manifest, err)
+	}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Load(first.RunID, required.ApprovalID)
+	if err != nil || len(pending.RequiredRoles) == 0 {
+		t.Fatalf("pending approval=%+v err=%v", pending, err)
+	}
+	if _, err := store.Decide(first.RunID, required.ApprovalID, approval.Decision{
+		ActorID: "dev-1", ActorRole: pending.RequiredRoles[0], Action: "approve", SubjectHash: required.SubjectHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed := New(cfg, prReviewRegistry(), WithRuntimeFactory(rt.factory), WithPRStageChecks(checks), WithPrompter(&scriptedPrompter{}))
+	if _, err := resumed.RunWithResult(context.Background(), RunConfig{ResumeRunID: first.RunID, TargetDir: dir}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if checks.repositoryCaptures != 1 {
+		t.Fatalf("resume must reuse run.json instead of recapturing the repository, captures=%d", checks.repositoryCaptures)
+	}
+	if rt.calls["reviewer"] != 1 || checks.diffExpected == nil {
+		t.Fatalf("resumed run did not reach PR review with the recorded repository: reviewer=%d diff=%+v", rt.calls["reviewer"], checks.diffExpected)
+	}
+}
+
+// BL-21: a run recorded without a repository (started before capture existed)
+// fails PR rules with a hint to start a new run rather than a bare refusal.
+func TestResumedRunWithoutTaskRepositoryHintsRestart(t *testing.T) {
+	repository, reason := resumedTaskRepository(evidence.RunManifest{RunID: "run-old"})
+	if repository != "" || !strings.Contains(reason, "run-old") || !strings.Contains(reason, "start a new run") ||
+		!strings.Contains(reason, "never recomputed on resume") {
+		t.Fatalf("missing restart hint: repository=%q reason=%q", repository, reason)
+	}
+	repository, reason = resumedTaskRepository(evidence.RunManifest{RunID: "run-new", TaskRepository: fakeTaskRepository})
+	if repository != fakeTaskRepository || reason != "" {
+		t.Fatalf("recorded repository must be reused: repository=%q reason=%q", repository, reason)
+	}
+	_, reason = resumedTaskRepository(evidence.RunManifest{RunID: "run-old"})
+	rs := &runState{p: New(&config.Config{}, nil), taskRepositoryErr: reason}
+	if _, err := rs.prTaskRepository(); err == nil || !strings.Contains(err.Error(), "start a new run") {
+		t.Fatalf("PR rules must surface the restart hint: %v", err)
+	}
+}

@@ -239,6 +239,16 @@ func (c *Controller) Resume(runID string) error {
 	})
 }
 
+// RunActive reports whether this controller is executing runID right now.
+// The web server checks it before it records a resume launch, so a resume
+// that will be refused with ErrActive leaves no authorship record.
+func (c *Controller) RunActive(runID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, active := c.active[runID]
+	return active
+}
+
 // launch registers a process-local worker exactly like Resume. Engine actions
 // that must not block the HTTP request (skip, deferred delivery) reuse it so
 // the active-run guard stays consistent.

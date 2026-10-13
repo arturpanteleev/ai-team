@@ -378,10 +378,16 @@ func TestControllerRejectsDuplicateResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if controller.RunActive("run-resume") {
+		t.Fatal("run is active before Resume")
+	}
 	if err := controller.Resume("run-resume"); err != nil {
 		t.Fatal(err)
 	}
 	<-engine.started
+	if !controller.RunActive("run-resume") || controller.RunActive("other-run") {
+		t.Fatal("RunActive must report exactly the executing run")
+	}
 	if err := controller.Resume("run-resume"); !errors.Is(err, ErrActive) {
 		t.Fatalf("duplicate resume: %v", err)
 	}

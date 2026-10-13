@@ -422,7 +422,7 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// Resuming an agent stage launches its agent: record the actor first so
 	// forbid_self_approval sees the launch; an unrecorded launch must not run.
 	session, _ := s.requestSession(r)
-	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); errors.Is(err, errResumeAwaitingDecision) {
+	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); errors.Is(err, errResumeAwaitingDecision) || errors.Is(err, errResumeRunActive) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	} else if err != nil {

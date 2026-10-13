@@ -41,6 +41,16 @@ func (s *Server) selfApprovalViolation(runID string, pending approval.PendingApp
 // resume is a conflict, not a storage failure.
 var errResumeAwaitingDecision = errors.New("run всё ещё ожидает human decision")
 
+// errResumeRunActive means the run is executing right now: Resume would be
+// refused, so nothing is launched and no authorship is recorded.
+var errResumeRunActive = errors.New("run уже исполняется")
+
+// activeRunReporter is implemented by run controllers that know which runs
+// they are executing (control.Controller).
+type activeRunReporter interface {
+	RunActive(runID string) bool
+}
+
 // stageAgentRequestedEvent records the actor who launched a stage agent, so
 // the launch counts as authorship for forbid_self_approval.
 const stageAgentRequestedEvent = "stage_agent_requested"
@@ -238,6 +248,12 @@ func (s *Server) recordResumeAgentLaunch(runID, actorID string) error {
 		stageIDs = append(stageIDs, pending.Targets[pending.ResolvedAction])
 	default:
 		return nil
+	}
+	// A running checkpoint is also what an active run looks like. Resume of an
+	// active run is refused, so the launch must not be recorded: the actor did
+	// not start the agent and must not become an author of its stage.
+	if reporter, ok := s.controller.(activeRunReporter); ok && reporter.RunActive(runID) {
+		return errResumeRunActive
 	}
 	cfg, found, err := s.pinnedTaskConfig(runID)
 	if err != nil {

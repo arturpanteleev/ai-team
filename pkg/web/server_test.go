@@ -62,7 +62,10 @@ type fakeRunController struct {
 	deliveryRecord delivery.TerminalRecord
 	deliveryErr    error
 	deliveryCalls  int
+	activeRuns     map[string]bool
 }
+
+func (f *fakeRunController) RunActive(runID string) bool { return f.activeRuns[runID] }
 
 type approvalBoundaryEngine struct{}
 

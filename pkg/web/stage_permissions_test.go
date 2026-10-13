@@ -788,6 +788,20 @@ func TestResumeRecordsAgentLaunchInEveryResumablePhase(t *testing.T) {
 		}
 	})
 
+	t.Run("active running run records nothing", func(t *testing.T) {
+		fixture := newTemplateFixture(t, agentStageTemplate, true, nil,
+			map[string]lifecycle.State{"run-r": {Phase: lifecycle.PhaseRunning, NextStage: "build"}})
+		fixture.controller.activeRuns = map[string]bool{"run-r": true}
+		response := fixture.requestAs(t, "a@example.test", developer, http.MethodPost, resumePath, "")
+		if response.Code != http.StatusConflict || fixture.controller.resumeCalls != 0 {
+			t.Fatalf("resume of an active run must be a conflict without Resume: %d calls=%d %s",
+				response.Code, fixture.controller.resumeCalls, response.Body.String())
+		}
+		if got := stageAgentRequests(t, fixture, "run-r", "build", "a@example.test"); got != 0 {
+			t.Fatalf("an active run's agent was not launched by this resume, got %d records", got)
+		}
+	})
+
 	t.Run("unresolved waiting approval records nothing", func(t *testing.T) {
 		gate := resolvedGate("gate-0", "spec", map[string]string{"approve": "build"}, "", base)
 		gate.Status, gate.ResolvedAt = approval.StatusPending, time.Time{}

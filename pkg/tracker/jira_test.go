@@ -2,7 +2,10 @@ package tracker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -34,6 +37,8 @@ func TestJiraAdapterTransitionsAndCommentsFromTaskEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`{"transitions":[{"id":"31","name":"Start Progress","to":{"name":"In Progress"}}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-12/transitions":
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-12/comment":
+			_, _ = w.Write([]byte(`{"comments":[{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"ai-team attempt: attempt-30"}]}]}}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-12/comment":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":"comment-1"}`))
@@ -59,6 +64,7 @@ func TestJiraAdapterTransitionsAndCommentsFromTaskEvent(t *testing.T) {
 		"GET /rest/api/3/issue/APP-12",
 		"GET /rest/api/3/issue/APP-12/transitions",
 		"POST /rest/api/3/issue/APP-12/transitions",
+		"GET /rest/api/3/issue/APP-12/comment",
 		"POST /rest/api/3/issue/APP-12/comment",
 	}
 	gotPaths := make([]string, len(requests))
@@ -74,12 +80,13 @@ func TestJiraAdapterTransitionsAndCommentsFromTaskEvent(t *testing.T) {
 	if requests[2].body["transition"].(map[string]any)["id"] != "31" {
 		t.Fatalf("transition payload=%v", requests[2].body)
 	}
-	body, err := json.Marshal(requests[3].body)
+	body, err := json.Marshal(requests[4].body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	comment := string(body)
-	for _, want := range []string{"https://ai-team.example/pipelines/42", "Stage result: implementation", "status=passed", "outcome=passed"} {
+	// A comment of another attempt whose ID shares a prefix is not a match.
+	for _, want := range []string{"https://ai-team.example/pipelines/42", "Stage result: implementation", "status=passed", "outcome=passed", `"ai-team attempt: attempt-3"`} {
 		if !strings.Contains(comment, want) {
 			t.Errorf("comment missing %q: %s", want, comment)
 		}
@@ -225,7 +232,8 @@ func TestIssueKeyFromLinksIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
 		{"ftp://acme.atlassian.net/browse/APP-1"},
 		{"APP-1 https://acme.atlassian.net/browse/APP-1"},
 		{"app-1"},
-		{"https://acme.atlassian.net/browse/app-1"},
+		{"https://acme.atlassian.net:8443/browse/APP-1"},
+		{"https://acme.atlassian.net/browse/app"},
 	} {
 		key, err := issueKeyFromLinks(links, base)
 		if err != nil || key != "" {
@@ -240,6 +248,9 @@ func TestIssueKeyFromLinksIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
 		"https://acme.atlassian.net/browse/APP-7?focusedCommentId=1": "APP-7",
 		"https://acme.atlassian.net/browse/APP-7#comment-1":          "APP-7",
 		"https://acme.atlassian.net/browse/APP-7//":                  "APP-7",
+		"https://acme.atlassian.net:443/browse/APP-7":                "APP-7",
+		"https://acme.atlassian.net/browse/app-7":                    "APP-7",
+		"http://acme.atlassian.net/browse/App-7":                     "APP-7",
 	} {
 		key, err := issueKeyFromLinks([]string{"https://other.example/browse/OTHER-1", "UTF-8 text", links}, base)
 		if err != nil || key != want {
@@ -266,5 +277,101 @@ func TestJiraAdapterIgnoresForeignHostLinkWithoutHTTP(t *testing.T) {
 	}
 	if called {
 		t.Fatal("key-shaped text and foreign-host links must not reach Jira")
+	}
+}
+
+func TestIssueKeyFromLinksNormalizesDefaultPortOfBaseURL(t *testing.T) {
+	key, err := issueKeyFromLinks([]string{"https://jira.example/browse/OPS-4"}, "https://jira.example:443")
+	if err != nil || key != "OPS-4" {
+		t.Errorf("explicit default port in base_url: key=%q, %v", key, err)
+	}
+	key, err = issueKeyFromLinks([]string{"https://jira.example:8443/browse/OPS-4"}, "https://jira.example:8443")
+	if err != nil || key != "OPS-4" {
+		t.Errorf("matching non-default port: key=%q, %v", key, err)
+	}
+	key, err = issueKeyFromLinks([]string{"https://jira.example/browse/OPS-4"}, "https://jira.example:8443")
+	if err != nil || key != "" {
+		t.Errorf("default port must not match base_url on :8443: key=%q, %v", key, err)
+	}
+}
+
+func TestJiraAdapterDoesNotRepostCommentOfSameAttempt(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-9/comment":
+			if r.URL.Query().Get("orderBy") != "-created" {
+				t.Errorf("comments must be read newest first, query=%q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"comments":[
+				{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"unrelated"}]}]}},
+				{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"ai-team task: x"}]},
+					{"type":"paragraph","content":[{"type":"text","text":"ai-team attempt: attempt-9"}]}]}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
+	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
+		TaskID: 9, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-9", ExternalLinks: []string{"APP-9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"GET /rest/api/3/issue/APP-9/comment"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%v, want only the lookup and no second comment", requests)
+	}
+}
+
+func TestJiraAdapterCommentLookupFailureDoesNotPost(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
+	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
+		TaskID: 9, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-9", ExternalLinks: []string{"APP-9"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("lookup failure error=%v", err)
+	}
+	if want := []string{"GET /rest/api/3/issue/APP-9/comment"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%v, want no comment after a failed lookup", requests)
+	}
+}
+
+// leakyTransport fails every request with an error that echoes the request
+// URL and Authorization header, as a misbehaving proxy or custom transport
+// might. None of it may reach the returned error.
+type leakyTransport struct{}
+
+func (leakyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("refused %s with %s", request.URL, request.Header.Get("Authorization"))}
+}
+
+func TestJiraAdapterTransportErrorDoesNotLeakCredentials(t *testing.T) {
+	const token = "jira-secret-token-123"
+	adapter := NewJiraAdapter(config.JiraConfig{
+		BaseURL: "https://jira.example/private-context", Email: "bot@example.test", WebBaseURL: "https://ai-team.example",
+	}, token, &http.Client{Transport: leakyTransport{}})
+	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
+		TaskID: 1, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-1", ExternalLinks: []string{"APP-1"},
+	})
+	if err == nil {
+		t.Fatal("transport failure must be reported")
+	}
+	basic := base64.StdEncoding.EncodeToString([]byte("bot@example.test:" + token))
+	for _, secret := range []string{token, basic, "private-context", "jira.example"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("transport error leaks %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "connection failed (dial)") {
+		t.Fatalf("transport error lost its classification: %v", err)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -182,5 +184,71 @@ func TestWebhookRequiresHTTPSDestination(t *testing.T) {
 	}
 	if err := NewSlackChannel("team", "", nil).Send(context.Background(), sampleNotification()); err == nil || err.Error() != "slack: destination URL is not configured" {
 		t.Fatalf("missing env value error=%v", err)
+	}
+}
+
+func TestWebhookRejectsRedirectToSameHostOnAnotherPort(t *testing.T) {
+	var otherHits atomic.Int32
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	_, otherPort, err := net.SplitHostPort(other.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, _ := net.SplitHostPort(r.Host)
+		http.Redirect(w, r, "https://"+net.JoinHostPort(host, otherPort)+"/collect", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	err = NewWebhookChannel("ops", origin.URL+secretPath, origin.Client()).Send(context.Background(), sampleNotification())
+	assertNoLeak(t, err, origin)
+	if !strings.Contains(err.Error(), "redirect to a different host was rejected") {
+		t.Fatalf("error=%v", err)
+	}
+	if otherHits.Load() != 0 {
+		t.Fatal("payload reached another port of the same host")
+	}
+}
+
+func TestWebhookRejectsRedirectFromHTTPSToHTTP(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Same host and port, plain http: following it would send the
+		// payload unencrypted.
+		http.Redirect(w, r, "http://"+r.Host+"/collect", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	err := NewWebhookChannel("ops", origin.URL+secretPath, origin.Client()).Send(context.Background(), sampleNotification())
+	assertNoLeak(t, err, origin)
+	if !strings.Contains(err.Error(), "redirect to a different host was rejected") {
+		t.Fatalf("https→http redirect must be rejected by policy, error=%v", err)
+	}
+}
+
+func TestSameHTTPSOriginNormalizesDefaultPortAndCase(t *testing.T) {
+	parse := func(raw string) *url.URL {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	destination := parse("https://hooks.example/path")
+	for raw, want := range map[string]bool{
+		"https://hooks.example/other":     true,
+		"https://HOOKS.example:443/other": true,
+		"https://hooks.example:8443/x":    false,
+		"http://hooks.example/x":          false,
+		"http://hooks.example:443/x":      false,
+		"https://evil.example/x":          false,
+	} {
+		if got := sameHTTPSOrigin(parse(raw), destination); got != want {
+			t.Errorf("sameHTTPSOrigin(%q)=%v, want %v", raw, got, want)
+		}
+	}
+	if !sameHTTPSOrigin(parse("https://hooks.example/x"), parse("https://hooks.example:443/")) {
+		t.Error("explicit :443 destination must match an omitted port")
 	}
 }

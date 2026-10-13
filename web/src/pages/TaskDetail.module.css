@@ -828,7 +828,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spinner {
+  .spinner,
+  .buttonSpinner {
     animation: none;
   }
 }
@@ -939,11 +940,7 @@
 }
 
 .details {
-  margin-top: 0;
-  padding: 2px 20px 6px;
-  border-radius: var(--radius-xl);
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
+  margin-top: 14px;
 }
 
 .routePanel {
@@ -1015,7 +1012,7 @@
     gap: 16px;
   }
 
-  /* На узком экране текущий этап идёт сразу после шапки, а остальные блоки - ниже. */
+  /* На узком экране текущий этап идёт сразу после шапки, затем идея. */
   .summary,
   .stage {
     display: contents;
@@ -1023,10 +1020,7 @@
 
   .hero { order: 1; }
   .stageCard { order: 2; }
-  .stageRest { order: 3; }
-  .intent { order: 4; }
-  .details { order: 5; }
-  .routePanel { order: 6; }
+  .intent { order: 3; }
 }
 
 /* Упавший этап: красный в полосе маршрута и в карточке текущего этапа. */
@@ -1066,6 +1060,12 @@
   font-weight: 750;
 }
 
+.failureHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .failure a {
   display: inline-flex;
   min-height: 32px;
@@ -1073,4 +1073,86 @@
   color: inherit;
   font-weight: 650;
   text-decoration: underline;
+}
+
+.ideaHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.ideaHeading h2 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.fullWidth {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.fullWidth > * {
+  margin: 0;
+}
+
+.sectionNote {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.questions {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--warning-bg);
+  color: var(--text-primary);
+}
+
+.questions > h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.questionHint {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.questionHint a {
+  font-weight: 650;
+  color: var(--ink-teal);
+}
+
+.waiting {
+  display: flex;
+  align-items: center;
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.buttonSpinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }

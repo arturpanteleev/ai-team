@@ -1,9 +1,9 @@
 .card {
   display: grid;
   gap: 8px;
-  padding: 12px;
+  padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: var(--shadow);
 }
@@ -13,6 +13,13 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.titleRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .feature {

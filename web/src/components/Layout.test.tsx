@@ -49,4 +49,13 @@ describe('Layout team navigation', () => {
     expect(screen.getByRole('link', { name: 'Доска' })).toHaveAttribute('href', '/tasks');
     expect(screen.queryByRole('link', { name: 'Дашборд' })).not.toBeInTheDocument();
   });
+  it('shows the user as avatar and name, keeps roles in a tooltip and the logout as a labelled door', () => {
+    renderLayout(false);
+
+    expect(screen.getByRole('button', { name: 'Выйти' })).toHaveAttribute('title', 'Выйти');
+    const user = screen.getByText('owner@example.com').closest('[aria-describedby]');
+    expect(user).toHaveAttribute('aria-describedby', 'user-roles');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('владелец продукта');
+    expect(screen.queryByText(/^владелец продукта$/)).toBeNull();
+  });
 });

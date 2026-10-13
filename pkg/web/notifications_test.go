@@ -237,3 +237,96 @@ func TestNotificationDispatcherFromConfig(t *testing.T) {
 		t.Fatalf("dispatcher=%+v", dispatcher)
 	}
 }
+
+// If the delivery record is lost after the failure warning was persisted, the
+// replay resends to the channel but must not add a second warning.
+func TestNotificationFailureWarningIsRecordedOncePerChannelEvent(t *testing.T) {
+	var calls atomic.Int32
+	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer hook.Close()
+	path := filepath.Join(t.TempDir(), "web.db")
+	s, err := store.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	worker, err := NewNotificationWorker(s, notificationDispatcher(notificationConfig([]string{"stage_stalled"}, nil), hook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &store.Event{RunID: "dedupe-run", Type: "stage_stalled", Stage: "qa", Timestamp: time.Now().UTC(), DataJSON: `{}`}
+	if err := s.AppendEventNext(source); err != nil {
+		t.Fatal(err)
+	}
+	if !worker.Deliver(context.Background(), *source) {
+		t.Fatal("first delivery should be acknowledged after its warning")
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`DELETE FROM notification_deliveries`); err != nil {
+		t.Fatal(err)
+	}
+	if !worker.Deliver(context.Background(), *source) {
+		t.Fatal("replayed delivery should be acknowledged")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("webhook calls=%d, want 2 (the replay resends)", got)
+	}
+	var warnings int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM events WHERE type = 'integration_error' AND run_uid = 'dedupe-run'`).Scan(&warnings); err != nil {
+		t.Fatal(err)
+	}
+	if warnings != 1 {
+		t.Fatalf("integration_error count=%d, want 1", warnings)
+	}
+}
+
+func TestWebServerPrunesOldNotificationDeliveriesOnStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "web.db")
+	seed, err := store.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = seed.Close()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	old := time.Now().UTC().Add(-store.NotificationDeliveryRetention - time.Hour)
+	if _, err := raw.Exec(`INSERT INTO notification_deliveries(channel, event_id, outcome, recorded_at) VALUES
+		('ops-hook', 1, 'delivered', ?), ('ops-hook', 2, 'delivered', ?)`, old, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer hook.Close()
+	target := t.TempDir()
+	srv, err := NewServer(path, "", target, WithTargetDir(target),
+		WithNotifications(notificationDispatcher(notificationConfig([]string{"stage_stalled"}, nil), hook)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	var remaining []int64
+	rows, err := raw.Query(`SELECT event_id FROM notification_deliveries ORDER BY event_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		remaining = append(remaining, id)
+	}
+	if len(remaining) != 1 || remaining[0] != 2 {
+		t.Fatalf("remaining=%v, want only the recent record [2]", remaining)
+	}
+}

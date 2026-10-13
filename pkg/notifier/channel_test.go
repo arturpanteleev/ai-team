@@ -20,33 +20,34 @@ func logKey(channel string, eventID int64) string {
 	return fmt.Sprintf("%s/%d", channel, eventID)
 }
 
-func (l *memoryLog) ClaimNotification(channel string, eventID int64) (ClaimState, error) {
+func (l *memoryLog) ClaimNotification(channel string, eventID int64) (ClaimState, string, error) {
 	if l.failRead != nil {
-		return ClaimBusy, l.failRead
+		return ClaimBusy, "", l.failRead
 	}
 	switch l.outcomes[logKey(channel, eventID)] {
 	case "":
 		l.outcomes[logKey(channel, eventID)] = "claimed"
-		return ClaimAcquired, nil
+		return ClaimAcquired, "claimed", nil
 	case "claimed":
-		return ClaimBusy, nil
+		return ClaimBusy, "", nil
 	default:
-		return ClaimHandled, nil
+		return ClaimHandled, "", nil
 	}
 }
 
-func (l *memoryLog) RecordNotification(channel string, eventID int64, outcome string) error {
+func (l *memoryLog) RecordNotification(channel string, eventID int64, token, outcome string) error {
 	if l.failSave != nil {
 		return l.failSave
 	}
-	if current := l.outcomes[logKey(channel, eventID)]; current == "" || current == "claimed" {
-		l.outcomes[logKey(channel, eventID)] = outcome
+	if l.outcomes[logKey(channel, eventID)] != token {
+		return ErrClaimLost
 	}
+	l.outcomes[logKey(channel, eventID)] = outcome
 	return nil
 }
 
-func (l *memoryLog) ReleaseNotification(channel string, eventID int64) error {
-	if l.outcomes[logKey(channel, eventID)] == "claimed" {
+func (l *memoryLog) ReleaseNotification(channel string, eventID int64, token string) error {
+	if l.outcomes[logKey(channel, eventID)] == token {
 		delete(l.outcomes, logKey(channel, eventID))
 	}
 	return nil

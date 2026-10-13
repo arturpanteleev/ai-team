@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -478,73 +480,135 @@ const notificationClaimPrefix = "claimed:"
 // ClaimNotification atomically claims a channel/event delivery for this
 // process. Every process sharing the database (`ai-team web`, `ai-team run`,
 // `ai-team scheduler-worker`) uses the same channel/event key, so only one of
-// them sends a given notification.
-func (s *Store) ClaimNotification(channel string, eventID int64) (notifier.ClaimState, error) {
+// them sends a given notification. On ClaimAcquired the returned token
+// identifies this claim: only its holder can record or release it.
+func (s *Store) ClaimNotification(channel string, eventID int64) (notifier.ClaimState, string, error) {
 	return s.ClaimNotificationAt(channel, eventID, time.Now().UTC())
 }
 
 // ClaimNotificationAt is ClaimNotification with an explicit clock.
-func (s *Store) ClaimNotificationAt(channel string, eventID int64, now time.Time) (notifier.ClaimState, error) {
+func (s *Store) ClaimNotificationAt(channel string, eventID int64, now time.Time) (notifier.ClaimState, string, error) {
 	if strings.TrimSpace(channel) == "" || eventID <= 0 {
-		return notifier.ClaimBusy, fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
+		return notifier.ClaimBusy, "", fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	claim := notificationClaimPrefix + strconv.FormatInt(now.Add(NotificationClaimLease).UnixNano(), 10)
+	claim, err := newNotificationClaim(now.Add(NotificationClaimLease))
+	if err != nil {
+		return notifier.ClaimBusy, "", err
+	}
 	result, err := s.db.Exec(`INSERT OR IGNORE INTO notification_deliveries(channel, event_id, outcome, recorded_at)
 		VALUES (?, ?, ?, ?)`, channel, eventID, claim, now)
 	if err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
 	if affected, err := result.RowsAffected(); err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	} else if affected == 1 {
-		return notifier.ClaimAcquired, nil
+		return notifier.ClaimAcquired, claim, nil
 	}
 	var current string
 	if err := s.db.QueryRow(`SELECT outcome FROM notification_deliveries WHERE channel = ? AND event_id = ?`, channel, eventID).Scan(&current); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Released between the insert and the read; retry on the next pass.
-			return notifier.ClaimBusy, nil
+			return notifier.ClaimBusy, "", nil
 		}
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
-	expiry, claimed := strings.CutPrefix(current, notificationClaimPrefix)
+	expires, claimed := notificationClaimExpiry(current)
 	if !claimed {
-		return notifier.ClaimHandled, nil
+		return notifier.ClaimHandled, "", nil
 	}
-	if expires, parseErr := strconv.ParseInt(expiry, 10, 64); parseErr == nil && now.UnixNano() < expires {
-		return notifier.ClaimBusy, nil
+	if now.UnixNano() < expires {
+		return notifier.ClaimBusy, "", nil
 	}
 	// The holder's lease expired: take the claim over with compare-and-swap so
-	// two processes reclaiming at once cannot both win.
+	// two processes reclaiming at once cannot both win. The new token makes
+	// any late Record or Release of the previous holder a no-op.
 	result, err = s.db.Exec(`UPDATE notification_deliveries SET outcome = ?, recorded_at = ?
 		WHERE channel = ? AND event_id = ? AND outcome = ?`, claim, now, channel, eventID, current)
 	if err != nil {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-		return notifier.ClaimBusy, err
+		return notifier.ClaimBusy, "", err
 	}
-	return notifier.ClaimAcquired, nil
+	return notifier.ClaimAcquired, claim, nil
 }
 
-// RecordNotification durably marks a channel/event pair as handled. The first
-// final outcome wins; later attempts for the same pair are ignored.
-func (s *Store) RecordNotification(channel string, eventID int64, outcome string) error {
-	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" || strings.HasPrefix(outcome, notificationClaimPrefix) {
+// newNotificationClaim builds a claim token "claimed:<expiry ns>:<nonce>".
+// The random nonce makes two claims with the same expiry distinct.
+func newNotificationClaim(expires time.Time) (string, error) {
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("notification claim nonce: %w", err)
+	}
+	return notificationClaimPrefix + strconv.FormatInt(expires.UnixNano(), 10) + ":" + hex.EncodeToString(nonce), nil
+}
+
+// notificationClaimExpiry parses a stored outcome. claimed is false for a
+// final outcome; an unparsable claim is treated as already expired.
+func notificationClaimExpiry(outcome string) (expires int64, claimed bool) {
+	rest, claimed := strings.CutPrefix(outcome, notificationClaimPrefix)
+	if !claimed {
+		return 0, false
+	}
+	expiry, _, _ := strings.Cut(rest, ":")
+	expires, err := strconv.ParseInt(expiry, 10, 64)
+	if err != nil {
+		return 0, true
+	}
+	return expires, true
+}
+
+// RecordNotification replaces the caller's claim with a final outcome. It
+// fails with notifier.ErrClaimLost when token no longer holds the pair: the
+// lease expired and another process took it over, or the pair is final.
+func (s *Store) RecordNotification(channel string, eventID int64, token, outcome string) error {
+	if strings.TrimSpace(channel) == "" || eventID <= 0 || strings.TrimSpace(outcome) == "" ||
+		strings.HasPrefix(outcome, notificationClaimPrefix) || !strings.HasPrefix(token, notificationClaimPrefix) {
 		return fmt.Errorf("invalid notification delivery %q/%d", channel, eventID)
 	}
-	_, err := s.db.Exec(`INSERT INTO notification_deliveries(channel, event_id, outcome, recorded_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(channel, event_id) DO UPDATE SET outcome = excluded.outcome, recorded_at = excluded.recorded_at
-		WHERE notification_deliveries.outcome LIKE 'claimed:%'`, channel, eventID, outcome, time.Now().UTC())
+	result, err := s.db.Exec(`UPDATE notification_deliveries SET outcome = ?, recorded_at = ?
+		WHERE channel = ? AND event_id = ? AND outcome = ?`, outcome, time.Now().UTC(), channel, eventID, token)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return notifier.ErrClaimLost
+	}
+	return nil
+}
+
+// ReleaseNotification drops the caller's unfinished claim so the pair can be
+// retried. A claim that was taken over or finished is left untouched.
+func (s *Store) ReleaseNotification(channel string, eventID int64, token string) error {
+	if !strings.HasPrefix(token, notificationClaimPrefix) {
+		return fmt.Errorf("invalid notification claim for %q/%d", channel, eventID)
+	}
+	_, err := s.db.Exec(`DELETE FROM notification_deliveries
+		WHERE channel = ? AND event_id = ? AND outcome = ?`, channel, eventID, token)
 	return err
 }
 
-// ReleaseNotification drops an unfinished claim so the pair can be retried.
-func (s *Store) ReleaseNotification(channel string, eventID int64) error {
-	_, err := s.db.Exec(`DELETE FROM notification_deliveries
-		WHERE channel = ? AND event_id = ? AND outcome LIKE 'claimed:%'`, channel, eventID)
-	return err
+// NotificationDeliveryRetention is how long final delivery records are kept.
+// A record only suppresses a replay of its event, and every cursor moves past
+// an event within seconds of a successful delivery, so a month is ample.
+const NotificationDeliveryRetention = 30 * 24 * time.Hour
+
+// PruneNotificationDeliveries deletes final delivery records older than
+// cutoff and returns how many were removed. Live claims are never removed,
+// whatever their age, so pruning cannot let a second process send an event
+// that is being delivered.
+func (s *Store) PruneNotificationDeliveries(cutoff time.Time) (int64, error) {
+	result, err := s.db.Exec(`DELETE FROM notification_deliveries
+		WHERE recorded_at < ? AND outcome NOT LIKE 'claimed:%'`, cutoff.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) publishEvent(event Event) {
@@ -787,21 +851,96 @@ func (s *Store) ReconcileInterrupted(at time.Time) error {
 	return tx.Commit()
 }
 
+// schemaQuerier is the part of *sql.Conn the migration needs; the migration
+// runs on a dedicated connection inside an explicit BEGIN IMMEDIATE.
+type schemaQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// storedSchemaVersion reads MAX(version) without writing anything; a database
+// without schema_migrations (new or pre-versioning) reports version 0.
+func storedSchemaVersion(ctx context.Context, q schemaQuerier) (int64, error) {
+	var tables int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+	var latest sql.NullInt64
+	if err := q.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil {
+		return 0, err
+	}
+	return latest.Int64, nil
+}
+
+func checkSchemaVersion(version int64) error {
+	if version > SchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, SchemaVersion)
+	}
+	return nil
+}
+
+// migrate brings the schema to SchemaVersion. Opening a database that is
+// already at SchemaVersion only reads the version and takes no write lock, so
+// concurrent opens of a busy database cannot fail with SQLITE_BUSY (BL-33).
+// A database with a newer version is refused, so an old binary never opens a
+// schema it does not understand. When a migration is needed it runs under
+// BEGIN IMMEDIATE: the write lock is taken up front (waiting via
+// busy_timeout) instead of upgrading a stale read snapshot, and the version is
+// re-read under the lock in case another process migrated first.
 func migrate(db *sql.DB) error {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	version, err := storedSchemaVersion(ctx, db)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }() // Rollback после успешного Commit возвращает ErrTxDone — штатный исход этого defer.
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+	if err := checkSchemaVersion(version); err != nil {
 		return err
 	}
-	var latest sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil {
+	if version == SchemaVersion {
+		return nil
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
 		return err
 	}
-	if latest.Valid && latest.Int64 > SchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", latest.Int64, SchemaVersion)
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	version, err = storedSchemaVersion(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := checkSchemaVersion(version); err != nil {
+		return err
+	}
+	if version < SchemaVersion {
+		if err := applyMigrations(ctx, conn); err != nil {
+			return err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// applyMigrations is idempotent: every statement tolerates a partially
+// migrated database, so it can run from any older version.
+func applyMigrations(ctx context.Context, tx schemaQuerier) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		return err
 	}
 	base := []string{
 		`CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -814,7 +953,7 @@ func migrate(db *sql.DB) error {
 			FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id))`,
 	}
 	for _, query := range base {
-		if _, err := tx.Exec(query); err != nil {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return err
 		}
 	}
@@ -826,7 +965,7 @@ func migrate(db *sql.DB) error {
 		{"stages", "checks_json", "TEXT"}, {"stages", "mutations_json", "TEXT"}, {"stages", "delivery_json", "TEXT"},
 	}
 	for _, column := range columns {
-		if err := ensureColumn(tx, column.table, column.name, column.declaration); err != nil {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.declaration); err != nil {
 			return err
 		}
 	}
@@ -879,18 +1018,23 @@ func migrate(db *sql.DB) error {
 			status TEXT NOT NULL, created_by TEXT NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
 			ready_by TEXT NOT NULL DEFAULT '', ready_at DATETIME, run_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '')`,
 		`CREATE INDEX IF NOT EXISTS idx_backlog_queue ON backlog_items(status, ready_at, id)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP)`,
+		// Version 12 (BL-25): the task-scoped event feed filters by run_uid and
+		// pages by the global event ID in both directions; without this index
+		// SQLite walks the whole events table for every page. IF NOT EXISTS
+		// keeps reopening an upgraded file a no-op.
+		`CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_uid, id)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {
 			for _, column := range []struct{ name, declaration string }{
 				{"stage", "TEXT"}, {"actor", "TEXT"}, {"executor", "TEXT"}, {"severity", "TEXT"}, {"dedupe_key", "TEXT"},
 			} {
-				if err := ensureColumn(tx, "events", column.name, column.declaration); err != nil {
+				if err := ensureColumn(ctx, tx, "events", column.name, column.declaration); err != nil {
 					return err
 				}
 			}
-			if _, err := tx.Exec(`UPDATE events SET
+			if _, err := tx.ExecContext(ctx, `UPDATE events SET
 				stage = COALESCE(NULLIF(stage, ''), json_extract(data_json, '$.stage'), json_extract(data_json, '$.stage_id'), json_extract(data_json, '$.from_stage'), ''),
 				actor = COALESCE(NULLIF(actor, ''), json_extract(data_json, '$.actor'), json_extract(data_json, '$.actor_id'), ''),
 				executor = COALESCE(NULLIF(executor, ''), json_extract(data_json, '$.executor'), ''),
@@ -899,15 +1043,15 @@ func migrate(db *sql.DB) error {
 				return err
 			}
 		}
-		if _, err := tx.Exec(query); err != nil {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-func ensureColumn(tx *sql.Tx, table, name, declaration string) error {
-	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)
+func ensureColumn(ctx context.Context, tx schemaQuerier, table, name, declaration string) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return err
 	}
@@ -929,7 +1073,7 @@ func ensureColumn(tx *sql.Tx, table, name, declaration string) error {
 	if exists {
 		return nil
 	}
-	_, err = tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + declaration)
+	_, err = tx.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+name+` `+declaration)
 	return err
 }
 

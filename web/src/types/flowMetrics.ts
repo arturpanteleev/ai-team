@@ -18,6 +18,8 @@ export interface FlowStageStats {
   duration_ms: number;
   human_attempts: number;
   agent_attempts: number;
+  // Пропущенные попытки не входят ни в агента, ни в участника, ни в долю агента.
+  skipped_attempts?: number;
   agent_share: number | null;
   by_state: FlowStageStateStats[];
   tokens_input: number | null;

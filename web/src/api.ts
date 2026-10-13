@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskEvent, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 import type { FlowMetrics } from './types/flowMetrics';
 
 const API_BASE = '/api';
@@ -55,8 +55,9 @@ export async function getTaskRun(runID: string): Promise<{ run: PipelineRun; sta
 }
 
 // getGlobalEvents pages the global feed newest-first. `before` is the previous
-// page's next_cursor; 0 starts from the newest persisted event.
-export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = false): Promise<{ events: TaskEvent[]; next_cursor: number }> {
+// page's next_cursor; 0 omits the parameter and starts from the newest
+// persisted event (the server rejects an explicit before=0).
+export async function getGlobalEvents(before = 0, limit = 100, warningsOnly = false): Promise<TaskRunEventsResponse> {
   const query = new URLSearchParams({ order: 'desc', limit: String(limit) });
   if (before > 0) query.set('before', String(before));
   if (warningsOnly) query.set('warnings', 'true');

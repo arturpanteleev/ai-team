@@ -198,7 +198,9 @@ func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
 	type page struct {
 		Events     []Event `json:"events"`
 		NextCursor int64   `json:"next_cursor"`
+		HasMore    *bool   `json:"has_more"`
 	}
+	more := func(value page) bool { return value.HasMore != nil && *value.HasMore }
 	get := func(path string) (int, page) {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -221,22 +223,37 @@ func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
 
 	status, newest := get("/api/events?order=desc&limit=2")
 	if status != http.StatusOK || fmt.Sprint(cursors(newest.Events)) != fmt.Sprint([]int64{storedEvents[3].ID, storedEvents[2].ID}) ||
-		newest.NextCursor != storedEvents[2].ID {
+		newest.NextCursor != storedEvents[2].ID || newest.HasMore == nil || !more(newest) {
 		t.Fatalf("newest page status=%d page=%+v", status, newest)
 	}
 	status, older := get(fmt.Sprintf("/api/events?order=desc&limit=2&before=%d", newest.NextCursor))
 	if status != http.StatusOK || fmt.Sprint(cursors(older.Events)) != fmt.Sprint([]int64{storedEvents[1].ID, storedEvents[0].ID}) ||
-		older.NextCursor != storedEvents[0].ID {
+		older.NextCursor != storedEvents[0].ID || older.HasMore == nil || more(older) {
 		t.Fatalf("older page status=%d page=%+v", status, older)
 	}
 	status, warnings := get("/api/events?order=desc&limit=1&warnings=true")
-	if status != http.StatusOK || len(warnings.Events) != 1 || warnings.Events[0].Type != "stage_skipped" {
+	if status != http.StatusOK || len(warnings.Events) != 1 || warnings.Events[0].Type != "stage_skipped" ||
+		!warnings.Events[0].Warning || !more(warnings) {
 		t.Fatalf("newest warning status=%d page=%+v", status, warnings)
 	}
 	status, olderWarnings := get(fmt.Sprintf("/api/events?order=desc&limit=1&warnings=true&before=%d", warnings.NextCursor))
+	// The last warning page also examined the older non-warning event, so the
+	// cursor moves past it and has_more is false: no empty "load more" page.
 	if status != http.StatusOK || len(olderWarnings.Events) != 1 || olderWarnings.Events[0].Type != "check_error" ||
-		olderWarnings.NextCursor != storedEvents[1].ID {
+		olderWarnings.NextCursor != storedEvents[0].ID || more(olderWarnings) {
 		t.Fatalf("older warning status=%d page=%+v", status, olderWarnings)
+	}
+	// A page that ends exactly at the oldest event reports has_more=false.
+	status, exact := get("/api/events?order=desc&limit=4")
+	if status != http.StatusOK || len(exact.Events) != 4 || exact.HasMore == nil || more(exact) {
+		t.Fatalf("exact page status=%d page=%+v", status, exact)
+	}
+	status, ascending := get("/api/events?limit=3")
+	if status != http.StatusOK || len(ascending.Events) != 3 || !more(ascending) || ascending.NextCursor != storedEvents[2].ID {
+		t.Fatalf("ascending page status=%d page=%+v", status, ascending)
+	}
+	if !ascending.Events[1].Warning || ascending.Events[0].Warning || ascending.Events[2].Warning {
+		t.Fatalf("warning flags must come from the server classification, got %+v", ascending.Events)
 	}
 	status, runPage := get(fmt.Sprintf("/api/runs/%s/events?order=desc&limit=1", run.RunID))
 	if status != http.StatusOK || len(runPage.Events) != 1 || runPage.Events[0].Cursor != storedEvents[3].ID {
@@ -248,9 +265,29 @@ func TestGlobalEventFeedPagesNewestFirstWithBeforeCursor(t *testing.T) {
 		"/api/events?order=desc&after=1&before=3",
 		"/api/events?order=sideways",
 		"/api/events?order=desc&before=-1",
+		"/api/events?order=desc&before=0",
 	} {
 		if status, _ := get(path); status != http.StatusBadRequest {
 			t.Fatalf("GET %s status=%d, want 400", path, status)
+		}
+	}
+}
+
+// A broken store is a server error, not a bad request or an unknown task.
+func TestEventFeedsReportStoreFailureAs500(t *testing.T) {
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	for _, path := range []string{"/api/events?order=desc", "/api/runs/run-any/events"} {
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, newLoopbackRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "store_unavailable") {
+			t.Fatalf("GET %s status=%d body=%s, want 500 store_unavailable", path, response.Code, response.Body.String())
 		}
 	}
 }
@@ -1311,7 +1348,7 @@ func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 		t.Skip("race and coverage instrumentation change the wall-clock performance acceptance measurement")
 	}
 	if os.Getenv("CI") == "true" && os.Getenv("AI_TEAM_FLOW_METRICS_PERF") != "1" {
-		t.Skip("CI runs the wall-clock acceptance check separately after the unit and coverage suites")
+		t.Skip("CI runs the wall-clock acceptance check in the separate flow-metrics-perf job")
 	}
 	target := t.TempDir()
 	controlDir := filepath.Join(target, ".ai-team")

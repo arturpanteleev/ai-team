@@ -10,11 +10,11 @@ vi.mock('../api', () => ({ getGlobalEvents: vi.fn() }));
 vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: vi.fn() }));
 
 const regularEvent: TaskEvent = {
-  version: 1, cursor: 1, run_id: 'run-1', sequence: 1, type: 'run_started',
+  version: 1, cursor: 1, run_id: 'run-1', sequence: 1, type: 'run_started', warning: false,
   timestamp: '2026-10-12T10:00:00Z', data: { feature: 'Первая задача' },
 };
 const warningEvent: TaskEvent = {
-  version: 1, cursor: 2, run_id: 'run-1', sequence: 2, type: 'check_error', stage: 'qa', severity: 'warning',
+  version: 1, cursor: 2, run_id: 'run-1', sequence: 2, type: 'check_error', stage: 'qa', warning: true,
   timestamp: '2026-10-12T10:01:00Z', data: { reason: 'Проверка не пройдена' },
 };
 
@@ -61,8 +61,8 @@ describe('global event feed', () => {
       ...regularEvent, cursor: 200 - index, sequence: 200 - index, data: { feature: `Задача ${200 - index}` },
     }));
     vi.mocked(getGlobalEvents)
-      .mockResolvedValueOnce({ events: newestPage, next_cursor: 101 })
-      .mockResolvedValueOnce({ events: [{ ...warningEvent, cursor: 100, sequence: 100 }], next_cursor: 100 });
+      .mockResolvedValueOnce({ events: newestPage, next_cursor: 101, has_more: true })
+      .mockResolvedValueOnce({ events: [{ ...warningEvent, cursor: 100, sequence: 100 }], next_cursor: 100, has_more: false });
     renderFeed();
     await waitFor(() => expect(screen.getAllByText('Задача создана')).toHaveLength(100));
     expect(getGlobalEvents).toHaveBeenLastCalledWith(0, 100, false);
@@ -73,7 +73,7 @@ describe('global event feed', () => {
 
     const options = vi.mocked(useWebSocket).mock.calls.at(-1)?.[0];
     const liveEvent: WsEvent = {
-      version: 1, stream: 'stream-1', cursor: 5000, run_id: 'run-1', sequence: 5000, type: 'stage_skipped', severity: 'warning',
+      version: 1, stream: 'stream-1', cursor: 5000, run_id: 'run-1', sequence: 5000, type: 'stage_skipped', warning: true,
       timestamp: '2026-10-12T10:02:00Z', data: { feature: 'Свежая задача', reason: 'Недоступен' },
     };
     act(() => options?.onEvent?.(liveEvent));
@@ -98,9 +98,9 @@ describe('global event feed', () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       ...regularEvent, cursor: 200 - index, sequence: 200 - index,
     }));
-    const pendingAllEventsPage = deferred<{ events: TaskEvent[]; next_cursor: number }>();
+    const pendingAllEventsPage = deferred<{ events: TaskEvent[]; next_cursor: number; has_more?: boolean }>();
     vi.mocked(getGlobalEvents)
-      .mockResolvedValueOnce({ events: firstPage, next_cursor: 101 })
+      .mockResolvedValueOnce({ events: firstPage, next_cursor: 101, has_more: true })
       .mockReturnValueOnce(pendingAllEventsPage.promise)
       .mockResolvedValueOnce({ events: [warningEvent], next_cursor: 2 });
     renderFeed();
@@ -118,5 +118,35 @@ describe('global event feed', () => {
     });
     expect(screen.queryByText('Задача создана')).not.toBeInTheDocument();
     expect(screen.getByText('Ошибка проверки')).toBeInTheDocument();
+  });
+
+  it('offers "load more" only when the server reports has_more', async () => {
+    // A full page that is also the last one: no extra empty click.
+    const fullLastPage = Array.from({ length: 100 }, (_, index) => ({ ...regularEvent, cursor: 100 - index, sequence: 100 - index }));
+    vi.mocked(getGlobalEvents).mockResolvedValueOnce({ events: fullLastPage, next_cursor: 1, has_more: false });
+    renderFeed();
+    await waitFor(() => expect(screen.getAllByText('Задача создана')).toHaveLength(100));
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).not.toBeInTheDocument();
+    cleanup();
+
+    // A short warnings page that still has older matches keeps the button.
+    vi.mocked(getGlobalEvents).mockResolvedValueOnce({ events: [warningEvent], next_cursor: 2, has_more: true });
+    renderFeed();
+    expect(await screen.findByRole('button', { name: 'Показать ещё' })).toBeInTheDocument();
+  });
+
+  it('marks warnings by the server flag, not by a client list of event types', async () => {
+    vi.mocked(getGlobalEvents).mockResolvedValueOnce({
+      events: [
+        { ...regularEvent, cursor: 3, type: 'budget_exceeded', warning: true, data: { feature: 'Бюджет' } },
+        { ...regularEvent, cursor: 4, type: 'check_error', warning: false, data: { feature: 'Без флага' } },
+      ],
+      next_cursor: 3, has_more: false,
+    });
+    renderFeed();
+    await screen.findByText('budget_exceeded');
+    expect(screen.getAllByText('Предупреждение', { selector: 'span' })).toHaveLength(1);
+    expect(screen.getByText('budget_exceeded').closest('article')).toHaveAttribute('data-warning', 'true');
+    expect(screen.getByText('Ошибка проверки').closest('article')).toHaveAttribute('data-warning', 'false');
   });
 });

@@ -95,8 +95,15 @@ Event endpoints share the persisted SQLite event-ID cursor. By default
 first; this is the replay contract for resuming a stream. With `order=desc`
 they return events newest first: without `before` the page starts at the newest
 persisted event, and `before=<next_cursor>` returns only older events.
-`next_cursor` is the last cursor examined in the requested direction. `before`
-requires `order=desc` and cannot be combined with `after`. `from` and `to`
+`next_cursor` is the last cursor examined in the requested direction.
+`has_more` is `true` only when at least one more matching event (respecting the
+warning filter) exists past the page, so a client can hide “load more” without
+an extra request. `before` requires `order=desc`, cannot be combined with
+`after`, and must be a positive cursor: `before=0` is rejected with 400, and
+omitting `before` starts from the newest event. Each event carries `warning`,
+the server's classification (typed warning events or `severity=warning`); the
+dashboard uses it instead of its own list of warning types. Store failures
+return 500 with `code: "store_unavailable"`. `from` and `to`
 accept RFC3339 timestamps or `YYYY-MM-DD`; intervals are half-open `[from,to)`
 and default to the last 30 days. Pagination limits range from 1 to 100 for run
 lists and 1 to 1000 for event feeds.
@@ -119,7 +126,10 @@ conflict returns 409 with `code: "invalid_state"` and `allowed_actions`.
 Flow metrics report lead and cycle time through acceptance completion as a
 median and nearest-rank p80. Each stage includes duration and attempt counts by
 execution, decision, and outcome, plus its share of non-invalidated attempts
-executed by an agent. The report includes overrides, skips, and returns by the
+executed by an agent. Skipped attempts (`outcome` or status `skipped`) stay in
+`attempts`, duration and `by_state` and are reported as `skipped_attempts`, but
+count toward neither `human_attempts` nor `agent_attempts`, the agent share
+denominator, usage attestation, nor agent results. The report includes overrides, skips, and returns by the
 stage that issued the action, and successful agent results without linked human
 edits. The JSON and CSV exports contain the same metrics.
 
@@ -142,7 +152,7 @@ attestation, configuration/envelope/manifest source, currency, and formula
 basis.
 
 The optional `run_id` restricts the selected runs to one task (400 for an
-unsafe ID, 404 for an unknown task). Without `from` and `to` it covers the
+unsafe ID, 404 for an unknown task, 500 when the store cannot be read). Without `from` and `to` it covers the
 whole task; monthly subscription denominators still use all project runs. The
 executor kind of an attempt (`human_attempts`, `agent_attempts`, stage tokens)
 comes from its `attempt_finished` event, because `stages.execution` holds the
@@ -160,7 +170,9 @@ the interval. Returns (`return_to_*` transitions and return events), check
 overrides and skips are marked on the issuing stage. A stage without events has
 no bar. Selecting a lane opens the stage card (FR-23), whose tokens and
 subscription-share estimate come from `GET /api/metrics/flow?run_id=`; unknown
-values read “нет данных”. A table of the same segments and marks is available
+values read “нет данных”. When stage usage is not `complete`, the card says
+“частично (N из M)” with N attested of M agent attempts. The open interval of
+a running task is redrawn every 30 seconds. A table of the same segments and marks is available
 for screen readers, and lanes are navigable with the arrow, Home and End keys.
 
 The flow metrics calculation is expected to complete in 300 ms or less for
@@ -169,4 +181,9 @@ The flow metrics calculation is expected to complete in 300 ms or less for
 The `/observability` dashboard page reads these routes. Its period picker
 selects inclusive calendar days and sends `from=<first day>` and
 `to=<day after last day>` as `YYYY-MM-DD`, so the API window `[from, to)` covers
-whole UTC days. CSV export uses the same period as the displayed metrics.
+whole UTC days; the fields are labelled as UTC dates and the page shows the
+applied period. CSV export uses the same period as the displayed metrics and is
+disabled while metrics are loading, after a load error, or when the period has
+no data. Text cells in the CSV that start with `=`, `+`, `-`, `@`, tab or
+carriage return are prefixed with `'` so spreadsheets do not evaluate them as
+formulas.

@@ -122,6 +122,32 @@ describe('Observability', () => {
     expect(screen.getByText('Входные токены').parentElement).toHaveTextContent('нет данных');
     expect(screen.getByText('За этот период данных по этапам нет.')).toBeInTheDocument();
     expect(screen.getByText('За этот период обходов, пропусков и возвратов не было.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Экспорт CSV' })).toBeDisabled();
+  });
+
+  it('labels the period fields as UTC and shows the applied period', async () => {
+    render(<Observability />);
+    await screen.findByRole('heading', { name: 'Разложение по этапам' });
+    expect(screen.getByLabelText('С')).toHaveAccessibleDescription('Даты в UTC, обе границы включительно.');
+    expect(screen.getByLabelText('По')).toHaveAccessibleDescription('Даты в UTC, обе границы включительно.');
+
+    fireEvent.change(screen.getByLabelText('С'), { target: { value: '2026-10-01' } });
+    fireEvent.change(screen.getByLabelText('По'), { target: { value: '2026-10-31' } });
+    // Пока период не применён, подпись показывает прежний.
+    expect(screen.getByTestId('applied-period')).not.toHaveTextContent('01.10.2026');
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    expect(screen.getByTestId('applied-period')).toHaveTextContent('Показан период: 01.10.2026 — 31.10.2026 (UTC)');
+  });
+
+  it('labels stage states with execution, decision and outcome', async () => {
+    render(<Observability />);
+    expect(await screen.findByText(/agent → approved → accepted: 3 · 45 мин/)).toBeInTheDocument();
+  });
+
+  it('shows skipped attempts separately from agent and human attempts', async () => {
+    getFlowMetrics.mockResolvedValue({ ...metrics, by_stage: [{ ...metrics.by_stage[0], skipped_attempts: 1 }] });
+    render(<Observability />);
+    expect(await screen.findByText('3 агент · 1 человек · 1 пропуск')).toBeInTheDocument();
   });
 
   it('reports a load failure and drops metrics of the previous period', async () => {
@@ -135,6 +161,7 @@ describe('Observability', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Метрики недоступны');
     expect(screen.queryAllByText('implementation')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Экспорт CSV' })).toBeDisabled();
   });
 
   it('reports a CSV export failure without downloading a file', async () => {

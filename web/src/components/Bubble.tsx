@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import styles from './Bubble.module.css';
 
-export type BubbleTone = 'yellow' | 'mint' | 'coral' | 'lilac' | 'blue';
+export type BubbleTone = 'yellow' | 'mint' | 'coral' | 'mustard' | 'blue';
 
 // Пастельная плашка-«пузырь» с градиентом и бликом под иконкой. Декоративная: подпись рядом с ней.
 export function Bubble({ tone, size = 'md', className, children }: {

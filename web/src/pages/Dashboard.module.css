@@ -246,8 +246,8 @@
   gap: 8px;
   padding: 20px;
   border-radius: var(--radius-xl);
-  background: var(--tint-lilac);
-  color: var(--ink-lilac);
+  background: var(--tint-mustard);
+  color: var(--ink-mustard);
 }
 
 .intakeNotice span {

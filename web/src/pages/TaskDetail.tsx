@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import type { CSSProperties, FormEvent, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Link, useParams } from '../router';
 import {
@@ -47,7 +47,8 @@ interface TaskDetailSnapshot {
 }
 
 type RouteState = 'passed' | 'current' | 'upcoming' | 'failed';
-type AgentLaunch = { phase: 'idle' | 'starting' | 'started'; at: number };
+type AgentLaunch = { phase: 'idle' | 'starting' | 'started'; at: number; previous: string };
+const idleLaunch: AgentLaunch = { phase: 'idle', at: 0, previous: '' };
 type ActionKey = 'take' | 'run-agent' | 'results' | 'confirm' | 'answer' | 'new-version' | 'done' | 'plan' | 'skip' | 'override'
   | 'return' | 'executor' | 'decision' | 'resume' | 'grant' | 'cancel' | 'delivery';
 type ErrorScope = 'stage' | 'control' | 'delivery';
@@ -62,7 +63,6 @@ const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'st
 const cancelableStatuses = ['queued', 'running', 'waiting_for_approval'];
 const finishedStatuses = ['completed', 'completed_with_warnings'];
 const routeLabels: Record<RouteState, string> = { passed: 'пройден', current: 'текущий', upcoming: 'впереди', failed: 'Упал' };
-const resultLabels: Record<string, string> = { md: 'текст', link: 'ссылка', approve: 'подтверждение' };
 
 async function loadRunEvents(runId: string): Promise<TaskEvent[]> {
   const events: TaskEvent[] = [];
@@ -126,6 +126,14 @@ function shortError(value?: string): string {
   return head.length > 240 ? `${head.slice(0, 237)}…` : head;
 }
 
+// Старые брифы начинаются с заголовка «# Исходное намерение»: на странице он не нужен.
+function stripLeadingHeading(text: string): string {
+  const lines = text.split('\n');
+  const first = lines.findIndex((line) => line.trim() !== '');
+  if (first >= 0 && /^#{1,6}\s/.test(lines[first].trim())) return lines.slice(first + 1).join('\n').replace(/^\s*\n/, '');
+  return text;
+}
+
 function briefLink(runID: string, path: string): string {
   return `/artifacts/${encodeURIComponent(runID)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
@@ -150,7 +158,7 @@ export function TaskDetail() {
   const [approvalReasons, setApprovalReasons] = useState<Record<string, string>>({});
   const [budgetReason, setBudgetReason] = useState('');
   const [budgetGrantable, setBudgetGrantable] = useState(false);
-  const [agentLaunch, setAgentLaunch] = useState<AgentLaunch>({ phase: 'idle', at: 0 });
+  const [agentLaunch, setAgentLaunch] = useState<AgentLaunch>(idleLaunch);
   const [resultAccepted, setResultAccepted] = useState(false);
   const [activeKey, setActiveKey] = useState<ActionKey | null>(null);
   const [errorScope, setErrorScope] = useState<ErrorScope>('stage');
@@ -202,7 +210,7 @@ export function TaskDetail() {
     setApprovalAnswers({});
     setApprovalReasons({});
     setBudgetReason('');
-    setAgentLaunch({ phase: 'idle', at: 0 });
+    setAgentLaunch(idleLaunch);
     setResultAccepted(false);
     refresh()
       .catch((reason: unknown) => {
@@ -241,6 +249,25 @@ export function TaskDetail() {
     return () => { active = false; window.clearInterval(timer); };
   }, [run?.status, refresh, runID]);
 
+  // After "Запустить агента" the page polls until the new attempt shows up, so the status does not wait for the 30 s timer.
+  useEffect(() => {
+    if (agentLaunch.phase !== 'started') return undefined;
+    const startedAt = Date.now();
+    const hasFreshAttempt = () => {
+      const detail = snapshotRef.current?.detail;
+      const stageID = detail?.state?.next_stage;
+      return (detail?.stages ?? []).some((stage) => stage.agent_name === stageID && stage.attempt_id !== agentLaunch.previous);
+    };
+    const timer = window.setInterval(() => {
+      if (hasFreshAttempt() || Date.now() - startedAt > 180000) {
+        window.clearInterval(timer);
+        return;
+      }
+      void refresh().catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [agentLaunch, refresh]);
+
   const template = details?.template;
   const currentStageID = details?.state?.next_stage ?? '';
   const currentStage = template?.stages.find((stage) => stage.id === currentStageID);
@@ -262,7 +289,7 @@ export function TaskDetail() {
   }, [currentRunID, currentStageID, resultsAllowed]);
   // The chosen return target belongs to the stage it was picked on.
   useEffect(() => { setReturnTarget(''); }, [currentStageID]);
-  useEffect(() => { setAgentLaunch({ phase: 'idle', at: 0 }); setResultAccepted(false); }, [currentStageID]);
+  useEffect(() => { setAgentLaunch(idleLaunch); setResultAccepted(false); }, [currentStageID]);
 
   // Текст намерения: последняя версия brief/ читается с сервера и показывается на странице.
   const briefArtifacts = (visibleSnapshot?.artifacts ?? [])
@@ -332,9 +359,10 @@ export function TaskDetail() {
     const stageRunID = run.run_id;
     const stageID = currentStage.id;
     const launchedAt = Date.now();
-    setAgentLaunch({ phase: 'starting', at: launchedAt });
+    const previous = lastAgentAttempt?.attempt_id ?? '';
+    setAgentLaunch({ phase: 'starting', at: launchedAt, previous });
     const started = await perform('Агент запущен', () => runTaskStageAgent(stageRunID, stageID, mode), 'run-agent');
-    setAgentLaunch(started ? { phase: 'started', at: launchedAt } : { phase: 'idle', at: 0 });
+    setAgentLaunch(started ? { phase: 'started', at: launchedAt, previous } : idleLaunch);
   };
 
   const submitResult = async (value: StageResultSubmission) => {
@@ -399,7 +427,7 @@ export function TaskDetail() {
   const pendingDecisions = details.approvals.filter((approval) => approval.status === 'pending' && !handledByStagePanel(approval));
   // Approvals that ask for an answer are answered in the current stage card, not in the approvals list.
   const questionDecisions = details.approvals.filter((approval) => approval.status === 'pending'
-    && approval.actions.includes('answer_questions') && !(grillAllowed && approval.id === pending?.id));
+    && (approval.actions.includes('answer_questions') || approval.kind === 'questions') && !(grillAllowed && approval.id === pending?.id));
   const otherDecisions = pendingDecisions.filter((approval) => !questionDecisions.some((question) => question.id === approval.id));
   const decidedDecisions = details.approvals.filter((approval) => approval.status !== 'pending' && payloadMarkdown(approval.payload) === null);
   const runningAttempt = details.stages.find((stage) => stage.status === 'running' && stage.agent_name === currentStageID);
@@ -416,20 +444,6 @@ export function TaskDetail() {
   const failureReason = shortError(failureAttempt?.error) || shortError(run.error)
     || 'Причина в данных задачи не записана. Откройте лог этапа, чтобы увидеть подробности.';
 
-  const nextStepText = (() => {
-    if (finished) return 'задача завершена.';
-    if (run.status === 'canceled') return 'задача отменена.';
-    if (run.status === 'failed') return failureAttempt ? `разобрать ошибку этапа «${stageTitle(failureAttempt.agent_name)}».` : 'разобрать ошибку задачи.';
-    if (pending && grillAllowed) return `ответить на вопросы по этапу «${stageTitle(currentStageID)}».`;
-    if (pending?.trigger === 'delivery_plan' && allowed.has('plan/approve')) return 'подтвердить план доставки.';
-    if (allowed.has('confirm')) return `подтвердить этап «${stageTitle(currentStageID)}».`;
-    if (allowed.has('take') || allowed.has('results')) return `сделать этап «${stageTitle(currentStageID)}» самому или отдать агенту.`;
-    if (allowed.has('run-agent')) return `запустить агента на этапе «${stageTitle(currentStageID)}».`;
-    if (pendingDecisions.length > 0) return 'решить согласование, которое ждёт участника.';
-    if (resumable) return 'продолжить задачу.';
-    if (runningAttempt) return `дождаться выполнения этапа «${stageTitle(currentStageID)}».`;
-    return currentStageID ? `этап «${stageTitle(currentStageID)}».` : 'ждём следующего шага.';
-  })();
 
   const route = (template?.stages ?? []).map((stage, index) => {
     const currentIndex = template?.stages.findIndex((item) => item.id === currentStageID) ?? -1;
@@ -480,11 +494,32 @@ export function TaskDetail() {
 
   const taskTitle = template?.title || (details.task ?? '').split('\n')[0].trim() || run.feature;
 
+  const stageName = currentStage?.title ?? currentStageID;
+  const stageState = (() => {
+    if (questionDecisions.length > 0 || otherDecisions.length > 0) return 'Ждёт решения';
+    if (runningAttempt) return 'В работе';
+    if (lastAgentAttempt?.status === 'blocked' || run.status === 'blocked') return 'Заблокирована';
+    if (lastAgentAttempt?.status === 'failed' || run.status === 'failed') return 'Ошибка';
+    if (lastAgentAttempt && (lastAgentAttempt.status === 'passed' || lastAgentAttempt.status === 'warning')) return 'Пройдена';
+    if (finishedStatuses.includes(run.status)) return 'Завершена';
+    return 'Ожидает';
+  })();
+  const stageLine = stageName ? `${stageState}: этап «${stageName}»` : stageState;
+  const expectation = questionDecisions.length > 0 ? 'Ждём ваш ответ на вопросы: без него этап не продолжится.'
+    : otherDecisions.length > 0 ? 'Ждём решения по согласованию ниже.'
+    : runningAttempt ? 'Агент работает, ждать ответа от вас не нужно.'
+    : allowed.has('confirm') ? 'Ждём подтверждения этапа.'
+    : allowed.has('take') || allowed.has('results') || allowed.has('run-agent') ? 'Ждём: сделайте этап сами или отдайте его агенту.'
+    : undefined;
+  const half = Math.ceil(route.length / 2);
+  const routeRows = route.length > 6 ? [route.slice(0, half), route.slice(half)] : [route];
+  const rowStarts = routeRows.length > 1 ? [0, half] : [0];
+
   const renderDecision = (approval: Approval) => {
     const markdown = payloadMarkdown(approval.payload);
     const answer = approvalAnswers[approval.id] ?? '';
     const reason = approvalReasons[approval.id] ?? '';
-    const needsAnswer = approval.actions.includes('answer_questions');
+    const needsAnswer = approval.actions.includes('answer_questions') || approval.kind === 'questions';
     const needsReason = approval.status === 'pending' && (approval.feedback_actions
       ? approval.feedback_actions.length > 0
       : approval.actions.some((action) => action.startsWith('return_to_')));
@@ -503,6 +538,7 @@ export function TaskDetail() {
         <textarea value={reason} maxLength={16 * 1024} rows={3}
           onChange={(event) => setApprovalReasons((current) => ({ ...current, [approval.id]: event.target.value }))} />
       </label>}
+      {approval.actions.length > 0 && approval.required_roles.length > 0 && !approval.required_roles.some((role) => canAct(role)) && <p className={styles.questionLabel}>Ответить или решить может участник с ролью: {approval.required_roles.join(', ')}.</p>}
       <div className={styles.actions}>
         {approval.required_roles
           .filter((role) => canAct(role))
@@ -536,13 +572,9 @@ export function TaskDetail() {
     <main className={styles.container}>
       <div className={styles.layout}>
         <div className={styles.summary}>
-          <header className={styles.hero}>
-            <div className={styles.headingLine}>
-              <h1>{taskTitle}</h1>
-                          </div>
-            <p className={styles.nextStep}>
-              <span className={styles.nextLabel}>Что дальше:</span> {nextStepText}
-            </p>
+          <section className={`${styles.intent} ${styles.ideaCard}`} aria-labelledby="idea-heading">
+            <h1 id="idea-heading">{taskTitle}</h1>
+            <p className={styles.stageLine}>{stageLine}</p>
             {(details.external_links ?? []).length > 0 && (
               <ul className={styles.externalLinks} aria-label="Внешние ссылки">
                 {details.external_links?.map((value) => (
@@ -552,11 +584,9 @@ export function TaskDetail() {
                 ))}
               </ul>
             )}
-          </header>
-          <section className={styles.intent} aria-labelledby="idea-heading">
-            <div className={styles.ideaHeading}><h2 id="idea-heading">Бизнес-идея</h2><StatusBadge status={run.status} /></div>
+            <p className={styles.eyebrow}>Бизнес-идея</p>
             {intentText !== null
-              ? <div className={styles.markdown}><ReactMarkdown>{intentText}</ReactMarkdown></div>
+              ? <div className={styles.markdown}><ReactMarkdown>{stripLeadingHeading(intentText)}</ReactMarkdown></div>
               : details.task
                 ? <p className={styles.task}>{details.task}</p>
                 : <p>Текст идеи пока не записан.</p>}
@@ -587,7 +617,8 @@ export function TaskDetail() {
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
                 <h2 id="current-stage-heading">{currentStage?.title ?? currentStageID ?? 'Этапов нет'}</h2>
-                {currentStage && <p>{currentStage.function} · результат: {resultLabels[currentStage.result] ?? currentStage.result}</p>}
+                {currentStage && <p>Кто делает этап: <strong>{currentExecutor === 'agent' ? `Агент ${currentStage.agent ?? ''}` : 'Вы'}</strong></p>}
+                {expectation && <p className={styles.expect}>{expectation}</p>}
                 {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
                   {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
                     {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
@@ -616,7 +647,7 @@ export function TaskDetail() {
 
             {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && <div className={styles.modes}>
               {(allowed.has('take') || allowed.has('results')) && <article className={styles.modeCard}>
-                <h3>Сделать самому</h3>
+                <h3>Напишу сам</h3>
                 <p>Возьмите этап себе и сдайте результат текстом или ссылкой.</p>
                 <div className={styles.actions}>
                   {allowed.has('take') && <button type="button" disabled={working}
@@ -626,7 +657,7 @@ export function TaskDetail() {
                 </div>
               </article>}
               {allowed.has('run-agent') && currentStage.agent && <article className={styles.modeCard}>
-                <h3>Отдать агенту</h3>
+                <h3>Агент {currentStage.agent} сделает этап</h3>
                 <p>Агент {currentStage.agent} подготовит результат. Вы проверите его и подтвердите или вернёте на доработку.</p>
                 <div className={styles.actions}>
                   <button type="button" disabled={working}
@@ -639,11 +670,11 @@ export function TaskDetail() {
 
             {currentStage && allowed.size > 0 && <div className={styles.actions}>
               {allowed.has('executor') && currentStage.agent && (
-                <label className={styles.inlineSelect}>Исполнитель этапа
+                <label className={styles.inlineSelect}>Кто делает этап
                   <select disabled={working} value={currentExecutor}
                     onChange={(event) => void perform('Исполнитель изменён', () => setTaskStageExecutor(
                       run.run_id, currentStage.id, event.currentTarget.value as 'human' | 'agent'), 'executor')}>
-                    <option value="human">Участник</option><option value="agent">Агент: {currentStage.agent}</option>
+                    <option value="human">Вы</option><option value="agent">Агент {currentStage.agent}</option>
                   </select>
                 </label>
               )}
@@ -710,16 +741,26 @@ export function TaskDetail() {
       <div className={styles.fullWidth}>
         <section className={`${styles.panel} ${styles.routePanel}`} aria-labelledby="route-heading">
           <h2 id="route-heading">Маршрут процесса</h2>
-          {route.length === 0 ? <p>Этапов нет.</p> : <ol className={styles.route}>
-            {route.map(({ stage, state, current }, index) => (
-              <li key={stage.id} className={styles.routeItem} data-state={state}
-                aria-current={current ? 'step' : undefined}>
-                <span className={styles.routeDot} aria-hidden="true">{state === 'passed' ? '✓' : state === 'failed' ? '!' : index + 1}</span>
-                <span className={styles.routeTitle}>{stage.title}</span>
-                <span className={styles.routeState}>{routeLabels[state]}</span>
-              </li>
+          {route.length === 0 ? <p>Этапов нет.</p> : <div className={styles.rails}>
+            {routeRows.map((row, rowIndex) => (
+              <ol key={rowIndex} className={`${styles.routeRow} ${rowIndex === 0 ? styles.rowTop : styles.rowBottom}`}
+                style={{ '--cols': row.length } as CSSProperties}>
+                {row.map(({ stage, state, current }, index) => (
+                  <li key={stage.id} className={styles.routeItem} data-state={state}
+                    data-turn={rowIndex === 0 && routeRows.length > 1 && index === row.length - 1 ? 'true' : undefined}
+                    aria-current={current ? 'step' : undefined}>
+                    <span className={styles.routeDot} aria-hidden="true">
+                      {state === 'passed' ? '✓' : state === 'failed' ? '!' : rowStarts[rowIndex] + index + 1}
+                    </span>
+                    <span className={styles.routeText}>
+                      <span className={styles.routeTitle}>{stage.title}</span>
+                      <span className={styles.routeState}>{routeLabels[state]}</span>
+                    </span>
+                  </li>
+                ))}
+              </ol>
             ))}
-          </ol>}
+          </div>}
         </section>
 
         <section className={`${styles.panel} ${styles.stageRest}`} aria-labelledby="approvals-heading">
@@ -727,7 +768,9 @@ export function TaskDetail() {
           {!principal && otherDecisions.length > 0 && <label className={styles.questionLabel}>Ваш идентификатор
             <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Идентификатор участника" />
           </label>}
-          {otherDecisions.length === 0 && questionDecisions.length === 0 && <p>Сейчас никто не ждёт вашего решения.</p>}
+          {otherDecisions.length === 0 && <p>{questionDecisions.length > 0
+          ? 'Вопросы к Product Owner ждут ответа в карточке текущего этапа.'
+          : 'Сейчас никто не ждёт вашего решения.'}</p>}
           {otherDecisions.map(renderDecision)}
           {decidedDecisions.length > 0 && <details className={styles.history}>
             <summary>История согласований ({decidedDecisions.length})</summary>
@@ -908,8 +951,7 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
   launch: AgentLaunch;
 }) {
   // After a launch, an attempt that started earlier belongs to the previous run and is not shown as the outcome.
-  const current = launch.phase === 'started' && lastAttempt && Date.parse(lastAttempt.started_at) < launch.at
-    ? undefined : lastAttempt;
+  const current = launch.phase === 'started' && lastAttempt?.attempt_id === launch.previous ? undefined : lastAttempt;
   const attempt = runningAttempt ?? current;
   let state: 'running' | 'starting' | 'started' | 'finished' | 'idle' = 'idle';
   let title = '';
@@ -930,7 +972,7 @@ function AgentStatus({ runID, stageTitle, agent, runningAttempt, lastAttempt, la
     title = 'Агент завершил, ждём проверки';
   }
   if (state === 'idle') return null;
-  const tone = state === 'finished' ? 'mint' : state === 'running' ? 'yellow' : 'lilac';
+  const tone = state === 'finished' ? 'mint' : state === 'running' ? 'yellow' : 'mustard';
   return <div className={styles.agentStatus} role="status" data-state={state}>
     {state === 'running'
       ? <span className={styles.spinner} aria-hidden="true" />

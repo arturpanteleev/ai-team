@@ -776,7 +776,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
-    expect(screen.getByText('Что дальше:').parentElement).toHaveTextContent('подтвердить этап «Идея».');
+    expect(screen.getByText('Ждём подтверждения этапа.')).toBeInTheDocument();
+    expect(screen.getByText('Ожидает: этап «Идея»')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
   });
 
@@ -790,8 +791,9 @@ describe('Task page controls moved from the old pipeline page', () => {
     });
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Сделать самому' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Отдать агенту' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Напишу сам' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Агент analyst сделает этап' })).toBeInTheDocument();
+    expect(screen.getByText('Кто делает этап:').parentElement).toHaveTextContent('Агент analyst');
     expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
@@ -874,7 +876,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     await screen.findByRole('heading', { name: 'Закреплённый маршрут' });
 
     expect(screen.queryByRole('link', { name: '← К задачам' })).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
+    expect(screen.getByText('Бизнес-идея')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Закреплённый маршрут' })).toBeInTheDocument();
     expect(screen.queryByText('Исходное намерение')).not.toBeInTheDocument();
     expect(screen.queryByText(/Бизнес-намерение/)).not.toBeInTheDocument();
   });
@@ -984,5 +987,15 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     expect(await screen.findByText('Ждём ответ сервера…')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сохраняем…' })).toBeDisabled();
+  });
+  it('moves the launch notice to the working state once the server reports the agent attempt', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([]));
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
+    expect(await screen.findByText('Агент работает')).toBeInTheDocument();
+    expect(screen.queryByText('Агент запущен')).not.toBeInTheDocument();
   });
 });

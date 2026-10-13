@@ -132,7 +132,7 @@ func printUsage() {
 	fmt.Println(`ai-team — AI-команда для spec-driven разработки
 
 Использование:
-  ai-team init [--target <path>] [--write-gitignore]
+  ai-team init [--target <path>]
                                      Инициализировать .ai-team/ в проекте
   ai-team run                      Запустить пайплайн агентов
   ai-team runs [--target <path>]   Показать задачи проекта
@@ -1001,7 +1001,7 @@ func cmdInit() {
 	targetFlag := initFlags.String("target", ".", "Путь к целевому проекту")
 	profileFlag := initFlags.String("profile", config.ProfileStandard, "Шаблон процесса: fast, standard или regulated")
 	force := initFlags.Bool("force", false, "Перезаписать существующий .ai-team/config.yaml")
-	writeGitignore := initFlags.Bool("write-gitignore", false, "Записать разделяемое правило в .gitignore вместо локального Git exclude")
+	writeGitignore := initFlags.Bool("write-gitignore", false, "Устарело и игнорируется: .gitignore не меняется, правило всегда пишется в Git info/exclude")
 	if err := initFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов init: %v", err)
 	}
@@ -1054,7 +1054,10 @@ func cmdInit() {
 		fmt.Fprintf(os.Stderr, "Предупреждение: %v\n", err)
 	}
 
-	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
+	if *writeGitignore {
+		fmt.Fprintln(os.Stderr, "Предупреждение: --write-gitignore устарел и игнорируется; .gitignore не изменяется")
+	}
+	ignorePath, err := ensureControlIgnored(target)
 	if err != nil {
 		fatal("Ошибка настройки ignore policy: %v", err)
 	}
@@ -1115,14 +1118,10 @@ func writeInitConfig(path string, data []byte, force bool) error {
 	return os.Rename(tmpPath, path)
 }
 
-// ensureControlIgnored гарантирует исключение .ai-team/ из Git. По умолчанию
-// используется локальный info/exclude, чтобы init не изменял workspace.
-func ensureControlIgnored(target string, writeGitignore bool) (string, error) {
-	if writeGitignore {
-		path := filepath.Join(target, ".gitignore")
-		return path, appendIgnoreRule(path)
-	}
-
+// ensureControlIgnored гарантирует исключение .ai-team/ из Git через локальный
+// info/exclude: версионируемый .gitignore init не трогает, иначе рабочее дерево
+// становится грязным и прогон падает на проверке clean git workspace.
+func ensureControlIgnored(target string) (string, error) {
 	check := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree")
 	if output, err := check.Output(); err != nil || strings.TrimSpace(string(output)) != "true" {
 		var exitErr *exec.ExitError

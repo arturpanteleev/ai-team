@@ -524,14 +524,14 @@ func TestEnsureControlIgnoredUsesLocalGitExclude(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	excludePath, err := ensureControlIgnored(target, false)
+	excludePath, err := ensureControlIgnored(target)
 	if err != nil {
 		t.Fatalf("ensure local exclude: %v", err)
 	}
 	if excludePath == "" {
 		t.Fatal("ожидался разрешённый Git exclude path")
 	}
-	if _, err := ensureControlIgnored(target, false); err != nil {
+	if _, err := ensureControlIgnored(target); err != nil {
 		t.Fatalf("повторный ensure local exclude: %v", err)
 	}
 
@@ -552,24 +552,6 @@ func TestEnsureControlIgnoredUsesLocalGitExclude(t *testing.T) {
 	runGitTest(t, target, "check-ignore", "--no-index", ".ai-team/config.yaml")
 }
 
-func TestEnsureControlIgnoredCanWriteGitignore(t *testing.T) {
-	target := t.TempDir()
-	path, err := ensureControlIgnored(target, true)
-	if err != nil {
-		t.Fatalf("write .gitignore: %v", err)
-	}
-	if path != filepath.Join(target, ".gitignore") {
-		t.Fatalf("неожиданный путь: %s", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), ".ai-team/") {
-		t.Fatalf("правило отсутствует:\n%s", data)
-	}
-}
-
 func TestEnsureControlIgnoredSupportsLinkedWorktree(t *testing.T) {
 	repository := t.TempDir()
 	runGitTest(t, repository, "init", "-b", "main")
@@ -583,7 +565,7 @@ func TestEnsureControlIgnoredSupportsLinkedWorktree(t *testing.T) {
 
 	worktree := filepath.Join(t.TempDir(), "linked")
 	runGitTest(t, repository, "worktree", "add", "-b", "feature", worktree)
-	path, err := ensureControlIgnored(worktree, false)
+	path, err := ensureControlIgnored(worktree)
 	if err != nil {
 		t.Fatalf("ensure linked worktree exclude: %v", err)
 	}

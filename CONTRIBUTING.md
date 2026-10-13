@@ -161,13 +161,16 @@ make go-toolchain    # каким Go пойдут цели Makefile (GOTOOLCHAIN
 
 Все цели `Makefile` запускают Go ровно той версии, что закреплена в
 [`.tool-versions`](.tool-versions) (сейчас 1.26.9): Makefile экспортирует
-`GOTOOLCHAIN=go<пин>`, если `GOTOOLCHAIN` не задан в окружении, и Go сам
+`GOTOOLCHAIN=go<пин>`, если `GOTOOLCHAIN` в окружении не задан или пуст, и Go сам
 скачивает этот тулчейн при первом запуске. Без пина `make verify` взял бы
 любой более новый установленный Go, и `govulncheck` проверял бы уже его
 stdlib — локальный гейт расходился бы с CI. CI задаёт `GOTOOLCHAIN: auto` в
 workflow и пином Makefile не затрагивается. Проверить другой тулчейн
 локально можно явно: `GOTOOLCHAIN=auto make verify` или
-`GOTOOLCHAIN=go1.27.2 make verify`.
+`GOTOOLCHAIN=go1.27.2 make verify`. Переменная окружения, которую экспортирует
+Makefile, у Go приоритетнее `go env -w`, поэтому `go env -w GOTOOLCHAIN=local`
+пин не отключает; собрать установленным Go без скачивания —
+`GOTOOLCHAIN=local make …`.
 
 `make lint` гоняет golangci-lint с ровно тремя анализаторами — staticcheck,
 errcheck и ineffassign (набор и исключения зафиксированы в `.golangci.yaml`,

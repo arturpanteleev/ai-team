@@ -6,12 +6,23 @@ PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
 # ПОЧЕМУ: go.mod задаёт только МИНИМУМ, поэтому без пина `make verify` берёт
 # любой более новый локальный Go, и govulncheck сканирует уже его stdlib —
 # локальный гейт расходится с CI (так было с 1.27.1: 13 уязвимостей stdlib
-# локально при зелёном CI). `?=` уважает GOTOOLCHAIN из окружения: CI задаёт
-# `GOTOOLCHAIN: auto` в workflow и этим пином не затрагивается; локально
-# пин отключается явным `GOTOOLCHAIN=auto make verify`.
+# локально при зелёном CI). ПОЧЕМУ именно go1.26.9: это одновременно минимум
+# из go.mod и версия `go-version:` в .github/workflows/*, то есть ровно тот
+# stdlib, который проверяет CI; меняется только вместе с ними.
+# Пин действует, только если GOTOOLCHAIN в окружении не задан или пуст: CI
+# задаёт `GOTOOLCHAIN: auto` в workflow и этим пином не затрагивается;
+# локально пин отключается явным `GOTOOLCHAIN=auto make verify`.
+# ВНИМАНИЕ: экспортированная переменная окружения у go приоритетнее файла
+# `go env -w`, поэтому `go env -w GOTOOLCHAIN=local` пин НЕ отключает —
+# make всё равно запустит go1.26.9. Собрать локальным Go без скачивания:
+# `GOTOOLCHAIN=local make …`.
+# Пустое значение (`GOTOOLCHAIN= make …`) считается незаданным: `?=` счёл бы
+# его заданным и молча отключил пин, поэтому проверка идёт через strip.
 GO_TOOLCHAIN_PIN := $(shell awk '$$1 == "golang" { print "go" $$2 }' .tool-versions 2>/dev/null)
 ifneq ($(GO_TOOLCHAIN_PIN),)
-export GOTOOLCHAIN ?= $(GO_TOOLCHAIN_PIN)
+ifeq ($(strip $(GOTOOLCHAIN)),)
+export GOTOOLCHAIN := $(GO_TOOLCHAIN_PIN)
+endif
 endif
 
 # Версия статического анализатора пинится здесь — единственный источник истины

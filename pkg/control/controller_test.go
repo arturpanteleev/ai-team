@@ -32,6 +32,9 @@ type fakeEngine struct {
 	skipCalls   int
 	skipConfig  pipeline.SkipStageConfig
 	resumeGrant *pipeline.BudgetAllowanceGrant
+	// finished, если задан, закрывается после того, как Resume закончил
+	// обращаться к target: тест ждёт его до удаления TempDir.
+	finished chan struct{}
 }
 
 func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeline.RunResult, error) {
@@ -49,6 +52,9 @@ func (f *fakeEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pi
 	f.mu.Lock()
 	f.resumeGrant = config.BudgetAllowance
 	f.mu.Unlock()
+	if f.finished != nil {
+		defer close(f.finished)
+	}
 	close(f.started)
 	<-f.release
 	if config.CancelRequested != nil && config.CancelRequested() {
@@ -416,7 +422,7 @@ func TestControllerResumeWithBudgetAllowancePassesGrant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
 	controller, err := New(engine, target)
 	if err != nil {
 		t.Fatal(err)
@@ -432,6 +438,7 @@ func TestControllerResumeWithBudgetAllowancePassesGrant(t *testing.T) {
 	grant := engine.resumeGrant
 	engine.mu.Unlock()
 	close(engine.release)
+	<-engine.finished
 	if grant == nil || grant.ActorID != "alice" || grant.Reason != "why" {
 		t.Fatalf("engine resume grant = %+v", grant)
 	}

@@ -437,7 +437,7 @@ func cmdWorker() {
 	}
 	cfg := loadWorkerTemplateConfig(target, job, reg)
 	if job.Operation != worker.OperationCancel {
-		report := preflight.New(cfg, reg, target).Check(context.Background())
+		report := workerPreflight(cfg, reg, target, controllerAPI).Check(context.Background())
 		if !report.Ready {
 			if recorderStore != nil {
 				_ = recorderStore.Close()
@@ -1211,6 +1211,17 @@ func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry
 		fatal("Pinned template validation: %v", err)
 	}
 	return cfg
+}
+
+// workerPreflight builds the disposable worker's preflight. With the
+// controller API the controller performs stage and terminal delivery, so the
+// sandboxed worker (no GitHub token, no network) does not check gh/origin.
+func workerPreflight(cfg *config.Config, reg *agent.Registry, target string, controllerAPI bool) *preflight.Checker {
+	var options []preflight.Option
+	if controllerAPI {
+		options = append(options, preflight.WithControllerDelivery())
+	}
+	return preflight.New(cfg, reg, target, options...)
 }
 
 type projectTemplatePreflight struct {

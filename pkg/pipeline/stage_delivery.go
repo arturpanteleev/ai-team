@@ -196,11 +196,15 @@ func (rs *runState) validateLocalStageDeliveryApproval(stageID string, request d
 	if current, digestErr := checks.WorkspaceDigest(rs.sourceDir()); digestErr != nil || current != candidateSHA {
 		return delivery.Plan{}, errors.Join(errors.New("stage delivery workspace differs from the approved candidate digest"), digestErr)
 	}
-	// Explicitness: an operator-supplied hash wins; otherwise the in-process
-	// controller's own authorization (rs.approvedPlanHash) or, after resume,
-	// the plan hash of the hash-chained delivery_plan_approved event that
-	// stageDeliveryApprovalIdentity already required. The local file store has
-	// no authenticated-decision authority, unlike the worker-facing path.
+	// The local file store has no authenticated-decision authority, so the
+	// validator's "explicit hash" gate is not what authorizes this delivery:
+	// with no operator hash the fallback is request.PlanHash, which always
+	// matches. The authority is the resolved release-manager approval in the
+	// store (exact canonical plan, candidate, attempt and decision, checked by
+	// the validator) together with the hash-chained delivery_plan_approved
+	// event that stageDeliveryApprovalIdentity required. An operator-supplied
+	// hash (--approve-plan) or this process's own authorization still has to
+	// equal the plan, so a foreign hash is rejected.
 	explicit := rs.p.deliveryApprovalHash
 	if explicit == "" {
 		explicit = rs.approvedPlanHash

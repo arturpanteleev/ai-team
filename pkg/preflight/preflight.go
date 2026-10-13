@@ -90,6 +90,9 @@ type Checker struct {
 	run      CommandRunner
 	lookPath LookPath
 	timeout  time.Duration
+	// controllerDelivery: delivery (push, gh) runs in the controller, not in
+	// this process, so this checker must not require gh/origin here.
+	controllerDelivery bool
 }
 
 // Option настраивает Checker. Опции применяются после значений из конфига,
@@ -122,6 +125,14 @@ func WithTimeout(timeout time.Duration) Option {
 			c.timeout = timeout
 		}
 	}
+}
+
+// WithControllerDelivery marks a checker running inside a worker whose
+// delivery is performed by the controller through the controller API. Such a
+// worker has no GitHub credentials or network, so gh/origin are not checked
+// here; the controller's own preflight keeps requiring them.
+func WithControllerDelivery() Option {
+	return func(c *Checker) { c.controllerDelivery = true }
 }
 
 func New(cfg *config.Config, registry *agent.Registry, target string, options ...Option) *Checker {
@@ -213,7 +224,9 @@ func (c *Checker) Check(ctx context.Context) Report {
 		add(Check{ID: "git_branch", Status: StatusPassed, Required: true, Message: firstLine(output)})
 	}
 
-	if c.hasDelivery() {
+	if c.controllerDelivery && c.hasDelivery() {
+		add(Check{ID: "delivery", Status: StatusPassed, Message: "delivery выполняет контроллер; gh и origin проверяются на его стороне"})
+	} else if c.hasDelivery() {
 		if output, err := c.git(ctx, "remote", "get-url", "origin"); err != nil || firstLine(output) == "" {
 			add(Check{ID: "delivery_remote", Status: StatusFailed, Required: true, Message: "remote origin не настроен"})
 		} else {

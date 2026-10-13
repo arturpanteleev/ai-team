@@ -32,6 +32,8 @@ func TestSanitizedCheckEnvironmentIsAllowlist(t *testing.T) {
 	got := sanitizedCheckEnvironment([]string{
 		"PATH=/usr/bin",
 		"LC_ALL=C",
+		"LC_TIME=C",
+		"LC_FORWARDED_BY_SSH=sentinel",
 		"GOFLAGS=-mod=mod",
 		"CGO_ENABLED=0",
 		"DATABASE_URL=postgres://user:sentinel@db/app",
@@ -43,7 +45,7 @@ func TestSanitizedCheckEnvironmentIsAllowlist(t *testing.T) {
 		"MALFORMED",
 		"=empty-key",
 	})
-	want := []string{"PATH=/usr/bin", "LC_ALL=C", "GOFLAGS=-mod=mod", "CGO_ENABLED=0"}
+	want := []string{"PATH=/usr/bin", "LC_ALL=C", "LC_TIME=C", "GOFLAGS=-mod=mod", "CGO_ENABLED=0"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("check environment = %q, want only %q", got, want)
 	}

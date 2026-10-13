@@ -14,6 +14,10 @@ var checkEnvironmentAllowlist = map[string]bool{
 	"GOARM": true, "GOAMD64": true, "GOEXPERIMENT": true, "GO111MODULE": true,
 	"GOWORK": true, "GODEBUG": true, "GOMAXPROCS": true, "GOTRACEBACK": true,
 	"CGO_ENABLED": true, "CC": true, "CXX": true,
+	// Standard locale categories only: SSH forwards arbitrary LC_* names from
+	// the client, so a prefix match would admit client-chosen variables.
+	"LC_ALL": true, "LC_CTYPE": true, "LC_COLLATE": true, "LC_MESSAGES": true,
+	"LC_MONETARY": true, "LC_NUMERIC": true, "LC_TIME": true,
 }
 
 func sanitizedCheckEnvironment(environment []string) []string {
@@ -29,7 +33,7 @@ func sanitizedCheckEnvironment(environment []string) []string {
 }
 
 func allowedCheckEnvironmentKey(key string) bool {
-	return checkEnvironmentAllowlist[key] || strings.HasPrefix(key, "LC_")
+	return checkEnvironmentAllowlist[key]
 }
 
 // isSecretEnvironmentKey is defense in depth behind the allowlist.

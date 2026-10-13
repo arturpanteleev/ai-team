@@ -254,6 +254,9 @@ export interface TaskEvent {
   actor?: string;
   executor?: string;
   severity?: string;
+  // Серверная классификация предупреждения (store.WarningEventTypes или
+  // severity=warning); клиент не держит свой список типов.
+  warning?: boolean;
   attempt_id?: string;
   timestamp: string;
   data: Record<string, unknown>;
@@ -371,6 +374,8 @@ export interface TaskRunDetails {
 export interface TaskRunEventsResponse {
   events: TaskEvent[];
   next_cursor: number;
+  // Есть ли ещё подходящие события за next_cursor (с учётом фильтра).
+  has_more?: boolean;
 }
 
 export interface TaskRunFilters {

@@ -86,28 +86,49 @@ test('global event feed filters warnings and opens the linked task', async ({ pa
     const { run_id: runID } = await createResponse.json()
 
     const at = new Date().toISOString()
-    const events = [
-      // Keep fixtures beyond the live events generated while creating the task.
-      { version: 1, cursor: 100, run_id: runID, sequence: 1, type: 'run_started', timestamp: at, data: { feature: 'browser-event-feed' } },
-      { version: 1, cursor: 101, run_id: runID, sequence: 2, type: 'check_error', stage: 'qa', severity: 'warning', timestamp: at, data: { feature: 'browser-event-feed', reason: 'Проверка требует внимания' } },
-    ]
+    // Fixture cursors are beyond the live events generated while creating the
+    // task. The server pages newest-first, so the mock serves pages in that
+    // order and asserts the parameters the feed sends.
+    const startedEvent = { version: 1, cursor: 100, run_id: runID, sequence: 1, type: 'run_started', warning: false, timestamp: at, data: { feature: 'browser-event-feed', reason: 'fixture-oldest' } }
+    const warningEvent = { version: 1, cursor: 101, run_id: runID, sequence: 2, type: 'check_error', stage: 'qa', severity: 'warning', warning: true, timestamp: at, data: { feature: 'browser-event-feed', reason: 'Проверка требует внимания' } }
+    const newestEvent = { version: 1, cursor: 102, run_id: runID, sequence: 3, type: 'attempt_started', stage: 'idea', warning: false, timestamp: at, data: { feature: 'browser-event-feed', reason: 'fixture-newest' } }
+    const feedRequests = []
     await page.route('**/*', async (route) => {
       const url = new URL(route.request().url())
       if (url.pathname !== '/api/events') return route.continue()
-      const warningsOnly = url.searchParams.get('warnings') === 'true'
-      await route.fulfill({ json: { events: warningsOnly ? [events[1]] : events, next_cursor: 101 } })
+      const params = Object.fromEntries(url.searchParams)
+      feedRequests.push(params)
+      if (params.order !== 'desc' || 'after' in params || params.before === '0') {
+        return route.fulfill({ status: 400, json: { error: `unexpected feed query ${url.search}`, code: 'bad_event_query' } })
+      }
+      if (params.warnings === 'true') return route.fulfill({ json: { events: [warningEvent], next_cursor: 101, has_more: false } })
+      if (!('before' in params)) return route.fulfill({ json: { events: [newestEvent, warningEvent], next_cursor: 101, has_more: true } })
+      if (params.before === '101') return route.fulfill({ json: { events: [startedEvent], next_cursor: 100, has_more: false } })
+      return route.fulfill({ status: 400, json: { error: `unexpected before ${params.before}`, code: 'bad_event_query' } })
     })
 
     await page.getByRole('link', { name: 'Лента' }).click()
     await expect(page.getByRole('heading', { name: 'Лента событий' })).toBeVisible()
-    await expect(page.getByText('Задача создана')).toBeVisible()
     await expect(page.getByText('Ошибка проверки')).toBeVisible()
+    expect(feedRequests[0]).toEqual({ order: 'desc', limit: '100' })
+    // Live WebSocket events may also be listed; only the fixtures' relative
+    // order is asserted: newest first, the older page appended below.
+    const fixtureOrder = () => page.getByRole('list', { name: 'Список событий' }).locator('article').evaluateAll((articles) =>
+      articles.map((article) => article.textContent ?? '')
+        .map((text) => ['fixture-newest', 'Проверка требует внимания', 'fixture-oldest'].find((marker) => text.includes(marker)))
+        .filter(Boolean))
+    await expect.poll(fixtureOrder).toEqual(['fixture-newest', 'Проверка требует внимания'])
+
+    await page.getByRole('button', { name: 'Показать ещё' }).click()
+    await expect.poll(fixtureOrder).toEqual(['fixture-newest', 'Проверка требует внимания', 'fixture-oldest'])
+    expect(feedRequests.at(-1)).toEqual({ order: 'desc', limit: '100', before: '101' })
+    await expect(page.getByRole('button', { name: 'Показать ещё' })).toHaveCount(0)
 
     const warningResponse = page.waitForResponse((response) =>
       new URL(response.url()).pathname === '/api/events' && new URL(response.url()).searchParams.get('warnings') === 'true')
     await page.getByRole('button', { name: 'Предупреждения' }).click()
     await warningResponse
-    await expect(page.getByText('Задача создана')).toHaveCount(0)
+    await expect(page.getByText('fixture-oldest')).toHaveCount(0)
     await expect(page.getByText('Проверка требует внимания')).toBeVisible()
 
     await page.getByRole('link', { name: 'Задача: browser-event-feed' }).click()

@@ -75,6 +75,10 @@ make docs
 `make verify` проверяет OpenSpec, формат Go, модули, vet, govulncheck, race,
 coverage, E2E, runnable demo и frontend build/lint/tests/audit. Это может
 занять несколько минут и требует сети для установки инструментов/зависимостей.
+Цели `Makefile` идут на Go из [`.tool-versions`](../.tool-versions) (1.26.9),
+даже если локально установлен более новый Go: иначе `govulncheck` проверял бы
+stdlib другого тулчейна, чем CI. Какой Go будет использован, покажет
+`make go-toolchain`; отключить пин — `GOTOOLCHAIN=auto make verify`.
 Для E2E после изменения runtime используйте `-count=1`, чтобы не принять
 закэшированный subprocess-тест за новое исполнение.
 

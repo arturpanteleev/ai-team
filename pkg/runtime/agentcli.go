@@ -403,6 +403,13 @@ func serviceSection(agent *Agent, task *Task) string {
 	}
 	summaryPath := filepath.Join(task.ArtifactRoot, task.Feature, ".stage-summary", agent.Name+".md")
 	s += fmt.Sprintf("- В конце работы запиши краткое резюме этапа (2–5 строк: что сделано, ключевые решения) в файл `%s`.\n", summaryPath)
+	if agent.AskQuestions {
+		// Контроллер ищет вопросы строго в <ArtifactRoot>/tasks/<feature>/questions.md;
+		// без абсолютного пути агент пишет их в корень рабочего каталога и этап
+		// становится terminal blocked без возможности ответа.
+		questionsPath := filepath.Join(task.ArtifactRoot, "tasks", task.Feature, "questions.md")
+		s += fmt.Sprintf("- Если для продолжения нужен ответ Product Owner, запиши вопросы строго в файл `%s` (не в корень рабочего каталога).\n", questionsPath)
+	}
 	s += "- " + verdict.BlockedInstruction(task.ArtifactRoot, task.Feature, agent.Name) + "\n"
 	return s
 }

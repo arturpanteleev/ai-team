@@ -245,7 +245,7 @@ func createInitialBrief(runRoot func(string) (string, error), runID, intention s
 	if err != nil {
 		return BriefDocument{}, err
 	}
-	content := []byte("# Исходное намерение\n\n" + intention + "\n")
+	content := []byte(intention + "\n")
 	path := filepath.Join(root, "0001-intention.md")
 	if err := writeImmutable(path, content); err != nil {
 		return BriefDocument{}, err

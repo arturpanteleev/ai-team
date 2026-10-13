@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { createTask, getActivePrincipal, getTemplatesList } from '../api';
+import { createTask, getActivePrincipal, getTemplatesList, isAuthenticationRequired } from '../api';
 import { Link } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
 import type { TemplateValidation } from '../types';
@@ -21,7 +21,10 @@ function newDraftKey(): string {
 export function NewTask() {
   usePageTitle('Новая задача');
   const principal = getActivePrincipal();
-  const canCreate = !principal || principal.roles.includes('product_owner');
+  // Без principal форма доступна только в локальном режиме. В облачном режиме
+  // null значит «нет сессии» — такому пользователю форму не открываем.
+  const signedOutInCloud = !principal && isAuthenticationRequired();
+  const canCreate = principal ? principal.roles.includes('product_owner') : !signedOutInCloud;
   const [templates, setTemplates] = useState<TemplateValidation[]>([]);
   const [template, setTemplate] = useState('');
   const [name, setName] = useState('');
@@ -55,6 +58,9 @@ export function NewTask() {
       .catch(() => setTemplates([]));
   }, []);
 
+  if (signedOutInCloud) {
+    return <main className={styles.state}>Войдите, чтобы создавать задачи.</main>;
+  }
   if (!canCreate) {
     return <main className={styles.state}>Создавать задачи может Product Owner.</main>;
   }

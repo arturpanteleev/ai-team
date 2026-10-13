@@ -4,11 +4,15 @@ import { NewTask } from './NewTask';
 import { MemoryRouter } from '../router';
 import { createTask, getTemplatesList } from '../api';
 
-const session = vi.hoisted(() => ({ principal: { actor_id: 'product-1', roles: ['product_owner'] } }));
+const session = vi.hoisted(() => ({
+  principal: { actor_id: 'product-1', roles: ['product_owner'] } as { actor_id: string; roles: string[] } | null,
+  authenticationRequired: true,
+}));
 
 vi.mock('../api', () => ({
   createTask: vi.fn(),
   getActivePrincipal: () => session.principal,
+  isAuthenticationRequired: () => session.authenticationRequired,
   getTemplatesList: vi.fn(),
 }));
 
@@ -26,6 +30,7 @@ const templatesResponse = {
 
 beforeEach(() => {
   session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
+  session.authenticationRequired = true;
   vi.mocked(getTemplatesList).mockResolvedValue(templatesResponse);
   vi.mocked(createTask).mockResolvedValue({ run_id: 'run-new-1' });
 });
@@ -78,5 +83,24 @@ describe('New task screen', () => {
 
     expect(screen.getByText('Создавать задачи может Product Owner.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Название')).not.toBeInTheDocument();
+  });
+
+  it('в облачном режиме без principal не открывает форму создания', () => {
+    session.principal = null;
+    session.authenticationRequired = true;
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
+
+    expect(screen.getByText('Войдите, чтобы создавать задачи.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Название')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Создать задачу' })).not.toBeInTheDocument();
+  });
+
+  it('в локальном режиме без principal форма доступна', async () => {
+    session.principal = null;
+    session.authenticationRequired = false;
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
+
+    expect(await screen.findByLabelText('Название')).toBeInTheDocument();
+    expect(screen.queryByText('Войдите, чтобы создавать задачи.')).not.toBeInTheDocument();
   });
 });

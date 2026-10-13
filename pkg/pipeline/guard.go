@@ -114,6 +114,11 @@ func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative strin
 			return true
 		}
 	}
+	// Вопросы к Product Owner (BLOCKED-протокол) принимаются только агентам с
+	// ask_questions, в любой из форм пути относительно корня артефактов.
+	if a.AskQuestions && isAgentProtocolPath(relative, rs.runCfg.Feature, name) {
+		return true
+	}
 	for _, outputPath := range a.Outputs {
 		output := filepath.ToSlash(filepath.Clean(filepath.FromSlash(runtime.ReplaceVars(outputPath, rs.runCfg.Feature))))
 		if relative == output {

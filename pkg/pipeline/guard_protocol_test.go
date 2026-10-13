@@ -9,6 +9,7 @@ func TestReadOnlyStageAllowsProtocolFilesOnly(t *testing.T) {
 		"google-auth/status/analyst.md",
 		"google-auth/.stage-summary/analyst.md",
 		".ai-team/artifacts/google-auth/status/analyst.md",
+		"google-auth/tasks/google-auth/questions.md",
 	}
 	for _, path := range protocol {
 		if hasProjectChange([]string{path}, feature, "analyst") {

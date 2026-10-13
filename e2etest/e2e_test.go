@@ -414,7 +414,7 @@ func TestE2E_SuccessfulPipeline(t *testing.T) {
 
 	feature := "e2e-test"
 	checkFile(t, artifactsDir(dir, feature, "proposal.md"))
-	checkFile(t, artifactsDir(dir, feature, "specs", "product", "spec.md"))
+	checkFile(t, artifactsDir(dir, feature, "specs", "spec.md"))
 	checkFile(t, artifactsDir(dir, feature, "design.md"))
 	checkFile(t, artifactsDir(dir, feature, "tasks.md"))
 	checkFile(t, artifactsDir(dir, feature, "review.md"))

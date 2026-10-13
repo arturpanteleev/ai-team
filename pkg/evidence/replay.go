@@ -248,17 +248,30 @@ func replayEventsWithAttemptManifestSourceAndTarget(events []Event, runID, runDi
 
 // replayEventsForAppend allows the durable prefix between attempt_finished and
 // stage_skipped. The skip reason is persisted in attempt_finished so recovery
-// can append the warning event before normal strict replay resumes.
+// can append the warning event before normal strict replay resumes. It also
+// carries the in-flight agent-completion window of
+// replayEventsWithPendingAgentFinished, derived from the chain itself (see
+// trailingPendingAgentFinishedAttemptID), so every append-mode caller tolerates
+// both a durable attempt_finished awaiting agent_finished and one awaiting a
+// stage_skipped warning without having to remember to pass the window.
 func replayEventsForAppend(events []Event, runID, runDir string, source AttemptManifestSource) (ReplayedRun, error) {
-	return replayEventsWithAttemptManifestSourceAndTargetMode(events, runID, runDir, source, "", false)
+	return replayEventsWithAttemptManifestSourceAndTargetModeWithPending(events, runID, runDir, source, "", false,
+		trailingPendingAgentFinishedAttemptID(events))
 }
 
-// replayEventsForAppendWithPending is replayEventsForAppend with the in-flight
-// agent-completion window of replayEventsWithPendingAgentFinished: the append
-// validator tolerates both a durable attempt_finished awaiting agent_finished
-// and one awaiting a stage_skipped warning.
-func replayEventsForAppendWithPending(events []Event, runID, runDir string, source AttemptManifestSource, pendingAgentFinishedAttemptID string) (ReplayedRun, error) {
-	return replayEventsWithAttemptManifestSourceAndTargetModeWithPending(events, runID, runDir, source, "", false, pendingAgentFinishedAttemptID)
+// trailingPendingAgentFinishedAttemptID returns the attempt whose matching
+// agent_finished may legitimately still be in flight: a worker records
+// attempt_finished immediately before agent_finished, so the window exists only
+// while that attempt_finished is the last durable event. Any earlier gap is a
+// genuinely missing event and yields no window.
+func trailingPendingAgentFinishedAttemptID(events []Event) string {
+	if len(events) == 0 {
+		return ""
+	}
+	if last := events[len(events)-1]; last.Type == "attempt_finished" {
+		return last.AttemptID
+	}
+	return ""
 }
 
 // replayEventsWithPendingAgentFinished replays a verified chain and, when

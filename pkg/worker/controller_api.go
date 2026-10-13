@@ -1963,7 +1963,8 @@ func sameLifecycleState(a, b lifecycle.State) bool {
 		a.Phase == b.Phase && a.NextStage == b.NextStage &&
 		a.PendingApprovalID == b.PendingApprovalID && a.AttemptOrdinal == b.AttemptOrdinal &&
 		a.ConfigSHA256 == b.ConfigSHA256 && a.WorkflowSHA256 == b.WorkflowSHA256 &&
-		a.CreatedAt.Equal(b.CreatedAt) && a.UpdatedAt.Equal(b.UpdatedAt)
+		a.CreatedAt.Equal(b.CreatedAt) && a.UpdatedAt.Equal(b.UpdatedAt) &&
+		a.StageEnteredAt.Equal(b.StageEnteredAt)
 }
 
 type workerAPIPort struct {

@@ -194,6 +194,10 @@ func (s *Server) handleListTaskRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTaskRuns() ([]taskRunListItem, error) {
+	return s.listTaskRunsWith(s.newTaskTemplateLookup())
+}
+
+func (s *Server) listTaskRunsWith(templates *taskTemplateLookup) ([]taskRunListItem, error) {
 	var runs []store.PipelineRun
 	for offset := 0; ; offset += 100 {
 		page, err := s.store.GetPipelineRunsPage(100, offset)
@@ -206,6 +210,9 @@ func (s *Server) listTaskRuns() ([]taskRunListItem, error) {
 		}
 	}
 	items := make([]taskRunListItem, 0, len(runs))
+	// One request shares the lifecycle store and the pinned-template lookups:
+	// building them per run cost several directory/YAML round trips per task.
+	stateStore, stateErr := lifecycle.NewStore(s.targetDir)
 	for _, run := range runs {
 		item := taskRunListItem{ID: run.ID, RunID: run.RunID, Feature: run.Feature, Status: run.Status,
 			StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, AllowedActions: []string{}}
@@ -214,13 +221,13 @@ func (s *Server) listTaskRuns() ([]taskRunListItem, error) {
 			item.Task, item.Mode = snapshot.Task, snapshot.Mode
 			item.ExternalLinks = snapshot.ExternalLinks
 		}
-		if stateStore, err := lifecycle.NewStore(s.targetDir); err == nil {
+		if stateErr == nil {
 			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil {
 				item.Phase, item.CurrentStage = string(state.Phase), state.NextStage
-				enteredAt := state.UpdatedAt
+				enteredAt := state.StageEnteredSince()
 				item.StageEnteredAt = &enteredAt
-				item.AllowedActions = s.taskAllowedActions(run.RunID, state.NextStage, state)
-				if stage, stageErr := s.pinnedTaskStage(run.RunID, state.NextStage); stageErr == nil {
+				item.AllowedActions = s.taskAllowedActionsWith(templates, run.RunID, state.NextStage, state)
+				if stage, stageErr := templates.stage(run.RunID, state.NextStage); stageErr == nil {
 					item.CurrentFunction = stage.Function
 					item.Executor = stage.Executor
 					item.ExecutorAgent = stage.Agent
@@ -375,16 +382,70 @@ func (s *Server) pinnedTaskTemplate(runID string) ([]byte, string, bool, error) 
 }
 
 func (s *Server) pinnedTaskConfig(runID string) (*config.Config, bool, error) {
-	data, _, found, err := s.pinnedTaskTemplate(runID)
-	if err != nil || !found {
-		return nil, found, err
-	}
-	cfg, err := config.ParseYAML(data)
-	return cfg, true, err
+	return s.newTaskTemplateLookup().config(runID)
 }
 
 func (s *Server) pinnedTaskStage(runID, stageID string) (config.TemplateStage, error) {
-	cfg, found, err := s.pinnedTaskConfig(runID)
+	return s.newTaskTemplateLookup().stage(runID, stageID)
+}
+
+// taskTemplateLookup memoizes pinned-template reads for one request. The
+// template store is opened once, each run pin is read once, and identical
+// pinned versions are parsed once, so listing N tasks no longer repeats the
+// store setup and YAML parse for every helper that needs the run's stage.
+type taskTemplateLookup struct {
+	templates    *config.TemplateStore
+	templatesErr error
+	byRun        map[string]pinnedTaskConfigResult
+	byVersion    map[string]*config.Config
+	pinReads     int
+	parses       int
+}
+
+type pinnedTaskConfigResult struct {
+	cfg   *config.Config
+	found bool
+	err   error
+}
+
+func (s *Server) newTaskTemplateLookup() *taskTemplateLookup {
+	templates, err := s.templateStore()
+	return &taskTemplateLookup{templates: templates, templatesErr: err,
+		byRun: map[string]pinnedTaskConfigResult{}, byVersion: map[string]*config.Config{}}
+}
+
+func (l *taskTemplateLookup) config(runID string) (*config.Config, bool, error) {
+	if cached, ok := l.byRun[runID]; ok {
+		return cached.cfg, cached.found, cached.err
+	}
+	result := l.load(runID)
+	l.byRun[runID] = result
+	return result.cfg, result.found, result.err
+}
+
+func (l *taskTemplateLookup) load(runID string) pinnedTaskConfigResult {
+	if l.templatesErr != nil {
+		return pinnedTaskConfigResult{err: l.templatesErr}
+	}
+	l.pinReads++
+	data, version, found, err := l.templates.ReadPinnedRun(runID)
+	if err != nil || !found {
+		return pinnedTaskConfigResult{found: found, err: err}
+	}
+	if cfg, ok := l.byVersion[version]; ok {
+		return pinnedTaskConfigResult{cfg: cfg, found: true}
+	}
+	l.parses++
+	cfg, err := config.ParseYAML(data)
+	if err != nil {
+		return pinnedTaskConfigResult{found: true, err: err}
+	}
+	l.byVersion[version] = cfg
+	return pinnedTaskConfigResult{cfg: cfg, found: true}
+}
+
+func (l *taskTemplateLookup) stage(runID, stageID string) (config.TemplateStage, error) {
+	cfg, found, err := l.config(runID)
 	if err != nil || !found {
 		return config.TemplateStage{}, errors.New("pinned template unavailable")
 	}
@@ -397,11 +458,15 @@ func (s *Server) pinnedTaskStage(runID, stageID string) (config.TemplateStage, e
 }
 
 func (s *Server) taskAllowedActions(runID, stageID string, state lifecycle.State) []string {
+	return s.taskAllowedActionsWith(s.newTaskTemplateLookup(), runID, stageID, state)
+}
+
+func (s *Server) taskAllowedActionsWith(templates *taskTemplateLookup, runID, stageID string, state lifecycle.State) []string {
 	actions := make([]string, 0, 6)
 	if stageID == "" {
 		return actions
 	}
-	stage, stageErr := s.pinnedTaskStage(runID, stageID)
+	stage, stageErr := templates.stage(runID, stageID)
 	if state.Phase == lifecycle.PhaseResumable && stageErr == nil && stage.Agent != "" {
 		actions = append(actions, "run-agent")
 	}
@@ -445,7 +510,7 @@ func (s *Server) taskAllowedActions(runID, stageID string, state lifecycle.State
 		actions = append(actions, "skip")
 	}
 	if stageErr == nil && state.Phase == lifecycle.PhaseWaiting {
-		cfg, found, err := s.pinnedTaskConfig(runID)
+		cfg, found, err := templates.config(runID)
 		if err == nil && found {
 			for _, route := range cfg.Returns {
 				if route.From == stageID {

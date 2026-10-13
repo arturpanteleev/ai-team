@@ -13,6 +13,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -431,5 +432,45 @@ func TestTemplateReturnHonorsMaxVisitsBeforeStartingTarget(t *testing.T) {
 	}
 	if rt.calls["analyst"] != 2 || rt.calls["questioner"] != 2 || rt.calls["reviewer"] != 2 {
 		t.Fatalf("visit limit must block the third target before another intermediate cycle: calls=%+v", rt.calls)
+	}
+}
+
+// BL-06: a configured skip is a one-shot request. It must be cleared after the
+// requested stage executes for both agent and human executors, and an agent
+// stage that did not record OutcomeSkipped must fail closed.
+func TestConsumeConfiguredSkipClearsRequestForHumanAndAgentStages(t *testing.T) {
+	const reason = "Not needed for this task."
+	skipped := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomeSkipped}}
+	passed := notifier.StageResult{State: workflow.AttemptState{Outcome: workflow.OutcomePassed}}
+	for _, tc := range []struct {
+		name            string
+		current         string
+		skippedByConfig bool
+		result          notifier.StageResult
+		wantErr         bool
+		wantCleared     bool
+	}{
+		{name: "human stage consumes skip via approval", current: "optional", skippedByConfig: false, result: skipped, wantCleared: true},
+		{name: "agent stage skipped by config", current: "optional", skippedByConfig: true, result: skipped, wantCleared: true},
+		{name: "agent stage without recorded skip", current: "optional", skippedByConfig: true, result: passed, wantErr: true},
+		{name: "other stage keeps request", current: "setup", skippedByConfig: false, result: passed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := &runState{runCfg: RunConfig{skipStageID: "optional", skipReason: reason}}
+			err := rs.consumeConfiguredSkip(tc.current, tc.skippedByConfig, tc.result)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("consumeConfiguredSkip error = %v; wantErr %v", err, tc.wantErr)
+			}
+			cleared := rs.runCfg.skipStageID == "" && rs.runCfg.skipReason == ""
+			kept := rs.runCfg.skipStageID == "optional" && rs.runCfg.skipReason == reason
+			if tc.wantCleared && !cleared || !tc.wantCleared && !kept {
+				t.Fatalf("skip request after %s: stage=%q reason=%q; wantCleared %v",
+					tc.current, rs.runCfg.skipStageID, rs.runCfg.skipReason, tc.wantCleared)
+			}
+		})
+	}
+	empty := &runState{}
+	if err := empty.consumeConfiguredSkip("optional", false, passed); err != nil || empty.runCfg.skipStageID != "" {
+		t.Fatalf("no skip request must be a no-op: err=%v cfg=%+v", err, empty.runCfg)
 	}
 }

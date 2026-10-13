@@ -74,6 +74,12 @@ func TestAppendVerifiedClarificationRejectsMalformedDurableApprovals(t *testing.
 			later.ActorID = ""
 			v.Decisions = append(v.Decisions, later)
 		}},
+		{name: "ambiguous resolving decisions", change: func(v *approval.PendingApproval) {
+			second := v.Decisions[0]
+			second.ActorID = "other-qa@example.com"
+			v.Decisions = append(v.Decisions, second)
+		}},
+		{name: "missing source attempt", change: func(v *approval.PendingApproval) { v.AttemptID = "" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

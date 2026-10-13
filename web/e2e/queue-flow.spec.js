@@ -342,7 +342,7 @@ test('authenticated cookie session survives reload and a second window for write
     await expect(second.getByRole('alert')).toHaveText('Укажите хотя бы одну роль.')
     expect(emptyRolePatchSent).toBe(false)
 
-    await second.getByRole('link', { name: 'Задачи' }).click()
+    await second.getByRole('link', { name: 'Дашборд' }).click()
     await expect(second.getByRole('heading', { name: 'Задачи' })).toBeVisible()
     await second.getByLabel('Название инициативы').fill('authenticated-after-reconnect')
     await second.getByLabel('Какого результата хотите достичь?').fill('Submit with a recovered CSRF token')

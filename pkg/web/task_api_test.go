@@ -1415,3 +1415,82 @@ func TestFlowMetrics1000RunsUnder300ms(t *testing.T) {
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
+
+func TestTaskListSharesTemplateLookupsAndKeepsStageEntry(t *testing.T) {
+	target := t.TempDir()
+	controlDir := filepath.Join(target, ".ai-team")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.DefaultProfile(config.ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateYAML, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), templateYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
+		WithTargetDir(target), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	templateStore, err := srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := NewStoreRecorder(srv.store)
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	const runs = 5
+	for index := 0; index < runs; index++ {
+		runID := fmt.Sprintf("run-n%d", index)
+		if _, err := templateStore.PinCurrentForRun(runID, runID); err != nil {
+			t.Fatal(err)
+		}
+		recorder.RunStarted(runID, "feature-n", `{"task":"idea","mode":"manual"}`, created)
+		if err := stateStore.Create(lifecycle.State{
+			RunID: runID, Feature: "feature-n", TargetDir: target, Task: "idea",
+			Phase: lifecycle.PhaseRunning, NextStage: "acceptance",
+			ConfigSHA256: strings.Repeat("a", 64), WorkflowSHA256: strings.Repeat("b", 64), CreatedAt: created,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A same-stage save (running → resumable) must not reset the stage entry time.
+	previous, err := stateStore.Load("run-n0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := previous
+	next.Phase = lifecycle.PhaseResumable
+	if err := stateStore.Save(previous, next); err != nil {
+		t.Fatal(err)
+	}
+
+	lookup := srv.newTaskTemplateLookup()
+	items, err := srv.listTaskRunsWith(lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != runs {
+		t.Fatalf("listed %d runs, want %d", len(items), runs)
+	}
+	// Each run pin is read once and the shared pinned version is parsed once,
+	// instead of several store/YAML round trips per task.
+	if lookup.pinReads != runs || lookup.parses != 1 {
+		t.Fatalf("template lookups: pin reads=%d parses=%d (want %d and 1)", lookup.pinReads, lookup.parses, runs)
+	}
+	for _, item := range items {
+		if item.CurrentFunction == "" || item.StageEnteredAt == nil || !item.StageEnteredAt.Equal(created) {
+			t.Fatalf("run %s: function=%q stage entered=%v (want %v)", item.RunID, item.CurrentFunction, item.StageEnteredAt, created)
+		}
+	}
+}

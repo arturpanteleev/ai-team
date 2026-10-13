@@ -657,9 +657,13 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	checkDir(t, dir, ".ai-team", "artifacts", "tasks")
 	checkDir(t, dir, ".ai-team", "reports")
 	checkDir(t, dir, ".ai-team", "logs")
-	gitignore, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if err != nil || !strings.Contains(string(gitignore), ".ai-team/") {
-		t.Fatalf("--write-gitignore должен записать правило: err=%v\n%s", err, gitignore)
+	// Исключение пишется в .git/info/exclude, версионируемый .gitignore не меняется.
+	exclude, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	if err != nil || !strings.Contains(string(exclude), ".ai-team/") {
+		t.Fatalf("init должен записать исключение в .git/info/exclude: err=%v\n%s", err, exclude)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); err == nil {
+		t.Fatalf("init не должен создавать или менять версионируемый .gitignore")
 	}
 }
 

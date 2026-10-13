@@ -107,7 +107,7 @@ test('global event feed filters warnings and opens the linked task', async ({ pa
       return route.fulfill({ status: 400, json: { error: `unexpected before ${params.before}`, code: 'bad_event_query' } })
     })
 
-    await page.getByRole('link', { name: 'Лента' }).click()
+    await page.goto('/events')
     await expect(page.getByRole('heading', { name: 'Лента событий' })).toBeVisible()
     await expect(page.getByText('Ошибка проверки')).toBeVisible()
     expect(feedRequests[0]).toEqual({ order: 'desc', limit: '100' })

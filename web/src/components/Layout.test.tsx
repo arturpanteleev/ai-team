@@ -25,8 +25,15 @@ describe('Layout team navigation', () => {
     renderLayout(false);
 
     expect(screen.queryByRole('link', { name: 'Команда' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Лента' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Наблюдаемость' })).toHaveAttribute('href', '/observability');
+  });
+
+  it('оставляет в меню только рабочие разделы: без ленты, наблюдаемости и отдельного «Шаблон»', () => {
+    renderLayout(false);
+
+    expect(screen.getByRole('link', { name: 'Шаблоны' })).toHaveAttribute('href', '/template');
+    expect(screen.queryByRole('link', { name: 'Лента' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Наблюдаемость' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Шаблон' })).not.toBeInTheDocument();
   });
 
   it('keeps Team navigation for cloud auth', () => {

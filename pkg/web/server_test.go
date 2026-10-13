@@ -1457,6 +1457,25 @@ func TestAmbiguousQueueInsertFailureConvergesThroughAdmissionRecovery(t *testing
 	}
 }
 
+func TestBackgroundResumeFailureKeepsApprovalCheckpointVisible(t *testing.T) {
+	srv, _ := newTestServer(t)
+	run := &store.PipelineRun{
+		RunID: "run-resume-error", Feature: "feat", Status: "waiting_for_approval", StartedAt: time.Now(),
+	}
+	if err := srv.store.CreatePipelineRun(run); err != nil {
+		t.Fatal(err)
+	}
+	srv.RecordAdmissionFailure(run.RunID, "resume run: provenance drift")
+	got, err := srv.store.GetPipelineRunByRunID(run.RunID)
+	if err != nil || got.Status != "waiting_for_approval" {
+		t.Fatalf("resume failure changed checkpoint: run=%+v err=%v", got, err)
+	}
+	event, err := srv.store.LatestRunEvent(run.RunID, "run_resume_failed")
+	if err != nil || event == nil || !strings.Contains(event.DataJSON, "provenance drift") {
+		t.Fatalf("resume failure was hidden: event=%+v err=%v", event, err)
+	}
+}
+
 func TestRunLogReturnsBoundedTail(t *testing.T) {
 	srv, artifactRoot := newTestServer(t)
 	run := &store.PipelineRun{RunID: "run-log", Feature: "feat", Status: "running", StartedAt: time.Now()}

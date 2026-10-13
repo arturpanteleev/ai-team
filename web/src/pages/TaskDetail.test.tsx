@@ -986,6 +986,43 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(await screen.findByText('Ждём ответ сервера…')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Сохраняем…' })[0]).toBeDisabled();
   });
+  it('resumes the run after the product question answer is resolved', async () => {
+    const api = await import('../api');
+    const question = {
+      id: 'q-resume', run_id: 'run-detail-1', attempt_id: 'attempt-q', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'graph_outcome:blocked', subject_hash: 'e'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Кто клиент?' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'intent', pending_approval_id: question.id },
+      approvals: [question],
+      allowed_actions: [],
+    });
+    vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...question, status: 'resolved', resolved_action: 'answer_questions' });
+    renderDetail();
+
+    await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' });
+    const card = document.getElementById('current-stage');
+    fireEvent.change(within(card!).getByLabelText('Ответ на вопрос'), { target: { value: 'B2B' } });
+    fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
+
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+  });
+  it('shows a background resume error while keeping the answered task available', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(baseDetails);
+    vi.mocked(api.getTaskRunEvents).mockResolvedValue({ events: [{
+      version: 1, cursor: 7, sequence: 7, run_id: 'run-detail-1',
+      type: 'run_resume_failed', timestamp: '2026-10-12T09:03:00Z',
+      data: { error: 'resume run: provenance drift: runtime changed' },
+    }], next_cursor: 7 });
+    renderDetail();
+
+    expect(await screen.findByTestId('stage-failure')).toHaveTextContent('provenance drift: runtime changed');
+    expect(screen.getByRole('button', { name: 'Продолжить задачу' })).toBeInTheDocument();
+  });
   it('moves the launch notice to the working state once the server reports the agent attempt', async () => {
     const api = await import('../api');
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([]));

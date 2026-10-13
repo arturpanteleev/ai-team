@@ -88,6 +88,7 @@ function httpLink(value: string): boolean {
 function eventTitle(type: string): string {
   const titles: Record<string, string> = {
     run_started: 'Задача создана', run_resumed: 'Задача продолжена', run_paused: 'Задача приостановлена',
+    run_resume_failed: 'Не удалось продолжить задачу',
     run_canceled: 'Задача отменена', run_finished: 'Задача завершена', attempt_started: 'Этап начат',
     attempt_finished: 'Этап завершён', attempts_invalidated: 'Результаты этапа пересчитаны',
     approval_requested: 'Запрошено решение', approval_decided: 'Решение принято',
@@ -441,6 +442,12 @@ export function TaskDetail() {
   const failureTitle = failureAttempt ? `Этап «${stageTitle(failureAttempt.agent_name)}» упал` : 'Прогон завершился ошибкой';
   const failureReason = shortError(failureAttempt?.error) || shortError(run.error)
     || 'Причина в данных задачи не записана. Откройте лог этапа, чтобы увидеть подробности.';
+  const latestResumeOutcome = [...visibleSnapshot.events].reverse().find((event) =>
+    event.type === 'run_resume_failed' || event.type === 'run_resumed');
+  const resumeFailure = run.status === 'waiting_for_approval' && latestResumeOutcome?.type === 'run_resume_failed'
+    ? latestResumeOutcome : undefined;
+  const resumeFailureReason = resumeFailure && typeof resumeFailure.data.error === 'string'
+    ? resumeFailure.data.error : 'Сервер не записал причину ошибки возобновления.';
 
 
   const route = (template?.stages ?? []).map((stage, index) => {
@@ -454,11 +461,14 @@ export function TaskDetail() {
 
   const sendDecision = (value: Approval, role: string, action: string, comment?: string) => perform(
     `Решение: ${approvalLabel(action)}`,
-    () => decideApproval(run.run_id, value, {
-      actor_id: principal?.actor_id ?? actor, actor_role: role, action, comment,
-      ...(value.artifact_revisions && Object.keys(value.artifact_revisions).length > 0
-        ? { artifact_revisions: value.artifact_revisions } : {}),
-    }), 'decision');
+    async () => {
+      const resolved = await decideApproval(run.run_id, value, {
+        actor_id: principal?.actor_id ?? actor, actor_role: role, action, comment,
+        ...(value.artifact_revisions && Object.keys(value.artifact_revisions).length > 0
+          ? { artifact_revisions: value.artifact_revisions } : {}),
+      });
+      if (action === 'answer_questions' && resolved.status === 'resolved') await resumeRun(run.run_id);
+    }, 'decision');
 
   function approvalLabel(action: string): string {
     if (action === 'answer_questions') return 'Ответить и продолжить';
@@ -608,6 +618,7 @@ export function TaskDetail() {
 
         <div className={styles.stage}>
           <section id="current-stage" className={`${styles.panel} ${styles.stageCard}`} aria-labelledby="current-stage-heading">
+            {resumeFailure && <FailureNotice runID={run.run_id} title="Не удалось продолжить задачу" reason={resumeFailureReason} />}
             {showFailure && <FailureNotice runID={run.run_id} title={failureTitle} reason={failureReason} attempt={failureAttempt} />}
             <div className={styles.panelHeading}>
               <div>

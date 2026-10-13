@@ -971,6 +971,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}
 			}
 		}
+		// A clarification loop may land on a human-owned stage. Its input gate
+		// creates a new approval before the agent can run again; the resolved
+		// executor choice must not discard the answer from the preceding loop.
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			resumedApproval.Kind == approval.KindInput && resumedApproval.FromStage == runCfg.retryFrom &&
+			(resumedApproval.ResolvedAction == "run_agent" || resumedApproval.ResolvedAction == "refine_agent") {
+			recoveredClarification, err = RecoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("resume clarification through human input: %w", err)
+			}
+		}
 		if resumedState.ActiveApprovalID != "" {
 			if resumedState.NextStage != runCfg.retryFrom {
 				// Evidence reconciliation moved past the stage that owned this
@@ -1530,26 +1541,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{RunID: runID, Outcome: outcome}, finalErr
 		}
 		if inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
-			filtered := make([]runtime.Artifact, 0, len(inputs)+1)
-			for _, input := range inputs {
-				if input.Name == "questions" {
-					filtered = append(filtered, input)
-				}
-			}
-			var answer runtime.Artifact
-			var answerErr error
-			if p.questionAnswerInputs != nil {
-				answer, answerErr = p.questionAnswerInputs.MaterializeQuestionAnswer(runID, inputApproval.ID)
-			} else {
-				answer, answerErr = writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
-			}
-			if answerErr != nil {
-				outcome, finalErr := rs.finalize(answerErr)
+			clarification, clarificationErr := rs.clarificationInputs(*inputApproval)
+			if clarificationErr != nil {
+				outcome, finalErr := rs.finalize(clarificationErr)
 				return RunResult{RunID: runID, Outcome: outcome}, finalErr
 			}
-			filtered = append(filtered, answer)
-			filtered = append(filtered, briefInputs(rs.brief)...)
-			rs.extraInputs[runCfg.retryFrom] = filtered
+			rs.extraInputs[runCfg.retryFrom] = clarification
 		} else if isApprovedSpecPayload(inputApproval.Payload) {
 			var payload approvedSpecPayload
 			if err := json.Unmarshal(inputApproval.Payload, &payload); err != nil || payload.Kind != "agreed_spec" ||
@@ -1599,6 +1596,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], feedback)
 			}
 		}
+	}
+	if recoveredClarification != nil && inputApproval != nil && inputApproval.Kind == approval.KindInput &&
+		(inputApproval.ResolvedAction == "run_agent" || inputApproval.ResolvedAction == "refine_agent") {
+		clarification, clarificationErr := rs.clarificationInputs(*recoveredClarification)
+		if clarificationErr != nil {
+			outcome, finalErr := rs.finalize(clarificationErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		rs.questionAnswerTargetStage = recoveredClarification.FromStage
+		rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], clarification...)
 	}
 	// A grill-approved human revision belongs to the source result, but the
 	// attempt manifest remains immutable. If a process crashed after the

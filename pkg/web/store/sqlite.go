@@ -719,7 +719,7 @@ func (s *Store) LatestEventCursor() (int64, error) {
 var WarningEventTypes = []string{
 	"check_overridden", "check_error", "description_missing",
 	"stage_skipped", "stage_stalled", "integration_error",
-	"budget_exceeded", "auto_pickup_deferred", "auto_pickup_failed",
+	"budget_exceeded", "auto_pickup_deferred", "auto_pickup_failed", "run_resume_failed",
 }
 
 // CountRunWarningEvents groups warning events by run for the given run IDs.

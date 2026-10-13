@@ -446,6 +446,14 @@ func (s *Server) RecordAdmissionFailure(runID, cause string) {
 			return
 		}
 	}
+	if existing != nil && existing.Status == "waiting_for_approval" {
+		// A failed background resume leaves the durable approval checkpoint
+		// intact. Surface the error without turning that resumable run terminal.
+		s.appendRunEvent(runID, "run_resume_failed", now, map[string]any{
+			"status": existing.Status, "error": cause, "severity": "warning",
+		})
+		return
+	}
 	changed, err := s.store.MarkRunAdmissionFailure(runID, cause, now)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ admission failure projection: %v\n", err)

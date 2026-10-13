@@ -851,21 +851,96 @@ func (s *Store) ReconcileInterrupted(at time.Time) error {
 	return tx.Commit()
 }
 
+// schemaQuerier is the part of *sql.Conn the migration needs; the migration
+// runs on a dedicated connection inside an explicit BEGIN IMMEDIATE.
+type schemaQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// storedSchemaVersion reads MAX(version) without writing anything; a database
+// without schema_migrations (new or pre-versioning) reports version 0.
+func storedSchemaVersion(ctx context.Context, q schemaQuerier) (int64, error) {
+	var tables int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+	var latest sql.NullInt64
+	if err := q.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil {
+		return 0, err
+	}
+	return latest.Int64, nil
+}
+
+func checkSchemaVersion(version int64) error {
+	if version > SchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, SchemaVersion)
+	}
+	return nil
+}
+
+// migrate brings the schema to SchemaVersion. Opening a database that is
+// already at SchemaVersion only reads the version and takes no write lock, so
+// concurrent opens of a busy database cannot fail with SQLITE_BUSY (BL-33).
+// A database with a newer version is refused, so an old binary never opens a
+// schema it does not understand. When a migration is needed it runs under
+// BEGIN IMMEDIATE: the write lock is taken up front (waiting via
+// busy_timeout) instead of upgrading a stale read snapshot, and the version is
+// re-read under the lock in case another process migrated first.
 func migrate(db *sql.DB) error {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	version, err := storedSchemaVersion(ctx, db)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }() // Rollback после успешного Commit возвращает ErrTxDone — штатный исход этого defer.
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+	if err := checkSchemaVersion(version); err != nil {
 		return err
 	}
-	var latest sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil {
+	if version == SchemaVersion {
+		return nil
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
 		return err
 	}
-	if latest.Valid && latest.Int64 > SchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", latest.Int64, SchemaVersion)
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	version, err = storedSchemaVersion(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := checkSchemaVersion(version); err != nil {
+		return err
+	}
+	if version < SchemaVersion {
+		if err := applyMigrations(ctx, conn); err != nil {
+			return err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// applyMigrations is idempotent: every statement tolerates a partially
+// migrated database, so it can run from any older version.
+func applyMigrations(ctx context.Context, tx schemaQuerier) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		return err
 	}
 	base := []string{
 		`CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -878,7 +953,7 @@ func migrate(db *sql.DB) error {
 			FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id))`,
 	}
 	for _, query := range base {
-		if _, err := tx.Exec(query); err != nil {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return err
 		}
 	}
@@ -890,7 +965,7 @@ func migrate(db *sql.DB) error {
 		{"stages", "checks_json", "TEXT"}, {"stages", "mutations_json", "TEXT"}, {"stages", "delivery_json", "TEXT"},
 	}
 	for _, column := range columns {
-		if err := ensureColumn(tx, column.table, column.name, column.declaration); err != nil {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.declaration); err != nil {
 			return err
 		}
 	}
@@ -950,11 +1025,11 @@ func migrate(db *sql.DB) error {
 			for _, column := range []struct{ name, declaration string }{
 				{"stage", "TEXT"}, {"actor", "TEXT"}, {"executor", "TEXT"}, {"severity", "TEXT"}, {"dedupe_key", "TEXT"},
 			} {
-				if err := ensureColumn(tx, "events", column.name, column.declaration); err != nil {
+				if err := ensureColumn(ctx, tx, "events", column.name, column.declaration); err != nil {
 					return err
 				}
 			}
-			if _, err := tx.Exec(`UPDATE events SET
+			if _, err := tx.ExecContext(ctx, `UPDATE events SET
 				stage = COALESCE(NULLIF(stage, ''), json_extract(data_json, '$.stage'), json_extract(data_json, '$.stage_id'), json_extract(data_json, '$.from_stage'), ''),
 				actor = COALESCE(NULLIF(actor, ''), json_extract(data_json, '$.actor'), json_extract(data_json, '$.actor_id'), ''),
 				executor = COALESCE(NULLIF(executor, ''), json_extract(data_json, '$.executor'), ''),
@@ -963,15 +1038,15 @@ func migrate(db *sql.DB) error {
 				return err
 			}
 		}
-		if _, err := tx.Exec(query); err != nil {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-func ensureColumn(tx *sql.Tx, table, name, declaration string) error {
-	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)
+func ensureColumn(ctx context.Context, tx schemaQuerier, table, name, declaration string) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return err
 	}
@@ -993,7 +1068,7 @@ func ensureColumn(tx *sql.Tx, table, name, declaration string) error {
 	if exists {
 		return nil
 	}
-	_, err = tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + declaration)
+	_, err = tx.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+name+` `+declaration)
 	return err
 }
 

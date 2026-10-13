@@ -23,7 +23,7 @@ function executorLabel(run: TaskRun): string {
 }
 
 const statusTone: Record<string, BubbleTone> = {
-  running: 'yellow', queued: 'lilac', waiting_for_approval: 'lilac', completed: 'mint',
+  running: 'yellow', queued: 'mustard', waiting_for_approval: 'mustard', completed: 'mint',
   completed_with_warnings: 'mint', failed: 'coral', blocked: 'coral', interrupted: 'coral',
   stopped: 'coral', canceled: 'blue',
 };
@@ -70,7 +70,7 @@ export function TaskCard({ run, stageTitle, now, onCancel }: TaskCardProps) {
     >
       <div className={styles.header}>
         <div className={styles.titleRow}>
-          <Bubble tone={statusTone[run.status] ?? 'lilac'} size="sm">
+          <Bubble tone={statusTone[run.status] ?? 'mustard'} size="sm">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="5" y="4" width="14" height="16" rx="4" /><path d="M9 12l2 2 4-4" />
             </svg>

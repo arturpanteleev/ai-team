@@ -36,7 +36,7 @@
 
 .card[data-status='completed']::before,
 .card[data-status='completed_with_warnings']::before {
-  background: var(--tint-lilac);
+  background: var(--tint-mustard);
 }
 
 .card:hover {

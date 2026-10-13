@@ -9,7 +9,7 @@ import styles from './Layout.module.css';
 type IconName = 'tasks' | 'board' | 'template' | 'feed' | 'observability' | 'team';
 
 const navTone: Record<IconName, BubbleTone> = {
-  tasks: 'yellow', board: 'mint', template: 'lilac', feed: 'coral', observability: 'blue', team: 'yellow',
+  tasks: 'yellow', board: 'mint', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow',
 };
 
 // Иконки намеренно простые: контур 1.8px, наследуют цвет текста (внутри пузыря).

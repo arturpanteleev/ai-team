@@ -545,93 +545,19 @@
   overflow-wrap: anywhere;
 }
 
-.route {
-  display: flex;
-  gap: 0;
-  margin: 0;
-  padding: 4px 0 6px;
-  list-style: none;
-  overflow-x: auto;
-}
 
-.routeItem {
-  position: relative;
-  flex: 1 0 128px;
-  display: grid;
-  justify-items: start;
-  gap: 4px;
-  min-width: 128px;
-  padding: 0 10px 0 0;
-  color: var(--text-muted);
-}
 
 /* Линия между этапами: проходит через точки. */
-.routeItem::before {
-  content: '';
-  position: absolute;
-  top: 14px;
-  left: 34px;
-  right: 6px;
-  height: 3px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-muted);
-}
 
-.routeItem:last-child::before {
-  display: none;
-}
 
-.routeItem[data-state='passed']::before {
-  background: var(--tint-teal);
-}
 
-.routeDot {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 700;
-}
 
-.routeItem[data-state='passed'] {
-  color: var(--text-muted);
-}
 
-.routeItem[data-state='passed'] .routeDot {
-  background: var(--tint-teal);
-  color: var(--ink-teal);
-}
 
-.routeItem[data-state='current'] {
-  color: var(--text-primary);
-}
 
-.routeItem[data-state='current'] .routeDot {
-  background: var(--create-yellow);
-  color: var(--on-yellow);
-  box-shadow: 0 0 0 4px var(--tint-yellow);
-}
 
-.routeItem[data-state='upcoming'] {
-  color: var(--text-muted);
-}
 
-.routeTitle {
-  font-weight: 650;
-  font-size: 14px;
-  overflow-wrap: anywhere;
-}
 
-.routeState {
-  font-size: 12px;
-  color: var(--text-muted);
-}
 
 .modes {
   display: grid;
@@ -652,12 +578,12 @@
 }
 
 .modeCard:first-child {
-  background: var(--tint-lilac);
-  color: var(--ink-lilac);
+  background: var(--tint-mustard);
+  color: var(--ink-mustard);
 }
 
 .modeCard:first-child p {
-  color: var(--ink-lilac);
+  color: var(--ink-mustard);
 }
 
 .modeCard h3 {
@@ -904,10 +830,6 @@
     padding: 20px 18px 18px;
   }
 
-  .routeItem {
-    flex-basis: 112px;
-    min-width: 112px;
-  }
 
   .stageCard {
     padding: 20px 18px;
@@ -943,13 +865,7 @@
   margin-top: 14px;
 }
 
-.routePanel {
-  padding: 16px 20px;
-}
 
-.routePanel > h2 {
-  font-size: 1rem;
-}
 
 .agentStatus {
   min-width: 0;
@@ -1024,18 +940,8 @@
 }
 
 /* Упавший этап: красный в полосе маршрута и в карточке текущего этапа. */
-.routeItem[data-state='failed'] {
-  color: var(--danger-fg);
-}
 
-.routeItem[data-state='failed']::before {
-  background: var(--danger-bg);
-}
 
-.routeItem[data-state='failed'] .routeDot {
-  background: var(--danger-fg);
-  color: var(--danger-bg);
-}
 
 .failure {
   min-width: 0;
@@ -1155,4 +1061,179 @@
   border-right-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+/* Идея: одна карточка слева сверху. */
+.ideaCard h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: clamp(1.35rem, 2.6vw, 1.75rem);
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.stageLine {
+  display: inline-block;
+  max-width: 100%;
+  margin: 10px 0 0;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--tint-yellow);
+  color: var(--ink-yellow);
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.ideaCard > .eyebrow {
+  margin-top: 18px;
+}
+
+.expect {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* Маршрут: рельса по всей ширине; больше шести этапов - две строки змейкой. */
+.rails {
+  display: grid;
+  gap: 30px;
+  min-width: 0;
+  padding: 6px 4px 0;
+}
+
+.routeRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rowBottom {
+  direction: rtl;
+}
+
+.routeItem {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 6px;
+  direction: ltr;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.rowBottom .routeItem {
+  flex-direction: column;
+}
+
+.routeText {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+}
+
+.routeTitle {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.routeState {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.routeDot {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Рельса: линия между соседними кружками в строке; для второй строки - ниже кружка. */
+.routeItem:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-inline-end: -50%;
+  height: 2px;
+  background: var(--border-strong);
+  bottom: 11px;
+}
+
+.rowBottom .routeItem:not(:last-child)::after {
+  bottom: auto;
+  top: 11px;
+  inset-inline-start: -50%;
+  inset-inline-end: 50%;
+}
+
+/* Загиб: от последнего кружка первой строки вниз к первому кружку второй. */
+.routeItem[data-turn]::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 50%;
+  top: calc(100% - 12px);
+  width: 2px;
+  height: 54px;
+  background: var(--border-strong);
+}
+
+.routeItem[data-state='passed'] .routeDot {
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
+.routeItem[data-state='current'] {
+  color: var(--text-primary);
+}
+
+.routeItem[data-state='current'] .routeDot {
+  background: var(--create-yellow);
+  color: var(--on-yellow);
+  box-shadow: 0 0 0 4px var(--tint-yellow);
+}
+
+.routeItem[data-state='failed'] {
+  color: var(--danger-fg);
+}
+
+.routeItem[data-state='failed'] .routeDot {
+  background: var(--danger-fg);
+  color: var(--danger-bg);
+}
+
+.routeItem[data-state='upcoming'] .routeDot {
+  background: var(--surface-muted);
+}
+
+@media (max-width: 600px) {
+  .rails {
+    gap: 26px;
+  }
+
+  .routeTitle {
+    font-size: 11px;
+  }
 }

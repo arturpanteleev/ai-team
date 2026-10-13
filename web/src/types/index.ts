@@ -210,6 +210,7 @@ export interface ApprovalDecision {
 
 export interface Approval {
   id: string;
+  kind?: string;
   run_id: string;
   attempt_id: string;
   from_stage: string;

@@ -185,6 +185,7 @@ export function TaskDetail() {
   const [activeKey, setActiveKey] = useState<ActionKey | null>(null);
   const [errorScope, setErrorScope] = useState<ErrorScope>('stage');
   const [intentText, setIntentText] = useState<string | null>(null);
+  const [ideaOpen, setIdeaOpen] = useState(false);
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const snapshotRef = useRef<TaskDetailSnapshot | null>(null);
   const activeRunID = useRef(runID);
@@ -625,7 +626,17 @@ export function TaskDetail() {
     </article>;
   };
 
+  // The idea block: its first line is the title, the next lines a preview, the whole text sits under «Подробности».
+  // Full idea text is mounted only while «Подробности» is open, so the title and preview never repeat in the DOM.
+  const ideaBody = (intentText !== null ? stripLeadingHeading(intentText) : (details.task ?? '')).trim();
+  const ideaLines = ideaBody.split('\n').map((line) => line.replace(/^#+\s*/, '').trim()).filter(Boolean);
+  const ideaTitle = ideaLines[0] ? (ideaLines[0].length > 120 ? `${ideaLines[0].slice(0, 117)}…` : ideaLines[0]) : 'Без названия';
+  const ideaPreviewText = ideaLines.slice(1).join(' ');
+  const ideaPreview = ideaPreviewText.length > 280 ? `${ideaPreviewText.slice(0, 277)}…` : ideaPreviewText;
+
   // Одна строка о том, что сделать прямо сейчас; подробности — в блоках ниже.
+  // A pending result decision (approve / decline) is the one action left: start-work cards would only duplicate it.
+  const choiceOwnsStage = Boolean(currentDecision && currentDecision.trigger !== 'human_input');
   const nextStep = (() => {
     if (issue) return null;
     if (currentDecision?.kind === 'check_decision') return 'Проверка не прошла или не завершилась. Откройте отчёт и отправьте результат на повторную проверку.';
@@ -645,6 +656,8 @@ export function TaskDetail() {
             <div className={styles.ideaTop}>
               <h2 id="idea-heading">Бизнес-идея</h2>
             </div>
+            <p className={styles.ideaTitle}>{ideaTitle}</p>
+            {ideaPreview && <p className={styles.ideaPreview}>{ideaPreview}</p>}
             {(details.external_links ?? []).length > 0 && (
               <ul className={styles.externalLinks} aria-label="Внешние ссылки">
                 {details.external_links?.map((value) => (
@@ -653,14 +666,12 @@ export function TaskDetail() {
                     : <code>{value}</code>}</li>
                 ))}
               </ul>
-            )}
-            {intentText !== null
-              ? <div className={styles.markdown}><ReactMarkdown>{stripLeadingHeading(intentText)}</ReactMarkdown></div>
-              : details.task
-                ? <p className={styles.task}>{details.task}</p>
-                : <p>Текст идеи пока не записан.</p>}
-            <details className={styles.details}>
+              )}
+            <details className={styles.details} onToggle={(event) => setIdeaOpen(event.currentTarget.open)}>
               <summary>Подробности</summary>
+              {ideaOpen && (ideaBody
+                ? <div className={styles.markdown}><ReactMarkdown>{ideaBody}</ReactMarkdown></div>
+                : <p>Текст идеи пока не записан.</p>)}
               <dl>
                 <div><dt>ID задачи</dt><dd><CopyableHash value={run.run_id} label="ID задачи" /></dd></div>
                 <div><dt>Фича</dt><dd><code>{run.feature}</code></dd></div>
@@ -751,7 +762,7 @@ export function TaskDetail() {
             {working && <p className={styles.waiting} role="status"><span className={styles.buttonSpinner} aria-hidden="true" />Ждём ответ сервера…</p>}
             {actionError && errorScope === 'stage' && <p className={styles.actionError} role="alert">{actionError}</p>}
 
-            {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && <div className={styles.modes}>
+            {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && !choiceOwnsStage && <div className={styles.modes}>
               {allowed.has('results') && <article className={styles.modeCard}>
                 <h3>Сделаю сам</h3>
                 <div className={styles.actions}>

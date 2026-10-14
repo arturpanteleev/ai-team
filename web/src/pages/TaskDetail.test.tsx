@@ -910,6 +910,12 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(returnButton).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Комментарий для доработки или возврата'), { target: { value: 'Уточнить роли' } });
     expect(returnButton).toBeEnabled();
+    vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'new_version' } as never);
+    fireEvent.click(within(stage).getByRole('button', { name: 'Доработать результат и проверить снова' }));
+    await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
+      action: 'new_version', actor_id: 'owner', actor_role: 'po',
+    })));
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
     const override = within(stage).getByRole('button', { name: 'Подтвердить без проверки' });
     expect(override).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Причина подтверждения без проверки'), { target: { value: 'Проверка недоступна' } });

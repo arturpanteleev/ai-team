@@ -1142,8 +1142,16 @@ func allowedRunArtifactPath(relative string) bool {
 		return true
 	}
 	parts := strings.Split(relative, "/")
+	if len(parts) == 2 && parts[0] == "checks" && parts[1] != "" && strings.HasSuffix(parts[1], ".md") {
+		return true
+	}
 	return len(parts) >= 4 && parts[0] == "attempts" && parts[1] != "" &&
 		(parts[2] == "artifacts" || parts[2] == "inputs")
+}
+
+func allowedRunArtifactRevisionPath(relative string) bool {
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))
+	return allowedRunArtifactPath(relative) && !strings.HasPrefix(cleaned, "checks/")
 }
 
 func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, root, rel string) {

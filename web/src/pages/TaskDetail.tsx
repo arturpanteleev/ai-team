@@ -111,6 +111,14 @@ function payloadMarkdown(payload: unknown): string | null {
   return typeof markdown === 'string' ? markdown : null;
 }
 
+function checkReportPath(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const path = (payload as { report_path?: unknown }).report_path;
+  if (typeof path !== 'string' || !path.endsWith('.md')) return null;
+  const name = path.split('/').at(-1);
+  return name ? `checks/${name}` : null;
+}
+
 function nextStageFromGraph(graph: WorkflowGraph | undefined, stageID: string): string | undefined {
   const edges = graph?.edges.filter((edge) => edge.from === stageID) ?? [];
   return (edges.find((edge) => edge.outcome === 'passed') ?? edges[0])?.to;
@@ -138,6 +146,19 @@ function briefLink(runID: string, path: string): string {
   return `/artifacts/${encodeURIComponent(runID)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+function isStageResultArtifact(artifact: Artifact, attemptID: string): boolean {
+  return artifact.path.startsWith(`attempts/${attemptID}/artifacts/`)
+    && !['/status/', '/.stage-check/', '/human/', '/tasks/'].some((part) => artifact.path.includes(part))
+    && /\.(md|markdown)$/i.test(artifact.path);
+}
+
+function canonicalApprovalRole(role: string): string {
+  const value = role.trim().toLowerCase();
+  if (['bo', 'po', 'business_owner'].includes(value)) return 'product_owner';
+  if (value === 'deployer') return 'release_manager';
+  return value;
+}
+
 export function TaskDetail() {
   const principal = getActivePrincipal();
   const { runID = '' } = useParams<{ runID: string }>();
@@ -163,6 +184,8 @@ export function TaskDetail() {
   const [activeKey, setActiveKey] = useState<ActionKey | null>(null);
   const [errorScope, setErrorScope] = useState<ErrorScope>('stage');
   const [intentText, setIntentText] = useState<string | null>(null);
+  const [resultPreview, setResultPreview] = useState<string | null>(null);
+  const [resultPreviewError, setResultPreviewError] = useState('');
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const snapshotRef = useRef<TaskDetailSnapshot | null>(null);
   const activeRunID = useRef(runID);
@@ -280,6 +303,12 @@ export function TaskDetail() {
   const currentRunID = run?.run_id;
   const runStatus = run?.status;
   const runDbID = run?.id;
+  const lastStageAttempt = [...(details?.stages ?? []).filter((stage) => stage.agent_name === currentStageID)]
+    .sort((left, right) => left.stage_index - right.stage_index).at(-1);
+  const currentOutputArtifacts = (visibleSnapshot?.artifacts ?? []).filter((artifact) =>
+    artifact.run_id === currentRunID && !!lastStageAttempt &&
+    isStageResultArtifact(artifact, lastStageAttempt.attempt_id));
+  const primaryResultPath = currentOutputArtifacts[0]?.path ?? '';
 
   // A draft saved before a page reload reopens the result form for that stage.
   useEffect(() => {
@@ -291,20 +320,31 @@ export function TaskDetail() {
   useEffect(() => { setReturnTarget(''); }, [currentStageID]);
   useEffect(() => { setAgentLaunch(idleLaunch); setResultAccepted(false); }, [currentStageID]);
 
-  // Текст намерения: последняя версия brief/ читается с сервера и показывается на странице.
+  // Бизнес-идея остаётся первоначальной: последующие brief/ содержат ответы и вопросы.
   const briefArtifacts = (visibleSnapshot?.artifacts ?? [])
     .filter((artifact) => artifact.run_id === currentRunID && artifact.path.startsWith('brief/'))
     .sort((left, right) => left.path.localeCompare(right.path));
-  const latestBriefPath = briefArtifacts.at(-1)?.path ?? '';
+  const initialBriefPath = briefArtifacts[0]?.path ?? '';
   useEffect(() => {
     setIntentText(null);
-    if (!currentRunID || !latestBriefPath) return;
+    if (!currentRunID || !initialBriefPath) return;
     let active = true;
-    getArtifact(currentRunID, latestBriefPath)
+    getArtifact(currentRunID, initialBriefPath)
       .then((text) => { if (active) setIntentText(text); })
       .catch(() => { if (active) setIntentText(null); });
     return () => { active = false; };
-  }, [currentRunID, latestBriefPath]);
+  }, [currentRunID, initialBriefPath]);
+
+  useEffect(() => {
+    setResultPreview(null);
+    setResultPreviewError('');
+    if (!currentRunID || !primaryResultPath) return;
+    let active = true;
+    getArtifact(currentRunID, primaryResultPath)
+      .then((text) => { if (active) setResultPreview(text); })
+      .catch(() => { if (active) setResultPreviewError('Не удалось загрузить результат. Откройте файл по ссылке ниже.'); });
+    return () => { active = false; };
+  }, [currentRunID, primaryResultPath]);
 
   // Частичная выдача бюджета доступна только если сервер так отметил задачу.
   useEffect(() => {
@@ -403,15 +443,15 @@ export function TaskDetail() {
   const resumable = resumableStatuses.includes(run.status);
   const cancelable = cancelableStatuses.includes(run.status);
   const finished = finishedStatuses.includes(run.status);
-  const canAct = (role: string) => !principal || (principal.roles as string[]).includes(role);
+  const canAct = (role: string) => !principal || principal.roles.some((heldRole) => heldRole === canonicalApprovalRole(role));
   const attemptArtifacts = (stage: Stage) => visibleSnapshot.artifacts.filter((artifact) =>
     artifact.path.includes(`attempts/${stage.attempt_id}/`));
 
   // Что произойдёт после подтверждения текущего этапа.
-  const confirmTargetID = pending?.targets?.approve
+  const confirmTargetID = pending?.targets?.approve_spec ?? pending?.targets?.approve
     ?? nextStageFromGraph(template?.graph, currentStageID)
     ?? template?.stages[template.stages.findIndex((stage) => stage.id === currentStageID) + 1]?.id;
-  const confirmHint = currentStage && (allowed.has('confirm') || pending?.trigger === 'stage_check')
+  const confirmHint = currentStage && allowed.has('confirm')
     ? confirmTargetID ? `Что произойдёт после подтверждения: ${stageTitle(confirmTargetID)}`
       : 'Что произойдёт после подтверждения: задача завершится'
     : null;
@@ -427,12 +467,15 @@ export function TaskDetail() {
   // Approvals that ask for an answer are answered in the current stage card, not in the approvals list.
   const questionDecisions = details.approvals.filter((approval) => approval.status === 'pending'
     && (approval.actions.includes('answer_questions') || approval.kind === 'questions') && !(grillAllowed && approval.id === pending?.id));
-  const otherDecisions = pendingDecisions;
+  const currentDecision = pendingDecisions.find((approval) => approval.id === pending?.id
+    && !approval.actions.includes('answer_questions') && approval.kind !== 'questions');
+  const otherDecisions = pendingDecisions.filter((approval) => approval.id !== currentDecision?.id
+    && !questionDecisions.some((question) => question.id === approval.id));
   const decidedDecisions = details.approvals.filter((approval) => approval.status !== 'pending' && payloadMarkdown(approval.payload) === null);
   const runningAttempt = details.stages.find((stage) => stage.status === 'running' && stage.agent_name === currentStageID);
   const latestAttemptFor = (stageID: string) => [...details.stages.filter((stage) => stage.agent_name === stageID)]
     .sort((left, right) => left.stage_index - right.stage_index).at(-1);
-  const lastAgentAttempt = latestAttemptFor(currentStageID);
+  const lastAgentAttempt = lastStageAttempt;
   const latestFailedAttempt = [...details.stages.filter((stage) => stage.status === 'failed')]
     .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at)).at(-1);
   // The failure shown on the current stage: its own failed attempt first, then the latest failure of a failed run.
@@ -467,7 +510,7 @@ export function TaskDetail() {
         ...(value.artifact_revisions && Object.keys(value.artifact_revisions).length > 0
           ? { artifact_revisions: value.artifact_revisions } : {}),
       });
-      if (action === 'answer_questions' && resolved.status === 'resolved') await resumeRun(run.run_id);
+      if (resolved.status === 'resolved') await resumeRun(run.run_id);
     }, 'decision');
 
   function approvalLabel(action: string): string {
@@ -476,15 +519,24 @@ export function TaskDetail() {
     if (action === 'refine_agent') return 'Попросить агента доработать';
     if (action === 'approve_spec') return 'Согласовать ТЗ и передать архитектору';
     if (action === 'approve') return 'Согласовать';
+    if (action === 'new_version') return 'Доработать результат и проверить снова';
+    if (action === 'override') return 'Подтвердить без проверки';
+    if (action === 'return') return 'Вернуть этап на доработку';
     if (action === 'reject') return 'Отклонить';
     if (action === 'stop') return 'Остановить';
     if (action.startsWith('return_to_')) return `Вернуть на «${stageTitle(action.slice('return_to_'.length))}»`;
     return action;
   }
 
+  const decisionButtonLabel = (approval: Approval, action: string): string => {
+    const target = approval.targets?.[action];
+    if (action === 'approve' && target) return `Согласовать и перейти: ${stageTitle(target)}`;
+    return approvalLabel(action);
+  };
+
   const requiresReturnReason = (value: Approval, action: string) => value.feedback_actions
     ? value.feedback_actions.includes(action)
-    : action.startsWith('return_to_');
+    : action.startsWith('return_to_') || (value.kind === 'check_decision' && action === 'return');
 
   const sendRunCommand = (kind: 'resume' | 'grant' | 'cancel') => {
     if (kind === 'cancel') return perform('Задача отменена', () => cancelRun(run.run_id), 'cancel');
@@ -503,7 +555,10 @@ export function TaskDetail() {
   const prURL = safePullRequestURL(details.delivery.record?.pr_url);
 
   const stageState = (() => {
-    if (questionDecisions.length > 0 || otherDecisions.length > 0) return 'Ждёт решения';
+    if (currentDecision && lastAgentAttempt && ['passed', 'warning'].includes(lastAgentAttempt.status)) {
+      return 'Результат готов · ждёт решения';
+    }
+    if (questionDecisions.length > 0 || currentDecision || otherDecisions.length > 0) return 'Ждёт решения';
     if (runningAttempt) return 'В работе';
     if (lastAgentAttempt?.status === 'blocked' || run.status === 'blocked') return 'Заблокирована';
     if (lastAgentAttempt?.status === 'failed' || run.status === 'failed') return 'Ошибка';
@@ -517,17 +572,17 @@ export function TaskDetail() {
 
   // "submit" and "approve" of a human input go through the stage result form, not the approvals list.
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
-    ? approval.actions.filter((action) => action !== 'submit' && action !== 'approve')
-    : approval.actions);
+    ? approval.actions.filter((action) => !['submit', 'approve'].includes(action)
+      && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
+    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override') : approval.actions);
 
   const renderDecision = (approval: Approval) => {
     const markdown = payloadMarkdown(approval.payload);
     const answer = approvalAnswers[approval.id] ?? '';
     const reason = approvalReasons[approval.id] ?? '';
     const needsAnswer = approval.actions.includes('answer_questions') || approval.kind === 'questions';
-    const needsReason = approval.status === 'pending' && (approval.feedback_actions
-      ? approval.feedback_actions.length > 0
-      : approval.actions.some((action) => action.startsWith('return_to_')));
+    const needsReason = approval.status === 'pending' && decisionActions(approval).some((action) =>
+      requiresReturnReason(approval, action));
     return <article key={approval.id} className={styles.approval}>
       <strong>{approval.from_stage === approval.to_stage
         ? `Этап «${stageTitle(approval.from_stage)}»`
@@ -539,7 +594,7 @@ export function TaskDetail() {
         <textarea value={answer} rows={4} maxLength={16 * 1024}
           onChange={(event) => setApprovalAnswers((current) => ({ ...current, [approval.id]: event.target.value }))} />
       </label>}
-      {needsReason && <label className={styles.questionLabel}>Причина возврата и комментарий для следующей роли
+      {needsReason && <label className={styles.questionLabel}>Комментарий для доработки или возврата
         <textarea value={reason} maxLength={16 * 1024} rows={3}
           onChange={(event) => setApprovalReasons((current) => ({ ...current, [approval.id]: event.target.value }))} />
       </label>}
@@ -553,7 +608,7 @@ export function TaskDetail() {
               (requiresReturnReason(approval, action) && !reason.trim())}
             onClick={() => void sendDecision(approval, role, action,
               action === 'answer_questions' ? answer : requiresReturnReason(approval, action) ? reason : undefined)}>
-              <BusyLabel busy={working && activeKey === 'decision'} text="Сохраняем…">{approvalLabel(action)}</BusyLabel>
+              <BusyLabel busy={working && activeKey === 'decision'} text="Сохраняем…">{decisionButtonLabel(approval, action)}</BusyLabel>
             </button>
           )))}
       </div>
@@ -580,7 +635,6 @@ export function TaskDetail() {
           <section className={`${styles.intent} ${styles.ideaCard}`} aria-labelledby="idea-heading">
             <div className={styles.ideaTop}>
               <h2 id="idea-heading">Бизнес-идея</h2>
-              <span className={styles.stageLine} data-state={stageState}>{stageState}</span>
             </div>
             {(details.external_links ?? []).length > 0 && (
               <ul className={styles.externalLinks} aria-label="Внешние ссылки">
@@ -596,12 +650,6 @@ export function TaskDetail() {
               : details.task
                 ? <p className={styles.task}>{details.task}</p>
                 : <p>Текст идеи пока не записан.</p>}
-            {briefArtifacts.length > 0 && <div className={styles.briefLinks}>
-              <span>Файлы идеи:</span>
-              {briefArtifacts.map((artifact, index) => (
-                <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>{briefArtifacts.length > 1 ? `идея ${index + 1}` : 'идея'}</Link>
-              ))}
-            </div>}
             <details className={styles.details}>
               <summary>Подробности</summary>
               <dl>
@@ -623,8 +671,10 @@ export function TaskDetail() {
             <div className={styles.panelHeading}>
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
-                <h2 id="current-stage-heading">{currentStage?.title ?? currentStageID ?? 'Этапов нет'}</h2>
-                {currentStage && <p className={styles.stageState} data-state={stageState}>{stageState}</p>}
+                <h2 id="current-stage-heading">{currentStage?.title || (finished ? 'Задача завершена' : currentStageID || 'Этап не выбран')}</h2>
+                <p className={styles.stageState} data-state={stageState}>{stageState}</p>
+                {currentDecision?.kind === 'check_decision' && <p className={styles.stageGuidance}>Результат агента сохранён. Проверка требует решения перед переходом к следующему этапу.</p>}
+                {currentDecision && currentDecision.kind !== 'check_decision' && currentDecision.trigger !== 'human_input' && <p className={styles.stageGuidance}>Посмотри результат и выбери действие ниже, чтобы продолжить задачу.</p>}
                 {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
                   {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
                     {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
@@ -639,7 +689,7 @@ export function TaskDetail() {
             </div>
 
             {questionDecisions.length > 0 && <section className={styles.questions} aria-labelledby="question-heading">
-              <h3 id="question-heading">Нужно уточнение Product Owner</h3>
+              <h3 id="question-heading">Для этапа «{currentStage?.title ?? currentStageID}» нужно уточнение Product Owner</h3>
               {!principal && <label className={styles.questionLabel}>Ваш идентификатор
                 <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Идентификатор участника" />
               </label>}
@@ -647,6 +697,48 @@ export function TaskDetail() {
                 && <p>Текст вопросов не передан в запросе: откройте артефакт этапа.</p>}
               {questionDecisions.map(renderDecision)}
             </section>}
+            {currentDecision && decisionActions(currentDecision).length > 0 && <section className={styles.decisionPanel} aria-labelledby="current-decision-heading">
+              <h3 id="current-decision-heading">Твоё решение по этапу</h3>
+              {currentDecision.kind === 'check_decision' && <>
+                <p>Автоматическая проверка не завершилась или нашла проблему. Можно отправить результат на доработку или подтвердить обход проверки с причиной.</p>
+                {checkReportPath(currentDecision.payload) && <Link to={briefLink(run.run_id, checkReportPath(currentDecision.payload)!)}>Открыть отчёт проверки</Link>}
+              </>}
+              {currentOutputArtifacts.length > 0 && <p><a href="#current-result-heading">Посмотреть результат этапа ниже</a></p>}
+              {renderDecision(currentDecision)}
+              {currentDecision.kind === 'check_decision' && allowed.has('override') && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
+                <label>Причина подтверждения без проверки
+                  <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
+                </label>
+                <button disabled={working || !overrideReason.trim()}>Подтвердить без проверки</button>
+              </form>}
+            </section>}
+
+            {(currentOutputArtifacts.length > 0 || (details.results[currentStageID] ?? []).length > 0) &&
+              <section className={styles.currentResult} aria-labelledby="current-result-heading">
+                <div className={styles.resultHeading}>
+                  <h3 id="current-result-heading">Результат этапа</h3>
+                  {lastAgentAttempt && <span>Агент завершил работу · попытка {lastAgentAttempt.stage_index}</span>}
+                </div>
+                {primaryResultPath ? <>
+                  {resultPreviewError && <p role="alert">{resultPreviewError}</p>}
+                  {resultPreview === null && !resultPreviewError && <p>Загружаем результат…</p>}
+                  {resultPreview !== null && <div className={`${styles.markdown} ${styles.resultPreview}`}><ReactMarkdown>{resultPreview}</ReactMarkdown></div>}
+                  <div className={styles.resultFiles}>
+                    {currentOutputArtifacts.map((artifact) => <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>
+                      Открыть файл: {artifact.name}
+                    </Link>)}
+                  </div>
+                </> : <div className={`${styles.markdown} ${styles.resultPreview}`}>
+                  <ReactMarkdown>{(details.results[currentStageID] ?? []).at(-1)?.content ?? 'Результат сохранён как решение этапа.'}</ReactMarkdown>
+                </div>}
+              </section>}
+
+            {briefArtifacts.length > 1 && <details className={styles.briefHistory}>
+              <summary>Ответы и уточнения ({briefArtifacts.length - 1})</summary>
+              <div className={styles.resultFiles}>{briefArtifacts.slice(1).map((artifact, index) =>
+                <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>Уточнение {index + 1}</Link>)}</div>
+            </details>}
+
             {actionStatus && <p className={styles.actionStatus} role="status">{actionStatus}</p>}
             {working && <p className={styles.waiting} role="status"><span className={styles.buttonSpinner} aria-hidden="true" />Ждём ответ сервера…</p>}
             {actionError && errorScope === 'stage' && <p className={styles.actionError} role="alert">{actionError}</p>}
@@ -674,7 +766,7 @@ export function TaskDetail() {
 
             {currentStage && allowed.size > 0 && <div className={styles.actions}>
               {allowed.has('confirm') && <button type="button" disabled={working}
-                onClick={() => void perform('Этап подтверждён', () => confirmTaskStage(run.run_id, currentStage.id), 'confirm')}><BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">Подтвердить этап</BusyLabel></button>}
+                onClick={() => void perform('Этап подтверждён', () => confirmTaskStage(run.run_id, currentStage.id), 'confirm')}><BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `Подтвердить и перейти: ${stageTitle(confirmTargetID)}` : 'Подтвердить и завершить задачу'}</BusyLabel></button>}
               {(allowed.has('grill/answer') || allowed.has('grill/new-version') || allowed.has('grill/done')) && pending &&
                 <GrillPanel approval={pending} answer={grillAnswer} setAnswer={setGrillAnswer} disabled={working} activeKey={activeKey}
                 canAnswer={allowed.has('grill/answer')} canNewVersion={allowed.has('grill/new-version')} canDone={allowed.has('grill/done')}
@@ -707,7 +799,7 @@ export function TaskDetail() {
                   </label>
                   <button disabled={working || !skipReason.trim()}>Пропустить этап</button>
                 </form>}
-                {allowed.has('override') && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
+                {allowed.has('override') && currentDecision?.kind !== 'check_decision' && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
                   <label>Причина обхода проверки
                     <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
                   </label>
@@ -748,7 +840,9 @@ export function TaskDetail() {
                       {state === 'passed' ? '✓' : state === 'failed' ? '!' : rowStarts[rowIndex] + index + 1}
                     </span>
                     <span className={styles.routeText}>
-                      <span className={styles.routeTitle}>{stage.title}</span>
+                      <a className={styles.routeTitle} href={current ? '#current-stage' : `#result-${stage.id}`}>
+                        {stage.title}
+                      </a>
                       <span className={styles.routeState}>{routeLabels[state]}</span>
                     </span>
                   </li>
@@ -763,8 +857,8 @@ export function TaskDetail() {
           {!principal && otherDecisions.length > 0 && <label className={styles.questionLabel}>Ваш идентификатор
             <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Идентификатор участника" />
           </label>}
-          {otherDecisions.length === 0 && <p>{questionDecisions.length > 0
-          ? 'Вопросы к Product Owner ждут ответа в карточке текущего этапа.'
+          {otherDecisions.length === 0 && <p>{currentDecision || questionDecisions.length > 0
+          ? 'Текущее решение находится в карточке этапа выше.'
           : 'Сейчас никто не ждёт вашего решения.'}</p>}
           {otherDecisions.map(renderDecision)}
           {decidedDecisions.length > 0 && <details className={styles.history}>
@@ -841,11 +935,15 @@ export function TaskDetail() {
       </div>
 
       <section className={styles.panel} aria-labelledby="results-heading">
-        <h2 id="results-heading">Результаты этапов и версии</h2>
+        <h2 id="results-heading">Результаты этапов</h2>
         <div className={styles.resultStages}>
-          {(template?.stages ?? []).map((stage) => (
-            <ResultHistory key={stage.id} title={stage.title} stageID={stage.id} revisions={details.results[stage.id] ?? []} />
-          ))}
+          {(template?.stages ?? []).map((stage) => {
+            const attempt = latestAttemptFor(stage.id);
+            const files = attempt ? visibleSnapshot.artifacts.filter((artifact) =>
+              artifact.run_id === run.run_id && isStageResultArtifact(artifact, attempt.attempt_id)) : [];
+            return <ResultHistory key={stage.id} title={stage.title} stageID={stage.id}
+              revisions={details.results[stage.id] ?? []} artifacts={files} runID={run.run_id} />;
+          })}
         </div>
       </section>
 
@@ -1037,16 +1135,23 @@ function GrillHistory({ approvals }: { approvals: Approval[] }) {
   </div>;
 }
 
-function ResultHistory({ title, stageID, revisions }: {
+function ResultHistory({ title, stageID, revisions, artifacts, runID }: {
   title: string;
   stageID: string;
   revisions: TaskResultRevision[];
+  artifacts: Artifact[];
+  runID: string;
 }) {
   const previous = revisions.length > 1 ? revisions[revisions.length - 2] : null;
   const latest = revisions.at(-1);
-  return <article className={styles.resultStage}>
+  return <article id={`result-${stageID}`} className={styles.resultStage}>
     <h3>{title} <code>{stageID}</code></h3>
-    {revisions.length === 0 ? <p>Версий результата пока нет.</p> : <>
+    {artifacts.length > 0 && <div className={styles.resultFiles}>
+      {artifacts.map((artifact) => <Link key={artifact.path} to={briefLink(runID, artifact.path)}>
+        {artifact.name}
+      </Link>)}
+    </div>}
+    {revisions.length === 0 ? artifacts.length === 0 && <p>Результата пока нет.</p> : <>
       <ol className={styles.versions}>
         {revisions.map((revision) => <li key={revision.id}>
           <div className={styles.versionHeading}>

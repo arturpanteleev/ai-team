@@ -261,7 +261,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('link', { name: 'https://tracker.example/TASK-62' })).toBeVisible()
     await page.getByText('Сравнить версии 1 и 2').click()
     await expect(page.getByText('Первая версия идеи')).toHaveCount(2)
-    await expect(page.getByText('Вторая версия идеи')).toHaveCount(2)
+    await expect(page.getByText('Вторая версия идеи').first()).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Завершить грилл без ответа' })).toHaveCount(0)
 
@@ -281,7 +281,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('region', { name: 'Грилл: вопросы и ответы' }).getByText('Какой сегмент проверяем первым?')).toBeVisible()
     await page.getByLabel('Ваш ответ').fill('Малый бизнес')
     await page.getByRole('button', { name: 'Ответить и продолжить' }).click()
-    await expect(page.getByRole('button', { name: 'Подтвердить этап' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Подтвердить и перейти/ })).toBeVisible()
     await page.getByText('Другие действия: пропуск, обход проверки, возврат').click()
     await expect(page.getByRole('button', { name: 'Обойти проверку' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
@@ -312,7 +312,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(planContent.getByText('Выкладываем после подтверждения.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Подтвердить план' }).click()
-    await expect(page.getByText('завершена')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 
     // Automatic tasks expose only the two agent actions and finish without human controls.
     await page.goto(`${baseURL}/tasks/run-auto`)
@@ -326,7 +326,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await page.getByRole('button', { name: /запустить агента/i }).click()
     await expect(page.getByRole('heading', { name: 'Проверка', level: 2 })).toBeVisible()
     await page.getByRole('button', { name: /запустить агента/i }).click()
-    await expect(page.getByText('завершена')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 
     expect(actionsSeen.map((value) => value.replace(/\/api\/runs\/run-(?:manual|auto)/, '/api/runs/<run>'))).toEqual([
       '/api/runs/<run>/stages/idea/take',

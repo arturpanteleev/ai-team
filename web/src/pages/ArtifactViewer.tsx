@@ -23,6 +23,7 @@ export function ArtifactViewer() {
 
   const view = searchParams.get('view') || 'rendered';
   const isRendered = view === 'rendered';
+  const isCheckReport = path?.split('/')[1] === 'checks';
 
   usePageTitle(path?.split('/').at(-1) ?? 'Артефакт');
 
@@ -94,7 +95,7 @@ export function ArtifactViewer() {
       <div className={styles.header}>
         <span className={styles.path}>{path || ''}</span>
         <div className={styles.toolbar}>
-          {!editing && <button className={styles.toggle} onClick={startEditing}>Предложить изменение</button>}
+          {!editing && !isCheckReport && <button className={styles.toggle} onClick={startEditing}>Предложить изменение</button>}
           {!editing && <button className={styles.toggle} onClick={toggleView}>{isRendered ? 'Исходный текст' : 'Предпросмотр'}</button>}
         </div>
       </div>

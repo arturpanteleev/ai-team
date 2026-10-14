@@ -35,6 +35,11 @@ type AgentConfig struct {
 }
 
 type Config struct {
+	// QuestionStages — этапы шаблона, чей агент умеет задавать вопросы
+	// (ask_questions). Заполняется пайплайном из реестра агентов; по нему
+	// шаблон добавляет переход blocked → тот же этап с согласованием ответа.
+	QuestionStages map[string]bool `yaml:"-" json:"-"`
+
 	SchemaVersion int    `yaml:"schema_version"`
 	Template      string `yaml:"template"`
 	Title         string `yaml:"title"`
@@ -1161,14 +1166,14 @@ func (c *Config) Validate(reg AgentLookup) error {
 			}
 			lookup, ok := reg.(productSpecContractLookup)
 			if !ok {
-				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует registry с проверкой outputs proposal и spec; настройте контракт Product Owner approval", edge.From))
+				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует registry с проверкой outputs proposal; настройте контракт Product Owner approval", edge.From))
 				continue
 			}
 			hasContract, err := lookup.HasProductSpecContract(edge.From)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("workflow: проверить contract %s для approve_spec: %v", edge.From, err))
 			} else if !hasContract {
-				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует outputs proposal и spec в .ai-team/agents/%s/def.yaml; используйте обычное действие approve без этого контракта", edge.From, edge.From))
+				errs = append(errs, fmt.Sprintf("workflow: действие %s.approve_spec требует outputs proposal в .ai-team/agents/%s/def.yaml; используйте обычное действие approve без этого контракта", edge.From, edge.From))
 			}
 		}
 	}

@@ -48,6 +48,25 @@ func questionsPayload(resultOutputs []runtime.Artifact) (json.RawMessage, bool, 
 	return nil, false, nil
 }
 
+// questionsPayloadFromPath reads the questions file from its controller path
+// when the stage did not declare a "questions" output. Agents write
+// <ArtifactRoot>/tasks/<feature>/questions.md, and without this read a BLOCKED
+// stage ends terminal instead of asking Product Owner.
+func questionsPayloadFromPath(path string) (json.RawMessage, bool, error) {
+	data, err := safeio.ReadRegularFile(path, maxQuestionBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read stage questions: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil, false, errors.New("stage questions artifact is empty")
+	}
+	encoded, err := json.Marshal(questionPayload{Kind: "questions", Markdown: string(data)})
+	return encoded, true, err
+}
+
 func questionAnswer(decisions []approval.Decision) string {
 	for index := len(decisions) - 1; index >= 0; index-- {
 		if decisions[index].Action == "answer_questions" {
@@ -55,6 +74,35 @@ func questionAnswer(decisions []approval.Decision) string {
 		}
 	}
 	return ""
+}
+
+// clarificationInputs restores the exact questions and controller-owned answer
+// when an answer loop crosses another human input gate before the agent runs.
+func (rs *runState) clarificationInputs(value approval.PendingApproval) ([]runtime.Artifact, error) {
+	if rs.brief.Kind != "clarification" || rs.brief.ApprovalID != value.ID {
+		return nil, errors.New("current business brief is not bound to the clarification approval")
+	}
+	outputs, err := rs.stageOutputs(value.FromStage, value.AttemptID)
+	if err != nil {
+		return nil, err
+	}
+	inputs := make([]runtime.Artifact, 0, len(outputs)+3)
+	for _, output := range outputs {
+		if output.Name == "questions" {
+			inputs = append(inputs, output)
+		}
+	}
+	var answer runtime.Artifact
+	if rs.p.questionAnswerInputs != nil {
+		answer, err = rs.p.questionAnswerInputs.MaterializeQuestionAnswer(rs.runID, value.ID)
+	} else {
+		answer, err = writeQuestionAnswerInput(rs.runCfg.TargetDir, rs.runID, value.ID, questionAnswer(value.Decisions))
+	}
+	if err != nil {
+		return nil, err
+	}
+	inputs = append(inputs, answer)
+	return append(inputs, briefInputs(rs.brief)...), nil
 }
 
 type questionApprovalLookup interface {

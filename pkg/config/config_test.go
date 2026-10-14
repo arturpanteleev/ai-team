@@ -243,10 +243,10 @@ func TestBuiltInTemplateAgentContracts(t *testing.T) {
 		map[string]string{"observation": "{feature}/observation.md"}, "", nil)
 	assertContract("analyst",
 		map[string]string{"task": "tasks/{feature}/task.md"},
-		map[string]string{"proposal": "{feature}/proposal.md", "spec": "{feature}/specs/product/spec.md"}, "", nil)
+		map[string]string{"proposal": "{feature}/proposal.md"}, "", nil)
 	assertContract("architect",
-		map[string]string{"specs": "{feature}/specs"},
-		map[string]string{"design": "{feature}/design.md", "tasks": "{feature}/tasks.md"}, "", nil)
+		map[string]string{"proposal": "{feature}/proposal.md"},
+		map[string]string{"spec": "{feature}/specs/spec.md", "design": "{feature}/design.md", "tasks": "{feature}/tasks.md"}, "", nil)
 	assertContract("coder",
 		map[string]string{"design": "{feature}/design.md", "tasks": "{feature}/tasks.md"}, map[string]string{}, "", nil)
 	for _, name := range []string{"design-reviewer", "reviewer", "tester"} {
@@ -803,7 +803,7 @@ func (f fakeProductSpecLookup) HasProductSpecContract(name string) (bool, error)
 
 func TestLegacyApproveSpecContractIsOnlyForInMemoryFixture(t *testing.T) {
 	cfg := Default()
-	if err := cfg.Validate(fakeProductSpecLookup{}); err == nil || !strings.Contains(err.Error(), "outputs proposal и spec") {
+	if err := cfg.Validate(fakeProductSpecLookup{}); err == nil || !strings.Contains(err.Error(), "outputs proposal") {
 		t.Fatalf("approve_spec without registry contract should fail, got %v", err)
 	}
 	if err := cfg.Validate(fakeProductSpecLookup{hasContract: true}); err != nil {
@@ -857,3 +857,25 @@ func cloneConfig(t *testing.T, source *Config) *Config {
 type fakeLookup map[string]bool
 
 func (f fakeLookup) Exists(name string) bool { return f[name] }
+
+func TestTemplateGraphAddsBlockedAnswerLoopForQuestionStages(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.QuestionStages = map[string]bool{"product_spec": true}
+	graph, err := cfg.CompiledGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, ok := graph.Edge("product_spec", "blocked")
+	if !ok || edge.To != "product_spec" {
+		t.Fatalf("product_spec должен получить blocked → product_spec: %+v ok=%v", edge, ok)
+	}
+	if edge.Approval == nil || edge.Approval.Actions["answer_questions"] != "product_spec" {
+		t.Fatalf("согласование должно принимать answer_questions на этом же этапе: %+v", edge.Approval)
+	}
+	if _, ok := graph.Edge("tech_design", "blocked"); ok {
+		t.Fatal("этап без вопросов не должен получать blocked-петлю")
+	}
+}

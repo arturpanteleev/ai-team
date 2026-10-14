@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getActivePrincipal, getProjectTemplate, publishProjectTemplate, validateProjectTemplate } from '../api';
+import { getActivePrincipal, getProjectTemplate, getTemplatesList, publishProjectTemplate, validateProjectTemplate } from '../api';
 import type { ProjectTemplateResponse, TemplateValidation } from '../types';
 import { usePageTitle } from '../hooks/usePageTitle';
 import styles from './TemplateEditor.module.css';
@@ -9,10 +9,12 @@ function shortVersion(version: string): string {
 }
 
 export function TemplateEditor() {
-  usePageTitle('Шаблон проекта');
+  usePageTitle('Шаблоны');
   const principal = getActivePrincipal();
   const canEdit = !principal || principal.roles.includes('product_owner') || principal.roles.includes('architect');
   const [project, setProject] = useState<ProjectTemplateResponse | null>(null);
+  const [catalog, setCatalog] = useState<TemplateValidation[]>([]);
+  const [selectedID, setSelectedID] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [validation, setValidation] = useState<TemplateValidation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,8 +25,9 @@ export function TemplateEditor() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const fresh = await getProjectTemplate();
+      const [fresh, list] = await Promise.all([getProjectTemplate(), getTemplatesList().catch(() => null)]);
       setProject(fresh);
+      setCatalog(list?.templates ?? []);
       setDraft(fresh.template.yaml ?? '');
       setValidation(fresh.template.valid ? fresh.template : null);
       setError('');
@@ -84,10 +87,14 @@ export function TemplateEditor() {
 
   if (loading) return <main className={styles.state}>Загружаем шаблон проекта…</main>;
   if (error && !project) return <main className={styles.error} role="alert">{error}</main>;
-  if (!project) return <main className={styles.error} role="alert">Шаблон проекта недоступен.</main>;
+  if (!project) return <main className={styles.error} role="alert">Шаблоны недоступны.</main>;
 
   const active = project.template;
-  const displayed = changed ? validation : active;
+  // Активный шаблон проекта — единственный, который можно редактировать; остальные только просматриваются.
+  const options: TemplateValidation[] = [active, ...catalog.filter((item) => item.valid && item.template !== active.template)];
+  const selected = options.find((option) => option.template === selectedID) ?? active;
+  const isActiveSelected = selected.template === active.template;
+  const displayed = isActiveSelected ? (changed ? validation : active) : selected;
   const stages = displayed?.stages ?? [];
   const returnRoutes = displayed?.returns ?? [];
 
@@ -95,7 +102,7 @@ export function TemplateEditor() {
     <main className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1>Шаблон проекта</h1>
+          <h1>Шаблоны</h1>
           <p>У проекта один выбранный шаблон: его граф используется для новых задач.</p>
         </div>
         <div className={styles.version}>
@@ -105,6 +112,22 @@ export function TemplateEditor() {
       </header>
 
       <p className={styles.pinNotice}>Уже созданные задачи сохраняют свою закреплённую версию при продолжении и восстановлении. Публикация влияет на новые задачи.</p>
+
+      <section className={styles.panel} aria-labelledby="template-list-heading">
+        <h2 id="template-list-heading">Шаблоны</h2>
+        <ul className={styles.templateList} aria-label="Доступные шаблоны">
+          {options.map((option) => {
+            const isActive = option.template === active.template;
+            return <li key={option.template ?? option.title}>
+              <button type="button" className={styles.templateOption} aria-pressed={option === selected}
+                onClick={() => setSelectedID(option.template ?? null)}>
+                <strong>{option.title || option.template}</strong>
+                <span><code>{option.template}</code> · {isActive ? 'активный' : 'не активный'}</span>
+              </button>
+            </li>;
+          })}
+        </ul>
+      </section>
 
       <section className={styles.panel} aria-labelledby="template-flow-heading">
         <div className={styles.panelHeader}>
@@ -146,6 +169,7 @@ export function TemplateEditor() {
         </section>
       </section>
 
+      {isActiveSelected ? (
       <section className={styles.panel} aria-labelledby="template-yaml-heading">
         <div className={styles.panelHeader}>
           <div>
@@ -170,6 +194,9 @@ export function TemplateEditor() {
         </div>}
         {validationMatchesDraft && <p className={styles.status}>Текущая опубликованная конфигурация валидна.</p>}
       </section>
+      ) : (
+        <p className={styles.status}>Этот шаблон не активен: его можно только посмотреть. Редактировать можно активный шаблон проекта.</p>
+      )}
 
       <section className={styles.panel} aria-labelledby="template-versions-heading">
         <h2 id="template-versions-heading">Опубликованные версии</h2>

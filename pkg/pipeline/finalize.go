@@ -26,6 +26,9 @@ import (
 
 // finalize.go — итоговый статус run, отчёт и summary.
 
+// pauseReasonInfraFailed — причина паузы в run_paused при инфраструктурном сбое.
+const pauseReasonInfraFailed = "infra_failed"
+
 func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 	endTime := time.Now()
 	status := runStatusFor(runErr, rs.results)
@@ -53,9 +56,15 @@ func (rs *runState) finalize(runErr error) (workflow.RunOutcome, error) {
 		}
 		return workflow.RunStopped, &RunError{Outcome: workflow.RunStopped, Err: runErr}
 	}
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) || errors.Is(runErr, ErrTokenBudgetExceeded) ||
+	infraStop := runErr != nil && status == string(workflow.RunFailed) && infraOnlyFailure(attemptStatesFor(rs.results))
+	if infraStop || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, ErrStageTimeout) || errors.Is(runErr, ErrAgentFinishedEvidence) || errors.Is(runErr, ErrTokenBudgetExceeded) ||
 		errors.Is(runErr, ErrPendingCheckOutputChanged) {
 		pauseData := map[string]any{"status": status, "next_stage": rs.lifecycleState.NextStage}
+		if infraStop {
+			// Инфраструктурный сбой (рантайм, сеть, авторизация агента) — не вердикт:
+			// прогон остаётся resumable с тем же run_id, терминальный run_finished не пишем.
+			pauseData["reason"] = pauseReasonInfraFailed
+		}
 		if errors.Is(runErr, ErrTokenBudgetExceeded) {
 			// Пауза по бюджету — остановка до решения человека, а не сбой.
 			status = string(workflow.RunStopped)
@@ -254,6 +263,12 @@ func (rs *runState) writeAttestation(finishedAt time.Time, status string) error 
 
 // runStatus — финальный статус запуска для store.
 func runStatusFor(err error, results []notifier.StageResult) string {
+	return string(workflow.DeriveRun(runSignal(err), attemptStatesFor(results)))
+}
+
+// attemptStatesFor возвращает состояния попыток; для результатов без
+// заполненного State выводит их из Err/Verdict/Status.
+func attemptStatesFor(results []notifier.StageResult) []workflow.AttemptState {
 	states := make([]workflow.AttemptState, 0, len(results))
 	for _, result := range results {
 		state := result.State
@@ -269,7 +284,25 @@ func runStatusFor(err error, results []notifier.StageResult) string {
 		}
 		states = append(states, state)
 	}
-	return string(workflow.DeriveRun(runSignal(err), states))
+	return states
+}
+
+// infraOnlyFailure сообщает, что все падающие попытки — infra_failed:
+// нет вердикта-отказа, BLOCKED, отказа проверки или отмены.
+func infraOnlyFailure(states []workflow.AttemptState) bool {
+	failing := 0
+	for _, state := range states {
+		switch state.Outcome {
+		case workflow.OutcomeFailed:
+			if state.Execution != workflow.ExecutionInfraFailed {
+				return false
+			}
+			failing++
+		case workflow.OutcomeBlocked, workflow.OutcomeCanceled, workflow.OutcomePending:
+			return false
+		}
+	}
+	return failing > 0
 }
 
 func runSignal(err error) workflow.RunSignal {

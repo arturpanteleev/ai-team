@@ -33,7 +33,7 @@ func (rs *runState) enforceMutationGuard(
 			changedPaths := changedSnapshotPaths(workspaceBefore, workspaceAfter)
 			result.Mutations = append([]string(nil), changedPaths...)
 			result.MutationChanges = classifyMutationChanges(workspaceBefore, workspaceAfter, changedPaths)
-			if a.Mutation == "none" && workspaceBefore.Fingerprint != workspaceAfter.Fingerprint {
+			if a.Mutation == "none" && hasProjectChange(changedPaths, rs.runCfg.Feature, name) {
 				guardErrors = append(guardErrors, fmt.Errorf("агент %s нарушил mutation policy: read-only этап изменил проект", name))
 			}
 			if a.Mutation == "source" || a.Mutation == "tests" {
@@ -114,6 +114,11 @@ func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative strin
 			return true
 		}
 	}
+	// Вопросы к Product Owner (BLOCKED-протокол) принимаются только агентам с
+	// ask_questions, в любой из форм пути относительно корня артефактов.
+	if a.AskQuestions && isAgentProtocolPath(relative, rs.runCfg.Feature, name) {
+		return true
+	}
 	for _, outputPath := range a.Outputs {
 		output := filepath.ToSlash(filepath.Clean(filepath.FromSlash(runtime.ReplaceVars(outputPath, rs.runCfg.Feature))))
 		if relative == output {
@@ -121,6 +126,36 @@ func (rs *runState) artifactMutationAllowed(a *agent.Agent, name, relative strin
 		}
 		fullOutput := filepath.Join(rs.task.ArtifactRoot, filepath.FromSlash(output))
 		if info, err := os.Lstat(fullOutput); err == nil && info.IsDir() && strings.HasPrefix(relative, output+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasProjectChange сообщает, есть ли среди изменённых путей что-то кроме
+// протокольных файлов агента: статуса, сводки этапа и вопросов к Product Owner.
+// Такие файлы пишутся при штатной остановке этапа (BLOCKED) и не являются
+// мутацией проекта. Остальные изменения read-only этапа по-прежнему нарушают политику.
+func hasProjectChange(changedPaths []string, feature, name string) bool {
+	for _, changed := range changedPaths {
+		if !isAgentProtocolPath(changed, feature, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAgentProtocolPath проверяет путь относительно корня артефактов или
+// рабочего каталога: status/<name>.md, .stage-summary/<name>.md и
+// tasks/<feature>/questions.md.
+func isAgentProtocolPath(path, feature, name string) bool {
+	p := filepath.ToSlash(path)
+	for _, suffix := range []string{
+		"status/" + name + ".md",
+		".stage-summary/" + name + ".md",
+		"tasks/" + feature + "/questions.md",
+	} {
+		if p == suffix || strings.HasSuffix(p, "/"+suffix) {
 			return true
 		}
 	}

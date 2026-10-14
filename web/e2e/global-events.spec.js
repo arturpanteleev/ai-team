@@ -107,7 +107,7 @@ test('global event feed filters warnings and opens the linked task', async ({ pa
       return route.fulfill({ status: 400, json: { error: `unexpected before ${params.before}`, code: 'bad_event_query' } })
     })
 
-    await page.getByRole('link', { name: 'Лента' }).click()
+    await page.goto(`${baseURL}/events`)
     await expect(page.getByRole('heading', { name: 'Лента событий' })).toBeVisible()
     await expect(page.getByText('Ошибка проверки')).toBeVisible()
     expect(feedRequests[0]).toEqual({ order: 'desc', limit: '100' })
@@ -132,8 +132,9 @@ test('global event feed filters warnings and opens the linked task', async ({ pa
     await expect(page.getByText('Проверка требует внимания')).toBeVisible()
 
     await page.getByRole('link', { name: 'Задача: browser-event-feed' }).click()
-    await expect(page).toHaveURL(/\/pipelines\/\d+$/)
-    await expect(page.getByRole('heading', { name: 'browser-event-feed' })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/tasks/${runID}$`))
+    await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
+    await expect(page.getByText('Создать задачу для проверки глобальной ленты событий.')).toBeVisible()
   } finally {
     await stop(webServer)
     await rm(tempRoot, { recursive: true, force: true })

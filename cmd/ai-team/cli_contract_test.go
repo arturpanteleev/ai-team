@@ -1873,6 +1873,9 @@ func TestInitCommandContract(t *testing.T) {
 
 	t.Run("standard создаёт конфиг и структуру", func(t *testing.T) {
 		target := t.TempDir()
+		if out, err := exec.Command("git", "-C", target, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
 		stdout, code, stderr := runCLI(t, "init", "--target", target, "--write-gitignore")
 		if code != 0 {
 			t.Fatalf("ожидался exit 0, получен %d; stderr: %s", code, stderr)
@@ -1890,9 +1893,12 @@ func TestInitCommandContract(t *testing.T) {
 				t.Fatalf("init не создал %s: %v", relative, err)
 			}
 		}
-		gitignore, err := os.ReadFile(filepath.Join(target, ".gitignore"))
-		if err != nil || !strings.Contains(string(gitignore), ".ai-team/") {
-			t.Fatalf("--write-gitignore обязан исключать control root: %q (%v)", gitignore, err)
+		if gitignore, err := os.ReadFile(filepath.Join(target, ".gitignore")); err == nil {
+			t.Fatalf("--write-gitignore не должен менять версионируемый .gitignore: %q", gitignore)
+		}
+		exclude, err := os.ReadFile(filepath.Join(target, ".git", "info", "exclude"))
+		if err != nil || !strings.Contains(string(exclude), ".ai-team/") {
+			t.Fatalf("init обязан исключать control root через .git/info/exclude: %q (%v)", exclude, err)
 		}
 		// Повторный init обязан сохранить уже существующий config.yaml.
 		// Сверять байты до и после мало: конфиг сериализуется детерминированно,

@@ -1,51 +1,111 @@
+/* Главная: слева ~3/4 — поиск, фильтры и карточки задач; справа ~1/4 — создание и состояние. */
 .container {
-  width: min(100%, 900px);
-  padding: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
+  gap: 28px;
+  width: min(100%, 1400px);
+  min-width: 0;
+  padding: 36px 40px 48px;
   margin: 0 auto;
+  align-items: start;
+}
+
+.main,
+.side {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .header {
-  display: grid;
-  gap: 14px;
-  margin-bottom: 24px;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .title {
   margin: 0;
   color: var(--text-primary);
-  font-size: 24px;
-  font-weight: 650;
+  font-size: clamp(28px, 3.4vw, 38px);
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
 }
 
-.filters {
+.subtitle {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.toolbar {
   display: flex;
-  gap: 8px;
-  max-width: 100%;
-  padding: 2px 2px 8px;
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-  scrollbar-color: var(--border-strong) transparent;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.search {
+  position: relative;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.search input {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  font-size: 15px;
+}
+
+.search input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 .filtersToggle {
   display: none;
 }
 
+.filters {
+  display: flex;
+  flex: 1 1 100%;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px 2px 4px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
 .filterBtn {
   flex: 0 0 auto;
-  min-height: 36px;
-  padding: 5px 12px;
+  min-height: 34px;
+  padding: 5px 14px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--text-secondary);
-  cursor: pointer;
   font-size: 13px;
   white-space: nowrap;
 }
 
 .filterBtn:hover {
-  border-color: var(--link);
   color: var(--text-primary);
 }
 
@@ -56,155 +116,332 @@
 }
 
 .pipelines {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  gap: 14px;
 }
 
 .empty,
 .loading {
-  padding: 40px 16px;
+  padding: 48px 16px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
   color: var(--text-muted);
   text-align: center;
 }
 
-.runForm {
+/* Крупная жёлтая кнопка создания. */
+.createBig {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 64px;
+  padding: 16px 22px;
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--create-yellow);
+  color: var(--on-yellow);
+  font-size: 18px;
+  font-weight: 750;
+  box-shadow: 0 8px 22px rgb(255 216 77 / 35%);
+}
+
+.createBig:hover:not(:disabled) {
+  background: #ffd62e;
+  border: 0;
+}
+
+.plus {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.createCard {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
-  margin-bottom: 24px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  padding: 20px;
+  border-radius: var(--radius-xl);
   background: var(--surface);
   box-shadow: var(--shadow);
 }
 
-.runForm label {
+.createHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.createHead h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.cancelCreate {
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.createCard label {
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
 
-.runForm input,
-.runForm textarea {
+.createCard input,
+.createCard textarea {
   width: 100%;
   min-width: 0;
+  padding: 10px 14px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 9px 12px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
 }
 
-.runForm input::placeholder,
-.runForm textarea::placeholder {
-  color: var(--text-muted);
-  opacity: 1;
-}
-
-.runForm textarea {
+.createCard textarea {
   resize: vertical;
   line-height: 1.5;
 }
 
-.runForm button {
-  justify-self: start;
-  max-width: 100%;
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-weight: 650;
+.createCard small {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.runForm small,
-.intakeNotice span {
-  color: var(--text-muted);
-  line-height: 1.5;
+.createCard > span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.createSubmit {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--create-yellow);
+  color: var(--on-yellow);
+  font-size: 16px;
+  font-weight: 750;
+}
+
+.createSubmit:hover:not(:disabled) {
+  background: #ffd62e;
+  border: 0;
+}
+
+.fieldError {
+  color: var(--danger-fg);
 }
 
 .intakeNotice {
   display: grid;
   gap: 8px;
-  margin-bottom: 24px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text-secondary);
+  padding: 20px;
+  border-radius: var(--radius-xl);
+  background: var(--tint-mustard);
+  color: var(--ink-mustard);
 }
 
-.runForm span {
-  grid-column: 1 / -1;
-  color: var(--text-secondary);
-  font-size: 12px;
-  overflow-wrap: anywhere;
+.intakeNotice span {
+  font-size: 13px;
+  line-height: 1.5;
 }
 
-.preflight {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: -12px 0 24px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.preflight div {
+.created {
   display: grid;
-  grid-template-columns: minmax(100px, 0.6fr) minmax(90px, 0.5fr) minmax(0, 2fr);
-  gap: 8px;
+  gap: 6px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
+.created a {
+  font-weight: 650;
+}
+
+.commandError {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
 
-.preflight div[data-status='failed'] {
+.readiness,
+.recent {
+  padding: 18px 20px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.readiness {
+  display: grid;
+  gap: 6px;
+}
+
+.readinessHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.readinessHead h2,
+.recent h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.readiness p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.readiness[data-state='ready'] .dot {
+  background: #2fbf86;
+  box-shadow: 0 0 0 4px var(--success-bg);
+}
+
+.readiness[data-state='blocked'] .dot {
+  background: #ff7a66;
+  box-shadow: 0 0 0 4px var(--danger-bg);
+}
+
+.readiness[data-state='unknown'] .dot {
+  background: #f2b632;
+  box-shadow: 0 0 0 4px var(--warning-bg);
+}
+
+.checks {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.checks summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.checks > div {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.checks > div[data-status='failed'] {
   color: var(--danger-fg);
 }
 
-.preflight div[data-status='warning'] {
+.checks > div[data-status='warning'] {
   color: var(--warning-fg);
+}
+
+.recent h2 {
+  margin-bottom: 10px;
+}
+
+.recentList {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recentList li {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.recentList a {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 1000px) {
+  .container {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 24px 20px 36px;
+  }
+
+  .side {
+    order: -1;
+  }
 }
 
 @media (max-width: 640px) {
   .container {
     padding: 18px 14px 28px;
-  }
-
-  .header {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 18px;
+    gap: 18px;
   }
 
   .title {
-    min-width: 0;
-    font-size: 22px;
+    font-size: 26px;
+  }
+
+  .subtitle {
+    font-size: 14px;
+  }
+
+  .toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .search input {
+    min-height: 46px;
   }
 
   .filtersToggle {
     display: block;
     min-height: 44px;
-    padding: 9px 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--surface-raised);
-    color: var(--text-primary);
-    font: inherit;
+    padding: 9px 16px;
     font-size: 13px;
-    cursor: pointer;
+    color: var(--text-primary);
   }
 
   .filters {
     display: none;
     grid-column: 1 / -1;
     flex-wrap: wrap;
-    gap: 8px;
-    padding: 2px 0 4px;
     overflow: visible;
   }
 
@@ -214,29 +451,96 @@
 
   .filterBtn {
     min-height: 44px;
-    padding: 8px 12px;
+    padding: 8px 14px;
   }
 
-  .runForm {
-    padding: 12px;
+  .createBig {
+    min-height: 60px;
   }
 
-  .runForm input,
-  .runForm textarea {
-    min-height: 44px;
-    padding: 12px;
+  .createSubmit {
+    min-height: 50px;
   }
+}
 
-  .runForm button {
-    width: 100%;
-    min-height: 48px;
-    line-height: 1.35;
+/* Пузырь мысли в правом нижнем углу окна: поверх контента, гаснет сам через несколько секунд. */
+.createWrap {
+  position: relative;
+}
+
+.thought {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 50;
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  box-sizing: border-box;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 16px - 16px - 40px));
+  padding: 14px 20px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text-primary);
+  text-align: center;
+  overflow-wrap: anywhere;
+  animation: thoughtPulse 1.8s ease-in-out infinite;
+}
+
+.thought strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.thought a {
+  font-weight: 650;
+  color: var(--link);
+}
+
+/* Хвостик из кружков уходит влево к кнопке. */
+.tailLg,
+.tailSm {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.tailLg {
+  left: -14px;
+  bottom: 10px;
+  width: 18px;
+  height: 18px;
+}
+
+.tailSm {
+  left: -30px;
+  bottom: -4px;
+  width: 9px;
+  height: 9px;
+}
+
+@keyframes thoughtPulse {
+  0%,
+  100% {
+    transform: scale(1);
   }
+  50% {
+    transform: scale(1.04);
+  }
+}
 
-  .preflight div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 3px;
-    padding: 6px 0;
-    border-top: 1px solid var(--border);
+@media (max-width: 600px) {
+  .thought {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thought {
+    animation: none;
   }
 }

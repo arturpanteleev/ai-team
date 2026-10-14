@@ -107,12 +107,12 @@ case "$AGENT" in
       create_output "$ARTIFACT_ROOT/$FEATURE/status/analyst.md" "**Status:** BLOCKED\n**Blocker:** требования противоречивы (mock)"
       exit 0
     fi
-    create_output "$ARTIFACT_ROOT/$FEATURE/proposal.md" "# Proposal for $FEATURE\n\n## Goal\n$FEATURE"
-    create_output "$ARTIFACT_ROOT/$FEATURE/specs/product/spec.md" "# Product spec for $FEATURE\n\n## Requirements\n- feature $FEATURE"
+    create_output "$ARTIFACT_ROOT/$FEATURE/proposal.md" "# Proposal for $FEATURE\n\n## Goal\n$FEATURE\n\n## Критерии приёмки\n- feature $FEATURE"
     write_summary
     ;;
 
   architect)
+    create_output "$ARTIFACT_ROOT/$FEATURE/specs/spec.md" "# Technical spec for $FEATURE\n\n## ADDED Requirements\n- feature $FEATURE"
     create_output "$ARTIFACT_ROOT/$FEATURE/design.md" "# Design for $FEATURE\n\n## Architecture\nSimple"
     create_output "$ARTIFACT_ROOT/$FEATURE/tasks.md" "# Tasks for $FEATURE\n\n- [ ] implement"
     write_summary

@@ -1,60 +1,123 @@
+/*
+ * Тёплая светлая тема: кремовый фон, белые карточки с мягким объёмом,
+ * основной жёлтый и вторичный фиолетовый. Имена переменных сохранены.
+ */
 :root,
 :root[data-theme='light'] {
   color-scheme: light;
-  --canvas: #f8fafc;
+  --canvas: #fbf8f3;
   --surface: #ffffff;
-  --surface-raised: #f1f5f9;
-  --surface-muted: #e2e8f0;
-  --text-primary: #172033;
-  --text-secondary: #334155;
-  --text-muted: #475569;
-  --border: #cbd5e1;
-  --border-strong: #94a3b8;
-  --link: #1d4ed8;
-  --accent: #1d4ed8;
-  --accent-contrast: #ffffff;
-  --focus: #1d4ed8;
-  --success-bg: #dcfce7;
-  --success-fg: #166534;
-  --warning-bg: #fef3c7;
-  --warning-fg: #854d0e;
-  --danger-bg: #fee2e2;
-  --danger-fg: #b91c1c;
-  --info-bg: #e0f2fe;
-  --info-fg: #075985;
-  --shadow: 0 8px 24px rgb(15 23 42 / 10%);
-  --executor-agent: #1d4ed8;
-  --executor-human: #9a3412;
-  --executor-unknown: #475569;
+  --surface-raised: #fdfbf7;
+  --surface-muted: #f3eee6;
+  --text-primary: #1f1d24;
+  --text-secondary: #3f3b46;
+  --text-muted: #716b63;
+  --border: #ece6db;
+  --border-strong: #d8d0c2;
+  --link: #7a5c00;
+  --accent: #ffd84d;
+  --accent-contrast: #2a2200;
+  --focus: #c9a227;
+  --success-bg: #d9f5e8;
+  --success-fg: #17663f;
+  --warning-bg: #fff1c2;
+  --warning-fg: #6b4d00;
+  --danger-bg: #ffe0da;
+  --danger-fg: #a8321f;
+  --info-bg: #d9f2f5;
+  --info-fg: #0c5560;
+  /* Объём: светлый блик сверху и два мягких слоя тени тёплого тона. */
+  --shadow: inset 0 1px 0 rgb(255 255 255 / 85%), 0 2px 6px rgb(60 44 20 / 5%), 0 14px 32px rgb(60 44 20 / 8%);
+  --shadow-soft: inset 0 1px 0 rgb(255 255 255 / 85%), 0 2px 6px rgb(60 44 20 / 4%), 0 10px 24px rgb(60 44 20 / 6%);
+  --button-shadow: inset 0 1px 0 rgb(255 255 255 / 75%), 0 2px 6px rgb(60 44 20 / 6%);
+  --executor-agent: #7a5c00;
+  --executor-human: #9a4a1c;
+  --executor-unknown: #716b63;
+
+  /* Активный пункт меню: тот же жёлтый основной акцент с тенью. */
+  --active-gradient: linear-gradient(135deg, #ffe27a 0%, #ffd84d 100%);
+  --active-shadow: 0 8px 18px rgb(201 162 39 / 32%);
+
+  /* Цветные акценты-плашки: фон и цвет текста на нём. */
+  --tint-teal: #d4f3ee;
+  --ink-teal: #0d5f55;
+  --tint-yellow: #ffe98a;
+  --ink-yellow: #3b2f00;
+  --tint-coral: #ffd9d1;
+  --ink-coral: #9c3a26;
+  --tint-mustard: #fbeeb8;
+  --ink-mustard: #5e4a00;
+  --create-yellow: #ffd84d;
+  /* Текст на жёлтых кнопках и активных пунктах: одинаков в обеих темах. */
+  --on-yellow: #2a2200;
+
+  /* Пастельные «пузыри» под иконками: градиент от светлого к насыщенному. */
+  --bubble-yellow: linear-gradient(145deg, #fff8cf 0%, #ffd84d 100%);
+  --bubble-mint: linear-gradient(145deg, #e3fbf2 0%, #7fdcbc 100%);
+  --bubble-coral: linear-gradient(145deg, #ffe6df 0%, #ff9f8a 100%);
+  --bubble-mustard: linear-gradient(145deg, #fff3c4 0%, #e5b93a 100%);
+  --bubble-blue: linear-gradient(145deg, #e4f1ff 0%, #9ccaff 100%);
+  --bubble-glyph: #2a2530;
+  --mustard-solid: #d4a72c;
+
+  /* Геометрия: карточки 20-28px, пилюли 999px. */
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-pill: 999px;
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --canvas: #0b1220;
-  --surface: #111c2e;
-  --surface-raised: #1e293b;
-  --surface-muted: #263449;
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
-  --text-muted: #94a3b8;
-  --border: #334155;
-  --border-strong: #475569;
-  --link: #93c5fd;
-  --accent: #1d4ed8;
-  --accent-contrast: #ffffff;
-  --focus: #60a5fa;
+  --canvas: #120f1c;
+  --surface: #1b1828;
+  --surface-raised: #242036;
+  --surface-muted: #2d2841;
+  --text-primary: #f4f1fb;
+  --text-secondary: #d4cfe3;
+  --text-muted: #a09ab5;
+  --border: #35304a;
+  --border-strong: #4a4462;
+  --link: #e7c34f;
+  --accent: #ffd84d;
+  --accent-contrast: #2a2200;
+  --focus: #e7c34f;
   --success-bg: #14532d;
   --success-fg: #bbf7d0;
-  --warning-bg: #713f12;
+  --warning-bg: #5b3d10;
   --warning-fg: #fde68a;
-  --danger-bg: #7f1d1d;
+  --danger-bg: #5c2320;
   --danger-fg: #fecaca;
   --info-bg: #0c4a6e;
   --info-fg: #bae6fd;
-  --shadow: 0 8px 24px rgb(0 0 0 / 24%);
-  --executor-agent: #60a5fa;
+  --shadow: inset 0 1px 0 rgb(255 255 255 / 6%), 0 2px 6px rgb(0 0 0 / 30%), 0 14px 32px rgb(0 0 0 / 34%);
+  --shadow-soft: inset 0 1px 0 rgb(255 255 255 / 6%), 0 2px 6px rgb(0 0 0 / 26%), 0 10px 24px rgb(0 0 0 / 28%);
+  --button-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 2px 6px rgb(0 0 0 / 30%);
+  --executor-agent: #e7c34f;
   --executor-human: #fdba74;
-  --executor-unknown: #94a3b8;
+  --executor-unknown: #a09ab5;
+
+  --active-gradient: linear-gradient(135deg, #ffe27a 0%, #ffd84d 100%);
+  --active-shadow: 0 8px 20px rgb(0 0 0 / 40%);
+
+  --tint-teal: #15382f;
+  --ink-teal: #9ff0e2;
+  --tint-yellow: #4a3b00;
+  --ink-yellow: #ffe98a;
+  --tint-coral: #4a1f18;
+  --ink-coral: #ffc2b5;
+  --tint-mustard: #3f3410;
+  --ink-mustard: #f3dd8a;
+  --create-yellow: #ffd84d;
+  --on-yellow: #2a2200;
+
+  --bubble-yellow: linear-gradient(145deg, #6b5a14 0%, #c9a52a 100%);
+  --bubble-mint: linear-gradient(145deg, #1f5b4b 0%, #3fa98a 100%);
+  --bubble-coral: linear-gradient(145deg, #6a3328 0%, #d9735e 100%);
+  --bubble-mustard: linear-gradient(145deg, #5c4a12 0%, #b8922a 100%);
+  --bubble-blue: linear-gradient(145deg, #23476e 0%, #4f8fd6 100%);
+  --bubble-glyph: #fbf9ff;
+  --mustard-solid: #c9a227;
 }
 
 * {
@@ -86,16 +149,23 @@ select {
 }
 
 button {
-  min-height: 36px;
-  padding: 7px 12px;
+  min-height: 38px;
+  padding: 8px 18px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface-raised);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--button-shadow);
   cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--link);
+  border-color: var(--text-primary);
+  background: var(--surface-raised);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 button:disabled {

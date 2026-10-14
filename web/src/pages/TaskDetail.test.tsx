@@ -1,7 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter, Routes } from '../router';
-import type { TaskRunDetails } from '../types';
+import type { Stage, TaskRunDetails } from '../types';
 import { DRAFT_SAVE_DELAY_MS } from '../components/StageResultForm';
 import { TaskDetail } from './TaskDetail';
 
@@ -16,8 +16,14 @@ vi.mock('../api', () => ({
   approveTaskDeliveryPlan: vi.fn().mockResolvedValue({}),
   cancelRun: vi.fn().mockResolvedValue({}),
   confirmTaskStage: vi.fn().mockResolvedValue({}),
+  decideApproval: vi.fn().mockResolvedValue({}),
   finishTaskGrill: vi.fn().mockResolvedValue({}),
+  getActivePrincipal: vi.fn().mockReturnValue(null),
+  getArtifact: vi.fn().mockResolvedValue(''),
   getPipelineArtifacts: vi.fn().mockResolvedValue([]),
+  getPipelineRun: vi.fn().mockResolvedValue({ run: { id: 5, run_id: 'run-detail-1' }, stages: [] }),
+  resumeRun: vi.fn().mockResolvedValue({}),
+  retryDelivery: vi.fn().mockResolvedValue({}),
   getRunLog: vi.fn().mockResolvedValue({ content: 'agent log', truncated: false }),
   getTaskRunDetails: vi.fn(),
   getTaskRunEvents: vi.fn().mockResolvedValue({ events: [], next_cursor: 0 }),
@@ -118,9 +124,9 @@ describe('Task detail', () => {
   it('shows the pinned task, result history and comparison, event feed, and only allowed stage actions', async () => {
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Новый маршрут' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
     expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
-    expect(screen.getByText(/Закреплённый маршрут/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Закреплённый маршрут/).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
@@ -146,7 +152,7 @@ describe('Task detail', () => {
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
       result: 'md', content: 'Проверенная идея', description: 'Описаны ограничения',
     }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
   });
 
   it('shows the checker report and log link while exposing only confirm when that is allowed', async () => {
@@ -411,7 +417,7 @@ describe('Task detail', () => {
         <Routes routes={[{ path: '/tasks/:runID', element: <TaskDetail /> }]} />
       </MemoryRouter>,
     );
-    expect(await screen.findByRole('heading', { name: 'Старая задача' })).toBeInTheDocument();
+    expect(await screen.findByText('Старое описание')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Старый результат' } });
@@ -426,7 +432,7 @@ describe('Task detail', () => {
     });
     await waitFor(() => expect(oldRunCalls).toBe(2));
     fireEvent.click(screen.getByRole('link', { name: 'Перейти к новой задаче' }));
-    expect(await screen.findByRole('heading', { name: 'Новая задача' })).toBeInTheDocument();
+    expect(await screen.findByText('Новое описание')).toBeInTheDocument();
     expect(screen.queryByText('Старое описание')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
@@ -440,8 +446,8 @@ describe('Task detail', () => {
       oldRefresh.resolve(oldRunDetails);
       await oldRefresh.promise;
     });
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Новая задача' })).toBeInTheDocument());
-    expect(screen.queryByRole('heading', { name: 'Старая задача' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Новое описание')).toBeInTheDocument());
+    expect(screen.queryByText('Старое описание')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
   });
 });
@@ -484,7 +490,7 @@ describe('Browser stage submission', () => {
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
       result: 'md', content: '# План\n\nшаги', description: 'Собран план',
     }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
     expect(storage.getItem(draftKey())).toBeNull();
     expect(screen.queryByRole('button', { name: 'Предпросмотр' })).not.toBeInTheDocument();
   });
@@ -636,7 +642,7 @@ describe('Browser stage submission', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Без хранилища' }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
   });
 
   it('keeps editing when the storage quota is exceeded', async () => {
@@ -682,7 +688,7 @@ describe('Browser stage submission', () => {
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Сдаю без паузы' } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
-    expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+    expect(await screen.findByText('Результат принят')).toBeInTheDocument();
     expect(storage.getItem(draftKey())).toBeNull();
     cleanup();
     expect(storage.getItem(draftKey())).toBeNull();
@@ -708,7 +714,7 @@ describe('Browser stage submission', () => {
         await accepted.promise;
       });
       vi.useRealTimers();
-      expect(await screen.findByText('Результат отправлен выполнено.')).toBeInTheDocument();
+      expect(await screen.findByText('Результат принят')).toBeInTheDocument();
       expect(storage.getItem(draftKey())).toBeNull();
       hidePage();
       cleanup();
@@ -754,5 +760,299 @@ describe('Browser stage submission', () => {
     await openResultForm();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('');
     expect(screen.queryByText(/Восстановлен черновик/)).not.toBeInTheDocument();
+  });
+});
+
+describe('Task page controls moved from the old pipeline page', () => {
+  it('shows what happens after confirmation and the next step in one line', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'running' },
+      state: { ...baseDetails.state!, phase: 'running', pending_approval_id: undefined },
+      approvals: [],
+      allowed_actions: ['confirm'],
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
+    expect(screen.getAllByText('Ожидает').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
+  });
+
+  it('offers the manual path and the agent path as separate choices with the route states', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: undefined },
+      approvals: [],
+      allowed_actions: ['take', 'results', 'run-agent'],
+    });
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Сделаю сам' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Агент analyst подготовит результат' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.getAllByText('пройден')).toHaveLength(1);
+    expect(screen.getAllByText('текущий')).toHaveLength(1);
+    expect(screen.getAllByText('впереди')).toHaveLength(1);
+  });
+
+  it('keeps service fields out of the main view until the details block is opened', async () => {
+    renderDetail();
+    await screen.findByRole('heading', { name: 'Бизнес-идея' });
+
+    const details = screen.getAllByText('Подробности', { selector: 'summary' })[0].closest('details');
+    expect(details).not.toBeNull();
+    expect(details).toHaveTextContent('run-detail-1');
+    expect(details).toHaveTextContent('Длительность');
+  });
+
+  it('shows the intention text on the page and not only as a file link', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue([
+      { name: '0001-intention.md', path: 'brief/0001-intention.md', run_id: 'run-detail-1', size: 10, mod_time: '2026-10-12T09:00:00Z' },
+    ]);
+    vi.mocked(api.getArtifact).mockResolvedValue('Клиенты входят через Google без пароля.');
+    renderDetail();
+
+    expect(await screen.findByText('Клиенты входят через Google без пароля.')).toBeInTheDocument();
+    expect(api.getArtifact).toHaveBeenCalledWith('run-detail-1', 'brief/0001-intention.md');
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue([]);
+  });
+
+  it('decides a plain approval through the task API and shows where it leads', async () => {
+    const api = await import('../api');
+    const approval = {
+      id: 'spec-1', run_id: 'run-detail-1', attempt_id: 'attempt-spec', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'stage_gate', subject_hash: 'f'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['approve', 'reject'], targets: { approve: 'analysis' }, status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, pending_approval_id: 'spec-1' },
+      approvals: [approval],
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Далее: Согласовать → Анализ')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Согласовать' }));
+    await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
+      action: 'approve', actor_role: 'product_owner', actor_id: 'local-user',
+    })));
+  });
+
+  it('resumes a stopped task and retries a failed delivery from the same page', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'stopped' },
+      approvals: [],
+      allowed_actions: [],
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Продолжить задачу' }));
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+    expect(screen.queryByRole('button', { name: 'Выдать бюджет и продолжить' })).not.toBeInTheDocument();
+
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'completed' },
+      approvals: [],
+      allowed_actions: [],
+      delivery: { status: 'failed', error: 'push rejected' },
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Повторить одобренную Git-доставку' }));
+    await waitFor(() => expect(api.retryDelivery).toHaveBeenCalledWith('run-detail-1'));
+  });
+  it('moves the back link out of the header and names the idea block without the intention wording', async () => {
+    renderDetail();
+    await screen.findByRole('heading', { name: 'Бизнес-идея' });
+
+    expect(screen.queryByRole('link', { name: '← К задачам' })).not.toBeInTheDocument();
+    expect(screen.getByText('Бизнес-идея')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Бизнес-идея' })).toBeInTheDocument();
+    expect(screen.queryByText('Исходное намерение')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Бизнес-намерение/)).not.toBeInTheDocument();
+  });
+
+  const agentStage = (status: 'running' | 'failed', extra: Partial<Stage> = {}): Stage => ({
+    id: 9, pipeline_run_id: 5, attempt_id: 'agent-attempt-9', stage_index: 1, agent_name: 'analysis',
+    status, started_at: new Date().toISOString(), ...extra,
+  });
+  const agentOnStage = (stages: Stage[]): TaskRunDetails => ({
+    ...baseDetails,
+    state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: undefined,
+      executor_overrides: { analysis: { executor: 'agent', previous_executor: 'human' } } },
+    approvals: [],
+    stages,
+    allowed_actions: ['run-agent', 'take', 'results'],
+  });
+
+  it('shows the agent working state with a link to its log', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
+    renderDetail();
+
+    expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+      'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
+    );
+  });
+
+  it('shows the agent failure with its reason', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('failed', { error: 'Нет доступа к репозиторию' })]));
+    renderDetail();
+
+    expect(await screen.findByText('Этап «Анализ» упал')).toBeInTheDocument();
+    expect(screen.getByTestId('stage-failure')).toHaveTextContent('Нет доступа к репозиторию');
+  });
+
+  it('confirms the agent start at once, before the server reports the attempt', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...agentOnStage([]) });
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    expect(await screen.findByText('Агент запущен')).toBeInTheDocument();
+    expect(api.runTaskStageAgent).toHaveBeenCalledWith('run-detail-1', 'analysis', 'run');
+  });
+  it('marks the failed stage in the route and shows its short reason with the agent log on the current stage', async () => {
+    const api = await import('../api');
+    const failed = agentStage('failed', {
+      error: 'Не найден файл спецификации\nНужен docs/spec.md в ветке\nхвост трассировки, которого не должно быть на странице',
+    });
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...agentOnStage([failed]),
+      run: { ...baseDetails.run, status: 'failed' },
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    const banner = await screen.findByTestId('stage-failure');
+    expect(banner).toHaveTextContent('Этап «Анализ» упал');
+    expect(banner).toHaveTextContent('Не найден файл спецификации Нужен docs/spec.md в ветке');
+    expect(banner).not.toHaveTextContent('хвост трассировки');
+    expect(within(banner).getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+      'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
+    );
+    expect(screen.getByText('Упал')).toBeInTheDocument();
+    expect(screen.getByText('Упал').closest('li')).toHaveAttribute('data-state', 'failed');
+  });
+
+  it('shows the run error when a failed run has no stage attempt to point at', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'failed', error: 'Сборка упала на шаге проверки' },
+      stages: [],
+      allowed_actions: [],
+    });
+    renderDetail();
+
+    const banner = await screen.findByTestId('stage-failure');
+    expect(banner).toHaveTextContent('Прогон завершился ошибкой');
+    expect(banner).toHaveTextContent('Сборка упала на шаге проверки');
+    expect(within(banner).queryByRole('link')).not.toBeInTheDocument();
+  });
+  it('answers the product questions inside the current stage card and shows the wait while the server answers', async () => {
+    const api = await import('../api');
+    const question = {
+      id: 'q-1', run_id: 'run-detail-1', attempt_id: 'attempt-q', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'human_input', subject_hash: 'e'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Какой сегмент выбрать?' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'intent', pending_approval_id: 'q-1' },
+      approvals: [question],
+      allowed_actions: ['results'],
+    });
+    vi.mocked(api.decideApproval).mockImplementationOnce(() => new Promise(() => undefined) as never);
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' })).toBeInTheDocument();
+    const card = document.getElementById('current-stage');
+    expect(card).toHaveTextContent('Какой сегмент выбрать?');
+    fireEvent.change(screen.getAllByLabelText('Ответ на вопрос')[0], { target: { value: 'Малый бизнес' } });
+    fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
+
+    expect(await screen.findByText('Ждём ответ сервера…')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Сохраняем…' })[0]).toBeDisabled();
+  });
+  it('resumes the run after the product question answer is resolved', async () => {
+    const api = await import('../api');
+    const question = {
+      id: 'q-resume', run_id: 'run-detail-1', attempt_id: 'attempt-q', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'graph_outcome:blocked', subject_hash: 'e'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['answer_questions'], payload: { kind: 'questions', markdown: 'Кто клиент?' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'intent', pending_approval_id: question.id },
+      approvals: [question],
+      allowed_actions: [],
+    });
+    vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...question, status: 'resolved', resolved_action: 'answer_questions' });
+    renderDetail();
+
+    await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' });
+    const card = document.getElementById('current-stage');
+    fireEvent.change(within(card!).getByLabelText('Ответ на вопрос'), { target: { value: 'B2B' } });
+    fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
+
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+  });
+  it('shows a background resume error while keeping the answered task available', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(baseDetails);
+    vi.mocked(api.getTaskRunEvents).mockResolvedValue({ events: [{
+      version: 1, cursor: 7, sequence: 7, run_id: 'run-detail-1',
+      type: 'run_resume_failed', timestamp: '2026-10-12T09:03:00Z',
+      data: { error: 'resume run: provenance drift: runtime changed' },
+    }], next_cursor: 7 });
+    renderDetail();
+
+    expect(await screen.findByTestId('stage-failure')).toHaveTextContent('provenance drift: runtime changed');
+    expect(screen.getByRole('button', { name: 'Продолжить задачу' })).toBeInTheDocument();
+  });
+  it('moves the launch notice to the working state once the server reports the agent attempt', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([]));
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
+    expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
+    expect(screen.queryByText('Агент запущен')).not.toBeInTheDocument();
+  });
+  it('lists the pending approval of the current stage with its actions and asks for a decision', async () => {
+    const api = await import('../api');
+    const pendingInput = {
+      id: 'input-2', run_id: 'run-detail-1', attempt_id: 'attempt-input', from_stage: 'intent', to_stage: 'intent',
+      trigger: 'human_input', subject_hash: 'f'.repeat(64), required_roles: ['product_owner'], quorum: 'any' as const,
+      actions: ['submit', 'run_agent', 'refine_agent', 'reject'], targets: {}, status: 'pending' as const,
+      created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'intent', pending_approval_id: 'input-2' },
+      approvals: [pendingInput],
+      allowed_actions: ['take', 'results', 'run-agent'],
+    });
+    renderDetail();
+
+    expect(await screen.findByText(/Ждёт вашего решения/)).toBeInTheDocument();
+    const approvals = document.getElementById('approvals-heading')!.closest('section')!;
+    expect(within(approvals).getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(within(approvals).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(within(approvals).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
   });
 });

@@ -41,6 +41,7 @@ export function Login({ allowActivation, ssoEnabled = false, onLogin, onActivate
       <form className={styles.card} onSubmit={submit}>
         <h1>Войти в ai-team</h1>
         <p>Сессия истекла или отсутствует. Введите временный токен доступа.</p>
+        <p>Токен лежит в файле <code>.ai-team/web.token</code> в папке проекта. Показать его: <code>cat .ai-team/web.token</code>, скопировать в буфер (macOS): <code>pbcopy &lt; .ai-team/web.token</code>.</p>
         <textarea aria-label="Токен доступа" value={token}
           onChange={(event) => setToken(event.target.value)} autoFocus />
         {error && <div className={styles.error}>{error}</div>}

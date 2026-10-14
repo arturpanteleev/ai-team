@@ -4,6 +4,7 @@ import { TemplateEditor } from './TemplateEditor';
 
 const api = vi.hoisted(() => ({
   getProjectTemplate: vi.fn(),
+  getTemplatesList: vi.fn(),
   validateProjectTemplate: vi.fn(),
   publishProjectTemplate: vi.fn(),
 }));
@@ -11,6 +12,7 @@ const api = vi.hoisted(() => ({
 vi.mock('../api', () => ({
   getActivePrincipal: () => ({ actor_id: 'owner', roles: ['product_owner'] }),
   getProjectTemplate: api.getProjectTemplate,
+  getTemplatesList: api.getTemplatesList,
   validateProjectTemplate: api.validateProjectTemplate,
   publishProjectTemplate: api.publishProjectTemplate,
 }));
@@ -42,6 +44,7 @@ beforeEach(() => {
   api.validateProjectTemplate.mockReset();
   api.publishProjectTemplate.mockReset();
   api.getProjectTemplate.mockResolvedValue(templateResponse());
+  api.getTemplatesList.mockResolvedValue({ templates: [], active_template: 'single-flow', versions: [] });
 });
 afterEach(cleanup);
 
@@ -57,6 +60,23 @@ describe('TemplateEditor', () => {
     expect(screen.getAllByText('analyst', { selector: 'code' })).toHaveLength(2);
     expect(screen.getByText('возвращает в')).toBeInTheDocument();
     expect(screen.getByText(/У проекта один выбранный шаблон/)).toBeInTheDocument();
+  });
+
+  it('lets the user choose a template and edits only the active one', async () => {
+    const inactive = {
+      valid: true, template: 'side-flow', title: 'Side flow', version: 'c'.repeat(64),
+      stages: [{ id: 'qa', title: 'Проверка качества', function: 'qa', result: 'md', executor: 'human' }],
+      returns: [],
+    };
+    api.getTemplatesList.mockResolvedValue({ templates: [{ valid: true, template: 'single-flow', title: 'One project template' }, inactive], active_template: 'single-flow', versions: [] });
+    render(<TemplateEditor />);
+
+    expect(await screen.findByRole('button', { name: /Side flow/ })).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByRole('button', { name: /Side flow/ }));
+    expect(await screen.findByRole('heading', { name: 'Side flow' })).toBeInTheDocument();
+    expect(screen.getByText('Проверка качества')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Конфигурация выбранного шаблона')).not.toBeInTheDocument();
+    expect(screen.getByText(/Этот шаблон не активен/)).toBeInTheDocument();
   });
 
   it('validates YAML diagnostics and publishes against the version that was loaded', async () => {

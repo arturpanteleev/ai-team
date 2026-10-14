@@ -156,14 +156,17 @@ func (r *AgentCLIRuntime) Execute(ctx context.Context, agent *Agent, task *Task,
 		if ctx.Err() != nil {
 			return fmt.Errorf("агент %s: %w", agent.Name, ctx.Err())
 		}
+		// Причина и хвост вывода идут в ошибку этапа: она попадает в манифест
+		// попытки и в attempt_finished, чтобы сбой был виден без логов.
+		detail := runFailureDetail(runErr, capturedStdout.String(), capturedStderr.String())
 		if classifier, ok := adapter.(interface{ ClassifyError(output string) error }); ok {
 			output := capturedStdout.String()
 			if capturedStderr.Len() > 0 {
 				output += "\n" + capturedStderr.String()
 			}
-			return fmt.Errorf("агент %s: %w", agent.Name, classifier.ClassifyError(output))
+			return fmt.Errorf("агент %s: %w%s", agent.Name, classifier.ClassifyError(output), detail)
 		}
-		return fmt.Errorf("агент %s завершился с ошибкой: %w", agent.Name, runErr)
+		return fmt.Errorf("агент %s завершился с ошибкой: %w%s", agent.Name, runErr, detail)
 	}
 	if err := publishScopedOutputs(); err != nil {
 		return fmt.Errorf("агент %s: публикация результатов из ограниченной workspace: %w", agent.Name, err)
@@ -321,6 +324,42 @@ func (r *AgentCLIRuntime) buildPrompt(agent *Agent, task *Task, inputs []Artifac
 	return prompt, nil
 }
 
+// runFailureTailLimit — сколько последних байт stdout/stderr попадает в
+// ошибку этапа.
+const runFailureTailLimit = 2000
+
+// runFailureCredentialEnv — переменные с учётными данными, значения которых
+// вырезаются из текста ошибки, даже если вывод харнесса их повторил.
+var runFailureCredentialEnv = []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"}
+
+// runFailureDetail формирует хвост ошибки запуска: причину выхода процесса
+// и последние строки stdout/stderr с вырезанными учётными данными.
+func runFailureDetail(runErr error, stdout, stderr string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "; причина: %v", runErr)
+	if tail := outputTail(stdout); tail != "" {
+		fmt.Fprintf(&b, "; stdout: %s", tail)
+	}
+	if tail := outputTail(stderr); tail != "" {
+		fmt.Fprintf(&b, "; stderr: %s", tail)
+	}
+	text := b.String()
+	for _, name := range runFailureCredentialEnv {
+		if value := strings.TrimSpace(os.Getenv(name)); len(value) >= 8 {
+			text = strings.ReplaceAll(text, value, "[redacted]")
+		}
+	}
+	return text
+}
+
+func outputTail(output string) string {
+	text := strings.Join(strings.Fields(output), " ")
+	if len(text) > runFailureTailLimit {
+		text = "…" + strings.ToValidUTF8(text[len(text)-runFailureTailLimit:], "")
+	}
+	return text
+}
+
 // boundedBuilder ограничивает накапливаемый текст, не позволяя переполнять
 // память произвольным объёмом вывода харнесса (используется только для
 // классификации ошибок адаптером).
@@ -364,6 +403,13 @@ func serviceSection(agent *Agent, task *Task) string {
 	}
 	summaryPath := filepath.Join(task.ArtifactRoot, task.Feature, ".stage-summary", agent.Name+".md")
 	s += fmt.Sprintf("- В конце работы запиши краткое резюме этапа (2–5 строк: что сделано, ключевые решения) в файл `%s`.\n", summaryPath)
+	if agent.AskQuestions {
+		// Контроллер ищет вопросы строго в <ArtifactRoot>/tasks/<feature>/questions.md;
+		// без абсолютного пути агент пишет их в корень рабочего каталога и этап
+		// становится terminal blocked без возможности ответа.
+		questionsPath := filepath.Join(task.ArtifactRoot, "tasks", task.Feature, "questions.md")
+		s += fmt.Sprintf("- Если для продолжения нужен ответ Product Owner, запиши вопросы строго в файл `%s` (не в корень рабочего каталога).\n", questionsPath)
+	}
 	s += "- " + verdict.BlockedInstruction(task.ArtifactRoot, task.Feature, agent.Name) + "\n"
 	return s
 }

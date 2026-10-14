@@ -291,6 +291,7 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 		cfg = config.Default()
 	}
 	p := &Pipeline{cfg: cfg, reg: reg}
+	p.markQuestionStages()
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -970,6 +971,17 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				}
 			}
 		}
+		// A clarification loop may land on a human-owned stage. Its input gate
+		// creates a new approval before the agent can run again; the resolved
+		// executor choice must not discard the answer from the preceding loop.
+		if resumedState.Phase == lifecycle.PhaseWaiting && resumedApproval != nil &&
+			resumedApproval.Kind == approval.KindInput && resumedApproval.FromStage == runCfg.retryFrom &&
+			(resumedApproval.ResolvedAction == "run_agent" || resumedApproval.ResolvedAction == "refine_agent") {
+			recoveredClarification, err = RecoveredQuestionApproval(approvalStore, runID, runCfg.retryFrom, replayedRun)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("resume clarification through human input: %w", err)
+			}
+		}
 		if resumedState.ActiveApprovalID != "" {
 			if resumedState.NextStage != runCfg.retryFrom {
 				// Evidence reconciliation moved past the stage that owned this
@@ -1106,6 +1118,34 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			for index := range replayedRun.Attempts {
 				attempt := &replayedRun.Attempts[index]
 				if !containsString(abandonedAttemptIDs, attempt.AttemptID) {
+					continue
+				}
+				attempt.Superseded = true
+				attempt.State = workflow.Invalidate(attempt.State)
+				attempt.Status = attempt.State.LegacyStatus()
+			}
+		}
+		// Инфра-попытка прошлого запуска — последняя в run (run останавливается на
+		// ней, а не ретраит). После resume она не должна определять итоговый
+		// статус: повтор этапа заменяет её, как abandoned-попытки выше.
+		var infraFailedAttemptIDs []string
+		for index := range replayedRun.Attempts {
+			attempt := &replayedRun.Attempts[index]
+			if attempt.Superseded || attempt.FinishedAt.IsZero() || attempt.State.Execution != workflow.ExecutionInfraFailed {
+				continue
+			}
+			infraFailedAttemptIDs = append(infraFailedAttemptIDs, attempt.AttemptID)
+		}
+		if len(infraFailedAttemptIDs) > 0 {
+			if err := evidenceStore.Append(evidence.Event{
+				Type: "attempts_invalidated", Timestamp: runStartedAt,
+				Data: map[string]any{"attempt_ids": infraFailedAttemptIDs, "reason": "infra_failure_retry"},
+			}); err != nil {
+				return RunResult{}, err
+			}
+			for index := range replayedRun.Attempts {
+				attempt := &replayedRun.Attempts[index]
+				if !containsString(infraFailedAttemptIDs, attempt.AttemptID) {
 					continue
 				}
 				attempt.Superseded = true
@@ -1501,26 +1541,12 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			return RunResult{RunID: runID, Outcome: outcome}, finalErr
 		}
 		if inputApproval.Kind == approval.KindQuestions && inputApproval.ResolvedAction == "answer_questions" {
-			filtered := make([]runtime.Artifact, 0, len(inputs)+1)
-			for _, input := range inputs {
-				if input.Name == "questions" {
-					filtered = append(filtered, input)
-				}
-			}
-			var answer runtime.Artifact
-			var answerErr error
-			if p.questionAnswerInputs != nil {
-				answer, answerErr = p.questionAnswerInputs.MaterializeQuestionAnswer(runID, inputApproval.ID)
-			} else {
-				answer, answerErr = writeQuestionAnswerInput(runCfg.TargetDir, runID, inputApproval.ID, questionAnswer(inputApproval.Decisions))
-			}
-			if answerErr != nil {
-				outcome, finalErr := rs.finalize(answerErr)
+			clarification, clarificationErr := rs.clarificationInputs(*inputApproval)
+			if clarificationErr != nil {
+				outcome, finalErr := rs.finalize(clarificationErr)
 				return RunResult{RunID: runID, Outcome: outcome}, finalErr
 			}
-			filtered = append(filtered, answer)
-			filtered = append(filtered, briefInputs(rs.brief)...)
-			rs.extraInputs[runCfg.retryFrom] = filtered
+			rs.extraInputs[runCfg.retryFrom] = clarification
 		} else if isApprovedSpecPayload(inputApproval.Payload) {
 			var payload approvedSpecPayload
 			if err := json.Unmarshal(inputApproval.Payload, &payload); err != nil || payload.Kind != "agreed_spec" ||
@@ -1532,7 +1558,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			for _, input := range inputs {
 				byName[input.Name] = input
 			}
-			for _, name := range []string{"proposal", "spec"} {
+			for _, name := range []string{"proposal"} {
 				input, ok := byName[name]
 				if !ok {
 					outcome, finalErr := rs.finalize(fmt.Errorf("approved stage artifact %s missing", name))
@@ -1570,6 +1596,16 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 				rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], feedback)
 			}
 		}
+	}
+	if recoveredClarification != nil && inputApproval != nil && inputApproval.Kind == approval.KindInput &&
+		(inputApproval.ResolvedAction == "run_agent" || inputApproval.ResolvedAction == "refine_agent") {
+		clarification, clarificationErr := rs.clarificationInputs(*recoveredClarification)
+		if clarificationErr != nil {
+			outcome, finalErr := rs.finalize(clarificationErr)
+			return RunResult{RunID: runID, Outcome: outcome}, finalErr
+		}
+		rs.questionAnswerTargetStage = recoveredClarification.FromStage
+		rs.extraInputs[runCfg.retryFrom] = append(rs.extraInputs[runCfg.retryFrom], clarification...)
 	}
 	// A grill-approved human revision belongs to the source result, but the
 	// attempt manifest remains immutable. If a process crashed after the
@@ -1950,4 +1986,31 @@ func resumedTaskRepository(manifest evidence.RunManifest) (repository, reason st
 	return "", "run " + manifest.RunID + " was started without a captured GitHub task repository " +
 		"(started before repository capture existed, or origin was not an accepted GitHub URL); " +
 		"the identity is never recomputed on resume — start a new run (ai-team run without --resume) to use PR checks"
+}
+
+// markQuestionStages records which template stages run an agent with
+// ask_questions, so the compiled graph gets the BLOCKED → answer loop.
+func (p *Pipeline) markQuestionStages() {
+	markQuestionStages(p.cfg, p.reg)
+}
+
+// markQuestionStages is shared with runs that load a pinned template version:
+// the pinned config must carry the same question stages as the live one.
+func markQuestionStages(cfg *config.Config, reg *agent.Registry) {
+	if cfg == nil || reg == nil || len(cfg.Stages) == 0 {
+		return
+	}
+	for _, stage := range cfg.Stages {
+		if stage.Agent == "" {
+			continue
+		}
+		a, err := reg.Load(stage.Agent)
+		if err != nil || a == nil || !a.AskQuestions {
+			continue
+		}
+		if cfg.QuestionStages == nil {
+			cfg.QuestionStages = map[string]bool{}
+		}
+		cfg.QuestionStages[stage.ID] = true
+	}
 }

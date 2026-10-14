@@ -25,8 +25,15 @@ describe('Layout team navigation', () => {
     renderLayout(false);
 
     expect(screen.queryByRole('link', { name: 'Команда' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Лента' })).toBeInTheDocument();
+  });
+
+  it('показывает рабочие разделы с понятными подписями и без дубля «Шаблон»', () => {
+    renderLayout(false);
+
+    expect(screen.getByRole('link', { name: 'Шаблоны' })).toHaveAttribute('href', '/template');
+    expect(screen.getByRole('link', { name: 'Лента' })).toHaveAttribute('href', '/events');
     expect(screen.getByRole('link', { name: 'Наблюдаемость' })).toHaveAttribute('href', '/observability');
+    expect(screen.queryByRole('link', { name: 'Шаблон' })).not.toBeInTheDocument();
   });
 
   it('keeps Team navigation for cloud auth', () => {
@@ -35,11 +42,20 @@ describe('Layout team navigation', () => {
     expect(screen.getByRole('link', { name: 'Команда' })).toBeInTheDocument();
   });
 
-  it('ведёт на дашборд и на доску задач разными пунктами без дубля «Задачи»', () => {
+  it('ведёт на главную «Задачи» и на доску разными пунктами', () => {
     renderLayout(false);
 
-    expect(screen.getByRole('link', { name: 'Дашборд' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'Задачи' })).toHaveAttribute('href', '/');
     expect(screen.getByRole('link', { name: 'Доска' })).toHaveAttribute('href', '/tasks');
-    expect(screen.queryByRole('link', { name: 'Задачи' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Дашборд' })).not.toBeInTheDocument();
+  });
+  it('shows the user as avatar and name, keeps roles in a tooltip and the logout as a labelled door', () => {
+    renderLayout(false);
+
+    expect(screen.getByRole('button', { name: 'Выйти' })).toHaveAttribute('title', 'Выйти');
+    const user = screen.getByText('owner@example.com').closest('[aria-describedby]');
+    expect(user).toHaveAttribute('aria-describedby', 'user-roles');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('владелец продукта');
+    expect(screen.queryByText(/^владелец продукта$/)).toBeNull();
   });
 });

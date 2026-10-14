@@ -32,8 +32,8 @@ queued задачи. CI ставит Chromium и запускает тот же 
 - `src/hooks/useWebSocket.ts` — живой event stream `/ws` с cursor/replay;
   stream identity сбрасывает cursor при пересоздании SQLite store, polling
   остаётся recovery fallback.
-- `src/pages/Dashboard.tsx` — список runs; `PipelineDetail.tsx` — детали run,
-  pending approvals (subject hash, actions), checks/mutations/delivery.
+- `src/pages/Dashboard.tsx` — список задач; `src/pages/TaskDetail.tsx` — единая страница задачи
+  (`/tasks/:id`, старые `/runs/:id` и `/pipelines/:id` ведут сюда): этапы, согласования, доставка.
 - Аутентификация: в cloud-режиме Bearer token обменивается на HttpOnly
   session cookie; все write-запросы требуют `X-CSRF-Token` (см. `src/api.ts`).
 

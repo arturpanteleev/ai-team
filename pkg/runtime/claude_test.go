@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -356,5 +357,83 @@ func TestClaudeStdinPromptWiringThroughOrchestrator(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "тестовый промпт claude") || !strings.Contains(content, "## Служебные требования") {
 		t.Errorf("prompt должен уходить в stdin claude -p, got: %q", content)
+	}
+}
+
+func TestClaudeWritePolicyAllowsOnlyStageArtifactDirInsideAiTeam(t *testing.T) {
+	target := t.TempDir()
+	aiTeam := filepath.Join(target, ".ai-team")
+	for _, dir := range []string{
+		filepath.Join(aiTeam, "artifacts", "feat"),
+		filepath.Join(aiTeam, "artifacts", "other"),
+		filepath.Join(aiTeam, "state"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	artifactDir := filepath.Join(aiTeam, "artifacts", "feat")
+	settings, err := claudeSessionSettings(&Task{
+		Feature: "feat", TargetDir: target, ArtifactRoot: filepath.Join(aiTeam, "artifacts"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(settings, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	allow := strings.Join(parsed.Permissions.Allow, "\n")
+	deny := strings.Join(parsed.Permissions.Deny, "\n")
+	for _, want := range []string{
+		"Edit(//" + filepath.ToSlash(artifactDir)[1:] + "/**)",
+		"Write(//" + filepath.ToSlash(artifactDir)[1:] + "/**)",
+	} {
+		if !strings.Contains(allow, want) {
+			t.Fatalf("allow должен содержать %q: %s", want, allow)
+		}
+	}
+	for _, want := range []string{
+		"Edit(//" + filepath.ToSlash(aiTeam)[1:] + "/state/**)",
+		"Write(//" + filepath.ToSlash(aiTeam)[1:] + "/state)",
+		"Edit(//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts", "other"))[1:] + "/**)",
+		"Edit(//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts"))[1:] + "/*.*)",
+	} {
+		if !strings.Contains(deny, want) {
+			t.Fatalf("deny должен содержать %q: %s", want, deny)
+		}
+	}
+	// Протокольный каталог tasks (questions.md при BLOCKED) не запрещается
+	// и разрешается на запись именно для каталога feature.
+	tasksFeature := "//" + filepath.ToSlash(filepath.Join(aiTeam, "artifacts", "tasks", "feat"))[1:] + "/**"
+	if !strings.Contains(allow, "Write("+tasksFeature+")") {
+		t.Fatalf("allow должен содержать запись в tasks/<feature>: %s", allow)
+	}
+	if strings.Contains(deny, "artifacts/tasks") {
+		t.Fatalf("tasks не должен попадать в deny: %s", deny)
+	}
+	if strings.Contains(deny, "Edit(//"+filepath.ToSlash(artifactDir)[1:]+"/**)") {
+		t.Fatal("каталог этапа не должен попадать в deny")
+	}
+	if strings.Contains(allow, "Edit(//**)") || strings.Contains(allow, "\"Edit\"") {
+		t.Fatalf("записи не должны разрешаться широко: allow=%s", allow)
+	}
+}
+
+func TestRunFailureDetailKeepsStderrAndRedactsCredentials(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-secret")
+	detail := runFailureDetail(errors.New("exit status 1"), `{"result":"Not logged in"}`, "fatal: sk-ant-synthetic-secret leaked\nsecond line")
+	for _, want := range []string{"exit status 1", "Not logged in", "fatal:", "second line"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail должен содержать %q: %s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "sk-ant-synthetic-secret") {
+		t.Fatal("учётные данные не должны попадать в текст ошибки")
 	}
 }

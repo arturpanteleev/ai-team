@@ -267,3 +267,35 @@
     min-height: 340px;
   }
 }
+
+.templateList {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.templateOption {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.templateOption[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.templateOption strong {
+  overflow-wrap: anywhere;
+}

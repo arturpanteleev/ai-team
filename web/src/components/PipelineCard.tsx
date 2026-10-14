@@ -25,11 +25,12 @@ export function PipelineCard({ run, onCancel }: PipelineCardProps) {
   return (
     <article
       className={styles.card}
-      onClick={() => navigate(`/pipelines/${run.id}`)}
+      data-status={run.status}
+      onClick={() => navigate(`/tasks/${encodeURIComponent(run.run_id)}`)}
       onKeyDown={(event) => {
         if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          navigate(`/pipelines/${run.id}`);
+          navigate(`/tasks/${encodeURIComponent(run.run_id)}`);
         }
       }}
       role="link"

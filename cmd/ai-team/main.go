@@ -132,7 +132,7 @@ func printUsage() {
 	fmt.Println(`ai-team — AI-команда для spec-driven разработки
 
 Использование:
-  ai-team init [--target <path>] [--write-gitignore]
+  ai-team init [--target <path>]
                                      Инициализировать .ai-team/ в проекте
   ai-team run                      Запустить пайплайн агентов
   ai-team runs [--target <path>]   Показать задачи проекта
@@ -1001,7 +1001,7 @@ func cmdInit() {
 	targetFlag := initFlags.String("target", ".", "Путь к целевому проекту")
 	profileFlag := initFlags.String("profile", config.ProfileStandard, "Шаблон процесса: fast, standard или regulated")
 	force := initFlags.Bool("force", false, "Перезаписать существующий .ai-team/config.yaml")
-	writeGitignore := initFlags.Bool("write-gitignore", false, "Записать разделяемое правило в .gitignore вместо локального Git exclude")
+	writeGitignore := initFlags.Bool("write-gitignore", false, "Устарело и игнорируется: .gitignore не меняется, правило всегда пишется в Git info/exclude")
 	if err := initFlags.Parse(os.Args[2:]); err != nil {
 		fatal("Ошибка аргументов init: %v", err)
 	}
@@ -1054,7 +1054,10 @@ func cmdInit() {
 		fmt.Fprintf(os.Stderr, "Предупреждение: %v\n", err)
 	}
 
-	ignorePath, err := ensureControlIgnored(target, *writeGitignore)
+	if *writeGitignore {
+		fmt.Fprintln(os.Stderr, "Предупреждение: --write-gitignore устарел и игнорируется; .gitignore не изменяется")
+	}
+	ignorePath, err := ensureControlIgnored(target)
 	if err != nil {
 		fatal("Ошибка настройки ignore policy: %v", err)
 	}
@@ -1115,14 +1118,10 @@ func writeInitConfig(path string, data []byte, force bool) error {
 	return os.Rename(tmpPath, path)
 }
 
-// ensureControlIgnored гарантирует исключение .ai-team/ из Git. По умолчанию
-// используется локальный info/exclude, чтобы init не изменял workspace.
-func ensureControlIgnored(target string, writeGitignore bool) (string, error) {
-	if writeGitignore {
-		path := filepath.Join(target, ".gitignore")
-		return path, appendIgnoreRule(path)
-	}
-
+// ensureControlIgnored гарантирует исключение .ai-team/ из Git через локальный
+// info/exclude: версионируемый .gitignore init не трогает, иначе рабочее дерево
+// становится грязным и прогон падает на проверке clean git workspace.
+func ensureControlIgnored(target string) (string, error) {
 	check := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree")
 	if output, err := check.Output(); err != nil || strings.TrimSpace(string(output)) != "true" {
 		var exitErr *exec.ExitError
@@ -1195,6 +1194,50 @@ func loadValidatedConfig(target string, reg *agent.Registry) *config.Config {
 		fatal("%v", err)
 	}
 	return cfg
+}
+
+// loadRunConfig re-reads .ai-team/config.yaml for a new run. Unlike
+// loadValidatedConfig it returns errors instead of exiting, because the web
+// dashboard keeps serving when a run cannot start.
+func loadRunConfig(target string, reg *agent.Registry) (*config.Config, error) {
+	if cfg, overridden := e2eInMemoryLegacyConfig(target); overridden {
+		return cfg, nil
+	}
+	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
+	if err := safeio.RejectSymlink(cfgPath); err != nil {
+		return nil, fmt.Errorf("небезопасный config path: %w", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("загрузка конфига: %w", err)
+	}
+	if err := cfg.Validate(reg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// runStarter starts one run from a configuration snapshot.
+type runStarter interface {
+	Start(context.Context, pipeline.RunConfig) (pipeline.RunResult, error)
+}
+
+// freshConfigRunEngine re-reads the project config before every new run, so a
+// CLI or agent override takes effect on the next start without restarting the
+// dashboard. Resume, cancel and the other engine actions keep the engine built
+// at startup, because they continue runs pinned to their own template.
+type freshConfigRunEngine struct {
+	*pipeline.RunEngine
+	load  func() (*config.Config, error)
+	build func(*config.Config) runStarter
+}
+
+func (e freshConfigRunEngine) Start(ctx context.Context, run pipeline.RunConfig) (pipeline.RunResult, error) {
+	cfg, err := e.load()
+	if err != nil {
+		return pipeline.RunResult{RunID: run.RunID}, fmt.Errorf("перечитать конфиг перед запуском: %w", err)
+	}
+	return e.build(cfg).Start(ctx, run)
 }
 
 func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry) *config.Config {
@@ -2109,15 +2152,59 @@ func cmdList() {
 		fatal("Небезопасный project agent registry: %v", err)
 	}
 
+	cfg := loadListConfig(target)
+
 	logging.Printf("%-20s %-15s %-10s %-20s %s\n", "Имя", "Runtime", "CLI", "Источник", "Описание")
 	fmt.Println(strings.Repeat("-", 80))
 	agents, failures := reg.List()
 	for _, a := range agents {
-		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, a.CLI, a.Source, a.Description)
+		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, effectiveAgentCLI(cfg, a.Name, a.CLI), a.Source, a.Description)
 	}
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
 	}
+}
+
+// loadListConfig читает проектный .ai-team/config.yaml целевого каталога, чтобы
+// `list` показывал рантайм с учётом переопределений. Отсутствие файла — законный
+// случай (nil). Битый файл не валит список: выводится предупреждение, а CLI
+// показываются по определениям агентов.
+func loadListConfig(target string) *config.Config {
+	cfgPath := filepath.Join(target, ".ai-team", "config.yaml")
+	if _, err := os.Lstat(cfgPath); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s config.yaml недоступен: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		}
+		return nil
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s config.yaml не загружен, CLI показаны по определениям агентов: %v\n", ui.Colorize("⚠", ui.ColorYellow), err)
+		return nil
+	}
+	return cfg
+}
+
+// effectiveAgentCLI повторяет разрешение рантайма из пайплайна: CLI, заданный
+// в конфиге для этапа, который исполняет агент (или для проверки, адресованной
+// агенту по имени), перекрывает CLI из определения агента. Глобальный `cli`
+// конфига подставляется в AgentConfig, поэтому учитывается автоматически.
+func effectiveAgentCLI(cfg *config.Config, agentName, definedCLI string) string {
+	if cfg == nil {
+		return definedCLI
+	}
+	candidates := []string{agentName}
+	for _, stage := range cfg.Stages {
+		if stage.ID != "" && cfg.RegistryAgentName(stage.ID) == agentName {
+			candidates = append(candidates, stage.ID)
+		}
+	}
+	for _, name := range candidates {
+		if ac := cfg.AgentConfig(name); ac != nil && ac.CLI != "" {
+			return ac.CLI
+		}
+	}
+	return definedCLI
 }
 
 // cmdVerify проверяет tamper-evident evidence терминального run или
@@ -2287,12 +2374,15 @@ func cmdWeb() {
 	if err := approvalStore.ImportLegacy(filepath.Join(target, ".ai-team", "state", "approvals")); err != nil {
 		fatal("Не удалось безопасно перенести file approvals в web DB: %v", err)
 	}
-	localEngineOptions := append([]pipeline.Option{
-		pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
-		pipeline.WithApprovalStore(approvalStore),
-		pipeline.WithControllerReadDenyPaths(*dbPath),
-	}, deployProviderOptions(cfg)...)
-	localEngine := pipeline.NewRunEngine(pipeline.New(cfg, reg, localEngineOptions...))
+	buildLocalEngine := func(runCfg *config.Config) *pipeline.RunEngine {
+		localEngineOptions := append([]pipeline.Option{
+			pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
+			pipeline.WithApprovalStore(approvalStore),
+			pipeline.WithControllerReadDenyPaths(*dbPath),
+		}, deployProviderOptions(runCfg)...)
+		return pipeline.NewRunEngine(pipeline.New(runCfg, reg, localEngineOptions...))
+	}
+	localEngine := buildLocalEngine(cfg)
 	controllerOptions := []control.Option{
 		control.WithApprovalStore(approvalStore),
 		control.WithDeferredDelivery(localEngine.DeliverDeferred),
@@ -2335,7 +2425,11 @@ func cmdWeb() {
 		runController, err = control.New(processEngine, target, controllerOptions...)
 	} else {
 		controllerOptions = append(controllerOptions, control.WithPreflight(projectTemplatePreflight{target: target, reg: reg}))
-		runController, err = control.New(localEngine, target, controllerOptions...)
+		runController, err = control.New(freshConfigRunEngine{
+			RunEngine: localEngine,
+			load:      func() (*config.Config, error) { return loadRunConfig(target, reg) },
+			build:     func(runCfg *config.Config) runStarter { return buildLocalEngine(runCfg) },
+		}, target, controllerOptions...)
 	}
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)

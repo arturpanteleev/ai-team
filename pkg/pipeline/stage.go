@@ -376,14 +376,9 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 				r.Status = notifier.StatusFailed
 			}
 		}
-		if rs.candidate != nil {
-			currentLive, liveErr := checks.WorkspaceDigest(rs.runCfg.TargetDir)
-			if liveErr != nil || currentLive != rs.liveWorkspaceSHA {
-				r.ValidationFailed = true
-				r.Err = errors.Join(r.Err, fmt.Errorf("live workspace изменён во время isolated candidate attempt"))
-				r.Status = notifier.StatusFailed
-			}
-		}
+		// The live checkout is not part of an isolated candidate attempt: the agent
+		// writes only to its own worktree, and other people's edits in the live
+		// checkout must not fail it. The candidate mutation guard above covers it.
 	}()
 
 	var execErr error

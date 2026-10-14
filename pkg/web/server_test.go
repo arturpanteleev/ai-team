@@ -48,6 +48,7 @@ type fakeRunController struct {
 	startFeature   string
 	startTask      string
 	startCalls     int
+	upgradeCalls   int
 	resumeRunID    string
 	resumeCalls    int
 	grantActor     string
@@ -1041,6 +1042,11 @@ func (f *fakeRunController) StartWithAdmission(feature, task string, admit func(
 func (f *fakeRunController) Resume(runID string) error {
 	f.resumeRunID = runID
 	f.resumeCalls++
+	return nil
+}
+func (f *fakeRunController) ResumeWithRuntimeUpgrade(runID string) error {
+	f.resumeRunID = runID
+	f.upgradeCalls++
 	return nil
 }
 func (f *fakeRunController) ResumeWithBudgetAllowance(runID, actorID, reason string) error {

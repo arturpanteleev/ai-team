@@ -183,6 +183,29 @@ func CheckDrift(stored, live *Manifest) error {
 	return nil
 }
 
+// CheckDriftExceptRuntime validates every pinned input except the controller
+// executable. A caller must record an explicit runtime upgrade before using
+// this for a paused run; it must never be the default resume policy.
+func CheckDriftExceptRuntime(stored, live *Manifest) error {
+	if stored == nil || live == nil {
+		return CheckDrift(stored, live)
+	}
+	oldCopy, newCopy := *stored, *live
+	oldCopy.Items = make([]Item, 0, len(stored.Items))
+	newCopy.Items = make([]Item, 0, len(live.Items))
+	for _, item := range stored.Items {
+		if item.Kind != KindRuntime {
+			oldCopy.Items = append(oldCopy.Items, item)
+		}
+	}
+	for _, item := range live.Items {
+		if item.Kind != KindRuntime {
+			newCopy.Items = append(newCopy.Items, item)
+		}
+	}
+	return CheckDrift(&oldCopy, &newCopy)
+}
+
 func description(name string) string {
 	if name == "" {
 		return "(глобальный)"

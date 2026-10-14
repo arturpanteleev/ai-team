@@ -26,6 +26,8 @@ type RunEngine struct {
 type ResumeConfig struct {
 	RunID           string
 	TargetDir       string
+	RuntimeUpgrade  bool
+	RetryCheck      bool
 	ApproveGates    bool
 	ApprovePlanHash string
 	CancelRequested func() bool
@@ -148,6 +150,8 @@ func (e *RunEngine) Resume(ctx context.Context, config ResumeConfig) (RunResult,
 	return runPipeline.RunWithResult(ctx, RunConfig{
 		ResumeRunID:     config.RunID,
 		TargetDir:       config.TargetDir,
+		RuntimeUpgrade:  config.RuntimeUpgrade,
+		RetryCheck:      config.RetryCheck,
 		ApproveGates:    config.ApproveGates,
 		ApprovePlanHash: config.ApprovePlanHash,
 		CancelRequested: config.CancelRequested,

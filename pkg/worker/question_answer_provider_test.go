@@ -185,7 +185,7 @@ func TestWorkerAPIQuestionAnswerProviderPropagatesControllerFailure(t *testing.T
 
 func TestValidateQuestionAnswerCandidateUsesCurrentWorkspaceIdentity(t *testing.T) {
 	target := t.TempDir()
-	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "tests@example.com"}, {"config", "user.name", "Coverage Test"}} {
+	for _, args := range [][]string{{"init", "-b", "master"}, {"config", "user.email", "tests@example.com"}, {"config", "user.name", "Coverage Test"}} {
 		command := exec.Command("git", append([]string{"-C", target}, args...)...)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, output)

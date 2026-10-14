@@ -24,14 +24,15 @@ import (
 )
 
 type fakeEngine struct {
-	mu          sync.Mutex
-	started     chan struct{}
-	release     chan struct{}
-	observed    bool
-	cancelCalls int
-	skipCalls   int
-	skipConfig  pipeline.SkipStageConfig
-	resumeGrant *pipeline.BudgetAllowanceGrant
+	mu            sync.Mutex
+	started       chan struct{}
+	release       chan struct{}
+	observed      bool
+	cancelCalls   int
+	skipCalls     int
+	skipConfig    pipeline.SkipStageConfig
+	resumeGrant   *pipeline.BudgetAllowanceGrant
+	resumeUpgrade bool
 	// finished, если задан, закрывается после того, как Resume закончил
 	// обращаться к target: тест ждёт его до удаления TempDir.
 	finished chan struct{}
@@ -51,6 +52,7 @@ func (f *fakeEngine) Start(_ context.Context, config pipeline.RunConfig) (pipeli
 func (f *fakeEngine) Resume(_ context.Context, config pipeline.ResumeConfig) (pipeline.RunResult, error) {
 	f.mu.Lock()
 	f.resumeGrant = config.BudgetAllowance
+	f.resumeUpgrade = config.RuntimeUpgrade
 	f.mu.Unlock()
 	if f.finished != nil {
 		defer close(f.finished)
@@ -444,6 +446,40 @@ func TestControllerResumeWithBudgetAllowancePassesGrant(t *testing.T) {
 	}
 }
 
+func TestControllerResumeWithRuntimeUpgradePassesFlagOnlyWhenRequested(t *testing.T) {
+	target := t.TempDir()
+	stateStore, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("identity"))
+	if err := stateStore.Create(lifecycle.State{
+		RunID: "run-upgrade", Feature: "feature", TargetDir: filepath.Clean(target), Task: "задача",
+		Phase: lifecycle.PhaseResumable, NextStage: "analyst",
+		ConfigSHA256: stringHex(digest[:]), WorkflowSHA256: stringHex(digest[:]),
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	controller, err := New(engine, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.ResumeWithRuntimeUpgrade("run-upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	<-engine.started
+	engine.mu.Lock()
+	upgrade := engine.resumeUpgrade
+	engine.mu.Unlock()
+	close(engine.release)
+	<-engine.finished
+	if !upgrade {
+		t.Fatal("explicit runtime upgrade must reach the engine")
+	}
+}
+
 type recordingApprovalStore struct {
 	values    map[string]approval.PendingApproval
 	decisions []approval.Decision
@@ -600,14 +636,14 @@ func TestControllerSkipPendingHumanStagePreservesActorAndReason(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	store := newRecordingApprovalStore(approval.PendingApproval{
 		ID: "approval-skip", RunID: "run-skip-human", AttemptID: "attempt-1", Status: approval.StatusPending,
-		Kind: approval.KindInput, FromStage: "design_review", ToStage: "design_review", Trigger: "human_input",
+		Kind: approval.KindInput, FromStage: "tech_design", ToStage: "tech_design", Trigger: "human_input",
 		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
 		Actions: []string{"reject", "submit", "skip"},
-		Targets: map[string]string{"reject": "design_review", "submit": "design_review", "skip": "design_review"},
+		Targets: map[string]string{"reject": "tech_design", "submit": "tech_design", "skip": "tech_design"},
 	})
-	controller, _ := newStageActionFixture(t, stageActionState("run-skip-human", "design_review", "approval-skip", lifecycle.PhaseWaiting), engine, store)
+	controller, _ := newStageActionFixture(t, stageActionState("run-skip-human", "tech_design", "approval-skip", lifecycle.PhaseWaiting), engine, store)
 
-	if err := controller.SkipStage(context.Background(), "run-skip-human", "design_review", "out of scope", "actor-1", "reviewer"); err != nil {
+	if err := controller.SkipStage(context.Background(), "run-skip-human", "tech_design", "out of scope", "actor-1", "reviewer"); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.decisions) != 1 || store.decisions[0].Action != "skip" ||
@@ -818,7 +854,7 @@ func TestControllerSkipResumableAgentStageUsesEngine(t *testing.T) {
 
 func TestControllerRunStageAgentRefineFeedsCurrentResult(t *testing.T) {
 	payload, err := json.Marshal(approval.InputPayload{
-		Kind: string(approval.KindInput), StageID: "design_review", Result: "md",
+		Kind: string(approval.KindInput), StageID: "code_review", Result: "md",
 		OutputName: "result", OutputPath: "feature/result.md", AgentEnabled: true, InitialResult: "current agent result",
 	})
 	if err != nil {
@@ -827,15 +863,15 @@ func TestControllerRunStageAgentRefineFeedsCurrentResult(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	store := newRecordingApprovalStore(approval.PendingApproval{
 		ID: "approval-agent", RunID: "run-agent", AttemptID: "attempt-1", Status: approval.StatusPending,
-		Kind: approval.KindInput, FromStage: "design_review", ToStage: "design_review", Trigger: "human_input",
+		Kind: approval.KindInput, FromStage: "code_review", ToStage: "code_review", Trigger: "human_input",
 		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
 		Actions: []string{"reject", "submit", "run_agent", "refine_agent"},
-		Targets: map[string]string{"reject": "design_review", "submit": "design_review", "run_agent": "design_review", "refine_agent": "design_review"},
+		Targets: map[string]string{"reject": "code_review", "submit": "code_review", "run_agent": "code_review", "refine_agent": "code_review"},
 		Payload: payload,
 	})
-	controller, _ := newStageActionFixture(t, stageActionState("run-agent", "design_review", "approval-agent", lifecycle.PhaseWaiting), engine, store)
+	controller, _ := newStageActionFixture(t, stageActionState("run-agent", "code_review", "approval-agent", lifecycle.PhaseWaiting), engine, store)
 
-	if err := controller.RunStageAgent(context.Background(), "run-agent", "design_review", "actor-1", true); err != nil {
+	if err := controller.RunStageAgent(context.Background(), "run-agent", "code_review", "actor-1", true); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.decisions) != 1 || store.decisions[0].Action != "refine_agent" ||
@@ -851,21 +887,21 @@ func TestControllerReturnStageResolvesConfiguredRoute(t *testing.T) {
 	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
 	store := newRecordingApprovalStore(approval.PendingApproval{
 		ID: "approval-return", RunID: "run-return", AttemptID: "attempt-1", Status: approval.StatusPending,
-		FromStage: "design_review", ToStage: "design_review", Trigger: "graph_outcome:passed",
+		FromStage: "code_review", ToStage: "code_review", Trigger: "graph_outcome:passed",
 		SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
-		Actions: []string{"approve", "return_to_tech_design"},
-		Targets: map[string]string{"approve": "implementation", "return_to_tech_design": "tech_design"},
+		Actions: []string{"approve", "return_to_implementation"},
+		Targets: map[string]string{"approve": "implementation", "return_to_implementation": "implementation"},
 	})
-	controller, _ := newStageActionFixture(t, stageActionState("run-return", "design_review", "approval-return", lifecycle.PhaseWaiting), engine, store)
+	controller, _ := newStageActionFixture(t, stageActionState("run-return", "code_review", "approval-return", lifecycle.PhaseWaiting), engine, store)
 
-	if err := controller.ReturnStage(context.Background(), "run-return", "design_review", "tech_design", "redo design", "actor-1", "reviewer"); err != nil {
+	if err := controller.ReturnStage(context.Background(), "run-return", "code_review", "implementation", "redo code", "actor-1", "reviewer"); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.decisions) != 1 || store.decisions[0].Action != "return_to_tech_design" ||
-		store.decisions[0].Comment != "redo design" || !store.decisions[0].ControllerAuthenticated {
+	if len(store.decisions) != 1 || store.decisions[0].Action != "return_to_implementation" ||
+		store.decisions[0].Comment != "redo code" || !store.decisions[0].ControllerAuthenticated {
 		t.Fatalf("return decision mismatch: %+v", store.decisions)
 	}
-	if err := controller.ReturnStage(context.Background(), "run-return", "design_review", "qa", "nope", "actor-1", "reviewer"); err == nil {
+	if err := controller.ReturnStage(context.Background(), "run-return", "code_review", "qa", "nope", "actor-1", "reviewer"); err == nil {
 		t.Fatal("return to an unconfigured target must fail")
 	}
 }

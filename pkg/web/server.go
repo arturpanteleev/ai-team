@@ -420,6 +420,9 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ListenAndServe(addr string) error {
+	// Runs left "running" by a process that exited cannot be advanced by anyone;
+	// reconcile them before serving so they become resumable.
+	s.reconcileOrphanRuns(time.Now().UTC())
 	s.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           s.router,
@@ -446,9 +449,10 @@ func (s *Server) RecordAdmissionFailure(runID, cause string) {
 			return
 		}
 	}
-	if existing != nil && existing.Status == "waiting_for_approval" {
-		// A failed background resume leaves the durable approval checkpoint
-		// intact. Surface the error without turning that resumable run terminal.
+	if existing != nil && existing.Status != "queued" {
+		// A failed background resume leaves the run's durable checkpoint intact
+		// (waiting, interrupted, blocked or stopped). Surface the error without
+		// turning that resumable run terminal, otherwise a failed resume is silent.
 		s.appendRunEvent(runID, "run_resume_failed", now, map[string]any{
 			"status": existing.Status, "error": cause, "severity": "warning",
 		})

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Link, useParams } from '../router';
+import { classifyIssue, type IssueCode } from './taskIssue';
 import {
   answerTaskGrill,
   approveTaskDeliveryPlan,
@@ -17,13 +18,13 @@ import {
   getTaskRunEvents,
   overrideTaskStageCheck,
   resumeRun,
+  resumeRunWithRuntimeUpgrade,
   retryDelivery,
   returnTaskStage,
   runTaskStageAgent,
   skipTaskStage,
   submitTaskGrillVersion,
   submitTaskStageResult,
-  takeTaskStage,
 } from '../api';
 import type { Approval, Artifact, Stage, TaskEvent, TaskResultRevision, TaskRunDetails, WorkflowGraph } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -58,7 +59,7 @@ const actionScopes: Record<ActionKey, ErrorScope> = {
   resume: 'control', grant: 'control', cancel: 'control', delivery: 'delivery',
 };
 
-const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'stopped'];
+const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'stopped', 'failed'];
 const cancelableStatuses = ['queued', 'running', 'waiting_for_approval'];
 const finishedStatuses = ['completed', 'completed_with_warnings'];
 const routeLabels: Record<RouteState, string> = { passed: 'пройден', current: 'текущий', upcoming: 'впереди', failed: 'Упал' };
@@ -184,8 +185,6 @@ export function TaskDetail() {
   const [activeKey, setActiveKey] = useState<ActionKey | null>(null);
   const [errorScope, setErrorScope] = useState<ErrorScope>('stage');
   const [intentText, setIntentText] = useState<string | null>(null);
-  const [resultPreview, setResultPreview] = useState<string | null>(null);
-  const [resultPreviewError, setResultPreviewError] = useState('');
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const snapshotRef = useRef<TaskDetailSnapshot | null>(null);
   const activeRunID = useRef(runID);
@@ -335,17 +334,6 @@ export function TaskDetail() {
     return () => { active = false; };
   }, [currentRunID, initialBriefPath]);
 
-  useEffect(() => {
-    setResultPreview(null);
-    setResultPreviewError('');
-    if (!currentRunID || !primaryResultPath) return;
-    let active = true;
-    getArtifact(currentRunID, primaryResultPath)
-      .then((text) => { if (active) setResultPreview(text); })
-      .catch(() => { if (active) setResultPreviewError('Не удалось загрузить результат. Откройте файл по ссылке ниже.'); });
-    return () => { active = false; };
-  }, [currentRunID, primaryResultPath]);
-
   // Частичная выдача бюджета доступна только если сервер так отметил задачу.
   useEffect(() => {
     setBudgetGrantable(false);
@@ -439,7 +427,9 @@ export function TaskDetail() {
     return <main className={styles.state} role="alert">{error || 'Задача не найдена.'}</main>;
   }
 
-  const stageTitle = (stageID: string) => template?.stages.find((stage) => stage.id === stageID)?.title ?? stageID;
+  const stageTitle = (stageID: string) => (stageID === '$stop'
+    ? 'остановка задачи'
+    : template?.stages.find((stage) => stage.id === stageID)?.title ?? stageID);
   const resumable = resumableStatuses.includes(run.status);
   const cancelable = cancelableStatuses.includes(run.status);
   const finished = finishedStatuses.includes(run.status);
@@ -467,7 +457,8 @@ export function TaskDetail() {
   // Approvals that ask for an answer are answered in the current stage card, not in the approvals list.
   const questionDecisions = details.approvals.filter((approval) => approval.status === 'pending'
     && (approval.actions.includes('answer_questions') || approval.kind === 'questions') && !(grillAllowed && approval.id === pending?.id));
-  const currentDecision = pendingDecisions.find((approval) => approval.id === pending?.id
+  // The stage card owns the decision of its own stage even when the run's pending pointer went stale.
+  const currentDecision = pendingDecisions.find((approval) => (approval.id === pending?.id || approval.from_stage === currentStageID)
     && !approval.actions.includes('answer_questions') && approval.kind !== 'questions');
   const otherDecisions = pendingDecisions.filter((approval) => approval.id !== currentDecision?.id
     && !questionDecisions.some((question) => question.id === approval.id));
@@ -487,10 +478,15 @@ export function TaskDetail() {
     || 'Причина в данных задачи не записана. Откройте лог этапа, чтобы увидеть подробности.';
   const latestResumeOutcome = [...visibleSnapshot.events].reverse().find((event) =>
     event.type === 'run_resume_failed' || event.type === 'run_resumed');
-  const resumeFailure = run.status === 'waiting_for_approval' && latestResumeOutcome?.type === 'run_resume_failed'
+  const resumeFailure = resumableStatuses.includes(run.status) && latestResumeOutcome?.type === 'run_resume_failed'
     ? latestResumeOutcome : undefined;
   const resumeFailureReason = resumeFailure && typeof resumeFailure.data.error === 'string'
     ? resumeFailure.data.error : 'Сервер не записал причину ошибки возобновления.';
+  // One place for the failure: a resume failure wins over the stage failure it follows.
+  const issueSource = resumeFailure
+    ? { heading: 'Не удалось продолжить задачу', text: resumeFailureReason, attempt: undefined as Stage | undefined }
+    : showFailure ? { heading: failureTitle, text: failureReason, attempt: failureAttempt } : null;
+  const issue = issueSource ? { ...issueSource, ...classifyIssue(issueSource.text) } : null;
 
 
   const route = (template?.stages ?? []).map((stage, index) => {
@@ -628,6 +624,18 @@ export function TaskDetail() {
     </article>;
   };
 
+  // Одна строка о том, что сделать прямо сейчас; подробности — в блоках ниже.
+  const nextStep = (() => {
+    if (issue) return null;
+    if (currentDecision?.kind === 'check_decision') return 'Проверка не прошла или не завершилась. Откройте отчёт и отправьте результат на повторную проверку.';
+    if (currentDecision) return 'Результат ждёт вашего решения: проверьте его и выберите действие ниже.';
+    if (runningAttempt) return 'Агент работает. Страница обновится, когда он закончит.';
+    if (currentStage?.agent && allowed.has('run-agent')) return `Запустите агента ${currentStage.agent}: он подготовит результат, потом вы его проверите.`;
+    if (allowed.has('results')) return 'Сдайте результат текстом или ссылкой.';
+    if (allowed.has('confirm')) return 'Результат принят. Подтвердите этап, чтобы перейти дальше.';
+    return null;
+  })();
+
   return (
     <main className={styles.container}>
       <div className={styles.layout}>
@@ -666,15 +674,14 @@ export function TaskDetail() {
 
         <div className={styles.stage}>
           <section id="current-stage" className={`${styles.panel} ${styles.stageCard}`} aria-labelledby="current-stage-heading">
-            {resumeFailure && <FailureNotice runID={run.run_id} title="Не удалось продолжить задачу" reason={resumeFailureReason} />}
-            {showFailure && <FailureNotice runID={run.run_id} title={failureTitle} reason={failureReason} attempt={failureAttempt} />}
+            {issue && <IssuePanel runID={run.run_id} issue={issue} working={working} busy={working && activeKey === 'resume'}
+              onUpgrade={() => void perform('Задача продолжена на текущей версии', () => resumeRunWithRuntimeUpgrade(run.run_id), 'resume')} />}
             <div className={styles.panelHeading}>
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
                 <h2 id="current-stage-heading">{currentStage?.title || (finished ? 'Задача завершена' : currentStageID || 'Этап не выбран')}</h2>
                 <p className={styles.stageState} data-state={stageState}>{stageState}</p>
-                {currentDecision?.kind === 'check_decision' && <p className={styles.stageGuidance}>Результат агента сохранён. Проверка требует решения перед переходом к следующему этапу.</p>}
-                {currentDecision && currentDecision.kind !== 'check_decision' && currentDecision.trigger !== 'human_input' && <p className={styles.stageGuidance}>Посмотри результат и выбери действие ниже, чтобы продолжить задачу.</p>}
+                {nextStep && <p className={styles.stageGuidance}>{nextStep}</p>}
                 {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
                   {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
                     {new Date(details.stage_owners[currentStageID].taken_at).toLocaleString('ru-RU')}</time></>}</p>}
@@ -700,17 +707,20 @@ export function TaskDetail() {
             {currentDecision && decisionActions(currentDecision).length > 0 && <section className={styles.decisionPanel} aria-labelledby="current-decision-heading">
               <h3 id="current-decision-heading">Твоё решение по этапу</h3>
               {currentDecision.kind === 'check_decision' && <>
-                <p>Автоматическая проверка не завершилась или нашла проблему. Можно отправить результат на доработку или подтвердить обход проверки с причиной.</p>
+                <p>Автоматическая проверка не завершилась или нашла проблему. Открой отчёт и отправь результат на повторную проверку.</p>
                 {checkReportPath(currentDecision.payload) && <Link to={briefLink(run.run_id, checkReportPath(currentDecision.payload)!)}>Открыть отчёт проверки</Link>}
               </>}
               {currentOutputArtifacts.length > 0 && <p><a href="#current-result-heading">Посмотреть результат этапа ниже</a></p>}
               {renderDecision(currentDecision)}
-              {currentDecision.kind === 'check_decision' && allowed.has('override') && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
-                <label>Причина подтверждения без проверки
-                  <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
-                </label>
-                <button disabled={working || !overrideReason.trim()}>Подтвердить без проверки</button>
-              </form>}
+              {currentDecision.kind === 'check_decision' && allowed.has('override') && <details className={styles.moreActions}>
+                <summary>Дополнительное действие: обойти проверку</summary>
+                <form className={styles.reasonForm} onSubmit={submitReason('override')}>
+                  <label>Причина обхода проверки
+                    <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
+                  </label>
+                  <button disabled={working || !overrideReason.trim()}>Подтвердить без проверки</button>
+                </form>
+              </details>}
             </section>}
 
             {(currentOutputArtifacts.length > 0 || (details.results[currentStageID] ?? []).length > 0) &&
@@ -719,18 +729,15 @@ export function TaskDetail() {
                   <h3 id="current-result-heading">Результат этапа</h3>
                   {lastAgentAttempt && <span>Агент завершил работу · попытка {lastAgentAttempt.stage_index}</span>}
                 </div>
+                <p>{currentDecision ? 'Результат ждёт вашего решения: откройте файл, затем примите его или отправьте на доработку.' : 'Результат сохранён. Следующий шаг — в блоке действий ниже.'}</p>
                 {primaryResultPath ? <>
-                  {resultPreviewError && <p role="alert">{resultPreviewError}</p>}
-                  {resultPreview === null && !resultPreviewError && <p>Загружаем результат…</p>}
-                  {resultPreview !== null && <div className={`${styles.markdown} ${styles.resultPreview}`}><ReactMarkdown>{resultPreview}</ReactMarkdown></div>}
                   <div className={styles.resultFiles}>
                     {currentOutputArtifacts.map((artifact) => <Link key={artifact.path} to={briefLink(run.run_id, artifact.path)}>
-                      Открыть файл: {artifact.name}
+                      Открыть {artifact.name}
                     </Link>)}
                   </div>
-                </> : <div className={`${styles.markdown} ${styles.resultPreview}`}>
-                  <ReactMarkdown>{(details.results[currentStageID] ?? []).at(-1)?.content ?? 'Результат сохранён как решение этапа.'}</ReactMarkdown>
-                </div>}
+                </> : (details.results[currentStageID] ?? []).at(-1)?.result === 'link' &&
+                  <a href={(details.results[currentStageID] ?? []).at(-1)?.content} target="_blank" rel="noreferrer">Открыть результат</a>}
               </section>}
 
             {briefArtifacts.length > 1 && <details className={styles.briefHistory}>
@@ -744,11 +751,9 @@ export function TaskDetail() {
             {actionError && errorScope === 'stage' && <p className={styles.actionError} role="alert">{actionError}</p>}
 
             {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && <div className={styles.modes}>
-              {(allowed.has('take') || allowed.has('results')) && <article className={styles.modeCard}>
+              {allowed.has('results') && <article className={styles.modeCard}>
                 <h3>Сделаю сам</h3>
                 <div className={styles.actions}>
-                  {allowed.has('take') && <button type="button" disabled={working}
-                    onClick={() => void perform('Этап взят', () => takeTaskStage(run.run_id, currentStage.id), 'take')}><BusyLabel busy={working && activeKey === 'take'} text="Сохраняем…">Взять этап</BusyLabel></button>}
                   {allowed.has('results') && !showResultForm && <button type="button" disabled={working}
                     onClick={() => setShowResultForm(true)}>Сдать результат</button>}
                 </div>
@@ -1016,22 +1021,33 @@ function BusyLabel({ busy, text, children }: { busy: boolean; text: string; chil
   return <><span className={styles.buttonSpinner} aria-hidden="true" />{text}</>;
 }
 
-function FailureNotice({ runID, title, reason, attempt }: {
+function IssuePanel({ runID, issue, working, busy, onUpgrade }: {
   runID: string;
-  title: string;
-  reason: string;
-  attempt?: Stage;
+  issue: { heading: string; text: string; code: IssueCode; explanation: string; attempt?: Stage };
+  working: boolean;
+  busy: boolean;
+  onUpgrade: () => void;
 }) {
+  const attempt = issue.attempt;
   return <div className={styles.failure} role="status" data-testid="stage-failure">
     <div className={styles.failureHead}>
       <Bubble tone="coral" size="sm">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 7v6M12 17h.01" /></svg>
       </Bubble>
-      <p className={styles.failureTitle}>{title}</p>
+      <p className={styles.failureTitle}>{issue.heading}</p>
     </div>
-    <p>{reason}</p>
-    {attempt && <a href={`/api/runs/${encodeURIComponent(runID)}/logs/${encodeURIComponent(attempt.attempt_id)}`}
-      target="_blank" rel="noreferrer">Открыть лог агента</a>}
+    <p>{issue.explanation}</p>
+    {issue.code === 'version' && <div className={styles.actions}>
+      <button type="button" disabled={working} onClick={onUpgrade}>
+        <BusyLabel busy={busy} text="Запускаем…">Продолжить на текущей версии</BusyLabel>
+      </button>
+    </div>}
+    <details className={styles.details}>
+      <summary>Подробности</summary>
+      <p>{issue.text}</p>
+      {attempt && <a href={`/api/runs/${encodeURIComponent(runID)}/logs/${encodeURIComponent(attempt.attempt_id)}`}
+        target="_blank" rel="noreferrer">Открыть лог агента</a>}
+    </details>
   </div>;
 }
 

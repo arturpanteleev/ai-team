@@ -44,3 +44,14 @@ func (p *ConsolePrompter) Ask(question string) string {
 	}
 	return strings.ToLower(strings.TrimSpace(text))
 }
+
+// NonInteractivePrompter is used by the web server and its controller. Human
+// decisions there arrive through the web API, so the pipeline must never block
+// on the process stdin: when a terminal is attached, ConsolePrompter would wait
+// for a console answer and the run would never leave the approval checkpoint.
+type NonInteractivePrompter struct{}
+
+func (NonInteractivePrompter) Interactive() bool { return false }
+
+// Ask is never reached on the non-interactive path; it refuses by default.
+func (NonInteractivePrompter) Ask(string) string { return "n" }

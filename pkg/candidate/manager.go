@@ -186,19 +186,18 @@ func CreateWithMetadataStore(ctx context.Context, controlTarget, runID string, s
 	if _, err := git(ctx, target, "rev-parse", "--show-toplevel"); err != nil {
 		return nil, false, nil
 	}
-	if status, err := git(ctx, target, "status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).ai-team"); err != nil {
-		return nil, true, fmt.Errorf("candidate baseline status: %w", err)
-	} else if strings.TrimSpace(status) != "" {
-		return nil, true, fmt.Errorf("candidate требует clean git workspace")
-	}
-	baseCommit, err := git(ctx, target, "rev-parse", "--verify", "HEAD")
+	// Every run works in its own worktree cut from the current base branch, so
+	// the live checkout may hold other people's unfinished changes: it is never
+	// the base and never has to be clean.
+	baseCommit, err := resolveBaseCommit(ctx, target)
 	if err != nil {
-		return nil, true, fmt.Errorf("candidate baseline commit: %w", err)
+		return nil, true, err
 	}
-	baseTree, err := git(ctx, target, "rev-parse", "--verify", "HEAD^{tree}")
+	baseTree, err := git(ctx, target, "rev-parse", "--verify", baseCommit+"^{tree}")
 	if err != nil {
 		return nil, true, fmt.Errorf("candidate baseline tree: %w", err)
 	}
+	baseCommit = strings.TrimSpace(baseCommit)
 	root, err := safeio.EnsureDir(target, ".ai-team", "worktrees")
 	if err != nil {
 		return nil, true, err
@@ -208,17 +207,17 @@ func CreateWithMetadataStore(ctx context.Context, controlTarget, runID string, s
 		// A worker can die after `git worktree add` and before publishing the
 		// candidate metadata. Under the run's workspace lock, recover that exact
 		// detached worktree only when it still points at the current baseline.
-		manager, recoverErr := recoverCreatedWorktree(ctx, target, runID, worktree, strings.TrimSpace(baseCommit), strings.TrimSpace(baseTree), store)
+		manager, recoverErr := recoverCreatedWorktree(ctx, target, runID, worktree, baseCommit, strings.TrimSpace(baseTree), store)
 		return manager, true, recoverErr
 	} else if !os.IsNotExist(err) {
 		return nil, true, err
 	}
-	if _, err := git(ctx, target, "worktree", "add", "--detach", worktree, strings.TrimSpace(baseCommit)); err != nil {
+	if _, err := git(ctx, target, "worktree", "add", "--detach", worktree, baseCommit); err != nil {
 		return nil, true, fmt.Errorf("candidate worktree add: %w", err)
 	}
 	metadata := Metadata{
 		SchemaVersion: metadataVersion, RunID: runID, ControlTarget: target,
-		Worktree: worktree, BaseCommit: strings.TrimSpace(baseCommit),
+		Worktree: worktree, BaseCommit: baseCommit,
 		BaseTree: strings.TrimSpace(baseTree), CreatedAt: time.Now().UTC(),
 	}
 	manager := &Manager{metadata: metadata}
@@ -757,4 +756,33 @@ func (b *limitedBuffer) Write(value []byte) (int, error) {
 		_, _ = b.Buffer.Write(value[:remaining])
 	}
 	return len(value), nil
+}
+
+// CandidateBaseBranch is the branch every candidate worktree is cut from.
+const CandidateBaseBranch = "master"
+
+// resolveBaseCommit returns the commit a new candidate starts from: the freshly
+// fetched origin/<branch> when the repository has an origin, otherwise the local
+// branch. A stale or unreachable base fails closed instead of silently using
+// whatever the live checkout happens to be on.
+func resolveBaseCommit(ctx context.Context, target string) (string, error) {
+	ref := "refs/heads/" + CandidateBaseBranch
+	remotes, err := git(ctx, target, "remote")
+	if err != nil {
+		return "", fmt.Errorf("candidate remotes: %w", err)
+	}
+	for _, name := range strings.Fields(remotes) {
+		if name == "origin" {
+			if _, err := git(ctx, target, "fetch", "--no-tags", "--quiet", "origin", CandidateBaseBranch); err != nil {
+				return "", fmt.Errorf("candidate: не удалось обновить origin/%s: %w", CandidateBaseBranch, err)
+			}
+			ref = "refs/remotes/origin/" + CandidateBaseBranch
+			break
+		}
+	}
+	commit, err := git(ctx, target, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("candidate: базовая ветка %s не найдена: %w", ref, err)
+	}
+	return strings.TrimSpace(commit), nil
 }

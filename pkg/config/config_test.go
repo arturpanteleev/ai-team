@@ -18,7 +18,7 @@ func TestDefaultProfileWritesOneV5Template(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SchemaVersion != 5 || cfg.Template != "idea-to-prod" || len(cfg.Stages) != 10 {
+	if cfg.SchemaVersion != 5 || cfg.Template != "idea-to-prod" || len(cfg.Stages) != 9 {
 		t.Fatalf("unexpected standard template: schema=%d template=%q stages=%d", cfg.SchemaVersion, cfg.Template, len(cfg.Stages))
 	}
 	if err := cfg.Validate(nil); err != nil {
@@ -138,7 +138,6 @@ func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	wantAgents := map[string]string{
 		"product_spec":   "analyst",
 		"tech_design":    "architect",
-		"design_review":  "design-reviewer",
 		"implementation": "coder",
 		"code_review":    "reviewer",
 		"qa":             "tester",
@@ -375,8 +374,8 @@ func TestTemplateValidationRules(t *testing.T) {
 		{"missing agent for agent executor", func(c *Config) { c.Stages[2].Agent = "" }, "executor agent требует agent"},
 		{"missing registry agent", func(c *Config) { c.Stages[2].Agent = "ghost" }, "не найден в registry"},
 		{"invalid result", func(c *Config) { c.Stages[0].Result = "json" }, "result"},
-		{"invalid link kind", func(c *Config) { c.Stages[4].LinkKind = "issue" }, "link_kind"},
-		{"link kind on md", func(c *Config) { c.Stages[5].LinkKind = "pr" }, "link_kind допустим только"},
+		{"invalid link kind", func(c *Config) { c.Stages[3].LinkKind = "issue" }, "link_kind"},
+		{"link kind on md", func(c *Config) { c.Stages[4].LinkKind = "pr" }, "link_kind допустим только"},
 		{"sections on approve", func(c *Config) { c.Stages[0].RequiredSections = []string{"Decision"} }, "required_sections допустим только"},
 		{"confirm none unsupported", func(c *Config) { c.Stages[2].Confirm = "none" }, "confirm"},
 		{"forward return", func(c *Config) { c.Returns[0].To = "acceptance" }, "должен вести только назад"},
@@ -390,10 +389,10 @@ func TestTemplateValidationRules(t *testing.T) {
 		}, "не совпадает с лимитом возврата"},
 		{"bad check agent", func(c *Config) { c.Stages[1].Check.Agent = "ghost" }, "агент проверки"},
 		{"project check requires PR link", func(c *Config) {
-			c.Stages[5].Check.Rules = []string{"project_checks"}
+			c.Stages[4].Check.Rules = []string{"project_checks"}
 		}, "допустимо только для result link с link_kind pr"},
 		{"invalid executor", func(c *Config) { c.Stages[0].Executor = "robot" }, "executor"},
-		{"delivery without PR", func(c *Config) { c.Stages[4].LinkKind = "build" }, "delivery допустим"},
+		{"delivery without PR", func(c *Config) { c.Stages[3].LinkKind = "build" }, "delivery допустим"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

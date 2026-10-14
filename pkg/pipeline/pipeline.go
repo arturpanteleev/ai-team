@@ -17,7 +17,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
-	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/cicd"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
@@ -319,9 +318,15 @@ func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {
 type RunConfig struct {
 	RunID       string
 	ResumeRunID string
-	Feature     string
-	TaskDesc    string
-	TargetDir   string
+	// Explicit local recovery of a paused run after a controller upgrade.
+	// The original manifest remains intact and the change is journaled.
+	RuntimeUpgrade bool
+	// RetryCheck supersedes an unconsumed check override with a fresh stage
+	// attempt and checker run. It never accepts the failed check result.
+	RetryCheck bool
+	Feature    string
+	TaskDesc   string
+	TargetDir  string
 	// Mode is the run-level execution mode. It is consumed by RunEngine before
 	// the immutable task template pin is resolved.
 	Mode            string
@@ -394,7 +399,6 @@ type runState struct {
 	stageSkipTransitioned     map[string]bool
 	candidate                 *candidate.Manager
 	sourceTarget              string
-	liveWorkspaceSHA          string
 	loopbackCycles            int
 	deferredDelivery          *deferredDelivery
 	stageDeliveryReceipt      *delivery.StageDeliveryReceipt
@@ -1064,10 +1068,49 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 			if provErr != nil {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, provErr
 			}
-			if err := provenance.CheckDrift(&storedProvenance, liveProvenance); err != nil {
+			checkDrift := provenance.CheckDrift
+			if runCfg.RuntimeUpgrade {
+				checkDrift = provenance.CheckDriftExceptRuntime
+			}
+			if err := checkDrift(&storedProvenance, liveProvenance); err != nil {
 				return RunResult{RunID: runID, Outcome: workflow.RunFailed},
 					fmt.Errorf("resume run: %w", err)
 			}
+			if runCfg.RuntimeUpgrade {
+				oldRuntime, oldOK := storedProvenance.Find(provenance.KindRuntime, "")
+				newRuntime, newOK := liveProvenance.Find(provenance.KindRuntime, "")
+				if !oldOK || !newOK || !oldRuntime.Known() || !newRuntime.Known() {
+					return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume run: runtime upgrade требует две известные identity")
+				}
+				if oldRuntime.Value != newRuntime.Value {
+					if err := evidenceStore.Append(evidence.Event{Type: "runtime_upgraded", Timestamp: time.Now().UTC(),
+						Data: map[string]any{"from": oldRuntime.Value, "to": newRuntime.Value, "actor_id": "local-cli"}}); err != nil {
+						return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("record runtime upgrade: %w", err)
+					}
+				}
+			}
+		}
+		if runCfg.RetryCheck {
+			if resumedApproval == nil || resumedApproval.Kind != approval.KindCheckDecision ||
+				resumedApproval.ResolvedAction != "override" || resumedState.Phase != lifecycle.PhaseWaiting {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("retry check требует неисполненное решение об обходе проверки")
+			}
+			events, err := evidence.VerifyEventLog(filepath.Join(evidenceStore.RunDir(), "events.jsonl"), runID)
+			if err != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("retry check evidence: %w", err)
+			}
+			for _, event := range events {
+				if event.Type == "check_overridden" && event.AttemptID == resumedApproval.AttemptID {
+					return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("проверка уже обойдена; повторный прогон нужен как новая задача")
+				}
+			}
+			if err := evidenceStore.Append(evidence.Event{Type: "check_retry_requested", Stage: resumedApproval.FromStage,
+				AttemptID: resumedApproval.AttemptID, Timestamp: time.Now().UTC(), Data: map[string]any{
+					"approval_id": resumedApproval.ID, "supersedes": "override", "actor_id": "local-cli",
+				}}); err != nil {
+				return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("record check retry: %w", err)
+			}
+			runCfg.resumeDecisionAction = "new_version"
 		}
 		var abandonedAttemptIDs []string
 		for index := range replayedRun.Attempts {
@@ -1824,12 +1867,6 @@ func (rs *runState) initializeWorkspaceOwnership() error {
 	for path := range workspace.Files {
 		if !gitState.Tracked[path] {
 			rs.userOwnedPaths[path] = true
-		}
-	}
-	if rs.candidate != nil {
-		rs.liveWorkspaceSHA, err = checks.WorkspaceDigest(rs.runCfg.TargetDir)
-		if err != nil {
-			return fmt.Errorf("live workspace identity: %w", err)
 		}
 	}
 	return nil

@@ -194,6 +194,11 @@ export function startRun(feature: string, task: string): Promise<{ run_id: strin
 // Resume без grant новый бюджет задачи не выдаёт: если бюджет задачи
 // исчерпан, задача снова остановится. Выдача — только явным решением с
 // причиной; дневной бюджет не выдаётся никогда.
+// Продолжение на текущем бинарнике после смены версии сервера: явное решение, записывается в журнал.
+export function resumeRunWithRuntimeUpgrade(runId: string): Promise<{ run_id: string }> {
+  return command(`/runs/${encodeURIComponent(runId)}/resume`, { upgrade_runtime: true });
+}
+
 export function resumeRun(runId: string, grant?: { reason: string }): Promise<{ run_id: string }> {
   if (grant) {
     return command(`/runs/${encodeURIComponent(runId)}/resume`, { grant_budget_allowance: true, reason: grant.reason });

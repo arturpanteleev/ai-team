@@ -152,3 +152,41 @@ func TestCheckDriftMatrix(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckDriftExceptRuntime(t *testing.T) {
+	now := time.Now()
+	known := func(seed string) Digest { return DigestBytes([]byte(seed)) }
+
+	t.Run("runtime change alone is accepted", func(t *testing.T) {
+		stored := New("run-1", now)
+		stored.Add("runtime", "", known("bin-a"))
+		stored.Add("prompt", "coder", known("p"))
+		live := New("run-1", now)
+		live.Add("runtime", "", known("bin-b"))
+		live.Add("prompt", "coder", known("p"))
+		if err := CheckDriftExceptRuntime(stored, live); err != nil {
+			t.Fatalf("смена только бинарника должна проходить при явном upgrade: %v", err)
+		}
+	})
+
+	t.Run("non-runtime drift is still rejected", func(t *testing.T) {
+		stored := New("run-1", now)
+		stored.Add("runtime", "", known("bin-a"))
+		stored.Add("prompt", "coder", known("p"))
+		live := New("run-1", now)
+		live.Add("runtime", "", known("bin-b"))
+		live.Add("prompt", "coder", known("p-changed"))
+		if err := CheckDriftExceptRuntime(stored, live); err == nil ||
+			!strings.Contains(err.Error(), "prompt coder") {
+			t.Fatalf("дрейф prompt должен оставаться ошибкой, got %v", err)
+		}
+	})
+
+	t.Run("nil manifests fall back to strict check", func(t *testing.T) {
+		live := New("run-1", now)
+		live.Add("runtime", "", known("bin"))
+		if err := CheckDriftExceptRuntime(nil, live); err != nil {
+			t.Fatalf("legacy nil должен вести себя как CheckDrift: %v", err)
+		}
+	})
+}

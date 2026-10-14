@@ -38,8 +38,8 @@ func localStageDeliveryFixture(t *testing.T, prURL string) (string, *config.Conf
 	}
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	for _, args := range [][]string{
-		{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "main"},
-		{"init", "--bare", "--initial-branch=main", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "main"},
+		{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "master"},
+		{"init", "--bare", "--initial-branch=master", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "master"},
 	} {
 		command := exec.Command("git", args...)
 		if args[0] != "init" {
@@ -50,7 +50,7 @@ func localStageDeliveryFixture(t *testing.T, prURL string) (string, *config.Conf
 		}
 	}
 	bin := t.TempDir()
-	ghOutput := `{"url":"` + prURL + `","state":"OPEN","baseRefName":"main","headRefName":"ai-team/feat"}`
+	ghOutput := `{"url":"` + prURL + `","state":"OPEN","baseRefName":"master","headRefName":"ai-team/feat"}`
 	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nprintf '%s\\n' '"+ghOutput+"'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}

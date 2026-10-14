@@ -1348,6 +1348,8 @@ func cmdRun() {
 	templateID := runFlags.String("template", "", "ID активного шаблона проекта")
 	mode := runFlags.String("mode", "", "Режим выполнения: auto")
 	grantBudget := runFlags.String("grant-budget-allowance", "", "С --resume: явно выдать задаче ещё один бюджет max_task_tokens после остановки по бюджету задачи; значение — причина решения")
+	runtimeUpgrade := runFlags.Bool("upgrade-runtime", false, "С --resume: записать смену бинарника и проверить остальные источники provenance")
+	retryCheck := runFlags.Bool("retry-check", false, "С --resume: вместо неисполненного обхода повторить этап и его проверку")
 
 	// FlagSet создан с flag.ExitOnError: Parse сам завершает процесс и ошибку не возвращает.
 	_ = runFlags.Parse(interspersedTaskArgs(os.Args[2:], map[string]bool{
@@ -1389,6 +1391,9 @@ func cmdRun() {
 	}
 	if *resumeRunID != "" && (*templateID != "" || *mode != "") {
 		fatal("--resume нельзя сочетать с --template или --mode; настройки run уже закреплены")
+	}
+	if *resumeRunID == "" && (*runtimeUpgrade || *retryCheck) {
+		fatal("--upgrade-runtime и --retry-check допустимы только вместе с --resume")
 	}
 
 	// Config/registry validation is intentionally before task.md writes: a bad
@@ -1471,7 +1476,7 @@ func cmdRun() {
 	if *resumeRunID != "" {
 		runResult, err = engine.Resume(ctx, pipeline.ResumeConfig{
 			RunID: *resumeRunID, TargetDir: *target, ApproveGates: *approveGates, ApprovePlanHash: *approvePlan,
-			BudgetAllowance: budgetAllowance,
+			BudgetAllowance: budgetAllowance, RuntimeUpgrade: *runtimeUpgrade, RetryCheck: *retryCheck,
 		})
 	} else {
 		runResult, err = engine.Start(ctx, pipeline.RunConfig{
@@ -2389,6 +2394,7 @@ func cmdWeb() {
 		localEngineOptions := append([]pipeline.Option{
 			pipeline.WithRecorder(web.NewStoreRecorder(recorderStore)),
 			pipeline.WithApprovalStore(approvalStore),
+			pipeline.WithPrompter(pipeline.NonInteractivePrompter{}),
 			pipeline.WithControllerReadDenyPaths(*dbPath),
 		}, deployProviderOptions(runCfg)...)
 		return pipeline.NewRunEngine(pipeline.New(runCfg, reg, localEngineOptions...))

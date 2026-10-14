@@ -1933,7 +1933,7 @@ func TestInitCommandContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("init --force должен записать валидный v5 config: %v", err)
 		}
-		if forced.Template != "idea-to-prod-fast" || len(forced.Stages) != 10 {
+		if forced.Template != "idea-to-prod-fast" || len(forced.Stages) != 9 {
 			t.Fatalf("init --force должен заменить конфиг выбранным шаблоном: %q/%d", forced.Template, len(forced.Stages))
 		}
 	})
@@ -1948,7 +1948,7 @@ func TestInitCommandContract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Template != "idea-to-prod-fast" || len(cfg.Stages) != 10 || cfg.Stages[0].Confirm != "auto" {
+		if cfg.Template != "idea-to-prod-fast" || len(cfg.Stages) != 9 || cfg.Stages[0].Confirm != "auto" {
 			t.Fatalf("fast profile should be materialized as a v5 template: %q, stages=%d", cfg.Template, len(cfg.Stages))
 		}
 		if _, err := os.Stat(filepath.Join(target, ".ai-team", "agents")); !os.IsNotExist(err) {

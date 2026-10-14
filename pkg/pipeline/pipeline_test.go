@@ -2945,7 +2945,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	for _, args := range [][]string{
 		{"add", "."},
 		{"commit", "-qm", "init"},
-		{"branch", "-M", "main"},
+		{"branch", "-M", "master"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
@@ -2964,6 +2964,11 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 		}
 	}
 
+	push := exec.Command("git", "push", "-q", "origin", "master")
+	push.Dir = dir
+	if out, err := push.CombinedOutput(); err != nil {
+		t.Fatalf("push master to origin: %v\n%s", err, out)
+	}
 	rt := newScripted()
 	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
@@ -4236,7 +4241,7 @@ func TestRun_InfraFailureStaysResumableWithSameRunID(t *testing.T) {
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	for _, args := range [][]string{
-		{"init", "-q"},
+		{"init", "-q", "-b", "master"},
 		{"config", "user.email", "test@test"},
 		{"config", "user.name", "test"},
 	} {

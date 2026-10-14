@@ -415,12 +415,21 @@ func (s *Server) startTask(ctx context.Context, command startRunCommand, actorID
 type resumeCommand struct {
 	GrantBudgetAllowance bool   `json:"grant_budget_allowance"`
 	Reason               string `json:"reason"`
+	// UpgradeRuntime accepts that the controller binary changed since the run
+	// was started. It is an explicit, journaled decision, never the default.
+	UpgradeRuntime bool `json:"upgrade_runtime"`
 }
 
 // budgetAllowanceResumer — контроллер, умеющий передать в pipeline явную
 // выдачу бюджета задачи при resume.
 type budgetAllowanceResumer interface {
 	ResumeWithBudgetAllowance(runID, actorID, reason string) error
+}
+
+// runtimeUpgradeResumer — контроллер, умеющий продолжить run на новом
+// бинарнике контроллера с явной фиксацией смены runtime в evidence.
+type runtimeUpgradeResumer interface {
+	ResumeWithRuntimeUpgrade(runID string) error
 }
 
 func decodeResumeCommand(w http.ResponseWriter, r *http.Request) (resumeCommand, error) {
@@ -442,6 +451,9 @@ func decodeResumeCommand(w http.ResponseWriter, r *http.Request) (resumeCommand,
 	}
 	if !command.GrantBudgetAllowance && command.Reason != "" {
 		return command, errors.New("reason задаётся только вместе с grant_budget_allowance")
+	}
+	if command.UpgradeRuntime && command.GrantBudgetAllowance {
+		return command, errors.New("upgrade_runtime нельзя сочетать с grant_budget_allowance")
 	}
 	return command, nil
 }
@@ -481,9 +493,17 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent launch could not be recorded", http.StatusServiceUnavailable)
 		return
 	}
-	if resumer != nil {
+	switch {
+	case resumer != nil:
 		err = resumer.ResumeWithBudgetAllowance(runID, session.Principal.ActorID, command.Reason)
-	} else {
+	case command.UpgradeRuntime:
+		upgrader, ok := s.controller.(runtimeUpgradeResumer)
+		if !ok {
+			http.Error(w, "контроллер не поддерживает смену runtime при resume", http.StatusNotImplemented)
+			return
+		}
+		err = upgrader.ResumeWithRuntimeUpgrade(runID)
+	default:
 		err = s.controller.Resume(runID)
 	}
 	if err != nil {
@@ -495,6 +515,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// если бюджет исчерпан.
 	data := map[string]any{
 		"actor_id": session.Principal.ActorID, "budget_allowance_granted": command.GrantBudgetAllowance,
+	}
+	if command.UpgradeRuntime {
+		data["runtime_upgrade"] = true
 	}
 	if command.GrantBudgetAllowance {
 		data["reason"] = command.Reason

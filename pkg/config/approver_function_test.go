@@ -22,14 +22,14 @@ func TestTemplateApproverFunctionValidation(t *testing.T) {
 		approver string
 		want     string
 	}{
-		{"omitted approver is valid", 4, "", ""},
-		{"distinct approver is valid", 4, "reviewer", ""},
-		{"alias approver is valid", 4, "po", ""},
-		{"same function", 4, "developer", "совпадает с функцией исполнителя"},
+		{"omitted approver is valid", 3, "", ""},
+		{"distinct approver is valid", 3, "reviewer", ""},
+		{"alias approver is valid", 3, "po", ""},
+		{"same function", 3, "developer", "совпадает с функцией исполнителя"},
 		{"alias of executor function", 1, "product_owner", "совпадает с функцией исполнителя"},
-		{"deployer alias of release manager", 7, "release_manager", "совпадает с функцией исполнителя"},
-		{"unknown approver", 4, "operator", "не сопоставлен ни одной роли"},
-		{"padded approver", 4, " reviewer", "пробелы"},
+		{"deployer alias of release manager", 6, "release_manager", "совпадает с функцией исполнителя"},
+		{"unknown approver", 3, "operator", "не сопоставлен ни одной роли"},
+		{"padded approver", 3, " reviewer", "пробелы"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

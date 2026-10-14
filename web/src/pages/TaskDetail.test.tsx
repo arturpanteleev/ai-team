@@ -133,7 +133,7 @@ describe('Task detail', () => {
     expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
     expect(screen.getAllByText(/Закреплённый маршрут/).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /запустить агента/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Подтвердить этап' })).not.toBeInTheDocument();
@@ -798,7 +798,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(await screen.findByRole('heading', { name: 'Сделаю сам' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Агент analyst подготовит результат' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
     expect(screen.getAllByText('текущий')).toHaveLength(1);
     expect(screen.getAllByText('впереди')).toHaveLength(1);
@@ -883,8 +883,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(idea).not.toHaveTextContent('Ответ владельца');
     const stage = screen.getByRole('region', { name: 'Анализ' });
     expect(await within(stage).findByRole('heading', { name: 'Результат этапа' })).toBeInTheDocument();
-    expect(await within(stage).findByText('Критерии приёмки: Google вход.')).toBeInTheDocument();
-    expect(within(stage).getByRole('link', { name: 'Открыть файл: proposal.md' })).toBeInTheDocument();
+    expect(stage).not.toHaveTextContent('Критерии приёмки: Google вход.');
+    expect(within(stage).getByRole('link', { name: 'Открыть proposal.md' })).toBeInTheDocument();
     expect(within(stage).getByRole('button', { name: 'Согласовать и перейти: Релиз' })).toBeInTheDocument();
     expect(within(stage).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
     expect(stage).not.toHaveTextContent('Версий результата пока нет');
@@ -918,7 +918,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
     const override = within(stage).getByRole('button', { name: 'Подтвердить без проверки' });
     expect(override).toBeDisabled();
-    fireEvent.change(within(stage).getByLabelText('Причина подтверждения без проверки'), { target: { value: 'Проверка недоступна' } });
+    fireEvent.change(within(stage).getByLabelText('Причина обхода проверки'), { target: { value: 'Проверка недоступна' } });
     fireEvent.click(override);
     await waitFor(() => expect(api.overrideTaskStageCheck).toHaveBeenCalledWith('run-detail-1', 'analysis', 'Проверка недоступна'));
   });

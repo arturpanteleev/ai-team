@@ -72,7 +72,6 @@ type stageSpec struct {
 
 var defaultTemplateReturns = []TemplateReturn{
 	{From: "tech_design", To: "product_spec"},
-	{From: "design_review", To: "tech_design"},
 	{From: "code_review", To: "implementation"},
 	{From: "qa", To: "implementation"},
 	{From: "qa", To: "product_spec"},
@@ -84,9 +83,8 @@ func ideaToProdStages() []TemplateStage {
 	return []TemplateStage{
 		{ID: "intent", Title: "Бизнес-идея", Function: "bo", Result: "approve", Executor: "human"},
 		{ID: "product_spec", Title: "Продуктовая спецификация", Function: "po", Result: "md", Executor: "human", Agent: "analyst", RequiredSections: []string{"Критерии приёмки"}, Check: &TemplateCheck{Kind: "agent", Agent: "spec-checker", Mode: "grill", MaxRounds: 3}},
-		{ID: "tech_design", Title: "Техническое решение", Function: "architect", Result: "md", Executor: "agent", Agent: "architect", Check: &TemplateCheck{Kind: "agent", Agent: "verifier"}, Confirm: "required", Skippable: true},
-		{ID: "design_review", Title: "Ревью техрешения", Function: "reviewer", Result: "approve", Executor: "human", Agent: "design-reviewer", Skippable: true},
-		{ID: "implementation", Title: "Реализация", Function: "developer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "coder", Delivery: &TemplateDelivery{}, Check: &TemplateCheck{Kind: "hard", Rules: []string{"pr_exists", "pr_open", "pr_base_branch"}}},
+		{ID: "tech_design", Title: "Техническая архитектура", Function: "architect", Result: "md", Executor: "agent", Agent: "architect", Check: &TemplateCheck{Kind: "agent", Agent: "verifier"}, Confirm: "required", Skippable: true},
+		{ID: "implementation", Title: "Техническая реализация", Function: "developer", Result: "link", LinkKind: "pr", Executor: "agent", Agent: "coder", Delivery: &TemplateDelivery{}, Check: &TemplateCheck{Kind: "hard", Rules: []string{"pr_exists", "pr_open", "pr_base_branch"}}},
 		{ID: "code_review", Title: "Код-ревью", Function: "reviewer", Result: "md", Executor: "human", Agent: "reviewer", Check: &TemplateCheck{Kind: "hard", Rules: []string{"verdict_marker"}}},
 		{ID: "qa", Title: "Тестирование", Function: "qa", Result: "md", Executor: "human", Agent: "tester"},
 		{ID: "deploy", Title: "Выкладка", Function: "deployer", Result: "link", LinkKind: "build", Executor: "human"},

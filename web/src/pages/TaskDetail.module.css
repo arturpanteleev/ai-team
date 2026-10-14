@@ -848,11 +848,12 @@
   }
 }
 
-/* Идея остаётся короткой шапкой; текущий этап использует всю ширину. */
+/* Слева бизнес-идея, справа текущий этап; маршрут ниже на всю ширину. */
 .layout {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
 }
 
 .summary,
@@ -934,6 +935,7 @@
 
 @media (max-width: 899px) {
   .layout {
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
 }

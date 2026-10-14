@@ -131,7 +131,8 @@ describe('Task detail', () => {
 
     expect(await screen.findByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
     expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
-    expect(screen.getAllByText(/Закреплённый маршрут/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByText('Подробности', { selector: 'summary' })[0]);
+    expect(await screen.findByText(/Закреплённый маршрут/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();

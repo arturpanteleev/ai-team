@@ -141,7 +141,8 @@ func TestListRejectsTargetWithoutValue(t *testing.T) {
 
 // TestListShowsEffectiveCLIFromProjectConfig — пункт 7 журнала: глобальный
 // `cli` проектного config.yaml перекрывает CLI встроенного агента в выводе
-// `list`, а без config.yaml показываются определения агентов.
+// `list` для всех agentcli, включая проверяющих вне текущего шаблона.
+// Без config.yaml показываются определения агентов.
 func TestListShowsEffectiveCLIFromProjectConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".ai-team")
@@ -187,8 +188,8 @@ func TestListShowsEffectiveCLIFromProjectConfig(t *testing.T) {
 	if got := cliOf("spec-checker"); got != "claude" {
 		t.Fatalf("spec-checker проверяет этап с глобальным cli: claude, в выводе %q:\n%s", got, stdout)
 	}
-	// Агент без этапа в конфиге не исполняется пайплайном: остаётся своё определение.
-	if got := cliOf("tester"); got == "claude" {
-		t.Fatalf("tester не привязан к этапу, CLI не должен переопределяться, получено %q", got)
+	// Глобальный CLI распространяется и на встроенных агентов вне шаблона.
+	if got := cliOf("tester"); got != "claude" {
+		t.Fatalf("tester должен использовать глобальный CLI, получено %q", got)
 	}
 }

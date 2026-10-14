@@ -2158,7 +2158,11 @@ func cmdList() {
 	fmt.Println(strings.Repeat("-", 80))
 	agents, failures := reg.List()
 	for _, a := range agents {
-		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, effectiveAgentCLI(cfg, a.Name, a.CLI), a.Source, a.Description)
+		cli := a.CLI
+		if a.RuntimeType == "agentcli" {
+			cli = effectiveAgentCLI(cfg, a.Name, a.CLI)
+		}
+		logging.Printf("%-20s %-15s %-10s %-20s %s\n", a.Name, a.RuntimeType, cli, a.Source, a.Description)
 	}
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "%s агент %q не загружен: %v\n", ui.Colorize("⚠", ui.ColorYellow), f.Name, f.Err)
@@ -2188,7 +2192,8 @@ func loadListConfig(target string) *config.Config {
 // effectiveAgentCLI повторяет разрешение рантайма из пайплайна: CLI, заданный
 // в конфиге для этапа, который исполняет агент (или для проверки, адресованной
 // агенту по имени), перекрывает CLI из определения агента. Глобальный `cli`
-// конфига подставляется в AgentConfig, поэтому учитывается автоматически.
+// конфига используется и для встроенных агентов, не включённых в текущий
+// шаблон: если их добавят позже, они также получат выбранный CLI.
 func effectiveAgentCLI(cfg *config.Config, agentName, definedCLI string) string {
 	if cfg == nil {
 		return definedCLI
@@ -2206,6 +2211,9 @@ func effectiveAgentCLI(cfg *config.Config, agentName, definedCLI string) string 
 		if ac := cfg.AgentConfig(name); ac != nil && ac.CLI != "" {
 			return ac.CLI
 		}
+	}
+	if cfg.CLI != "" {
+		return cfg.CLI
 	}
 	return definedCLI
 }

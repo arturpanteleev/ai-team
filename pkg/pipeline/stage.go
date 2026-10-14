@@ -232,7 +232,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	modelAttempt = !a.ControllerOperation() && !continuation
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
-		agentCfg = &config.AgentConfig{Name: name}
+		agentCfg = &config.AgentConfig{Name: name, CLI: rs.p.cfg.CLI, Model: rs.p.cfg.Model, Effort: rs.p.cfg.Effort}
 	}
 
 	// The runtime normally receives its immutable evidence snapshot. A controller

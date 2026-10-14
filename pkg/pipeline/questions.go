@@ -352,15 +352,7 @@ func recoveredGraphInputApproval(store ApprovalStore, runID, nextStage string, g
 		if source.FinishedAt.IsZero() || source.Superseded || source.State.Outcome != outcome {
 			return nil, fmt.Errorf("resolved graph approval %s disagrees with its completed source attempt", value.ID)
 		}
-		stale := false
-		for _, attempt := range replayed.Attempts[sourceAttempt+1:] {
-			if attempt.Stage == nextStage && !attempt.FinishedAt.IsZero() &&
-				attempt.Status != "canceled" && attempt.State.Execution != workflow.ExecutionCanceled {
-				stale = true
-				break
-			}
-		}
-		if stale {
+		if handoffTargetCompleted(replayed.Attempts[sourceAttempt+1:], nextStage) {
 			continue
 		}
 		return value, nil
@@ -409,4 +401,19 @@ func writeQuestionAnswerInput(targetDir, runID, approvalID, answer string) (runt
 		return runtime.Artifact{}, err
 	}
 	return runtime.Artifact{Name: "clarification-answer", Path: path, Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
+// handoffTargetCompleted reports whether the handoff target already ran to a
+// completed attempt after the source. Canceled and infra-failed attempts do not
+// count: the resume invalidates them (see infra_failure_retry), and counting an
+// infrastructure failure would block the stage forever.
+func handoffTargetCompleted(attempts []evidence.ReplayedAttempt, nextStage string) bool {
+	for _, attempt := range attempts {
+		if attempt.Stage == nextStage && !attempt.FinishedAt.IsZero() &&
+			attempt.Status != "canceled" && attempt.State.Execution != workflow.ExecutionCanceled &&
+			attempt.State.Execution != workflow.ExecutionInfraFailed {
+			return true
+		}
+	}
+	return false
 }

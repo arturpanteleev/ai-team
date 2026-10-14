@@ -211,14 +211,14 @@ func setupAgentPRGit(t *testing.T, dir string) string {
 		dir  string
 		args []string
 	}{
-		{dir, []string{"init", "-b", "main"}},
+		{dir, []string{"init", "-b", "master"}},
 		{dir, []string{"config", "user.name", "AI Team E2E"}},
 		{dir, []string{"config", "user.email", "ai-team@example.test"}},
 		{dir, []string{"add", "."}},
 		{dir, []string{"commit", "-m", "initial"}},
-		{filepath.Dir(remote), []string{"init", "--bare", "-b", "main", remote}},
+		{filepath.Dir(remote), []string{"init", "--bare", "-b", "master", remote}},
 		{dir, []string{"remote", "add", "origin", remote}},
-		{dir, []string{"push", "-u", "origin", "main"}},
+		{dir, []string{"push", "-u", "origin", "master"}},
 	} {
 		command := exec.Command("git", step.args...)
 		command.Dir = step.dir
@@ -262,7 +262,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   fi
   head=$(cat "$STATE/head")
   oid=$(git --git-dir "$REMOTE" rev-parse "refs/heads/$head")
-  printf '{"url":"https://example.test/org/repo/pull/35","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$head" "$oid"
+  printf '{"url":"https://example.test/org/repo/pull/35","state":"OPEN","baseRefName":"master","headRefName":"%s","headRefOid":"%s"}\n' "$head" "$oid"
   exit 0
 fi
 echo "unexpected gh call: $*" >&2

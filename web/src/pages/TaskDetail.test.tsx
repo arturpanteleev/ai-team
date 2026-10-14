@@ -110,7 +110,12 @@ beforeEach(async () => {
   storage = new MemoryStorage();
   useStorage(() => storage);
   const api = await import('../api');
+  vi.mocked(api.getActivePrincipal).mockReturnValue(null);
   vi.mocked(api.getTaskRunDetails).mockResolvedValue(baseDetails);
+  vi.mocked(api.getPipelineArtifacts).mockReset().mockResolvedValue([]);
+  vi.mocked(api.getArtifact).mockReset().mockResolvedValue('');
+  vi.mocked(api.decideApproval).mockReset().mockResolvedValue({} as never);
+  vi.mocked(api.resumeRun).mockReset().mockResolvedValue({ run_id: 'run-detail-1' });
   vi.mocked(api.submitTaskStageResult).mockReset().mockResolvedValue({});
   vi.mocked(api.getTaskRunEvents).mockResolvedValue({ events: [{
     version: 1, cursor: 1, run_id: 'run-detail-1', sequence: 1, type: 'run_started',
@@ -128,7 +133,7 @@ describe('Task detail', () => {
     expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
     expect(screen.getAllByText(/Закреплённый маршрут/).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /запустить агента/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Подтвердить этап' })).not.toBeInTheDocument();
@@ -175,7 +180,7 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(report);
     renderDetail();
 
-    expect(await screen.findByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Подтвердить и перейти: Релиз' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Открыть лог этапа' })).toHaveAttribute(
@@ -777,7 +782,7 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
     expect(screen.getAllByText('Ожидает').length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: 'Подтвердить этап' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Подтвердить и перейти: Анализ' })).toBeInTheDocument();
   });
 
   it('offers the manual path and the agent path as separate choices with the route states', async () => {
@@ -793,7 +798,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(await screen.findByRole('heading', { name: 'Сделаю сам' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Агент analyst подготовит результат' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
     expect(screen.getAllByText('текущий')).toHaveLength(1);
     expect(screen.getAllByText('впереди')).toHaveLength(1);
@@ -835,13 +840,87 @@ describe('Task page controls moved from the old pipeline page', () => {
       approvals: [approval],
       allowed_actions: [],
     });
+    vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'approve' });
     renderDetail();
 
     expect(await screen.findByText('Далее: Согласовать → Анализ')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Согласовать' }));
+    const current = document.getElementById('current-stage')!;
+    fireEvent.click(within(current).getByRole('button', { name: 'Согласовать и перейти: Анализ' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
       action: 'approve', actor_role: 'product_owner', actor_id: 'local-user',
     })));
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+  });
+
+  it('keeps the original idea short and puts the agent result beside the pending approval', async () => {
+    const api = await import('../api');
+    const attemptID = 'analysis-agent-1';
+    const resultPath = `attempts/${attemptID}/artifacts/feature/proposal.md`;
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: 'review-1' },
+      stages: [{ id: 8, pipeline_run_id: 5, attempt_id: attemptID, stage_index: 2, agent_name: 'analysis',
+        status: 'passed', started_at: '2026-10-12T09:10:00Z' }],
+      results: { analysis: [] },
+      approvals: [{ id: 'review-1', run_id: 'run-detail-1', attempt_id: attemptID,
+        from_stage: 'analysis', to_stage: 'release', trigger: 'stage_gate', subject_hash: 'f'.repeat(64),
+        required_roles: ['product_owner'], quorum: 'any', actions: ['approve', 'reject'],
+        targets: { approve: 'release' }, status: 'pending', created_at: '2026-10-12T09:12:00Z' }],
+      allowed_actions: [],
+    });
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue([
+      { name: '0001-intention.md', path: 'brief/0001-intention.md', run_id: 'run-detail-1', size: 20, mod_time: '2026-10-12T09:00:00Z' },
+      { name: '0002-answer.md', path: 'brief/0002-answer.md', run_id: 'run-detail-1', size: 200, mod_time: '2026-10-12T09:05:00Z' },
+      { name: 'proposal.md', path: resultPath, run_id: 'run-detail-1', size: 120, mod_time: '2026-10-12T09:12:00Z' },
+    ]);
+    vi.mocked(api.getArtifact).mockImplementation(async (_run, path) => path === resultPath
+      ? '# Спецификация\n\nКритерии приёмки: Google вход.'
+      : path === 'brief/0001-intention.md' ? '# Исходное намерение\n\nВойти через Google.' : 'Ответ владельца и длинные вопросы.');
+    renderDetail();
+
+    const idea = await screen.findByRole('region', { name: 'Бизнес-идея' });
+    expect(await within(idea).findByText('Войти через Google.')).toBeInTheDocument();
+    expect(idea).not.toHaveTextContent('Ответ владельца');
+    const stage = screen.getByRole('region', { name: 'Анализ' });
+    expect(await within(stage).findByRole('heading', { name: 'Результат этапа' })).toBeInTheDocument();
+    expect(stage).not.toHaveTextContent('Критерии приёмки: Google вход.');
+    expect(within(stage).getByRole('link', { name: 'Открыть proposal.md' })).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Согласовать и перейти: Релиз' })).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(stage).not.toHaveTextContent('Версий результата пока нет');
+  });
+
+  it('puts a failed checker decision in the current stage with a reasoned override', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getActivePrincipal).mockReturnValue({ actor_id: 'owner', roles: ['product_owner'] });
+    const approval = { id: 'check-failed', run_id: 'run-detail-1', attempt_id: 'analysis-agent-1',
+      from_stage: 'analysis', to_stage: 'analysis', trigger: 'stage_check', kind: 'check_decision',
+      subject_hash: 'f'.repeat(64), required_roles: ['po'], quorum: 'any' as const,
+      actions: ['new_version', 'override', 'return'], targets: { new_version: 'analysis', override: 'analysis', return: 'analysis' },
+      payload: { kind: 'check_decision', status: 'error' }, status: 'pending' as const, created_at: '2026-10-12T09:12:00Z' };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: approval.id },
+      approvals: [approval], allowed_actions: ['override'] });
+    renderDetail();
+
+    const stage = await screen.findByRole('region', { name: 'Анализ' });
+    expect(within(stage).getByRole('heading', { name: 'Твоё решение по этапу' })).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Доработать результат и проверить снова' })).toBeInTheDocument();
+    const returnButton = within(stage).getByRole('button', { name: 'Вернуть этап на доработку' });
+    expect(returnButton).toBeDisabled();
+    fireEvent.change(within(stage).getByLabelText('Комментарий для доработки или возврата'), { target: { value: 'Уточнить роли' } });
+    expect(returnButton).toBeEnabled();
+    vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'new_version' } as never);
+    fireEvent.click(within(stage).getByRole('button', { name: 'Доработать результат и проверить снова' }));
+    await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
+      action: 'new_version', actor_id: 'owner', actor_role: 'po',
+    })));
+    await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
+    const override = within(stage).getByRole('button', { name: 'Подтвердить без проверки' });
+    expect(override).toBeDisabled();
+    fireEvent.change(within(stage).getByLabelText('Причина обхода проверки'), { target: { value: 'Проверка недоступна' } });
+    fireEvent.click(override);
+    await waitFor(() => expect(api.overrideTaskStageCheck).toHaveBeenCalledWith('run-detail-1', 'analysis', 'Проверка недоступна'));
   });
 
   it('resumes a stopped task and retries a failed delivery from the same page', async () => {
@@ -977,7 +1056,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.decideApproval).mockImplementationOnce(() => new Promise(() => undefined) as never);
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение Product Owner' })).toBeInTheDocument();
     const card = document.getElementById('current-stage');
     expect(card).toHaveTextContent('Какой сегмент выбрать?');
     fireEvent.change(screen.getAllByLabelText('Ответ на вопрос')[0], { target: { value: 'Малый бизнес' } });
@@ -1003,7 +1082,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...question, status: 'resolved', resolved_action: 'answer_questions' });
     renderDetail();
 
-    await screen.findByRole('heading', { name: 'Нужно уточнение Product Owner' });
+    await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение Product Owner' });
     const card = document.getElementById('current-stage');
     fireEvent.change(within(card!).getByLabelText('Ответ на вопрос'), { target: { value: 'B2B' } });
     fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
@@ -1050,9 +1129,11 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     expect(await screen.findByText(/Ждёт вашего решения/)).toBeInTheDocument();
+    const card = document.getElementById('current-stage')!;
+    expect(within(card).getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
     const approvals = document.getElementById('approvals-heading')!.closest('section')!;
-    expect(within(approvals).getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
-    expect(within(approvals).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
-    expect(within(approvals).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
+    expect(within(approvals).queryByRole('button', { name: 'Отклонить' })).not.toBeInTheDocument();
   });
 });

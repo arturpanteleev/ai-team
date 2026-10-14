@@ -234,7 +234,7 @@ func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, repositor
 		f.called = map[string]int{}
 	}
 	f.called[rule]++
-	identity := prchecks.PullRequest{URL: f.prURL(), State: "OPEN", BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
+	identity := prchecks.PullRequest{URL: f.prURL(), State: "OPEN", BaseRefName: "master", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
 	if expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
 		return "", "", prchecks.PullRequest{}, errors.New("identity mismatch")
 	}
@@ -247,7 +247,7 @@ func (f *fakePRStageChecks) Diff(_ context.Context, _ string, repository string,
 	}
 	return []byte("diff --git a/main.go b/main.go\n+added\n"), prchecks.PullRequest{
 		URL: f.prURL(), State: "OPEN",
-		BaseRefName: "main", BaseRefOID: strings.Repeat("b", 40),
+		BaseRefName: "master", BaseRefOID: strings.Repeat("b", 40),
 		HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40),
 	}, nil
 }

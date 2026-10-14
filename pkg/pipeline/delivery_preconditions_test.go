@@ -118,7 +118,7 @@ func TestRun_AgentDeliveryUsesCurrentAttemptEvidenceAndProjectsPRResult(t *testi
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "main"}} {
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "master"}} {
 		command := exec.Command("git", args...)
 		command.Dir = dir
 		if output, err := command.CombinedOutput(); err != nil {
@@ -134,6 +134,11 @@ func TestRun_AgentDeliveryUsesCurrentAttemptEvidenceAndProjectsPRResult(t *testi
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
+	}
+	push := exec.Command("git", "push", "-q", "origin", "master")
+	push.Dir = dir
+	if out, err := push.CombinedOutput(); err != nil {
+		t.Fatalf("push master to origin: %v\n%s", err, out)
 	}
 
 	checkDefinition := checks.Definition{
@@ -278,7 +283,7 @@ func TestControllerStageDeliveryReconcilesRemoteCrashAndRepairsProjection(t *tes
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "main"}} {
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "master"}} {
 		command := exec.Command("git", args...)
 		command.Dir = dir
 		if output, err := command.CombinedOutput(); err != nil {
@@ -286,7 +291,7 @@ func TestControllerStageDeliveryReconcilesRemoteCrashAndRepairsProjection(t *tes
 		}
 	}
 	remote := filepath.Join(t.TempDir(), "remote.git")
-	for _, args := range [][]string{{"init", "--bare", "--initial-branch=main", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "main"}} {
+	for _, args := range [][]string{{"init", "--bare", "--initial-branch=master", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "master"}} {
 		command := exec.Command("git", args...)
 		if args[0] != "init" {
 			command.Dir = dir
@@ -401,7 +406,7 @@ func TestRun_AgentDeliveryDefaultGraphPublishesPRBeforeReviewAndQA(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "main"}} {
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "init"}, {"branch", "-M", "master"}} {
 		command := exec.Command("git", args...)
 		command.Dir = dir
 		if output, err := command.CombinedOutput(); err != nil {
@@ -409,7 +414,7 @@ func TestRun_AgentDeliveryDefaultGraphPublishesPRBeforeReviewAndQA(t *testing.T)
 		}
 	}
 	remote := filepath.Join(t.TempDir(), "remote.git")
-	for _, args := range [][]string{{"init", "--bare", "--initial-branch=main", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "main"}} {
+	for _, args := range [][]string{{"init", "--bare", "--initial-branch=master", remote}, {"remote", "add", "origin", remote}, {"push", "-u", "origin", "master"}} {
 		command := exec.Command("git", args...)
 		if args[0] != "init" {
 			command.Dir = dir
@@ -419,7 +424,7 @@ func TestRun_AgentDeliveryDefaultGraphPublishesPRBeforeReviewAndQA(t *testing.T)
 		}
 	}
 	bin := t.TempDir()
-	ghOutput := `{"url":"https://example.test/org/repo/pull/1","state":"OPEN","baseRefName":"main","headRefName":"ai-team/feat"}`
+	ghOutput := `{"url":"https://example.test/org/repo/pull/1","state":"OPEN","baseRefName":"master","headRefName":"ai-team/feat"}`
 	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nprintf '%s\\n' '"+ghOutput+"'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}

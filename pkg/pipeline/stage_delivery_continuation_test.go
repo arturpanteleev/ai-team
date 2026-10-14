@@ -51,9 +51,9 @@ func newAwaitingPlanFixture(t *testing.T) continuationFixture {
 		dir  string
 		args []string
 	}{
-		{dir, []string{"add", "."}}, {dir, []string{"commit", "-qm", "init"}}, {dir, []string{"branch", "-M", "main"}},
-		{"", []string{"init", "--bare", "--initial-branch=main", remote}},
-		{dir, []string{"remote", "add", "origin", remote}}, {dir, []string{"push", "-u", "origin", "main"}},
+		{dir, []string{"add", "."}}, {dir, []string{"commit", "-qm", "init"}}, {dir, []string{"branch", "-M", "master"}},
+		{"", []string{"init", "--bare", "--initial-branch=master", remote}},
+		{dir, []string{"remote", "add", "origin", remote}}, {dir, []string{"push", "-u", "origin", "master"}},
 	} {
 		command := exec.Command("git", step.args...)
 		command.Dir = step.dir
@@ -62,7 +62,7 @@ func newAwaitingPlanFixture(t *testing.T) continuationFixture {
 		}
 	}
 	bin := t.TempDir()
-	ghOutput := `{"url":"https://example.test/org/repo/pull/1","state":"OPEN","baseRefName":"main","headRefName":"ai-team/feat"}`
+	ghOutput := `{"url":"https://example.test/org/repo/pull/1","state":"OPEN","baseRefName":"master","headRefName":"ai-team/feat"}`
 	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nprintf '%s\\n' '"+ghOutput+"'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}

@@ -270,6 +270,38 @@ func TestRun_AgentCheckPassAllowsTransition(t *testing.T) {
 	}
 }
 
+func TestRun_CheckerInheritsStageCLIUnlessExplicitlyConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stageCLI   string
+		checkerCLI string
+		want       string
+	}{
+		{name: "global CLI", want: "claude"},
+		{name: "stage CLI", stageCLI: "codex", want: "codex"},
+		{name: "checker override", checkerCLI: "opencode", want: "opencode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := env(t)
+			rt := newScripted()
+			rt.content["tech"] = map[string]string{"result": "# Решение\n\nок\n"}
+			rt.content["verifier"] = map[string]string{"verification": "# Проверка\n\n**Verdict:** PASSED\n"}
+			cfg := stageCheckConfig(&config.TemplateCheck{Kind: "agent", Agent: "verifier"})
+			cfg.CLI = "claude"
+			cfg.PipelineAgents = []config.AgentConfig{{Name: "tech", CLI: tc.stageCLI}}
+			if tc.checkerCLI != "" {
+				cfg.PipelineAgents = append(cfg.PipelineAgents, config.AgentConfig{Name: "verifier", CLI: tc.checkerCLI})
+			}
+			if err := runStageCheckPipeline(t, dir, cfg, rt); err != nil {
+				t.Fatalf("проверка этапа: %v", err)
+			}
+			if got := rt.cliByAgent["verifier"]; got != tc.want {
+				t.Fatalf("checker CLI = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRun_AgentCheckFailureBlocksWithCheckDecision(t *testing.T) {
 	dir := env(t)
 	rt := newScripted()

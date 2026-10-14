@@ -194,6 +194,7 @@ type scriptedRuntime struct {
 	usage             *runtime.Usage
 	usagePer          map[string]*runtime.Usage
 	mcpServersByAgent map[string][]runtime.MCPServerConfig
+	cliByAgent        map[string]string
 	// deadline первого Execute: стадия видит min(stage timeout, run budget),
 	// поэтому по нему проверяется, что бюджет run'а реально вооружён.
 	firstDeadline    time.Time
@@ -238,6 +239,10 @@ func (r *scriptedRuntime) Usage() *runtime.Usage { return r.usage }
 
 func (r *scriptedRuntime) Execute(ctx context.Context, a *runtime.Agent, task *runtime.Task, inputs []runtime.Artifact) error {
 	r.executed = append(r.executed, a.Name)
+	if r.cliByAgent == nil {
+		r.cliByAgent = map[string]string{}
+	}
+	r.cliByAgent[a.Name] = a.CLI
 	if r.mcpServersByAgent == nil {
 		r.mcpServersByAgent = map[string][]runtime.MCPServerConfig{}
 	}
@@ -2940,7 +2945,7 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 	for _, args := range [][]string{
 		{"add", "."},
 		{"commit", "-qm", "init"},
-		{"branch", "-M", "main"},
+		{"branch", "-M", "master"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
@@ -2959,6 +2964,11 @@ func TestDeliverDeferredRetriesFailedHookFromCandidateWorktree(t *testing.T) {
 		}
 	}
 
+	push := exec.Command("git", "push", "-q", "origin", "master")
+	push.Dir = dir
+	if out, err := push.CombinedOutput(); err != nil {
+		t.Fatalf("push master to origin: %v\n%s", err, out)
+	}
 	rt := newScripted()
 	rt.content["approver"] = map[string]string{"review": "**Verdict:** APPROVED\n"}
 	rt.onExec = func(name string, _ []runtime.Artifact) {
@@ -4231,7 +4241,7 @@ func TestRun_InfraFailureStaysResumableWithSameRunID(t *testing.T) {
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	for _, args := range [][]string{
-		{"init", "-q"},
+		{"init", "-q", "-b", "master"},
 		{"config", "user.email", "test@test"},
 		{"config", "user.name", "test"},
 	} {

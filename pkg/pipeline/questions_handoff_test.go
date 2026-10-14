@@ -152,3 +152,25 @@ func TestQuestionAnswerApprovalRejectsForeignAndCompletedRuns(t *testing.T) {
 		t.Fatal("terminal replay was accepted for clarification recovery")
 	}
 }
+
+func TestHandoffTargetCompletedIgnoresInfraAndCanceledAttempts(t *testing.T) {
+	finished := time.Now().Add(-time.Minute)
+	attempt := func(state workflow.AttemptState, status string) evidence.ReplayedAttempt {
+		return evidence.ReplayedAttempt{Stage: "tech_design", StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: status, State: state}
+	}
+	infra := attempt(workflow.AttemptState{Execution: workflow.ExecutionInfraFailed, Outcome: workflow.OutcomeFailed}, "failed")
+	canceled := attempt(workflow.AttemptState{Execution: workflow.ExecutionCanceled, Outcome: workflow.OutcomeCanceled}, "canceled")
+	passed := attempt(workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Outcome: workflow.OutcomePassed}, "passed")
+	other := evidence.ReplayedAttempt{Stage: "qa", StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "passed",
+		State: workflow.AttemptState{Execution: workflow.ExecutionSucceeded, Outcome: workflow.OutcomePassed}}
+
+	if handoffTargetCompleted([]evidence.ReplayedAttempt{infra, canceled, other}, "tech_design") {
+		t.Fatal("infra-failed and canceled target attempts must not make the handoff stale")
+	}
+	if !handoffTargetCompleted([]evidence.ReplayedAttempt{infra, passed}, "tech_design") {
+		t.Fatal("a completed target attempt must make the handoff stale")
+	}
+	if handoffTargetCompleted([]evidence.ReplayedAttempt{passed}, "qa") {
+		t.Fatal("attempts of other stages must not count")
+	}
+}

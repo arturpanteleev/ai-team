@@ -119,7 +119,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     exit 1
   fi
   oid=$(git rev-parse HEAD)
-  printf '{"url":"https://example.test/pull/9","state":"OPEN","baseRefName":"main","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
+  printf '{"url":"https://example.test/pull/9","state":"OPEN","baseRefName":"master","headRefName":"%s","headRefOid":"%s"}\n' "$3" "$oid"
   exit 0
 fi
 touch "` + ghMarker + `"
@@ -140,7 +140,7 @@ func setupDeliveryGit(t *testing.T, dir string) {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
 	}
-	runGit(dir, "init", "-b", "main")
+	runGit(dir, "init", "-b", "master")
 	runGit(dir, "config", "user.name", "AI Team E2E")
 	runGit(dir, "config", "user.email", "ai-team@example.test")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("fixture\n"), 0644); err != nil {
@@ -154,7 +154,7 @@ func setupDeliveryGit(t *testing.T, dir string) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	runGit(filepath.Dir(remote), "init", "--bare", remote)
 	runGit(dir, "remote", "add", "origin", remote)
-	runGit(dir, "push", "-u", "origin", "main")
+	runGit(dir, "push", "-u", "origin", "master")
 }
 
 func artifactsDir(dir, feature string, parts ...string) string {
@@ -635,7 +635,7 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	dir := t.TempDir()
 	bin := buildBinary(t)
 	pathEnv := setupMock(t)
-	runCommand(t, dir, "git", "init", "-b", "main")
+	runCommand(t, dir, "git", "init", "-b", "master")
 
 	if code, out := runAI(t, bin, dir, []string{pathEnv}, "init", "--write-gitignore"); code != 0 {
 		t.Fatalf("ai-team init failed (%d):\n%s", code, out)
@@ -685,7 +685,7 @@ func TestE2E_InitLoadsAndCompilesV5Template(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init template graph should compile: %v", err)
 	}
-	if graph.Entry != "intent" || len(graph.Nodes) != 10 {
+	if graph.Entry != "intent" || len(graph.Nodes) != 9 {
 		t.Fatalf("unexpected compiled graph entry/nodes: %q/%d", graph.Entry, len(graph.Nodes))
 	}
 	for _, route := range cfg.Returns {

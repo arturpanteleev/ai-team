@@ -562,3 +562,41 @@ func TestResumeGrantRefusedAfterRecordedAllowance(t *testing.T) {
 		t.Fatalf("grant over a recorded allowance: %d %s grants=%d", response.Code, response.Body.String(), controller.grantCalls)
 	}
 }
+
+// Смена runtime при resume — только явное решение: upgrade_runtime уходит в
+// отдельный путь контроллера, обычный resume его не получает, а сочетание с
+// выдачей бюджета отклоняется до контроллера.
+func TestResumeWithRuntimeUpgradeIsExplicit(t *testing.T) {
+	srv, controller := newPickupServer(t, ":memory:", t.TempDir(), autopickup.Policy{}, &fixedLedger{}, pickupTestNow)
+	if err := srv.store.CreatePipelineRun(&store.PipelineRun{RunID: "run-upgrade", Feature: "upgrade", Status: "interrupted", StartedAt: pickupTestNow}); err != nil {
+		t.Fatal(err)
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, authorizedRequest(t, srv, http.MethodPost, "/api/runs/run-upgrade/resume", body))
+		return response
+	}
+
+	if response := post(`{"upgrade_runtime":true,"grant_budget_allowance":true,"reason":"x"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("upgrade with grant must be refused, got %d %s", response.Code, response.Body.String())
+	}
+	if controller.upgradeCalls != 0 {
+		t.Fatalf("refused upgrade reached the controller: %d", controller.upgradeCalls)
+	}
+
+	if response := post(`{"upgrade_runtime":true}`); response.Code != http.StatusAccepted {
+		t.Fatalf("upgrade resume: %d %s", response.Code, response.Body.String())
+	}
+	if controller.upgradeCalls != 1 || controller.resumeCalls != 0 {
+		t.Fatalf("upgrade must use the upgrade path only: upgrades=%d resumes=%d", controller.upgradeCalls, controller.resumeCalls)
+	}
+	event, err := srv.store.LatestRunEvent("run-upgrade", "run_resume_requested")
+	if err != nil || event == nil || !strings.Contains(event.DataJSON, `"runtime_upgrade":true`) {
+		t.Fatalf("upgrade must be recorded in the resume event: %+v err=%v", event, err)
+	}
+
+	if response := post(``); response.Code != http.StatusAccepted || controller.resumeCalls != 1 || controller.upgradeCalls != 1 {
+		t.Fatalf("plain resume must not upgrade: code=%d resumes=%d upgrades=%d", response.Code, controller.resumeCalls, controller.upgradeCalls)
+	}
+}

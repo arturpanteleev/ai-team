@@ -3342,7 +3342,7 @@ func TestWorkerControllerAPICandidateCreateAndLoadResolveSymlinkedParent(t *test
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	linkedTarget := filepath.Join(linkParent, "workspace")
-	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
+	for _, args := range [][]string{{"init", "-b", "master"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
 		cmd := exec.Command("git", append([]string{"-C", target}, args...)...)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, output)
@@ -3599,7 +3599,7 @@ func TestPrepareCandidateAbsenceRejectsCorruptProofAndGitRecoveryWithoutProof(t 
 	// A Git Start cannot publish its positive admission record when the
 	// controller state path is obstructed by a regular file.
 	gitTarget := makeTarget()
-	if output, err := exec.Command("git", "-C", gitTarget, "init", "-b", "main").CombinedOutput(); err != nil {
+	if output, err := exec.Command("git", "-C", gitTarget, "init", "-b", "master").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
 	if err := os.MkdirAll(filepath.Join(gitTarget, ".ai-team", "state"), 0o700); err != nil {
@@ -3648,7 +3648,7 @@ func TestPrepareCandidateAbsenceRejectsCorruptProofAndGitRecoveryWithoutProof(t 
 	// the controller must not grant absence authority without an admission
 	// record from Start.
 	gitRecoverTarget := makeTarget()
-	if output, err := exec.Command("git", "-C", gitRecoverTarget, "init", "-b", "main").CombinedOutput(); err != nil {
+	if output, err := exec.Command("git", "-C", gitRecoverTarget, "init", "-b", "master").CombinedOutput(); err != nil {
 		t.Fatalf("git init for Recover: %v: %s", err, output)
 	}
 	gitRecoverStore, err := lifecycle.NewStore(gitRecoverTarget)
@@ -3778,7 +3778,7 @@ func TestPrepareCandidateAbsenceRejectsCorruptProofAndGitRecoveryWithoutProof(t 
 
 func TestGitCandidateCannotBeDowngradedByHidingGitMarkerAfterControllerSetup(t *testing.T) {
 	target := t.TempDir()
-	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	command := exec.Command("git", "-C", target, "init", "-b", "master")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
@@ -3810,7 +3810,7 @@ func TestGitCandidateCannotBeDowngradedByHidingGitMarkerAfterControllerSetup(t *
 
 func TestUnisolatedGitWorkerDoesNotClaimControllerAdmissionProof(t *testing.T) {
 	target := t.TempDir()
-	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	command := exec.Command("git", "-C", target, "init", "-b", "master")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
@@ -3833,7 +3833,7 @@ func TestUnisolatedGitWorkerDoesNotClaimControllerAdmissionProof(t *testing.T) {
 
 func TestRecoverCannotCreateAbsenceProofAfterGitStartAdmission(t *testing.T) {
 	target := t.TempDir()
-	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	command := exec.Command("git", "-C", target, "init", "-b", "master")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
@@ -3872,7 +3872,7 @@ func TestRecoverCannotCreateAbsenceProofAfterGitStartAdmission(t *testing.T) {
 
 func TestRecoverRejectsPreseededAbsenceMarkerAfterGitStart(t *testing.T) {
 	target := t.TempDir()
-	command := exec.Command("git", "-C", target, "init", "-b", "main")
+	command := exec.Command("git", "-C", target, "init", "-b", "master")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}

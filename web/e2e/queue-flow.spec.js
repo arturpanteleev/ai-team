@@ -401,13 +401,16 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
   try {
     run('go', ['build', '-tags=e2etest', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
     await mkdir(target, { recursive: true })
-    run('git', ['init', '-b', 'main'], { cwd: target })
+    const remoteDir = `${target}.origin.git`
+    run('git', ['init', '--bare', '-b', 'master', remoteDir], { cwd: repoDir })
+    run('git', ['init', '-b', 'master'], { cwd: target })
     run('git', ['config', 'user.name', 'AI Team Browser E2E'], { cwd: target })
     run('git', ['config', 'user.email', 'ai-team-browser-e2e@example.test'], { cwd: target })
-    run('git', ['remote', 'add', 'origin', 'https://example.test/ai-team/browser-fixture.git'], { cwd: target })
+    run('git', ['remote', 'add', 'origin', remoteDir], { cwd: target })
     await writeFile(path.join(target, 'README.md'), 'Browser E2E fixture.\n')
     run('git', ['add', 'README.md'], { cwd: target })
     run('git', ['commit', '-m', 'Initialize browser E2E target'], { cwd: target })
+    run('git', ['push', '-u', 'origin', 'master'], { cwd: target })
     // Initialize only after Git exists so ai-team can put .ai-team/ in the
     // repository-local exclude file. The first admitted run then starts from
     // a genuinely clean workspace, matching the server's real preflight.
@@ -572,27 +575,24 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     const decisionResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'POST' &&
       new URL(response.url()).pathname === `/api/runs/${runID}/approvals/${pendingSpec.id}/decisions`)
+    const resumeResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/runs/${runID}/resume`)
     await page.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }).click()
     expect((await decisionResponsePromise).status()).toBe(200)
+    expect((await resumeResponsePromise).status()).toBe(202)
     await expect.poll(async () => {
       detail = await readDetail()
       return detail?.approvals?.find((approval) => approval.id === pendingSpec.id)?.status
     }).toBe('resolved')
     expect(detail.run.run_id).toBe(runID)
-    expect(detail.run.status).toBe('waiting_for_approval')
 
     await page.reload()
-    await expect(page.getByRole('button', { name: 'Продолжить задачу' })).toBeVisible()
     await page.getByText('История согласований (1)').click()
     await expect(page.getByText('local-user (product_owner): approve_spec', { exact: true })).toBeVisible()
     detail = await readDetail()
     expect(detail.run.run_id).toBe(runID)
     expect(detail.approvals.find((approval) => approval.id === pendingSpec.id)?.status).toBe('resolved')
 
-    const resumeResponsePromise = page.waitForResponse((response) =>
-      response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/runs/${runID}/resume`)
-    await page.getByRole('button', { name: 'Продолжить задачу' }).click()
-    expect((await resumeResponsePromise).status()).toBe(202)
     const resumeDeadline = Date.now() + 30_000
     let resumedRunReady = false
     while (!resumedRunReady && Date.now() < resumeDeadline) {

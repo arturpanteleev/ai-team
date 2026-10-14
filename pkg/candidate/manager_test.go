@@ -136,13 +136,30 @@ func TestCreateRecoversWorktreeCreatedBeforeMetadataThroughInjectedStore(t *test
 	}
 }
 
-func TestCreateRejectsDirtyLiveWorkspace(t *testing.T) {
+// A live checkout with someone else's unfinished edits must not block a run:
+// the candidate is cut from the base branch, not from the live working tree.
+func TestCreateIgnoresDirtyLiveWorkspaceAndStartsFromBaseBranch(t *testing.T) {
 	target := gitRepository(t)
+	baseHead := command(t, target, "rev-parse", "HEAD")
 	if err := os.WriteFile(filepath.Join(target, "dirty.txt"), []byte("dirty"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, available, err := Create(context.Background(), target, "run-dirty"); err == nil || !available {
-		t.Fatalf("dirty workspace принят: available=%t err=%v", available, err)
+	command(t, target, "checkout", "-q", "-b", "feature-in-progress")
+	if err := os.WriteFile(filepath.Join(target, "feature.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	command(t, target, "add", "feature.txt")
+	command(t, target, "commit", "-q", "-m", "wip")
+	manager, available, err := Create(context.Background(), target, "run-dirty")
+	if err != nil || !available {
+		t.Fatalf("dirty live checkout must not block the run: available=%t err=%v", available, err)
+	}
+	identity, err := manager.Identity()
+	if err != nil || identity.BaseCommit != baseHead {
+		t.Fatalf("candidate must start from master, not from the live branch: base=%s want=%s err=%v", identity.BaseCommit, baseHead, err)
+	}
+	if _, err := os.Stat(filepath.Join(manager.Root(), "feature.txt")); !os.IsNotExist(err) {
+		t.Fatalf("live branch leaked into the candidate: %v", err)
 	}
 }
 
@@ -225,7 +242,7 @@ func TestDetectGitRepositoryRejectsBrokenRepositoryAsAbsence(t *testing.T) {
 func gitRepository(t *testing.T) string {
 	t.Helper()
 	target := t.TempDir()
-	command(t, target, "init", "-b", "main")
+	command(t, target, "init", "-b", CandidateBaseBranch)
 	command(t, target, "config", "user.email", "test@example.com")
 	command(t, target, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(target, "README.md"), []byte("base"), 0644); err != nil {
@@ -244,4 +261,36 @@ func command(t *testing.T, target string, args ...string) string {
 		t.Fatalf("git %v: %v: %s", args, err, output)
 	}
 	return string(bytes.TrimSpace(output))
+}
+
+// With an origin the candidate starts from the freshly fetched origin/master,
+// even when the live checkout is behind it.
+func TestCreateFetchesOriginBaseBranchBeforeCutting(t *testing.T) {
+	bare := t.TempDir()
+	command(t, bare, "init", "--bare", "-b", CandidateBaseBranch)
+	target := gitRepository(t)
+	command(t, target, "remote", "add", "origin", bare)
+	command(t, target, "push", "-q", "origin", CandidateBaseBranch)
+	staleHead := command(t, target, "rev-parse", "HEAD")
+
+	other := t.TempDir()
+	command(t, other, "clone", "-q", bare, ".")
+	command(t, other, "config", "user.email", "test@example.com")
+	command(t, other, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(other, "newer.txt"), []byte("newer"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	command(t, other, "add", "newer.txt")
+	command(t, other, "commit", "-q", "-m", "newer master")
+	command(t, other, "push", "-q", "origin", CandidateBaseBranch)
+	newHead := command(t, other, "rev-parse", "HEAD")
+
+	manager, available, err := Create(context.Background(), target, "run-fetch")
+	if err != nil || !available {
+		t.Fatalf("create: available=%t err=%v", available, err)
+	}
+	identity, err := manager.Identity()
+	if err != nil || identity.BaseCommit != newHead || identity.BaseCommit == staleHead {
+		t.Fatalf("candidate must start from the fetched origin/master: base=%s want=%s stale=%s err=%v", identity.BaseCommit, newHead, staleHead, err)
+	}
 }

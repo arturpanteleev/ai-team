@@ -216,7 +216,14 @@ func (c *Controller) Preflight(ctx context.Context) preflight.Report {
 }
 
 func (c *Controller) Resume(runID string) error {
-	return c.resume(runID, nil)
+	return c.resume(runID, nil, false)
+}
+
+// ResumeWithRuntimeUpgrade продолжает run на текущем бинарнике контроллера,
+// явно записывая смену runtime в evidence. Без этого вызова дрейф
+// provenance по runtime останавливает resume.
+func (c *Controller) ResumeWithRuntimeUpgrade(runID string) error {
+	return c.resume(runID, nil, true)
 }
 
 // ResumeWithBudgetAllowance продолжает задачу с явной выдачей нового бюджета
@@ -227,10 +234,10 @@ func (c *Controller) ResumeWithBudgetAllowance(runID, actorID, reason string) er
 	if err := grant.Validate(); err != nil {
 		return err
 	}
-	return c.resume(runID, grant)
+	return c.resume(runID, grant, false)
 }
 
-func (c *Controller) resume(runID string, grant *pipeline.BudgetAllowanceGrant) error {
+func (c *Controller) resume(runID string, grant *pipeline.BudgetAllowanceGrant, upgradeRuntime bool) error {
 	stateStore, err := lifecycle.NewStore(c.target)
 	if err != nil {
 		return err
@@ -253,6 +260,7 @@ func (c *Controller) resume(runID string, grant *pipeline.BudgetAllowanceGrant) 
 	}
 	return c.launch(runID, func(ctx context.Context, cancelRequested <-chan struct{}) (pipeline.RunResult, error) {
 		return c.engine.Resume(ctx, pipeline.ResumeConfig{RunID: runID, TargetDir: c.target, BudgetAllowance: grant,
+			RuntimeUpgrade:  upgradeRuntime,
 			CancelRequested: func() bool { return cancellationRequested(c.target, runID, cancelRequested) }})
 	})
 }

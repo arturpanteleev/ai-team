@@ -288,7 +288,7 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 		return
 	}
 	stageResultPath := allowedStageSubmissionPath(command.ArtifactPath)
-	if !allowedRunArtifactPath(command.ArtifactPath) && !stageResultPath {
+	if !allowedRunArtifactRevisionPath(command.ArtifactPath) && !stageResultPath {
 		http.Error(w, "invalid artifact path", http.StatusBadRequest)
 		return
 	}

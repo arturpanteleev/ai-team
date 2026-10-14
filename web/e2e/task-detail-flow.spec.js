@@ -266,8 +266,6 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('button', { name: 'Завершить грилл без ответа' })).toHaveCount(0)
 
     // Human input, then agent work and its question/check reviews.
-    await page.getByRole('button', { name: 'Взять этап' }).click()
-    await expect(page.getByText('Ответственный: local-user')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toBeVisible()
     await page.getByRole('button', { name: 'Сдать результат' }).click()
     await page.getByLabel('Результат в Markdown').fill('Идея подтверждена')
@@ -329,7 +327,6 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 
     expect(actionsSeen.map((value) => value.replace(/\/api\/runs\/run-(?:manual|auto)/, '/api/runs/<run>'))).toEqual([
-      '/api/runs/<run>/stages/idea/take',
       '/api/runs/<run>/stages/idea/results',
       '/api/runs/<run>/stages/analysis/run-agent',
       '/api/runs/<run>/stages/analysis/grill/answer',

@@ -112,13 +112,16 @@ test('observability page shows a recorded stage attempt and exports it as CSV', 
   try {
     run('go', ['build', '-tags=e2etest', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
     await mkdir(target, { recursive: true })
-    run('git', ['init', '-b', 'main'], { cwd: target })
+    const remoteDir = `${target}.origin.git`
+    run('git', ['init', '--bare', '-b', 'master', remoteDir], { cwd: repoDir })
+    run('git', ['init', '-b', 'master'], { cwd: target })
     run('git', ['config', 'user.name', 'AI Team Observability E2E'], { cwd: target })
     run('git', ['config', 'user.email', 'ai-team-observability-e2e@example.test'], { cwd: target })
-    run('git', ['remote', 'add', 'origin', 'https://example.test/ai-team/observability-fixture.git'], { cwd: target })
+    run('git', ['remote', 'add', 'origin', remoteDir], { cwd: target })
     await writeFile(path.join(target, 'README.md'), 'Observability E2E fixture.\n')
     run('git', ['add', 'README.md'], { cwd: target })
     run('git', ['commit', '-m', 'Initialize observability E2E target'], { cwd: target })
+    run('git', ['push', '-u', 'origin', 'master'], { cwd: target })
     run(binary, ['init', '--target', target], { cwd: repoDir })
 
     await mkdir(mockBin, { recursive: true })

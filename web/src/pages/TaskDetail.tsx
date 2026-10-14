@@ -483,9 +483,10 @@ export function TaskDetail() {
   const resumeFailureReason = resumeFailure && typeof resumeFailure.data.error === 'string'
     ? resumeFailure.data.error : 'Сервер не записал причину ошибки возобновления.';
   // One place for the failure: a resume failure wins over the stage failure it follows.
-  const issueSource = resumeFailure
-    ? { heading: 'Не удалось продолжить задачу', text: resumeFailureReason, attempt: undefined as Stage | undefined }
-    : showFailure ? { heading: failureTitle, text: failureReason, attempt: failureAttempt } : null;
+  // The stage that failed keeps its heading; the newest error (a failed resume, when there is one) is the text.
+  const issueSource = showFailure
+    ? { heading: failureTitle, text: resumeFailure ? resumeFailureReason : failureReason, attempt: failureAttempt }
+    : resumeFailure ? { heading: 'Не удалось продолжить задачу', text: resumeFailureReason, attempt: undefined as Stage | undefined } : null;
   const issue = issueSource ? { ...issueSource, ...classifyIssue(issueSource.text) } : null;
 
 

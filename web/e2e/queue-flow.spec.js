@@ -401,13 +401,16 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
   try {
     run('go', ['build', '-tags=e2etest', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
     await mkdir(target, { recursive: true })
-    run('git', ['init', '-b', 'main'], { cwd: target })
+    const remoteDir = `${target}.origin.git`
+    run('git', ['init', '--bare', '-b', 'master', remoteDir], { cwd: repoDir })
+    run('git', ['init', '-b', 'master'], { cwd: target })
     run('git', ['config', 'user.name', 'AI Team Browser E2E'], { cwd: target })
     run('git', ['config', 'user.email', 'ai-team-browser-e2e@example.test'], { cwd: target })
-    run('git', ['remote', 'add', 'origin', 'https://example.test/ai-team/browser-fixture.git'], { cwd: target })
+    run('git', ['remote', 'add', 'origin', remoteDir], { cwd: target })
     await writeFile(path.join(target, 'README.md'), 'Browser E2E fixture.\n')
     run('git', ['add', 'README.md'], { cwd: target })
     run('git', ['commit', '-m', 'Initialize browser E2E target'], { cwd: target })
+    run('git', ['push', '-u', 'origin', 'master'], { cwd: target })
     // Initialize only after Git exists so ai-team can put .ai-team/ in the
     // repository-local exclude file. The first admitted run then starts from
     // a genuinely clean workspace, matching the server's real preflight.

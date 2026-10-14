@@ -4340,8 +4340,8 @@ func TestRun_GitGuard_PreexistingDirtyStateDoesNotCount(t *testing.T) {
 	err, _ := runPipeline(t, dir,
 		cfgFor(config.AgentConfig{Name: "analyst"}, config.AgentConfig{Name: "coder"}),
 		rt, &scriptedPrompter{})
-	if err == nil || !strings.Contains(err.Error(), "требует clean git workspace") {
-		t.Fatalf("новый run с пользовательским dirty state должен fail closed, got: %v", err)
+	if err != nil && strings.Contains(err.Error(), "требует clean git workspace") {
+		t.Fatalf("новый run в собственном worktree не должен блокироваться грязным live checkout: %v", err)
 	}
 }
 

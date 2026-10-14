@@ -513,13 +513,13 @@ export function TaskDetail() {
 
   function approvalLabel(action: string): string {
     if (action === 'answer_questions') return 'Ответить и продолжить';
-    if (action === 'run_agent') return 'Запустить агента';
-    if (action === 'refine_agent') return 'Попросить агента доработать';
+    if (action === 'run_agent') return 'Поручить агенту';
+    if (action === 'refine_agent') return 'Изменить: доработать агентом';
     if (action === 'approve_spec') return 'Согласовать ТЗ и передать архитектору';
     if (action === 'approve') return 'Согласовать';
-    if (action === 'new_version') return 'Доработать результат и проверить снова';
+    if (action === 'new_version') return 'Изменить: доработать и проверить снова';
     if (action === 'override') return 'Подтвердить без проверки';
-    if (action === 'return') return 'Вернуть этап на доработку';
+    if (action === 'return') return 'Изменить: вернуть этап на доработку';
     if (action === 'reject') return 'Отклонить';
     if (action === 'stop') return 'Остановить';
     if (action.startsWith('return_to_')) return `Вернуть на «${stageTitle(action.slice('return_to_'.length))}»`;
@@ -613,10 +613,6 @@ export function TaskDetail() {
             </button>
           )))}
       </div>
-      {approval.targets && Object.keys(approval.targets).length > 0 && (
-        <small>Далее: {Object.entries(approval.targets).map(([action, target]) =>
-          `${approvalLabel(action)} → ${stageTitle(target)}`).join(' · ')}</small>
-      )}
       <details className={styles.approvalDetails}>
         <summary>Подробности</summary>
         <div className={styles.hashes}><span>Хеш решения</span><CopyableHash value={approval.subject_hash} label="хеш решения" /></div>
@@ -645,7 +641,7 @@ export function TaskDetail() {
     if (currentDecision?.kind === 'check_decision') return 'Проверка не прошла или не завершилась. Откройте отчёт и отправьте результат на повторную проверку.';
     if (currentDecision) return 'Результат ждёт вашего решения: проверьте его и выберите действие ниже.';
     if (runningAttempt) return 'Агент работает. Страница обновится, когда он закончит.';
-    if (currentStage?.agent && allowed.has('run-agent')) return `Запустите агента ${currentStage.agent}: он подготовит результат, потом вы его проверите.`;
+    if (currentStage?.agent && allowed.has('run-agent')) return `Сделайте этап сами или поручите агенту ${currentStage.agent}: потом вы примете результат или измените его.`;
     if (allowed.has('results')) return 'Сдайте результат текстом или ссылкой.';
     if (allowed.has('confirm')) return 'Результат принят. Подтвердите этап, чтобы перейти дальше.';
     return null;
@@ -767,18 +763,18 @@ export function TaskDetail() {
 
             {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && !choiceOwnsStage && <div className={styles.modes}>
               {allowed.has('results') && <article className={styles.modeCard}>
-                <h3>Сделаю сам</h3>
+                <h3>Сделать самому</h3>
                 <div className={styles.actions}>
                   {allowed.has('results') && !showResultForm && <button type="button" disabled={working}
                     onClick={() => setShowResultForm(true)}>Сдать результат</button>}
                 </div>
               </article>}
               {allowed.has('run-agent') && currentStage.agent && <article className={styles.modeCard}>
-                <h3>Агент {currentStage.agent} подготовит результат</h3>
+                <h3>Агент {currentStage.agent} сделает этап</h3>
                 <div className={styles.actions}>
                   <button type="button" disabled={working}
                     onClick={() => void startAgent(pending?.actions.includes('retry') ? 'refine' : 'run')}>
-                    <BusyLabel busy={working && activeKey === 'run-agent'} text="Запускаем…">{pending?.actions.includes('retry') ? 'Попросить агента доработать' : 'Запустить агента'}</BusyLabel>
+                    <BusyLabel busy={working && activeKey === 'run-agent'} text="Запускаем…"><span aria-hidden="true">🤖 </span>{pending?.actions.includes('retry') ? 'Изменить: доработать агентом' : 'Поручить агенту'}</BusyLabel>
                   </button>
                 </div>
               </article>}

@@ -136,7 +136,7 @@ describe('Task detail', () => {
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /запустить агента/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /поручить агенту/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Подтвердить этап' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Обойти проверку' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Пропустить этап' })).not.toBeInTheDocument();
@@ -796,9 +796,9 @@ describe('Task page controls moved from the old pipeline page', () => {
     });
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Сделаю сам' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Агент analyst подготовит результат' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Сделать самому' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Агент analyst сделает этап' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Поручить агенту' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
     expect(screen.getAllByText('текущий')).toHaveLength(1);
@@ -844,7 +844,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'approve' });
     renderDetail();
 
-    expect(await screen.findByText('Далее: Согласовать → Анализ')).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Принять и перейти: Анализ' });
     const current = document.getElementById('current-stage')!;
     fireEvent.click(within(current).getByRole('button', { name: 'Принять и перейти: Анализ' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
@@ -906,13 +906,13 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     const stage = await screen.findByRole('region', { name: 'Анализ' });
     expect(within(stage).getByRole('heading', { name: 'Твоё решение по этапу' })).toBeInTheDocument();
-    expect(within(stage).getByRole('button', { name: 'Доработать результат и проверить снова' })).toBeInTheDocument();
-    const returnButton = within(stage).getByRole('button', { name: 'Вернуть этап на доработку' });
+    expect(within(stage).getByRole('button', { name: 'Изменить: доработать и проверить снова' })).toBeInTheDocument();
+    const returnButton = within(stage).getByRole('button', { name: 'Изменить: вернуть этап на доработку' });
     expect(returnButton).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Комментарий для доработки или возврата'), { target: { value: 'Уточнить роли' } });
     expect(returnButton).toBeEnabled();
     vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'new_version' } as never);
-    fireEvent.click(within(stage).getByRole('button', { name: 'Доработать результат и проверить снова' }));
+    fireEvent.click(within(stage).getByRole('button', { name: 'Изменить: доработать и проверить снова' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
       action: 'new_version', actor_id: 'owner', actor_role: 'po',
     })));
@@ -998,7 +998,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...agentOnStage([]) });
     renderDetail();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Поручить агенту' }));
     expect(await screen.findByText('Агент запущен')).toBeInTheDocument();
     expect(api.runTaskStageAgent).toHaveBeenCalledWith('run-detail-1', 'analysis', 'run');
   });
@@ -1108,7 +1108,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([]));
     renderDetail();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Запустить агента' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Поручить агенту' }));
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(agentOnStage([agentStage('running')]));
     expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
     expect(screen.queryByText('Агент запущен')).not.toBeInTheDocument();
@@ -1131,7 +1131,7 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     expect(await screen.findByText(/Ждёт вашего решения/)).toBeInTheDocument();
     const card = document.getElementById('current-stage')!;
-    expect(within(card).getByRole('button', { name: 'Запустить агента' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Поручить агенту' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
     expect(within(card).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
     const approvals = document.getElementById('approvals-heading')!.closest('section')!;

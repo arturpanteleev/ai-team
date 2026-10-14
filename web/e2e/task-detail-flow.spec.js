@@ -271,10 +271,10 @@ test('task detail traverses the manual and automatic templates using allowed act
     await page.getByLabel('Результат в Markdown').fill('Идея подтверждена')
     await page.getByRole('button', { name: 'Отправить результат' }).click()
     await expect(page.getByRole('heading', { name: 'Анализ', level: 2 })).toBeVisible()
-    await expect(page.getByRole('button', { name: /запустить агента/i })).toBeVisible()
+    await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
 
-    await page.getByRole('button', { name: /запустить агента/i }).click()
+    await page.getByRole('button', { name: /поручить агенту/i }).click()
     await expect(page.getByRole('heading', { name: 'Грилл: вопросы и ответы' })).toBeVisible()
     await expect(page.getByRole('region', { name: 'Грилл: вопросы и ответы' }).getByText('Какой сегмент проверяем первым?')).toBeVisible()
     await page.getByLabel('Ваш ответ').fill('Малый бизнес')
@@ -317,13 +317,13 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
     await page.getByRole('region', { name: 'Бизнес-идея' }).getByText('Подробности').click()
     await expect(page.getByRole('region', { name: 'Бизнес-идея' }).getByText('Авто', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: /запустить агента/i })).toBeVisible()
+    await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
     for (const invalidAction of ['Взять этап', 'Сдать результат', 'Подтвердить этап', 'Обойти проверку', 'Пропустить этап', 'Вернуть этап', 'Подтвердить план']) {
       await expect(page.getByRole('button', { name: invalidAction })).toHaveCount(0)
     }
-    await page.getByRole('button', { name: /запустить агента/i }).click()
+    await page.getByRole('button', { name: /поручить агенту/i }).click()
     await expect(page.getByRole('heading', { name: 'Проверка', level: 2 })).toBeVisible()
-    await page.getByRole('button', { name: /запустить агента/i }).click()
+    await page.getByRole('button', { name: /поручить агенту/i }).click()
     await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 
     expect(actionsSeen.map((value) => value.replace(/\/api\/runs\/run-(?:manual|auto)/, '/api/runs/<run>'))).toEqual([

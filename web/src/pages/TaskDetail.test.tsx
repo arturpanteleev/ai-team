@@ -846,7 +846,7 @@ describe('Task page controls moved from the old pipeline page', () => {
 
     expect(await screen.findByText('Далее: Согласовать → Анализ')).toBeInTheDocument();
     const current = document.getElementById('current-stage')!;
-    fireEvent.click(within(current).getByRole('button', { name: 'Согласовать и перейти: Анализ' }));
+    fireEvent.click(within(current).getByRole('button', { name: 'Принять и перейти: Анализ' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
       action: 'approve', actor_role: 'product_owner', actor_id: 'local-user',
     })));
@@ -886,7 +886,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(await within(stage).findByRole('heading', { name: 'Результат этапа' })).toBeInTheDocument();
     expect(stage).not.toHaveTextContent('Критерии приёмки: Google вход.');
     expect(within(stage).getByRole('link', { name: 'Открыть proposal.md' })).toBeInTheDocument();
-    expect(within(stage).getByRole('button', { name: 'Согласовать и перейти: Релиз' })).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Принять и перейти: Релиз' })).toBeInTheDocument();
     expect(within(stage).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
     expect(stage).not.toHaveTextContent('Версий результата пока нет');
   });

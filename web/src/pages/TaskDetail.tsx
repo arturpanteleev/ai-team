@@ -528,7 +528,7 @@ export function TaskDetail() {
 
   const decisionButtonLabel = (approval: Approval, action: string): string => {
     const target = approval.targets?.[action];
-    if (action === 'approve' && target) return `Согласовать и перейти: ${stageTitle(target)}`;
+    if (action === 'approve' && target) return `Принять и перейти: ${stageTitle(target)}`;
     return approvalLabel(action);
   };
 
@@ -569,8 +569,11 @@ export function TaskDetail() {
   const rowStarts = routeRows.length > 1 ? [0, half] : [0];
 
   // "submit" and "approve" of a human input go through the stage result form, not the approvals list.
+  // A stage whose result is only an approval has no content to submit, so «Принять» is the decision itself.
+  const stageNeedsContent = (stageID: string) => (template?.stages.find((stage) => stage.id === stageID)?.result ?? 'md') !== 'approve';
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
-    ? approval.actions.filter((action) => !['submit', 'approve'].includes(action)
+    ? approval.actions.filter((action) => action !== 'submit'
+      && !(action === 'approve' && stageNeedsContent(approval.from_stage))
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
     : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override') : approval.actions);
 

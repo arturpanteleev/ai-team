@@ -1850,6 +1850,12 @@ func (rs *runState) initializeWorkspaceOwnership() error {
 	if !available {
 		return nil
 	}
+	if rs.candidate != nil {
+		// The run works in its own worktree cut from master. The live checkout's
+		// uncommitted edits are neither its base nor writable by agents, so they
+		// must not block a new run.
+		return nil
+	}
 	if rs.runCfg.retryFrom == "" && len(gitState.Dirty) > 0 {
 		paths := make([]string, 0, len(gitState.Dirty))
 		for path := range gitState.Dirty {

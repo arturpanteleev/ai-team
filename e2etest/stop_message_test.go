@@ -48,22 +48,20 @@ func TestE2E_StopMessagePrintedOnce(t *testing.T) {
 		if code, out := runAI(t, bin, dir, []string{pathEnv}, "init"); code != 0 {
 			t.Fatalf("init failed (%d):\n%s", code, out)
 		}
-		// Пользовательское изменение в tracked-файле: новый run обязан
-		// отказаться ещё до запуска агентов.
+		// Пользовательское изменение в tracked-файле живого checkout. Run работает
+		// в собственном worktree от master: эта правка не блокирует запуск и не
+		// должна быть затронута агентами.
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("user edit\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		code, out := runAI(t, bin, dir, []string{pathEnv},
+		_, out := runAI(t, bin, dir, []string{pathEnv},
 			"run", "--feature", "stop-dirty", "--task", "dirty workspace", "--approve-gates")
-		if code == 0 {
-			t.Fatalf("грязный workspace обязан остановить run:\n%s", out)
+		if strings.Contains(out, "clean git workspace") {
+			t.Fatalf("грязный live checkout не должен блокировать run в собственном worktree:\n%s", out)
 		}
-		if !strings.Contains(out, "clean git workspace") {
-			t.Fatalf("ожидалась ошибка про clean git workspace:\n%s", out)
-		}
-		if got := countStopLines(out); got != 1 {
-			t.Fatalf("сообщение об остановке напечатано %d раз(а), ожидался 1:\n%s", got, out)
+		if data, err := os.ReadFile(filepath.Join(dir, "README.md")); err != nil || string(data) != "user edit\n" {
+			t.Fatalf("пользовательская правка в live checkout затронута: %q err=%v", data, err)
 		}
 	})
 

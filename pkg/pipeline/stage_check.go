@@ -1087,7 +1087,15 @@ func (rs *runState) runCheckerAgentWithInputs(ctx context.Context, stage config.
 	}
 	agentCfg := rs.p.cfg.AgentConfig(check.Agent)
 	if agentCfg == nil {
-		agentCfg = &config.AgentConfig{Name: check.Agent}
+		// Template configs project runtime settings onto stage IDs, while a
+		// checker runs under its own agent name. Inherit the checked stage's
+		// CLI/model settings when the checker has no explicit override.
+		agentCfg = rs.p.cfg.AgentConfig(stage.ID)
+	}
+	if agentCfg == nil {
+		agentCfg = &config.AgentConfig{
+			Name: check.Agent, CLI: rs.p.cfg.CLI, Model: rs.p.cfg.Model, Effort: rs.p.cfg.Effort,
+		}
 	}
 	if err := rs.clearStageEphemeral(check.Agent, definition); err != nil {
 		return "", fmt.Errorf("очистка старого отчёта агента проверки %s: %w", check.Agent, err)

@@ -2198,6 +2198,9 @@ func effectiveAgentCLI(cfg *config.Config, agentName, definedCLI string) string 
 		if stage.ID != "" && cfg.RegistryAgentName(stage.ID) == agentName {
 			candidates = append(candidates, stage.ID)
 		}
+		if stage.ID != "" && stage.Check != nil && stage.Check.Agent == agentName {
+			candidates = append(candidates, stage.ID)
+		}
 	}
 	for _, name := range candidates {
 		if ac := cfg.AgentConfig(name); ac != nil && ac.CLI != "" {

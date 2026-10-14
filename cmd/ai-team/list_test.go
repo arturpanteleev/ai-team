@@ -158,7 +158,10 @@ func TestListShowsEffectiveCLIFromProjectConfig(t *testing.T) {
 		"    function: developer\n" +
 		"    result: md\n" +
 		"    executor: agent\n" +
-		"    agent: coder\n"
+		"    agent: coder\n" +
+		"    check:\n" +
+		"      kind: agent\n" +
+		"      agent: spec-checker\n"
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +183,9 @@ func TestListShowsEffectiveCLIFromProjectConfig(t *testing.T) {
 	}
 	if got := cliOf("coder"); got != "claude" {
 		t.Fatalf("coder привязан к этапу с глобальным cli: claude, в выводе %q:\n%s", got, stdout)
+	}
+	if got := cliOf("spec-checker"); got != "claude" {
+		t.Fatalf("spec-checker проверяет этап с глобальным cli: claude, в выводе %q:\n%s", got, stdout)
 	}
 	// Агент без этапа в конфиге не исполняется пайплайном: остаётся своё определение.
 	if got := cliOf("tester"); got == "claude" {

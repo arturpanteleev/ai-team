@@ -309,6 +309,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 
 	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
 	srv.router.Get("/api/session", srv.handleSession)
+	srv.router.Get("/api/version", srv.handleVersion)
 	srv.router.Delete("/api/session", srv.handleLogout)
 	if srv.oidc != nil {
 		srv.router.Get(oidcLoginPath, srv.handleOIDCLogin)

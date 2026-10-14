@@ -1,0 +1,20 @@
+/* Маленькая панель состояния в правом нижнем углу: только для разработчика, не мешает страницам. */
+.badge {
+  position: fixed;
+  right: 8px;
+  bottom: 6px;
+  z-index: 50;
+  display: inline-flex;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-soft);
+  opacity: 0.85;
+  pointer-events: none;
+  user-select: text;
+}

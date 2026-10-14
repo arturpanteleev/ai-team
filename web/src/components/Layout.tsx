@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { VersionBadge } from './VersionBadge';
 import { NavLink } from '../router';
 import { closeSession, getActivePrincipal } from '../api';
 import { useTheme } from '../theme';
@@ -95,6 +96,7 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
         </div>
       </aside>
       <main className={styles.main}>{children}</main>
+      <VersionBadge />
     </div>
   );
 }

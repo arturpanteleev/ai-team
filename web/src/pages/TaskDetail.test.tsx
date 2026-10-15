@@ -338,7 +338,7 @@ describe('Task detail', () => {
     renderDetail();
 
     fireEvent.change(await screen.findByLabelText('Причина возврата'), { target: { value: 'Не тот объём' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Вернуть на доработку' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Вернуть на доработку/ }));
     await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'release', 'intent', 'Не тот объём'));
 
     fireEvent.change(screen.getByLabelText('Вернуть на этап'), { target: { value: 'analysis' } });
@@ -351,7 +351,7 @@ describe('Task detail', () => {
     expect(await screen.findByRole('heading', { name: 'Проверка', level: 2 })).toBeInTheDocument();
     expect(screen.getByLabelText('Вернуть на этап')).toHaveValue('intent');
     fireEvent.change(screen.getByLabelText('Причина возврата'), { target: { value: 'Повторить' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Вернуть на доработку' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Вернуть на доработку/ }));
     await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'qa', 'intent', 'Повторить'));
   });
 
@@ -927,7 +927,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     const stage = await screen.findByRole('complementary', { name: 'Действия' });
     expect(screen.getByRole('region', { name: 'Проверка не пройдена' })).toBeInTheDocument();
     expect(within(stage).getByRole('button', { name: 'Отправить новую версию' })).toBeInTheDocument();
-    const returnButton = within(stage).getByRole('button', { name: 'Вернуть на доработку' });
+    const returnButton = within(stage).getByRole('button', { name: /^Вернуть на доработку/ });
     expect(returnButton).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Комментарий для доработки или возврата'), { target: { value: 'Уточнить роли' } });
     expect(returnButton).toBeEnabled();

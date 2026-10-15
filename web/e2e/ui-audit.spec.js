@@ -90,6 +90,9 @@ for (const [id, scenario] of Object.entries(scenarios)) {
       if (want.flag) await expect(page.locator(`[data-gate-flag="${want.flag}"]`).first()).toBeVisible()
       if (want.noActions) await expect(actions.getByTestId('no-actions')).toBeVisible()
 
+      // No two buttons with the same name in the actions column (one meaning, one button).
+      const names = (await actions.getByRole('button').allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim()).filter(Boolean)
+      expect(names, `duplicate buttons: ${names.join(' | ')}`).toEqual([...new Set(names)])
       // One primary action at most: not two competing yellow buttons.
       const primaries = await actions.locator('button[class*="primary"]').count()
       expect(primaries).toBeLessThanOrEqual(1)

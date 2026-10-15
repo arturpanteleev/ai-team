@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createProject, getActivePrincipal, isAuthenticationRequired, setProjectArchived } from '../api';
+import { createProject, getActivePrincipal, setProjectArchived } from '../api';
+import { mayPerform } from '../permissions';
 import { Link } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useProjects } from '../hooks/useProjects';
@@ -13,9 +14,7 @@ export function Projects() {
   // Создавать и архивировать проекты могут Product Owner и архитектор (как и
   // создавать задачи); окончательное решение за сервером. Без principal форма
   // доступна только в локальном режиме.
-  const canManage = principal
-    ? principal.roles.includes('product_owner') || principal.roles.includes('architect')
-    : !isAuthenticationRequired();
+  const canManage = mayPerform(principal, 'project:manage');
   const { projects, loaded, error: loadError, reload } = useProjects();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');

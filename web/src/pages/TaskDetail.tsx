@@ -566,6 +566,8 @@ export function TaskDetail() {
 
   const decisionButtonLabel = (approval: Approval, action: string): string => {
     const target = approval.targets?.[action];
+    // A return always names where the stage goes back to, so two return buttons are never the same words.
+    if (action === 'return' && target) return `${actionVerbs.returnStage}: ${stageTitle(target)}`;
     if ((action === 'approve' || action === 'approve_spec') && target) {
       // A decision that stays at the stage (the human input itself) is plain «Принять»; moving on names where.
       return target === approval.from_stage && approval.trigger === 'human_input' ? actionVerbs.acceptHere : `${actionVerbs.accept}: ${stageTitle(target)}`;
@@ -613,14 +615,11 @@ export function TaskDetail() {
   // "submit" and "approve" of a human input go through the stage result form, not the approvals list.
   // A stage whose result is only an approval has no content to submit, so «Принять» is the decision itself.
   const stageNeedsContent = (stageID: string) => (template?.stages.find((stage) => stage.id === stageID)?.result ?? 'md') !== 'approve';
-  // The «confirm» action of the task API accepts the pending approval with its hash: the decision card then keeps only the other actions (no second «Принять»).
-  const confirmsPending = (approval: Approval) => allowed.has('confirm') && approval.id === pending?.id;
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
     ? approval.actions.filter((action) => action !== 'submit'
       && !(action === 'approve' && stageNeedsContent(approval.from_stage))
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
-    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions)
-    .filter((action) => !(confirmsPending(approval) && action === 'approve'));
+    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions);
 
   const renderDecision = (approval: Approval) => {
     const answer = approvalAnswers[approval.id] ?? '';
@@ -683,7 +682,11 @@ export function TaskDetail() {
   // A pending result decision (approve / decline) is the one action left: start-work cards would only duplicate it.
   const choiceOwnsStage = Boolean(currentDecision && currentDecision.trigger !== 'human_input');
   // A stage whose result is only an approval is accepted by the decision itself: no second «Сдать результат» for it.
-  const approveDecidesStage = currentStage?.result === 'approve' && currentDecision?.trigger === 'human_input'
+  // The decision card already offers «Принять» for the pending approval (decided in the role the approval names):
+  // the stage-level «confirm» would be a second button for the same meaning.
+  const decisionCoversConfirm = Boolean(currentDecision && pending?.id === currentDecision.id
+    && decisionActions(currentDecision).includes('approve'));
+  const approveDecidesStage =currentStage?.result === 'approve' && currentDecision?.trigger === 'human_input'
     && decisionActions(currentDecision).includes('approve');
   const nextStep = (() => {
     if (issue) return null;
@@ -703,6 +706,8 @@ export function TaskDetail() {
     ? [...(details.stage_statuses?.stages ?? [])].filter((entry) => entry.visited).sort((left, right) => left.index - right.index).at(-1) : undefined;
   const viewID = viewStageID && template?.stages.some((stage) => stage.id === viewStageID) ? viewStageID : currentStageID || stoppedAt?.stage_id || '';
   const viewStageDef = template?.stages.find((stage) => stage.id === viewID);
+  // The current stage's files are listed in the result card: no empty «Результата пока нет» under it.
+  const filesShownAbove = viewID === currentStageID && currentOutputArtifacts.length > 0 && (details.results[viewID] ?? []).length === 0;
   const viewAttempt = viewID ? latestAttemptFor(viewID) : undefined;
   const viewFiles = viewAttempt ? visibleSnapshot.artifacts.filter((artifact) =>
     artifact.run_id === run.run_id && isStageResultArtifact(artifact, viewAttempt.attempt_id)) : [];
@@ -856,7 +861,7 @@ export function TaskDetail() {
 
           {hasStageActions && <section className={styles.group} aria-label={`Этап «${stageName}»`}>
             <h3>Этап «{stageName}»</h3>
-            {allowed.has('confirm') && <button type="button" className={styles.primary} disabled={working || !pending?.subject_hash}
+            {allowed.has('confirm') && !decisionCoversConfirm && <button type="button" className={styles.primary} disabled={working || !pending?.subject_hash}
               title={pending?.subject_hash ? undefined : 'Запрос решения ещё не загружен: подождите обновления страницы'}
               onClick={() => void perform('Этап принят', () => confirmTaskStage(run.run_id, currentStageID, pending?.subject_hash ?? ''), 'confirm')}>
               <BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `${actionVerbs.accept}: ${stageTitle(confirmTargetID)}` : actionVerbs.acceptFinal}</BusyLabel></button>}
@@ -930,7 +935,7 @@ export function TaskDetail() {
               <label>Причина возврата
                 <input value={returnReason} onChange={(event) => setReturnReason(event.target.value)} required maxLength={4000} />
               </label>
-              <button disabled={working || !returnReason.trim()}>{actionVerbs.returnStage}</button>
+              <button disabled={working || !returnReason.trim()}>{actionVerbs.returnStage}: {stageTitle(effectiveReturnTarget)}</button>
             </form>}
             {allowed.has('override') && canOverride && <form className={`${styles.reasonForm} ${styles.overrideForm}`} onSubmit={submitReason('override')}>
               <p>Только для администратора. Исход гейта останется «провал»; обход запишется с вашим именем, причиной и версией результата.</p>
@@ -1025,9 +1030,9 @@ export function TaskDetail() {
                     </div> : (details.results[currentStageID] ?? []).at(-1)?.result === 'link' &&
                       <a href={(details.results[currentStageID] ?? []).at(-1)?.content} target="_blank" rel="noreferrer">Открыть результат</a>}
                   </section>}
-                <h3 className={styles.viewHeading}>Этап «{viewStageDef?.title ?? viewID}»{currentStageID && viewID !== currentStageID ? ' (не текущий)' : ''}</h3>
-                <ResultHistory title={viewStageDef?.title ?? viewID} stageID={viewID} revisions={details.results[viewID] ?? []}
-                  artifacts={viewID === currentStageID && currentOutputArtifacts.length > 0 ? [] : viewFiles} runID={run.run_id} />
+                {!filesShownAbove && <h3 className={styles.viewHeading}>Этап «{viewStageDef?.title ?? viewID}»{currentStageID && viewID !== currentStageID ? ' (не текущий)' : ''}</h3>}
+                {!filesShownAbove && <ResultHistory title={viewStageDef?.title ?? viewID} stageID={viewID} revisions={details.results[viewID] ?? []}
+                  artifacts={viewID === currentStageID && currentOutputArtifacts.length > 0 ? [] : viewFiles} runID={run.run_id} />}
                 {briefArtifacts.length > 1 && <details className={styles.briefHistory}>
                   <summary>Ответы и уточнения ({briefArtifacts.length - 1})</summary>
                   <div className={styles.resultFiles}>{briefArtifacts.slice(1).map((artifact, index) =>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { getActivePrincipal, getProjectTemplate, getTemplatesList, publishProjectTemplate, validateProjectTemplate } from '../api';
 import type { ProjectTemplateResponse, TemplateValidation } from '../types';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { mayPerform } from '../permissions';
 import styles from './TemplateEditor.module.css';
 
 function shortVersion(version: string): string {
@@ -11,7 +12,7 @@ function shortVersion(version: string): string {
 export function TemplateEditor() {
   usePageTitle('Шаблоны');
   const principal = getActivePrincipal();
-  const canEdit = !principal || principal.roles.includes('product_owner') || principal.roles.includes('architect');
+  const canEdit = mayPerform(principal, 'template:edit');
   const [project, setProject] = useState<ProjectTemplateResponse | null>(null);
   const [catalog, setCatalog] = useState<TemplateValidation[]>([]);
   const [selectedID, setSelectedID] = useState<string | null>(null);

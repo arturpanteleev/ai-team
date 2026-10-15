@@ -216,7 +216,7 @@ export const scenarios = {
     approvals: [inputApproval('code_review', ['reviewer'])],
     allowed: ['results', 'run-agent', 'skip', 'return'],
     statuses: statuses(3, { status: 'rejected', readiness: 'engaged', phase: 'awaiting_human', outcome: 'rejected', executor: human('bob'), allowed_actions: ['results', 'run-agent', 'skip', 'return'] }),
-    expect: { chip: 'Отклонён', buttons: ['Пропустить этап', 'Вернуть на доработку', 'Сдать результат'] },
+    expect: { chip: 'Отклонён', buttons: ['Пропустить этап', 'Вернуть на доработку: Техническая реализация', 'Сдать результат'] },
   },
   'returned-second-visit': {
     title: 'Возврат: второе посещение этапа',

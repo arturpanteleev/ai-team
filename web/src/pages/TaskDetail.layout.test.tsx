@@ -91,7 +91,7 @@ describe('Task page columns keep their purpose (S16)', () => {
     expect(within(context).queryByRole('button', { name: /Принять|Пропустить|Вернуть|Отклонить/ })).not.toBeInTheDocument();
     expect(within(actions).getByRole('button', { name: /Принять и перейти/ })).toBeInTheDocument();
     expect(within(actions).getByRole('button', { name: 'Пропустить этап' })).toBeInTheDocument();
-    expect(within(actions).getByRole('button', { name: 'Вернуть на доработку' })).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: /^Вернуть на доработку/ })).toBeInTheDocument();
     expect(within(context).queryByLabelText('Причина пропуска')).not.toBeInTheDocument();
   });
 

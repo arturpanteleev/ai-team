@@ -24,6 +24,18 @@
 
 ### Added
 
+- **Встроенные кодовые гейты на общем контракте (S04).** `required_sections`,
+  `verdict_marker`, `pr_exists`, `pr_open`, `pr_base_branch`, `project_checks`,
+  `pr_checks_green` исполняются только планировщиком гейтов (попытка с
+  `execution` и `verdict`); удалён неиспользуемый обходной `runHardChecks`.
+  Нечитаемый md-результат у `required_sections`/`verdict_marker` теперь `error`
+  (технический сбой), а не `fail`. Добавлен гейт `required_phrases@1`: явные
+  `case`, `scope` (весь результат или раздел по заголовку), `match`
+  (`all|any|at_least`), `unit` (подстрока или слово) и опциональный
+  `regex: true` (только RE2, до 50 фраз по 200 байт, компиляция при валидации);
+  скриптов нет. Неверный параметр — ошибка конфигурации до запуска. Тесты
+  pass/fail/error на каждый гейт, приёмка «спека без Критериев приёмки
+  блокируется до LLM и человека». Инъекция `WithPullRequestRunner` для `gh pr view`.
 - **Гейт внешней программы с JSON-контрактом (S07).** В библиотеке появился
   `external_program@1`: доверенная команда из конфига репозитория (argv без
   shell, `timeout_seconds`, `cwd`, `env_allow`, `max_output_bytes`) получает

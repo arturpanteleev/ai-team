@@ -3,6 +3,7 @@ package gatelib
 import (
 	"sync"
 
+	"github.com/arturpanteleev/ai-team/pkg/gatephrases"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -14,11 +15,14 @@ const (
 	// Code gates (kind builtin).
 	GateRequiredSections = "required_sections"
 	GateVerdictMarker    = "verdict_marker"
-	GatePRExists         = "pr_exists"
-	GatePROpen           = "pr_open"
-	GatePRBaseBranch     = "pr_base_branch"
-	GateProjectChecks    = "project_checks"
-	GatePRChecksGreen    = "pr_checks_green"
+	// GateRequiredPhrases checks that explicitly configured words or fragments
+	// are present in the Markdown result (pkg/gatephrases).
+	GateRequiredPhrases = "required_phrases"
+	GatePRExists        = "pr_exists"
+	GatePROpen          = "pr_open"
+	GatePRBaseBranch    = "pr_base_branch"
+	GateProjectChecks   = "project_checks"
+	GatePRChecksGreen   = "pr_checks_green"
 	// GateAgentReview is the LLM gate: a reviewer agent with a fixed input
 	// and verdict schema. mode=grill is one way of running it.
 	GateAgentReview = "agent_review"
@@ -68,6 +72,31 @@ func newBuiltin() *Registry {
 		Description: "Markdown-результат содержит маркер вердикта проверяющего.",
 		ResultTypes: []string{"md"},
 	})
+	one := 1
+	r.MustRegister(workflow.GateDefinition{
+		ID: GateRequiredPhrases, Version: 1, Kind: workflow.GateKindBuiltin,
+		Title:       "Обязательные слова и фрагменты",
+		Description: "Markdown-результат содержит заданные слова или фрагменты. Регистр, область поиска (весь результат или раздел по заголовку) и правило совпадения задаются явно; пустой результат и отсутствующий раздел — fail. Пользовательских скриптов нет; регулярные выражения только RE2 и только с regex: true.",
+		ResultTypes: []string{"md"},
+		Params: []workflow.GateParam{
+			{Name: gatephrases.ParamPhrases, Type: workflow.GateParamStringList, Required: true,
+				Description: "Слова или фрагменты (не больше 50, каждая до 200 байт); при regex: true — выражения RE2."},
+			{Name: gatephrases.ParamCase, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.CaseValues,
+				Description: "Учитывать ли регистр: sensitive или insensitive."},
+			{Name: gatephrases.ParamScope, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.ScopeValues,
+				Description: "Где искать: result — весь результат, section — только в разделе."},
+			{Name: gatephrases.ParamSection, Type: workflow.GateParamString,
+				Description: "Заголовок раздела (обязателен при scope: section); тело раздела — до заголовка того же или более высокого уровня."},
+			{Name: gatephrases.ParamMatch, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.MatchValues,
+				Description: "Правило: all — все фразы, any — любая, at_least — не меньше min_count."},
+			{Name: gatephrases.ParamMinCount, Type: workflow.GateParamInt, Min: &one,
+				Description: "Минимум найденных фраз (обязателен при match: at_least, не больше числа фраз)."},
+			{Name: gatephrases.ParamUnit, Type: workflow.GateParamEnum, Enum: gatephrases.UnitValues,
+				Description: "Единица совпадения: substring (по умолчанию) или word — целое слово."},
+			{Name: gatephrases.ParamRegex, Type: workflow.GateParamBool,
+				Description: "true — фразы это выражения RE2 (линейное время, без скриптов); по умолчанию false."},
+		},
+	})
 	for _, spec := range []struct{ id, title, description string }{
 		{GatePRExists, "PR существует", "Ссылка результата указывает на существующий pull request."},
 		{GatePROpen, "PR открыт", "Pull request из ссылки результата открыт."},
@@ -104,7 +133,6 @@ func newBuiltin() *Registry {
 		Title:       "Решение человека",
 		Description: "Пауза до решения ответственной функции этапа по точному хешу результата.",
 	})
-	one := 1
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateExternalProgram, Version: 1, Kind: workflow.GateKindExternal,
 		Title:       "Внешняя программа",
@@ -141,4 +169,13 @@ func newBuiltin() *Registry {
 		},
 	})
 	return r
+}
+
+// paramValidators hold the cross-parameter rules a flat parameter schema cannot
+// express (a parameter required only for one value of another, bounds relative
+// to a list, pattern compilation). They run in Resolve, so a bad combination is
+// rejected by configuration validation before any run starts. The key is the
+// exact "id@version".
+var paramValidators = map[string]func(map[string]any) error{
+	"required_phrases@1": gatephrases.Validate,
 }

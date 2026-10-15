@@ -1001,10 +1001,6 @@ func stageStatusColor(status string) string {
 	}
 }
 
-func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) stagecheck.Report {
-	return rs.runHardRules(ctx, stage, result, stage.RequiredSections, stage.Check.Rules, &hardWaveState{})
-}
-
 // hardWaveState is shared by the code gates of one wave. The gates run in
 // parallel, but the PR identity pinned by the first project check must be the
 // one every later project check compares against, and the pull request is
@@ -1019,8 +1015,8 @@ type hardWaveState struct {
 }
 
 // runHardRules evaluates the given section titles and rule names over the
-// result with the deterministic checker. runHardChecks is the legacy single
-// call; the gate wave calls it once per gate with that gate's own rule.
+// result with the deterministic checker. It is reached only through the gate
+// wave (builtinGateRunner), once per gate with that gate's own rule.
 func (rs *runState) runHardRules(ctx context.Context, stage config.TemplateStage, result notifier.StageResult, sections, rules []string, shared *hardWaveState) stagecheck.Report {
 	content, reference := rs.stageCheckInputs(stage, result)
 	input := stagecheck.HardInput{
@@ -1082,7 +1078,7 @@ func (rs *runState) prCheckClosure(baseErr error, base string, shared *hardWaveS
 		if shared.prDone && shared.prKey == key {
 			return shared.prRules, shared.prErr
 		}
-		report, err := delivery.CheckPullRequest(ctx, delivery.ExecRunner{}, rs.runCfg.TargetDir, reference, base)
+		report, err := delivery.CheckPullRequest(ctx, rs.p.prViewRunner(), rs.runCfg.TargetDir, reference, base)
 		var results []stagecheck.RuleResult
 		if err == nil {
 			results = make([]stagecheck.RuleResult, 0, len(report.Rules))
@@ -1109,9 +1105,7 @@ func (rs *runState) stageCheckInputs(stage config.TemplateStage, result notifier
 		if err != nil {
 			continue
 		}
-		lowerName := strings.ToLower(output.Name)
-		lowerPath := strings.ToLower(filepath.ToSlash(output.Path))
-		if strings.HasSuffix(lowerPath, ".md") || strings.HasSuffix(lowerName, ".md") || strings.HasSuffix(lowerName, ".markdown") {
+		if isMarkdownOutput(output) {
 			builder.Write(data)
 			builder.WriteString("\n\n")
 			continue
@@ -1121,6 +1115,39 @@ func (rs *runState) stageCheckInputs(stage config.TemplateStage, result notifier
 		}
 	}
 	return builder.String(), reference
+}
+
+func isMarkdownOutput(output runtime.Artifact) bool {
+	lowerName := strings.ToLower(output.Name)
+	lowerPath := strings.ToLower(filepath.ToSlash(output.Path))
+	return strings.HasSuffix(lowerPath, ".md") || strings.HasSuffix(lowerName, ".md") || strings.HasSuffix(lowerName, ".markdown")
+}
+
+// strictResultContent returns the concatenated Markdown outputs of the result
+// for gates whose pass depends on what is in the text. Unlike stageCheckInputs
+// (which keeps the lenient behavior of the v5 rules), a Markdown output that
+// cannot be read, is not a regular file or is too large is an error, and so is
+// a result without any Markdown output: an unreadable result must not look like
+// an empty one that merely failed.
+func (rs *runState) strictResultContent(result notifier.StageResult) (string, error) {
+	var builder strings.Builder
+	found := false
+	for _, output := range result.Outputs {
+		if output.Path == "" || !isMarkdownOutput(output) {
+			continue
+		}
+		data, err := safeio.ReadRegularFile(output.Path, maxArtifactFileBytes)
+		if err != nil {
+			return "", fmt.Errorf("результат %q не удалось прочитать: %w", output.Name, err)
+		}
+		found = true
+		builder.Write(data)
+		builder.WriteString("\n\n")
+	}
+	if !found {
+		return "", errors.New("результат этапа не содержит md-файла для проверки")
+	}
+	return builder.String(), nil
 }
 
 func looksBinary(data []byte) bool {

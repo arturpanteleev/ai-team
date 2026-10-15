@@ -7,6 +7,7 @@ import { PipelineCard } from '../components/PipelineCard';
 import { Link } from '../router';
 import { statusLabels } from '../statusLabels';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { projectLabel, useProjects } from '../hooks/useProjects';
 import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import styles from './Dashboard.module.css';
 
@@ -47,6 +48,11 @@ export function Dashboard() {
   const principal = getActivePrincipal();
   const canSubmitIntention = !principal || principal.roles.includes('product_owner');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const { projects, active: activeProjects } = useProjects();
+  // Проект новой задачи обязателен; пока не выбран явно, берётся первый активный.
+  const [chosenProject, setChosenProject] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const projectId = chosenProject || (activeProjects[0] ? String(activeProjects[0].id) : '');
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const [filtersExpanded, setFiltersExpanded] = useState(false);
@@ -113,6 +119,7 @@ export function Dashboard() {
   const needle = query.trim().toLowerCase();
   const filtered = runs
     .filter((r) => filter === 'all' || r.status === filter)
+    .filter((r) => !projectFilter || String(r.project_id) === projectFilter)
     .filter((r) => !needle || r.feature.toLowerCase().includes(needle) || r.run_id.toLowerCase().includes(needle));
   const activeRuns = runs.filter((r) => activeStatuses.includes(r.status));
   const sideRuns = (activeRuns.length > 0 ? activeRuns : runs).slice(0, 5);
@@ -135,9 +142,13 @@ export function Dashboard() {
       featureRef.current?.focus();
       return;
     }
+    if (!projectId) {
+      setCommandStatus('Выберите проект для задачи.');
+      return;
+    }
     setCommandStatus('Создаём задачу…');
     try {
-      const result = await startRun(feature, task);
+      const result = await startRun(Number(projectId), feature, task);
       setCreatedRunID(result.run_id);
       setCreatedName(name.trim() || feature);
       setCommandStatus('');
@@ -165,6 +176,11 @@ export function Dashboard() {
         <h2 id="create-heading">Новая задача</h2>
         <button type="button" className={styles.cancelCreate} onClick={() => { setCreating(false); setCommandStatus(''); }}>Отмена</button>
       </div>
+      <label htmlFor="initiative-project">Проект</label>
+      <select id="initiative-project" value={projectId} onChange={(event) => setChosenProject(event.target.value)} required>
+        {activeProjects.length === 0 && <option value="">Нет доступных проектов</option>}
+        {activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+      </select>
       <label htmlFor="initiative-name">Название задачи</label>
       <input id="initiative-name" value={name} onChange={(event) => {
         setName(event.target.value);
@@ -184,7 +200,7 @@ export function Dashboard() {
       <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
         placeholder="Опишите цель, ограничения и ожидаемый результат. Аналитик уточнит недостающие детали."
         rows={5} required />
-      <button type="submit" className={styles.createSubmit} disabled={readiness === 'blocked'}>Создать задачу</button>
+      <button type="submit" className={styles.createSubmit} disabled={readiness === 'blocked' || !projectId}>Создать задачу</button>
       <small>Намерение и уточнения сохраняются в истории задачи. До технического планирования Product Owner согласует спецификацию.</small>
       {commandStatus && <span role="status">{commandStatus}</span>}
     </form>
@@ -205,6 +221,13 @@ export function Dashboard() {
             <span className={styles.visuallyHidden}>Поиск задач</span>
             <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
               placeholder="Поиск задач" />
+          </label>
+          <label className={styles.projectFilter}>
+            <span className={styles.visuallyHidden}>Фильтр по проекту</span>
+            <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)} aria-label="Фильтр по проекту">
+              <option value="">Все проекты</option>
+              {projects.map((project) => <option key={project.id} value={project.id}>{projectLabel(project)}</option>)}
+            </select>
           </label>
           <button
             type="button"

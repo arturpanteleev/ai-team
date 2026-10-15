@@ -22,7 +22,7 @@ func newBacklogStore(t *testing.T) *Store {
 func TestBacklogItemsStartAsDraftAndAreNeverPicked(t *testing.T) {
 	s := newBacklogStore(t)
 	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
-	item, err := s.CreateBacklogItem("Идея", "Описание", "idea", "po-1", at)
+	item, err := s.CreateBacklogItem(DefaultProjectID, "Идея", "Описание", "idea", "po-1", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestNextReadyIgnoresUnknownMarkers(t *testing.T) {
 	for _, status := range []string{"READY", "ready ", "auto", "approved", "", "starting", "started", "failed", "discarded"} {
 		t.Run(status, func(t *testing.T) {
 			s := newBacklogStore(t)
-			item, err := s.CreateBacklogItem("Идея", "", "idea", "po-1", time.Now())
+			item, err := s.CreateBacklogItem(DefaultProjectID, "Идея", "", "idea", "po-1", time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,8 +60,8 @@ func TestNextReadyIgnoresUnknownMarkers(t *testing.T) {
 func TestReadyQueueOrderAndClaimLifecycle(t *testing.T) {
 	s := newBacklogStore(t)
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
-	first, _ := s.CreateBacklogItem("Первая", "", "first", "po", base)
-	second, _ := s.CreateBacklogItem("Вторая", "", "second", "po", base)
+	first, _ := s.CreateBacklogItem(DefaultProjectID, "Первая", "", "first", "po", base)
+	second, _ := s.CreateBacklogItem(DefaultProjectID, "Вторая", "", "second", "po", base)
 	// Порядок очереди — момент пометки ready, а не создания.
 	if _, err := s.SetBacklogItemStatus(second.ID, autopickup.StatusReady, "po-2", base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestReadyQueueOrderAndClaimLifecycle(t *testing.T) {
 func TestFailedItemReturnsToQueueOnlyByHuman(t *testing.T) {
 	s := newBacklogStore(t)
 	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
-	item, _ := s.CreateBacklogItem("Идея", "", "idea", "po", at)
+	item, _ := s.CreateBacklogItem(DefaultProjectID, "Идея", "", "idea", "po", at)
 	if _, err := s.SetBacklogItemStatus(item.ID, autopickup.StatusReady, "po", at); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestBacklogSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item, err := s.CreateBacklogItem("Идея", "", "idea", "po", time.Now())
+	item, err := s.CreateBacklogItem(DefaultProjectID, "Идея", "", "idea", "po", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

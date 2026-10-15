@@ -105,6 +105,8 @@ const (
 	PermissionArtifactEdit Permission = "artifact:edit"
 	PermissionTemplateEdit Permission = "template:edit"
 	PermissionTeamManage   Permission = "team:manage"
+	// PermissionProjectManage — создание, правка и архивирование проектов.
+	PermissionProjectManage Permission = "project:manage"
 )
 
 func Authorize(principal Principal, permission Permission, selectedRole Role) error {
@@ -128,6 +130,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect)
 	case PermissionTeamManage:
 		allowed = principal.Has(RoleProductOwner)
+	case PermissionProjectManage:
+		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect)
 	default:
 		return fmt.Errorf("cloud RBAC: неизвестное permission %q", permission)
 	}

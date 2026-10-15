@@ -544,3 +544,27 @@
     animation: none;
   }
 }
+
+/* Фильтр по проекту рядом с поиском; на телефоне занимает всю строку. */
+.projectFilter {
+  flex: 0 1 220px;
+  min-width: 0;
+}
+
+.projectFilter select {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  font-size: 15px;
+}
+
+@media (max-width: 760px) {
+  .projectFilter {
+    grid-column: 1 / -1;
+    flex: 1 1 100%;
+  }
+}

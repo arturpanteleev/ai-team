@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, PipelineRun, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 import type { FlowMetrics } from './types/flowMetrics';
 
 const API_BASE = '/api';
@@ -187,8 +187,8 @@ async function command<T>(url: string, body?: unknown, extraHeaders?: Record<str
   return response.json();
 }
 
-export function startRun(feature: string, task: string): Promise<{ run_id: string }> {
-  return command('/runs', { feature, task });
+export function startRun(projectId: number, feature: string, task: string): Promise<{ run_id: string }> {
+  return command('/runs', { project_id: projectId, feature, task });
 }
 
 // Resume без grant новый бюджет задачи не выдаёт: если бюджет задачи
@@ -375,6 +375,19 @@ export function getTemplatesList(): Promise<TemplatesResponse> {
 // создания при повторе сетевого сбоя — ключ передаёт вызывающий код.
 export function createTask(payload: CreateTaskRequest, idempotencyKey: string): Promise<{ run_id: string; template_version?: string }> {
   return command('/runs', payload, { 'Idempotency-Key': idempotencyKey });
+}
+
+// GET /api/projects: проекты-папки. Архивные приходят только по запросу.
+export function getProjects(includeArchived = false): Promise<{ projects: Project[] }> {
+  return fetchJson(`/projects${includeArchived ? '?include_archived=true' : ''}`);
+}
+
+export function createProject(name: string, description: string): Promise<Project> {
+  return command('/projects', { name, description });
+}
+
+export function setProjectArchived(projectId: number, archived: boolean): Promise<Project> {
+  return command(`/projects/${projectId}/${archived ? 'archive' : 'unarchive'}`, {});
 }
 
 function flowMetricsQuery(from: string, to: string): string {

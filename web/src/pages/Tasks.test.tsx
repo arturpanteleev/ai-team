@@ -2,10 +2,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Tasks } from './Tasks';
-import { getTaskRuns, getTemplatesList } from '../api';
+import { getProjects, getTaskRuns, getTemplatesList } from '../api';
 import type { TaskRun } from '../types';
 
 const ws = vi.hoisted(() => ({ onEvent: undefined as ((event: unknown) => void) | undefined }));
+const route = vi.hoisted(() => ({ search: '', setParams: vi.fn() }));
 
 vi.mock('../hooks/useWebSocket', () => ({
   useWebSocket: (options: { onEvent?: (event: unknown) => void }) => {
@@ -15,11 +16,13 @@ vi.mock('../hooks/useWebSocket', () => ({
 vi.mock('../router', () => ({
   Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
   useNavigate: () => () => {},
+  useSearchParams: () => [new URLSearchParams(route.search), route.setParams],
 }));
 vi.mock('../api', () => ({
   cancelRun: vi.fn().mockResolvedValue({}),
   getTaskRuns: vi.fn(),
   getTemplatesList: vi.fn(),
+  getProjects: vi.fn(),
 }));
 
 const boardRun: TaskRun = {
@@ -40,8 +43,17 @@ const boardRun: TaskRun = {
   external_links: ['JIRA-9 https://tracker.example/JIRA-9'],
 };
 
+const projectsFixture = [
+  { id: 1, name: 'Основной', description: '', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+  { id: 2, name: 'Платформа', description: 'Задачи платформы', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+  { id: 3, name: 'Старый', description: '', archived: true, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+];
+
 beforeEach(() => {
   ws.onEvent = undefined;
+  route.search = '';
+  route.setParams.mockClear();
+  vi.mocked(getProjects).mockResolvedValue({ projects: projectsFixture });
   vi.mocked(getTemplatesList).mockResolvedValue({
     templates: [{
       valid: true,
@@ -166,6 +178,58 @@ describe('Tasks board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отменить' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('нельзя отменить'));
     expect(api.cancelRun).toHaveBeenCalledWith('run-queued');
+  });
+});
+
+describe('Tasks projects', () => {
+  it('фильтрует доску и список по проекту из адреса и передаёт его в API', async () => {
+    route.search = 'project=2';
+    render(<Tasks />);
+    await screen.findByText('Идея роста');
+
+    await waitFor(() => expect(getTaskRuns).toHaveBeenCalledWith(expect.objectContaining({ project_id: '2' })));
+    await waitFor(() => expect(screen.getByLabelText('Проект')).toHaveValue('2'));
+    expect(screen.getByRole('link', { name: 'Новая задача' })).toHaveAttribute('href', '/tasks/new?project=2');
+  });
+
+  it('выбор проекта в фильтре меняет адрес, архивные проекты помечены', async () => {
+    render(<Tasks />);
+    await screen.findByText('Идея роста');
+    expect(await screen.findByRole('option', { name: 'Старый (архив)' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Проект'), { target: { value: '2' } });
+    expect(route.setParams).toHaveBeenCalledWith({ project: '2' });
+    fireEvent.change(screen.getByLabelText('Проект'), { target: { value: '' } });
+    expect(route.setParams).toHaveBeenLastCalledWith({});
+  });
+
+  it('новый проект без задач показывает понятную пустую страницу с первым шагом', async () => {
+    route.search = 'project=2';
+    vi.mocked(getTaskRuns).mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 });
+    render(<Tasks />);
+
+    const empty = await screen.findByLabelText('Пустой проект');
+    expect(empty).toHaveTextContent('В проекте «Платформа» пока нет задач');
+    expect(empty).toHaveTextContent('Задачи платформы');
+    expect(within(empty).getByRole('link', { name: 'Создать первую задачу' })).toHaveAttribute('href', '/tasks/new?project=2');
+  });
+
+  it('пустой архивный проект не предлагает создавать задачи', async () => {
+    route.search = 'project=3';
+    vi.mocked(getTaskRuns).mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 });
+    render(<Tasks />);
+
+    const empty = await screen.findByLabelText('Пустой проект');
+    expect(empty).toHaveTextContent('Проект в архиве');
+    expect(within(empty).queryByRole('link', { name: 'Создать первую задачу' })).toBeNull();
+  });
+
+  it('без выбранного проекта пустой результат остаётся обычным пустым списком', async () => {
+    vi.mocked(getTaskRuns).mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 });
+    render(<Tasks />);
+
+    await screen.findByLabelText('Этап: В очереди');
+    expect(screen.queryByLabelText('Пустой проект')).toBeNull();
   });
 });
 

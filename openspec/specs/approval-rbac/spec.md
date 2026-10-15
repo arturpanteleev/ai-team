@@ -47,6 +47,11 @@ Start, resume и cancel MUST проверяться server-side RBAC policy.
 - **КОГДА** principal имеет роль Product Owner или Architect
 - **ТОГДА** он MAY создать run
 
+#### Scenario: Управление проектами
+
+- **КОГДА** principal имеет роль Product Owner или Architect
+- **ТОГДА** он MAY создавать, править и архивировать проекты (permission `project:manage`)
+
 #### Scenario: Cancel
 
 - **КОГДА** principal не имеет роль Product Owner или Release Manager

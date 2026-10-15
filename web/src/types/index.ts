@@ -15,6 +15,7 @@ export interface Principal {
 export interface PipelineRun {
   id: number;
   run_id: string;
+  project_id?: number;
   feature: string;
   status: PipelineStatus;
   started_at: string;
@@ -271,6 +272,7 @@ export interface WsEvent extends TaskEvent {
 export interface TaskRun {
   id: number;
   run_id: string;
+  project_id?: number;
   feature: string;
   task?: string;
   status: PipelineStatus;
@@ -380,6 +382,7 @@ export interface TaskRunEventsResponse {
 }
 
 export interface TaskRunFilters {
+  project_id?: number | string;
   status?: string;
   stage?: string;
   function?: string;
@@ -395,6 +398,7 @@ export interface TemplatesResponse {
 }
 
 export interface CreateTaskRequest {
+  project_id: number;
   feature: string;
   task?: string;
   title?: string;
@@ -402,4 +406,16 @@ export interface CreateTaskRequest {
   template?: string;
   mode?: 'manual' | 'auto';
   external_links?: string[];
+}
+
+/** Проект — папка для группировки задач; архивный не принимает новые задачи. */
+export interface Project {
+  id: number;
+  name: string;
+  description: string;
+  archived: boolean;
+  archived_at?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
 }

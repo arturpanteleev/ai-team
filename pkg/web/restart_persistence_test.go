@@ -157,7 +157,7 @@ func TestServerRestartKeepsTasksRequestsAndEvents(t *testing.T) {
 		stageID: cfg.Stages[0].ID, done: make(chan struct{})}
 	srv := restartServer(t, dbPath, target, first)
 
-	const createBody = `{"feature":"restart-task","task":"Задача переживает перезапуск"}`
+	const createBody = `{"project_id":1,"feature":"restart-task","task":"Задача переживает перезапуск"}`
 	create := authorizedRequest(t, srv, http.MethodPost, "/api/runs", createBody)
 	create.Header.Set("Idempotency-Key", "create-restart-task")
 	created := httptest.NewRecorder()

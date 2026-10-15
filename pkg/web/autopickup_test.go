@@ -56,7 +56,7 @@ func newPickupServer(t *testing.T, dbPath, target string, policy autopickup.Poli
 
 func readyItem(t *testing.T, srv *Server, title string) store.BacklogItem {
 	t.Helper()
-	item, err := srv.store.CreateBacklogItem(title, "Идея: "+title, "auto-"+strings.ToLower(title), "po-1", pickupTestNow)
+	item, err := srv.store.CreateBacklogItem(store.DefaultProjectID, title, "Идея: "+title, "auto-"+strings.ToLower(title), "po-1", pickupTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func eventsOfType(t *testing.T, srv *Server, eventType string) []store.Event {
 func TestAutoPickupStartsReadyItemInAutoMode(t *testing.T) {
 	ledger := &fixedLedger{usage: tokenbudget.Usage{Tokens: 99}}
 	srv, controller := newPickupServer(t, ":memory:", t.TempDir(), pickupPolicy(1, 100), ledger, pickupTestNow)
-	draft, err := srv.store.CreateBacklogItem("Черновик", "", "draft-idea", "po-1", pickupTestNow)
+	draft, err := srv.store.CreateBacklogItem(store.DefaultProjectID, "Черновик", "", "draft-idea", "po-1", pickupTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,12 +334,12 @@ func TestBacklogHTTPAPI(t *testing.T) {
 		srv.router.ServeHTTP(response, authorizedRequest(t, srv, method, path, body))
 		return response
 	}
-	created := serve(http.MethodPost, "/api/backlog", `{"title":"Новая идея","idea":"Сделать отчёт","feature":"report-idea"}`)
+	created := serve(http.MethodPost, "/api/backlog", `{"project_id":1,"title":"Новая идея","idea":"Сделать отчёт","feature":"report-idea"}`)
 	var item store.BacklogItem
 	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &item) != nil || item.Status != autopickup.StatusDraft {
 		t.Fatalf("create: %d %s", created.Code, created.Body.String())
 	}
-	for _, body := range []string{`{"title":"","feature":"x"}`, `{"title":"ok","feature":"../bad"}`, `{"title":"ok","feature":"x","status":"ready"}`} {
+	for _, body := range []string{`{"project_id":1,"title":"","feature":"x"}`, `{"project_id":1,"title":"ok","feature":"../bad"}`, `{"project_id":1,"title":"ok","feature":"x","status":"ready"}`} {
 		if response := serve(http.MethodPost, "/api/backlog", body); response.Code != http.StatusBadRequest {
 			t.Fatalf("invalid create %s: %d %s", body, response.Code, response.Body.String())
 		}
@@ -369,7 +369,7 @@ func TestBacklogHTTPAPI(t *testing.T) {
 		t.Fatalf("list: %d %s", list.Code, list.Body.String())
 	}
 	unauthenticated := httptest.NewRecorder()
-	srv.router.ServeHTTP(unauthenticated, newLoopbackRequest(http.MethodPost, "/api/backlog", strings.NewReader(`{"title":"x","feature":"x"}`)))
+	srv.router.ServeHTTP(unauthenticated, newLoopbackRequest(http.MethodPost, "/api/backlog", strings.NewReader(`{"project_id":1,"title":"x","feature":"x"}`)))
 	if unauthenticated.Code < 400 {
 		t.Fatalf("write without session must be rejected: %d", unauthenticated.Code)
 	}

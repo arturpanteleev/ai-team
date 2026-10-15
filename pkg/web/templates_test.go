@@ -138,7 +138,7 @@ func TestTemplateEditorAPIValidatesPublishesAndPinsNewTasks(t *testing.T) {
 		t.Fatalf("pre-publication task pin: found=%t version=%q err=%v", found, existingVersion, err)
 	}
 
-	start := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"template-test","task":"Use the active template"}`)
+	start := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"template-test","task":"Use the active template"}`)
 	startResponse := httptest.NewRecorder()
 	srv.router.ServeHTTP(startResponse, start)
 	if startResponse.Code != http.StatusAccepted {

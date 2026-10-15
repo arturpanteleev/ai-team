@@ -383,7 +383,7 @@ func TestWebSocketReplaysAfterCursor(t *testing.T) {
 	}
 	defer func() { _ = server.Close() }()
 	now := time.Now().UTC()
-	first := &store.Event{RunID: "run-replay", Sequence: 1, Type: "run_started", Timestamp: now, DataJSON: `{"feature":"replay"}`}
+	first := &store.Event{RunID: "run-replay", Sequence: 1, Type: "run_started", Timestamp: now, DataJSON: `{"project_id":1,"feature":"replay"}`}
 	second := &store.Event{RunID: "run-replay", Sequence: 2, Type: "run_finished", Timestamp: now.Add(time.Second), DataJSON: `{"status":"completed"}`}
 	if err := server.Store().AppendEvent(first); err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestWebSocketBridgePublishesSQLiteEvent(t *testing.T) {
 
 	stored := &store.Event{
 		RunID: "run-live", Sequence: 1, Type: "run_started",
-		Timestamp: time.Now().UTC(), DataJSON: `{"feature":"live"}`,
+		Timestamp: time.Now().UTC(), DataJSON: `{"project_id":1,"feature":"live"}`,
 	}
 	if err := server.Store().AppendEvent(stored); err != nil {
 		t.Fatal(err)

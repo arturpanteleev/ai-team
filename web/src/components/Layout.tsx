@@ -7,10 +7,10 @@ import { Bubble } from './Bubble';
 import type { BubbleTone } from './Bubble';
 import styles from './Layout.module.css';
 
-type IconName = 'tasks' | 'board' | 'template' | 'feed' | 'observability' | 'team';
+type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team';
 
 const navTone: Record<IconName, BubbleTone> = {
-  tasks: 'yellow', board: 'mint', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow',
+  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow',
 };
 
 // Иконки намеренно простые: контур 1.8px, наследуют цвет текста (внутри пузыря).
@@ -18,6 +18,7 @@ function NavIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
     tasks: <><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8 12.5l2.5 2.5L16 9.5" /></>,
     board: <><rect x="3.5" y="4" width="5" height="16" rx="1.5" /><rect x="9.5" y="4" width="5" height="10" rx="1.5" /><rect x="15.5" y="4" width="5" height="13" rx="1.5" /></>,
+    projects: <><path d="M3.5 7.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" /></>,
     template: <><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" /><path d="M9 12h6M9 15.5h4" /></>,
     feed: <><path d="M4 7h16M4 12h11M4 17h7" /><circle cx="18" cy="16.5" r="2.5" /></>,
     observability: <><path d="M3.5 17l5-5 3.5 3.5 4.5-6 4 4" /><path d="M3.5 20.5h17" /></>,
@@ -71,6 +72,7 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
         <nav className={styles.nav} aria-label="Разделы">
           <NavItem to="/" end name="tasks">Задачи</NavItem>
           <NavItem to="/tasks" name="board">Доска</NavItem>
+          <NavItem to="/projects" name="projects">Проекты</NavItem>
           <NavItem to="/template" name="template">Шаблоны</NavItem>
           <NavItem to="/events" name="feed">Лента</NavItem>
           <NavItem to="/observability" name="observability">Наблюдаемость</NavItem>

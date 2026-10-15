@@ -120,7 +120,7 @@ func TestGlobalEventFeedPaginatesWarningsByPersistedCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	storedEvents := []*store.Event{
-		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{"feature":"feed demo"}`},
+		{RunID: run.RunID, Type: "run_started", Timestamp: startedAt, DataJSON: `{"project_id":1,"feature":"feed demo"}`},
 		{RunID: run.RunID, Type: "check_error", Stage: "qa", Severity: "warning", Timestamp: startedAt.Add(time.Second), DataJSON: `{"reason":"check failed"}`},
 		{RunID: run.RunID, Type: "attempt_started", Stage: "review", Timestamp: startedAt.Add(2 * time.Second), DataJSON: `{}`},
 		{RunID: run.RunID, Type: "stage_skipped", Stage: "review", Timestamp: startedAt.Add(3 * time.Second), DataJSON: `{"reason":"not required"}`},
@@ -337,7 +337,7 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	withoutAuth := newLoopbackRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"feature":"auth","task":"task"}`))
+	withoutAuth := newLoopbackRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"project_id":1,"feature":"auth","task":"task"}`))
 	withoutAuthResponse := httptest.NewRecorder()
 	srv.router.ServeHTTP(withoutAuthResponse, withoutAuth)
 	var authError apiResponseError
@@ -345,7 +345,7 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 		t.Fatalf("write without auth should be JSON 401: %d %s", withoutAuthResponse.Code, withoutAuthResponse.Body.String())
 	}
 
-	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task"}`)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"auth","task":"task"}`)
 	request.Header.Set("Idempotency-Key", "create-task-once")
 	first := httptest.NewRecorder()
 	srv.router.ServeHTTP(first, request)
@@ -353,7 +353,7 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 		t.Fatalf("first create: status=%d calls=%d body=%s", first.Code, controller.startCalls, first.Body.String())
 	}
 
-	replayRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task"}`)
+	replayRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"auth","task":"task"}`)
 	replayRequest.Header.Set("Idempotency-Key", "create-task-once")
 	replay := httptest.NewRecorder()
 	srv.router.ServeHTTP(replay, replayRequest)
@@ -361,7 +361,7 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 		t.Fatalf("retry was not an exact replay: first=%d %s retry=%d %s calls=%d", first.Code, first.Body.String(), replay.Code, replay.Body.String(), controller.startCalls)
 	}
 
-	conflictRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"different","task":"task"}`)
+	conflictRequest := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"different","task":"task"}`)
 	conflictRequest.Header.Set("Idempotency-Key", "create-task-once")
 	conflict := httptest.NewRecorder()
 	srv.router.ServeHTTP(conflict, conflictRequest)
@@ -370,7 +370,7 @@ func TestTaskWriteAPIRequiresAuthAndReplaysIdempotentRequests(t *testing.T) {
 		t.Fatalf("key reuse with different request should conflict: status=%d calls=%d body=%s", conflict.Code, controller.startCalls, conflict.Body.String())
 	}
 
-	advanced := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"auth","task":"task","mode":"auto"}`)
+	advanced := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"auth","task":"task","mode":"auto"}`)
 	advancedResponse := httptest.NewRecorder()
 	srv.router.ServeHTTP(advancedResponse, advanced)
 	var advancedError apiResponseError
@@ -410,7 +410,7 @@ func TestTaskCreateOptionsReachController(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	body := `{"feature":"board-task","task":"legacy text","title":"Новая задача","idea":"Текст идеи","mode":"auto","external_links":["JIRA-1 https://tracker.example/JIRA-1"]}`
+	body := `{"project_id":1,"feature":"board-task","task":"legacy text","title":"Новая задача","idea":"Текст идеи","mode":"auto","external_links":["JIRA-1 https://tracker.example/JIRA-1"]}`
 	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", body)
 	request.Header.Set("Idempotency-Key", "create-full-task")
 	response := httptest.NewRecorder()

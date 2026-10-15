@@ -270,7 +270,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     await page.getByRole('button', { name: 'Сдать результат' }).click()
     await page.getByLabel('Результат в Markdown').fill('Идея подтверждена')
     await page.getByRole('button', { name: 'Отправить результат' }).click()
-    await expect(page.getByRole('heading', { name: 'Анализ', level: 2 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Анализ', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
 
@@ -292,17 +292,17 @@ test('task detail traverses the manual and automatic templates using allowed act
 
     await page.getByLabel('Причина обхода проверки').fill('Проверено вручную')
     await page.getByRole('button', { name: 'Обойти проверку' }).click()
-    await expect(page.getByRole('heading', { name: 'Проверка', level: 2 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Проверка', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Вернуть этап' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Пропустить этап' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Подтвердить этап' })).toHaveCount(0)
     await page.getByLabel('Причина возврата').fill('Перепроверить предпосылку')
     await page.getByRole('button', { name: 'Вернуть этап' }).click()
-    await expect(page.getByRole('heading', { name: 'Идея', level: 2 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Идея', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Пропустить этап' })).toBeVisible()
     await page.getByLabel('Причина пропуска').fill('Результат уже проверен')
     await page.getByRole('button', { name: 'Пропустить этап' }).click()
-    await expect(page.getByRole('heading', { name: 'План доставки', level: 2 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'План доставки', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Подтвердить план' })).toBeVisible()
     const planContent = page.getByRole('region', { name: 'Содержимое плана доставки' })
     await expect(planContent.getByText('ai-team/run-manual', { exact: true })).toBeVisible()
@@ -322,7 +322,7 @@ test('task detail traverses the manual and automatic templates using allowed act
       await expect(page.getByRole('button', { name: invalidAction })).toHaveCount(0)
     }
     await page.getByRole('button', { name: /поручить агенту/i }).click()
-    await expect(page.getByRole('heading', { name: 'Проверка', level: 2 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Проверка', level: 2, exact: true })).toBeVisible()
     await page.getByRole('button', { name: /поручить агенту/i }).click()
     await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 

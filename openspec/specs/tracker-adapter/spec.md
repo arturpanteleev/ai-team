@@ -135,8 +135,9 @@ A comment MUST carry an idempotency key derived from the run and the event ID,
 and the adapter MUST NOT post a second comment with a key it has already
 posted. For Jira the key is a separate text node `ai-team event: <key>`, the
 attempt ID a separate node `ai-team attempt: <attempt_id>`, and the adapter MUST
-check the newest 50 issue comments for the key before posting; if that check
-fails the comment MUST NOT be posted. A transition to the status the issue
+page through the issue comments, newest first, until it finds the key or runs
+out of comments before posting (with a finite page limit); if that check fails
+or the limit is reached the comment MUST NOT be posted. A transition to the status the issue
 already has MUST send nothing. The consumer MUST advance its durable
 per-adapter cursor only after the outcome is persisted; on first enable the
 cursor starts at the current event tail, later starts replay events after the
@@ -175,7 +176,11 @@ failed deliveries and conflicts, and lists of conflicts and deliveries. An
 authorized actor MUST be able to retry one failed delivery or all failed
 deliveries of a task; a retry uses the task's current link, increments the
 attempt count, keeps a still-failing delivery visible, and MUST refuse a
-delivery that is not failed.
+delivery that is not failed. A delivery that failed for a link that was later
+removed MUST become `abandoned` and MUST NOT be sent to a new link or counted as
+a failure. A retry MUST NOT send a transition when a newer stage event of the
+same task is already delivered to the same issue; such a delivery becomes
+`superseded` (its comment is still delivered idempotently).
 
 #### Scenario: Tracker request fails
 

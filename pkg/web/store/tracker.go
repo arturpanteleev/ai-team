@@ -27,6 +27,13 @@ var (
 const (
 	TrackerDeliveryDelivered = "delivered"
 	TrackerDeliveryFailed    = "failed"
+	// TrackerDeliveryAbandoned — доставка не удалась, а связь с карточкой потом
+	// сняли: событие не уходит на новую карточку без явного решения и не
+	// считается ошибкой.
+	TrackerDeliveryAbandoned = "abandoned"
+	// TrackerDeliverySuperseded — повтор пропущен, потому что по задаче уже
+	// доставлено более новое событие и старый переход откатил бы карточку.
+	TrackerDeliverySuperseded = "superseded"
 )
 
 // TrackerLink — связь задачи (pipeline_runs.id) с карточкой.
@@ -220,6 +227,12 @@ func (s *Store) DeleteTrackerLink(taskID int64) (bool, error) {
 	if _, err := tx.Exec(`DELETE FROM tracker_link_conflicts WHERE task_id = ?`, taskID); err != nil {
 		return false, err
 	}
+	// Неудавшиеся доставки относились к снятой карточке: после повторной
+	// связи они не должны уйти на новую без явного решения оператора.
+	if _, err := tx.Exec(`UPDATE tracker_deliveries SET status = ? WHERE task_id = ? AND status = ?`,
+		TrackerDeliveryAbandoned, taskID, TrackerDeliveryFailed); err != nil {
+		return false, err
+	}
 	return affected > 0, tx.Commit()
 }
 
@@ -377,6 +390,31 @@ func (s *Store) RecordTrackerDelivery(d TrackerDelivery, at time.Time) (TrackerD
 		return TrackerDelivery{}, err
 	}
 	return s.GetTrackerDelivery(d.EventID)
+}
+
+// SetTrackerDeliveryStatus закрывает доставку без обращения к трекеру
+// (abandoned, superseded) и сохраняет причину.
+func (s *Store) SetTrackerDeliveryStatus(eventID int64, status, reason string, at time.Time) (TrackerDelivery, error) {
+	result, err := s.db.Exec(`UPDATE tracker_deliveries SET status = ?, last_error = ?, updated_at = ? WHERE event_id = ?`,
+		status, reason, at.UTC(), eventID)
+	if err != nil {
+		return TrackerDelivery{}, err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return TrackerDelivery{}, ErrDeliveryNotFound
+	}
+	return s.GetTrackerDelivery(eventID)
+}
+
+// HasNewerDeliveredTrackerEvent сообщает, доставлено ли по задаче и карточке
+// более новое событие этапа (старт или завершение), чем eventID.
+func (s *Store) HasNewerDeliveredTrackerEvent(taskID int64, tracker, issueKey string, eventID int64) (bool, error) {
+	var found int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM tracker_deliveries
+		WHERE task_id = ? AND tracker = ? AND issue_key = ? AND status = ? AND event_id > ?
+		AND event_type IN ('attempt_started', 'attempt_finished') LIMIT 1)`,
+		taskID, tracker, issueKey, TrackerDeliveryDelivered, eventID).Scan(&found)
+	return found > 0, err
 }
 
 const trackerDeliveryColumns = `event_id, task_id, tracker, issue_key, event_type, stage, status, attempts, last_error, created_at, updated_at, delivered_at`

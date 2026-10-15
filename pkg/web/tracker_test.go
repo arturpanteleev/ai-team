@@ -493,3 +493,84 @@ func TestTrackerLinkAndRetryUseRBAC(t *testing.T) {
 		t.Fatalf("link must record the actor: %+v", link)
 	}
 }
+
+func TestTrackerRetryDoesNotSendStaleTransitionOverNewerDelivery(t *testing.T) {
+	fake := tracker.NewFake(nil, tracker.FakeIssueSeed{Key: "APP-1"})
+	srv := newTrackerServer(t, ":memory:", fake)
+	run := createJiraTask(t, srv, "stale-run", nil)
+	linkTask(t, srv, run, "APP-1")
+
+	fake.FailNext("transition", errors.New("tracker is down"), -1)
+	trackerEvent(t, srv, run, "attempt_started", "implementation", "att-1", `{}`)
+	eventually(t, "failed on_enter delivery", func() bool {
+		failed, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryFailed, 10)
+		return len(failed) == 1
+	})
+	fake.ClearFailures()
+	trackerEvent(t, srv, run, "attempt_finished", "implementation", "att-1", `{"status":"passed","outcome":"passed"}`)
+	eventually(t, "newer delivery", func() bool {
+		delivered, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryDelivered, 10)
+		return len(delivered) == 1
+	})
+	if s, _ := fake.Status("APP-1"); s != "In Review" {
+		t.Fatalf("status=%s, want In Review", s)
+	}
+	failed, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryFailed, 10)
+	retry := fmt.Sprintf("/api/runs/%s/tracker/deliveries/%d/retry", run.RunID, failed[0].EventID)
+	if r := projectServe(t, srv, http.MethodPost, retry, ""); r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"status":"superseded"`) {
+		t.Fatalf("retry: %d %s", r.Code, r.Body.String())
+	}
+	if s, _ := fake.Status("APP-1"); s != "In Review" {
+		t.Fatalf("the stale on_enter moved the card back to %s", s)
+	}
+	if state := runTrackerState(t, srv, run); state["sync_status"] != "ok" {
+		t.Fatalf("superseded must not count as an error: %v", state)
+	}
+}
+
+func TestTrackerUnlinkAbandonsFailedDeliveriesInsteadOfSendingThemToTheNewCard(t *testing.T) {
+	fake := tracker.NewFake(nil, tracker.FakeIssueSeed{Key: "APP-1"}, tracker.FakeIssueSeed{Key: "APP-2"})
+	srv := newTrackerServer(t, ":memory:", fake)
+	run := createJiraTask(t, srv, "relink-run", nil)
+	linkTask(t, srv, run, "APP-1")
+	fake.FailNext("transition", errors.New("tracker is down"), -1)
+	trackerEvent(t, srv, run, "attempt_started", "implementation", "att-1", `{}`)
+	eventually(t, "failed delivery", func() bool {
+		failed, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryFailed, 10)
+		return len(failed) == 1
+	})
+	fake.ClearFailures()
+	if r := projectServe(t, srv, http.MethodDelete, "/api/runs/"+run.RunID+"/tracker/link", ""); r.Code != http.StatusOK && r.Code != http.StatusNoContent {
+		t.Fatalf("unlink: %d %s", r.Code, r.Body.String())
+	}
+	linkTask(t, srv, run, "APP-2")
+	if failed, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryFailed, 10); len(failed) != 0 {
+		t.Fatalf("failed deliveries of the removed link must not stay failed: %+v", failed)
+	}
+	abandoned, _ := srv.store.ListTrackerDeliveries(run.ID, store.TrackerDeliveryAbandoned, 10)
+	if len(abandoned) != 1 {
+		t.Fatalf("abandoned=%+v", abandoned)
+	}
+	if state := runTrackerState(t, srv, run); state["sync_status"] != "ok" {
+		t.Fatalf("abandoned must not count as an error: %v", state)
+	}
+	retry := fmt.Sprintf("/api/runs/%s/tracker/deliveries/%d/retry", run.RunID, abandoned[0].EventID)
+	if r := projectServe(t, srv, http.MethodPost, retry, ""); r.Code != http.StatusConflict {
+		t.Fatalf("an abandoned delivery must not be retried: %d %s", r.Code, r.Body.String())
+	}
+	if s, _ := fake.Status("APP-2"); s != "To Do" {
+		t.Fatalf("the old event reached the new card: %s", s)
+	}
+}
+
+func TestNextIntegrationPauseDoublesUpToAMinute(t *testing.T) {
+	pause := time.Duration(0)
+	var seen []time.Duration
+	for range 10 {
+		pause, _ = nextIntegrationPause(pause)
+		seen = append(seen, pause)
+	}
+	if seen[0] != 500*time.Millisecond || seen[1] != time.Second || seen[len(seen)-1] != time.Minute {
+		t.Fatalf("pauses=%v", seen)
+	}
+}

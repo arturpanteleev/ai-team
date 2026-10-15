@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
 )
@@ -178,5 +179,13 @@ func TestFakeSimulatesExternalChangesWithCursor(t *testing.T) {
 	rest, _ := fake.Changes(ctx, ChangeQuery{Cursor: all.Cursor})
 	if len(all.Changes) != 1 || len(rest.Changes) != 1 || all.Changes[0].ID == rest.Changes[0].ID {
 		t.Fatalf("limit paging all=%+v rest=%+v", all, rest)
+	}
+}
+
+func TestOneLineCutsOnRuneBoundary(t *testing.T) {
+	// A Cyrillic letter is two bytes, so byte 300 falls inside a rune.
+	got := oneLine("x" + strings.Repeat("я", 200))
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") {
+		t.Fatalf("oneLine produced invalid UTF-8: %q", got)
 	}
 }

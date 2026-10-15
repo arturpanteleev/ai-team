@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -25,6 +27,10 @@ type JiraAdapter struct {
 	settings config.JiraConfig
 	token    string
 	client   *http.Client
+
+	selfMu    sync.Mutex
+	selfKnown bool
+	self      jiraUser
 }
 
 // NewJiraAdapter keeps the HTTP client injectable so callers and tests can
@@ -178,10 +184,14 @@ func (a *JiraAdapter) Transition(ctx context.Context, key, target string) (bool,
 	return true, nil
 }
 
-// jiraCommentLookback is how many of the newest issue comments are checked
-// for the idempotency marker before posting. A replay or a manual retry
-// happens soon after the original comment, so it is among the newest ones.
-const jiraCommentLookback = 50
+// Comments are read page by page, newest first, until the marker is found or
+// the issue has no more comments. The page limit only protects against an
+// endless loop; a card with more comments than that is reported as an error
+// and nothing is posted, because a duplicate is worse than a delayed comment.
+const (
+	jiraCommentPageSize = 100
+	jiraCommentMaxPages = 50
+)
 
 // CommentMarker is the text that identifies the comment with an idempotency
 // key; it is the last paragraph (v3) or line (v2) of the comment.
@@ -237,35 +247,83 @@ func (a *JiraAdapter) AddComment(ctx context.Context, key string, comment Commen
 }
 
 type jiraCommentsResponse struct {
+	Total    int `json:"total"`
 	Comments []struct {
 		Body json.RawMessage `json:"body"`
 	} `json:"comments"`
 }
 
 func (a *JiraAdapter) hasRecentComment(ctx context.Context, endpoint, marker string) (bool, error) {
-	query := url.Values{"orderBy": {"-created"}, "maxResults": {fmt.Sprint(jiraCommentLookback)}}
-	var comments jiraCommentsResponse
-	if err := a.requestJSON(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil, &comments); err != nil {
-		return false, err
-	}
-	for _, comment := range comments.Comments {
-		var body any
-		if err := json.Unmarshal(comment.Body, &body); err != nil {
-			continue
+	startAt := 0
+	for page := 0; page < jiraCommentMaxPages; page++ {
+		query := url.Values{"orderBy": {"-created"}, "startAt": {strconv.Itoa(startAt)}, "maxResults": {strconv.Itoa(jiraCommentPageSize)}}
+		var comments jiraCommentsResponse
+		if err := a.requestJSON(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil, &comments); err != nil {
+			return false, err
 		}
-		if text, ok := body.(string); ok {
-			for _, line := range strings.Split(text, "\n") {
-				if strings.TrimSpace(line) == marker {
-					return true, nil
-				}
+		for _, comment := range comments.Comments {
+			if jiraCommentHasMarker(comment.Body, marker) {
+				return true, nil
 			}
-			continue
 		}
-		if adfHasText(body, marker) {
-			return true, nil
+		startAt += len(comments.Comments)
+		if len(comments.Comments) == 0 || startAt >= comments.Total {
+			return false, nil
 		}
 	}
-	return false, nil
+	return false, errors.New("jira issue has too many comments to check the idempotency marker")
+}
+
+func jiraCommentHasMarker(raw json.RawMessage, marker string) bool {
+	var body any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return false
+	}
+	if text, ok := body.(string); ok {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == marker {
+				return true
+			}
+		}
+		return false
+	}
+	return adfHasText(body, marker)
+}
+
+// jiraUser identifies the account behind the configured credentials.
+type jiraUser struct {
+	AccountID string `json:"accountId"`
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	Email     string `json:"emailAddress"`
+}
+
+func (u jiraUser) matches(author jiraUser) bool {
+	same := func(a, b string) bool { return a != "" && strings.EqualFold(a, b) }
+	return same(u.AccountID, author.AccountID) || same(u.Name, author.Name) || same(u.Key, author.Key) || same(u.Email, author.Email)
+}
+
+// authenticatedUser asks Jira who the credentials belong to (/myself), which
+// works for API tokens and personal access tokens alike and does not rely on
+// jira.email matching the profile e-mail (Cloud often hides e-mail). The
+// answer is cached; when it cannot be read the configured e-mail is the only
+// signal.
+func (a *JiraAdapter) authenticatedUser(ctx context.Context) jiraUser {
+	a.selfMu.Lock()
+	defer a.selfMu.Unlock()
+	if a.selfKnown {
+		return a.self
+	}
+	var me jiraUser
+	endpoint := fmt.Sprintf("%s/rest/api/%d/myself", a.baseURL(), a.apiVersion())
+	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &me); err != nil {
+		return jiraUser{Email: strings.TrimSpace(a.settings.Email)}
+	}
+	if me.Email == "" {
+		me.Email = strings.TrimSpace(a.settings.Email)
+	}
+	a.self, a.selfKnown = me, true
+	return me
 }
 
 type jiraSearchResponse struct {
@@ -276,8 +334,11 @@ type jiraSearchResponse struct {
 				ID      string `json:"id"`
 				Created string `json:"created"`
 				Author  struct {
-					Email string `json:"emailAddress"`
-					Name  string `json:"displayName"`
+					AccountID string `json:"accountId"`
+					Login     string `json:"name"`
+					Key       string `json:"key"`
+					Email     string `json:"emailAddress"`
+					Name      string `json:"displayName"`
 				} `json:"author"`
 				Items []struct {
 					Field      string `json:"field"`
@@ -294,7 +355,9 @@ type jiraSearchResponse struct {
 // returns nothing. Jira's search filters by issue update time, so the query
 // reaches back a minute before the cursor and changes at or before the cursor
 // are dropped locally; the cursor therefore never repeats a change. Only the
-// changelog page that Jira embeds in the search result is read.
+// changelog page that Jira embeds in the search result is read. A change is
+// AITeam-origin when its author is the account behind the credentials
+// (/myself), not when jira.email happens to equal a profile e-mail.
 func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePage, error) {
 	if query.Cursor == "" {
 		return ChangePage{Cursor: formatJiraCursor(time.Now().UTC().UnixMilli(), 0)}, nil
@@ -315,14 +378,30 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 	if a.baseURL() == "" {
 		return ChangePage{}, errors.New("jira base URL is empty")
 	}
-	since := time.UnixMilli(afterMS).UTC().Add(-time.Minute).Format("2006/01/02 15:04")
-	jql := fmt.Sprintf(`key in (%s) AND updated >= "%s" ORDER BY updated ASC`, strings.Join(query.Keys, ","), since)
+	// JQL date literals have no time zone (Jira reads them in the user's
+	// zone), so the window is a relative offset in minutes, which does not
+	// depend on any zone: from a minute before the cursor until now.
+	window := int(math.Ceil(time.Since(time.UnixMilli(afterMS).Add(-time.Minute)).Minutes())) + 1
+	if window < 1 {
+		window = 1
+	}
+	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY updated ASC`, strings.Join(query.Keys, ","), window)
 	values := url.Values{"jql": {jql}, "fields": {"status"}, "expand": {"changelog"}, "maxResults": {"100"}}
 	var response jiraSearchResponse
-	endpoint := fmt.Sprintf("%s/rest/api/%d/search?%s", a.baseURL(), a.apiVersion(), values.Encode())
+	// /search/jql replaces the removed /search on Jira Cloud; Jira Server and
+	// Data Center only know /search, so a 404 falls back to it.
+	endpoint := fmt.Sprintf("%s/rest/api/%d/search/jql?%s", a.baseURL(), a.apiVersion(), values.Encode())
 	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-		return ChangePage{}, err
+		if !errors.Is(err, ErrNotFound) {
+			return ChangePage{}, err
+		}
+		response = jiraSearchResponse{}
+		endpoint = fmt.Sprintf("%s/rest/api/%d/search?%s", a.baseURL(), a.apiVersion(), values.Encode())
+		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+			return ChangePage{}, err
+		}
 	}
+	self := a.authenticatedUser(ctx)
 	type found struct {
 		change Change
 		ms, id int64
@@ -344,7 +423,7 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 					continue
 				}
 				origin := OriginExternal
-				if email := strings.TrimSpace(a.settings.Email); email != "" && strings.EqualFold(email, history.Author.Email) {
+				if self.matches(jiraUser{AccountID: history.Author.AccountID, Name: history.Author.Login, Key: history.Author.Key, Email: history.Author.Email}) {
 					origin = OriginAITeam
 				}
 				author := history.Author.Name

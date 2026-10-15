@@ -81,8 +81,9 @@ func (s *Server) handleTrackerConflicts(w http.ResponseWriter, _ *http.Request) 
 
 func (s *Server) handleTrackerDeliveries(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	if status != "" && status != store.TrackerDeliveryFailed && status != store.TrackerDeliveryDelivered {
-		writeJSONAPIError(w, http.StatusBadRequest, "status must be failed or delivered", "bad_request")
+	if status != "" && status != store.TrackerDeliveryFailed && status != store.TrackerDeliveryDelivered &&
+		status != store.TrackerDeliveryAbandoned && status != store.TrackerDeliverySuperseded {
+		writeJSONAPIError(w, http.StatusBadRequest, "status must be failed, delivered, abandoned or superseded", "bad_request")
 		return
 	}
 	deliveries, err := s.store.ListTrackerDeliveries(0, status, 200)

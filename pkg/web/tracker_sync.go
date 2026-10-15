@@ -174,6 +174,11 @@ func (s *Server) retryTrackerDelivery(ctx context.Context, eventID int64) (store
 	if link == nil {
 		return delivery, errTrackerLinkMissing
 	}
+	if link.Tracker != delivery.Tracker || link.IssueKey != delivery.IssueKey {
+		// The delivery belonged to a card that is no longer linked; sending it
+		// to the new card needs an explicit decision, not a silent retry.
+		return s.markTrackerDelivery(delivery, store.TrackerDeliveryAbandoned, "link changed after the failure")
+	}
 	stored, err := s.store.GetEventByID(eventID)
 	if err != nil {
 		return delivery, err
@@ -185,11 +190,49 @@ func (s *Server) retryTrackerDelivery(ctx context.Context, eventID int64) (store
 	if err != nil {
 		return delivery, err
 	}
+	ops, stale, err := s.dropSupersededTransitions(delivery, ops)
+	if err != nil {
+		return delivery, err
+	}
+	if len(ops) == 0 {
+		return s.markTrackerDelivery(delivery, store.TrackerDeliverySuperseded, stale)
+	}
 	updated, ok := s.runTrackerDelivery(ctx, *stored, *link, ops)
 	if !ok {
 		return delivery, errors.New("tracker delivery outcome could not be recorded")
 	}
 	return updated, nil
+}
+
+// dropSupersededTransitions removes transitions from a retried delivery when
+// a newer stage event of the same task is already delivered to the same card:
+// the old transition would move the card back. Comments are idempotent and
+// stay. The returned text explains the skip.
+func (s *Server) dropSupersededTransitions(delivery store.TrackerDelivery, ops []tracker.Operation) ([]tracker.Operation, string, error) {
+	hasTransition := false
+	for _, op := range ops {
+		hasTransition = hasTransition || op.Kind == tracker.OpTransition
+	}
+	if !hasTransition {
+		return ops, "", nil
+	}
+	newer, err := s.store.HasNewerDeliveredTrackerEvent(delivery.TaskID, delivery.Tracker, delivery.IssueKey, delivery.EventID)
+	if err != nil || !newer {
+		return ops, "", err
+	}
+	kept := ops[:0:0]
+	for _, op := range ops {
+		if op.Kind != tracker.OpTransition {
+			kept = append(kept, op)
+		}
+	}
+	return kept, "superseded by a newer delivered event; the stale transition was not sent", nil
+}
+
+// markTrackerDelivery closes a failed delivery without calling the tracker.
+func (s *Server) markTrackerDelivery(delivery store.TrackerDelivery, status, reason string) (store.TrackerDelivery, error) {
+	delivery.Status, delivery.LastError = status, reason
+	return s.store.SetTrackerDeliveryStatus(delivery.EventID, status, reason, s.clock())
 }
 
 // trackerSyncStatus summarizes the synchronization state of one task.

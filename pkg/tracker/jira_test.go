@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,8 @@ type mockJira struct {
 	failPath  string
 	failCode  int
 	personAt  string
+	legacy    bool // only the old /search endpoint exists (Server/Data Center)
+	jql       string
 	server    *httptest.Server
 }
 
@@ -70,7 +73,7 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		m.status = map[string]string{"31": "In Progress", "41": "Done"}[body.Transition.ID]
 		m.histories = append(m.histories, map[string]any{
 			"id": fmt.Sprint(100 + len(m.histories)), "created": time.Now().UTC().Add(time.Second).Format("2006-01-02T15:04:05.000-0700"),
-			"author": map[string]any{"emailAddress": "bot@example.test", "displayName": "Bot"},
+			"author": map[string]any{"accountId": "bot-1", "displayName": "Bot"},
 			"items":  []map[string]any{{"field": "status", "fromString": from, "toString": m.status}},
 		})
 		w.WriteHeader(http.StatusNoContent)
@@ -83,7 +86,16 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		for _, body := range newestFirst {
 			wrapped = append(wrapped, map[string]json.RawMessage{"body": body})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"comments": wrapped})
+		startAt, _ := strconv.Atoi(r.URL.Query().Get("startAt"))
+		size, err := strconv.Atoi(r.URL.Query().Get("maxResults"))
+		if err != nil || size <= 0 || size > 100 {
+			size = 50 // Jira's default page
+		}
+		end := min(startAt+size, len(wrapped))
+		if startAt > end {
+			startAt = end
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total": len(wrapped), "startAt": startAt, "comments": wrapped[startAt:end]})
 	case r.Method == http.MethodPost && r.URL.Path == issue+"/comment":
 		var body struct {
 			Body json.RawMessage `json:"body"`
@@ -92,11 +104,18 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		m.comments = append(m.comments, body.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":"1"}`))
-	case r.Method == http.MethodGet && r.URL.Path == prefix+"search":
+	case r.Method == http.MethodGet && r.URL.Path == prefix+"myself":
+		_, _ = w.Write([]byte(`{"accountId":"bot-1","emailAddress":""}`))
+	case r.Method == http.MethodGet && r.URL.Path == prefix+"search/jql" && m.legacy:
+		http.NotFound(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == prefix+"search" && !m.legacy:
+		w.WriteHeader(http.StatusGone)
+	case r.Method == http.MethodGet && (r.URL.Path == prefix+"search" || r.URL.Path == prefix+"search/jql"):
+		m.jql = r.URL.Query().Get("jql")
 		_ = json.NewEncoder(w).Encode(map[string]any{"issues": []map[string]any{{
 			"key": "APP-1", "changelog": map[string]any{"histories": append(append([]map[string]any{}, m.histories...), map[string]any{
 				"id": "900", "created": m.personAt,
-				"author": map[string]any{"emailAddress": "person@example.test", "displayName": "Person"},
+				"author": map[string]any{"accountId": "acc-person", "emailAddress": "person@example.test", "displayName": "Person"},
 				"items":  []map[string]any{{"field": "status", "fromString": "Done", "toString": "In Review"}, {"field": "assignee"}},
 			})},
 		}}})
@@ -369,5 +388,78 @@ func TestJiraTransportErrorDoesNotLeakCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connection failed (dial)") {
 		t.Fatalf("transport error lost its classification: %v", err)
+	}
+}
+
+func TestJiraCommentIdempotencyReadsBeyondTheFirstPage(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	ctx := context.Background()
+	comment := Comment{Key: "run-1#7", Lines: []string{"first"}}
+	if posted, err := adapter.AddComment(ctx, "APP-1", comment); err != nil || !posted {
+		t.Fatalf("first post=%v err=%v", posted, err)
+	}
+	// 230 newer comments push the marker beyond the newest 50 and 100.
+	for index := 0; index < 230; index++ {
+		other := Comment{Key: fmt.Sprintf("run-2#%d", index), Lines: []string{"noise"}}
+		if posted, err := adapter.AddComment(ctx, "APP-1", other); err != nil || !posted {
+			t.Fatalf("noise %d post=%v err=%v", index, posted, err)
+		}
+	}
+	before := len(mock.comments)
+	if posted, err := adapter.AddComment(ctx, "APP-1", comment); err != nil || posted {
+		t.Fatalf("a marker on page 3 must still be found, posted=%v err=%v", posted, err)
+	}
+	if len(mock.comments) != before {
+		t.Fatalf("duplicate comment was posted")
+	}
+}
+
+func TestJiraChangesUseSearchJQLWithFallbackAndRelativeWindow(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		mock := newMockJira(t, 3)
+		mock.legacy = legacy
+		adapter := mock.adapter(3)
+		start, err := adapter.Changes(context.Background(), ChangeQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}})
+		if err != nil || len(page.Changes) != 1 {
+			t.Fatalf("legacy=%v changes=%+v err=%v", legacy, page.Changes, err)
+		}
+		if !strings.Contains(mock.jql, `updated >= "-`) || !strings.Contains(mock.jql, `m"`) {
+			t.Fatalf("JQL must use a zone-independent relative window: %q", mock.jql)
+		}
+		seen := mock.seen()
+		first := "GET /rest/api/3/search/jql"
+		found := false
+		for _, request := range seen {
+			found = found || request == first
+		}
+		if !found {
+			t.Fatalf("legacy=%v: /search/jql must be tried first: %v", legacy, seen)
+		}
+	}
+}
+
+func TestJiraChangeOriginUsesAuthenticatedAccountNotConfiguredEmail(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	adapter.settings.Email = "someone-else@example.test" // PAT or hidden Cloud e-mail
+	start, _ := adapter.Changes(context.Background(), ChangeQuery{})
+	if _, err := adapter.Transition(context.Background(), "APP-1", "In Progress"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}})
+	if err != nil || len(page.Changes) != 2 {
+		t.Fatalf("changes=%+v err=%v", page.Changes, err)
+	}
+	origins := map[string]string{}
+	for _, change := range page.Changes {
+		origins[change.Author] = change.Origin
+	}
+	if origins["Bot"] != OriginAITeam || origins["Person"] != OriginExternal {
+		t.Fatalf("origins=%v", origins)
 	}
 }

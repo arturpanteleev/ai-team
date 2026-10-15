@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
@@ -149,7 +150,11 @@ func stageComment(event TaskEvent, outcome Outcome, taskURL string) Comment {
 func oneLine(text string) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if len(text) > 300 {
-		text = text[:300] + "..."
+		cut := 300
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "..."
 	}
 	return text
 }

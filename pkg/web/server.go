@@ -636,6 +636,11 @@ func (s *Server) consumeIntegrationEvents(ctx context.Context, integration strin
 	updates := s.store.SubscribeEvents(ctx, 256)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	// A handler that keeps the event pending (for example when its outcome
+	// cannot be stored) must not be called every tick: the pause doubles up
+	// to a minute and resets after the first success.
+	var pause time.Duration
+	var pausedUntil time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -646,10 +651,14 @@ func (s *Server) consumeIntegrationEvents(ctx context.Context, integration strin
 			}
 		case <-ticker.C:
 		}
+		if time.Now().Before(pausedUntil) {
+			continue
+		}
 		for {
 			events, err := s.store.GetEventsAfter(cursor, 100)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s event replay: %v\n", integration, err)
+				pause, pausedUntil = nextIntegrationPause(pause)
 				break
 			}
 			stopDrain := false
@@ -665,11 +674,29 @@ func (s *Server) consumeIntegrationEvents(ctx context.Context, integration strin
 				}
 				cursor = event.ID
 			}
-			if stopDrain || len(events) < 100 {
+			if stopDrain {
+				pause, pausedUntil = nextIntegrationPause(pause)
+				break
+			}
+			pause = 0
+			if len(events) < 100 {
 				break
 			}
 		}
 	}
+}
+
+// nextIntegrationPause doubles the pause after a failed drain: 0.5s, 1s, ...
+// up to one minute.
+func nextIntegrationPause(previous time.Duration) (time.Duration, time.Time) {
+	next := previous * 2
+	if next < 500*time.Millisecond {
+		next = 500 * time.Millisecond
+	}
+	if next > time.Minute {
+		next = time.Minute
+	}
+	return next, time.Now().Add(next)
 }
 
 func (s *Server) recordIntegrationError(source store.Event, integration, reason string) bool {

@@ -43,7 +43,10 @@ The version-1 library MUST contain code gates `required_sections` (parameter
 the LLM gate `agent_review` (parameters `agent`, `mode`,
 `max_rounds`), the human gate `human_approval`, and the external-program gate
 `external_program` (see the external-gate capability). Each version-1 gate MUST keep
-the semantics of its schema v5 counterpart.
+the semantics of its schema v5 counterpart. The library MUST also publish
+`agent_review@2` (adds `verdict_schema` and `max_attempts`) and
+`human_approval@2` (adds `on_reject`) next to the unchanged version 1 of both,
+so pinned templates keep their definitions.
 
 #### Scenario: Gate applicability
 
@@ -187,8 +190,12 @@ The controller MUST execute the exit chain of a stage group by group in the
 listed order, and MUST start the gates of one group together, running at most
 the configured concurrency limit (`gate_concurrency`, default 4, range 1 to 64)
 at the same time. A group MAY mix gate kinds (code and LLM) and a stage MAY have
-several LLM gates; a `human_approval` gate MUST be the transition approval of the
-stage and therefore MUST NOT precede an automatic group. The next group MUST
+several LLM gates (a stage MAY have at most one `agent_review` in mode `grill`);
+a `human_approval` gate MUST be the transition approval of the stage, MUST sit
+in the last group and therefore MUST NOT precede an automatic group. A
+`human_approval` gate that shares the last group with automatic gates MUST wait
+for them: the person is asked only after every automatic gate ended without a
+blocking outcome. The next group MUST
 start only after every gate of the previous group reached a terminal outcome and
 every required gate passed (or was `not_applicable`). When a required gate does
 not pass, the following groups MUST NOT start, but every gate of the current
@@ -305,3 +312,101 @@ ignored. A stage whose chain has no automatic gate MUST run no check.
 - **КОГДА** a required code gate returns `fail`
 - **ТОГДА** the transition MUST be blocked pending a `check_decision` and the
   report MUST list the gates that did not start
+
+### Requirement: LLM gate has a fixed verdict contract independent of grill
+
+An `agent_review` gate MUST call the reviewer agent with fixed inputs (the
+agent's declared inputs plus the outputs of the checked stage) and MUST read the
+answer by the configured `verdict_schema`: `verdict_marker` (default, a
+`Verdict: PASSED|FAILED` line outside code blocks and quotes) or `json` (one
+object `{"verdict":"pass|fail","reason":"...","findings":[{"severity","message"}]}`
+either as the whole report or as the only fenced `json` block; unknown fields,
+an unknown verdict or severity, a `fail` without reason or findings, and a
+`pass` with a `blocker` finding MUST violate the schema). An answer that does
+not match the schema and a refusal or failure of the runtime MUST end the
+attempt with `execution: error` and no verdict; they MUST NOT become `pass` or
+`fail`. The gate MUST call the reviewer up to `max_attempts` times (default 1,
+at most 5) until a valid verdict arrives, MUST keep every attempt of the call in
+the reason of the gate attempt, MUST NOT retry a valid negative verdict, and
+MUST stop at once when the context is canceled. `verdict_schema` and
+`max_attempts` MUST NOT be accepted together with `mode: grill`; the grill mode
+keeps its own question rounds, answers and new versions, and the contract of the
+gate MUST NOT depend on it.
+
+#### Scenario: Answer outside the schema
+
+- **КОГДА** the reviewer answers with prose where the schema requires a verdict
+- **ТОГДА** the gate attempt MUST end `error` without a verdict
+- **И** the stage MUST be blocked with a `check_error`, not passed
+
+#### Scenario: Retry recovers a technical failure only
+
+- **КОГДА** the first call of a gate with `max_attempts: 2` fails and the
+  second returns a valid `pass`
+- **ТОГДА** the gate MUST pass and its reason MUST not hide the first failure
+- **И** a valid `fail` on the first call MUST end the gate without a second call
+
+### Requirement: Human gate records every wait and every decision
+
+The `human_approval` gate MUST be recorded in the same attempt history as the
+other gates: when the controller asks the person it MUST record a
+`gate_attempt_waiting` attempt of the gate (executor `human`) bound to the hash
+of the result version, and when the person decides it MUST finish that attempt
+with the action, the role, the author and a bounded comment in the reason:
+`approve` as `pass`, and `reject` and every `return_to_*` as `fail`. The record
+MUST be written whether the decision is made in the running process or while the
+process is stopped (Web, REST, MCP), and an identical redelivery MUST NOT add a
+second decision. The gate definition `human_approval@2` MUST accept `on_reject`:
+`stop` (default, the run ends) or `stay` (the task stays at the stage, the
+refusal needs a reason, and the new version of the result MUST run the whole
+chain again from the first group without consuming the visit allowance of the
+stage). Allowed actions are those of the transition approval, the role is the
+decision function of the stage and the quorum is `any`; the decision is bound to
+the exact subject hash of the approval.
+
+#### Scenario: Refusal keeps the task at the stage
+
+- **КОГДА** a person rejects a result whose gate has `on_reject: stay`
+- **ТОГДА** the human gate attempt MUST be finished with `fail` and the reason
+  MUST name the action, the author and the comment
+- **И** the stage MUST run again and the code, LLM and human gates MUST run again
+  for the new version
+
+#### Scenario: The person is asked last
+
+- **КОГДА** an automatic gate of the chain fails or errors
+- **ТОГДА** no transition approval and no human gate attempt MUST exist for that
+  result version
+
+### Requirement: One service path for human decisions
+
+A decision on a stage transition MUST be made through one service
+(`pkg/humandecision`) used by Web, REST and MCP. The service MUST, in order:
+find a pending transition approval; accept only an action the approval offers;
+require the subject hash of the request to equal the hash of the approval (a
+request without hash or with a stale one MUST be refused); require that the
+actor holds a required role that no earlier vote covered; refuse
+self-approval when the pinned template forbids it; store the decision with the
+artifact revisions pinned by the first vote; and write an audit record
+`human_gate_decided` with the approval, stage, action, target, author, role,
+hash, channel and idempotency key. A redelivered identical request of the same
+author MUST NOT store a second decision and MUST be audited as
+`human_gate_decision_replayed`. When the audit cannot be written after the
+decision was stored, the caller MUST be told so and a repeat of the request
+MUST be safe. A client that omits the hash on the Web confirmation endpoint
+MUST be served with the hash of the pending approval and the audit MUST say
+that the person did not confirm the hash.
+
+#### Scenario: Web and REST give the same decision and audit
+
+- **КОГДА** the same person decides the same approval through the task confirm
+  endpoint and through the generic decision endpoint
+- **ТОГДА** the stored decision and the audit record MUST be identical except
+  for the channel
+
+#### Scenario: Stale view
+
+- **КОГДА** the result changed after the person opened the page and the request
+  carries the old hash
+- **ТОГДА** the decision MUST be refused with `subject_hash_mismatch` and MUST
+  neither be stored nor audited

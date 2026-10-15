@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun } from './api';
+import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -41,6 +41,27 @@ describe('write API client', () => {
       actor_id: 'product-1',
       subject_hash: 'a'.repeat(64),
     });
+  });
+});
+
+describe('stage confirmation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('отправляет хеш предмета решения, который видел человек', async () => {
+    // The CSRF token is cached by the module, so the calls are told apart by URL.
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) => Promise.resolve(new Response(
+      url.endsWith('/csrf') || url.includes('session') ? JSON.stringify({ csrf_token: 'csrf-1' }) : '{}', { status: 200 })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await confirmTaskStage('run-1', 'spec', 'c'.repeat(64));
+    await confirmTaskStage('run-1', 'spec');
+
+    const confirms = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/stages/spec/confirm'));
+    expect(confirms).toHaveLength(2);
+    expect(JSON.parse(String((confirms[0][1] as RequestInit).body))).toEqual({ subject_hash: 'c'.repeat(64) });
+    expect((confirms[1][1] as RequestInit).body).toBeUndefined();
   });
 });
 

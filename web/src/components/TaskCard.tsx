@@ -1,3 +1,4 @@
+import { actionVerbs } from '../actionLabels';
 import type { TaskRun } from '../types';
 import { formatStageDuration } from '../duration';
 import { useNavigate } from '../router';
@@ -135,7 +136,7 @@ export function TaskCard({ run, templateTitle, stageTitle, now, onCancel }: Task
         {run.status === 'queued' && onCancel ? (
           <button type="button" className={styles.cancel} onClick={(event) => {
             event.stopPropagation(); onCancel();
-          }}>Отменить</button>
+          }}>{actionVerbs.cancelTask}</button>
         ) : null}
       </div>
       {links.length > 0 && (

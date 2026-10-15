@@ -23,6 +23,8 @@ vi.mock('../api', () => ({
   getTaskRuns: vi.fn(),
   getTemplatesList: vi.fn(),
   getProjects: vi.fn(),
+  getActivePrincipal: () => null,
+  isAuthenticationRequired: () => false,
 }));
 
 const boardRun: TaskRun = {
@@ -175,7 +177,7 @@ describe('Tasks board', () => {
     await screen.findByText('Идея роста');
 
     vi.mocked(api.cancelRun).mockRejectedValueOnce(new Error('нельзя отменить'));
-    fireEvent.click(screen.getByRole('button', { name: 'Отменить' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить задачу' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('нельзя отменить'));
     expect(api.cancelRun).toHaveBeenCalledWith('run-queued');
   });
@@ -228,7 +230,7 @@ describe('Tasks projects', () => {
     vi.mocked(getTaskRuns).mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 });
     render(<Tasks />);
 
-    await screen.findByLabelText('Этап: В очереди');
+    expect(await screen.findByLabelText('Задач пока нет')).toHaveTextContent('Новая задача');
     expect(screen.queryByLabelText('Пустой проект')).toBeNull();
   });
 });

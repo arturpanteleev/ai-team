@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { cancelRun, getTaskRuns, getTemplatesList } from '../api';
+import { cancelRun, getActivePrincipal, getTaskRuns, getTemplatesList } from '../api';
+import { actionVerbs } from '../actionLabels';
+import { mayPerform, permissionRoles } from '../permissions';
 import { Link, useSearchParams } from '../router';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -70,6 +72,8 @@ export function Tasks() {
   const [offset, setOffset] = useState(0);
   const [templates, setTemplates] = useState<TemplateValidation | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const canStart = mayPerform(getActivePrincipal(), 'run:start');
   const [status, setStatus] = useState('');
   const [stage, setStage] = useState('');
   const [fn, setFn] = useState('');
@@ -82,8 +86,9 @@ export function Tasks() {
       const data = await getTaskRuns({ ...filters, limit: PAGE_SIZE, offset: activeOffset });
       setRuns(data.runs ?? []);
       setTotal(data.total ?? 0);
+      setLoadError('');
     } catch (err) {
-      console.error('Failed to fetch tasks:', err);
+      setLoadError(err instanceof Error ? err.message : 'Не удалось загрузить задачи.');
     } finally {
       setLoading(false);
     }
@@ -175,6 +180,8 @@ export function Tasks() {
 
   // Новый проект без задач: вместо пустой доски — объяснение и первый шаг.
   const projectIsEmpty = !loading && Boolean(projectParam) && total === 0 && !status && !stage && !fn && !mode;
+  // Совсем нет задач и нет ошибки загрузки: вместо пустой доски — первый шаг.
+  const noTasksAtAll = !loading && !loadError && !projectParam && total === 0 && !status && !stage && !fn && !mode;
 
   return (
     <div className={styles.container}>
@@ -187,7 +194,7 @@ export function Tasks() {
             <button type="button" aria-pressed={view === 'list'} className={view === 'list' ? styles.active : ''}
               onClick={() => setView('list')}>Список</button>
           </div>
-          <Link className={styles.newTask} to={projectParam ? `/tasks/new?project=${encodeURIComponent(projectParam)}` : '/tasks/new'}>Новая задача</Link>
+          {canStart && <Link className={styles.newTask} to={projectParam ? `/tasks/new?project=${encodeURIComponent(projectParam)}` : '/tasks/new'}>{actionVerbs.newTask}</Link>}
         </div>
       </div>
 
@@ -240,9 +247,21 @@ export function Tasks() {
       </div>
 
       {commandStatus && <p className={styles.commandStatus} role="alert">{commandStatus}</p>}
+      {loadError && <p className={styles.commandStatus} role="alert">
+        Не удалось загрузить задачи: {loadError} Показан последний полученный список.{' '}
+        <button type="button" className={styles.retryLink} onClick={() => void fetchRuns(offset, filters)}>Повторить загрузку</button>
+      </p>}
 
       {loading ? (
         <div className={styles.empty}>Загружаем задачи…</div>
+      ) : noTasksAtAll ? (
+        <section className={styles.emptyProject} aria-label="Задач пока нет">
+          <h2>Задач пока нет</h2>
+          <p>Задача — это идея, которая проходит этапы шаблона от бизнес-идеи до выкладки.</p>
+          {canStart
+            ? <Link className={styles.newTask} to="/tasks/new">{actionVerbs.newTask}</Link>
+            : <p>Создать задачу могут: {permissionRoles['run:start']}.</p>}
+        </section>
       ) : projectIsEmpty ? (
         <section className={styles.emptyProject} aria-label="Пустой проект">
           <h2>{selectedProject ? `В проекте «${selectedProject.name}» пока нет задач` : 'В этом проекте пока нет задач'}</h2>
@@ -251,7 +270,7 @@ export function Tasks() {
             ? <p>Проект в архиве: новые задачи он не принимает.</p>
             : <>
               <p>Проект — папка для задач. Создайте первую задачу, и она появится здесь на доске и в списке.</p>
-              <Link className={styles.newTask} to={`/tasks/new?project=${encodeURIComponent(projectParam)}`}>Создать первую задачу</Link>
+              {canStart && <Link className={styles.newTask} to={`/tasks/new?project=${encodeURIComponent(projectParam)}`}>Создать первую задачу</Link>}
             </>}
         </section>
       ) : view === 'board' ? (

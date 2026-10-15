@@ -1,0 +1,83 @@
+.page {
+  width: min(100%, 960px);
+  margin: 0 auto;
+  padding: 28px;
+  color: var(--text-primary);
+}
+
+.page h1 {
+  margin: 0 0 8px;
+}
+
+.page > p {
+  color: var(--text-secondary);
+}
+
+.card {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.card p {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.card button {
+  width: fit-content;
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.error {
+  color: var(--danger-fg) !important;
+  overflow-wrap: anywhere;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  overflow-wrap: anywhere;
+}
+
+.row[data-failed='true'] {
+  border-color: var(--danger-fg);
+}
+
+.row[data-state='conflict'],
+.row[data-state='pending'] {
+  border-color: var(--ink-indigo);
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding: 18px 14px;
+  }
+}

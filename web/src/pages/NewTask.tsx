@@ -3,6 +3,8 @@ import type { FormEvent } from 'react';
 import { createTask, getActivePrincipal, getTemplatesList, isAuthenticationRequired } from '../api';
 import { Link, useSearchParams } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { actionVerbs } from '../actionLabels';
+import { mayPerform, permissionRoles } from '../permissions';
 import { useProjects } from '../hooks/useProjects';
 import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import type { TemplateValidation } from '../types';
@@ -26,7 +28,7 @@ export function NewTask() {
   // Без principal форма доступна только в локальном режиме. В облачном режиме
   // null значит «нет сессии» — такому пользователю форму не открываем.
   const signedOutInCloud = !principal && isAuthenticationRequired();
-  const canCreate = principal ? principal.roles.includes('product_owner') : !signedOutInCloud;
+  const canCreate = mayPerform(principal, 'run:start');
   const [searchParams] = useSearchParams();
   const { active: activeProjects, loaded: projectsLoaded, error: projectsError } = useProjects();
   // Проект обязателен: из ссылки «?project=», иначе первый активный.
@@ -76,7 +78,7 @@ export function NewTask() {
     return <main className={styles.state}>Войдите, чтобы создавать задачи.</main>;
   }
   if (!canCreate) {
-    return <main className={styles.state}>Создавать задачи может Product Owner.</main>;
+    return <main className={styles.state}>Создавать задачи могут: {permissionRoles['run:start']}.</main>;
   }
 
   const submit = async (event: FormEvent) => {
@@ -124,7 +126,8 @@ export function NewTask() {
         setIdentifierErr(message);
         identifierRef.current?.focus();
       } else {
-        setError(message);
+        // The server names the failed environment check in English; say what it means.
+        setError(message.replace(/^preflight failed:\s*/i, 'Окружение не готово к запуску: '));
       }
     } finally {
       setSubmitting(false);
@@ -135,7 +138,7 @@ export function NewTask() {
     <main className={styles.container}>
       <header className={styles.header}>
         <h1>Новая задача</h1>
-        <p>Задача стартует по шаблону проекта: текст идеи заполняет этап intent, внешние ссылки сохраняются вместе с задачей.</p>
+        <p>Задача стартует по шаблону проекта: текст идеи становится результатом первого этапа, внешние ссылки сохраняются вместе с задачей.</p>
       </header>
 
       <form className={styles.form} onSubmit={submit}>
@@ -206,7 +209,7 @@ export function NewTask() {
 
         <div className={styles.actions}>
           <button type="submit" disabled={submitting || !projectId || templates.length > 0 && !template}>
-            {submitting ? 'Создаём…' : 'Создать задачу'}
+            {submitting ? 'Создаём…' : actionVerbs.createTask}
           </button>
           {status && <span className={styles.status} role="status">{status}</span>}
           {createdRunID && <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть задачу</Link>}

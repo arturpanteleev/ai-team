@@ -14,11 +14,12 @@ import { EventFeed } from './pages/EventFeed';
 import { PipelineRedirect, RunRedirect } from './pages/RunRedirect';
 import { TaskDetail } from './pages/TaskDetail';
 import { Observability } from './pages/Observability';
-import { activateTeamInvitation, getAuthConfig, openSession, SESSION_EXPIRED_EVENT } from './api';
+import { Tracker } from './pages/Tracker';
+import { activateTeamInvitation, getAuthConfig, getTrackerOverview, openSession, SESSION_EXPIRED_EVENT } from './api';
 
-function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }) {
+function RoutedApp({ teamManagementEnabled, trackerEnabled }: { teamManagementEnabled: boolean; trackerEnabled: boolean }) {
   return (
-    <Layout teamManagementEnabled={teamManagementEnabled}>
+    <Layout teamManagementEnabled={teamManagementEnabled} trackerEnabled={trackerEnabled}>
       <Routes routes={[
         { path: '/', element: <Dashboard /> },
         { path: '/tasks', element: <Tasks /> },
@@ -27,6 +28,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
         { path: '/tasks/:runID', element: <TaskDetail /> },
         { path: '/events', element: <EventFeed /> },
         { path: '/observability', element: <Observability /> },
+        { path: '/tracker', element: <Tracker /> },
         { path: '/runs/:runID', element: <RunRedirect /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },
         { path: '/access', element: teamManagementEnabled ? <McpAccess /> : <main role="status">Персональные MCP-токены доступны только на сервере с облачной аутентификацией.</main> },
@@ -42,6 +44,7 @@ function App() {
   const [authState, setAuthState] = useState<'loading' | 'login' | 'ready'>('loading');
   const [teamManagementEnabled, setTeamManagementEnabled] = useState(false);
   const [ssoEnabled, setSSOEnabled] = useState(false);
+  const [trackerEnabled, setTrackerEnabled] = useState(false);
 
   useEffect(() => {
     const onSessionExpired = () => setAuthState('login');
@@ -64,6 +67,12 @@ function App() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   }, []);
 
+  // The tracker entry appears in the menu only when a tracker is configured.
+  useEffect(() => {
+    if (authState !== 'ready') return;
+    getTrackerOverview().then((overview) => setTrackerEnabled(overview.configured === true)).catch(() => setTrackerEnabled(false));
+  }, [authState]);
+
   if (authState === 'loading') return <div>Загрузка…</div>;
   if (authState === 'login') {
     return <Login allowActivation={teamManagementEnabled} ssoEnabled={ssoEnabled} onLogin={async (token) => {
@@ -77,7 +86,7 @@ function App() {
   }
   return (
     <BrowserRouter>
-      <RoutedApp teamManagementEnabled={teamManagementEnabled} />
+      <RoutedApp teamManagementEnabled={teamManagementEnabled} trackerEnabled={trackerEnabled} />
     </BrowserRouter>
   );
 }

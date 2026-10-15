@@ -18,6 +18,10 @@ vi.mock('../api', () => ({
   getTaskFlowMetrics: vi.fn().mockResolvedValue({ by_stage: [] }),
   overrideTaskStageCheck: vi.fn(), returnTaskStage: vi.fn(), runTaskStageAgent: vi.fn(), setTaskStageExecutor: vi.fn(),
   skipTaskStage: vi.fn(), submitTaskGrillVersion: vi.fn(), submitTaskStageResult: vi.fn(), takeTaskStage: vi.fn(),
+  isAuthenticationRequired: () => false,
+  getRunTracker: vi.fn().mockResolvedValue({ configured: false, sync_status: 'not_configured' }),
+  getTrackerOverview: vi.fn().mockResolvedValue({ configured: false }),
+  setRunTrackerLink: vi.fn(), removeRunTrackerLink: vi.fn(), retryRunTrackerDeliveries: vi.fn(), dismissTrackerInbound: vi.fn(), syncTrackerNow: vi.fn(),
 }));
 
 const baseDetails: TaskRunDetails = {
@@ -97,8 +101,11 @@ describe('Task detail stage statuses (S11)', () => {
     expect(within(route).getByText('Внутренний агент: analyst (agentcli)')).toBeInTheDocument();
     expect(within(route).getByText('Посещений: 2, сейчас 2-е')).toBeInTheDocument();
     expect(within(route).getByText('Бывал активен ранее')).toBeInTheDocument();
-    expect(within(route).getByText('Доступно: поручить агенту')).toBeInTheDocument();
-    expect(screen.getByText('В работе · Внутренний агент: analyst (agentcli) · посещение 2 (возврат)')).toBeInTheDocument();
+    expect(within(route).getByText('Доступно: Поручить агенту')).toBeInTheDocument();
+    const status = screen.getByRole('region', { name: 'Анализ' });
+    expect(within(status).getByText('В работе')).toBeInTheDocument();
+    expect(within(status).getByText('Внутренний агент: analyst (agentcli)')).toBeInTheDocument();
+    expect(within(status).getByText('Посещение 2 из 2 (возврат)')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Посещения этапа (2)'));
     expect(screen.getByText(/Посещение 1 · неактивно · пройден/)).toBeInTheDocument();
     expect(screen.getByText(/Посещение 2 · активно · не завершён · Внутренний агент: analyst · возврат с «Релиз»/)).toBeInTheDocument();
@@ -120,7 +127,7 @@ describe('Task detail stage statuses (S11)', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(waiting);
     renderDetail();
     expect(await screen.findByText(/Сейчас ждёт этап «Анализ»; после решения откроется «Релиз»/)).toBeInTheDocument();
-    expect(screen.getByText(/Ждёт: нужно подтверждение результата \(роли: product_owner\)/)).toBeInTheDocument();
+    expect(screen.getByText(/нужно подтверждение результата \(роли: product_owner\)/)).toBeInTheDocument();
   });
 
   it('keeps the old route when the server sent no projection', async () => {

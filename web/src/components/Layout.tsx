@@ -2,15 +2,16 @@ import type { ReactNode } from 'react';
 import { VersionBadge } from './VersionBadge';
 import { NavLink } from '../router';
 import { closeSession, getActivePrincipal } from '../api';
+import { mayPerform } from '../permissions';
 import { useTheme } from '../theme';
 import { Bubble } from './Bubble';
 import type { BubbleTone } from './Bubble';
 import styles from './Layout.module.css';
 
-type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team' | 'access';
+type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team' | 'access' | 'tracker';
 
 const navTone: Record<IconName, BubbleTone> = {
-  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow', access: 'mint',
+  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow', access: 'mint', tracker: 'blue',
 };
 
 // Иконки намеренно простые: контур 1.8px, наследуют цвет текста (внутри пузыря).
@@ -24,6 +25,7 @@ function NavIcon({ name }: { name: IconName }) {
     observability: <><path d="M3.5 17l5-5 3.5 3.5 4.5-6 4 4" /><path d="M3.5 20.5h17" /></>,
     team: <><circle cx="9" cy="9" r="3.2" /><path d="M3.5 19.5c.8-3 2.9-4.6 5.5-4.6s4.7 1.6 5.5 4.6" /><path d="M16 6.2a3 3 0 0 1 0 5.6M18.2 14.9c1.3.7 2 2.2 2.3 4.6" /></>,
     access: <><circle cx="8.5" cy="14.5" r="3.5" /><path d="M11 12l8-8M16 7l2.5 2.5M14 9l2 2" /></>,
+    tracker: <><path d="M9.5 14.5l5-5" /><path d="M11 7.5l1-1a3.5 3.5 0 0 1 5 5l-1 1" /><path d="M13 16.5l-1 1a3.5 3.5 0 0 1-5-5l1-1" /></>,
   };
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
@@ -58,7 +60,11 @@ function DoorIcon() {
   );
 }
 
-export function Layout({ children, teamManagementEnabled }: { children: ReactNode; teamManagementEnabled: boolean }) {
+export function Layout({ children, teamManagementEnabled, trackerEnabled = false }: {
+  children: ReactNode;
+  teamManagementEnabled: boolean;
+  trackerEnabled?: boolean;
+}) {
   const principal = getActivePrincipal();
   const { theme, toggleTheme } = useTheme();
   const initial = principal?.actor_id.trim().charAt(0).toUpperCase() || '?';
@@ -71,14 +77,15 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           ai-team
         </div>
         <nav className={styles.nav} aria-label="Разделы">
-          <NavItem to="/" end name="tasks">Задачи</NavItem>
-          <NavItem to="/tasks" name="board">Доска</NavItem>
+          <NavItem to="/" end name="tasks">Очередь</NavItem>
+          <NavItem to="/tasks" name="board">Задачи</NavItem>
           <NavItem to="/projects" name="projects">Проекты</NavItem>
           <NavItem to="/template" name="template">Шаблоны</NavItem>
           <NavItem to="/events" name="feed">Лента</NavItem>
           <NavItem to="/observability" name="observability">Наблюдаемость</NavItem>
+          {trackerEnabled && <NavItem to="/tracker" name="tracker">Трекер</NavItem>}
           {teamManagementEnabled && <NavItem to="/access" name="access">Доступ MCP</NavItem>}
-          {teamManagementEnabled && principal?.roles.includes('product_owner') && (
+          {teamManagementEnabled && mayPerform(principal, 'team:manage') && (
             <NavItem to="/team" name="team">Команда</NavItem>
           )}
         </nav>
@@ -112,4 +119,5 @@ const roleNames: Record<string, string> = {
   reviewer: 'ревьюер',
   qa: 'тестировщик',
   release_manager: 'менеджер выпуска',
+  admin: 'администратор',
 };

@@ -1,3 +1,4 @@
+import { actionVerbs } from '../actionLabels';
 import { useNavigate } from '../router';
 import type { PipelineRun } from '../types';
 import { StatusBadge } from './StatusBadge';
@@ -48,7 +49,7 @@ export function PipelineCard({ run, onCancel }: PipelineCardProps) {
         {run.error ? <span role="alert">{run.error}</span> : null}
         {run.status === 'queued' && onCancel ? <button onClick={(event) => {
           event.stopPropagation(); onCancel();
-        }}>Отменить</button> : null}
+        }}>{actionVerbs.cancelTask}</button> : null}
       </div>
     </article>
   );

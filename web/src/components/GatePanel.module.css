@@ -10,6 +10,9 @@
 }
 
 .banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   margin: 0;
   padding: 10px 12px;
   border-radius: var(--radius-md);
@@ -95,10 +98,32 @@
   color: var(--danger-fg);
 }
 
-.technical,
+/* Technical error of a required gate blocks the move: a real failure, red; dashed to tell it from a content fail. */
+.technical {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  outline: 1px dashed var(--danger-fg);
+  outline-offset: -1px;
+}
+
+/* Amber is reserved for recommendations. */
 .warningTag {
   background: var(--warning-bg);
   color: var(--warning-fg);
+}
+
+.bannerIcon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.panel[data-compact='true'] {
+  margin: 0;
 }
 
 .neutral {

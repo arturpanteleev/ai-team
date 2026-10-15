@@ -43,7 +43,7 @@
   background: var(--surface);
 }
 
-.invite fieldset {
+.page fieldset {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 16px;
@@ -51,7 +51,7 @@
   border-radius: 8px;
 }
 
-.invite fieldset label {
+.page fieldset label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -106,6 +106,57 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.members article > .editor {
+  display: grid;
+  flex-basis: 100%;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.editor p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.members article .editorActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.roleChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.roleChip {
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+/* The system administrator right is a system right, not a process function: dashed, not red (red is for real failures). */
+.roleChip[data-role='admin'] {
+  outline: 1px dashed var(--border-strong);
+  outline-offset: -1px;
+  color: var(--text-primary);
+}
+
+.adminNote {
+  flex-basis: 100%;
+  color: var(--text-muted);
+}
+
+.page fieldset legend {
+  padding: 0 6px;
+  color: var(--text-secondary);
 }
 
 .audit {

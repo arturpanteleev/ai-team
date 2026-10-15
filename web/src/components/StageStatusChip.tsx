@@ -1,5 +1,6 @@
 import type { StageStatusKey } from '../types';
-import { stageStatusGlyphs, stageStatusLabels, stageStatusTones } from '../stageStatus';
+import { stageStatusLabels, stageStatusTones } from '../stageStatus';
+import { Icon } from './Icon';
 import styles from './StageStatusChip.module.css';
 
 // Статус этапа, вычисленный сервером. Подпись и значок одинаковы на карточке
@@ -7,7 +8,7 @@ import styles from './StageStatusChip.module.css';
 export function StageStatusChip({ status, title }: { status: StageStatusKey; title?: string }) {
   return (
     <span className={styles.chip} data-status={status} data-tone={stageStatusTones[status] ?? 'gray'} title={title}>
-      <span className={styles.glyph} aria-hidden="true">{stageStatusGlyphs[status] ?? '○'}</span>
+      <Icon name={status in stageStatusLabels ? status : 'not_reached'} size={12} className={styles.glyph} />
       {stageStatusLabels[status] ?? status}
     </span>
   );

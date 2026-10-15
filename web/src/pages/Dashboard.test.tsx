@@ -2,77 +2,71 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Dashboard } from './Dashboard';
 import { MemoryRouter } from '../router';
-import { getPipelineRuns, startRun } from '../api';
+import { getPipelineRuns } from '../api';
 
-const session = vi.hoisted(() => ({ principal: { actor_id: 'product-1', roles: ['product_owner'] } }));
+const session = vi.hoisted(() => ({ principal: { actor_id: 'product-1', roles: ['product_owner'] } as { actor_id: string; roles: string[] } | null }));
 
 vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: () => ({ connected: true }) }));
 vi.mock('../api', () => ({
   getActivePrincipal: () => session.principal,
+  isAuthenticationRequired: () => true,
   getPipelineRuns: vi.fn().mockResolvedValue([]),
   getPreflight: vi.fn().mockResolvedValue({ ready: true, checks: [] }),
-  startRun: vi.fn(),
+  cancelRun: vi.fn(),
   getProjects: vi.fn().mockResolvedValue({ projects: [
     { id: 1, name: 'Основной', description: '', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
   ] }),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.mocked(getPipelineRuns).mockResolvedValue([]);
+});
 
-// Форма создания открывается кнопкой «Создать задачу» в правой колонке.
-function openCreateForm() {
-  fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
+function renderDashboard() {
+  return render(<MemoryRouter><Dashboard /></MemoryRouter>);
 }
 
-describe('Dashboard business intake', () => {
-  it('дает Product Owner кнопку создания, которая открывает форму постановки бизнес-цели', () => {
+describe('Queue page', () => {
+  it('называется «Очередь» и ведёт к единственной форме создания задачи', () => {
     session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
-    render(<Dashboard />);
+    renderDashboard();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'Очередь' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Новая задача/ })).toHaveAttribute('href', '/tasks/new');
+    // Второй формы постановки задачи здесь нет: создание живёт на странице «Новая задача».
     expect(screen.queryByLabelText('Какого результата хотите достичь?')).not.toBeInTheDocument();
-    openCreateForm();
-    expect(screen.getByLabelText('Какого результата хотите достичь?')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/Аналитик уточнит недостающие детали/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Создать задачу' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Создать задачу' })).not.toBeInTheDocument();
   });
 
-  it('не отправляет инициативу с идентификатором не в формате slug', async () => {
-    session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
-    render(<Dashboard />);
+  it('даёт архитектору создавать задачи так же, как владельцу продукта', () => {
+    session.principal = { actor_id: 'arch-1', roles: ['architect'] };
+    renderDashboard();
 
-    openCreateForm();
-    await waitFor(() => expect(screen.getByLabelText('Проект')).toHaveValue('1'));
-    fireEvent.change(screen.getByLabelText('Название задачи'), { target: { value: 'Рост продаж' } });
-    fireEvent.change(screen.getByLabelText('Короткий идентификатор'), { target: { value: 'рост продаж' } });
-    fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Цель' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('Первый символ должен быть латинской буквой или цифрой, а не «р».');
-    expect(startRun).not.toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: /Новая задача/ })).toBeInTheDocument();
   });
 
-  it('направляет участника без роли Product Owner к владельцу бизнес-требований', () => {
+  it('называет роли, которые могут создать задачу, участнику без такого права', () => {
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
-    render(<Dashboard />);
+    renderDashboard();
 
-    expect(screen.getByText('Создать задачу может Product Owner.')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Какого результата хотите достичь?')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Новая задача/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/Создать задачу могут: Владелец продукта, Архитектор/)).toBeInTheDocument();
   });
 
-  it('обрабатывает неизвестную готовность и checks:null, оставляя enqueue доступным', async () => {
+  it('обрабатывает неизвестную готовность и checks:null, не блокируя создание', async () => {
     session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
     const api = await import('../api');
     vi.mocked(api.getPreflight).mockResolvedValue({ ready: false, unknown: true, checks: null, checked_at: '' });
-    render(<Dashboard />);
+    renderDashboard();
     expect(await screen.findByText('Статус неизвестен')).toBeInTheDocument();
     expect(screen.getByText(/Задача может подождать worker/)).toBeInTheDocument();
-    openCreateForm();
-    expect(screen.getByRole('button', { name: 'Создать задачу' })).toBeEnabled();
+    expect(screen.getAllByRole('link', { name: /Новая задача/ }).length).toBeGreaterThan(0);
   });
 
   it('сворачивает фильтры статусов и закрывает панель после выбора', () => {
     session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
-    render(<Dashboard />);
+    renderDashboard();
 
     const toggle = screen.getByRole('button', { name: /Статус: Все · Фильтры/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -83,19 +77,27 @@ describe('Dashboard business intake', () => {
     expect(screen.getByRole('button', { name: /Статус: Ждёт решения/ })).toBeInTheDocument();
   });
 
-  it('после создания инициативы обновляет список и синхронизируется при возврате вкладки', async () => {
+  it('пустой список предлагает первый шаг, а не молчит', async () => {
     session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
-    vi.mocked(startRun).mockResolvedValueOnce({ run_id: 'run-mobile-created' });
-    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    renderDashboard();
 
-    openCreateForm();
-    await waitFor(() => expect(screen.getByLabelText('Проект')).toHaveValue('1'));
-    fireEvent.change(screen.getByLabelText('Название задачи'), { target: { value: 'Mobile flow' } });
-    fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Согласовать требования с телефона' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
-    await waitFor(() => expect(startRun).toHaveBeenCalledWith(1, 'mobile-flow', 'Согласовать требования с телефона'));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Mobile flow'));
-    expect(screen.getByRole('link', { name: 'Открыть' })).toHaveAttribute('href', '/tasks/run-mobile-created');
+    expect(await screen.findByText(/Задач пока нет/)).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: /Новая задача/ }).length).toBeGreaterThan(0);
+  });
+
+  it('показывает ошибку загрузки и позволяет повторить', async () => {
+    session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
+    vi.mocked(getPipelineRuns).mockRejectedValueOnce(new Error('сервер недоступен'));
+    renderDashboard();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('сервер недоступен');
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('синхронизируется при возврате вкладки', async () => {
+    session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
+    renderDashboard();
 
     const previousCalls = vi.mocked(getPipelineRuns).mock.calls.length;
     fireEvent(document, new Event('visibilitychange'));

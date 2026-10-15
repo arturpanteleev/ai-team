@@ -42,12 +42,21 @@ describe('Layout team navigation', () => {
     expect(screen.getByRole('link', { name: 'Команда' })).toBeInTheDocument();
   });
 
-  it('ведёт на главную «Задачи» и на доску разными пунктами', () => {
+  it('называет главную «Очередь», а доску и список задач — «Задачи»: два пункта, два разных слова', () => {
     renderLayout(false);
 
-    expect(screen.getByRole('link', { name: 'Задачи' })).toHaveAttribute('href', '/');
-    expect(screen.getByRole('link', { name: 'Доска' })).toHaveAttribute('href', '/tasks');
+    expect(screen.getByRole('link', { name: 'Очередь' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'Задачи' })).toHaveAttribute('href', '/tasks');
+    expect(screen.queryByRole('link', { name: 'Доска' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Дашборд' })).not.toBeInTheDocument();
+  });
+
+  it('показывает «Трекер» только когда трекер подключён', () => {
+    const { unmount } = render(<ThemeProvider><MemoryRouter><Layout teamManagementEnabled={false}>x</Layout></MemoryRouter></ThemeProvider>);
+    expect(screen.queryByRole('link', { name: 'Трекер' })).not.toBeInTheDocument();
+    unmount();
+    render(<ThemeProvider><MemoryRouter><Layout teamManagementEnabled={false} trackerEnabled>x</Layout></MemoryRouter></ThemeProvider>);
+    expect(screen.getByRole('link', { name: 'Трекер' })).toHaveAttribute('href', '/tracker');
   });
   it('shows the user as avatar and name, keeps roles in a tooltip and the logout as a labelled door', () => {
     renderLayout(false);

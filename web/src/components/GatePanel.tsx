@@ -1,11 +1,14 @@
+import { actionVerbs } from '../actionLabels';
 import { attemptOutcome, outcomeOf } from '../gateView';
 import type { GateStage, GateStatus, GateWave, TaskGates } from '../types';
+import { Icon } from './Icon';
 import styles from './GatePanel.module.css';
 
 // Gate state of one stage: the real gates of the current result version, the
 // advisory warnings (amber), an administrator override of a failure (red) and
 // the aggregated "may the task move on, and why". An override never turns a
 // failed gate into a pass: the outcome label of the gate stays what it was.
+// Red means a real failure or a bypass; amber only a recommendation.
 
 const stateLabels: Record<string, string> = {
   passed: 'Переход разрешён',
@@ -37,9 +40,10 @@ export function OverrideBanner({ wave }: { wave: GateWave }) {
   const override = wave.override;
   if (!override) return null;
   return <p className={`${styles.banner} ${styles.override}`} role="status" data-testid="gate-override-banner">
-    Обход провала: администратор {override.actor_id} разрешил переход {when(override.at)}.
-    {' '}Причина: {override.reason}. Исход гейтов не изменён: {overriddenList(wave)}.
-    {' '}Действует только для версии результата <code>{override.artifact_sha256.slice(0, 12)}</code>.
+    <Icon name="override" size={15} className={styles.bannerIcon} />
+    <span>Обход провала: администратор {override.actor_id} разрешил переход {when(override.at)}.
+      {' '}Причина: {override.reason}. Исход гейтов не изменён: {overriddenList(wave)}.
+      {' '}Действует только для версии результата <code>{override.artifact_sha256.slice(0, 12)}</code>.</span>
   </p>;
 }
 
@@ -48,20 +52,39 @@ export function AdvisoryBanner({ wave }: { wave: GateWave }) {
   if (warnings.length === 0) return null;
   const items = warnings.map((gate) => `${gate.gate_name} (${attemptOutcome(gate.attempt).label.toLowerCase()})`);
   return <p className={`${styles.banner} ${styles.advisory}`} role="status" data-testid="gate-advisory-banner">
-    Рекомендация не выполнена: {items.join(', ')}. Переход ими не блокируется.
+    <Icon name="warning" size={15} className={styles.bannerIcon} />
+    <span>Рекомендация не выполнена: {items.join(', ')}. Переход ими не блокируется.</span>
   </p>;
 }
 
-export function GatePanel({ stage, canRetry, working, onRetry }: {
+// Gates that can be repeated on the same result version (technical error or
+// timeout). The buttons belong to the actions column, not to the status.
+export function GateRetryActions({ stage, working, onRetry }: {
   stage: GateStage | undefined;
-  canRetry: boolean;
   working: boolean;
   onRetry: (gate: string) => void;
 }) {
+  const retryable = stage?.current?.gates.filter((status) => status.retryable) ?? [];
+  if (retryable.length === 0) return null;
+  return <>
+    {retryable.map((status) => <button key={status.gate_name} type="button" disabled={working}
+      title="Повтор на той же версии результата: успешные гейты не запускаются заново"
+      onClick={() => onRetry(status.gate_name)}>
+      {actionVerbs.retryGate}: {status.gate_name}
+    </button>)}
+  </>;
+}
+
+// compact — the short list for the status column; the full panel (with the
+// attempt history) lives in the "Гейты" tab of the main area.
+export function GatePanel({ stage, compact = false }: {
+  stage: GateStage | undefined;
+  compact?: boolean;
+}) {
   const wave = stage?.current;
   if (!stage || !wave) return null;
-  return <section className={styles.panel} aria-label="Гейты этапа" data-testid="gate-panel">
-    <h3>Гейты этапа</h3>
+  return <section className={styles.panel} aria-label="Гейты этапа" data-testid="gate-panel" data-compact={compact ? 'true' : undefined}>
+    <h3>{compact ? 'Что проверяется' : 'Гейты этапа'}</h3>
     <OverrideBanner wave={wave} />
     <AdvisoryBanner wave={wave} />
     <p className={styles.decision} data-allowed={wave.transition.allowed ? 'true' : 'false'}>
@@ -78,14 +101,11 @@ export function GatePanel({ stage, canRetry, working, onRetry }: {
           {status.attempts > 1 && <span className={styles.tag}>попыток: {status.attempts}</span>}
           {status.warning && <span className={`${styles.tag} ${styles.warningTag}`}>Рекомендация</span>}
           {status.overridden && <span className={`${styles.tag} ${styles.overriddenTag}`}>Обойдён администратором, исход прежний</span>}
-          {status.retryable && canRetry && <button type="button" disabled={working} onClick={() => onRetry(status.gate_name)}>
-            Повторить на той же версии
-          </button>}
-          {status.attempt?.reason && <p className={styles.reason}>{status.attempt.reason}</p>}
+          {!compact && status.attempt?.reason && <p className={styles.reason}>{status.attempt.reason}</p>}
         </li>;
       })}
     </ul>
-    {wave.attempts.length > wave.gates.length && <details>
+    {!compact && wave.attempts.length > wave.gates.length && <details>
       <summary>История попыток ({wave.attempts.length})</summary>
       <ol className={styles.history}>
         {wave.attempts.map((attempt) => <li key={attempt.attempt_id}>
@@ -121,6 +141,9 @@ export function GateHistory({ gates }: { gates: TaskGates | null | undefined }) 
   if (entries.length === 0) return <p>Обходов и невыполненных рекомендаций нет.</p>;
   return <ul className={styles.list}>
     {entries.map((entry) => <li key={entry.key} className={`${styles.banner} ${entry.kind === 'override' ? styles.override : styles.advisory}`}
-      data-kind={entry.kind}>{entry.text}</li>)}
+      data-kind={entry.kind}>
+      <Icon name={entry.kind === 'override' ? 'override' : 'warning'} size={15} className={styles.bannerIcon} />
+      <span>{entry.text}</span>
+    </li>)}
   </ul>;
 }

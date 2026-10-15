@@ -163,12 +163,22 @@ func oneLine(text string) string {
 // does not stop the next one: a transition that cannot be made must not
 // hide the comment that explains the stage outcome. All failures are joined.
 func Execute(ctx context.Context, t Tracker, key string, ops []Operation) error {
+	_, err := ExecuteReport(ctx, t, key, ops)
+	return err
+}
+
+// ExecuteReport is Execute that also returns the target of the last transition
+// the tracker actually accepted (empty if none was performed).
+func ExecuteReport(ctx context.Context, t Tracker, key string, ops []Operation) (string, error) {
 	var errs []error
+	var transitioned string
 	for _, op := range ops {
 		switch op.Kind {
 		case OpTransition:
 			if _, err := t.Transition(ctx, key, op.Target); err != nil {
 				errs = append(errs, fmt.Errorf("transition to %q: %w", op.Target, err))
+			} else {
+				transitioned = op.Target
 			}
 		case OpComment:
 			if _, err := t.AddComment(ctx, key, op.Comment); err != nil {
@@ -178,5 +188,5 @@ func Execute(ctx context.Context, t Tracker, key string, ops []Operation) error 
 			errs = append(errs, errors.New("unknown tracker operation"))
 		}
 	}
-	return errors.Join(errs...)
+	return transitioned, errors.Join(errs...)
 }

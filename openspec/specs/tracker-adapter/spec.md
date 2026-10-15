@@ -178,9 +178,13 @@ deliveries of a task; a retry uses the task's current link, increments the
 attempt count, keeps a still-failing delivery visible, and MUST refuse a
 delivery that is not failed. A delivery that failed for a link that was later
 removed MUST become `abandoned` and MUST NOT be sent to a new link or counted as
-a failure. A retry MUST NOT send a transition when a newer stage event of the
-same task is already delivered to the same issue; such a delivery becomes
-`superseded` (its comment is still delivered idempotently).
+a failure. A retry MUST NOT send a transition when a newer event of the
+same task has already performed a transition on the same issue (a newer event
+whose delivery carried only a comment does not count, so its transition is
+retried); a delivery whose stale transition is skipped becomes `superseded`
+with the reason stored apart from the original error (its comment is still
+delivered idempotently). A retry racing with link removal MUST NOT turn an
+`abandoned` delivery back into `delivered` or `failed`.
 
 #### Scenario: Tracker request fails
 

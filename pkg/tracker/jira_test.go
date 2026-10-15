@@ -31,6 +31,7 @@ type mockJira struct {
 	failPath  string
 	failCode  int
 	personAt  string
+	omitTotal bool // comment pages carry no total (some Jira variants)
 	legacy    bool // only the old /search endpoint exists (Server/Data Center)
 	jql       string
 	server    *httptest.Server
@@ -95,7 +96,11 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		if startAt > end {
 			startAt = end
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"total": len(wrapped), "startAt": startAt, "comments": wrapped[startAt:end]})
+		page := map[string]any{"total": len(wrapped), "startAt": startAt, "comments": wrapped[startAt:end]}
+		if m.omitTotal {
+			delete(page, "total")
+		}
+		_ = json.NewEncoder(w).Encode(page)
 	case r.Method == http.MethodPost && r.URL.Path == issue+"/comment":
 		var body struct {
 			Body json.RawMessage `json:"body"`
@@ -412,6 +417,29 @@ func TestJiraCommentIdempotencyReadsBeyondTheFirstPage(t *testing.T) {
 	}
 	if len(mock.comments) != before {
 		t.Fatalf("duplicate comment was posted")
+	}
+}
+
+func TestJiraCommentPaginationContinuesWhenTotalIsMissing(t *testing.T) {
+	mock := newMockJira(t, 3)
+	mock.omitTotal = true
+	adapter := mock.adapter(3)
+	ctx := context.Background()
+	comment := Comment{Key: "run-1#7", Lines: []string{"first"}}
+	if posted, err := adapter.AddComment(ctx, "APP-1", comment); err != nil || !posted {
+		t.Fatalf("first post=%v err=%v", posted, err)
+	}
+	for index := 0; index < 230; index++ {
+		if _, err := adapter.AddComment(ctx, "APP-1", Comment{Key: fmt.Sprintf("run-2#%d", index), Lines: []string{"noise"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(mock.comments)
+	if posted, err := adapter.AddComment(ctx, "APP-1", comment); err != nil || posted {
+		t.Fatalf("without total the marker on page 3 must still be found, posted=%v err=%v", posted, err)
+	}
+	if len(mock.comments) != before {
+		t.Fatal("duplicate comment was posted")
 	}
 }
 

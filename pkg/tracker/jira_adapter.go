@@ -247,8 +247,9 @@ func (a *JiraAdapter) AddComment(ctx context.Context, key string, comment Commen
 }
 
 type jiraCommentsResponse struct {
-	Total    int `json:"total"`
-	Comments []struct {
+	Total      int `json:"total"`
+	MaxResults int `json:"maxResults"`
+	Comments   []struct {
 		Body json.RawMessage `json:"body"`
 	} `json:"comments"`
 }
@@ -267,7 +268,22 @@ func (a *JiraAdapter) hasRecentComment(ctx context.Context, endpoint, marker str
 			}
 		}
 		startAt += len(comments.Comments)
-		if len(comments.Comments) == 0 || startAt >= comments.Total {
+		if len(comments.Comments) == 0 {
+			return false, nil
+		}
+		if comments.Total > 0 {
+			if startAt >= comments.Total {
+				return false, nil
+			}
+			continue
+		}
+		// total is missing: only a short page proves the end. A full page
+		// (the size Jira actually applied) means there may be more.
+		pageSize := comments.MaxResults
+		if pageSize <= 0 {
+			pageSize = jiraCommentPageSize
+		}
+		if len(comments.Comments) < pageSize {
 			return false, nil
 		}
 	}

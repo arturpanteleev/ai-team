@@ -31,8 +31,9 @@ const (
 	// сняли: событие не уходит на новую карточку без явного решения и не
 	// считается ошибкой.
 	TrackerDeliveryAbandoned = "abandoned"
-	// TrackerDeliverySuperseded — повтор пропущен, потому что по задаче уже
-	// доставлено более новое событие и старый переход откатил бы карточку.
+	// TrackerDeliverySuperseded — устаревший переход не отправлен, потому что по
+	// задаче уже выполнен более новый переход; комментарий при этом мог уйти.
+	// Причина лежит в Note, исходная ошибка — в LastError.
 	TrackerDeliverySuperseded = "superseded"
 )
 
@@ -57,15 +58,20 @@ type TrackerLinkConflict struct {
 // TrackerDelivery — долговечная запись об исходящей доставке одного события.
 // Ошибка трекера не откатывает прогон, но остаётся здесь, пока её не повторят.
 type TrackerDelivery struct {
-	EventID     int64      `json:"event_id"`
-	TaskID      int64      `json:"task_id"`
-	Tracker     string     `json:"tracker"`
-	IssueKey    string     `json:"issue_key"`
-	EventType   string     `json:"event_type"`
-	Stage       string     `json:"stage,omitempty"`
-	Status      string     `json:"status"`
-	Attempts    int        `json:"attempts"`
-	LastError   string     `json:"last_error,omitempty"`
+	EventID   int64  `json:"event_id"`
+	TaskID    int64  `json:"task_id"`
+	Tracker   string `json:"tracker"`
+	IssueKey  string `json:"issue_key"`
+	EventType string `json:"event_type"`
+	Stage     string `json:"stage,omitempty"`
+	Status    string `json:"status"`
+	Attempts  int    `json:"attempts"`
+	LastError string `json:"last_error,omitempty"`
+	// TransitionTo — статус, в который доставка реально перевела карточку
+	// (пусто, если переход не планировался, не удался или был отброшен).
+	TransitionTo string `json:"transition_to,omitempty"`
+	// Note — пояснение к закрытию без полной доставки (abandoned, superseded).
+	Note        string     `json:"note,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
@@ -90,11 +96,19 @@ func migrateV16(ctx context.Context, tx schemaQuerier) error {
 			event_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, tracker TEXT NOT NULL, issue_key TEXT NOT NULL,
 			event_type TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
 			attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+			transition_to TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, delivered_at DATETIME)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracker_deliveries_task ON tracker_deliveries(task_id, event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracker_deliveries_status ON tracker_deliveries(status, event_id)`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	// v16 ещё не выходила в релиз: базы, созданные ранней сборкой v16, получают
+	// колонки здесь же.
+	for _, column := range []string{"transition_to", "note"} {
+		if err := ensureColumn(ctx, tx, "tracker_deliveries", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
@@ -373,19 +387,29 @@ func distinctSorted(values []string) []string {
 
 // RecordTrackerDelivery сохраняет итог попытки доставки события. Каждая
 // запись увеличивает attempts; успех очищает ошибку, неудача сохраняет её.
+// Статус superseded считается доставкой комментария (delivered_at ставится).
+// Строка abandoned не воскрешается: гонка повтора со снятием связи оставляет
+// abandoned, а возвращается актуальная строка. superseded сохраняет исходную
+// last_error (комментарий ушёл, переход нет — причина в note). transition_to не затирается
+// пустым значением: ранее выполненный переход остаётся фактом.
 func (s *Store) RecordTrackerDelivery(d TrackerDelivery, at time.Time) (TrackerDelivery, error) {
 	at = at.UTC()
 	var delivered any
-	if d.Status == TrackerDeliveryDelivered {
+	if d.Status == TrackerDeliveryDelivered || d.Status == TrackerDeliverySuperseded {
 		delivered = at
 	}
 	_, err := s.db.Exec(`INSERT INTO tracker_deliveries
-		(event_id, task_id, tracker, issue_key, event_type, stage, status, attempts, last_error, created_at, updated_at, delivered_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+		(event_id, task_id, tracker, issue_key, event_type, stage, status, attempts, last_error, transition_to, note, created_at, updated_at, delivered_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, attempts = tracker_deliveries.attempts + 1,
-			last_error = excluded.last_error, updated_at = excluded.updated_at,
-			delivered_at = excluded.delivered_at, issue_key = excluded.issue_key, tracker = excluded.tracker`,
-		d.EventID, d.TaskID, d.Tracker, d.IssueKey, d.EventType, d.Stage, d.Status, d.LastError, at, at, delivered)
+			last_error = CASE WHEN excluded.status = 'superseded' THEN tracker_deliveries.last_error ELSE excluded.last_error END,
+			updated_at = excluded.updated_at,
+			transition_to = CASE WHEN excluded.transition_to != '' THEN excluded.transition_to ELSE tracker_deliveries.transition_to END,
+			note = excluded.note,
+			delivered_at = excluded.delivered_at, issue_key = excluded.issue_key, tracker = excluded.tracker
+		WHERE tracker_deliveries.status != ?`,
+		d.EventID, d.TaskID, d.Tracker, d.IssueKey, d.EventType, d.Stage, d.Status, d.LastError, d.TransitionTo, d.Note, at, at, delivered,
+		TrackerDeliveryAbandoned)
 	if err != nil {
 		return TrackerDelivery{}, err
 	}
@@ -393,9 +417,9 @@ func (s *Store) RecordTrackerDelivery(d TrackerDelivery, at time.Time) (TrackerD
 }
 
 // SetTrackerDeliveryStatus закрывает доставку без обращения к трекеру
-// (abandoned, superseded) и сохраняет причину.
+// (abandoned, superseded). Причина пишется в note: исходная last_error остаётся.
 func (s *Store) SetTrackerDeliveryStatus(eventID int64, status, reason string, at time.Time) (TrackerDelivery, error) {
-	result, err := s.db.Exec(`UPDATE tracker_deliveries SET status = ?, last_error = ?, updated_at = ? WHERE event_id = ?`,
+	result, err := s.db.Exec(`UPDATE tracker_deliveries SET status = ?, note = ?, updated_at = ? WHERE event_id = ?`,
 		status, reason, at.UTC(), eventID)
 	if err != nil {
 		return TrackerDelivery{}, err
@@ -406,24 +430,27 @@ func (s *Store) SetTrackerDeliveryStatus(eventID int64, status, reason string, a
 	return s.GetTrackerDelivery(eventID)
 }
 
-// HasNewerDeliveredTrackerEvent сообщает, доставлено ли по задаче и карточке
-// более новое событие этапа (старт или завершение), чем eventID.
-func (s *Store) HasNewerDeliveredTrackerEvent(taskID int64, tracker, issueKey string, eventID int64) (bool, error) {
+// HasNewerExecutedTrackerTransition сообщает, выполнила ли доставка более
+// нового события этапа по той же задаче и карточке переход (transition_to
+// непусто). Событие без перехода «более новым» не считается: иначе повтор
+// молча потерял бы переход, который так и не был выполнен.
+func (s *Store) HasNewerExecutedTrackerTransition(taskID int64, tracker, issueKey string, eventID int64) (bool, error) {
 	var found int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM tracker_deliveries
-		WHERE task_id = ? AND tracker = ? AND issue_key = ? AND status = ? AND event_id > ?
-		AND event_type IN ('attempt_started', 'attempt_finished') LIMIT 1)`,
-		taskID, tracker, issueKey, TrackerDeliveryDelivered, eventID).Scan(&found)
+		WHERE task_id = ? AND tracker = ? AND issue_key = ? AND event_id > ? AND transition_to != ''
+		AND status IN (?, ?, ?) LIMIT 1)`,
+		taskID, tracker, issueKey, eventID,
+		TrackerDeliveryDelivered, TrackerDeliveryFailed, TrackerDeliverySuperseded).Scan(&found)
 	return found > 0, err
 }
 
-const trackerDeliveryColumns = `event_id, task_id, tracker, issue_key, event_type, stage, status, attempts, last_error, created_at, updated_at, delivered_at`
+const trackerDeliveryColumns = `event_id, task_id, tracker, issue_key, event_type, stage, status, attempts, last_error, transition_to, note, created_at, updated_at, delivered_at`
 
 func scanTrackerDelivery(scanner interface{ Scan(...any) error }) (TrackerDelivery, error) {
 	var d TrackerDelivery
 	var delivered sql.NullTime
 	if err := scanner.Scan(&d.EventID, &d.TaskID, &d.Tracker, &d.IssueKey, &d.EventType, &d.Stage, &d.Status,
-		&d.Attempts, &d.LastError, &d.CreatedAt, &d.UpdatedAt, &delivered); err != nil {
+		&d.Attempts, &d.LastError, &d.TransitionTo, &d.Note, &d.CreatedAt, &d.UpdatedAt, &delivered); err != nil {
 		return TrackerDelivery{}, err
 	}
 	d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()

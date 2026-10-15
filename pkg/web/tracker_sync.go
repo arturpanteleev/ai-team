@@ -98,7 +98,7 @@ func (s *Server) deliverTrackerEvent(ctx context.Context, stored store.Event) bo
 	if len(ops) == 0 {
 		return true
 	}
-	_, ok := s.runTrackerDelivery(ctx, stored, *link, ops)
+	_, ok := s.runTrackerDelivery(ctx, stored, *link, ops, "")
 	return ok
 }
 
@@ -122,14 +122,21 @@ func (s *Server) planTrackerEvent(stored store.Event, taskID int64) ([]tracker.O
 // runTrackerDelivery executes the operations, persists the outcome and, on
 // failure, a visible warning event. The bool is false when the outcome could
 // not be persisted at all, which keeps the source event pending.
-func (s *Server) runTrackerDelivery(ctx context.Context, stored store.Event, link store.TrackerLink, ops []tracker.Operation) (store.TrackerDelivery, bool) {
-	execErr := tracker.Execute(ctx, s.trackerSync.tracker, link.IssueKey, ops)
+func (s *Server) runTrackerDelivery(ctx context.Context, stored store.Event, link store.TrackerLink, ops []tracker.Operation, staleNote string) (store.TrackerDelivery, bool) {
+	transitioned, execErr := tracker.ExecuteReport(ctx, s.trackerSync.tracker, link.IssueKey, ops)
 	delivery := store.TrackerDelivery{
 		EventID: stored.ID, TaskID: link.TaskID, Tracker: link.Tracker, IssueKey: link.IssueKey,
 		EventType: stored.Type, Stage: stored.Stage, Status: store.TrackerDeliveryDelivered,
+		TransitionTo: transitioned, Note: staleNote,
+	}
+	if staleNote != "" {
+		// The comment went out but the stale transition did not: say so
+		// explicitly instead of reporting a plain delivery.
+		delivery.Status = store.TrackerDeliverySuperseded
 	}
 	if execErr != nil {
 		delivery.Status = store.TrackerDeliveryFailed
+		delivery.Note = ""
 		delivery.LastError = execErr.Error()
 	}
 	recorded, recordErr := s.store.RecordTrackerDelivery(delivery, s.clock())
@@ -197,7 +204,7 @@ func (s *Server) retryTrackerDelivery(ctx context.Context, eventID int64) (store
 	if len(ops) == 0 {
 		return s.markTrackerDelivery(delivery, store.TrackerDeliverySuperseded, stale)
 	}
-	updated, ok := s.runTrackerDelivery(ctx, *stored, *link, ops)
+	updated, ok := s.runTrackerDelivery(ctx, *stored, *link, ops, stale)
 	if !ok {
 		return delivery, errors.New("tracker delivery outcome could not be recorded")
 	}
@@ -205,8 +212,9 @@ func (s *Server) retryTrackerDelivery(ctx context.Context, eventID int64) (store
 }
 
 // dropSupersededTransitions removes transitions from a retried delivery when
-// a newer stage event of the same task is already delivered to the same card:
-// the old transition would move the card back. Comments are idempotent and
+// a newer event of the same task has already performed a transition on the
+// same card: the old transition would move the card back. A newer event that
+// only delivered a comment does not count; the transition is then retried. Comments are idempotent and
 // stay. The returned text explains the skip.
 func (s *Server) dropSupersededTransitions(delivery store.TrackerDelivery, ops []tracker.Operation) ([]tracker.Operation, string, error) {
 	hasTransition := false
@@ -216,7 +224,7 @@ func (s *Server) dropSupersededTransitions(delivery store.TrackerDelivery, ops [
 	if !hasTransition {
 		return ops, "", nil
 	}
-	newer, err := s.store.HasNewerDeliveredTrackerEvent(delivery.TaskID, delivery.Tracker, delivery.IssueKey, delivery.EventID)
+	newer, err := s.store.HasNewerExecutedTrackerTransition(delivery.TaskID, delivery.Tracker, delivery.IssueKey, delivery.EventID)
 	if err != nil || !newer {
 		return ops, "", err
 	}
@@ -226,12 +234,12 @@ func (s *Server) dropSupersededTransitions(delivery store.TrackerDelivery, ops [
 			kept = append(kept, op)
 		}
 	}
-	return kept, "superseded by a newer delivered event; the stale transition was not sent", nil
+	return kept, "stale transition was not sent: a newer event already moved the card", nil
 }
 
 // markTrackerDelivery closes a failed delivery without calling the tracker.
 func (s *Server) markTrackerDelivery(delivery store.TrackerDelivery, status, reason string) (store.TrackerDelivery, error) {
-	delivery.Status, delivery.LastError = status, reason
+	delivery.Status, delivery.Note = status, reason
 	return s.store.SetTrackerDeliveryStatus(delivery.EventID, status, reason, s.clock())
 }
 

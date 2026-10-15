@@ -102,6 +102,23 @@ which roles may do it. In local mode without a principal everything is offered.
 - **ТОГДА** the actions column MUST show «Ответить или решить может участник с ролью: …»
   and MUST NOT show the decision buttons
 
+#### Scenario: Stage actions follow the stage function
+
+- **КОГДА** the run detail lists `take`, `results`, `skip` or `run-agent` in
+  `allowed_actions` but not in `viewer_actions` (the viewer's role is not the function
+  of the stage)
+- **ТОГДА** the actions column MUST NOT show those buttons and MUST name the role
+  that may act
+- **И** the buttons MUST be shown only for the intersection of `allowed_actions` and
+  `viewer_actions`
+
+#### Scenario: A pending transition confirmation addresses the completed stage
+
+- **КОГДА** a transition confirmation waits and its `from_stage` differs from the next stage
+- **ТОГДА** the return routes and the return request MUST use the `from_stage`, as the
+  heading of the group does, and skip MUST NOT be offered
+- **И** one return path MUST exist per meaning, under one name
+
 #### Scenario: The administrator right is separate
 
 - **КОГДА** the viewer holds the product owner role without the administrator right

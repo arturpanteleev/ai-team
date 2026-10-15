@@ -122,6 +122,20 @@ tasks and renders each stage action only when its name is present in
 the task history and displays checker evidence, event details, and attempt log
 links alongside the run.
 
+`allowed_actions` says what the task state offers to anyone. Run detail also
+returns `viewer_actions` (always a list): the part of `allowed_actions` the
+requesting principal may perform, computed by the same checks the action
+handlers enforce: the stage function (`take`, `run-agent`, `executor`,
+`gate-retry` as take; `results` and `grill/*` as submit; `skip` as bypass;
+`confirm` and `return` as confirm on the stage being confirmed), the
+administrator right (`override`), the unvoted required role (`plan/approve`)
+and `forbid_self_approval` for `confirm`. It never adds an action that is not in
+`allowed_actions`. The page offers a button only for an action present in both
+lists and otherwise names the role that may act. MCP receives the same field.
+While a transition confirmation waits, `confirm` and `return` address the
+approval's `from_stage` (the completed stage), `skip` is offered only at a
+pending human input and `override` only at a failed check of the next stage.
+
 When `allowed_actions` contains `results`, the page submits the stage's
 configured result type through `POST .../results`: a Markdown editor with
 preview and `.md` file upload (UTF-8, up to 10 MiB), a link form that uses the

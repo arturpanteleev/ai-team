@@ -117,7 +117,11 @@ type taskRunDetails struct {
 	StageOwners    map[string]store.StageOwner         `json:"stage_owners"`
 	Results        map[string][]humanartifact.Revision `json:"results"`
 	AllowedActions []string                            `json:"allowed_actions"`
-	Delivery       webDeliveryProjection               `json:"delivery"`
+	// ViewerActions is the part of allowed_actions the requesting principal
+	// may perform (stage function, system right, plan roles). It is computed
+	// by the same checks the action handlers enforce.
+	ViewerActions []string              `json:"viewer_actions"`
+	Delivery      webDeliveryProjection `json:"delivery"`
 	// StageStatuses is the server-side projection of every stage of the task
 	// from the durable journal (S11). It is read-only: no route sets a status.
 	StageStatuses *stagestatus.Projection `json:"stage_statuses,omitempty"`
@@ -300,6 +304,7 @@ func (s *Server) handleGetTaskRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, status, err.Error(), apiErrorCode(status))
 		return
 	}
+	details.ViewerActions = s.viewerActions(r, details.State, details.Approvals, details.AllowedActions)
 	writeJSONResponse(w, http.StatusOK, details)
 }
 
@@ -316,7 +321,7 @@ func (s *Server) loadTaskRunDetails(runID string) (taskRunDetails, int, error) {
 		return taskRunDetails{}, http.StatusInternalServerError, errors.New("stage history unavailable")
 	}
 	details := taskRunDetails{Run: run, Stages: stages, Approvals: []approval.PendingApproval{},
-		StageOwners: map[string]store.StageOwner{}, Results: map[string][]humanartifact.Revision{}, AllowedActions: []string{}}
+		StageOwners: map[string]store.StageOwner{}, Results: map[string][]humanartifact.Revision{}, AllowedActions: []string{}, ViewerActions: []string{}}
 	var taskMetadata startRunCommand
 	if json.Unmarshal([]byte(run.ConfigSnapshot), &taskMetadata) == nil {
 		details.Task, details.Mode, details.ExternalLinks = taskMetadata.Task, taskMetadata.Mode, taskMetadata.ExternalLinks
@@ -514,6 +519,12 @@ func (s *Server) taskAllowedActionsWith(templates *taskTemplateLookup, runID, st
 	if stageID == "" {
 		return actions
 	}
+	// A return route starts at the stage a person confirms: while a transition
+	// confirmation waits that is the approval's from_stage, not the next stage.
+	returnFrom := stageID
+	// The controller skips a waiting stage only at its pending human input; a
+	// transition confirmation or a check decision cannot be skipped.
+	skipOffered := false
 	stage, stageErr := templates.stage(runID, stageID)
 	if state.Phase == lifecycle.PhaseResumable && stageErr == nil && stage.Agent != "" {
 		actions = append(actions, "run-agent")
@@ -524,8 +535,12 @@ func (s *Server) taskAllowedActionsWith(templates *taskTemplateLookup, runID, st
 				if pending.ID != state.PendingApprovalID || pending.Status != approval.StatusPending {
 					continue
 				}
+				if pending.FromStage != "" {
+					returnFrom = pending.FromStage
+				}
 				switch {
 				case pending.Kind == approval.KindInput && pending.Trigger == humanInputTrigger:
+					skipOffered = true
 					actions = append(actions, "take", "results")
 					if stageErr == nil && stage.Agent != "" {
 						actions = append(actions, "executor", "run-agent")
@@ -558,14 +573,14 @@ func (s *Server) taskAllowedActionsWith(templates *taskTemplateLookup, runID, st
 			}
 		}
 	}
-	if stageErr == nil && stage.Skippable && (state.Phase == lifecycle.PhaseWaiting || state.Phase == lifecycle.PhaseResumable) {
+	if stageErr == nil && stage.Skippable && (state.Phase == lifecycle.PhaseWaiting && skipOffered || state.Phase == lifecycle.PhaseResumable) {
 		actions = append(actions, "skip")
 	}
 	if stageErr == nil && state.Phase == lifecycle.PhaseWaiting {
 		cfg, found, err := templates.config(runID)
 		if err == nil && found {
 			for _, route := range cfg.Returns {
-				if route.From == stageID {
+				if route.From == returnFrom {
 					actions = append(actions, "return")
 					break
 				}

@@ -196,7 +196,7 @@ func TestPRHardRulesRunForHumanAndAgentImplementations(t *testing.T) {
 				Check: &config.TemplateCheck{Kind: "hard", Rules: []string{"project_checks", "pr_checks_green"}},
 			}
 			result := notifier.StageResult{Outputs: []runtime.Artifact{{Name: "pr-url", Path: path}}}
-			report := rs.runHardChecks(context.Background(), stage, result)
+			report := rs.runHardRules(context.Background(), stage, result, stage.RequiredSections, stage.Check.Rules, &hardWaveState{})
 			if report.Status != stagecheck.StatusPassed || report.PRIdentity == nil || report.PRIdentity.HeadRefOID != strings.Repeat("a", 40) || checks.called["project_checks"] != 1 || checks.called["pr_checks_green"] != 1 {
 				t.Fatalf("PR checks for executor=%s: report=%+v calls=%+v", executor, report, checks.called)
 			}
@@ -210,6 +210,9 @@ type fakePRStageChecks struct {
 	repositoryCaptures int
 	// url overrides the PR URL the fake reports (default example/project#9).
 	url string
+	// status/reason/err override the answer of CheckIdentity (default: passed).
+	status, reason string
+	err            error
 }
 
 func (f *fakePRStageChecks) prURL() string {
@@ -237,6 +240,12 @@ func (f *fakePRStageChecks) CheckIdentity(_ context.Context, _ string, repositor
 	identity := prchecks.PullRequest{URL: f.prURL(), State: "OPEN", BaseRefName: "master", BaseRefOID: strings.Repeat("b", 40), HeadRefName: "feature", HeadRefOID: strings.Repeat("a", 40)}
 	if expected != nil && (expected.URL != identity.URL || expected.BaseRefOID != identity.BaseRefOID || expected.HeadRefOID != identity.HeadRefOID) {
 		return "", "", prchecks.PullRequest{}, errors.New("identity mismatch")
+	}
+	if f.err != nil {
+		return "", "", prchecks.PullRequest{}, f.err
+	}
+	if f.status != "" {
+		return f.status, f.reason, identity, nil
 	}
 	return stagecheck.RulePassed, "test pass", identity, nil
 }
@@ -372,7 +381,7 @@ func TestPRRulesFailClosedWithoutCapturedTaskRepository(t *testing.T) {
 		Check: &config.TemplateCheck{Kind: "hard", Rules: []string{"pr_checks_green"}},
 	}
 	result := notifier.StageResult{Outputs: []runtime.Artifact{{Name: "pr-url", Path: path}}}
-	report := rs.runHardChecks(context.Background(), stage, result)
+	report := rs.runHardRules(context.Background(), stage, result, stage.RequiredSections, stage.Check.Rules, &hardWaveState{})
 	if report.Status == stagecheck.StatusPassed || report.PRIdentity != nil || len(checks.called) != 0 {
 		t.Fatalf("PR rules must not run without a captured task repository: report=%+v calls=%+v", report, checks.called)
 	}

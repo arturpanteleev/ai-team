@@ -15,6 +15,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/gatelib"
+	"github.com/arturpanteleev/ai-team/pkg/gatephrases"
 	"github.com/arturpanteleev/ai-team/pkg/gatesched"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
@@ -267,6 +268,10 @@ func (rs *runState) builtinGateRunner(stage config.TemplateStage, result notifie
 	return gatesched.RunnerFunc(func(ctx context.Context, in gatesched.Invocation) gatesched.Outcome {
 		var sections, rules []string
 		switch in.Ref.Gate {
+		case gatelib.GateRequiredPhrases:
+			report := rs.runRequiredPhrases(stage, result, in.Ref)
+			state.setReport(in.Ref.InstanceName(), report)
+			return outcomeFromReport(ctx, report)
 		case gatelib.GateRequiredSections:
 			sections = gatelib.StringListParam(in.Ref.Params, "sections")
 		case gatelib.GateVerdictMarker, gatelib.GatePRExists, gatelib.GatePROpen, gatelib.GatePRBaseBranch,
@@ -275,10 +280,47 @@ func (rs *runState) builtinGateRunner(stage config.TemplateStage, result notifie
 		default:
 			return gatesched.TechnicalError(fmt.Sprintf("нет реализации кодового гейта %s", in.Ref.Key()))
 		}
+		if stage.Result == "md" && (in.Ref.Gate == gatelib.GateRequiredSections || in.Ref.Gate == gatelib.GateVerdictMarker) {
+			// An unreadable md result is a technical error to retry, not an
+			// empty document that merely failed the rule.
+			if _, err := rs.strictResultContent(result); err != nil {
+				return gatesched.TechnicalError(err.Error())
+			}
+		}
 		report := rs.runHardRules(ctx, stage, result, sections, rules, state.hard)
 		state.setReport(in.Ref.InstanceName(), report)
 		return outcomeFromReport(ctx, report)
 	})
+}
+
+// runRequiredPhrases executes the required_phrases gate. Parameters were
+// validated with the configuration; a failure to parse them here, or a result
+// that cannot be read, is a technical error and never a pass or a verdict.
+func (rs *runState) runRequiredPhrases(stage config.TemplateStage, result notifier.StageResult, ref workflow.GateRef) stagecheck.Report {
+	report := stagecheck.Report{Stage: stage.ID, Kind: stagecheck.KindHard}
+	fail := func(reason string) stagecheck.Report {
+		report.Status = stagecheck.StatusError
+		report.Rules = []stagecheck.RuleResult{{Rule: ref.InstanceName(), Status: "error", Reason: reason}}
+		report.Notes = reason
+		return report
+	}
+	spec, err := gatephrases.Parse(ref.Params)
+	if err != nil {
+		return fail("конфигурация гейта: " + err.Error())
+	}
+	content, err := rs.strictResultContent(result)
+	if err != nil {
+		return fail(err.Error())
+	}
+	check := spec.Check(content)
+	rule := stagecheck.RuleResult{Rule: ref.InstanceName(), Status: stagecheck.RulePassed}
+	report.Status = stagecheck.StatusPassed
+	if !check.Satisfied {
+		rule.Status, rule.Reason = stagecheck.RuleFailed, check.Reason
+		report.Status = stagecheck.StatusFailed
+	}
+	report.Rules = []stagecheck.RuleResult{rule}
+	return report
 }
 
 // agentGateRunner executes LLM gates: a plain review is one agent call whose

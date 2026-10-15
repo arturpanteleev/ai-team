@@ -143,6 +143,7 @@ type Pipeline struct {
 	attemptManifestWriter   AttemptManifestWriter
 	eventLogSource          evidence.EventLog
 	prStageChecks           PRStageChecks
+	prRunner                delivery.CommandRunner
 	deliveryApprovalHash    string
 	questionAnswerInputs    QuestionAnswerInputProvider
 	controllerReadDenyPaths []string
@@ -284,6 +285,19 @@ func WithAttemptManifestStore(source evidence.AttemptManifestSource, writer Atte
 // boundary. Production uses the gh/git-backed prchecks.Runner.
 func WithPRStageChecks(checks PRStageChecks) Option {
 	return func(p *Pipeline) { p.prStageChecks = checks }
+}
+
+// WithPullRequestRunner injects the command runner behind the pr_exists,
+// pr_open and pr_base_branch gates (gh pr view). Production uses the real gh.
+func WithPullRequestRunner(runner delivery.CommandRunner) Option {
+	return func(p *Pipeline) { p.prRunner = runner }
+}
+
+func (p *Pipeline) prViewRunner() delivery.CommandRunner {
+	if p.prRunner != nil {
+		return p.prRunner
+	}
+	return delivery.ExecRunner{}
 }
 
 func New(cfg *config.Config, reg *agent.Registry, opts ...Option) *Pipeline {

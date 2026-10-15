@@ -16,8 +16,14 @@
 //  6. the decision is stored and an audit record names the actor, the role,
 //     the action, the hash and the channel.
 //
-// A redelivered request (same actor, same action, same hash) is recognized: it
-// does not create a second decision, and the audit records it as a replay.
+// A redelivered request (same actor, action and hash, with every role of the
+// actor already covered) is recognized: it does not create a second decision,
+// and the audit records it as a replay. A person holding several required
+// roles votes once per role: each call is counted in the next uncovered role
+// (local mode: one owner closes a multi-role quorum all by calling once per
+// role); once all the actor's roles are covered a different action gets
+// ErrAlreadyVoted. Deciding is atomic by the approval store result: of two
+// racing identical requests only the one the store applied writes AuditEvent.
 package humandecision
 
 import (
@@ -119,7 +125,8 @@ type Result struct {
 	// Resolved reports that the quorum is complete and the run may resume.
 	Resolved bool
 	// Replayed reports that an identical earlier decision of the same actor
-	// was found: nothing was stored or audited again.
+	// was found: no second decision was stored; the redelivery is audited as
+	// ReplayAuditEvent (not AuditEvent).
 	Replayed bool
 }
 
@@ -174,29 +181,18 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 	if hash != pending.SubjectHash {
 		return Result{}, ErrHashMismatch
 	}
-	for _, prior := range pending.Decisions {
-		if prior.ActorID == req.Actor.ID && prior.Action == req.Action && prior.SubjectHash == hash {
-			result := Result{Approval: *pending, Role: prior.ActorRole, Resolved: pending.Status == approval.StatusResolved, Replayed: true}
-			// The redelivery is audited as such; it is not a second decision.
-			data := map[string]any{
-				"approval_id": pending.ID, "stage": pending.FromStage, "action": req.Action,
-				"actor_id": req.Actor.ID, "actor_role": prior.ActorRole, "subject_hash": hash, "channel": req.Channel,
-			}
-			if req.RequestKey != "" {
-				data["request_key"] = req.RequestKey
-			}
-			if err := s.ports.Audit(req.RunID, ReplayAuditEvent, s.now(), data); err != nil {
-				return result, fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
-			}
-			return result, nil
-		}
-	}
 	if pending.Status != approval.StatusPending {
+		// A closed approval still recognizes a redelivery of the same decision.
+		if prior, ok := priorDecision(pending.Decisions, req.Actor.ID, req.Action, hash); ok {
+			return s.replay(req, *pending, prior, hash)
+		}
 		return Result{}, ErrNotPending
 	}
-	// A person who holds several required roles votes once per role (the
-	// approval store enforces the same action for quorum all); a role that is
-	// already covered cannot be voted again.
+	// A person who holds several required roles votes once per role, each
+	// time in the next role that is not covered yet (local mode: one owner
+	// holds every role and closes a quorum all of several roles by calling
+	// the decision once per role; the approval store enforces the same action
+	// for quorum all). A role that is already covered is never voted again.
 	role := ""
 	if req.Actor.HasRole != nil {
 		for _, required := range pending.RequiredRoles {
@@ -207,6 +203,11 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 		}
 	}
 	if role == "" {
+		// Every role of this actor is covered: the same decision again is a
+		// redelivery (replay); a different one is an explicit refusal.
+		if prior, ok := priorDecision(pending.Decisions, req.Actor.ID, req.Action, hash); ok {
+			return s.replay(req, *pending, prior, hash)
+		}
 		for _, prior := range pending.Decisions {
 			if prior.ActorID == req.Actor.ID {
 				return Result{}, ErrAlreadyVoted
@@ -228,13 +229,25 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 			return Result{}, fmt.Errorf("не удалось закрепить текущие версии артефактов: %w", err)
 		}
 	}
+	decidedAt := s.now()
 	resolved, err := s.ports.Decide(req.RunID, req.ApprovalID, approval.Decision{
-		ActorID: req.Actor.ID, ActorRole: role, Action: req.Action, Comment: req.Comment,
+		ActorID: req.Actor.ID, ActorRole: role, Action: req.Action, Comment: req.Comment, DecidedAt: decidedAt,
 		SubjectHash: hash, ArtifactRevisions: copyMap(revisions),
 		ControllerAuthenticated: req.Actor.Authenticated,
 	})
 	if err != nil {
 		return Result{}, err
+	}
+	// The store treats an identical decision of the same actor and role as
+	// idempotent and returns the stored one. Whether this call stored a new
+	// decision is decided by the store result (our unique timestamp is in it),
+	// not by the earlier read, so two racing identical requests audit once.
+	if !decisionStored(resolved.Decisions, req.Actor.ID, role, decidedAt) {
+		prior, _ := priorDecision(resolved.Decisions, req.Actor.ID, req.Action, hash)
+		if prior.ActorRole == "" {
+			prior.ActorRole = role
+		}
+		return s.replay(req, resolved, prior, hash)
 	}
 	result := Result{Approval: resolved, Role: role, Resolved: resolved.Status == approval.StatusResolved}
 	data := map[string]any{
@@ -254,6 +267,41 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 		return result, fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return result, nil
+}
+
+// replay answers a redelivered request: nothing is stored again and the audit
+// records the redelivery under ReplayAuditEvent.
+func (s *Service) replay(req Request, pending approval.PendingApproval, prior approval.Decision, hash string) (Result, error) {
+	result := Result{Approval: pending, Role: prior.ActorRole, Resolved: pending.Status == approval.StatusResolved, Replayed: true}
+	data := map[string]any{
+		"approval_id": pending.ID, "stage": pending.FromStage, "action": req.Action,
+		"actor_id": req.Actor.ID, "actor_role": prior.ActorRole, "subject_hash": hash, "channel": req.Channel,
+	}
+	if req.RequestKey != "" {
+		data["request_key"] = req.RequestKey
+	}
+	if err := s.ports.Audit(req.RunID, ReplayAuditEvent, s.now(), data); err != nil {
+		return result, fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+	}
+	return result, nil
+}
+
+func priorDecision(decisions []approval.Decision, actorID, action, hash string) (approval.Decision, bool) {
+	for _, prior := range decisions {
+		if prior.ActorID == actorID && prior.Action == action && prior.SubjectHash == hash {
+			return prior, true
+		}
+	}
+	return approval.Decision{}, false
+}
+
+func decisionStored(decisions []approval.Decision, actorID, role string, at time.Time) bool {
+	for _, decision := range decisions {
+		if decision.ActorID == actorID && decision.ActorRole == role && decision.DecidedAt.Equal(at) {
+			return true
+		}
+	}
+	return false
 }
 
 func roleVoted(decisions []approval.Decision, role string) bool {

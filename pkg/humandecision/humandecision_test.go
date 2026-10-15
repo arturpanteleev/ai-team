@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ type auditRecord struct {
 }
 
 type fakePorts struct {
+	mu        sync.Mutex
 	store     *approval.Store
 	selfErr   error
 	auditErr  error
@@ -28,7 +30,9 @@ func (f *fakePorts) Approvals(runID string) ([]approval.PendingApproval, error) 
 }
 
 func (f *fakePorts) Decide(runID, approvalID string, decision approval.Decision) (approval.PendingApproval, error) {
+	f.mu.Lock()
 	f.decisions++
+	f.mu.Unlock()
 	return f.store.Decide(runID, approvalID, decision)
 }
 
@@ -41,6 +45,8 @@ func (f *fakePorts) PinRevisions(string, approval.PendingApproval) (map[string]s
 }
 
 func (f *fakePorts) Audit(_ string, eventType string, _ time.Time, data map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.auditErr != nil {
 		return f.auditErr
 	}
@@ -215,5 +221,86 @@ func TestDecideRefusesNonTransitionApprovals(t *testing.T) {
 	req := request(other, actor("po-1", "product_owner"), "approve")
 	if _, err := New(ports).Decide(context.Background(), req); !errors.Is(err, ErrNotTransition) {
 		t.Fatalf("the delivery plan has its own path: %v", err)
+	}
+}
+
+func TestOneOwnerClosesMultiRoleQuorumAll(t *testing.T) {
+	ports, pending := newPending(t, approval.QuorumAll, "product_owner", "architect")
+	service := New(ports)
+	owner := actor("owner", "product_owner", "architect")
+	first, err := service.Decide(context.Background(), request(pending, owner, "approve"))
+	if err != nil || first.Resolved || first.Replayed {
+		t.Fatalf("first call covers one role: %+v %v", first, err)
+	}
+	second, err := service.Decide(context.Background(), request(pending, owner, "approve"))
+	if err != nil || !second.Resolved || second.Replayed || second.Role == first.Role {
+		t.Fatalf("second call must cover the other role and close the quorum: %+v %v", second, err)
+	}
+	if len(second.Approval.Decisions) != 2 {
+		t.Fatalf("decisions = %+v", second.Approval.Decisions)
+	}
+	// All roles covered: the same request is a replay, another action is refused.
+	again, err := service.Decide(context.Background(), request(pending, owner, "approve"))
+	if err != nil || !again.Replayed || !again.Resolved {
+		t.Fatalf("third identical call is a replay: %+v %v", again, err)
+	}
+	if _, err := service.Decide(context.Background(), request(pending, owner, "reject")); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("a closed request refuses another action: %v", err)
+	}
+}
+
+func TestSameActorOtherRoleIsNeverSilentReplay(t *testing.T) {
+	ports, pending := newPending(t, approval.QuorumAll, "product_owner", "architect", "qa")
+	service := New(ports)
+	owner := actor("owner", "product_owner", "architect")
+	if _, err := service.Decide(context.Background(), request(pending, owner, "approve")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Decide(context.Background(), request(pending, owner, "approve"))
+	if err != nil || got.Replayed || got.Resolved || len(got.Approval.Decisions) != 2 {
+		t.Fatalf("second role vote must be recorded, not replayed: %+v %v", got, err)
+	}
+	// Both of the actor's roles are covered; qa is still missing.
+	if _, err := service.Decide(context.Background(), request(pending, owner, "reject")); !errors.Is(err, ErrAlreadyVoted) {
+		t.Fatalf("a different action must be ErrAlreadyVoted: %v", err)
+	}
+	replay, err := service.Decide(context.Background(), request(pending, owner, "approve"))
+	if err != nil || !replay.Replayed || replay.Resolved {
+		t.Fatalf("redelivery with all own roles covered: %+v %v", replay, err)
+	}
+}
+
+func TestParallelIdenticalRequestsAuditOnce(t *testing.T) {
+	ports, pending := newPending(t, approval.QuorumAny, "product_owner")
+	service := New(ports)
+	req := request(pending, actor("po-1", "product_owner"), "approve")
+	const n = 8
+	var wg sync.WaitGroup
+	results := make([]Result, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = service.Decide(context.Background(), req)
+		}(i)
+	}
+	wg.Wait()
+	decided, replayed := 0, 0
+	for _, a := range ports.audits {
+		switch a.eventType {
+		case AuditEvent:
+			decided++
+		case ReplayAuditEvent:
+			replayed++
+		}
+	}
+	for i, err := range errs {
+		if err != nil || !results[i].Resolved {
+			t.Fatalf("request %d: %+v %v", i, results[i], err)
+		}
+	}
+	if decided != 1 || replayed != n-1 {
+		t.Fatalf("decided %d, replayed %d (audits %d)", decided, replayed, len(ports.audits))
 	}
 }

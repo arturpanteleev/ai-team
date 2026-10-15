@@ -17,7 +17,8 @@
 //     (the stage attempt that produced it). Attempts recorded for any other
 //     hash or scope are never read, so a success of an old version cannot
 //     satisfy a new one: a new version runs every group again from the first.
-//   - The hash is frozen for the whole wave: the Freezer lease is verified
+//   - The wave is bound to one hash (detective, fail-closed; writes are not
+//     blocked): the Freezer lease is verified
 //     before the wave, after every gate and at the end. A change aborts the
 //     wave with ErrResultChanged and nothing from that wave is trusted.
 //   - After a required gate fails the following groups never start, but every
@@ -30,6 +31,7 @@ package gatesched
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -353,6 +355,9 @@ func (s *Scheduler) Run(ctx context.Context, wave Wave) (Result, error) {
 			if errors.Is(err, ErrResultChanged) {
 				return abort(err)
 			}
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+				return s.finish(slots, result, err)
+			}
 			return Result{}, err
 		}
 		if err := verify(); err != nil {
@@ -482,12 +487,24 @@ func (s *Scheduler) runGroup(ctx context.Context, wave Wave, gates []*slot, veri
 		panic(panicking)
 	}
 	sort.Strings(invoked)
+	if fatal == nil {
+		// Gates interrupted by the cancellation report "canceled"; the wave as
+		// a whole is cancelled, not a technical error.
+		if err := ctx.Err(); err != nil {
+			fatal = fmt.Errorf("gatesched: %w", err)
+		}
+	}
 	return invoked, fatal
 }
 
 // runOne performs one attempt: record start, invoke, record the terminal or
 // waiting state. The returned ID is non-empty when the runner was invoked.
 func (s *Scheduler) runOne(ctx context.Context, wave Wave, sl *slot) (string, error) {
+	// A cancelled context must not start new attempts: they would only be
+	// recorded as running and immediately closed as canceled/error noise.
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("gatesched: %w", err)
+	}
 	latest, has := sl.latest()
 	resumed := has && latest.Execution == workflow.GateExecutionPending
 	var attempt workflow.GateAttempt
@@ -558,13 +575,17 @@ func (s *Scheduler) newAttempt(wave Wave, sl *slot) workflow.GateAttempt {
 
 // AttemptID is the deterministic ID of the n-th (1-based) attempt of a gate
 // instance on a wave key. Determinism lets a redelivered or replayed record be
-// recognized as the same attempt.
+// recognized as the same attempt. The scope (the stage attempt) is part of the
+// ID, so two stage attempts with the same visit and the same bytes never share
+// a gate attempt ID. Attempts recorded before the scope was added keep their
+// old IDs: recovery reads IDs from the journal and never recomputes them.
 func AttemptID(key WaveKey, gateName string, n int) string {
 	sha := key.ArtifactSHA256
 	if len(sha) > 12 {
 		sha = sha[:12]
 	}
-	return fmt.Sprintf("gate-%s-v%d-%s-%s-%d", key.Stage, key.Visit, sha, gateName, n)
+	scope := sha256.Sum256([]byte(key.Scope))
+	return fmt.Sprintf("gate-%s-v%d-%s-%x-%s-%d", key.Stage, key.Visit, sha, scope[:4], gateName, n)
 }
 
 // invoke runs the runner of the gate's kind.

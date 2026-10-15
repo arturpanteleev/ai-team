@@ -154,12 +154,14 @@ continues. LLM gates of one group MUST run one at a time.
 - **КОГДА** a group has more gates than `gate_concurrency`
 - **ТОГДА** no more than `gate_concurrency` of them MUST run at the same time
 
-### Requirement: The result version is frozen for the whole wave
+### Requirement: A wave is bound to one result version and an edit voids it
 
 A wave MUST be bound to one result version: the SHA-256 of the declared outputs
-of the checked stage attempt. The controller MUST verify before the wave, after
+of the checked stage attempt. The controller does not physically forbid writes to
+the result files (other processes own them); the binding is detective and
+fail-closed. The controller MUST verify before the wave, after
 every gate, and at the end of the wave that the hash did not change. A change MUST
-void the wave: no outcome of it MAY be used, no following group MAY start, and a
+be detected and MUST void the wave: no outcome of it MAY be used, no following group MAY start, and a
 `gate_wave_aborted` record MUST be written. A recorded outcome MUST be read only
 for the exact stage, visit, stage attempt, and hash of the wave: an outcome of an
 earlier version MUST NOT count for a new one, so a new version MUST run every

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -62,10 +63,12 @@ func resultVersionOf(outputs []runtime.Artifact) (string, error) {
 		if output.Path == "" {
 			continue
 		}
-		digest := "unreadable"
+		var digest string
 		if data, err := safeio.ReadRegularFile(output.Path, maxArtifactFileBytes); err == nil {
 			sum := sha256.Sum256(data)
 			digest = hex.EncodeToString(sum[:])
+		} else {
+			digest = unreadableDigest(output.Path, err)
 		}
 		entries = append(entries, entry{name: output.Name, path: output.Path, digest: digest})
 	}
@@ -80,6 +83,19 @@ func resultVersionOf(outputs []runtime.Artifact) (string, error) {
 		hash.Write([]byte(item.name + "\x00" + item.digest + "\n"))
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// unreadableDigest keeps an unreadable or oversized output from collapsing into
+// one constant: size and modification time of the file (or the absence of it)
+// go into the digest, so replacing or touching such a file changes the version
+// and voids the wave instead of passing unnoticed.
+func unreadableDigest(path string, readErr error) string {
+	state := "missing"
+	if info, err := os.Lstat(path); err == nil {
+		state = fmt.Sprintf("%s:%d:%d", info.Mode().Type(), info.Size(), info.ModTime().UnixNano())
+	}
+	sum := sha256.Sum256([]byte("unreadable\x00" + state + "\x00" + fmt.Sprintf("%T", readErr)))
+	return "unreadable:" + hex.EncodeToString(sum[:])
 }
 
 // resultFreezer pins the result version for a wave. The pipeline cannot take
@@ -471,7 +487,7 @@ func verifyRecordedPins(event evidence.Event, current []workflow.GatePin) error 
 			return fmt.Errorf("определение гейта %s не было закреплено при старте задачи", key)
 		}
 		if digest != pin.Digest {
-			return fmt.Errorf("определение гейта %s изменилось с момента старта задачи (digest %s, закреплён %s): опубликованные определения неизменяемы", key, short(pin.Digest), short(digest))
+			return fmt.Errorf("определение гейта %s изменилось с момента старта задачи (digest %s, закреплён %s): опубликованные определения неизменяемы; верните прежнюю версию библиотеки гейтов или создайте новую задачу из актуального шаблона", key, short(pin.Digest), short(digest))
 		}
 	}
 	return nil

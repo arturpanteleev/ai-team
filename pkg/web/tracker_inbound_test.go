@@ -161,12 +161,12 @@ func TestInboundAllowedStatusAdvancesGraphThroughController(t *testing.T) {
 	if result.Changes != 1 || result.Applied != 1 {
 		t.Fatalf("sync result: %+v", result)
 	}
-	if len(f.controller.agentCalls) != 1 || f.controller.agentCalls[0] != "inbound-ok|implementation|tracker:fake:alice" {
+	if len(f.controller.agentCalls) != 1 || f.controller.agentCalls[0] != "inbound-ok|implementation|tracker:fake" {
 		t.Fatalf("controller calls: %v", f.controller.agentCalls)
 	}
 	// The same change is visible through REST (the MCP tools project these routes).
 	applied := f.requests(t, "applied")
-	if len(applied) != 1 || applied[0].ToStatus != "In Progress" || applied[0].ResolvedBy != "tracker:fake:alice" || applied[0].Stage != "implementation" {
+	if len(applied) != 1 || applied[0].ToStatus != "In Progress" || applied[0].ResolvedBy != "tracker:fake" || applied[0].Stage != "implementation" {
 		t.Fatalf("applied requests: %+v", applied)
 	}
 	state := runTrackerState(t, f.srv, run)

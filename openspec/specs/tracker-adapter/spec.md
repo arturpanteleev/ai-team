@@ -256,7 +256,7 @@ a replayed change is never decided twice.
 Inbound requests MUST act only through the controller's own paths. The only
 graph action an inbound request may perform automatically is
 continuing a stage that is ready (the same controller call as the `run-agent`
-action, under the actor `tracker:<adapter>:<author>`). The server MUST NOT
+action, under the actor `tracker:<adapter>`). The server MUST NOT
 confirm a stage, decide an approval, override or skip a gate, submit a result
 or return a task on behalf of a tracker status, so required gates, human
 confirmations, the configured return routes and visit limits cannot be bypassed.
@@ -283,10 +283,71 @@ The local state MUST never be replaced by the tracker's status.
 - **THEN** the request MUST be `pending` with the reason and the allowed actions
 - **AND** no approval, override, skip or resume MUST be performed
 
+### Requirement: Inbound trust comes from configuration and every launch is audited
+
+The trust for an inbound launch MUST come from the `tracker.inbound`
+configuration: the operator who lists a status in `rules` decides that this
+status may continue a ready stage. The external author MUST NOT be identified
+as an ai-team user and no stage permission (RBAC) MUST be evaluated against
+that author; the author's display name MUST be stored and shown only as
+untrusted information and MUST NOT be part of the actor. The actor in the
+audit trail is the adapter (`tracker:<adapter>`) together with the change ID.
+Before the controller is called, the server MUST record the run event
+`tracker_inbound_launch` (actor, adapter, change ID, stage, issue key, status,
+untrusted author) and MUST NOT launch when the event cannot be recorded. This
+event MUST NOT count as stage authorship: a tracker launch neither makes a
+person an author of the stage nor removes authorship from a person who worked
+on it, so `forbid_self_approval` and the role check of whoever confirms the
+stage stay exactly as they are. Everything that needs a person's right (a
+confirmation, a gate decision, a return) MUST remain a request that the person
+performs under their own identity.
+
+A request MUST be applied only to the stage at which the status was set. A
+status set before the task entered its current stage MUST be stored as
+`superseded` with the reason, and a request that an earlier pass began for a
+stage and did not finish (a crash after the launch) MUST be `superseded` when
+the task is no longer ready at that stage instead of launching the next one.
+Fields that come from the tracker (author, statuses, change ID, reason) MUST
+be cleaned of control characters and limited to 256 bytes (reason: 512) when
+stored. A manual `sync now` inside five seconds after a successful manual pass
+MUST return that pass's result (marked `coalesced`) without reading the
+tracker; a failed pass is never reused.
+
+#### Scenario: Launch is audited and grants no authorship
+
+- **WHEN** an allowed status continues a ready stage
+- **THEN** a `tracker_inbound_launch` event with the actor `tracker:<adapter>`
+  and the change ID MUST be recorded before the controller is called
+- **AND** the author's display name MUST NOT appear in the actor
+- **AND** the event MUST NOT be a stage-author event
+
+#### Scenario: Stale status
+
+- **WHEN** the status change is older than the moment the task entered its stage
+- **THEN** the request MUST be `superseded` and the controller MUST NOT be called
+
+### Requirement: Refused requests wait for the operator and pre-link history is not replayed
+
+The server MUST keep a request refused by the controller (an active run, a
+visit limit, drift of the configuration or template) as `pending` with the
+controller's reason until an operator acts through the normal stage route or
+dismisses it; the server MUST NOT retry it automatically. The first pass on an
+empty cursor records the tracker tail, and while no task is linked the cursor
+keeps following the tail, so status changes made before a link was created are
+not visible and are never replayed.
+
+#### Scenario: Controller refuses
+
+- **WHEN** the controller refuses to continue the stage
+- **THEN** the request MUST stay `pending` with the refusal text
+
 ### Requirement: Inbound and outbound updates do not loop
 
 A change whose origin is ai-team's own account MUST be recorded as ignored and
-MUST NOT create a request. Changes of unknown origin MUST be treated as
+MUST NOT create a request. An adapter MUST fail the read, leaving the cursor
+unchanged, when it cannot determine its own account, instead of guessing the
+origin. An adapter MUST bound the size of one tracker query (Jira sends issue
+keys in batches of at most 50 and merges them under one cursor). Changes of unknown origin MUST be treated as
 external. A change for an issue that has no link MUST NOT be processed.
 
 #### Scenario: Own transition

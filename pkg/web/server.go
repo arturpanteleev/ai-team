@@ -167,6 +167,8 @@ type Server struct {
 	trackerSync         *trackerSync
 	trackerInbound      *trackerInboundPolicy
 	trackerSyncMu       sync.Mutex
+	trackerManualAt     *time.Time
+	trackerManualResult trackerSyncResult
 	notifications       *notifier.Dispatcher
 	notificationWorker  *NotificationWorker
 	templateAgentLookup config.AgentLookup

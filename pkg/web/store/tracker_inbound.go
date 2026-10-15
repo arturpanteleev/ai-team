@@ -6,7 +6,40 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
+
+// Предельные размеры недоверенных полей: значения приходят из трекера и
+// попадают в журнал, UI и MCP, поэтому режутся и чистятся при сохранении.
+const (
+	trackerUntrustedMax = 256
+	trackerReasonMax    = 512
+)
+
+// CleanTrackerText убирает управляющие и форматирующие символы (в том числе
+// переводы строк и bidi-метки), схлопывает пробелы и обрезает результат до max
+// байт по границе руны. Используется для всего, что пришло из трекера.
+func CleanTrackerText(value string, max int) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r == utf8.RuneError, unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		case unicode.IsSpace(r):
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= max {
+		return value
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
+}
 
 // Входящие изменения статуса из трекера (S15). Каждое внешнее изменение
 // получает ровно одну запись, ключ (tracker, change_id) — это идемпотентность:
@@ -160,6 +193,10 @@ func (s *Store) RecordTrackerSyncFailure(tracker, message string, at time.Time) 
 func (s *Store) BeginTrackerInbound(record TrackerInbound, at time.Time) (TrackerInbound, bool, error) {
 	at = at.UTC()
 	record.State = TrackerInboundReceived
+	record.ChangeID = CleanTrackerText(record.ChangeID, trackerUntrustedMax)
+	record.FromStatus = CleanTrackerText(record.FromStatus, trackerUntrustedMax)
+	record.ToStatus = CleanTrackerText(record.ToStatus, trackerUntrustedMax)
+	record.Author = CleanTrackerText(record.Author, trackerUntrustedMax)
 	record.ChangedAt = record.ChangedAt.UTC()
 	result, err := s.db.Exec(`INSERT OR IGNORE INTO tracker_inbound_changes
 		(tracker, change_id, task_id, issue_key, from_status, to_status, origin, author, changed_at, state, detected_at, updated_at)
@@ -201,6 +238,9 @@ func (s *Store) GetTrackerInbound(tracker, changeID string) (TrackerInbound, err
 // ResolveTrackerInbound записывает итог. Закрытое оператором или заменённое
 // изменение не оживает: запись в dismissed/superseded не перезаписывается.
 func (s *Store) ResolveTrackerInbound(record TrackerInbound, at time.Time) (TrackerInbound, error) {
+	record.ChangeID = CleanTrackerText(record.ChangeID, trackerUntrustedMax)
+	record.Reason = CleanTrackerText(record.Reason, trackerReasonMax)
+	record.ResolvedBy = CleanTrackerText(record.ResolvedBy, trackerUntrustedMax)
 	_, err := s.db.Exec(`UPDATE tracker_inbound_changes SET state = ?, action = ?, stage = ?, to_stage = ?, reason = ?,
 		suggested_action = ?, resolved_by = ?, task_id = ?, updated_at = ?
 		WHERE tracker = ? AND change_id = ? AND state NOT IN (?, ?)`,

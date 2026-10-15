@@ -54,6 +54,7 @@ type Fake struct {
 	failures map[string]*fakeFailure
 	changes  []Change
 	tick     int64
+	clock    func() time.Time
 }
 
 // NewFake returns a fake tracker with the given statuses (default workflow
@@ -248,11 +249,26 @@ func (f *Fake) Transition(_ context.Context, key, target string) (bool, error) {
 	return false, fmt.Errorf("%w %q", ErrNoTransition, target)
 }
 
+// SetChangeClock sets the time stamped on recorded changes (default: now), so
+// a test can place a change before or after some other event.
+func (f *Fake) SetChangeClock(now func() time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clock = now
+}
+
+func (f *Fake) changeTime() time.Time {
+	if f.clock != nil {
+		return f.clock().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func (f *Fake) recordChange(issue *fakeIssue, to, author, origin string) {
 	f.tick++
 	f.changes = append(f.changes, Change{
 		ID: strconv.FormatInt(f.tick, 10), IssueKey: issue.key, From: issue.status, To: to,
-		At: time.Unix(f.tick, 0).UTC(), Author: author, Origin: origin,
+		At: f.changeTime(), Author: author, Origin: origin,
 	})
 	issue.status = to
 }

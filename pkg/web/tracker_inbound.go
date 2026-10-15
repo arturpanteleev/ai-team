@@ -27,6 +27,15 @@ import (
 const (
 	trackerInboundBatch     = 100
 	trackerInboundErrorSize = 300
+	// trackerInboundLaunchEvent is the run event written before a tracker
+	// request launches a stage. It is deliberately not a stage-author event:
+	// see trackerInboundActor.
+	trackerInboundLaunchEvent = "tracker_inbound_launch"
+	// trackerManualMinGap is the shortest interval between two real manual
+	// passes; a "sync now" inside it returns the previous result.
+	trackerManualMinGap = 5 * time.Second
+	// trackerClockSkew tolerates a tracker clock that runs behind ai-team's.
+	trackerClockSkew = 5 * time.Second
 )
 
 // trackerInboundPolicy is the configured status map and poll period.
@@ -58,6 +67,9 @@ type trackerSyncResult struct {
 	Ignored    int    `json:"ignored"`
 	Duplicates int    `json:"duplicates"`
 	Cursor     string `json:"cursor"`
+	// Coalesced is set when a manual sync inside the minimum interval returned
+	// the previous pass instead of reading the tracker again.
+	Coalesced bool `json:"coalesced,omitempty"`
 }
 
 var errTrackerInboundOff = errors.New("tracker inbound synchronization is not configured")
@@ -101,6 +113,27 @@ func (s *Server) syncTrackerInbound(ctx context.Context, trigger string) (tracke
 	}
 	s.trackerSyncMu.Lock()
 	defer s.trackerSyncMu.Unlock()
+	if trigger == "manual" && s.trackerManualAt != nil && s.clock().Sub(*s.trackerManualAt) < trackerManualMinGap {
+		// Coalesce: a burst of "sync now" calls is one tracker read.
+		last := s.trackerManualResult
+		last.Trigger, last.Coalesced = trigger, true
+		return last, nil
+	}
+	result, err := s.runTrackerInbound(ctx, trigger)
+	if trigger == "manual" && err == nil {
+		// Only a successful pass is reused: after a failure the operator's
+		// retry must really read the tracker again.
+		at := s.clock()
+		s.trackerManualAt, s.trackerManualResult = &at, result
+	} else if trigger == "manual" {
+		s.trackerManualAt = nil
+	}
+	return result, err
+}
+
+// runTrackerInbound is one pass; the caller holds trackerSyncMu.
+func (s *Server) runTrackerInbound(ctx context.Context, trigger string) (trackerSyncResult, error) {
+	result := trackerSyncResult{Trigger: trigger}
 	t := s.trackerSync.tracker
 	name := t.Name()
 	result.Tracker = name
@@ -207,7 +240,7 @@ func (s *Server) processInboundChange(ctx context.Context, change tracker.Change
 		result.Pending++
 	case store.TrackerInboundConflict:
 		result.Conflicts++
-	default:
+	default: // ignored and superseded outcomes are both "nothing was done"
 		result.Ignored++
 	}
 	return nil
@@ -218,6 +251,9 @@ func (s *Server) processInboundChange(ctx context.Context, change tracker.Change
 // fresh change may start a stage.
 func (s *Server) decideInbound(ctx context.Context, rec store.TrackerInbound, mayApply bool) store.TrackerInbound {
 	prior := rec.Reason
+	// A request that was begun for a stage but never finished (a crash after
+	// the launch, before the outcome was stored) carries that stage.
+	recordedStage, replay := rec.Stage, rec.State == store.TrackerInboundReceived
 	rec.Reason, rec.SuggestedAction, rec.ResolvedBy = "", "", ""
 	if tracker.IsOwnEcho(tracker.Change{Origin: rec.Origin}) {
 		rec.State = store.TrackerInboundIgnored
@@ -240,6 +276,19 @@ func (s *Server) decideInbound(ctx context.Context, rec store.TrackerInbound, ma
 	rec.Stage = state.NextStage
 	if state.Phase == lifecycle.PhaseTerminal {
 		rec.State, rec.Reason = store.TrackerInboundIgnored, "the task is finished; the graph is not moved by a tracker status"
+		return rec
+	}
+	if mayApply && replay && recordedStage != "" && (recordedStage != state.NextStage || state.Phase != lifecycle.PhaseResumable) {
+		// The earlier attempt may have started the stage before the outcome was
+		// stored; a stale request must not launch the next stage.
+		rec.State = store.TrackerInboundSuperseded
+		rec.Reason = fmt.Sprintf("the task is no longer ready at stage %q (now %q, %s); a repeated request is not applied", recordedStage, state.NextStage, state.Phase)
+		return rec
+	}
+	if entered := state.StageEnteredSince(); !entered.IsZero() && !rec.ChangedAt.IsZero() && rec.ChangedAt.Add(trackerClockSkew).Before(entered) {
+		rec.State = store.TrackerInboundSuperseded
+		rec.Reason = fmt.Sprintf("the status was set at %s, before the task entered stage %q (%s); the request belongs to an earlier stage",
+			rec.ChangedAt.UTC().Format(time.RFC3339), state.NextStage, entered.UTC().Format(time.RFC3339))
 		return rec
 	}
 	rule, resolution, matched := tracker.ResolveInbound(s.trackerInbound.rules, rec.ToStatus, state.NextStage)
@@ -299,6 +348,19 @@ func (s *Server) decideInboundAdvance(ctx context.Context, rec store.TrackerInbo
 			return pendingInbound(rec, prior, allowed)
 		}
 		actor := trackerInboundActor(rec)
+		// Audit first: the launch is recorded in the run journal under the
+		// adapter, and an unrecorded launch does not run. Persist the stage
+		// being launched, so a replay after a crash can tell it went stale.
+		rec.Stage = state.NextStage
+		if _, err := s.store.ResolveTrackerInbound(rec, s.clock()); err != nil {
+			return pendingInbound(rec, "the request could not be recorded before the launch: "+trackerErrorText(err), allowed)
+		}
+		if err := s.appendRunEventRequired(runID, trackerInboundLaunchEvent, s.clock(), map[string]any{
+			"actor_id": actor, "adapter": rec.Tracker, "change_id": rec.ChangeID, "stage_id": state.NextStage,
+			"issue_key": rec.IssueKey, "to_status": rec.ToStatus, "untrusted_author": rec.Author,
+		}); err != nil {
+			return pendingInbound(rec, "the launch could not be recorded in the run journal: "+trackerErrorText(err), allowed)
+		}
 		if err := controller.RunStageAgent(ctx, runID, state.NextStage, actor, false); err != nil {
 			return pendingInbound(rec, "the controller refused to continue the stage: "+trackerErrorText(err), allowed)
 		}
@@ -360,12 +422,17 @@ func describeInboundRule(rule tracker.InboundRule) string {
 	return text
 }
 
+// trackerInboundActor is the audit identity of a tracker-launched stage:
+// the adapter only. The external author is a display name the Jira user can
+// change and is not an ai-team user, so it is never part of the actor; it is
+// stored beside the request as untrusted information. The launch is recorded
+// as trackerInboundLaunchEvent, which is not a stage-author event, so a
+// tracker launch neither makes anyone an author of the stage nor removes
+// authorship from a person who worked on it: forbid_self_approval keeps
+// excluding exactly the humans who really worked, and the person who confirms
+// the stage is still checked against their own role.
 func trackerInboundActor(rec store.TrackerInbound) string {
-	actor := "tracker:" + rec.Tracker
-	if rec.Author != "" {
-		actor += ":" + rec.Author
-	}
-	return actor
+	return "tracker:" + rec.Tracker
 }
 
 // refreshPendingInbound re-reads open requests: one whose task has moved to

@@ -44,7 +44,7 @@ func TestGateCatalogIsReadOnlyAndListsPinnedDefinitions(t *testing.T) {
 		}
 		found[gate.ID+"/"+gate.Kind] = true
 	}
-	for _, want := range []string{"required_sections/builtin", "verdict_marker/builtin", "agent_review/llm", "human_approval/human", "pr_checks_green/builtin"} {
+	for _, want := range []string{"required_sections/builtin", "verdict_marker/builtin", "agent_review/llm", "human_approval/human", "pr_checks_green/builtin", "required_phrases/builtin", "external_program/external", "docker_program/docker"} {
 		if !found[want] {
 			t.Fatalf("catalog lacks %s: %v", want, found)
 		}

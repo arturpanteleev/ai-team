@@ -2344,6 +2344,7 @@ func cmdWeb() {
 	oidcClientID := webFlags.String("oidc-client-id", os.Getenv("AI_TEAM_OIDC_CLIENT_ID"), "OIDC client ID")
 	oidcRedirectURL := webFlags.String("oidc-redirect-url", os.Getenv("AI_TEAM_OIDC_REDIRECT_URL"), "OIDC redirect URL (…/api/auth/oidc/callback)")
 	oidcSecretEnv := webFlags.String("oidc-client-secret-env", "AI_TEAM_OIDC_CLIENT_SECRET", "Env с OIDC client secret")
+	mcpOrigins := webFlags.String("mcp-allowed-origins", os.Getenv("AI_TEAM_MCP_ALLOWED_ORIGINS"), "Через запятую: браузерные Origin (https://host[:port]), которым разрешён POST /mcp помимо собственного origin; запросы без Origin разрешены всегда")
 	workerCommand := webFlags.String("worker-command", "", "Executable ai-team для disposable worker process")
 	schedulerDB := webFlags.String("scheduler-db", "", "Persistent scheduler SQLite (включает enqueue-only mode)")
 	schedulerMax := webFlags.Int("max-concurrent", 4, "Scheduler global concurrency")
@@ -2459,6 +2460,9 @@ func cmdWeb() {
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
 		web.WithAutoPickup(autopickup.PolicyFromConfig(cfg), cfg.AutoPickup.EffectivePollInterval(), nil),
+	}
+	if origins := strings.TrimSpace(*mcpOrigins); origins != "" {
+		serverOptions = append(serverOptions, web.WithMCPAllowedOrigins(strings.Split(origins, ",")...))
 	}
 	if cfg.Tracker != nil && cfg.Tracker.Jira != nil {
 		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)

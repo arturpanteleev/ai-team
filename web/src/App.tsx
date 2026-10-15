@@ -5,6 +5,7 @@ import { Dashboard } from './pages/Dashboard';
 import { ArtifactViewer } from './pages/ArtifactViewer';
 import { Login } from './pages/Login';
 import { Team } from './pages/Team';
+import { McpAccess } from './pages/McpAccess';
 import { TemplateEditor } from './pages/TemplateEditor';
 import { Tasks } from './pages/Tasks';
 import { NewTask } from './pages/NewTask';
@@ -28,6 +29,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
         { path: '/observability', element: <Observability /> },
         { path: '/runs/:runID', element: <RunRedirect /> },
         { path: '/team', element: teamManagementEnabled ? <Team /> : <main role="status">Управление командой недоступно в локальном режиме.</main> },
+        { path: '/access', element: teamManagementEnabled ? <McpAccess /> : <main role="status">Персональные MCP-токены доступны только на сервере с облачной аутентификацией.</main> },
         { path: '/template', element: <TemplateEditor /> },
         { path: '/pipelines/:id', element: <PipelineRedirect /> },
         { path: '/artifacts/*', element: <ArtifactViewer /> },

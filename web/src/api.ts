@@ -155,6 +155,21 @@ export function revokeTeamMember(actorId: string): Promise<{ actor_id: string; s
   return teamMutation(`/team/members/${encodeURIComponent(actorId)}`, 'DELETE');
 }
 
+export type McpToken = { id: string; label: string; hint: string; created_at: string; expires_at: string; last_used_at?: string; revoked_at?: string };
+export type IssuedMcpToken = McpToken & { token: string };
+
+export function listMcpTokens(): Promise<{ tokens: McpToken[]; max_active: number }> { return fetchJson('/mcp/tokens'); }
+export function issueMcpToken(label: string, ttlDays: number): Promise<IssuedMcpToken> {
+  return command('/mcp/tokens', { label, ttl_days: ttlDays });
+}
+export async function revokeMcpToken(id: string): Promise<void> {
+  const token = await getCsrfToken();
+  const response = await fetch(`${API_BASE}/mcp/tokens/${encodeURIComponent(id)}`, {
+    method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRF-Token': token },
+  });
+  if (!response.ok) throw await responseError(response);
+}
+
 export async function activateTeamInvitation(token: string): Promise<{ access_token: string }> {
   const response = await fetch(`${API_BASE}/team/activate`, { method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });

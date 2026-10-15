@@ -420,6 +420,7 @@ ai-team web [--target <путь>] [--host 127.0.0.1] [--port 8080] [другие
 | `--oidc-client-id` | `$AI_TEAM_OIDC_CLIENT_ID` | client ID приложения у провайдера |
 | `--oidc-redirect-url` | `$AI_TEAM_OIDC_REDIRECT_URL` | зарегистрированный callback `https://<хост>/api/auth/oidc/callback` |
 | `--oidc-client-secret-env` | `AI_TEAM_OIDC_CLIENT_SECRET` | имя переменной окружения с client secret; сам секрет флагом не передаётся |
+| `--mcp-allowed-origins` | `$AI_TEAM_MCP_ALLOWED_ORIGINS` | через запятую: браузерные `Origin` (`https://host[:port]`), которым разрешён `POST /mcp` помимо собственного origin; запросы без `Origin` разрешены всегда. См. [Сетевой MCP](mcp.md) |
 | `--worker-command <путь>` | — | исполнять прогоны в отдельном процессе `ai-team worker` |
 | `--scheduler-db <путь>` | — | только ставить задания в постоянную очередь |
 | `--max-concurrent`, `--per-target` | `4`, `1` | лимиты параллельности очереди |

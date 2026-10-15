@@ -208,6 +208,12 @@ func (s *Server) readSecurity(next http.Handler) http.Handler {
 }
 
 func (s *Server) requestSession(r *http.Request) (browserSession, bool) {
+	// An in-process MCP call carries the principal its bearer token resolved
+	// to. The context key is unexported and set only by mcpDispatch, so no
+	// network request can supply it.
+	if session, ok := r.Context().Value(mcpSessionContextKey{}).(browserSession); ok {
+		return session, true
+	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
 		return browserSession{}, false

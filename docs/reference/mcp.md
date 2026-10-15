@@ -141,6 +141,7 @@ codex exec "вызови ai-team whoami"
 | `get_task` | `/api/runs/{run_id}` | полный снимок: попытки, состояние, согласования, результаты, шаблон, delivery-план, доступные действия |
 | `get_task_stage_result` | `…/stages/{stage_id}/results/{version}` | версия результата этапа |
 | `get_task_workflow`, `get_task_template_version` | `…/workflow`, `…/template-version` | граф и закреплённая версия шаблона |
+| `get_task_gates` | `/api/runs/{id}/gates` | реальные гейты каждой версии результата, попытки, обходы администратора, рекомендательные предупреждения и агрегированное разрешение перехода |
 | `list_task_events`, `list_events` | `…/events`, `/api/events` | события; курсор `after`/`before`, `order`, `warnings` |
 | `get_task_log` | `…/logs/{attempt_id}` | хвост лога попытки (до 64 КиБ) |
 | `list_task_artifacts`, `read_task_artifact`, `list_artifact_revisions` | `/api/pipelines/{id}/artifacts`, `…/artifacts/*`, `…/artifact-revisions` | артефакты и ревизии |

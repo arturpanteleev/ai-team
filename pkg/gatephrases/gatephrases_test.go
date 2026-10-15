@@ -180,3 +180,69 @@ func TestCheckRegexIsExplicitRE2(t *testing.T) {
 		t.Fatal("without regex: true a phrase is a literal")
 	}
 }
+
+func TestSectionBodyHeadingSyntax(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		want    string
+		found   bool
+	}{
+		"hash without space is not a heading": {"# Итог\nтекст\n#Другое\nещё\n", "текст\n#Другое\nещё\n", true},
+		"indent 4 is not a heading":           {"# Итог\nтекст\n    # Другое\nещё\n", "текст\n    # Другое\nещё\n", true},
+		"indent 3 is a heading":               {"# Итог\nтекст\n   # Другое\nещё\n", "текст\n", true},
+		"seven hashes is not a heading":       {"# Итог\nтекст\n####### Другое\nещё\n", "текст\n####### Другое\nещё\n", true},
+		"empty heading ends section":          {"## Итог\nтекст\n##\nещё\n", "текст\n", true},
+		"closing hashes dropped":              {"## Итог ##\nтекст\n", "текст\n", true},
+		"heading in html comment ignored":     {"# Итог\nтекст\n<!--\n# Другое\n-->\nещё\n", "текст\n<!--\n# Другое\n-->\nещё\n", true},
+		"commented heading is not target":     {"<!--\n# Итог\n-->\nтекст\n", "", false},
+		"setext level 1 ends section":         {"# Итог\nтекст\n\nДругое\n======\nещё\n", "текст\n\n", true},
+		"setext target":                       {"Итог\n----\nтекст\n## Другое\nещё\n", "текст\n", true},
+		"setext level 2 stays inside level 1": {"# Итог\nтекст\n\nПодраздел\n---\nещё\n", "текст\n\nПодраздел\n---\nещё\n", true},
+		"thematic break is not setext":        {"# Итог\n\n---\nещё\n", "\n---\nещё\n", true},
+		"closing fence needs no info":         {"# Итог\n```\n```go\n# Код\n```\nещё\n", "```\n```go\n# Код\n```\nещё\n", true},
+		"shorter fence does not close":        {"# Итог\n````\n```\n# Код\n````\n# Другое\n", "````\n```\n# Код\n````\n", true},
+		"other fence char does not close":     {"# Итог\n```\n~~~\n# Код\n```\n# Другое\n", "```\n~~~\n# Код\n```\n", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, found := sectionBody(tc.content, "Итог")
+			if found != tc.found || got != tc.want {
+				t.Fatalf("sectionBody() = %q, %v; want %q, %v", got, found, tc.want, tc.found)
+			}
+		})
+	}
+}
+
+func TestParseRejectsZeroLengthRegex(t *testing.T) {
+	for _, expression := range []string{`\b`, `a|\b`, `^`, `$`, `a*`, `(?:x)?`, `\B`} {
+		_, err := Parse(params(map[string]any{ParamPhrases: []any{expression}, ParamRegex: true, ParamCase: CaseSensitive}))
+		if err == nil {
+			t.Errorf("выражение %q принято, хотя допускает нулевую длину", expression)
+		}
+	}
+	if _, err := Parse(params(map[string]any{ParamPhrases: []any{`\bword\b`}, ParamRegex: true})); err != nil {
+		t.Fatalf("корректное выражение отвергнуто: %v", err)
+	}
+}
+
+func TestCheckCaseInsensitiveFoldsSigmaAndSharpS(t *testing.T) {
+	cases := []struct{ phrase, content string }{
+		{"ΟΔΥΣΣΕΥΣ", "Ο ΟΔΥΣΣΕΥς ήρθε"},
+		{"οδυσσευς", "ΟΔΥΣΣΕΥΣ"},
+		{"οδυσσεύς", "ΟΔΥΣΣΕΎΣ"},
+		{"straße", "STRAẞE"},
+		{"STRASSE", "STRASSE"},
+	}
+	for _, tc := range cases {
+		spec := mustParse(t, map[string]any{ParamPhrases: []any{tc.phrase}})
+		if !spec.Check(tc.content).Satisfied {
+			t.Errorf("%q не найдена в %q", tc.phrase, tc.content)
+		}
+	}
+	if mustParse(t, map[string]any{ParamPhrases: []any{"straße"}}).Check("STRASSE").Satisfied {
+		t.Error("полная свёртка ß в ss не поддерживается и не должна срабатывать молча")
+	}
+	if _, err := Parse(params(map[string]any{ParamPhrases: []any{"σ", "ς"}})); err == nil {
+		t.Error("σ и ς — дубликат при case: insensitive")
+	}
+}

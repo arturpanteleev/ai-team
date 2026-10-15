@@ -169,7 +169,7 @@ func Parse(params map[string]any) (*Spec, error) {
 	for i, phrase := range phrases {
 		key := phrase
 		if !spec.CaseSensitive {
-			key = strings.ToLower(phrase)
+			key = foldCase(phrase)
 		}
 		if seen[key] {
 			return nil, fmt.Errorf("параметр %q[%d]: фраза повторяется (с учётом выбранного регистра)", ParamPhrases, i)
@@ -187,13 +187,31 @@ func Parse(params map[string]any) (*Spec, error) {
 			if err != nil {
 				return nil, fmt.Errorf("параметр %q[%d]: выражение не компилируется как RE2", ParamPhrases, i)
 			}
-			if compiled.MatchString("") {
-				return nil, fmt.Errorf("параметр %q[%d]: выражение совпадает с пустой строкой и прошло бы любой результат", ParamPhrases, i)
+			if matchesEmpty(compiled) {
+				return nil, fmt.Errorf("параметр %q[%d]: выражение допускает совпадение нулевой длины и прошло бы любой результат", ParamPhrases, i)
 			}
 			spec.patterns = append(spec.patterns, compiled)
 		}
 	}
 	return spec, nil
+}
+
+// emptyProbes are the strings a pattern is tried on to find zero-length
+// matches: empty, blank, a word, several words.
+var emptyProbes = []string{"", " ", "\n", "word", "two words", " a b ", "слово два", "x,y."}
+
+// matchesEmpty reports whether the pattern can match zero-length text anywhere
+// in the probes (covers a*, \b, ^, $, a|\b). Execution additionally ignores
+// zero-length matches, so a miss here still cannot turn into a pass.
+func matchesEmpty(re *regexp.Regexp) bool {
+	for _, probe := range emptyProbes {
+		for _, at := range re.FindAllStringIndex(probe, -1) {
+			if at[0] == at[1] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Validate is Parse without the result.
@@ -228,7 +246,7 @@ func (s *Spec) Check(content string) Result {
 	}
 	haystack := scope
 	if !s.CaseSensitive && !s.Regex {
-		haystack = strings.ToLower(scope)
+		haystack = foldCase(scope)
 	}
 	var result Result
 	for i, phrase := range s.Phrases {
@@ -265,11 +283,16 @@ func (s *Spec) Check(content string) Result {
 
 func (s *Spec) present(haystack string, index int, phrase string) bool {
 	if s.Regex {
-		return s.patterns[index].MatchString(haystack)
+		for _, at := range s.patterns[index].FindAllStringIndex(haystack, -1) {
+			if at[1] > at[0] {
+				return true
+			}
+		}
+		return false
 	}
 	needle := phrase
 	if !s.CaseSensitive {
-		needle = strings.ToLower(phrase)
+		needle = foldCase(phrase)
 	}
 	if s.Unit == UnitSubstring {
 		return strings.Contains(haystack, needle)
@@ -313,55 +336,231 @@ func isWordRune(r rune) bool {
 }
 
 // sectionBody returns the text under every heading titled section (compared
-// like required_sections: case-insensitive, trailing colons ignored), up to the
-// next heading of the same or a higher level; subsections belong to the body.
-// Lines inside fenced code blocks are never headings.
+// like required_sections: case-folded, trailing colons ignored), up to the next
+// heading of the same or a higher level; subsections belong to the body.
+//
+// Heading syntax follows CommonMark: an ATX heading is 1-6 '#' followed by a
+// space, a tab or the end of the line, indented by at most 3 spaces (an
+// optional closing '#' sequence is dropped); a setext heading is a paragraph
+// underlined with '=' (level 1) or '-' (level 2). Lines inside fenced code
+// blocks, indented code (4+ spaces) and HTML comments are never headings. A
+// closing fence is the same character, not shorter than the opening one, with
+// no info string.
 func sectionBody(content, section string) (string, bool) {
 	target := normalizeHeading(strings.TrimLeft(section, "#"))
 	var out strings.Builder
 	found, capturing := false, false
 	level := 0
 	fence := ""
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if marker := fenceMarker(trimmed); marker != "" {
-			switch {
-			case fence == "":
-				fence = marker
-			case marker[0] == fence[0] && len(marker) >= len(fence):
+	inComment := false
+	var paragraph []string
+
+	// open applies a heading of the given depth and title; it reports whether
+	// the heading line itself must be left out of the body.
+	open := func(depth int, title string) bool {
+		if capturing && depth <= level {
+			capturing = false
+		}
+		if !capturing && normalizeHeading(title) == target {
+			capturing, found, level = true, true, depth
+			return true
+		}
+		return false
+	}
+	flush := func() {
+		if capturing {
+			for _, line := range paragraph {
+				out.WriteString(line + "\n")
+			}
+		}
+		paragraph = paragraph[:0]
+	}
+
+	lines := strings.Split(content, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if inComment {
+			flush()
+			if capturing {
+				out.WriteString(line + "\n")
+			}
+			if strings.Contains(line, "-->") {
+				inComment = false
+			}
+			continue
+		}
+		if fence != "" {
+			flush()
+			if closesFence(line, fence) {
 				fence = ""
 			}
-		} else if fence == "" && strings.HasPrefix(trimmed, "#") {
-			depth := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
-			if capturing && depth <= level {
-				capturing = false
+			if capturing {
+				out.WriteString(line + "\n")
 			}
-			if !capturing && normalizeHeading(strings.TrimLeft(trimmed, "#")) == target {
-				capturing, found, level = true, true, depth
+			continue
+		}
+		if marker := openingFence(line); marker != "" {
+			flush()
+			fence = marker
+			if capturing {
+				out.WriteString(line + "\n")
+			}
+			continue
+		}
+		if depth, title, ok := atxHeading(line); ok {
+			flush()
+			if !open(depth, title) && capturing {
+				out.WriteString(line + "\n")
+			}
+			continue
+		}
+		if len(paragraph) > 0 {
+			if depth := setextUnderline(line); depth > 0 {
+				title := strings.Join(paragraph, " ")
+				paragraph = paragraph[:0]
+				if !open(depth, title) && capturing {
+					out.WriteString(title + "\n" + line + "\n")
+				}
 				continue
 			}
 		}
-		if capturing {
-			out.WriteString(line + "\n")
+		if strings.TrimSpace(line) == "" {
+			flush()
+			if capturing {
+				out.WriteString(line + "\n")
+			}
+			continue
+		}
+		if start := strings.Index(line, "<!--"); start >= 0 && !strings.Contains(line[start+4:], "-->") {
+			inComment = true
+		}
+		if indentOf(line) >= 4 && len(paragraph) == 0 {
+			// Indented code block: neither a heading nor a paragraph.
+			if capturing {
+				out.WriteString(line + "\n")
+			}
+			continue
+		}
+		paragraph = append(paragraph, line)
+		if inComment {
+			flush()
 		}
 	}
+	flush()
 	return out.String(), found
 }
 
-func fenceMarker(trimmed string) string {
-	for _, char := range []string{"`", "~"} {
-		count := len(trimmed) - len(strings.TrimLeft(trimmed, char))
-		if count >= 3 {
-			return strings.Repeat(char, count)
+// indentOf counts the leading columns; a tab counts as reaching column 4.
+func indentOf(line string) int {
+	columns := 0
+	for _, r := range line {
+		switch r {
+		case ' ':
+			columns++
+		case '\t':
+			return columns + 4 - columns%4
+		default:
+			return columns
 		}
 	}
+	return columns
+}
+
+// atxHeading parses "# Title" with up to 3 spaces of indent.
+func atxHeading(line string) (int, string, bool) {
+	if indentOf(line) >= 4 {
+		return 0, "", false
+	}
+	rest := strings.TrimLeft(line, " ")
+	depth := len(rest) - len(strings.TrimLeft(rest, "#"))
+	if depth < 1 || depth > 6 {
+		return 0, "", false
+	}
+	rest = rest[depth:]
+	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+		return 0, "", false
+	}
+	title := strings.TrimSpace(rest)
+	if trimmed := strings.TrimRight(title, "#"); trimmed != title {
+		if trimmed == "" {
+			title = ""
+		} else if last := trimmed[len(trimmed)-1]; last == ' ' || last == '\t' {
+			title = strings.TrimSpace(trimmed)
+		}
+	}
+	return depth, title, true
+}
+
+// setextUnderline returns 1 for a "===" line, 2 for a "---" line, 0 otherwise.
+func setextUnderline(line string) int {
+	if indentOf(line) >= 4 {
+		return 0
+	}
+	body := strings.TrimSpace(line)
+	if body == "" {
+		return 0
+	}
+	switch {
+	case strings.Trim(body, "=") == "":
+		return 1
+	case strings.Trim(body, "-") == "":
+		return 2
+	}
+	return 0
+}
+
+// openingFence returns the fence marker of an opening line, or "".
+func openingFence(line string) string {
+	if indentOf(line) >= 4 {
+		return ""
+	}
+	rest := strings.TrimLeft(line, " ")
+	for _, char := range []string{"`", "~"} {
+		count := len(rest) - len(strings.TrimLeft(rest, char))
+		if count < 3 {
+			continue
+		}
+		if char == "`" && strings.Contains(rest[count:], "`") {
+			return ""
+		}
+		return strings.Repeat(char, count)
+	}
 	return ""
+}
+
+// closesFence reports whether line closes a fence opened with marker.
+func closesFence(line, marker string) bool {
+	if indentOf(line) >= 4 {
+		return false
+	}
+	rest := strings.TrimSpace(line)
+	count := len(rest) - len(strings.TrimLeft(rest, marker[:1]))
+	return count >= len(marker) && count == len(rest)
 }
 
 func normalizeHeading(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimRight(value, ":")
-	return strings.ToLower(strings.TrimSpace(value))
+	return foldCase(strings.TrimSpace(value))
+}
+
+// foldCase maps every rune to the smallest member of its simple case-folding
+// orbit, so that sigma, final sigma and capital sigma (and ß and capital ẞ)
+// compare equal. It works rune by rune and never changes the rune count, unlike
+// strings.ToLower on special runes. Full folding (ß to ss) is not applied.
+func foldCase(value string) string {
+	return strings.Map(func(r rune) rune {
+		smallest := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < smallest {
+				smallest = next
+			}
+		}
+		return smallest
+	}, value)
 }
 
 func quoteList(items []string) string {

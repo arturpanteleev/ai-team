@@ -41,7 +41,7 @@ func TestRequiredPhrasesConfigRejectsBadParametersBeforeRun(t *testing.T) {
 		{"min without at_least", `{phrases: [a], case: sensitive, scope: result, match: all, min_count: 1}`, `"min_count"`},
 		{"broken regex", `{phrases: ['(oops'], case: sensitive, scope: result, match: all, regex: true}`, "RE2"},
 		{"backtracking construct", `{phrases: ['a(?=b)'], case: sensitive, scope: result, match: all, regex: true}`, "RE2"},
-		{"empty-matching regex", `{phrases: ['a*'], case: sensitive, scope: result, match: all, regex: true}`, "пустой строкой"},
+		{"empty-matching regex", `{phrases: ['a*'], case: sensitive, scope: result, match: all, regex: true}`, "нулевой длины"},
 		{"regex with word unit", `{phrases: [a], case: sensitive, scope: result, match: all, regex: true, unit: word}`, `"unit"`},
 		{"script param", `{phrases: [a], case: sensitive, scope: result, match: all, script: "x"}`, "script"},
 	}

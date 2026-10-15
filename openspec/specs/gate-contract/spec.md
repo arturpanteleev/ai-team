@@ -77,10 +77,15 @@ in an `md` result. The parameters `phrases`, `case` (`sensitive|insensitive`),
 `section` MUST be required exactly for `scope: section` and `min_count` exactly
 for `match: at_least` (1 to the number of phrases); `unit` (`substring|word`)
 defaults to `substring`. A section scope MUST cover the heading's body up to
-the next heading of the same or a higher level, excluding fenced code lines
-from heading detection. The gate MUST NOT execute user-supplied code. Regular
+the next heading of the same or a higher level. A heading MUST be an ATX
+heading (1 to 6 `#` followed by a space or the end of the line, indented by at
+most 3 spaces) or a setext heading (a paragraph underlined by `=` or `-`); lines
+inside fenced code blocks, indented code, and HTML comments MUST NOT be
+headings. A closing fence MUST use the same character, be no shorter than the
+opening fence, and carry no info string. `case: insensitive` MUST use simple
+Unicode case folding (sigma, final sigma and capital sigma are equal). The gate MUST NOT execute user-supplied code. Regular
 expressions MUST be available only with `regex: true`, MUST be Go RE2, bounded
-in count and length, MUST NOT match the empty string, and MUST be compiled
+in count and length, MUST NOT allow a zero-length match (such as `\b`, `^`, `$`, `a|\b`; checked on probe strings during validation and ignored at execution), and MUST be compiled
 during configuration validation. An invalid parameter or combination MUST be
 rejected before a run starts. An empty result or a missing section MUST be
 `fail`; an unreadable, oversized or absent Markdown output MUST be `error`; the

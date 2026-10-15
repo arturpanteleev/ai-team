@@ -67,7 +67,7 @@ type Config struct {
 	StageTimeout   string          `yaml:"stage_timeout,omitempty"`
 	// GateConcurrency limits how many gates of one group run at the same time
 	// (pkg/gatesched). Zero means gatesched.DefaultMaxParallel.
-	GateConcurrency int `yaml:"gate_concurrency,omitempty"`
+	GateConcurrency int `yaml:"gate_concurrency,omitempty" json:",omitempty"`
 	// PreflightTimeout — бюджет одной внешней команды preflight (опрос версии
 	// CLI-рантайма, git, gh). Холодный старт CLI-рантайма на порядок дороже
 	// прогретого, поэтому бюджет вынесен в конфигурацию: слишком тесный делает

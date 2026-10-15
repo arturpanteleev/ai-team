@@ -192,6 +192,12 @@ function installController(page) {
         timestamp: now, data: { outcome: 'continue' } }], next_cursor: 2 } })
       return
     }
+    if (request.method() === 'GET' && pathname.endsWith('/gates')) {
+      // The gate override is a system administrator right (S06): this session is
+      // the administrator, so the page offers the override action.
+      await route.fulfill({ json: { run_id: pathname.split('/')[3], can_override: true, stages: [], overrides: [], warnings: [] } })
+      return
+    }
     if (pathname.includes('/logs/')) {
       await route.fulfill({ json: { run_id: 'run-manual', attempt_id: 'analysis-attempt', offset: 0, truncated: false, content: 'Проверено: required-sections' } })
       return

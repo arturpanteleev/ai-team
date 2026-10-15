@@ -791,3 +791,55 @@ func TestCheckDecisionOverrideRequiresReason(t *testing.T) {
 		t.Fatalf("override с причиной и authority должен быть принят: %v", err)
 	}
 }
+
+func TestCheckDecisionRetryGateRules(t *testing.T) {
+	newApproval := func(t *testing.T, retryable []string) (*Store, PendingApproval) {
+		t.Helper()
+		store, err := NewStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		value := checkDecisionApproval()
+		value.Actions = append(value.Actions, ActionRetryGate)
+		value.Targets[ActionRetryGate] = "tech"
+		value.Payload, _ = json.Marshal(CheckDecisionPayload{
+			Kind: string(KindCheckDecision), StageID: "tech", CheckKind: "hard", Status: "failed",
+			ReportPath: "feat/.stage-check/tech.md", ReportSHA256: testSubject,
+			FailedRules: []string{"gate"}, RetryableGates: retryable,
+		})
+		created, err := store.Create(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store, created
+	}
+	decision := func(created PendingApproval, authenticated bool, gates ...string) Decision {
+		return Decision{
+			ActorID: "local-user", ActorRole: "architect", Action: ActionRetryGate, Gates: gates,
+			SubjectHash: created.SubjectHash, DecidedAt: time.Now().UTC(), ControllerAuthenticated: authenticated,
+		}
+	}
+	cases := []struct {
+		name      string
+		retryable []string
+		decision  func(PendingApproval) Decision
+		want      string
+	}{
+		{"unauthenticated", []string{"lint"}, func(c PendingApproval) Decision { return decision(c, false, "lint") }, "аутентифицированного"},
+		{"no retryable gates", nil, func(c PendingApproval) Decision { return decision(c, true, "lint") }, "технической ошибки"},
+		{"no gate named", []string{"lint"}, func(c PendingApproval) Decision { return decision(c, true) }, "имя гейта"},
+		{"gate not retryable", []string{"lint"}, func(c PendingApproval) Decision { return decision(c, true, "other") }, "не повторяется"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, created := newApproval(t, tc.retryable)
+			if _, err := store.Decide(created.RunID, created.ID, tc.decision(created)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+	store, created := newApproval(t, []string{"lint"})
+	if _, err := store.Decide(created.RunID, created.ID, decision(created, true, "lint")); err != nil {
+		t.Fatalf("retry_gate of a retryable gate must be accepted: %v", err)
+	}
+}

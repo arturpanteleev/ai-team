@@ -204,26 +204,93 @@ func TestMCPTokenAndSessionRoutesAreNeverTools(t *testing.T) {
 
 // docs/reference/mcp.md carries the matrix for people; it must list every row
 // and every tool, so the document cannot silently fall behind the code.
+// docMatrixRow is one data row of a markdown table of the reference document:
+// the whole text of the method cell and the backticked tokens of the others.
+type docMatrixRow struct {
+	method  string
+	pattern map[string]bool
+	tool    map[string]bool
+}
+
+var backtickTokenPattern = regexp.MustCompile("`([^`]+)`")
+
+func backtickTokens(cell string) map[string]bool {
+	tokens := map[string]bool{}
+	for _, match := range backtickTokenPattern.FindAllStringSubmatch(cell, -1) {
+		tokens[match[1]] = true
+	}
+	return tokens
+}
+
+// parseDocMatrixRows reads the table rows of the parity section, so a route or
+// a tool counts as documented only as a whole token in its own column (a prefix
+// of a longer route, or a mention in prose, does not count).
+func parseDocMatrixRows(doc string) []docMatrixRow {
+	var rows []docMatrixRow
+	for _, line := range strings.Split(doc, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "|") || strings.HasPrefix(line, "|---") {
+			continue
+		}
+		cells := strings.Split(strings.Trim(line, "|"), "|")
+		if len(cells) < 3 {
+			continue
+		}
+		rows = append(rows, docMatrixRow{
+			method: strings.TrimSpace(cells[0]), pattern: backtickTokens(cells[1]), tool: backtickTokens(cells[2]),
+		})
+	}
+	return rows
+}
+
+func methodListed(cell, method string) bool {
+	if method == "*" {
+		return cell == "все"
+	}
+	for _, part := range strings.Split(cell, ",") {
+		if strings.TrimSpace(part) == method {
+			return true
+		}
+	}
+	return false
+}
+
 func TestMCPParityMatrixIsInTheReferenceDocument(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference", "mcp.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := string(data)
+	rows := parseDocMatrixRows(string(data))
 	for _, entry := range mcpParityMatrix {
-		if !strings.Contains(doc, "`"+entry.Pattern+"`") {
-			t.Errorf("docs/reference/mcp.md does not mention route %s", entry.Pattern)
+		found := false
+		for _, row := range rows {
+			if row.pattern[entry.Pattern] && methodListed(row.method, entry.Method) && (entry.Tool == "" || row.tool[entry.Tool]) {
+				found = true
+				break
+			}
 		}
-		if entry.Tool != "" && !strings.Contains(doc, "`"+entry.Tool+"`") {
-			t.Errorf("docs/reference/mcp.md does not mention tool %s", entry.Tool)
+		if !found {
+			t.Errorf("docs/reference/mcp.md has no table row for %s %s (tool %q) with the full route and tool tokens", entry.Method, entry.Pattern, entry.Tool)
 		}
 	}
 	registry := newMCPRegistry()
 	registerMCPReadTools(registry)
 	registerMCPActionTools(registry)
 	for _, operation := range registry.operations {
-		if !strings.Contains(doc, "`"+operation.Name+"`") {
-			t.Errorf("docs/reference/mcp.md does not mention tool %s", operation.Name)
+		found := false
+		for _, row := range rows {
+			if row.tool[operation.Name] {
+				found = true
+				break
+			}
 		}
+		if !found {
+			t.Errorf("docs/reference/mcp.md has no table row naming tool %s as a whole token", operation.Name)
+		}
+	}
+	// The checker itself must not accept a prefix: a route that merely starts
+	// like a documented one is not documented.
+	if parseDocMatrixRows("| GET | `/api/runs/{runID}/events/extra` | `list_task_events_x` |\n")[0].pattern["/api/runs/{runID}/events"] {
+		t.Error("prefix of a longer route must not count as the route")
 	}
 }

@@ -286,6 +286,7 @@ func constantTimeEqual(actual, expected string) bool {
 }
 
 type startRunCommand struct {
+	ProjectID       int64    `json:"project_id"`
 	Feature         string   `json:"feature"`
 	Task            string   `json:"task"`
 	Title           string   `json:"title,omitempty"`
@@ -315,6 +316,9 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		actorID = session.Principal.ActorID
 	}
 	runID, version, admissionFailed, err := s.startTask(r.Context(), command, actorID, nil)
+	if err != nil && writeProjectError(w, err) {
+		return
+	}
 	if errors.Is(err, errTaskCreateUnavailable) {
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "task create options are not connected to the task controller", "controller_action_unavailable")
 		return
@@ -343,6 +347,11 @@ var errTaskCreateUnavailable = errors.New("task create options are not connected
 // beforeAdmit выполняется первым внутри admission, до появления run в
 // проекции; его ошибка отменяет запуск.
 func (s *Server) startTask(ctx context.Context, command startRunCommand, actorID string, beforeAdmit func(runID string) error) (string, string, bool, error) {
+	// Задача принадлежит ровно одному активному проекту; ранний отказ не
+	// запускает контроллер. Окончательная проверка повторяется в транзакции admission.
+	if err := s.store.RequireActiveProject(command.ProjectID); err != nil {
+		return "", "", false, err
+	}
 	now := time.Now().UTC()
 	admissionFailed := false
 	admit := func(runID string) error {
@@ -382,7 +391,7 @@ func (s *Server) startTask(ctx context.Context, command startRunCommand, actorID
 			return fmt.Errorf("invalid admission snapshot: %w", marshalErr)
 		}
 		if err := s.store.AdmitPipelineRun(&store.PipelineRun{
-			RunID: runID, Feature: command.Feature, Status: "queued", StartedAt: now, ConfigSnapshot: string(admissionSnapshot),
+			RunID: runID, Feature: command.Feature, ProjectID: command.ProjectID, Status: "queued", StartedAt: now, ConfigSnapshot: string(admissionSnapshot),
 		}); err != nil {
 			admissionFailed = true
 			return err

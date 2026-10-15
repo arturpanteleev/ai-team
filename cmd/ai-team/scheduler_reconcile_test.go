@@ -51,7 +51,7 @@ func TestReconcileSchedulerQueueOnceRecoversAdmissionsAndProjectsWorkerState(t *
 			t.Fatal(err)
 		}
 		if err := store.AdmitPipelineRun(&webstore.PipelineRun{
-			RunID: runID, Feature: job.Feature, Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: string(snapshot),
+			RunID: runID, ProjectID: 1, Feature: job.Feature, Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: string(snapshot),
 		}); err != nil {
 			t.Fatal(err)
 		}

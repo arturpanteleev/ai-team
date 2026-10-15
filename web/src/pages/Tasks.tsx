@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { cancelRun, getTaskRuns, getTemplatesList } from '../api';
-import { Link } from '../router';
+import { Link, useSearchParams } from '../router';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { projectLabel, useProjects } from '../hooks/useProjects';
 import { TaskCard } from '../components/TaskCard';
 import type { TaskRun, TaskRunFilters, TemplateValidation } from '../types';
 import { statusLabels } from '../statusLabels';
@@ -59,6 +60,11 @@ function boardColumnId(run: TaskRun): string {
 export function Tasks() {
   usePageTitle('Задачи');
   const [view, setView] = useState<ViewMode>('board');
+  // Проект выбирается в адресе (?project=ID): ссылку можно сохранить и передать.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const projectParam = searchParams.get('project') ?? '';
+  const { projects } = useProjects();
+  const selectedProject = projects.find((project) => String(project.id) === projectParam);
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -89,7 +95,10 @@ export function Tasks() {
       .catch(() => setTemplates(null));
   }, []);
 
-  const filters = useMemo<TaskRunFilters>(() => ({ status, stage, function: fn, mode }), [status, stage, fn, mode]);
+  const filters = useMemo<TaskRunFilters>(
+    () => ({ status, stage, function: fn, mode, project_id: projectParam }),
+    [status, stage, fn, mode, projectParam],
+  );
 
   useEffect(() => {
     void fetchRuns(offset, filters);
@@ -159,6 +168,14 @@ export function Tasks() {
     setOffset(0);
   };
 
+  const changeProject = (event: FormEvent<HTMLSelectElement>) => {
+    setSearchParams(event.currentTarget.value ? { project: event.currentTarget.value } : {});
+    setOffset(0);
+  };
+
+  // Новый проект без задач: вместо пустой доски — объяснение и первый шаг.
+  const projectIsEmpty = !loading && Boolean(projectParam) && total === 0 && !status && !stage && !fn && !mode;
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -170,11 +187,20 @@ export function Tasks() {
             <button type="button" aria-pressed={view === 'list'} className={view === 'list' ? styles.active : ''}
               onClick={() => setView('list')}>Список</button>
           </div>
-          <Link className={styles.newTask} to="/tasks/new">Новая задача</Link>
+          <Link className={styles.newTask} to={projectParam ? `/tasks/new?project=${encodeURIComponent(projectParam)}` : '/tasks/new'}>Новая задача</Link>
         </div>
       </div>
 
       <div className={styles.filters} aria-label="Фильтры задач">
+        <label>
+          Проект
+          <select value={projectParam} onChange={changeProject}>
+            <option value="">Все</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>{projectLabel(project)}</option>
+            ))}
+          </select>
+        </label>
         <label>
           Состояние
           <select value={status} onChange={changeFilter(setStatus)}>
@@ -217,6 +243,17 @@ export function Tasks() {
 
       {loading ? (
         <div className={styles.empty}>Загружаем задачи…</div>
+      ) : projectIsEmpty ? (
+        <section className={styles.emptyProject} aria-label="Пустой проект">
+          <h2>{selectedProject ? `В проекте «${selectedProject.name}» пока нет задач` : 'В этом проекте пока нет задач'}</h2>
+          {selectedProject?.description && <p>{selectedProject.description}</p>}
+          {selectedProject?.archived
+            ? <p>Проект в архиве: новые задачи он не принимает.</p>
+            : <>
+              <p>Проект — папка для задач. Создайте первую задачу, и она появится здесь на доске и в списке.</p>
+              <Link className={styles.newTask} to={`/tasks/new?project=${encodeURIComponent(projectParam)}`}>Создать первую задачу</Link>
+            </>}
+        </section>
       ) : view === 'board' ? (
         <section className={styles.board} aria-label="Доска по этапам">
           {columns.map((column) => {

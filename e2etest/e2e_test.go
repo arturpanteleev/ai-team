@@ -902,8 +902,8 @@ func TestE2E_WebDecisionAndResumeSameRun(t *testing.T) {
 		}
 		return response.StatusCode, result
 	}
-	status, started := post("/api/runs", map[string]string{
-		"feature": "web-control", "task": "web approval test",
+	status, started := post("/api/runs", map[string]any{
+		"project_id": 1, "feature": "web-control", "task": "web approval test",
 	})
 	runID, _ := started["run_id"].(string)
 	if status != http.StatusAccepted || runID == "" {
@@ -1080,7 +1080,7 @@ func TestE2E_DistributedSchedulerDispatchesAndArchivesRun(t *testing.T) {
 		csrf = session.CSRF
 		return csrf != ""
 	}, func() string { return serverOutput.String() })
-	data, _ := json.Marshal(map[string]string{"feature": "scheduled", "task": "scheduled task"})
+	data, _ := json.Marshal(map[string]any{"project_id": 1, "feature": "scheduled", "task": "scheduled task"})
 	request, _ := http.NewRequest(http.MethodPost, baseURL+"/api/runs", bytes.NewReader(data))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-CSRF-Token", csrf)

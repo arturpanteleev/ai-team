@@ -8,6 +8,7 @@ import { Team } from './pages/Team';
 import { TemplateEditor } from './pages/TemplateEditor';
 import { Tasks } from './pages/Tasks';
 import { NewTask } from './pages/NewTask';
+import { Projects } from './pages/Projects';
 import { EventFeed } from './pages/EventFeed';
 import { PipelineRedirect, RunRedirect } from './pages/RunRedirect';
 import { TaskDetail } from './pages/TaskDetail';
@@ -21,6 +22,7 @@ function RoutedApp({ teamManagementEnabled }: { teamManagementEnabled: boolean }
         { path: '/', element: <Dashboard /> },
         { path: '/tasks', element: <Tasks /> },
         { path: '/tasks/new', element: <NewTask /> },
+        { path: '/projects', element: <Projects /> },
         { path: '/tasks/:runID', element: <TaskDetail /> },
         { path: '/events', element: <EventFeed /> },
         { path: '/observability', element: <Observability /> },

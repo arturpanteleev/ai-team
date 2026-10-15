@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createTask, getActivePrincipal, getTemplatesList, isAuthenticationRequired } from '../api';
-import { Link } from '../router';
+import { Link, useSearchParams } from '../router';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { useProjects } from '../hooks/useProjects';
 import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import type { TemplateValidation } from '../types';
 import styles from './NewTask.module.css';
@@ -26,6 +27,13 @@ export function NewTask() {
   // null значит «нет сессии» — такому пользователю форму не открываем.
   const signedOutInCloud = !principal && isAuthenticationRequired();
   const canCreate = principal ? principal.roles.includes('product_owner') : !signedOutInCloud;
+  const [searchParams] = useSearchParams();
+  const { active: activeProjects, loaded: projectsLoaded, error: projectsError } = useProjects();
+  // Проект обязателен: из ссылки «?project=», иначе первый активный.
+  const [chosenProject, setChosenProject] = useState(searchParams.get('project') ?? '');
+  const projectId = activeProjects.some((project) => String(project.id) === chosenProject)
+    ? chosenProject
+    : activeProjects[0] ? String(activeProjects[0].id) : '';
   const [templates, setTemplates] = useState<TemplateValidation[]>([]);
   const [template, setTemplate] = useState('');
   const [name, setName] = useState('');
@@ -79,12 +87,17 @@ export function NewTask() {
       identifierRef.current?.focus();
       return;
     }
+    if (!projectId) {
+      setError('Выберите проект для задачи.');
+      return;
+    }
     setSubmitting(true);
     setStatus('Создаём задачу…');
     setError('');
     try {
       const externalLinks = links.split('\n').map((line) => line.trim()).filter(Boolean);
       const result = await createTask({
+        project_id: Number(projectId),
         feature: identifier,
         task: idea.trim(),
         title: name.trim(),
@@ -126,6 +139,17 @@ export function NewTask() {
       </header>
 
       <form className={styles.form} onSubmit={submit}>
+        <label htmlFor="task-project">Проект</label>
+        <select id="task-project" value={projectId} onChange={(event) => { touchDraft(); setChosenProject(event.target.value); }}
+          required disabled={activeProjects.length === 0}>
+          {activeProjects.length === 0 && <option value="">{projectsLoaded ? 'Нет доступных проектов' : 'Загружаем проекты…'}</option>}
+          {activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        </select>
+        {projectsError && <p role="alert" className={styles.error}>{projectsError}</p>}
+        {projectsLoaded && activeProjects.length === 0 && !projectsError && (
+          <p className={styles.hint}>Задача создаётся внутри проекта. <Link to="/projects">Создайте проект</Link>, чтобы продолжить.</p>
+        )}
+
         <label htmlFor="task-name">Название</label>
         <input id="task-name" value={name} onChange={(event) => {
           touchDraft();
@@ -181,7 +205,7 @@ export function NewTask() {
           rows={3} />
 
         <div className={styles.actions}>
-          <button type="submit" disabled={submitting || templates.length > 0 && !template}>
+          <button type="submit" disabled={submitting || !projectId || templates.length > 0 && !template}>
             {submitting ? 'Создаём…' : 'Создать задачу'}
           </button>
           {status && <span className={styles.status} role="status">{status}</span>}

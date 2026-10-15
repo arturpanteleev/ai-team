@@ -353,6 +353,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/preflight", srv.handlePreflight)
 		router.Get("/api/auth/me", srv.handleCurrentIdentity)
 		router.Get("/api/backlog", srv.handleListBacklog)
+		router.Get("/api/projects", srv.handleListProjects)
+		router.Get("/api/projects/{projectID}", srv.handleGetProject)
 	})
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.apiJSONErrors)
@@ -361,6 +363,10 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 			return apiIdempotencyMiddleware{store: srv.store, next: next}
 		})
 		router.Post("/api/runs", srv.handleStartRun)
+		router.Post("/api/projects", srv.handleCreateProject)
+		router.Patch("/api/projects/{projectID}", srv.handleUpdateProject)
+		router.Post("/api/projects/{projectID}/archive", srv.handleArchiveProject(true))
+		router.Post("/api/projects/{projectID}/unarchive", srv.handleArchiveProject(false))
 		router.Post("/api/backlog", srv.handleCreateBacklogItem)
 		router.Post("/api/backlog/{itemID}/status", srv.handleSetBacklogItemStatus)
 		router.Post("/api/template/validate", srv.handleValidateTemplate)

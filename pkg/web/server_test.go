@@ -1099,7 +1099,7 @@ func TestQueueProjectionConnectsQueueFailureToVisibleRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
-	run := &store.PipelineRun{RunID: "queued-run", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC()}
+	run := &store.PipelineRun{RunID: "queued-run", ProjectID: 1, Feature: "feature", Status: "queued", StartedAt: time.Now().UTC()}
 	if err := srv.store.AdmitPipelineRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -1145,7 +1145,7 @@ func TestSchedulerAdmissionIsVisibleAndCancelableWithoutWorker(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 	controller.SetAdmissionSink(srv.RecordQueuedJob)
-	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task without a worker"}`)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"feature","task":"task without a worker"}`)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted {
@@ -1189,18 +1189,18 @@ func TestPendingAdmissionRecoversQueueCorrelationAfterCrashAndRetry(t *testing.T
 	target := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "web.db")
 	queuePath := filepath.Join(t.TempDir(), "queue.db")
-	commandJSON := `{"feature":"feature","task":"recover after crash"}`
+	commandJSON := `{"project_id":1,"feature":"feature","task":"recover after crash"}`
 	srv, err := NewServer(dbPath, "", filepath.Join(target, ".ai-team", "artifacts"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.store.AdmitPipelineRun(&store.PipelineRun{
-		RunID: "recover-run", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
+		RunID: "recover-run", ProjectID: 1, Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.store.AdmitPipelineRun(&store.PipelineRun{
-		RunID: "crash-before-enqueue", Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
+		RunID: "crash-before-enqueue", ProjectID: 1, Feature: "feature", Status: "queued", StartedAt: time.Now().UTC(), ConfigSnapshot: commandJSON,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1291,7 +1291,7 @@ func TestStartRunProjectionFailurePreventsControllerStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = srv.Close() }()
-	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"feature","task":"task"}`)
 	breakTablesForTest(t, dbPath, "pipeline_runs")
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
@@ -1332,7 +1332,7 @@ func TestSchedulerAdmissionProjectionFailureCannotLeaveClaimableJob(t *testing.T
 	}
 	defer func() { _ = srv.Close() }()
 	baseController.SetAdmissionSink(srv.RecordQueuedJob)
-	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"feature","task":"task"}`)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"feature","task":"task"}`)
 	breakTablesForTest(t, dbPath, "pipeline_runs")
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
@@ -1385,7 +1385,7 @@ func TestAmbiguousQueueInsertFailureConvergesThroughAdmissionRecovery(t *testing
 	baseController.SetFailureSink(srv.RecordAdmissionFailure)
 	baseController.SetAdmissionSink(srv.RecordQueuedJob)
 
-	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"feature":"ambiguous-queue-work","task":"recover durable pending job"}`)
+	request := authorizedRequest(t, srv, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"ambiguous-queue-work","task":"recover durable pending job"}`)
 	response := httptest.NewRecorder()
 	srv.router.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted {
@@ -1635,7 +1635,7 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	noSession := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
+	noSession := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"project_id":1,"feature":"f","task":"t"}`))
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, noSession)
 	if writer.Code != http.StatusUnauthorized {
@@ -1648,7 +1648,7 @@ func TestWriteAPIRequiresSessionAndCSRF(t *testing.T) {
 	if sessionWriter.Code != http.StatusUnauthorized {
 		t.Fatalf("session bootstrap without authenticator: %d %s", sessionWriter.Code, sessionWriter.Body.String())
 	}
-	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"feature":"f","task":"t"}`))
+	noCSRF := newLoopbackRequest("POST", "/api/runs", strings.NewReader(`{"project_id":1,"feature":"f","task":"t"}`))
 	noCSRF.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "forged-session"})
 	noCSRF.Header.Set("X-CSRF-Token", "forged-csrf")
 	writer = httptest.NewRecorder()
@@ -1825,7 +1825,7 @@ func TestAuthenticatedSessionRecoversCSRFForSameOriginCookieAndRejectsExpiredSes
 		srv.router.ServeHTTP(result, req)
 		return result
 	}
-	if result := command("/api/runs", `{"feature":"reload-feature","task":"start after reload"}`); result.Code != http.StatusAccepted {
+	if result := command("/api/runs", `{"project_id":1,"feature":"reload-feature","task":"start after reload"}`); result.Code != http.StatusAccepted {
 		t.Fatalf("start after CSRF recovery: %d %s", result.Code, result.Body.String())
 	}
 	if result := command("/api/runs/run-1/resume", ""); result.Code != http.StatusAccepted || controller.resumeRunID != "run-1" {
@@ -1912,7 +1912,7 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача"}`)
+	start := authorizedRequest(t, srv, "POST", "/api/runs", `{"project_id":1,"feature":"feat","task":"задача"}`)
 	writer := httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, start)
 	if writer.Code != http.StatusAccepted || controller.startFeature != "feat" || controller.startTask != "задача" {
@@ -1933,7 +1933,7 @@ func TestWriteRunAndDecisionCommands(t *testing.T) {
 		t.Fatalf("queued cancellation not projected: %+v err=%v", queued, err)
 	}
 
-	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"feature":"feat","task":"задача","unknown":true}`)
+	bad := authorizedRequest(t, srv, "POST", "/api/runs", `{"project_id":1,"feature":"feat","task":"задача","unknown":true}`)
 	writer = httptest.NewRecorder()
 	srv.router.ServeHTTP(writer, bad)
 	if writer.Code != http.StatusBadRequest || controller.startCalls != 1 {
@@ -2167,7 +2167,7 @@ func TestCloudAuthenticationAndRBACUseTrustedPrincipal(t *testing.T) {
 		srv.router.ServeHTTP(response, request)
 		return response
 	}
-	if response := command("/api/runs", `{"feature":"f","task":"t"}`); response.Code != http.StatusForbidden {
+	if response := command("/api/runs", `{"project_id":1,"feature":"f","task":"t"}`); response.Code != http.StatusForbidden {
 		t.Fatalf("reviewer не должен создавать run: %d %s", response.Code, response.Body.String())
 	}
 	response := command("/api/runs/run-1/approvals/approval-1/decisions",
@@ -2587,7 +2587,7 @@ func TestGetArtifactsUnknownRunReturnsNotFound(t *testing.T) {
 func TestGetArtifactsUsesImmutableRunEvidence(t *testing.T) {
 	srv, root := newTestServer(t)
 	runID := "20260720T000000.000000000Z-0123456789abcdef"
-	run := &store.PipelineRun{RunID: runID, Feature: "feat", Status: "completed", StartedAt: time.Now()}
+	run := &store.PipelineRun{RunID: runID, ProjectID: 1, Feature: "feat", Status: "completed", StartedAt: time.Now()}
 	if err := srv.Store().CreatePipelineRun(run); err != nil {
 		t.Fatal(err)
 	}

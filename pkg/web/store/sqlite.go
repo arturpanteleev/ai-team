@@ -16,11 +16,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 13
+const SchemaVersion = 14
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
 	RunID          string     `json:"run_id"`
+	ProjectID      int64      `json:"project_id"`
 	Feature        string     `json:"feature"`
 	Status         string     `json:"status"`
 	StartedAt      time.Time  `json:"started_at"`
@@ -126,18 +127,24 @@ func (s *Store) CreatePipelineRun(run *PipelineRun) error {
 }
 
 // AdmitPipelineRun makes an accepted command visible before a worker claims it.
+//
+// Проект проверяется в той же транзакции, что и вставка: архивирование
+// проекта между проверкой запроса и admission не пропускает новую задачу.
 func (s *Store) AdmitPipelineRun(run *PipelineRun) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	_, err = tx.Exec(`INSERT INTO pipeline_runs (run_uid, feature, status, started_at, config_snapshot)
-		VALUES (?, ?, 'queued', ?, ?) ON CONFLICT DO NOTHING`, run.RunID, run.Feature, run.StartedAt, run.ConfigSnapshot)
+	if err := requireActiveProject(tx, run.ProjectID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO pipeline_runs (run_uid, feature, project_id, status, started_at, config_snapshot)
+		VALUES (?, ?, ?, 'queued', ?, ?) ON CONFLICT DO NOTHING`, run.RunID, run.Feature, run.ProjectID, run.StartedAt, run.ConfigSnapshot)
 	if err != nil {
 		return err
 	}
-	stored, err := s.scanRun(tx.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at,
+	stored, err := s.scanRun(tx.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, project_id, status, started_at,
 		completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
 		FROM pipeline_runs WHERE run_uid = ?`, run.RunID))
 	if err != nil {
@@ -256,7 +263,7 @@ func (s *Store) QueuedRunIDs() ([]struct {
 // yet been correlated. The task is stored with the admission so startup can
 // safely recreate a missing scheduler job after a process crash.
 func (s *Store) PendingAdmissions() ([]PipelineRun, error) {
-	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at,
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, project_id, status, started_at,
 		completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
 		FROM pipeline_runs WHERE status IN ('queued', 'failed') AND COALESCE(queue_job_id, 0) = 0 ORDER BY id`)
 	if err != nil {
@@ -266,7 +273,7 @@ func (s *Store) PendingAdmissions() ([]PipelineRun, error) {
 	var runs []PipelineRun
 	for rows.Next() {
 		var run PipelineRun
-		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt,
+		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.ProjectID, &run.Status, &run.StartedAt,
 			&run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
 			return nil, err
 		}
@@ -774,7 +781,7 @@ func (s *Store) GetPipelineRunsPage(limit, offset int) ([]PipelineRun, error) {
 	if limit < 1 || limit > 100 || offset < 0 {
 		return nil, fmt.Errorf("invalid pagination limit=%d offset=%d", limit, offset)
 	}
-	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), feature, project_id, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '')
 		FROM pipeline_runs ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
@@ -783,7 +790,7 @@ func (s *Store) GetPipelineRunsPage(limit, offset int) ([]PipelineRun, error) {
 	var runs []PipelineRun
 	for rows.Next() {
 		var run PipelineRun
-		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
+		if err := rows.Scan(&run.ID, &run.RunID, &run.Feature, &run.ProjectID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -801,16 +808,16 @@ func (s *Store) CountPipelineRuns() (int, error) {
 }
 
 func (s *Store) GetPipelineRunByID(id int64) (*PipelineRun, error) {
-	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE id = ?`, id))
+	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, project_id, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE id = ?`, id))
 }
 
 func (s *Store) GetPipelineRunByRunID(runID string) (*PipelineRun, error) {
-	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE run_uid = ?`, runID))
+	return s.scanRun(s.db.QueryRow(`SELECT id, COALESCE(run_uid, ''), feature, project_id, status, started_at, completed_at, COALESCE(config_snapshot, ''), COALESCE(queue_job_id, 0), COALESCE(admission_error, '') FROM pipeline_runs WHERE run_uid = ?`, runID))
 }
 
 func (s *Store) scanRun(row *sql.Row) (*PipelineRun, error) {
 	var run PipelineRun
-	if err := row.Scan(&run.ID, &run.RunID, &run.Feature, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
+	if err := row.Scan(&run.ID, &run.RunID, &run.Feature, &run.ProjectID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ConfigSnapshot, &run.QueueJobID, &run.Error); err != nil {
 		return nil, err
 	}
 	return &run, nil
@@ -1030,7 +1037,7 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		// SQLite walks the whole events table for every page. IF NOT EXISTS
 		// keeps reopening an upgraded file a no-op.
 		`CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_uid, id)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP), (14, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {
@@ -1054,7 +1061,10 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 			return err
 		}
 	}
-	return migrateV13(ctx, tx)
+	if err := migrateV13(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV14(ctx, tx)
 }
 
 // migrateV13 (BL-31) adds the SSO account binding of team members, the
@@ -1114,6 +1124,34 @@ func requireAffected(result sql.Result, entity string) error {
 	}
 	if affected != 1 {
 		return fmt.Errorf("%s update affected %d rows", entity, affected)
+	}
+	return nil
+}
+
+// migrateV14 (S01) добавляет проекты и привязывает к ним задачи и идеи
+// бэклога. Проект «Основной» (ID 1) создаётся и при чистой установке, и при
+// обновлении: существующие записи получают project_id = 1 через DEFAULT
+// добавляемой колонки, поэтому ни одна задача не остаётся без проекта.
+// Каждый оператор идемпотентен.
+func migrateV14(ctx context.Context, tx schemaQuerier) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS projects (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+		description TEXT NOT NULL DEFAULT '', archived_at DATETIME,
+		created_by TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO projects (id, name, name_key, description, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		DefaultProjectID, DefaultProjectName, projectNameKey(DefaultProjectName), DefaultProjectDescription); err != nil {
+		return err
+	}
+	for _, table := range []string{"pipeline_runs", "backlog_items"} {
+		if err := ensureColumn(ctx, tx, table, "project_id", fmt.Sprintf("INTEGER NOT NULL DEFAULT %d", DefaultProjectID)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_`+table+`_project ON `+table+`(project_id)`); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -25,6 +25,11 @@ Schema migrations MUST иметь номера в `schema_migrations` и при�
 - **КОГДА** открывается БД со старой таблицей pipeline_runs/stages
 - **ТОГДА** недостающие identity и evidence columns MUST быть добавлены идемпотентно
 
+#### Scenario: Database before projects
+- **КОГДА** открывается БД версии 13 без таблицы `projects`
+- **ТОГДА** миграция MUST создать проект «Основной» (ID 1) и колонки `project_id` у `pipeline_runs` и `backlog_items`
+- **И** все существующие run и элементы бэклога MUST принадлежать проекту «Основной», а повторное открытие MUST NOT создавать дубликатов
+
 #### Scenario: Already migrated database
 - **КОГДА** открывается БД, у которой `MAX(version)` в `schema_migrations` равна версии бинарника
 - **ТОГДА** store MUST только прочитать версию и MUST NOT брать write-lock, поэтому параллельные открытия занятой БД не получают `SQLITE_BUSY`

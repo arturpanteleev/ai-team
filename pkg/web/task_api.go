@@ -76,6 +76,7 @@ type taskStageActionCommand struct {
 
 type taskRunListItem struct {
 	ID              int64      `json:"id"`
+	ProjectID       int64      `json:"project_id"`
 	RunID           string     `json:"run_id"`
 	Feature         string     `json:"feature"`
 	Task            string     `json:"task,omitempty"`
@@ -154,6 +155,10 @@ func (s *Server) handleListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_pagination")
 		return
 	}
+	projectID, ok := projectFilter(w, r)
+	if !ok {
+		return
+	}
 	filter := map[string]string{
 		"status":   strings.TrimSpace(r.URL.Query().Get("status")),
 		"stage":    strings.TrimSpace(r.URL.Query().Get("stage")),
@@ -167,6 +172,9 @@ func (s *Server) handleListTaskRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	filtered := make([]taskRunListItem, 0, len(all))
 	for _, item := range all {
+		if projectID != 0 && item.ProjectID != projectID {
+			continue
+		}
 		if filter["status"] != "" && item.Status != filter["status"] && item.Phase != filter["status"] {
 			continue
 		}
@@ -215,7 +223,7 @@ func (s *Server) listTaskRunsWith(templates *taskTemplateLookup) ([]taskRunListI
 	// building them per run cost several directory/YAML round trips per task.
 	stateStore, stateErr := lifecycle.NewStore(s.targetDir)
 	for _, run := range runs {
-		item := taskRunListItem{ID: run.ID, RunID: run.RunID, Feature: run.Feature, Status: run.Status,
+		item := taskRunListItem{ID: run.ID, ProjectID: run.ProjectID, RunID: run.RunID, Feature: run.Feature, Status: run.Status,
 			StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, AllowedActions: []string{}}
 		var snapshot startRunCommand
 		if json.Unmarshal([]byte(run.ConfigSnapshot), &snapshot) == nil {

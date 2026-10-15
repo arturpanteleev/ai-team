@@ -16,6 +16,7 @@ pkg/
 ├── runtime/         Runtime interface + AgentCLI (prompt, логи, model/effort)
 ├── pipeline/        оркестрация, enforcement вердиктов, гейты, loopback
 ├── workflow/        доменные state/outcome типы и чистые переходы; контракт гейта
+├── stagestatus/     чистая проекция статусов этапов и истории посещений из durable-журнала
 ├── gatelib/         версионированная библиотека определений гейтов (реестр)
 ├── gatephrases/     логика гейта required_phrases (явные параметры, RE2 только по флагу)
 ├── gatesched/       планировщик групп гейтов: параллельные гейты, журнал, recovery
@@ -95,6 +96,53 @@ Compiler до run проверяет references, достижимость, termi
 SQLite/WebSocket projection, а lifecycle сохраняет exact следующий узел.
 Resolved `workflow.json` содержит фактически исполненный graph; web detail
 читает этот immutable snapshot и показывает текущую позицию и policies.
+
+## Статусы этапов и история посещений (S11)
+
+`pkg/stagestatus` — одна **чистая** функция `Project(Input) Projection`: из
+журнала событий, согласований, checkpoint жизненного цикла и закреплённого
+шаблона она выводит, где находится каждый этап. Ничего не хранится и не
+редактируется: проекция пересчитывается на каждом чтении, после перезапуска даёт
+тот же ответ, не меняет вход, а журнал без `transition_selected` (старые run)
+тоже читается — посещения тогда выводятся из попыток. `pkg/web`
+(`stage_status_api.go`) только собирает вход из SQLite-ленты задачи, approval
+store и lifecycle и отдаёт результат в `GET /api/runs/{id}` (`stage_statuses`),
+в карточках `GET /api/runs` (`stage_status`, только для запрошенной страницы),
+в `GET /api/runs/{id}/stage-statuses` и MCP `get_task_stage_statuses`. Записи
+статуса нет ни в одном API; те же события, пропущенные через verified
+`events.jsonl`, дают те же статусы (проверяется в сквозном тесте).
+
+Модель разделяет то, что раньше смешивал один «running»:
+
+| Измерение | Значения | Откуда |
+|---|---|---|
+| `readiness` | `not_reached`, `ready`, `engaged`, `left` | есть ли открытое посещение и началась ли работа |
+| `phase` | `none`, `working`, `checking`, `awaiting_human` | открытая попытка; гейты (`gate_attempt_*`) и проверки после попытки; ожидающее approval |
+| `executor` | `human`, `internal_agent`, `external_agent` + `source` | `attempt_finished.executor*` (факт), шаблон/`adapter` (по умолчанию), `executor_changed` / lifecycle-override (выбор человека) |
+| `outcome` | исход попытки (`passed`, `rejected`, …; `pending`) | `attempt_finished`, `attempts_invalidated` |
+| посещения | `visits[]`, `visited`, `visit_count` | `transition_selected` (вход/выход), `attempt_*`, `approval_*`, `stage_taken` |
+
+`status` — их свёртка. Посещение — это один вход в этап: `transition_selected`
+закрывает посещение `from` и открывает посещение `target`; переход на ту же
+стадию (`stay`) нового посещения не создаёт, возврат (индекс назад или действие
+`return_to_*`) помечает новое посещение `entered_via: return`. Закрытое
+посещение остаётся неактивным навсегда вместе с попытками (инвалидированные
+помечаются `superseded`), поэтому статус вернувшегося этапа — это статус его
+**открытого** посещения, а прежняя попытка не делает этап «завершённым»; этап,
+откуда вернулись, получает `not_reached` с `visited: true`. Ожидание человека
+выводится из pending approval этапа (`from_stage`): ввод (`human_input`) — это
+готовность (`ready`, а после `stage_taken` — работа человека), подтверждение,
+решение по проверке, вопросы grill и план доставки — `awaiting_human` с
+`blocked_by` (вид, approval, роли, действия, провалившиеся обязательные
+гейты). Подтверждение результата — решение о переходе, поэтому checkpoint и
+action-маршруты уже указывают на следующий этап (`action_stage_id`), а ждущим
+остаётся подтверждаемый.
+
+Журнал approval store перекрывает ленту: решение, принятое до resume, ещё не
+записано как `approval_decided`, но approval уже `resolved`. UI (карточка,
+маршрут, таймлайн) показывает проекцию одним набором слов
+(`web/src/stageStatus.ts`); красный — только отказ/ошибка/обход, янтарный —
+рекомендации гейтов.
 
 ## Гейты: контракт и библиотека
 

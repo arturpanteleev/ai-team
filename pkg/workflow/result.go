@@ -64,15 +64,31 @@ type AttemptUsage struct {
 	CacheReadIncludedInInput bool    `json:"cache_read_included_in_input,omitempty"`
 }
 
+// ExecutorInfo records which executor actually produced an attempt result:
+// the internal agent runtime or a named external adapter. It is provenance,
+// not authority: it never changes how the attempt is judged.
+type ExecutorInfo struct {
+	// Kind is internal_agent or external.
+	Kind string `json:"kind"`
+	// Name is the runtime type (internal_agent) or the adapter name (external).
+	Name     string            `json:"name,omitempty"`
+	Summary  string            `json:"summary,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+	// LogFile is the base name of the redacted executor log.
+	LogFile string `json:"log_file,omitempty"`
+}
+
 // StageResult is the domain record of one immutable stage attempt.
 // CheckOverridden marks an attempt whose failed stage check (B-40) was
 // bypassed by an explicit, reasoned human decision (B-41); delivery and
 // subsequent stages read it as "passed with override".
 type StageResult struct {
-	RunID                     string
-	AttemptID                 string
-	Name                      string
-	Executor                  string
+	RunID     string
+	AttemptID string
+	Name      string
+	Executor  string
+	// ExecutorInfo names the actual executor of an automated attempt.
+	ExecutorInfo              *ExecutorInfo
 	ActorID                   string
 	ActorRole                 string
 	HumanInputApprovalID      string

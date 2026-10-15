@@ -192,6 +192,12 @@ func validateControllerAttemptManifest(manifest AttemptManifest) error {
 	if manifest.Executor != "human" && (manifest.ActorID != "" || manifest.ActorRole != "" || manifest.HumanInputApprovalID != "") {
 		return errors.New("non-human attempt manifest cannot contain a human actor")
 	}
+	if info := manifest.ExecutorInfo; info != nil {
+		if manifest.Executor == "human" || (info.Kind != "internal_agent" && info.Kind != "external") ||
+			(info.Kind == "external" && strings.TrimSpace(info.Name) == "") {
+			return errors.New("attempt manifest executor info is invalid")
+		}
+	}
 	hasHumanSubmission := manifest.HumanSubmissionVersion != 0 || manifest.HumanSubmissionSHA256 != "" ||
 		manifest.HumanSubmissionResult != "" || manifest.HumanSubmissionLinkKind != "" || manifest.HumanSubmissionDescription != ""
 	if hasHumanSubmission && manifest.Executor != "human" {

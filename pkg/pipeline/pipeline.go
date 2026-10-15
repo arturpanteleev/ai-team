@@ -121,6 +121,7 @@ type Pipeline struct {
 	notifier                notifier.Notifier
 	prompter                Prompter
 	newRuntime              runtime.Factory
+	externalExecutors       ExternalExecutorFactory
 	recorder                Recorder
 	delivery                delivery.Service
 	stageDeliveryExecutor   StageDeliveryExecutor

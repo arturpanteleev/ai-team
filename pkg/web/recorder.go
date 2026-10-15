@@ -199,12 +199,19 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 		r.warn("update stage", err)
 		return
 	}
-	r.event("attempt_finished", stage.AttemptID, completedAt, map[string]any{
+	finished := map[string]any{
 		"stage": stage.Name, "agent": stage.Name, "actor_id": stage.ActorID, "executor": stage.Executor,
 		"status": stage.Status, "execution": stored.Execution,
 		"decision": stored.Decision, "outcome": stored.Outcome,
 		"human_edit_of_agent_attempt_id": stage.HumanEditOfAgentAttemptID,
-	})
+	}
+	if stage.ExecutorInfo != nil {
+		// The actual executor of the attempt (internal agent runtime or named
+		// external adapter); `executor` above stays the human/agent class.
+		finished["executor_kind"] = stage.ExecutorInfo.Kind
+		finished["executor_name"] = stage.ExecutorInfo.Name
+	}
+	r.event("attempt_finished", stage.AttemptID, completedAt, finished)
 }
 
 // EventRecorded projects selected immutable warning events to the task event

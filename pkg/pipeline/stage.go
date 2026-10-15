@@ -23,6 +23,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/report"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/stageexec"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
 	"github.com/arturpanteleev/ai-team/pkg/verdict"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -124,6 +125,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			MutationChanges: append([]workflow.MutationChange(nil), r.MutationChanges...),
 			Delivery:        r.Delivery,
 			Usage:           r.Usage,
+			ExecutorInfo:    r.ExecutorInfo,
 		}
 		if r.Err != nil {
 			manifest.Error = r.Err.Error()
@@ -152,6 +154,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		data := map[string]any{
 			"status": r.Status, "execution": r.State.Execution, "decision": r.State.Decision,
 			"outcome": r.State.Outcome, "verdict": r.Verdict, "executor": "agent",
+		}
+		if r.ExecutorInfo != nil {
+			data["executor_kind"] = r.ExecutorInfo.Kind
+			data["executor_name"] = r.ExecutorInfo.Name
 		}
 		if manifestPublished {
 			digest, _, digestErr := evidence.AttemptManifestDigest(rs.p.attemptManifestSource, rs.evidence.RunDir(), rs.runID, attemptID)
@@ -229,7 +235,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		defer func() { rs.deliveryContinuationStage = "" }()
 		logging.Printf("  ↻ %s: продолжение после ожидания delivery-плана, агент повторно не запускается\n", name)
 	}
-	modelAttempt = !a.ControllerOperation() && !continuation
+	adapterName := rs.p.stageAdapter(name)
+	if adapterName != "" && a.ControllerOperation() {
+		return fail(fmt.Errorf("агент %s: внешний исполнитель %s не применим к controller operation %s", name, adapterName, a.Kind))
+	}
+	externalExecutor := adapterName != "" && !continuation
+	modelAttempt = !a.ControllerOperation() && !continuation && !externalExecutor
 	agentCfg := rs.p.cfg.AgentConfig(name)
 	if agentCfg == nil {
 		agentCfg = &config.AgentConfig{Name: name, CLI: rs.p.cfg.CLI, Model: rs.p.cfg.Model, Effort: rs.p.cfg.Effort}
@@ -298,7 +309,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 
 	var stageRuntime runtime.Runtime
 	var runtimeAgent *runtime.Agent
-	if !a.ControllerOperation() && !continuation {
+	if !a.ControllerOperation() && !continuation && !externalExecutor {
 		stageRuntime, err = rs.p.newRuntime(a.RuntimeType)
 		if err != nil {
 			return fail(fmt.Errorf("ошибка создания runtime для %s: %w", name, err))
@@ -382,6 +393,7 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	}()
 
 	var execErr error
+	var claimedVerdict string
 	executionInvoked = true
 	if continuation {
 		// No model run: the controller only re-checks and re-authorizes.
@@ -398,7 +410,26 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		if err != nil {
 			return fail(fmt.Errorf("agent %s: clarification read boundary: %w", name, err))
 		}
-		execErr = stageRuntime.Execute(stageCtx, runtimeAgent, &stageTask, inputs)
+		var stageExecutor stageexec.StageExecutor
+		if externalExecutor {
+			stageExecutor, err = rs.p.newExternalExecutor(adapterName)
+			if err != nil {
+				return fail(fmt.Errorf("агент %s: %w", name, err))
+			}
+		} else {
+			stageExecutor = stageexec.NewInternalAgent(stageRuntime, runtimeAgent, &stageTask)
+		}
+		request, requestErr := rs.stageExecutorRequest(a, name, attemptID, &stageTask, inputs)
+		if requestErr != nil {
+			return fail(requestErr)
+		}
+		var executed stageexec.Result
+		executed, execErr = stageExecutor.Execute(stageCtx, request)
+		r.ExecutorInfo = executorInfo(executed)
+		claimedVerdict = executed.Verdict
+		if errors.Is(execErr, stageexec.ErrTimeout) {
+			execErr = &stageTimeoutError{stage: name, timeout: timeout}
+		}
 	}
 	// Persist reported usage before interpreting the execution result so that
 	// interrupted or failed model invocations still contribute their attested
@@ -516,6 +547,12 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	r.Verdict, err = verdict.FromOutputsContract(outputPaths, a.Verdict)
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: %w", name, err))
+	}
+	if claimedVerdict != "" && claimedVerdict != string(r.Verdict) {
+		// An executor's own verdict claim is only a cross-check: the verdict
+		// the controller parsed from the outputs is the one that counts.
+		r.ValidationFailed = true
+		return fail(fmt.Errorf("агент %s: исполнитель заявил verdict %q, а выходы содержат %q", name, claimedVerdict, r.Verdict))
 	}
 
 	if r.Verdict.IsNegative() {

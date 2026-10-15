@@ -156,63 +156,71 @@ func (c *Checker) Check(ctx context.Context) Report {
 		}
 	}
 
-	cli := strings.TrimSpace(c.config.CLI)
-	if cli == "" {
-		cli = runtime.DefaultCLI
-	}
-	if !runtime.AdapterExists(filepath.Base(cli)) {
-		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "configured CLI не поддерживается (нет runtime adapter: " + filepath.Base(cli) + ")"})
-	} else if resolved, err := c.lookPath(cli); err != nil {
-		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "команда " + filepath.Base(cli) + " не найдена в PATH"})
-	} else if version, err := c.command(ctx, resolved, "--version"); err != nil {
-		add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "не удалось получить версию: " + safeError(err)})
-	} else {
-		add(Check{ID: "cli", Status: StatusPassed, Required: true, Message: firstLine(version)})
-	}
-
-	model := strings.TrimSpace(c.config.Model)
-	if model == "" || model == "auto" {
-		// Диагностика ссылается на фактически выбранный CLI-рантайм из
-		// конфига (AUD-09): не хардкодим "OpenCode", если cli=codex/claude.
-		add(Check{ID: "model", Status: StatusWarning, Message: "model/provider выбирает " + filepath.Base(cli)})
-	} else {
-		add(Check{ID: "model", Status: StatusPassed, Message: model})
-	}
-
-	if cliName := filepath.Base(cli); cliName == "claude" || cliName == "codex" {
-		method := runtime.DetectAuthentication(cliName)
-		// Без способа входа рантайм падает на старте (изолированный
-		// CLAUDE_CONFIG_DIR не видит обычный логин), поэтому прогон не стартует.
-		message := "способ входа: не найден"
-		status := StatusFailed
-		switch method {
-		case runtime.AuthenticationAPIKey:
-			message, status = "способ входа: API-ключ", StatusPassed
-		case runtime.AuthenticationSubscription:
-			message, status = "способ входа: подписка", StatusPassed
+	adapters := c.usedAdapters()
+	if c.needsAgentCLI() {
+		cli := strings.TrimSpace(c.config.CLI)
+		if cli == "" {
+			cli = runtime.DefaultCLI
 		}
-		add(Check{ID: "credentials", Status: status, Required: true, Message: message})
-	} else {
-		allowed := allowedCredentialNames()
-		if len(allowed) == 0 {
-			add(Check{ID: "credentials", Status: StatusWarning, Message: "явные credential environment variables не разрешены"})
+		if !runtime.AdapterExists(filepath.Base(cli)) {
+			add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "configured CLI не поддерживается (нет runtime adapter: " + filepath.Base(cli) + ")"})
+		} else if resolved, err := c.lookPath(cli); err != nil {
+			add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "команда " + filepath.Base(cli) + " не найдена в PATH"})
+		} else if version, err := c.command(ctx, resolved, "--version"); err != nil {
+			add(Check{ID: "cli", Status: StatusFailed, Required: true, Message: "не удалось получить версию: " + safeError(err)})
 		} else {
-			var present, missing []string
-			for _, name := range allowed {
-				if _, ok := os.LookupEnv(name); ok {
-					present = append(present, name)
-				} else {
-					missing = append(missing, name)
-				}
-			}
-			message := "заданы: " + strings.Join(present, ", ")
-			status := StatusPassed
-			if len(missing) > 0 {
-				status = StatusWarning
-				message += "; отсутствуют: " + strings.Join(missing, ", ")
-			}
-			add(Check{ID: "credentials", Status: status, Message: strings.TrimSpace(message)})
+			add(Check{ID: "cli", Status: StatusPassed, Required: true, Message: firstLine(version)})
 		}
+
+		model := strings.TrimSpace(c.config.Model)
+		if model == "" || model == "auto" {
+			// Диагностика ссылается на фактически выбранный CLI-рантайм из
+			// конфига (AUD-09): не хардкодим "OpenCode", если cli=codex/claude.
+			add(Check{ID: "model", Status: StatusWarning, Message: "model/provider выбирает " + filepath.Base(cli)})
+		} else {
+			add(Check{ID: "model", Status: StatusPassed, Message: model})
+		}
+
+		if cliName := filepath.Base(cli); cliName == "claude" || cliName == "codex" {
+			method := runtime.DetectAuthentication(cliName)
+			// Без способа входа рантайм падает на старте (изолированный
+			// CLAUDE_CONFIG_DIR не видит обычный логин), поэтому прогон не стартует.
+			message := "способ входа: не найден"
+			status := StatusFailed
+			switch method {
+			case runtime.AuthenticationAPIKey:
+				message, status = "способ входа: API-ключ", StatusPassed
+			case runtime.AuthenticationSubscription:
+				message, status = "способ входа: подписка", StatusPassed
+			}
+			add(Check{ID: "credentials", Status: status, Required: true, Message: message})
+		} else {
+			allowed := allowedCredentialNames()
+			if len(allowed) == 0 {
+				add(Check{ID: "credentials", Status: StatusWarning, Message: "явные credential environment variables не разрешены"})
+			} else {
+				var present, missing []string
+				for _, name := range allowed {
+					if _, ok := os.LookupEnv(name); ok {
+						present = append(present, name)
+					} else {
+						missing = append(missing, name)
+					}
+				}
+				message := "заданы: " + strings.Join(present, ", ")
+				status := StatusPassed
+				if len(missing) > 0 {
+					status = StatusWarning
+					message += "; отсутствуют: " + strings.Join(missing, ", ")
+				}
+				add(Check{ID: "credentials", Status: status, Message: strings.TrimSpace(message)})
+			}
+		}
+	} else {
+		add(Check{ID: "cli", Status: StatusPassed, Message: "все agent-этапы исполняют внешние адаптеры; CLI агента не требуется"})
+	}
+	for _, name := range adapters {
+		add(c.adapterCheck(name))
 	}
 
 	if output, err := c.git(ctx, "rev-parse", "--show-toplevel"); err != nil {
@@ -261,6 +269,91 @@ func (c *Checker) git(ctx context.Context, args ...string) (string, error) {
 	}
 	args = append([]string{"-C", c.target}, args...)
 	return c.command(ctx, resolved, args...)
+}
+
+// needsAgentCLI reports whether any stage still runs through the model CLI.
+// Only a template whose every non-controller agent stage names an adapter can
+// skip the CLI and its credentials; a mixed or legacy config keeps them required.
+func (c *Checker) needsAgentCLI() bool {
+	if len(c.config.Stages) == 0 {
+		return true
+	}
+	adapterStages := 0
+	for _, stage := range c.config.Stages {
+		if stage.Executor != "agent" || stage.Agent == "" {
+			continue
+		}
+		if stage.Adapter != "" {
+			adapterStages++
+			continue
+		}
+		if definition, err := c.registry.Load(stage.Agent); err == nil && definition.ControllerOperation() {
+			continue
+		}
+		return true
+	}
+	return adapterStages == 0
+}
+
+// usedAdapters lists the adapter names referenced by stages, sorted.
+func (c *Checker) usedAdapters() []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, stage := range c.config.Stages {
+		if stage.Adapter != "" && !seen[stage.Adapter] {
+			seen[stage.Adapter] = true
+			names = append(names, stage.Adapter)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// adapterCheck verifies that the adapter program exists and is executable.
+// A relative path with a separator resolves from the target repository and
+// must stay inside it; a bare name resolves through PATH.
+func (c *Checker) adapterCheck(name string) Check {
+	id := "adapter:" + name
+	fail := func(message string) Check {
+		return Check{ID: id, Status: StatusFailed, Required: true, Message: message}
+	}
+	spec, ok := c.config.ExecutorAdapters[name]
+	if !ok || len(spec.Argv) == 0 || strings.TrimSpace(spec.Argv[0]) == "" {
+		return fail("адаптер " + name + " не объявлен в executor_adapters")
+	}
+	program := spec.Argv[0]
+	path := program
+	switch {
+	case filepath.IsAbs(program):
+	case strings.ContainsRune(program, '/') || strings.ContainsRune(program, filepath.Separator):
+		root, err := filepath.EvalSymlinks(c.target)
+		if err != nil {
+			return fail("каталог проекта недоступен: " + safeError(err))
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(root, program))
+		if err != nil {
+			return fail("программа адаптера " + program + " не найдена")
+		}
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fail("программа адаптера " + program + " выходит за пределы репозитория")
+		}
+		path = resolved
+	default:
+		resolved, err := c.lookPath(program)
+		if err != nil {
+			return fail("команда адаптера " + program + " не найдена в PATH")
+		}
+		return Check{ID: id, Status: StatusPassed, Required: true, Message: resolved}
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return fail("программа адаптера " + program + " не найдена")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return fail("программа адаптера " + program + " не исполняема")
+	}
+	return Check{ID: id, Status: StatusPassed, Required: true, Message: program}
 }
 
 // hasDelivery reports whether the workflow publishes through the controller

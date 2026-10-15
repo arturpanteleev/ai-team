@@ -14,6 +14,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/stageexec"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -51,6 +52,9 @@ type Config struct {
 	MaxVisits          map[string]int                     `yaml:"max_visits,omitempty"`
 	Checks             []checks.Definition                `yaml:"checks,omitempty"`
 	MCPServers         map[string]runtime.MCPServerConfig `yaml:"mcp_servers,omitempty"`
+	// ExecutorAdapters declares trusted external stage executors by name; a
+	// stage selects one with its adapter field.
+	ExecutorAdapters map[string]stageexec.AdapterSpec `yaml:"executor_adapters,omitempty"`
 
 	// PipelineAgents and Workflow are runtime compatibility projections. They
 	// are never serialized; schema v5 stores stage IDs, agent references and
@@ -724,7 +728,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"effort": true, "stage_timeout": true, "preflight_timeout": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
 		"tree_hash": true, "budget": true, "auto_pickup": true, "tracker": true, "cicd": true, "notifications": true, "redaction": true, "retention": true,
-		"mcp_servers": true,
+		"mcp_servers": true, "executor_adapters": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -739,6 +743,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		MaxVisits          map[string]int                     `yaml:"max_visits"`
 		Checks             []checks.Definition                `yaml:"checks"`
 		MCPServers         map[string]runtime.MCPServerConfig `yaml:"mcp_servers"`
+		ExecutorAdapters   map[string]stageexec.AdapterSpec   `yaml:"executor_adapters"`
 		CLI                string                             `yaml:"cli"`
 		Model              string                             `yaml:"model"`
 		Effort             string                             `yaml:"effort"`
@@ -781,6 +786,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.MaxVisits = raw.MaxVisits
 	c.Checks = raw.Checks
 	c.MCPServers = raw.MCPServers
+	c.ExecutorAdapters = raw.ExecutorAdapters
 	c.CLI = raw.CLI
 	c.Model = raw.Model
 	c.Effort = raw.Effort
@@ -1065,6 +1071,12 @@ type AgentLookup interface {
 	Exists(name string) bool
 }
 
+// controllerOperationLookup is implemented by registries that know whether an
+// agent is a controller operation (delivery, deploy).
+type controllerOperationLookup interface {
+	IsControllerOperation(name string) (bool, error)
+}
+
 type pipelineValidator interface {
 	ValidatePipeline(names []string) error
 }
@@ -1132,6 +1144,17 @@ func (c *Config) Validate(reg AgentLookup) error {
 	sort.Strings(mcpIDs)
 	for _, id := range mcpIDs {
 		if err := c.MCPServers[id].Validate(id); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
+	adapterIDs := make([]string, 0, len(c.ExecutorAdapters))
+	for id := range c.ExecutorAdapters {
+		adapterIDs = append(adapterIDs, id)
+	}
+	sort.Strings(adapterIDs)
+	for _, id := range adapterIDs {
+		if err := c.ExecutorAdapters[id].Validate(id); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}

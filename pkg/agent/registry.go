@@ -293,6 +293,16 @@ func (r *Registry) Exists(name string) bool {
 	return err == nil
 }
 
+// IsControllerOperation reports whether the named agent is executed by the
+// controller itself (delivery or deploy) rather than by a model or adapter.
+func (r *Registry) IsControllerOperation(name string) (bool, error) {
+	a, err := r.Load(name)
+	if err != nil {
+		return false, err
+	}
+	return a.ControllerOperation(), nil
+}
+
 // HasProductSpecContract reports whether a stage's agent declares the proposal
 // artifact required by the Product Owner specification approval action.
 func (r *Registry) HasProductSpecContract(name string) (bool, error) {

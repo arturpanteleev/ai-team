@@ -231,6 +231,12 @@ subject. Delivery исполняет уже проверенный план. Н�
 
 Исходники: [pkg/runtime](../pkg/runtime/).
 
+### stageexec — Исполнитель этапа
+
+Интерфейс `StageExecutor` создаёт результат этапа: `InternalAgent` оборачивает `runtime.Runtime`, `External` запускает доверенный argv из `executor_adapters` по JSON-контракту (лимиты времени и вывода, allowlist окружения, redaction лога). Отделён от гейтов: исполнитель только создаёт выходы, а тип результата, mutation scope и verdict проверяет контроллер.
+
+Исходники: [pkg/stageexec](../pkg/stageexec/).
+
 ### safeio — Файловые primitives
 
 Ограничивает regular-file чтение и проверяет пути; immutable write отвергает существующий файл и статические symlink-компоненты. ReadRegularFile отдельно защищает leaf; полную защиту родителей нельзя предполагать.

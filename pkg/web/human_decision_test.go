@@ -141,4 +141,13 @@ func TestHumanDecision_ConfirmWithoutHashIsAuditedAsServerFilled(t *testing.T) {
 	if len(audit) != 1 || audit[0]["hash_confirmed_by_actor"] != false {
 		t.Fatalf("a confirmation that named no hash must say so in the audit: %v", audit)
 	}
+	if response.Header().Get("Deprecation") != "true" || !strings.Contains(response.Header().Get("Warning"), "subject_hash") {
+		t.Fatalf("the hashless path must be marked deprecated: %v", response.Header())
+	}
+	withHash := confirmFixture(t)
+	named := withHash.requestAs(t, "reviewer@example.test", reviewerRoles, http.MethodPost,
+		"/api/runs/run-confirm/stages/build/confirm", `{"subject_hash":"`+testSubjectHash+`"}`)
+	if named.Code != http.StatusAccepted || named.Header().Get("Deprecation") != "" {
+		t.Fatalf("a confirmation with the hash is not deprecated: %d %v", named.Code, named.Header())
+	}
 }

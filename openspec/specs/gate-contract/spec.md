@@ -394,8 +394,19 @@ author MUST NOT store a second decision and MUST be audited as
 `human_gate_decision_replayed`. When the audit cannot be written after the
 decision was stored, the caller MUST be told so and a repeat of the request
 MUST be safe. A client that omits the hash on the Web confirmation endpoint
-MUST be served with the hash of the pending approval and the audit MUST say
-that the person did not confirm the hash.
+MAY be served with the hash of the pending approval, but this path is
+DEPRECATED: the response MUST carry the `Deprecation: true` and `Warning`
+headers and the audit MUST say that the person did not confirm the hash. The
+network MCP server and every new client MUST send `subject_hash`; the bundled
+frontend never confirms without it. A person who holds several required roles
+votes once per role, each call in the next role no earlier vote covered (a
+local owner closes a multi-role quorum by calling once per role); once every
+role of that person is covered an identical request is a replay and a different
+action MUST be refused with `ErrAlreadyVoted`. Of several racing identical
+requests exactly one MUST write `human_gate_decided`, decided by the result of
+the approval store. After a resume the visit counter MUST NOT count attempts
+that ended with an `on_reject: stay` refusal, so any number of refusals decided
+through Web or REST keeps the visit allowance.
 
 #### Scenario: Web and REST give the same decision and audit
 

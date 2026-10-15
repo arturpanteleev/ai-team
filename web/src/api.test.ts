@@ -56,12 +56,11 @@ describe('stage confirmation', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await confirmTaskStage('run-1', 'spec', 'c'.repeat(64));
-    await confirmTaskStage('run-1', 'spec');
+    await expect(confirmTaskStage('run-1', 'spec', '')).rejects.toThrow();
 
     const confirms = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/stages/spec/confirm'));
-    expect(confirms).toHaveLength(2);
+    expect(confirms).toHaveLength(1);
     expect(JSON.parse(String((confirms[0][1] as RequestInit).body))).toEqual({ subject_hash: 'c'.repeat(64) });
-    expect((confirms[1][1] as RequestInit).body).toBeUndefined();
   });
 });
 

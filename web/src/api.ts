@@ -347,10 +347,14 @@ export function submitTaskStageResult(runId: string, stageId: string, value: {
 }
 
 // subjectHash is the hash of the decision subject the person saw; the server
-// refuses the confirmation when the result changed in the meantime.
-export function confirmTaskStage(runId: string, stageId: string, subjectHash?: string): Promise<unknown> {
+// refuses the confirmation when the result changed in the meantime. It is
+// mandatory: the hashless server path is deprecated and the client never uses it.
+export function confirmTaskStage(runId: string, stageId: string, subjectHash: string): Promise<unknown> {
+  if (!subjectHash) {
+    return Promise.reject(new Error('Нет хеша результата для подтверждения: обновите страницу'));
+  }
   return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/confirm`,
-    subjectHash ? { subject_hash: subjectHash } : undefined);
+    { subject_hash: subjectHash });
 }
 
 export function overrideTaskStageCheck(runId: string, stageId: string, reason: string): Promise<unknown> {

@@ -803,6 +803,10 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 	hash, hashFromServer := command.SubjectHash, false
 	if hash == "" {
 		hash, hashFromServer = pending.SubjectHash, true
+		// Deprecated path: the person did not confirm the exact version. The
+		// network MCP server and new clients MUST send subject_hash.
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Warning", `299 - "confirm without subject_hash is deprecated: send the hash of the reviewed result"`)
 	}
 	decided, ok := s.decideTransition(w, humandecision.Request{
 		RunID: runID, ApprovalID: pending.ID, Action: "approve", SubjectHash: hash, HashFromServer: hashFromServer,

@@ -242,12 +242,8 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 	// idempotent and returns the stored one. Whether this call stored a new
 	// decision is decided by the store result (our unique timestamp is in it),
 	// not by the earlier read, so two racing identical requests audit once.
-	if !decisionStored(resolved.Decisions, req.Actor.ID, role, decidedAt) {
-		prior, _ := priorDecision(resolved.Decisions, req.Actor.ID, req.Action, hash)
-		if prior.ActorRole == "" {
-			prior.ActorRole = role
-		}
-		return s.replay(req, resolved, prior, hash)
+	if earlier, found := earlierDecision(resolved.Decisions, req.Actor.ID, role, decidedAt); found {
+		return s.replay(req, resolved, earlier, hash)
 	}
 	result := Result{Approval: resolved, Role: role, Resolved: resolved.Status == approval.StatusResolved}
 	data := map[string]any{
@@ -295,13 +291,16 @@ func priorDecision(decisions []approval.Decision, actorID, action, hash string) 
 	return approval.Decision{}, false
 }
 
-func decisionStored(decisions []approval.Decision, actorID, role string, at time.Time) bool {
+// earlierDecision finds a decision of the actor in the role that was stored by
+// another request (its timestamp is not ours): positive evidence that the store
+// treated this call as an idempotent repeat.
+func earlierDecision(decisions []approval.Decision, actorID, role string, at time.Time) (approval.Decision, bool) {
 	for _, decision := range decisions {
-		if decision.ActorID == actorID && decision.ActorRole == role && decision.DecidedAt.Equal(at) {
-			return true
+		if decision.ActorID == actorID && decision.ActorRole == role && !decision.DecidedAt.Equal(at) {
+			return decision, true
 		}
 	}
-	return false
+	return approval.Decision{}, false
 }
 
 func roleVoted(decisions []approval.Decision, role string) bool {

@@ -221,7 +221,7 @@ func TestMCPEndToEnd_PeopleCreateRunSubmitDecideAndReturn(t *testing.T) {
 	}
 	// Every MCP action is attributable in the run's event feed.
 	var actions []string
-	for _, record := range runEventData(t, env.srv, runID, mcpActionEvent) {
+	for _, record := range grantedMCPActions(t, env.srv, runID) {
 		if record["channel"] != "mcp" || record["token_id"] == nil || record["client"] == nil {
 			t.Fatalf("an MCP audit record must name the channel and the client: %v", record)
 		}
@@ -321,7 +321,7 @@ func TestMCPEndToEnd_FailedGateIsOverriddenOnlyByAnAdministrator(t *testing.T) {
 	}
 	// And the MCP audit tells who did it through which client.
 	var seen int
-	for _, entry := range runEventData(t, env.srv, runID, mcpActionEvent) {
+	for _, entry := range grantedMCPActions(t, env.srv, runID) {
 		if entry["tool"] == "override_stage_gate" {
 			seen++
 			if entry["actor_id"] != actorAdmin || entry["channel"] != "mcp" || entry["idempotency_key"] != "override-1" {

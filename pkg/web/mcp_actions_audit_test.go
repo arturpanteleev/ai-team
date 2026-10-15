@@ -10,6 +10,19 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 )
 
+// grantedMCPActions lists the journal records of actions that were carried out,
+// leaving the authorization denials (marked denied) aside.
+func grantedMCPActions(t *testing.T, srv *Server, runID string) []map[string]any {
+	t.Helper()
+	var granted []map[string]any
+	for _, record := range runEventData(t, srv, runID, mcpActionEvent) {
+		if record["denied"] != true {
+			granted = append(granted, record)
+		}
+	}
+	return granted
+}
+
 // A server failure after the dispatch is remembered like in REST: the action
 // may already have had side effects, so a retry with the same key replays the
 // answer and does not run the action a second time.

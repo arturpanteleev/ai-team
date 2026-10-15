@@ -95,7 +95,7 @@ func TestMCPHumanStageResultAndExecutor(t *testing.T) {
 	if text, failed := dev.call("get_task_stage_result", map[string]any{"run_id": "run-input", "stage_id": "build", "version": version}); failed || !strings.Contains(text, "результат") {
 		t.Fatalf("stage result: %v %s", failed, text)
 	}
-	events := runEventData(t, env.srv, "run-input", mcpActionEvent)
+	events := grantedMCPActions(t, env.srv, "run-input")
 	if len(events) != 1 || events[0]["tool"] != "submit_stage_result" || events[0]["actor_id"] != actorDev || events[0]["channel"] != "mcp" {
 		t.Fatalf("mcp audit = %v", events)
 	}

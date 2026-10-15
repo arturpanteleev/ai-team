@@ -275,7 +275,7 @@ func TestMCPRepeatedDeliveryDoesNotRepeatTheAction(t *testing.T) {
 	if got := len(runEventData(t, env.srv, "run-confirm", humandecision.AuditEvent)); got != 1 {
 		t.Fatalf("decision audited %d times", got)
 	}
-	if got := len(runEventData(t, env.srv, "run-confirm", mcpActionEvent)); got != 1 {
+	if got := len(grantedMCPActions(t, env.srv, "run-confirm")); got != 1 {
 		t.Fatalf("the MCP action was audited %d times", got)
 	}
 	// The same key for a different request is a client bug: refused, not run.

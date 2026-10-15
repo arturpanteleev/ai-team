@@ -87,7 +87,7 @@ func TestMCPTaskLifecycleAndDeliveryActions(t *testing.T) {
 	if count, decision := env.ctl.decisions(); count != 1 || decision.ActorID != actorPO || decision.SubjectHash != planHash || decision.Action != "approve" {
 		t.Fatalf("plan decision = %d %+v", count, decision)
 	}
-	audited := runEventData(t, env.srv, "run-plan", mcpActionEvent)
+	audited := grantedMCPActions(t, env.srv, "run-plan")
 	if len(audited) != 1 || audited[0]["tool"] != "approve_delivery_plan" {
 		t.Fatalf("plan approval audit = %v", audited)
 	}
@@ -346,7 +346,7 @@ func TestMCPTrackerActions(t *testing.T) {
 	if state, _ := dev.call("get_task_tracker", map[string]any{"run_id": "run-a"}); strings.Contains(state, `"issue_key":"APP-1"`) {
 		t.Fatalf("the link must be gone: %s", state)
 	}
-	audit := runEventData(t, env.srv, "run-a", mcpActionEvent)
+	audit := grantedMCPActions(t, env.srv, "run-a")
 	if len(audit) != 3 {
 		t.Fatalf("link, retry and unlink must each be audited: %v", audit)
 	}

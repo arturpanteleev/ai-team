@@ -1540,6 +1540,15 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 	for _, previous := range rs.results {
 		rs.visits[previous.Name]++
 	}
+	if runCfg.ResumeRunID != "" {
+		// human_approval on_reject: stay is not a loopback: each such refusal
+		// returned its attempt to the stage without consuming a visit in the
+		// live process. A resume restores the same count from the approval
+		// journal instead of from the number of results.
+		if err := rs.discountStayRejections(); err != nil {
+			return RunResult{RunID: runID, Outcome: workflow.RunFailed}, fmt.Errorf("resume visit count: %w", err)
+		}
+	}
 	rs.ps = ui.NewPipelineStatus(filepath.Base(runCfg.TargetDir), runCfg.Feature, len(rs.names))
 	rs.task.ConsoleOut = rs.ps.StatusWriter()
 	if p.recorder != nil {

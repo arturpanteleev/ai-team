@@ -228,3 +228,31 @@ func (rs *runState) resolvedTransitionApproval(stageID, attemptID, trigger strin
 	}
 	return found
 }
+
+// discountStayRejections removes from the restored visit counters the attempts
+// that ended with a resolved human_approval on_reject: stay refusal of their
+// own stage. It mirrors the live decrement in the graph loop, so the count
+// after a resume does not depend on whether the decision was made in the
+// process or through Web/REST while the run was stopped.
+func (rs *runState) discountStayRejections() error {
+	list, err := rs.approvalStore.List(rs.runID)
+	if err != nil {
+		return err
+	}
+	counted := make(map[string]bool, len(rs.results))
+	for _, result := range rs.results {
+		if result.AttemptID != "" {
+			counted[result.AttemptID+"\x00"+result.Name] = true
+		}
+	}
+	for _, value := range list {
+		if value.Status != approval.StatusResolved || value.Trigger != "graph_outcome:"+string(workflow.OutcomePassed) ||
+			!rejectKeepsStage(&value) || !counted[value.AttemptID+"\x00"+value.FromStage] {
+			continue
+		}
+		if rs.visits[value.FromStage] > 0 {
+			rs.visits[value.FromStage]--
+		}
+	}
+	return nil
+}

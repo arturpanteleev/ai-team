@@ -342,3 +342,41 @@ func TestHumanGate_DefaultRejectStopsTheRun(t *testing.T) {
 		t.Fatalf("the refusal must be recorded as a failed human gate: %+v", attempts)
 	}
 }
+
+// Reject-stay is a decision of a person, not a loopback: several refusals in a
+// row, each decided while the process was stopped (Web/REST) and resumed, must
+// not consume the max_visits allowance of the stage.
+func TestHumanGate_RepeatedRejectStayThroughResumeKeepsVisitAllowance(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": goodSpec}
+	rt.content["spec-checker"] = map[string]string{"spec-check": "{\"verdict\":\"pass\"}"}
+	rt.content["verifier"] = map[string]string{"verification": "ok"}
+	cfg := humanChainConfig(specChain(gatelib.OnRejectStay))
+	cfg.Returns = []config.TemplateReturn{{From: "next", To: "tech", MaxVisits: 2}}
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newGrillPipeline(cfg, rt, store)
+	if err := runGrillPipeline(t, p, dir, ""); !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("the person must be asked: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	for round := 1; round <= 3; round++ {
+		decide(t, store, runID, pendingTransition(t, store, runID), "reject", "доработать")
+		if err := runGrillPipeline(t, p, dir, runID); !errors.Is(err, ErrUserStopped) {
+			t.Fatalf("reject #%d through resume must keep the task at the stage waiting: %v", round, err)
+		}
+	}
+	decide(t, store, runID, pendingTransition(t, store, runID), "approve", "")
+	// The task moves on to the next stage; it then waits for the person's
+	// decision of the final transition, but never fails on max_visits.
+	err = runGrillPipeline(t, p, dir, runID)
+	if err != nil && (strings.Contains(err.Error(), "max_visits") || !errors.Is(err, ErrUserStopped)) {
+		t.Fatalf("approval after several refusals must pass the stage: %v", err)
+	}
+	if !strings.Contains(strings.Join(rt.executed, ","), "verifier") {
+		t.Fatalf("the next stage must run after approval: %v", rt.executed)
+	}
+}

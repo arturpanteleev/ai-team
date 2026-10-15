@@ -252,16 +252,16 @@ export function Tasks() {
         <button type="button" className={styles.retryLink} onClick={() => void fetchRuns(offset, filters)}>Повторить загрузку</button>
       </p>}
 
-      {loading ? (
-        <div className={styles.empty}>Загружаем задачи…</div>
-      ) : noTasksAtAll ? (
+      {noTasksAtAll && (
         <section className={styles.emptyProject} aria-label="Задач пока нет">
           <h2>Задач пока нет</h2>
-          <p>Задача — это идея, которая проходит этапы шаблона от бизнес-идеи до выкладки.</p>
-          {canStart
-            ? <Link className={styles.newTask} to="/tasks/new">{actionVerbs.newTask}</Link>
-            : <p>Создать задачу могут: {permissionRoles['run:start']}.</p>}
+          <p>Задача — это идея, которая проходит этапы шаблона от бизнес-идеи до выкладки. Ниже — этапы, по которым она будет двигаться.</p>
+          <p>{canStart ? `Нажмите «${actionVerbs.newTask}» вверху страницы.` : `Создать задачу могут: ${permissionRoles['run:start']}.`}</p>
         </section>
+      )}
+
+      {loading ? (
+        <div className={styles.empty}>Загружаем задачи…</div>
       ) : projectIsEmpty ? (
         <section className={styles.emptyProject} aria-label="Пустой проект">
           <h2>{selectedProject ? `В проекте «${selectedProject.name}» пока нет задач` : 'В этом проекте пока нет задач'}</h2>
@@ -269,8 +269,7 @@ export function Tasks() {
           {selectedProject?.archived
             ? <p>Проект в архиве: новые задачи он не принимает.</p>
             : <>
-              <p>Проект — папка для задач. Создайте первую задачу, и она появится здесь на доске и в списке.</p>
-              {canStart && <Link className={styles.newTask} to={`/tasks/new?project=${encodeURIComponent(projectParam)}`}>Создать первую задачу</Link>}
+              <p>Проект — папка для задач. Нажмите «Новая задача» — первая задача появится здесь на доске и в списке.</p>
             </>}
         </section>
       ) : view === 'board' ? (

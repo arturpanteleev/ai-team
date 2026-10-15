@@ -175,7 +175,7 @@ export function Dashboard() {
         ) : filtered.length === 0 ? (
           <div className={styles.empty}>
             {runs.length === 0
-              ? <>Задач пока нет.{canStart ? <> <Link to="/tasks/new">{actionVerbs.newTask}</Link> — первый шаг.</> : ''}</>
+              ? `Задач пока нет.${canStart ? ` Нажмите «${actionVerbs.newTask}» справа — это первый шаг.` : ''}`
               : 'Ничего не найдено по этим условиям.'}
           </div>
         ) : (

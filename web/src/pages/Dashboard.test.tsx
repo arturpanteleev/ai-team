@@ -61,7 +61,7 @@ describe('Queue page', () => {
     renderDashboard();
     expect(await screen.findByText('Статус неизвестен')).toBeInTheDocument();
     expect(screen.getByText(/Задача может подождать worker/)).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: /Новая задача/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('link', { name: /Новая задача/ })).toHaveLength(1);
   });
 
   it('сворачивает фильтры статусов и закрывает панель после выбора', () => {
@@ -82,7 +82,7 @@ describe('Queue page', () => {
     renderDashboard();
 
     expect(await screen.findByText(/Задач пока нет/)).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: /Новая задача/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('link', { name: /Новая задача/ })).toHaveLength(1);
   });
 
   it('показывает ошибку загрузки и позволяет повторить', async () => {

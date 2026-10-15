@@ -9,6 +9,23 @@ import { expect, test } from '@playwright/test'
 
 const mobileFeature = 'mobileunbrokenfeaturetoken'.repeat(3).slice(0, 64)
 
+// The one create flow of the app: «Новая задача» page. After the task is created the
+// helper returns to the queue («Очередь»), where the run card appears.
+async function openNewTaskForm(page, title, idea) {
+  await page.getByRole('link', { name: 'Новая задача' }).first().click()
+  await expect(page.getByRole('heading', { name: 'Новая задача', level: 1 })).toBeVisible()
+  await page.getByLabel('Название', { exact: true }).fill(title)
+  await page.getByLabel('Текст идеи').fill(idea)
+}
+
+async function createTaskFromForm(page, title, idea) {
+  await openNewTaskForm(page, title, idea)
+  await page.getByRole('button', { name: 'Создать задачу' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Задача создана' })).toBeVisible()
+  await page.getByRole('link', { name: 'Очередь', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
+}
+
 const webDir = path.dirname(fileURLToPath(import.meta.url)).replace(/\/e2e$/, '')
 const repoDir = path.resolve(webDir, '..')
 
@@ -183,7 +200,7 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     // but capture console errors from the login request and dashboard mount.
     captureConsoleErrors = true
     await page.getByRole('button', { name: 'Войти' }).click()
-    await expect(page.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
     for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
     for (const width of [360, 390, 430]) {
       await page.setViewportSize({ width, height: 800 })
@@ -226,10 +243,7 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await page.getByRole('button', { name: /Статус: В очереди · Фильтры/ }).click()
     await page.getByRole('button', { name: 'Все', exact: true }).click()
 
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
-    await page.getByLabel('Название задачи').fill(mobileFeature)
-    await page.getByLabel('Какого результата хотите достичь?').fill('Wait for a real scheduler worker')
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
+    await createTaskFromForm(page, mobileFeature, 'Wait for a real scheduler worker')
 
     const firstRun = page.locator('[class*="card"]').filter({ hasText: mobileFeature })
     await expect(firstRun.getByText('в очереди', { exact: true })).toBeVisible({ timeout: 10_000 })
@@ -276,10 +290,7 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await expect(recoveredFirstRun.getByText('ошибка', { exact: true })).toBeVisible()
     await expect(recoveredFirstRun.getByRole('alert')).toContainText(/preflight|opencode/i)
 
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
-    await page.getByLabel('Название задачи').fill('browser-cancel-after-reload')
-    await page.getByLabel('Какого результата хотите достичь?').fill('Remain queued until cancellation')
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
+    await createTaskFromForm(page, 'browser-cancel-after-reload', 'Remain queued until cancellation')
     const queuedRun = page.locator('[class*="card"]').filter({ hasText: 'browser-cancel-after-reload' })
     await expect(queuedRun.getByText('в очереди', { exact: true })).toBeVisible()
     await expect(queuedRun.getByText(/Очередь №\d+/)).toBeVisible()
@@ -287,7 +298,7 @@ test('real React dashboard shows durable scheduler queue, worker failure, reload
     await page.reload()
     const recoveredQueuedRun = page.locator('[class*="card"]').filter({ hasText: 'browser-cancel-after-reload' })
     await expect(recoveredQueuedRun.getByText('в очереди', { exact: true })).toBeVisible()
-    await recoveredQueuedRun.getByRole('button', { name: 'Отменить' }).click()
+    await recoveredQueuedRun.getByRole('button', { name: 'Отменить задачу' }).click()
     await expect(recoveredQueuedRun.getByText('отменена', { exact: true })).toBeVisible()
     expect(browserErrors).toEqual([])
   } finally {
@@ -325,15 +336,15 @@ test('authenticated cookie session survives reload and a second window for write
     await first.goto(baseURL)
     await first.getByLabel('Токен доступа').fill(token)
     await first.getByRole('button', { name: 'Войти' }).click()
-    await expect(first.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(first.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
 
     // A new JS context has no in-memory CSRF token; the HttpOnly cookie must
     // recover it before the command is sent.
     await first.reload()
-    await expect(first.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(first.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
     const second = await context.newPage()
     await second.goto(baseURL)
-    await expect(second.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(second.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
 
     // Team read APIs use the authenticated same-origin session without a
     // write CSRF header. The owner can load members/audit and the UI refuses
@@ -346,17 +357,16 @@ test('authenticated cookie session survives reload and a second window for write
     second.on('request', (request) => {
       if (request.method() === 'PATCH' && request.url().includes('/api/team/members/')) emptyRolePatchSent = true
     })
-    second.once('dialog', (dialog) => dialog.accept(' , '))
-    await second.getByRole('button', { name: 'Изменить роли' }).first().click()
-    await expect(second.getByRole('alert')).toHaveText('Укажите хотя бы одну роль.')
+    // Roles are edited with checkboxes (no free-text prompt); an empty set cannot be saved.
+    await second.getByRole('button', { name: /^Изменить роли/ }).first().click()
+    const editor = second.getByRole('group', { name: /^Роли: / })
+    for (const box of await editor.getByRole('checkbox').all()) if (await box.isChecked()) await box.uncheck()
+    await expect(second.getByRole('button', { name: 'Сохранить роли' })).toBeDisabled()
     expect(emptyRolePatchSent).toBe(false)
 
-    await second.getByRole('link', { name: 'Задачи' }).click()
-    await expect(second.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
-    await second.getByRole('button', { name: 'Создать задачу' }).click()
-    await second.getByLabel('Название задачи').fill('authenticated-after-reconnect')
-    await second.getByLabel('Какого результата хотите достичь?').fill('Submit with a recovered CSRF token')
-    await second.getByRole('button', { name: 'Создать задачу' }).click()
+    await second.getByRole('link', { name: 'Очередь', exact: true }).click()
+    await expect(second.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
+    await createTaskFromForm(second, 'authenticated-after-reconnect', 'Submit with a recovered CSRF token')
     const runCard = second.locator('[class*="card"]').filter({ hasText: 'authenticated-after-reconnect' })
     await expect(runCard.getByText('в очереди', { exact: true })).toBeVisible({ timeout: 10_000 })
 
@@ -369,7 +379,7 @@ test('authenticated cookie session survives reload and a second window for write
     })
     await waitForServer(baseURL, webServer)
     await second.reload()
-    await expect(second.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(second.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
 
     // Sign-out revokes the session on the server, so a reload cannot reuse it.
     await second.getByRole('button', { name: 'Выйти' }).click()
@@ -457,12 +467,11 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
     await page.getByLabel('Токен доступа').fill(localToken)
     await page.getByRole('button', { name: 'Войти' }).click()
-    await expect(page.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
     for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
 
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
-    await page.getByLabel('Название задачи').fill(mobileFeature)
-    await page.getByLabel('Какого результата хотите достичь?').fill('Согласовать настоящую спецификацию и продолжить тот же run.')
+    await openNewTaskForm(page, mobileFeature, 'Согласовать настоящую спецификацию и продолжить тот же run.')
+    for (const width of [1280, 360, 390, 430]) await expectNoHorizontalOverflow(page, width)
     const createResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/runs')
     await page.getByRole('button', { name: 'Создать задачу' }).click()
@@ -470,6 +479,8 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     expect(createResponse.status()).toBe(202)
     const { run_id: runID } = await createResponse.json()
     expect(runID).toBeTruthy()
+    await expect(page.getByRole('status').filter({ hasText: 'Задача создана' })).toBeVisible()
+    await page.getByRole('link', { name: 'Очередь', exact: true }).click()
 
     const readDetail = async () => {
       // APIRequestContext shares this browser context's cookie jar, unlike
@@ -505,7 +516,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     const socketsBeforeReturn = websocketUrls.length
     await page.goto('about:blank')
     await page.goto(baseURL)
-    await expect(page.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
     await expect.poll(() => pipelineListReads).toBeGreaterThan(readsBeforeReturn)
     await expect.poll(() => websocketUrls.length).toBeGreaterThan(socketsBeforeReturn)
     expect(new URL(websocketUrls.at(-1)).searchParams.get('cursor')).toBe(String(cursorBeforeReturn))
@@ -530,7 +541,9 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     }
 
     await runCard.click()
-    await expect(page.getByRole('heading', { name: 'Согласования' })).toBeVisible()
+    // The task page: status column, materials and the column with the allowed actions.
+    await expect(page.getByRole('complementary', { name: 'Действия' })).toBeVisible()
+    await expect(page.getByRole('complementary', { name: 'Статус и контекст' })).toBeVisible()
     for (const width of [1280, 360, 390, 430]) {
       await expectNoHorizontalOverflow(page, width)
       await expectQuestionContrast(page, width)
@@ -539,7 +552,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
       await page.setViewportSize({ width, height: 800 })
       await expectFingerTargets(page, [
         '[class*="back"]', '[class*="controlHeader"] button', '[class*="actions"] button',
-        '[class*="questionText"] a', '[class*="edges"] a', 'summary',
+        '[role="tab"]', '[class*="routeButton"]', '[class*="questionText"] a', '[class*="edges"] a', 'summary',
       ])
     }
     detail = await readDetail()
@@ -553,7 +566,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
       required_roles: ['product_owner'],
       payload: { kind: 'agreed_spec' },
     })
-    await expect(page.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Принять и перейти/ })).toBeVisible()
 
     const artifactsResponse = await page.request.get(`${baseURL}/api/pipelines/${detail.run.id}/artifacts`)
     expect(artifactsResponse.ok()).toBe(true)
@@ -570,14 +583,14 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
       ])
     }
     await page.getByRole('button', { name: '← Назад' }).click()
-    await expect(page.getByRole('heading', { name: 'Согласования' })).toBeVisible()
+    await expect(page.getByRole('complementary', { name: 'Действия' })).toBeVisible()
 
     const decisionResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'POST' &&
       new URL(response.url()).pathname === `/api/runs/${runID}/approvals/${pendingSpec.id}/decisions`)
     const resumeResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/runs/${runID}/resume`)
-    await page.getByRole('button', { name: 'Согласовать ТЗ и передать архитектору' }).click()
+    await page.getByRole('button', { name: /Принять и перейти/ }).click()
     expect((await decisionResponsePromise).status()).toBe(200)
     expect((await resumeResponsePromise).status()).toBe(202)
     await expect.poll(async () => {
@@ -587,7 +600,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     expect(detail.run.run_id).toBe(runID)
 
     await page.reload()
-    await page.getByText('История согласований (1)').click()
+    await page.getByRole('tab', { name: 'Решения и вопросы' }).click()
     await expect(page.getByText('local-user (product_owner): approve_spec', { exact: true })).toBeVisible()
     detail = await readDetail()
     expect(detail.run.run_id).toBe(runID)
@@ -658,16 +671,16 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     await page.goto(baseURL)
     // Server sessions are durable (B-83): the cookie survives the restart
     // above, so no re-authentication is needed for the recovery probe.
-    await expect(page.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Создать задачу' }).click()
-    await page.getByLabel('Название задачи').fill('websocket-recovery-probe')
-    await page.getByLabel('Какого результата хотите достичь?').fill('Проверить доставку события после восстановления WebSocket.')
+    await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
+    await openNewTaskForm(page, 'websocket-recovery-probe', 'Проверить доставку события после восстановления WebSocket.')
     const recoveryRunResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/runs')
     await page.getByRole('button', { name: 'Создать задачу' }).click()
     const recoveryRunResponse = await recoveryRunResponsePromise
     expect(recoveryRunResponse.status()).toBe(202)
     const { run_id: recoveryRunID } = await recoveryRunResponse.json()
+    // The create page has no live subscription; the queue opens the socket with the durable cursor and replays the event.
+    await page.getByRole('link', { name: 'Очередь', exact: true }).click()
     await expect.poll(() => websocketFrames.some(({ event }) => event.run_id === recoveryRunID)).toBe(true)
     const recoveryFrame = websocketFrames.find(({ event }) => event.run_id === recoveryRunID)
     expect(new URL(recoveryFrame.url).searchParams.get('cursor')).toBe(String(cursor))

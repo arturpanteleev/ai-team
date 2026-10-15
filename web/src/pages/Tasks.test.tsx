@@ -213,7 +213,7 @@ describe('Tasks projects', () => {
     const empty = await screen.findByLabelText('Пустой проект');
     expect(empty).toHaveTextContent('В проекте «Платформа» пока нет задач');
     expect(empty).toHaveTextContent('Задачи платформы');
-    expect(within(empty).getByRole('link', { name: 'Создать первую задачу' })).toHaveAttribute('href', '/tasks/new?project=2');
+    expect(empty).toHaveTextContent('Нажмите «Новая задача»');
   });
 
   it('пустой архивный проект не предлагает создавать задачи', async () => {
@@ -223,7 +223,7 @@ describe('Tasks projects', () => {
 
     const empty = await screen.findByLabelText('Пустой проект');
     expect(empty).toHaveTextContent('Проект в архиве');
-    expect(within(empty).queryByRole('link', { name: 'Создать первую задачу' })).toBeNull();
+    expect(empty).not.toHaveTextContent('Нажмите «Новая задача»');
   });
 
   it('без выбранного проекта пустой результат остаётся обычным пустым списком', async () => {
@@ -231,6 +231,7 @@ describe('Tasks projects', () => {
     render(<Tasks />);
 
     expect(await screen.findByLabelText('Задач пока нет')).toHaveTextContent('Новая задача');
+    expect(screen.getByLabelText('Этап: В очереди')).toBeInTheDocument();
     expect(screen.queryByLabelText('Пустой проект')).toBeNull();
   });
 });

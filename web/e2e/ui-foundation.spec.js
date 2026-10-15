@@ -108,9 +108,9 @@ test('Russian UI supports both accessible themes and fits a 390px viewport', asy
     const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
     await page.getByLabel('Токен доступа').fill(localToken)
     await page.getByRole('button', { name: 'Войти' }).click()
-    await expect(page.getByRole('heading', { name: 'Задачи', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Очередь', exact: true })).toBeVisible()
     await expect(page.locator('html')).toHaveAttribute('lang', 'ru')
-    await expect(page).toHaveTitle('Задачи — ai-team')
+    await expect(page).toHaveTitle('Очередь — ai-team')
     await expectThemeContrast(page)
 
     const themeToggle = page.getByRole('button', { name: 'Переключить тему' })

@@ -49,6 +49,11 @@ func (r *Registry) Resolve(ref workflow.GateRef, stage StageContext) (Resolved, 
 	if err := ValidateParams(def, ref.Params); err != nil {
 		return Resolved{}, err
 	}
+	if validate, ok := paramValidators[def.Ref()]; ok {
+		if err := validate(ref.Params); err != nil {
+			return Resolved{}, fmt.Errorf("гейт %s: %w", def.Ref(), err)
+		}
+	}
 	return Resolved{Ref: ref, Definition: def}, nil
 }
 

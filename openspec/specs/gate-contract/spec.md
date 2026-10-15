@@ -39,7 +39,8 @@ digest of each definition.
 The version-1 library MUST contain code gates `required_sections` (parameter
 `sections`, `md` results), `verdict_marker` (`md`), `pr_exists`, `pr_open`,
 `pr_base_branch` (`link`), `project_checks` and `pr_checks_green` (`link` with
-`link_kind: pr`), the LLM gate `agent_review` (parameters `agent`, `mode`,
+`link_kind: pr`), `required_phrases` (`md` results; see the requirement below),
+the LLM gate `agent_review` (parameters `agent`, `mode`,
 `max_rounds`), the human gate `human_approval`, and the external-program gate
 `external_program` (see the external-gate capability). Each version-1 gate MUST keep
 the semantics of its schema v5 counterpart.
@@ -48,6 +49,65 @@ the semantics of its schema v5 counterpart.
 
 - **КОГДА** `project_checks@1` is referenced from a stage with `link_kind: build`
 - **ТОГДА** validation MUST reject the reference naming the required link kind
+
+#### Scenario: Every code gate runs through the scheduler
+
+- **КОГДА** a stage lists any of `required_sections`, `verdict_marker`,
+  `required_phrases`, `pr_exists`, `pr_open`, `pr_base_branch`,
+  `project_checks`, `pr_checks_green`
+- **ТОГДА** the controller MUST execute it as a gate attempt of the group
+  scheduler with separate `execution` and `verdict` in the run journal
+- **И** a lookup or tool failure MUST be `error`, a negative finding MUST be
+  `fail`, and neither MUST be recorded as `pass`
+
+#### Scenario: Specification without acceptance criteria is blocked before LLM and human
+
+- **КОГДА** `product_spec` lists `[required_sections]`, `[agent_review]`,
+  `[human_approval]` and the result lacks the section `Критерии приёмки`
+- **ТОГДА** the code gate MUST fail, the LLM gate and the human decision MUST
+  NOT start
+- **И** after the section is added the new result version MUST run all groups
+  again from the first
+
+### Requirement: required_phrases checks explicit phrases without scripts
+
+`required_phrases@1` MUST check that configured words or fragments are present
+in an `md` result. The parameters `phrases`, `case` (`sensitive|insensitive`),
+`scope` (`result|section`) and `match` (`all|any|at_least`) MUST be required;
+`section` MUST be required exactly for `scope: section` and `min_count` exactly
+for `match: at_least` (1 to the number of phrases); `unit` (`substring|word`)
+defaults to `substring`. A section scope MUST cover the heading's body up to
+the next heading of the same or a higher level. A heading MUST be an ATX
+heading (1 to 6 `#` followed by a space or the end of the line, indented by at
+most 3 spaces) or a setext heading (a paragraph underlined by `=` or `-`); lines
+inside fenced code blocks, indented code, and HTML comments MUST NOT be
+headings. A closing fence MUST use the same character, be no shorter than the
+opening fence, and carry no info string. `case: insensitive` MUST use simple
+Unicode case folding (sigma, final sigma and capital sigma are equal). The gate MUST NOT execute user-supplied code. Regular
+expressions MUST be available only with `regex: true`, MUST be Go RE2, bounded
+in count and length, MUST NOT allow a zero-length match (such as `\b`, `^`, `$`, `a|\b`; checked on probe strings during validation and ignored at execution), and MUST be compiled
+during configuration validation. An invalid parameter or combination MUST be
+rejected before a run starts. An empty result or a missing section MUST be
+`fail`; an unreadable, oversized or absent Markdown output MUST be `error`; the
+gate MUST NOT return `not_applicable`.
+
+#### Scenario: Missing phrase fails with a reason
+
+- **КОГДА** `match: all` and one phrase is absent
+- **ТОГДА** the attempt MUST be `succeeded` with verdict `fail` and a reason
+  naming exactly the absent phrases
+
+#### Scenario: Invalid parameters are a configuration error
+
+- **КОГДА** `case` is omitted, `min_count` exceeds the number of phrases, or a
+  regular expression does not compile as RE2
+- **ТОГДА** configuration validation MUST fail naming the stage, the gate path
+  and the parameter, and MUST NOT repeat the phrase value
+
+#### Scenario: Unreadable result is an error
+
+- **КОГДА** the Markdown output of the result cannot be read
+- **ТОГДА** the attempt MUST be `error`, never `pass`
 
 ### Requirement: Stages reference exact versions with declared parameters
 

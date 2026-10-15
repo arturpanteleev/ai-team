@@ -270,6 +270,29 @@ func TestSameActorOtherRoleIsNeverSilentReplay(t *testing.T) {
 	}
 }
 
+func TestReplayInOtherClosedRoleIsRefused(t *testing.T) {
+	ports, pending := newPending(t, approval.QuorumAll, "product_owner", "architect", "qa")
+	service := New(ports)
+	if _, err := service.Decide(context.Background(), request(pending, actor("ann", "product_owner"), "approve")); err != nil {
+		t.Fatal(err)
+	}
+	// Another person closes the architect seat.
+	if _, err := service.Decide(context.Background(), request(pending, actor("bob", "architect"), "approve")); err != nil {
+		t.Fatal(err)
+	}
+	// Ann repeats the request, now claiming the architect role that Bob closed:
+	// not a replay of her product_owner decision.
+	got, err := service.Decide(context.Background(), request(pending, actor("ann", "architect"), "approve"))
+	if !errors.Is(err, ErrAlreadyVoted) || got.Replayed {
+		t.Fatalf("other closed role must be refused: %+v %v", got, err)
+	}
+	// In her own role the same request stays a replay.
+	own, err := service.Decide(context.Background(), request(pending, actor("ann", "product_owner"), "approve"))
+	if err != nil || !own.Replayed || own.Role != "product_owner" {
+		t.Fatalf("own role replay: %+v %v", own, err)
+	}
+}
+
 func TestParallelIdenticalRequestsAuditOnce(t *testing.T) {
 	ports, pending := newPending(t, approval.QuorumAny, "product_owner")
 	service := New(ports)

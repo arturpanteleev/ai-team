@@ -11,7 +11,9 @@
 //     to (the person confirms the exact result version, a stale view is
 //     refused instead of silently deciding another version);
 //  4. the actor holds one of the approval's required roles and has not voted
-//     yet (quorum all needs distinct voters);
+//     not voted in that role yet (a person votes once per role: with quorum
+//     all one person holding several required roles closes them one call per
+//     role);
 //  5. self-approval is forbidden when the pinned template says so;
 //  6. the decision is stored and an audit record names the actor, the role,
 //     the action, the hash and the channel.
@@ -31,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
@@ -105,7 +108,9 @@ type Request struct {
 	Comment     string
 	// Channel is web, rest or mcp.
 	Channel string
-	// RequestKey is the client's idempotency key, recorded in the audit.
+	// RequestKey is the client's Idempotency-Key. It is only written to the
+	// audit and never deduplicates: a replay is decided by (actor, action,
+	// subject hash, role).
 	RequestKey string
 	// ArtifactRevisions pins the reviewed revisions explicitly; empty means
 	// the service pins what Ports.PinRevisions returns.
@@ -138,7 +143,21 @@ type Service struct {
 
 // New returns a Service over the ports.
 func New(ports Ports) *Service {
-	return &Service{ports: ports, now: func() time.Time { return time.Now().UTC() }}
+	// The clock is strictly increasing: the decision timestamp is how a call
+	// recognizes its own stored decision, so two racing calls must never get
+	// the same instant on a coarse system clock.
+	var mu sync.Mutex
+	var last time.Time
+	return &Service{ports: ports, now: func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at := time.Now().UTC()
+		if !at.After(last) {
+			at = last.Add(time.Nanosecond)
+		}
+		last = at
+		return at
+	}}
 }
 
 // IsTransition reports whether the approval is a stage transition decision
@@ -183,7 +202,7 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 	}
 	if pending.Status != approval.StatusPending {
 		// A closed approval still recognizes a redelivery of the same decision.
-		if prior, ok := priorDecision(pending.Decisions, req.Actor.ID, req.Action, hash); ok {
+		if prior, ok := priorDecision(pending.Decisions, req.Actor, req.Action, hash); ok {
 			return s.replay(req, *pending, prior, hash)
 		}
 		return Result{}, ErrNotPending
@@ -205,7 +224,10 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 	if role == "" {
 		// Every role of this actor is covered: the same decision again is a
 		// redelivery (replay); a different one is an explicit refusal.
-		if prior, ok := priorDecision(pending.Decisions, req.Actor.ID, req.Action, hash); ok {
+		// A replay answers only in the role the actor still holds: a request
+		// made in another role whose seat somebody else closed is not a
+		// redelivery of the earlier decision and must not report its role.
+		if prior, ok := priorDecision(pending.Decisions, req.Actor, req.Action, hash); ok {
 			return s.replay(req, *pending, prior, hash)
 		}
 		for _, prior := range pending.Decisions {
@@ -282,9 +304,10 @@ func (s *Service) replay(req Request, pending approval.PendingApproval, prior ap
 	return result, nil
 }
 
-func priorDecision(decisions []approval.Decision, actorID, action, hash string) (approval.Decision, bool) {
+func priorDecision(decisions []approval.Decision, actor Actor, action, hash string) (approval.Decision, bool) {
 	for _, prior := range decisions {
-		if prior.ActorID == actorID && prior.Action == action && prior.SubjectHash == hash {
+		if prior.ActorID == actor.ID && prior.Action == action && prior.SubjectHash == hash &&
+			(actor.HasRole == nil || actor.HasRole(prior.ActorRole)) {
 			return prior, true
 		}
 	}

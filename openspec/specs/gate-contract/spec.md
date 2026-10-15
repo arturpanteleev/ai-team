@@ -389,9 +389,12 @@ actor holds a required role that no earlier vote covered; refuse
 self-approval when the pinned template forbids it; store the decision with the
 artifact revisions pinned by the first vote; and write an audit record
 `human_gate_decided` with the approval, stage, action, target, author, role,
-hash, channel and idempotency key. A redelivered identical request of the same
-author MUST NOT store a second decision and MUST be audited as
-`human_gate_decision_replayed`. When the audit cannot be written after the
+hash, channel and the client's `Idempotency-Key` (the key is only written to
+the audit and MUST NOT deduplicate anything). A redelivered identical request
+is recognized by (author, action, subject hash, role) alone: it MUST NOT store
+a second decision and MUST be audited as `human_gate_decision_replayed`, and it
+MUST be answered only in a role the author still holds; a request in another
+role whose seat somebody else closed MUST be refused, not reported as a replay. When the audit cannot be written after the
 decision was stored, the caller MUST be told so and a repeat of the request
 MUST be safe. A client that omits the hash on the Web confirmation endpoint
 MAY be served with the hash of the pending approval, but this path is

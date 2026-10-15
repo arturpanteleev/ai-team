@@ -116,6 +116,7 @@ ai-team run --resume <run_id> --approve-plan <sha256>
 | [Агенты и этапы](docs/reference/pipeline.md) | кто что делает и где решает человек |
 | [Статусы и коды выхода](docs/reference/statuses.md) | что означает код и что делать |
 | [Граница безопасности](docs/reference/security.md) | что гарантируется, а что нет |
+| [Протокол гейта](docs/reference/gate-protocol.md) | JSON-контракт гейта внешней программы |
 | [Архитектура](docs/ARCHITECTURE.md) | как устроен контроллер внутри |
 
 ## Разработка

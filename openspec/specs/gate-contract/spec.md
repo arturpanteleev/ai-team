@@ -38,7 +38,8 @@ The version-1 library MUST contain code gates `required_sections` (parameter
 `sections`, `md` results), `verdict_marker` (`md`), `pr_exists`, `pr_open`,
 `pr_base_branch` (`link`), `project_checks` and `pr_checks_green` (`link` with
 `link_kind: pr`), the LLM gate `agent_review` (parameters `agent`, `mode`,
-`max_rounds`), and the human gate `human_approval`. Each version-1 gate MUST keep
+`max_rounds`), the human gate `human_approval`, and the external-program gate
+`external_program` (see the external-gate capability). Each version-1 gate MUST keep
 the semantics of its schema v5 counterpart.
 
 #### Scenario: Gate applicability

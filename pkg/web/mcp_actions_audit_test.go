@@ -3,7 +3,6 @@ package web
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -68,7 +67,7 @@ func TestMCPAuthorizationDenialIsAudited(t *testing.T) {
 		if entry.Action != mcpActionEvent {
 			continue
 		}
-		raw := fmt.Sprintf("%+v", entry)
+		raw := entry.ActorID + " " + string(entry.Details)
 		if !strings.Contains(raw, actorDev) || !strings.Contains(raw, "403") {
 			t.Fatalf("a denial records the actor and the status: %s", raw)
 		}

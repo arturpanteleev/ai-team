@@ -552,6 +552,13 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 		// An executor's own verdict claim is only a cross-check: the verdict
 		// the controller parsed from the outputs is the one that counts.
 		r.ValidationFailed = true
+		// The response was rejected, so the outputs it wrote are not left behind
+		// as if they were an accepted result.
+		for _, path := range outputPaths {
+			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() {
+				_ = os.Remove(path)
+			}
+		}
 		return fail(fmt.Errorf("агент %s: исполнитель заявил verdict %q, а выходы содержат %q", name, claimedVerdict, r.Verdict))
 	}
 

@@ -253,10 +253,8 @@ func TestRun_DockerCodeReviewFailuresAreTechnicalErrors(t *testing.T) {
 				last.ExecutorInfo.Metadata["container.image"] != dockerReviewImage {
 				t.Fatalf("failed attempt = %+v", last)
 			}
-			if tc.flag != "--mismatch" {
-				if _, statErr := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "review.md")); statErr == nil {
-					t.Fatal("no review may exist after a failed container")
-				}
+			if _, statErr := os.Stat(filepath.Join(dir, ".ai-team", "artifacts", "feat", "review.md")); statErr == nil {
+				t.Fatal("no review may exist after a failed or rejected container response")
 			}
 		})
 	}

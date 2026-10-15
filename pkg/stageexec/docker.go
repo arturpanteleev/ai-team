@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -38,7 +39,11 @@ const (
 	DefaultDockerMemoryMB  = 512
 	DefaultDockerPidsLimit = 128
 	DefaultDockerTmpfsMB   = 64
-	nobodyUser             = "65534:65534"
+	// DefaultDockerOutputMB caps everything the program may write to /stage/out.
+	DefaultDockerOutputMB = 64
+	// MaxDockerOutputMB is the largest value output_mb accepts.
+	MaxDockerOutputMB = 1024
+	nobodyUser        = "65534:65534"
 	// maxOutputFileBytes caps one result file the program writes to /stage/out.
 	maxOutputFileBytes = 16 << 20
 )
@@ -72,6 +77,10 @@ type DockerSpec struct {
 	PidsLimit int    `yaml:"pids_limit,omitempty"`
 	// TmpfsMB is the size of the scratch /tmp; nil means the default, 0 none.
 	TmpfsMB *int `yaml:"tmpfs_mb,omitempty"`
+	// OutputMB caps the total size of /stage/out (default 64). The directory is
+	// a host bind mount, so the controller watches its size while the container
+	// runs and kills the container on overflow; 0 means the default.
+	OutputMB int `yaml:"output_mb,omitempty"`
 	// User is uid[:gid] or a name; empty means the controller's uid:gid (nobody
 	// when the controller is root).
 	User string `yaml:"user,omitempty"`
@@ -88,7 +97,7 @@ type DockerSpec struct {
 func (d *DockerSpec) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.MappingNode {
 		allowed := map[string]bool{"image": true, "allow_unpinned_image": true, "pull": true, "network": true,
-			"cpus": true, "memory_mb": true, "pids_limit": true, "tmpfs_mb": true, "user": true, "repo": true, "mounts": true}
+			"cpus": true, "memory_mb": true, "pids_limit": true, "tmpfs_mb": true, "output_mb": true, "user": true, "repo": true, "mounts": true}
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			if key := node.Content[index].Value; !allowed[key] {
 				return fmt.Errorf("config: executor adapter docker: неизвестный ключ %q", key)
@@ -139,6 +148,13 @@ func (d DockerSpec) tmpfsMB() int {
 	return *d.TmpfsMB
 }
 
+func (d DockerSpec) outputBytes() int64 {
+	if d.OutputMB == 0 {
+		return DefaultDockerOutputMB << 20
+	}
+	return int64(d.OutputMB) << 20
+}
+
 type dockerMount struct{ Path, Target string }
 
 func parseDockerMount(spec string) (dockerMount, error) {
@@ -164,6 +180,9 @@ func (d DockerSpec) Validate() error {
 		Image: d.Image, AllowUnpinned: d.AllowUnpinnedImage, Pull: d.Pull, Name: "validate",
 		Entrypoint: "x", Workdir: ContainerRoot, User: orUser(d.User),
 		Network: d.network(), CPUs: d.cpus(), MemoryMB: d.memoryMB(), PidsLimit: d.pidsLimit(), TmpfsMB: d.tmpfsMB(),
+	}
+	if d.OutputMB < 0 || d.OutputMB > MaxDockerOutputMB {
+		return fmt.Errorf("output_mb %d: допустимо от 0 до %d", d.OutputMB, MaxDockerOutputMB)
 	}
 	if d.CPUs != "" && !cpusPattern.MatchString(d.CPUs) {
 		return fmt.Errorf("cpus %q: ожидается десятичное число, например 1 или 0.5", d.CPUs)
@@ -310,16 +329,26 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 	// The container paths replace the host layout in the request.
 	doc.WorkDir, doc.ArtifactRoot = workdir, ContainerInputs
 
-	resultDir, err := os.MkdirTemp("", "ai-team-stage-")
+	// The scratch root is private (0700, owner only). The mounted result
+	// directory lives inside it: with the default user (the controller's own
+	// uid) it is 0700 as well; an explicit user need not be that uid, so the
+	// directory is opened to it (0777) but stays unreachable for every other
+	// host account because its parent is private. It is scratch space: the
+	// collected files are copied to their declared paths and the root is removed.
+	scratch, err := os.MkdirTemp("", "ai-team-stage-")
 	if err != nil {
 		return fmt.Errorf("docker executor: каталог результата: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(resultDir) }() // scratch space: the collected files already live at their declared paths.
+	defer func() { _ = os.RemoveAll(scratch) }()
+	resultDir := filepath.Join(scratch, "out")
 	mode := os.FileMode(0o700)
 	if settings.User != "" {
-		mode = 0o777 // an explicit user need not be the controller's uid
+		mode = 0o777
 	}
-	if err := os.Chmod(resultDir, mode); err != nil {
+	if err := os.Mkdir(resultDir, 0o700); err != nil {
+		return fmt.Errorf("docker executor: каталог результата: %w", err)
+	}
+	if err := os.Chmod(resultDir, mode); err != nil { // Mkdir is subject to umask
 		return fmt.Errorf("docker executor: каталог результата: %w", err)
 	}
 	mounts = append(mounts, dockerrun.Mount{Source: resultDir, Target: ContainerOutputs, ReadOnly: false})
@@ -374,7 +403,26 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 	if other := launch.Stderr.Limit(); other > limit {
 		limit = other
 	}
-	res := l.Docker.Run(ctx, spec, stdin, limit)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	exceeded := make(chan int64, 1)
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		watchDirSize(runCtx, resultDir, settings.outputBytes(), func(size int64) {
+			exceeded <- size
+			cancelRun()
+		})
+	}()
+	res := l.Docker.Run(runCtx, spec, stdin, limit)
+	cancelRun()
+	<-watched
+	select {
+	case size := <-exceeded:
+		_, _ = launch.Stdout.Write(res.Stdout)
+		_, _ = launch.Stderr.Write(res.Stderr)
+		return fmt.Errorf("каталог результата %s превысил лимит %d МБ (записано не менее %d байт): контейнер остановлен", ContainerOutputs, settings.outputBytes()>>20, size)
+	default:
+	}
 	_, _ = launch.Stdout.Write(res.Stdout)
 	_, _ = launch.Stderr.Write(res.Stderr)
 	if res.Err != nil {
@@ -387,13 +435,54 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		}
 		return errors.New(message)
 	}
-	return collectResultFiles(request, resultDir, res.Stdout)
+	// Result files are only read here, never written to their declared paths:
+	// External.Execute commits them after the whole response passed the
+	// contract check, so a rejected answer leaves nothing behind.
+	return stageResultFiles(request, resultDir, res.Stdout, launch.StagedFiles)
 }
 
-// collectResultFiles copies the files the program wrote to /stage/out to the
-// declared output paths, only when the program reported status ok. A name given
-// both as content and as a file is ambiguous and fails the attempt.
-func collectResultFiles(request Request, resultDir string, stdout []byte) error {
+// watchDirSize polls the size of dir and calls onExceed once when it passes
+// limit. It returns when ctx ends or the limit is exceeded.
+func watchDirSize(ctx context.Context, dir string, limit int64, onExceed func(size int64)) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if size := dirSize(dir, limit); size > limit {
+				onExceed(size)
+				return
+			}
+		}
+	}
+}
+
+// dirSize sums regular-file sizes below dir without following links and stops
+// early once the sum passes limit.
+func dirSize(dir string, limit int64) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // the program may delete files while we walk
+		}
+		if info, infoErr := entry.Info(); infoErr == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		if total > limit {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return total
+}
+
+// stageResultFiles reads the files the program wrote to /stage/out into staged,
+// keyed by output name, only when the program reported status ok. A name given
+// both as content and as a file is ambiguous and fails the attempt. Nothing is
+// written to a declared path here.
+func stageResultFiles(request Request, resultDir string, stdout []byte, staged map[string][]byte) error {
 	var reported launchOutputs
 	if json.Unmarshal(stdout, &reported) != nil || reported.Status != "ok" {
 		return nil // the contract check reports the real problem
@@ -416,6 +505,21 @@ func collectResultFiles(request Request, resultDir string, stdout []byte) error 
 		data, err := safeio.ReadRegularFile(source, maxOutputFileBytes)
 		if err != nil {
 			return fmt.Errorf("выход %q: %w", output.Name, err)
+		}
+		if staged != nil {
+			staged[output.Name] = data
+		}
+	}
+	return nil
+}
+
+// writeStagedFiles writes files staged by a launcher to the declared output
+// paths. It runs only after the response passed the contract check.
+func writeStagedFiles(request Request, staged map[string][]byte) error {
+	for _, output := range request.Outputs {
+		data, ok := staged[output.Name]
+		if !ok {
+			continue
 		}
 		if err := safeio.EnsureDirPath(filepath.Dir(output.Path)); err != nil {
 			return fmt.Errorf("выход %q: каталог: %w", output.Name, err)

@@ -176,6 +176,7 @@ func TestDockerExecutorFailuresAreTechnicalErrors(t *testing.T) {
 		"content and file": {
 			"--both",
 		},
+		"file written, then undeclared output": {"--file-extra"},
 	}
 	for name, flags := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -302,5 +303,81 @@ func TestDockerExecutorNetworkIsAnExplicitRecordedException(t *testing.T) {
 	if result.Metadata["default_route"] != "true" || result.Metadata["container.network"] != "bridge" ||
 		!strings.Contains(result.Metadata["container.exceptions"], "network=bridge") {
 		t.Fatalf("metadata = %v", result.Metadata)
+	}
+}
+
+func TestDockerExecutorOutputDirectoryIsCapped(t *testing.T) {
+	executor, request := reviewFixture(t, "+ok\n", "--flood")
+	executor.spec.Docker.OutputMB = 8
+	executor.launcher = DockerLauncher{Settings: *executor.spec.Docker}
+	started := time.Now()
+	_, err := executor.Execute(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "превысил лимит 8 МБ") {
+		t.Fatalf("an overflowing result directory must stop the container: %v", err)
+	}
+	if time.Since(started) > 60*time.Second {
+		t.Fatal("the flooding container was not stopped")
+	}
+	if _, statErr := os.Stat(request.Outputs[0].Path); statErr == nil {
+		t.Fatal("no output may exist after the overflow")
+	}
+	noStageContainers(t, request.AttemptID)
+}
+
+func TestDockerExecutorExplicitUserCanWriteResultFile(t *testing.T) {
+	executor, request := reviewFixture(t, "+ok\n", "--file")
+	executor.spec.Docker.User = "4242:4242"
+	executor.launcher = DockerLauncher{Settings: *executor.spec.Docker}
+	if _, err := executor.Execute(context.Background(), request); err != nil {
+		t.Fatalf("an explicit non-controller user must be able to write the result: %v", err)
+	}
+	if data, err := os.ReadFile(request.Outputs[0].Path); err != nil || !strings.Contains(string(data), "**Verdict:** APPROVED") {
+		t.Fatalf("review = %q, %v", data, err)
+	}
+}
+
+func TestStagedResultFilesAreWrittenOnlyAfterTheContractCheck(t *testing.T) {
+	dir := t.TempDir()
+	request := Request{Outputs: []Output{{Name: "review", Path: filepath.Join(dir, "artifacts", "review.md")}}}
+	resultDir := filepath.Join(dir, "out")
+	if err := os.Mkdir(resultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "review"), []byte("# R\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged := map[string][]byte{}
+	if err := stageResultFiles(request, resultDir, []byte(`{"status":"ok"}`), staged); err != nil {
+		t.Fatal(err)
+	}
+	if string(staged["review"]) != "# R\n" {
+		t.Fatalf("staged = %v", staged)
+	}
+	if _, err := os.Stat(request.Outputs[0].Path); err == nil {
+		t.Fatal("staging must not write the declared path")
+	}
+	if err := writeStagedFiles(request, staged); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(request.Outputs[0].Path); string(data) != "# R\n" {
+		t.Fatalf("committed = %q", data)
+	}
+	if err := stageResultFiles(request, resultDir, []byte(`{"status":"error"}`), map[string][]byte{}); err != nil {
+		t.Fatalf("a non-ok status stages nothing and is not this layer's error: %v", err)
+	}
+}
+
+func TestDockerSpecOutputMBValidation(t *testing.T) {
+	spec := AdapterSpec{Argv: []string{"x"}, Docker: &DockerSpec{Image: testImage, OutputMB: MaxDockerOutputMB + 1}}
+	if err := spec.Validate("review"); err == nil {
+		t.Fatal("an output_mb above the maximum must be rejected")
+	}
+	spec.Docker.OutputMB = -1
+	if err := spec.Validate("review"); err == nil {
+		t.Fatal("a negative output_mb must be rejected")
+	}
+	spec.Docker.OutputMB = 8
+	if err := spec.Validate("review"); err != nil {
+		t.Fatalf("valid output_mb rejected: %v", err)
 	}
 }

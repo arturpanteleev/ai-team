@@ -196,6 +196,10 @@ type Launch struct {
 	// about the execution environment (image, network, mounts). It is merged
 	// into the attempt metadata and wins over program-supplied keys.
 	Provenance map[string]string
+	// StagedFiles is filled by a container launcher with result files the
+	// program wrote (output name to bytes). Execute writes them to the declared
+	// paths only after the response passed the contract check.
+	StagedFiles map[string][]byte
 }
 
 // HostLauncher runs the program on the host under process-group supervision.
@@ -305,9 +309,10 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	defer cancel()
 	started := time.Now()
 	provenance := map[string]string{}
+	staged := map[string][]byte{}
 	runErr := e.launcher.Run(runCtx, Launch{
 		Argv: e.spec.Argv, Dir: request.WorkDir, Env: env, Stdin: stdin, Stdout: stdout, Stderr: stderr,
-		Request: request, Provenance: provenance,
+		Request: request, Provenance: provenance, StagedFiles: staged,
 	})
 	if len(provenance) > 0 {
 		result.Metadata = provenance
@@ -359,7 +364,13 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	default:
 		return result, fmt.Errorf("внешний исполнитель %s: status %q недопустим (ok|error)", e.name, parsed.Status)
 	}
+	if err := validateContentOutputs(request, parsed.Outputs); err != nil {
+		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
+	}
 	if err := writeContentOutputs(request, parsed.Outputs); err != nil {
+		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
+	}
+	if err := writeStagedFiles(request, staged); err != nil {
 		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
 	}
 	return result, nil
@@ -457,6 +468,24 @@ func (e *External) writeLog(request Request, started time.Time, runErr error, st
 		return ""
 	}
 	return path
+}
+
+// validateContentOutputs checks every content output before any is written, so
+// a response with one bad entry writes nothing.
+func validateContentOutputs(request Request, outputs map[string]resultOutput) error {
+	declared := make(map[string]bool, len(request.Outputs))
+	for _, output := range request.Outputs {
+		declared[output.Name] = true
+	}
+	for name, output := range outputs {
+		if !declared[name] {
+			return fmt.Errorf("результат содержит необъявленный output %q", name)
+		}
+		if output.Content == nil {
+			return fmt.Errorf("output %q: ожидается content", name)
+		}
+	}
+	return nil
 }
 
 func writeContentOutputs(request Request, outputs map[string]resultOutput) error {

@@ -15,13 +15,15 @@
 #   --garbage     print something that is not a JSON result
 #   --mismatch    claim a verdict that disagrees with the written review
 #   --file        write the review to /stage/out/review instead of "content"
+#   --file-extra  write the review file, then answer with an undeclared output
+#   --flood       write far more than the result directory limit, then hang
 #   --both        give the review as content AND as a file (ambiguous)
 set -eu
 
 mode=""
 for arg in "$@"; do
   case "$arg" in
-    --fail|--crash|--garbage|--mismatch|--file|--both) mode="$arg" ;;
+    --fail|--crash|--garbage|--mismatch|--file|--file-extra|--flood|--both) mode="$arg" ;;
   esac
 done
 
@@ -30,6 +32,7 @@ request=$(cat)
 case "$mode" in
   --crash) echo "reviewer crashed on purpose" >&2; exit 3 ;;
   --garbage) echo "this is not json"; exit 0 ;;
+  --flood) i=0; while [ "$i" -lt 64 ]; do head -c 1048576 /dev/zero >"/stage/out/junk$i"; i=$((i+1)); done; sleep 120; exit 0 ;;
   --fail) printf '{"schema_version":1,"status":"error","error":"reviewer backend unavailable"}'; exit 0 ;;
 esac
 
@@ -64,11 +67,13 @@ body="# Code review\\n\\n**Verdict:** $verdict\\n\\n- $finding\\n"
 meta="\"metadata\":{\"agent\":\"fixture-review\",\"agent_version\":\"1\",\"input_writable\":\"$input_writable\",\"default_route\":\"$default_route\"}"
 
 case "$mode" in
-  --file|--both)
+  --file|--file-extra|--both)
     printf '# Code review\n\n**Verdict:** %s\n\n- %s\n' "$verdict" "$finding" >/stage/out/review
     ;;
 esac
-if [ "$mode" = "--file" ]; then
+if [ "$mode" = "--file-extra" ]; then
+  printf '{"schema_version":1,"status":"ok","summary":"%s","verdict":"%s","outputs":{"bogus":{"content":"x"}},%s}' "$finding" "$claimed" "$meta"
+elif [ "$mode" = "--file" ]; then
   printf '{"schema_version":1,"status":"ok","summary":"%s","verdict":"%s",%s}' "$finding" "$claimed" "$meta"
 else
   printf '{"schema_version":1,"status":"ok","summary":"%s","verdict":"%s","outputs":{"review":{"content":"%s"}},%s}' "$finding" "$claimed" "$body" "$meta"

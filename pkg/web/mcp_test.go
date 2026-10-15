@@ -498,7 +498,7 @@ func TestMCPNegativeToolCallsDoNotLeak(t *testing.T) {
 	}
 }
 
-func TestMCPToolsAreReadOnlyAndRegistered(t *testing.T) {
+func TestMCPToolsAreAnnotatedByWhatTheyDo(t *testing.T) {
 	env := newMCPEnv(t)
 	token, _ := env.issueToken(t, "owner@example.com", `{"label":"x"}`)
 	session := env.mustConnect(t, token)
@@ -508,17 +508,25 @@ func TestMCPToolsAreReadOnlyAndRegistered(t *testing.T) {
 	}
 	registry := newMCPRegistry()
 	registerMCPReadTools(registry)
-	if len(listed.Tools) != len(registry.operations) || len(listed.Tools) < 20 {
+	registerMCPActionTools(registry)
+	if len(listed.Tools) != len(registry.operations) || len(listed.Tools) < 60 {
 		t.Fatalf("listed %d tools, registry has %d", len(listed.Tools), len(registry.operations))
 	}
-	for _, tool := range listed.Tools {
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || tool.Description == "" {
-			t.Errorf("tool %s must be annotated read-only and described", tool.Name)
-		}
-	}
+	byName := map[string]mcpOperation{}
 	for _, operation := range registry.operations {
-		if operation.Method != http.MethodGet {
-			t.Errorf("%s: S12 registers reads only", operation.Name)
+		byName[operation.Name] = operation
+	}
+	for _, tool := range listed.Tools {
+		operation := byName[tool.Name]
+		if tool.Annotations == nil || tool.Description == "" {
+			t.Errorf("tool %s must be annotated and described", tool.Name)
+			continue
+		}
+		if tool.Annotations.ReadOnlyHint != !operation.mutating() {
+			t.Errorf("tool %s: read-only hint %v for method %s", tool.Name, tool.Annotations.ReadOnlyHint, operation.Method)
+		}
+		if operation.mutating() && (tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint != operation.Destructive || !tool.Annotations.IdempotentHint) {
+			t.Errorf("tool %s: destructive/idempotent hints are wrong: %+v", tool.Name, tool.Annotations)
 		}
 	}
 }
@@ -890,12 +898,21 @@ func TestMCPRegistryGuards(t *testing.T) {
 	if got, err := operation.restPath(map[string]string{"run_id": "r1", "path": "reports/a.md"}); err != nil || got != "/api/runs/r1/artifacts/reports/a.md" {
 		t.Errorf("restPath = %q %v", got, err)
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("registering a non-read operation in S12 must panic")
-		}
-	}()
-	newMCPRegistry().add(mcpOperation{Name: "write", Method: http.MethodPost, Path: "/api/runs"})
+	for name, bad := range map[string]mcpOperation{
+		"unsupported method": {Name: "w1", Method: "TRACE", Path: "/api/runs"},
+		"GET with body":      {Name: "w2", Path: "/api/runs", Params: []mcpParam{{Name: "x", Kind: mcpString, Body: true}}},
+		"reserved key name":  {Name: "w3", Method: http.MethodPost, Path: "/api/runs", Params: []mcpParam{{Name: mcpIdempotencyKey, Kind: mcpString}}},
+		"action with paging": {Name: "w4", Method: http.MethodPost, Path: "/api/runs", ArrayKey: "runs"},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s must panic", name)
+				}
+			}()
+			newMCPRegistry().add(bad)
+		}()
+	}
 }
 
 func TestMCPSliceKeepsUTF8AndReportsContinuation(t *testing.T) {

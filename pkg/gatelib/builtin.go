@@ -24,6 +24,10 @@ const (
 	GateAgentReview = "agent_review"
 	// GateHumanApproval is the human decision gate bound to the result hash.
 	GateHumanApproval = "human_approval"
+	// GateExternalProgram is the external-program gate (kind external): a
+	// trusted command from the repository configuration that speaks the JSON
+	// gate protocol (docs/reference/gate-protocol.md, pkg/gaterun).
+	GateExternalProgram = "external_program"
 )
 
 // PRRuleGates are the code gates that check a pull-request reference. They
@@ -96,6 +100,19 @@ func newBuiltin() *Registry {
 		ID: GateHumanApproval, Version: 1, Kind: workflow.GateKindHuman,
 		Title:       "Решение человека",
 		Description: "Пауза до решения ответственной функции этапа по точному хешу результата.",
+	})
+	one := 1
+	r.MustRegister(workflow.GateDefinition{
+		ID: GateExternalProgram, Version: 1, Kind: workflow.GateKindExternal,
+		Title:       "Внешняя программа",
+		Description: "Доверенная команда из конфигурации репозитория читает JSON-контекст и возвращает один JSON-вердикт. Падение, таймаут, превышение лимита и неверный JSON — техническая ошибка, а не вердикт.",
+		Params: []workflow.GateParam{
+			{Name: "command", Type: workflow.GateParamStringList, Required: true, Description: "argv без shell: программа и аргументы; секреты в аргументы не вписываются."},
+			{Name: "timeout_seconds", Type: workflow.GateParamInt, Min: &one, Description: "Таймаут запуска, секунд (по умолчанию 60, максимум 3600)."},
+			{Name: "cwd", Type: workflow.GateParamString, Description: "Рабочий каталог относительно корня репозитория (по умолчанию .)."},
+			{Name: "env_allow", Type: workflow.GateParamStringList, Description: "Имена переменных окружения контроллера, передаваемых программе; остальное отбрасывается."},
+			{Name: "max_output_bytes", Type: workflow.GateParamInt, Min: &one, Description: "Лимит stdout и stderr по отдельности, байт (по умолчанию 1 МиБ, максимум 16 МиБ)."},
+		},
 	})
 	return r
 }

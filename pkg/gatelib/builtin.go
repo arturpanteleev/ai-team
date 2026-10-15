@@ -28,6 +28,9 @@ const (
 	// trusted command from the repository configuration that speaks the JSON
 	// gate protocol (docs/reference/gate-protocol.md, pkg/gaterun).
 	GateExternalProgram = "external_program"
+	// GateDockerProgram is the same JSON gate protocol, run in a pinned
+	// container image with strict isolation defaults (kind docker).
+	GateDockerProgram = "docker_program"
 )
 
 // PRRuleGates are the code gates that check a pull-request reference. They
@@ -111,6 +114,29 @@ func newBuiltin() *Registry {
 			{Name: "timeout_seconds", Type: workflow.GateParamInt, Min: &one, Description: "Таймаут запуска, секунд (по умолчанию 60, максимум 3600)."},
 			{Name: "cwd", Type: workflow.GateParamString, Description: "Рабочий каталог относительно корня репозитория (по умолчанию .)."},
 			{Name: "env_allow", Type: workflow.GateParamStringList, Description: "Имена переменных окружения контроллера, передаваемых программе; остальное отбрасывается."},
+			{Name: "max_output_bytes", Type: workflow.GateParamInt, Min: &one, Description: "Лимит stdout и stderr по отдельности, байт (по умолчанию 1 МиБ, максимум 16 МиБ)."},
+		},
+	})
+	r.MustRegister(workflow.GateDefinition{
+		ID: GateDockerProgram, Version: 1, Kind: workflow.GateKindDocker,
+		Title:       "Программа в Docker",
+		Description: "Тот же JSON-протокол, что у внешней программы, но команда выполняется в контейнере из образа, закреплённого digest: без сети, с read-only корнем и репозиторием, без capabilities, Docker-сокета, домашнего каталога и окружения контроллера. Любое расширение доступа задаётся параметрами и записывается в evidence. Ошибка Docker, образа или рантайма — техническая ошибка, а не вердикт.",
+		Params: []workflow.GateParam{
+			{Name: "image", Type: workflow.GateParamString, Required: true, Description: "Образ name@sha256:<digest>; тег без digest отклоняется."},
+			{Name: "command", Type: workflow.GateParamStringList, Required: true, Description: "argv внутри образа без shell; заменяет entrypoint образа. Секреты в аргументы не вписываются."},
+			{Name: "allow_unpinned_image", Type: workflow.GateParamBool, Description: "Явное разрешение образа без digest (исключение, записывается в evidence)."},
+			{Name: "pull", Type: workflow.GateParamEnum, Enum: []string{"missing", "never"}, Description: "missing (по умолчанию) — тянуть образ, если его нет локально; never — только локальный."},
+			{Name: "network", Type: workflow.GateParamEnum, Enum: []string{"none", "bridge"}, Description: "none (по умолчанию) — без сети; bridge — исключение."},
+			{Name: "cpus", Type: workflow.GateParamString, Description: "Лимит CPU, десятичное число (по умолчанию 1)."},
+			{Name: "memory_mb", Type: workflow.GateParamInt, Min: &one, Description: "Лимит памяти без swap, МиБ (по умолчанию 512)."},
+			{Name: "pids_limit", Type: workflow.GateParamInt, Min: &one, Description: "Лимит процессов (по умолчанию 128)."},
+			{Name: "tmpfs_mb", Type: workflow.GateParamInt, Min: &zero, Description: "Размер scratch /tmp в памяти (noexec), МиБ; 0 — без /tmp (по умолчанию 64)."},
+			{Name: "user", Type: workflow.GateParamString, Description: "uid[:gid] или имя пользователя в контейнере; по умолчанию uid:gid контроллера (не root)."},
+			{Name: "repo_access", Type: workflow.GateParamEnum, Enum: []string{"ro", "rw"}, Description: "Доступ к репозиторию: ro (по умолчанию) или rw (исключение)."},
+			{Name: "mounts", Type: workflow.GateParamStringList, Description: "Дополнительные mounts подкаталогов репозитория: <путь в репозитории>:<абсолютный путь в контейнере>[:ro|rw]; по умолчанию ro."},
+			{Name: "timeout_seconds", Type: workflow.GateParamInt, Min: &one, Description: "Таймаут запуска вместе с pull, секунд (по умолчанию 60, максимум 3600)."},
+			{Name: "cwd", Type: workflow.GateParamString, Description: "Рабочий каталог относительно корня репозитория (по умолчанию .)."},
+			{Name: "env_allow", Type: workflow.GateParamStringList, Description: "Имена переменных окружения контроллера, передаваемых программе в контейнере; остальное отбрасывается."},
 			{Name: "max_output_bytes", Type: workflow.GateParamInt, Min: &one, Description: "Лимит stdout и stderr по отдельности, байт (по умолчанию 1 МиБ, максимум 16 МиБ)."},
 		},
 	})

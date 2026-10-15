@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/dockerrun"
 	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/redact"
 )
@@ -35,6 +36,10 @@ type Config struct {
 	// EnvAllow names the only host variables the program inherits.
 	EnvAllow       []string
 	MaxOutputBytes int64
+	// Docker, when set, runs Command inside the container it describes
+	// (docker_program gate). Command is then the argv inside the image, not a
+	// host path.
+	Docker *DockerSettings
 }
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
@@ -91,7 +96,11 @@ func (c Config) Validate() error {
 	if err := validRelDir(c.CWD); err != nil {
 		return fmt.Errorf("external gate: cwd %q: %w", c.CWD, err)
 	}
-	if first := c.Command[0]; strings.Contains(first, "/") && !filepath.IsAbs(first) {
+	if c.Docker != nil {
+		if err := c.Docker.Validate(); err != nil {
+			return err
+		}
+	} else if first := c.Command[0]; strings.Contains(first, "/") && !filepath.IsAbs(first) {
 		if cleaned := path.Clean(first); cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 			return fmt.Errorf("external gate: command[0] %q must stay inside the repository", first)
 		}
@@ -102,6 +111,9 @@ func (c Config) Validate() error {
 		}
 		if strings.HasPrefix(strings.ToUpper(name), "AI_TEAM_GATE_") {
 			return fmt.Errorf("external gate: env_allow name %q is reserved", name)
+		}
+		if c.Docker != nil && dockerrun.ClientEnvName(name) {
+			return fmt.Errorf("docker gate: env_allow name %q belongs to the docker client environment and is never passed into a container", name)
 		}
 	}
 	return nil

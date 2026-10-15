@@ -62,6 +62,9 @@ type Runner struct {
 	WorkRoot string
 	// Launcher defaults to HostLauncher.
 	Launcher Launcher
+	// DockerLauncher runs gates whose Config has Docker settings; defaults to
+	// DockerLauncher{}. A docker gate never falls back to the host launcher.
+	DockerLauncher Launcher
 	// LookupEnv reads the controller environment for env_allow; defaults to
 	// os.LookupEnv.
 	LookupEnv func(string) (string, bool)
@@ -71,9 +74,17 @@ type Runner struct {
 	mu    sync.Mutex
 	locks map[string]*keyLock
 
+	sweepOnce sync.Once
+
 	keyMu   sync.Mutex
 	key     []byte
 	keyRoot string
+}
+
+// OrphanSweeper is implemented by launchers that can clean up after a dead
+// controller.
+type OrphanSweeper interface {
+	SweepOrphans(ctx context.Context) ([]string, error)
 }
 
 type keyLock struct {
@@ -125,6 +136,18 @@ func (r *Runner) Run(ctx context.Context, req Request) (workflow.GateAttempt, er
 	launcher := r.Launcher
 	if launcher == nil {
 		launcher = HostLauncher{}
+	}
+	if req.Config.Docker != nil {
+		launcher = r.DockerLauncher
+		if launcher == nil {
+			launcher = DockerLauncher{}
+		}
+		// On the first Docker gate of this Runner, remove containers that a
+		// previous controller left behind when it died. Best effort: a failure
+		// never blocks the gate.
+		if sweeper, ok := launcher.(OrphanSweeper); ok {
+			r.sweepOnce.Do(func() { _, _ = sweeper.SweepOrphans(ctx) })
+		}
 	}
 	now := r.Now
 	if now == nil {
@@ -276,7 +299,7 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 	// the repository. Symlinks inside the repository are not resolved: the
 	// repository content is part of the trusted configuration.
 	argv := append([]string{}, cfg.Command...)
-	if strings.Contains(argv[0], "/") && !filepath.IsAbs(argv[0]) {
+	if cfg.Docker == nil && strings.Contains(argv[0], "/") && !filepath.IsAbs(argv[0]) {
 		argv[0] = filepath.Join(repoRoot, filepath.FromSlash(argv[0]))
 	}
 
@@ -285,12 +308,15 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 	if ctx.Err() != nil {
 		outcome = Outcome{ExitCode: -1, Err: ctx.Err()}
 	} else {
-		outcome = launcher.Launch(runCtx, LaunchSpec{Argv: argv, Dir: cwd, Env: env, Stdin: stdin, MaxOutputBytes: cfg.MaxOutputBytes, Input: input})
+		outcome = launcher.Launch(runCtx, LaunchSpec{Argv: argv, Dir: cwd, Env: env, Stdin: stdin, MaxOutputBytes: cfg.MaxOutputBytes, Input: input, Docker: cfg.Docker})
 	}
 	timedOut := runCtx.Err() != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	cancel()
 
 	execution, result, reasonErr := classify(ctx, timedOut, outcome, cfg)
+	if reasonErr != nil && outcome.Detail != "" {
+		reasonErr = fmt.Errorf("%v; %s", reasonErr, outcome.Detail)
+	}
 	// The attempt directory was empty and its path was never given to the
 	// program. Anything in it now was put there by the program: discard it
 	// and refuse the result, whatever the program printed.
@@ -308,7 +334,7 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 			execution, reasonErr = workflow.GateExecutionError, evErr
 		}
 	}
-	extra := r.writeRecords(dir, id, cfg, argv, env, outcome, clean)
+	extra := r.writeRecords(dir, id, cfg, launcher.Kind(), argv, env, outcome, clean)
 	if extra.err != nil {
 		return workflow.GateAttempt{}, extra.err
 	}
@@ -425,7 +451,7 @@ type records struct {
 }
 
 // writeRecords stores the redacted logs and the invocation record.
-func (r *Runner) writeRecords(dir, id string, cfg Config, argv, env []string, outcome Outcome, clean sanitizer) records {
+func (r *Runner) writeRecords(dir, id string, cfg Config, kind workflow.GateKind, argv, env []string, outcome Outcome, clean sanitizer) records {
 	var refs []workflow.GateEvidenceRef
 	put := func(name, kind string, data []byte) error {
 		if err := safeio.WriteRegularFileNoFollow(filepath.Join(dir, name), data, safeio.ReadOnlyFileMode); err != nil {
@@ -443,8 +469,9 @@ func (r *Runner) writeRecords(dir, id string, cfg Config, argv, env []string, ou
 	for i, arg := range argv {
 		redactedArgv[i] = clean.text(arg)
 	}
-	invocation, _ := json.MarshalIndent(map[string]any{
+	record := map[string]any{
 		"protocol":         Protocol,
+		"executor":         string(kind),
 		"argv":             redactedArgv,
 		"cwd":              cfg.CWD,
 		"env_names":        names,
@@ -452,7 +479,11 @@ func (r *Runner) writeRecords(dir, id string, cfg Config, argv, env []string, ou
 		"max_output_bytes": cfg.MaxOutputBytes,
 		"exit_code":        outcome.ExitCode,
 		"output_exceeded":  outcome.OutputExceeded,
-	}, "", "  ")
+	}
+	if len(outcome.Record) > 0 {
+		record["launcher"] = cleanRecord(outcome.Record, clean)
+	}
+	invocation, _ := json.MarshalIndent(record, "", "  ")
 	for _, item := range []struct {
 		name, kind string
 		data       []byte
@@ -583,4 +614,36 @@ func (r *Runner) verifyMAC(dir, id string, data []byte) error {
 		return errors.New("signature does not match")
 	}
 	return nil
+}
+
+// cleanRecord passes a launcher record through the sanitizer value by value,
+// so a secret that slipped into any string is masked and the JSON stays valid.
+func cleanRecord(record map[string]any, clean sanitizer) any {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return map[string]any{"error": "launcher record could not be encoded"}
+	}
+	var generic any
+	if err := json.Unmarshal(data, &generic); err != nil {
+		return map[string]any{"error": "launcher record could not be decoded"}
+	}
+	var walk func(any) any
+	walk = func(value any) any {
+		switch v := value.(type) {
+		case string:
+			return clean.text(v)
+		case []any:
+			for i := range v {
+				v[i] = walk(v[i])
+			}
+			return v
+		case map[string]any:
+			for key := range v {
+				v[key] = walk(v[key])
+			}
+			return v
+		}
+		return value
+	}
+	return walk(generic)
 }

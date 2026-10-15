@@ -17,8 +17,9 @@ pkg/
 ├── pipeline/        оркестрация, enforcement вердиктов, гейты, loopback
 ├── workflow/        доменные state/outcome типы и чистые переходы; контракт гейта
 ├── gatelib/         версионированная библиотека определений гейтов (реестр)
-├── gaterun/         раннер гейта внешней программы: JSON-протокол, запуск без shell, evidence
 ├── gatesched/       планировщик групп гейтов: параллельные гейты, журнал, recovery
+├── gaterun/         раннер гейта внешней программы: JSON-протокол, запуск без shell, evidence; Docker-адаптер (docker_program)
+├── dockerrun/       запуск программы в контейнере через docker CLI: strict defaults, удаление по имени
 ├── verdict/         verdict-контракт: парсер маркеров, BLOCKED-протокол
 ├── checks/          deterministic verification runner и evidence
 ├── scope/           repository-relative mutation path policy (glob-матчинг)

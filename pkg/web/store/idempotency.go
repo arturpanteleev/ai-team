@@ -4,7 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
+
+// IdempotencyRetention is how long a request key and its stored response are
+// kept. A retry inside this window replays the original answer; afterwards the
+// key is forgotten and may be used again.
+const IdempotencyRetention = 7 * 24 * time.Hour
 
 // IdempotencyResponse is the durable response cached for one actor-scoped
 // write request. A zero status code means the key has been claimed but the
@@ -25,6 +31,11 @@ func (s *Store) BeginIdempotency(scope, requestKey, fingerprint string) (Idempot
 	if scope == "" || requestKey == "" || fingerprint == "" {
 		return IdempotencyResponse{}, false, errors.New("idempotency scope, request key, and fingerprint are required")
 	}
+	// Lazy expiry: issuing a key is the cheap moment to drop the ones past
+	// retention, so no separate worker exists. A failed cleanup never blocks
+	// the claim; the next claim tries again.
+	_, _ = s.db.Exec(`DELETE FROM api_idempotency WHERE created_at < ?`,
+		time.Now().UTC().Add(-IdempotencyRetention).Format("2006-01-02 15:04:05"))
 	result, err := s.db.Exec(`INSERT INTO api_idempotency(scope, request_key, fingerprint, status_code, created_at)
 		VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP) ON CONFLICT(scope, request_key) DO NOTHING`, scope, requestKey, fingerprint)
 	if err != nil {

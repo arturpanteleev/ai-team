@@ -633,8 +633,9 @@ func (s *Server) taskActionActor(w http.ResponseWriter, r *http.Request, stage c
 		return "", "", false
 	}
 	actorRole := stage.Function
-	if action == cloudidentity.StageActionConfirm && stage.ApproverFunction != "" {
-		// Generated stage approvals carry the canonical approver role.
+	if action == cloudidentity.StageActionConfirm {
+		// Generated stage approvals carry the canonical role of the confirming
+		// function ("po" is asked for as product_owner), never its alias.
 		actorRole = string(role)
 	}
 	return session.Principal.ActorID, actorRole, true
@@ -645,18 +646,8 @@ func stageFunctions(stage config.TemplateStage) cloudidentity.StageFunctions {
 }
 
 func (s *Server) taskStagePreconditions(w http.ResponseWriter, runID, stageID string) (lifecycle.State, config.TemplateStage, bool) {
-	if !safeIdentity(runID) || !safeIdentity(stageID) {
-		writeJSONAPIError(w, http.StatusBadRequest, "invalid run or stage id", "bad_identity")
-		return lifecycle.State{}, config.TemplateStage{}, false
-	}
-	stateStore, err := lifecycle.NewStore(s.targetDir)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusServiceUnavailable, "lifecycle state unavailable", "lifecycle_unavailable")
-		return lifecycle.State{}, config.TemplateStage{}, false
-	}
-	state, err := stateStore.Load(runID)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusNotFound, "run lifecycle state not found", "not_found")
+	state, ok := s.loadTaskState(w, runID, stageID)
+	if !ok {
 		return lifecycle.State{}, config.TemplateStage{}, false
 	}
 	if state.NextStage != stageID {
@@ -669,6 +660,70 @@ func (s *Server) taskStagePreconditions(w http.ResponseWriter, runID, stageID st
 		return lifecycle.State{}, config.TemplateStage{}, false
 	}
 	return state, stage, true
+}
+
+func (s *Server) loadTaskState(w http.ResponseWriter, runID, stageID string) (lifecycle.State, bool) {
+	if !safeIdentity(runID) || !safeIdentity(stageID) {
+		writeJSONAPIError(w, http.StatusBadRequest, "invalid run or stage id", "bad_identity")
+		return lifecycle.State{}, false
+	}
+	stateStore, err := lifecycle.NewStore(s.targetDir)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusServiceUnavailable, "lifecycle state unavailable", "lifecycle_unavailable")
+		return lifecycle.State{}, false
+	}
+	state, err := stateStore.Load(runID)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusNotFound, "run lifecycle state not found", "not_found")
+		return lifecycle.State{}, false
+	}
+	return state, true
+}
+
+// taskConfirmationPreconditions resolves the stage a confirmation or a return
+// is about. While a transition confirmation waits, the run's next stage is the
+// stage the run moves to, but the person confirms (or sends back) the stage
+// that was just completed: the approval's from_stage. That stage names the
+// request (stage_id may be it, or the run's next stage as older clients send)
+// and its function decides who may act; the approval itself still checks the
+// exact subject hash, the required roles and self-approval. The pending
+// approval is returned for the caller (nil when none is pending).
+func (s *Server) taskConfirmationPreconditions(w http.ResponseWriter, runID, stageID string) (lifecycle.State, config.TemplateStage, *approval.PendingApproval, bool) {
+	state, ok := s.loadTaskState(w, runID, stageID)
+	if !ok {
+		return lifecycle.State{}, config.TemplateStage{}, nil, false
+	}
+	var pending *approval.PendingApproval
+	if s.controller != nil && state.PendingApprovalID != "" {
+		values, err := s.controller.Approvals(runID)
+		if err != nil {
+			writeJSONAPIError(w, http.StatusServiceUnavailable, "approval state unavailable", "approval_unavailable")
+			return lifecycle.State{}, config.TemplateStage{}, nil, false
+		}
+		for index := range values {
+			if values[index].ID == state.PendingApprovalID && values[index].Status == approval.StatusPending {
+				pending = &values[index]
+				break
+			}
+		}
+	}
+	confirmed := stageID
+	if pending != nil && pending.FromStage != "" {
+		if stageID != state.NextStage && stageID != pending.FromStage {
+			s.taskConflict(w, runID, stageID, "stage is not current")
+			return lifecycle.State{}, config.TemplateStage{}, nil, false
+		}
+		confirmed = pending.FromStage
+	} else if stageID != state.NextStage {
+		s.taskConflict(w, runID, stageID, "stage is not current")
+		return lifecycle.State{}, config.TemplateStage{}, nil, false
+	}
+	stage, err := s.pinnedTaskStage(runID, confirmed)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusConflict, "pinned stage unavailable", "template_pin_unavailable")
+		return lifecycle.State{}, config.TemplateStage{}, nil, false
+	}
+	return state, stage, pending, true
 }
 
 func (s *Server) handleTaskStageExecutor(w http.ResponseWriter, r *http.Request) {
@@ -813,7 +868,7 @@ func (s *Server) handleTaskStageOverride(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) {
 	runID, stageID := chi.URLParam(r, "runID"), chi.URLParam(r, "stageID")
-	state, stage, ok := s.taskStagePreconditions(w, runID, stageID)
+	state, stage, pending, ok := s.taskConfirmationPreconditions(w, runID, stageID)
 	if !ok {
 		return
 	}
@@ -829,18 +884,6 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	values, err := s.controller.Approvals(runID)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusServiceUnavailable, "approval state unavailable", "approval_unavailable")
-		return
-	}
-	var pending *approval.PendingApproval
-	for index := range values {
-		if values[index].ID == state.PendingApprovalID && values[index].Status == approval.StatusPending {
-			pending = &values[index]
-			break
-		}
-	}
 	if pending == nil || pending.Kind == approval.KindInput || pending.Trigger == "delivery_plan" || !actionAllowed(pending.Actions, "approve") {
 		s.taskConflict(w, runID, stageID, "current approval is not a stage confirmation")
 		return
@@ -850,6 +893,12 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	hash, hashFromServer := command.SubjectHash, false
+	if _, viaMCP := mcpCallMetaFromRequest(r); viaMCP && hash == "" {
+		// The server must not fill in the hash for an MCP client: the agent has to
+		// name the exact result version it reviewed.
+		writeJSONAPIError(w, http.StatusBadRequest, "subject_hash is required: confirm the exact result version you reviewed", "subject_hash_required")
+		return
+	}
 	if hash == "" {
 		hash, hashFromServer = pending.SubjectHash, true
 		// Deprecated path: the person did not confirm the exact version. The
@@ -857,9 +906,10 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Deprecation", "true")
 		w.Header().Set("Warning", `299 - "confirm without subject_hash is deprecated: send the hash of the reviewed result"`)
 	}
+	channel, requestKey := decisionOrigin(r, humandecision.ChannelWeb)
 	decided, ok := s.decideTransition(w, humandecision.Request{
 		RunID: runID, ApprovalID: pending.ID, Action: "approve", SubjectHash: hash, HashFromServer: hashFromServer,
-		Channel: humandecision.ChannelWeb, RequestKey: r.Header.Get("Idempotency-Key"),
+		Channel: channel, RequestKey: requestKey,
 		Actor: humandecision.Actor{ID: actorID, Authenticated: true, HasRole: func(required string) bool { return required == actorRole }},
 	})
 	if !ok {
@@ -915,9 +965,13 @@ func (s *Server) handleTaskStageSkip(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 	runID, stageID := chi.URLParam(r, "runID"), chi.URLParam(r, "stageID")
-	state, stage, ok := s.taskStagePreconditions(w, runID, stageID)
+	state, stage, pending, ok := s.taskConfirmationPreconditions(w, runID, stageID)
 	if !ok {
 		return
+	}
+	if pending != nil && pending.FromStage != "" {
+		// The return route starts at the stage that was completed.
+		stageID = pending.FromStage
 	}
 	if state.Phase != lifecycle.PhaseWaiting {
 		s.taskConflict(w, runID, stageID, "return requires a current waiting stage")

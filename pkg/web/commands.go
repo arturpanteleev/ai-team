@@ -788,10 +788,11 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// A decision on a stage transition goes through the one decision service
 	// (roles, exact hash, self-approval, audit) shared with REST and MCP.
 	if pending, found := approvalByID(values, chi.URLParam(r, "approvalID")); found && humandecision.IsTransition(pending) {
+		channel, requestKey := decisionOrigin(r, humandecision.ChannelREST)
 		decided, ok := s.decideTransition(w, humandecision.Request{
 			RunID: chi.URLParam(r, "runID"), ApprovalID: pending.ID, Action: command.Action,
 			SubjectHash: command.SubjectHash, Comment: command.Comment, ArtifactRevisions: command.ArtifactRevisions,
-			Channel: humandecision.ChannelREST, RequestKey: r.Header.Get("Idempotency-Key"),
+			Channel: channel, RequestKey: requestKey,
 			Actor: humandecision.Actor{ID: actorID, Authenticated: s.authenticator != nil,
 				HasRole: func(required string) bool { return required == actorRole }},
 		})

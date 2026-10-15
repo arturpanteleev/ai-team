@@ -660,15 +660,17 @@ func (c *Controller) ReturnStage(_ context.Context, runID, stageID, toStage, rea
 	if err != nil {
 		return err
 	}
-	if state.NextStage != stageID {
-		return fmt.Errorf("stage %q is not current", stageID)
-	}
 	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" {
 		return errors.New("return requires a current waiting stage")
 	}
 	value, err := c.approvals.Load(runID, state.PendingApprovalID)
 	if err != nil {
 		return err
+	}
+	// While a transition confirmation waits, the run's next stage is the
+	// destination; the stage being sent back is the approval's from_stage.
+	if state.NextStage != stageID && value.FromStage != stageID {
+		return fmt.Errorf("stage %q is not current", stageID)
 	}
 	action := ""
 	for _, candidate := range value.Actions {

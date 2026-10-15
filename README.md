@@ -117,7 +117,7 @@ ai-team run --resume <run_id> --approve-plan <sha256>
 | [Статусы и коды выхода](docs/reference/statuses.md) | что означает код и что делать |
 | [Граница безопасности](docs/reference/security.md) | что гарантируется, а что нет |
 | [Протокол гейта](docs/reference/gate-protocol.md) | JSON-контракт гейта внешней программы |
-| [Сетевой MCP](docs/reference/mcp.md) | подключение Claude и Codex, токены, инструменты чтения |
+| [Сетевой MCP](docs/reference/mcp.md) | подключение Claude и Codex, токены, инструменты чтения и действия, матрица паритета с REST |
 | [Архитектура](docs/ARCHITECTURE.md) | как устроен контроллер внутри |
 
 ## Разработка

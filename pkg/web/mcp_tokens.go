@@ -64,6 +64,13 @@ func (s *Server) mcpTokenSession(mutating bool, next http.HandlerFunc) http.Hand
 			writeJSONAPIError(w, http.StatusUnauthorized, "web session required", "unauthorized")
 			return
 		}
+		if session.AuthMethod == "mcp" {
+			// Personal tokens are minted from a browser session only: an MCP
+			// credential never manages credentials, not even through a crafted
+			// internal request.
+			writeJSONAPIError(w, http.StatusForbidden, "MCP credentials cannot manage MCP tokens", "forbidden")
+			return
+		}
 		if mutating && !constantTimeEqual(r.Header.Get("X-CSRF-Token"), session.CSRFToken) {
 			writeJSONAPIError(w, http.StatusForbidden, "invalid CSRF token", "forbidden")
 			return

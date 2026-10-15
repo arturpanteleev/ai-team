@@ -58,6 +58,17 @@ func decodeOptionalCommand(w http.ResponseWriter, r *http.Request, destination a
 	return strictjson.Decode(bytes.NewReader(data), destination)
 }
 
+// decisionOrigin names the door a decision came through and the request key
+// the client attached: MCP when the request was dispatched from the MCP
+// server (the channel is derived from the transport, never from the request),
+// otherwise the given browser or REST channel.
+func decisionOrigin(r *http.Request, channel string) (string, string) {
+	if meta, ok := mcpCallMetaFromRequest(r); ok {
+		return humandecision.ChannelMCP, meta.Key
+	}
+	return channel, r.Header.Get("Idempotency-Key")
+}
+
 // decideTransition runs the service for an authenticated actor and writes the
 // HTTP error itself when the decision is refused. The returned bool is false
 // after an error response was written.

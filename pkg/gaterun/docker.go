@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,14 @@ const (
 	// never inherits root implicitly.
 	nobodyUser = "65534:65534"
 )
+
+// GateAttemptLabel marks every gate container with its attempt ID.
+const GateAttemptLabel = "ai-team.gate-attempt"
+
+// OrphanAge is how old a gate container must be before the start-up sweep
+// removes it: longer than the longest allowed gate run, so a container of
+// another live controller on the same daemon is never touched.
+const OrphanAge = MaxTimeout + 15*time.Minute
 
 // DockerMount is one explicit extra mount of a repository path.
 type DockerMount struct {
@@ -120,7 +129,7 @@ func (d DockerSettings) Exceptions(envNames []string) []string {
 		out = append(out, "network="+d.network())
 	}
 	if d.RepoWritable {
-		out = append(out, "repository mounted read-write")
+		out = append(out, "repository mounted read-write (.git stays read-only)")
 	}
 	for _, m := range d.Mounts {
 		mode := "read-only"
@@ -319,6 +328,21 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 			input.Artifact.Path = target
 		}
 	}
+	if settings.RepoWritable {
+		// A writable repository must not let the container plant a hook or
+		// change the git configuration that the host will run later: .git is
+		// laid over the writable mount read-only. The common git directory of
+		// a linked worktree lies outside the repository and is never mounted.
+		overlays, err := gitOverlays(repoRoot)
+		if err != nil {
+			return fail(fmt.Errorf("protecting .git: %w", err))
+		}
+		for _, rel := range overlays {
+			mounts = append(mounts, dockerrun.Mount{
+				Source: filepath.Join(repoRoot, filepath.FromSlash(rel)), Target: path.Join(ContainerRepoRoot, rel), ReadOnly: true,
+			})
+		}
+	}
 	for _, m := range settings.Mounts {
 		source := filepath.Join(repoRoot, filepath.FromSlash(m.Path))
 		if err := noSymlinkBelow(repoRoot, m.Path); err != nil {
@@ -345,7 +369,7 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 		User: l.user(settings), Mounts: mounts, TmpfsMB: settings.tmpfsMB(), Network: settings.network(),
 		CPUs: settings.cpus(), MemoryMB: settings.memoryMB(), PidsLimit: settings.pidsLimit(),
 		Env:    spec.Env,
-		Labels: map[string]string{"ai-team.gate-attempt": input.AttemptID},
+		Labels: map[string]string{GateAttemptLabel: input.AttemptID},
 	}
 	described := dspec.Describe()
 	described["exceptions"] = settings.Exceptions(envNames(spec.Env))
@@ -360,6 +384,46 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 		OutputExceeded: res.OutputExceeded, Err: res.Err, Detail: res.Detail,
 		Record: map[string]any{"container": described},
 	}
+}
+
+// SweepOrphans removes gate containers left by a controller that died before it
+// could remove them (see dockerrun.Runner.SweepOrphans). Best effort.
+func (l DockerLauncher) SweepOrphans(ctx context.Context) ([]string, error) {
+	return l.Docker.SweepOrphans(ctx, GateAttemptLabel, OrphanAge)
+}
+
+// gitOverlays returns the repository-relative paths that must be mounted
+// read-only over a writable repository: .git (a directory, or the gitfile of a
+// linked worktree) and every other git directory of the repository that lies
+// inside it. A symlinked .git is refused: the daemon would follow it.
+func gitOverlays(repoRoot string) ([]string, error) {
+	info, err := os.Lstat(filepath.Join(repoRoot, ".git"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !(info.IsDir() || info.Mode().IsRegular()) {
+		return nil, errors.New(".git must be a directory or a regular file, not a symlink")
+	}
+	overlays := []string{".git"}
+	if out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").Output(); err == nil { // #nosec G204 -- fixed argv
+		for _, dir := range strings.Fields(string(out)) {
+			rel, ok := within(repoRoot, dir)
+			if !ok || rel == "." || rel == ".git" {
+				continue // outside the repository: not mounted at all
+			}
+			if inside, _ := within(filepath.Join(repoRoot, ".git"), dir); inside != "" && !strings.HasPrefix(inside, "..") {
+				continue // already covered by the .git overlay
+			}
+			if err := noSymlinkBelow(repoRoot, rel); err != nil {
+				return nil, fmt.Errorf("git directory %s: %w", rel, err)
+			}
+			overlays = append(overlays, rel)
+		}
+	}
+	return overlays, nil
 }
 
 func (l DockerLauncher) user(settings DockerSettings) string {

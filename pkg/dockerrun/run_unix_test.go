@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,9 @@ func fakeDocker(t *testing.T, mode string) (Runner, string) {
 	script := `#!/bin/sh
 cmd=$1
 printf '%s\n' "$@" > "$FAKE_DIR/$cmd.args"
+if [ "$cmd" = "ps" ]; then printf '%s' "$FAKE_PS"; exit 0; fi
 if [ "$cmd" = "rm" ]; then
+  if [ "$FAKE_MODE" = "inprogress" ]; then echo "Error response from daemon: removal of container x is already in progress" >&2; exit 1; fi
   if [ "$FAKE_MODE" = "rmfail" ]; then echo "daemon down" >&2; exit 1; fi
   if [ "$FAKE_MODE" = "gone" ]; then echo "Error: No such container: x" >&2; exit 1; fi
   echo removed; exit 0
@@ -31,7 +34,7 @@ case "$FAKE_MODE" in
   ok) echo '{"ok":true}'; exit 0 ;;
   daemon) echo "Cannot connect to the Docker daemon" >&2; exit 125 ;;
   oom) exit 137 ;;
-  hang|rmfail|gone) exec sleep 30 ;;
+  hang|rmfail|gone|inprogress) exec sleep 30 ;;
   flood) yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ;;
 esac
 `
@@ -46,7 +49,7 @@ esac
 	}
 	_ = os.Remove(filepath.Join(dir, "rm.args"))
 	return Runner{Binary: bin, CleanupTimeout: 60 * time.Second, ClientEnv: func() []string {
-		return []string{"PATH=/usr/bin:/bin", "FAKE_DIR=" + dir, "FAKE_MODE=" + mode}
+		return []string{"PATH=/usr/bin:/bin", "FAKE_DIR=" + dir, "FAKE_MODE=" + mode, "FAKE_PS=" + os.Getenv("S08_FAKE_PS")}
 	}}, dir
 }
 
@@ -125,6 +128,12 @@ func TestRunReportsRemovalFailure(t *testing.T) {
 	if !strings.Contains(res.Detail, "could NOT be removed") {
 		t.Fatalf("detail = %q", res.Detail)
 	}
+	runner, dir = fakeDocker(t, "inprogress")
+	ctx3, cancel3 := cancelWhenStarted(t, dir, 100*time.Millisecond)
+	defer cancel3()
+	if res := runner.Run(ctx3, validSpec(), nil, 1<<16); strings.Contains(res.Detail, "NOT") || !strings.Contains(res.Detail, "being removed") {
+		t.Fatalf("an in-progress removal is not a failure: %q", res.Detail)
+	}
 	runner, dir = fakeDocker(t, "gone")
 	ctx2, cancel2 := cancelWhenStarted(t, dir, 100*time.Millisecond)
 	defer cancel2()
@@ -168,5 +177,44 @@ func TestRunInvalidSpecNeverStartsDocker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "run.args")); err == nil {
 		t.Fatal("docker was invoked for an invalid spec")
+	}
+}
+
+func TestRunLabelsContainers(t *testing.T) {
+	runner, dir := fakeDocker(t, "ok")
+	_ = runner.Run(context.Background(), validSpec(), nil, 1<<16)
+	args, _ := os.ReadFile(filepath.Join(dir, "run.args"))
+	for _, want := range []string{"--label\n" + LabelOwner + "=1\n", "--label\n" + LabelStarted + "="} {
+		if !strings.Contains(string(args), want) {
+			t.Errorf("argv lacks label %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestSweepOrphansRemovesOnlyOldOnes(t *testing.T) {
+	old := strconv.FormatInt(time.Now().Add(-3*time.Hour).Unix(), 10)
+	fresh := strconv.FormatInt(time.Now().Unix(), 10)
+	t.Setenv("S08_FAKE_PS", "aaa "+old+"\nbbb "+fresh+"\nccc \n")
+	runner, dir := fakeDocker(t, "ok")
+	removed, err := runner.SweepOrphans(context.Background(), "ai-team.gate-attempt", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(removed, ",") != "aaa,ccc" {
+		t.Fatalf("removed = %v (old and unlabeled-time are swept, fresh is kept)", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ps.args")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.SweepOrphans(context.Background(), "bad label!", time.Hour); err == nil {
+		t.Fatal("invalid label accepted")
+	}
+}
+
+func TestClientEnvNameIsCaseInsensitive(t *testing.T) {
+	for _, name := range []string{"docker_host", "Docker_Context", "path", "Home", "xdg_config_home"} {
+		if !ClientEnvName(name) {
+			t.Errorf("%s must be a client variable", name)
+		}
 	}
 }

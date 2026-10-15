@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,16 @@ type Result struct {
 	// Docker is the full `docker run` argv, recorded as evidence.
 	Docker []string
 }
+
+// Labels every container started by Runner carries. LabelOwner marks it as
+// ours and LabelStarted holds the unix time of the start, so SweepOrphans can
+// find containers whose controller died without removing them. A caller adds
+// its own label (the gate adapter uses ai-team.gate-attempt) to sweep only its
+// containers.
+const (
+	LabelOwner   = "ai-team.dockerrun"
+	LabelStarted = "ai-team.started"
+)
 
 // Runner runs Specs with the docker CLI.
 type Runner struct {
@@ -69,6 +80,13 @@ func (r Runner) clientEnv() []string {
 // each output stream, and always leaves no container behind: when ctx ends,
 // the output limit is hit or the run breaks, the container is removed by name.
 func (r Runner) Run(ctx context.Context, spec Spec, stdin []byte, maxOutput int64) Result {
+	labels := make(map[string]string, len(spec.Labels)+2)
+	for key, value := range spec.Labels {
+		labels[key] = value
+	}
+	labels[LabelOwner] = "1"
+	labels[LabelStarted] = strconv.FormatInt(time.Now().Unix(), 10)
+	spec.Labels = labels
 	args, err := spec.RunArgs()
 	if err != nil {
 		return Result{ExitCode: -1, Err: err, Detail: "container not started: invalid specification"}
@@ -134,9 +152,63 @@ func (r Runner) remove(name string) (message string, failed bool) {
 		return "container " + name + " removed", false
 	case strings.Contains(strings.ToLower(string(out)), "no such container"):
 		return "container " + name + " already gone", false
+	case strings.Contains(strings.ToLower(string(out)), "already in progress"):
+		// Another removal (the --rm of the daemon) is under way: the container
+		// is on its way out, which is what was asked for.
+		return "container " + name + " is already being removed", false
 	default:
 		return fmt.Sprintf("container %s could NOT be removed (%v); remove it manually", name, err), true
 	}
+}
+
+// SweepOrphans force-removes containers that carry LabelOwner and labelKey (a
+// caller's own label, so callers sweep only what they started) and were
+// started at least minAge ago: the leftovers of a controller that was killed
+// (kill -9, power loss) before it could remove its container. minAge must
+// exceed the longest legitimate run, so a container of another live controller
+// on the same daemon is never touched. It returns the removed container IDs
+// and the first error; one failed removal does not stop the others. This is
+// best effort: it runs when a controller starts, not while one is dead.
+func (r Runner) SweepOrphans(ctx context.Context, labelKey string, minAge time.Duration) ([]string, error) {
+	if !labelPattern.MatchString(labelKey) {
+		return nil, fmt.Errorf("docker: sweep label %q is invalid", labelKey)
+	}
+	timeout := r.CleanupTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	listCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	command := exec.CommandContext(listCtx, r.binary(), "ps", "-a", "--no-trunc", // #nosec G204 -- labelKey is validated
+		"--filter", "label="+LabelOwner, "--filter", "label="+labelKey,
+		"--format", `{{.ID}} {{.Label "`+LabelStarted+`"}}`)
+	command.Env = r.clientEnv()
+	out, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker: listing containers to sweep: %w", err)
+	}
+	var removed []string
+	var firstErr error
+	now := time.Now()
+	for _, line := range strings.Split(string(out), "\n") {
+		id, started, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if id == "" {
+			continue
+		}
+		// A container without a readable start time cannot be told from an old
+		// one; it is ours by label, so it is treated as old.
+		if unix, perr := strconv.ParseInt(strings.TrimSpace(started), 10, 64); perr == nil && now.Sub(time.Unix(unix, 0)) < minAge {
+			continue
+		}
+		if _, failed := r.remove(id); failed {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("docker: orphan container %s could not be removed", id)
+			}
+			continue
+		}
+		removed = append(removed, id)
+	}
+	return removed, firstErr
 }
 
 // exitDetail classifies docker run exit codes. 125, 126 and 127 are reserved

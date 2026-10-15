@@ -182,7 +182,14 @@ stage result file (read-only, when it lies outside the repository), and the
 configured `mounts`. A mount source MUST be a repository subpath without a
 symlink component; a writable mount of `.git`, a mount target under `/proc`,
 `/sys`, `/dev` or the reserved gate directories, and an `env_allow` name of the
-Docker client environment MUST be rejected before a run. The input document MUST
+Docker client environment (compared without case) MUST be rejected before a run.
+When `repo_access` is `rw`, the launcher MUST additionally mount `.git` (and any
+other git directory inside the repository) read-only over the writable repository,
+MUST NOT mount a git directory outside the repository, and MUST refuse a symlinked
+`.git`. With a remote daemon (`DOCKER_HOST`, `DOCKER_CONTEXT`) mount sources
+resolve on the remote machine; this is unsupported. With `network: bridge` the
+repository content, including `.git/config` remote URLs, is reachable from the
+network, and the exceptions record MUST say so by listing `network=bridge`. The input document MUST
 carry container paths only. Environment values MUST NOT appear in the `docker`
 argv or in any stored record.
 
@@ -199,12 +206,34 @@ argv or in any stored record.
   repository read-only and the evidence directory) and only the two reserved
   variables
 
+#### Scenario: Writable repository keeps .git read-only
+
+- **КОГДА** `repo_access` is `rw` and a program writes an ordinary repository file
+  and a file under `.git/hooks`
+- **ТОГДА** the first write MUST succeed and the second MUST fail
+
 #### Scenario: Closed sandbox
 
 - **КОГДА** a program inside the container tries to write to the repository or the
   root file system, reach the network, read a controller variable, find the Docker
   socket, or run as root
 - **ТОГДА** each attempt MUST fail
+
+### Requirement: Containers left by a dead controller are swept at the next start
+
+Every container MUST carry the labels `ai-team.dockerrun`, `ai-team.gate-attempt`
+and `ai-team.started` (unix start time). The first Docker gate of a Runner MUST
+remove containers with those labels that are older than the maximum gate timeout
+plus a margin. A sweep failure MUST NOT block the gate. Removal of a container
+whose removal is already in progress MUST NOT count as a failed removal. The
+guarantee that no container is left behind is best effort after a controller crash:
+the leftover lives until the next controller start.
+
+#### Scenario: Old and fresh containers
+
+- **КОГДА** an old and a fresh container carry the gate labels and a third lacks the
+  owner label
+- **ТОГДА** the sweep MUST remove only the old one of the labeled two
 
 ### Requirement: Docker failures are technical errors; a timeout removes the container
 

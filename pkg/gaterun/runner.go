@@ -74,9 +74,17 @@ type Runner struct {
 	mu    sync.Mutex
 	locks map[string]*keyLock
 
+	sweepOnce sync.Once
+
 	keyMu   sync.Mutex
 	key     []byte
 	keyRoot string
+}
+
+// OrphanSweeper is implemented by launchers that can clean up after a dead
+// controller.
+type OrphanSweeper interface {
+	SweepOrphans(ctx context.Context) ([]string, error)
 }
 
 type keyLock struct {
@@ -133,6 +141,12 @@ func (r *Runner) Run(ctx context.Context, req Request) (workflow.GateAttempt, er
 		launcher = r.DockerLauncher
 		if launcher == nil {
 			launcher = DockerLauncher{}
+		}
+		// On the first Docker gate of this Runner, remove containers that a
+		// previous controller left behind when it died. Best effort: a failure
+		// never blocks the gate.
+		if sweeper, ok := launcher.(OrphanSweeper); ok {
+			r.sweepOnce.Do(func() { _, _ = sweeper.SweepOrphans(ctx) })
 		}
 	}
 	now := r.Now

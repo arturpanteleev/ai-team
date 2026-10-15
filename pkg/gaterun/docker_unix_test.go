@@ -123,6 +123,7 @@ func fakeDockerCLI(t *testing.T, mode string) (dockerrun.Runner, string) {
 cmd=$1
 printf '%s\n' "$@" > "$FAKE_DIR/$cmd.args"
 if [ "$cmd" = "rm" ]; then echo removed; exit 0; fi
+if [ "$cmd" = "ps" ]; then exit 0; fi
 env > "$FAKE_DIR/run.env"
 cat > "$FAKE_DIR/run.stdin"
 case "$FAKE_MODE" in
@@ -572,5 +573,88 @@ func TestDockerTimeoutRemovesRealContainer(t *testing.T) {
 	out, err := exec.Command("docker", "ps", "-a", "-q", "--filter", "label=ai-team.gate-attempt="+attempt.AttemptID).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("container left behind: %q err=%v", out, err)
+	}
+}
+
+// TestDockerWritableRepoKeepsGitReadOnly: with repo_access rw the repository
+// takes writes but .git (hooks!) does not, checked from inside a real
+// container; an ordinary file written in the container shows up on the host.
+func TestDockerWritableRepoKeepsGitReadOnly(t *testing.T) {
+	dockerAvailable(t)
+	f := newFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.repo, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.repo, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	probe := `#!/bin/sh
+cat >/dev/null
+bad=""
+touch /gate/repo/written-by-container 2>/dev/null || bad="$bad repo not writable;"
+touch /gate/repo/.git/hooks/pre-commit 2>/dev/null && bad="$bad hook written;"
+echo x >> /gate/repo/.git/config 2>/dev/null && bad="$bad git config written;"
+if [ -n "$bad" ]; then
+  printf '{"protocol":"ai-team.gate/v1","verdict":"fail","reason":"%s"}\n' "$bad"
+else
+  printf '{"protocol":"ai-team.gate/v1","verdict":"pass","reason":"git is read-only"}\n'
+fi
+`
+	if err := os.WriteFile(filepath.Join(f.repo, "probe.sh"), []byte(probe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	attempt := f.run(t, "pass", func(r *Request) {
+		r.Config.Command = []string{"/bin/sh", "/gate/repo/probe.sh"}
+		r.Config.Docker = &DockerSettings{Image: testImage, RepoWritable: true}
+	})
+	if attempt.Execution != workflow.GateExecutionSucceeded || attempt.Verdict != workflow.GateVerdictPass {
+		t.Fatalf("attempt = %+v\n%s", attempt, attempt.Reason)
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, "written-by-container")); err != nil {
+		t.Fatalf("the writable repository did not take the write: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, ".git", "hooks", "pre-commit")); err == nil {
+		t.Fatal("a hook was planted in .git on the host")
+	}
+}
+
+func TestGitOverlays(t *testing.T) {
+	repo := t.TempDir()
+	if got, err := gitOverlays(repo); err != nil || len(got) != 0 {
+		t.Fatalf("no .git: %v %v", got, err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitOverlays(repo); err != nil || len(got) != 1 || got[0] != ".git" {
+		t.Fatalf("plain repo: %v %v", got, err)
+	}
+	other := t.TempDir()
+	repo2 := t.TempDir()
+	if err := os.Symlink(other, filepath.Join(repo2, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOverlays(repo2); err == nil {
+		t.Fatal("a symlinked .git was accepted")
+	}
+}
+
+// TestRunnerSweepsOrphansOnFirstDockerGate: the first Docker gate of a Runner
+// asks the launcher to remove containers a dead controller left behind, once.
+func TestRunnerSweepsOrphansOnFirstDockerGate(t *testing.T) {
+	docker, fakeDir := fakeDockerCLI(t, "pass")
+	f := dockerFixture(t, docker)
+	for i := 0; i < 2; i++ {
+		req := dockerRequest(f, "pass", DockerSettings{})
+		req.Attempt.AttemptID = req.Attempt.AttemptID + string(rune('a'+i))
+		if _, err := f.runner.Run(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps := readFile(t, filepath.Join(fakeDir, "ps.args"))
+	for _, want := range []string{"label=ai-team.dockerrun", "label=" + GateAttemptLabel} {
+		if !strings.Contains(ps, want) {
+			t.Errorf("sweep did not filter by %q:\n%s", want, ps)
+		}
 	}
 }

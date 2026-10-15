@@ -108,6 +108,9 @@ func IsPinned(image string) bool { return strings.Contains(image, "@sha256:") }
 // Such names cannot be container variables: their value would steer the
 // controller's docker client instead of the program.
 func ClientEnvName(name string) bool {
+	// Compared without case: Windows variable names are case-insensitive
+	// (docker_host is DOCKER_HOST there), and rejecting more is harmless.
+	name = strings.ToUpper(name)
 	switch name {
 	case "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SSH_AUTH_SOCK":
 		return true

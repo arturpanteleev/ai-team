@@ -144,101 +144,29 @@
   color: var(--on-yellow);
   font-size: 18px;
   font-weight: 750;
+  text-decoration: none;
   box-shadow: 0 8px 22px rgb(255 216 77 / 35%);
 }
 
-.createBig:hover:not(:disabled) {
+.createBig:hover {
   background: #ffd62e;
+  text-decoration: none;
+}
+
+.retryLink {
+  min-height: 0;
+  padding: 0;
   border: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font-weight: 650;
+  text-decoration: underline;
 }
 
 .plus {
   font-size: 24px;
   line-height: 1;
-}
-
-.createCard {
-  display: grid;
-  gap: 8px;
-  padding: 20px;
-  border-radius: var(--radius-xl);
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.createHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.createHead h2 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.cancelCreate {
-  min-height: 32px;
-  padding: 4px 12px;
-  font-size: 13px;
-}
-
-.createCard label {
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.createCard input,
-.createCard textarea {
-  width: 100%;
-  min-width: 0;
-  padding: 10px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface-raised);
-}
-
-.createCard textarea {
-  resize: vertical;
-  line-height: 1.5;
-}
-
-.createCard small {
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.createCard > span {
-  color: var(--text-secondary);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.createSubmit {
-  width: 100%;
-  min-height: 52px;
-  margin-top: 6px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: var(--create-yellow);
-  color: var(--on-yellow);
-  font-size: 16px;
-  font-weight: 750;
-}
-
-.createSubmit:hover:not(:disabled) {
-  background: #ffd62e;
-  border: 0;
-}
-
-.fieldError {
-  color: var(--danger-fg);
 }
 
 .intakeNotice {
@@ -253,19 +181,6 @@
 .intakeNotice span {
   font-size: 13px;
   line-height: 1.5;
-}
-
-.created {
-  display: grid;
-  gap: 6px;
-  padding: 16px 18px;
-  border-radius: var(--radius-lg);
-  background: var(--tint-teal);
-  color: var(--ink-teal);
-}
-
-.created a {
-  font-weight: 650;
 }
 
 .commandError {
@@ -327,9 +242,10 @@
   box-shadow: 0 0 0 4px var(--danger-bg);
 }
 
+/* Unknown is not a recommendation: neutral grey, not amber. */
 .readiness[data-state='unknown'] .dot {
-  background: #f2b632;
-  box-shadow: 0 0 0 4px var(--warning-bg);
+  background: var(--text-muted);
+  box-shadow: 0 0 0 4px var(--surface-muted);
 }
 
 .checks {
@@ -458,91 +374,6 @@
     min-height: 60px;
   }
 
-  .createSubmit {
-    min-height: 50px;
-  }
-}
-
-/* Пузырь мысли в правом нижнем углу окна: поверх контента, гаснет сам через несколько секунд. */
-.createWrap {
-  position: relative;
-}
-
-.thought {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 50;
-  display: grid;
-  gap: 6px;
-  justify-items: center;
-  box-sizing: border-box;
-  min-width: 200px;
-  max-width: min(280px, calc(100vw - 16px - 16px - 40px));
-  padding: 14px 20px;
-  border-radius: 999px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-  color: var(--text-primary);
-  text-align: center;
-  overflow-wrap: anywhere;
-  animation: thoughtPulse 1.8s ease-in-out infinite;
-}
-
-.thought strong {
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.thought a {
-  font-weight: 650;
-  color: var(--link);
-}
-
-/* Хвостик из кружков уходит влево к кнопке. */
-.tailLg,
-.tailSm {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
-}
-
-.tailLg {
-  left: -14px;
-  bottom: 10px;
-  width: 18px;
-  height: 18px;
-}
-
-.tailSm {
-  left: -30px;
-  bottom: -4px;
-  width: 9px;
-  height: 9px;
-}
-
-@keyframes thoughtPulse {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.04);
-  }
-}
-
-@media (max-width: 600px) {
-  .thought {
-    right: 16px;
-    bottom: 16px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .thought {
-    animation: none;
-  }
 }
 
 /* Фильтр по проекту рядом с поиском; на телефоне занимает всю строку. */

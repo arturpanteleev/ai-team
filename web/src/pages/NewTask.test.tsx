@@ -116,11 +116,11 @@ describe('New task screen', () => {
     expect(screen.getByLabelText('Идентификатор')).toHaveValue('vkhod');
   });
 
-  it('не показывает форму участникам без роли Product Owner', () => {
+  it('не показывает форму участникам без права создавать задачи', () => {
     session.principal = { actor_id: 'dev-1', roles: ['developer'] };
     render(<MemoryRouter><NewTask /></MemoryRouter>);
 
-    expect(screen.getByText('Создавать задачи может Product Owner.')).toBeInTheDocument();
+    expect(screen.getByText('Создавать задачи могут: Владелец продукта, Архитектор.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Название')).not.toBeInTheDocument();
   });
 

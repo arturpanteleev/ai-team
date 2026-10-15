@@ -1,5 +1,6 @@
 import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskGates, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 import type { FlowMetrics } from './types/flowMetrics';
+import type { RunTracker, TrackerDelivery, TrackerInbound, TrackerLink, TrackerOverview, TrackerSyncResult } from './types/tracker';
 
 const API_BASE = '/api';
 
@@ -169,6 +170,40 @@ export async function revokeMcpToken(id: string): Promise<void> {
   });
   if (!response.ok) throw await responseError(response);
 }
+
+// Трекер задач (S14/S15). Права на запись — tracker:link; сервер решает окончательно.
+async function sendJson<T>(method: 'PUT' | 'DELETE' | 'POST', url: string, body?: unknown): Promise<T> {
+  const token = await getCsrfToken();
+  const response = await fetch(`${API_BASE}${url}`, { method, credentials: 'same-origin', headers: {
+    'Content-Type': 'application/json', 'X-CSRF-Token': token,
+  }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+const trackerPath = (runId: string) => `/runs/${encodeURIComponent(runId)}/tracker`;
+
+export function getTrackerOverview(): Promise<TrackerOverview> { return fetchJson('/tracker'); }
+export function getTrackerInbound(state = 'open'): Promise<{ requests: TrackerInbound[] }> {
+  return fetchJson(`/tracker/inbound?state=${encodeURIComponent(state)}`);
+}
+export function getTrackerDeliveries(status = 'failed'): Promise<{ deliveries: TrackerDelivery[] }> {
+  return fetchJson(`/tracker/deliveries?status=${encodeURIComponent(status)}`);
+}
+export function getRunTracker(runId: string): Promise<RunTracker> { return fetchJson(trackerPath(runId)); }
+export function setRunTrackerLink(runId: string, issueKey: string): Promise<{ link: TrackerLink }> {
+  return sendJson('PUT', `${trackerPath(runId)}/link`, { issue_key: issueKey });
+}
+export function removeRunTrackerLink(runId: string): Promise<{ removed: boolean }> {
+  return sendJson('DELETE', `${trackerPath(runId)}/link`);
+}
+export function retryRunTrackerDeliveries(runId: string): Promise<{ deliveries: TrackerDelivery[] }> {
+  return sendJson('POST', `${trackerPath(runId)}/retry`);
+}
+export function dismissTrackerInbound(runId: string, changeId: string, reason: string): Promise<{ request: TrackerInbound }> {
+  return sendJson('POST', `${trackerPath(runId)}/inbound/${encodeURIComponent(changeId)}/dismiss`, { reason });
+}
+export function syncTrackerNow(): Promise<{ result: TrackerSyncResult }> { return sendJson('POST', '/tracker/sync'); }
 
 export async function activateTeamInvitation(token: string): Promise<{ access_token: string }> {
   const response = await fetch(`${API_BASE}/team/activate`, { method: 'POST', credentials: 'same-origin',

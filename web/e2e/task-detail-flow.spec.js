@@ -97,9 +97,14 @@ function allowedActions(template, stageID, phase, pending) {
   const actions = []
   if (!stageID) return actions
   const stage = template.stages.find((value) => value.id === stageID)
+  let skipOffered = false
+  // A return route starts at the stage a person confirms: the approval's from_stage.
+  let returnFrom = stageID
   if (phase === 'resumable' && stage?.agent) actions.push('run-agent')
   if (phase === 'waiting' && pending?.status === 'pending') {
+    if (pending.from_stage) returnFrom = pending.from_stage
     if (pending.kind === 'input' && pending.trigger === 'human_input') {
+      skipOffered = true
       actions.push('take', 'results')
       if (stage?.agent) actions.push('executor', 'run-agent')
     } else if (pending.kind === 'grill_questions') {
@@ -114,8 +119,8 @@ function allowedActions(template, stageID, phase, pending) {
       if (stage?.agent && pending.actions.includes('retry')) actions.push('run-agent')
     }
   }
-  if (stage?.skippable && (phase === 'waiting' || phase === 'resumable')) actions.push('skip')
-  if (stage && phase === 'waiting' && template.returns.some((route) => route.from === stageID)) actions.push('return')
+  if (stage?.skippable && ((phase === 'waiting' && skipOffered) || phase === 'resumable')) actions.push('skip')
+  if (stage && phase === 'waiting' && template.returns.some((route) => route.from === returnFrom)) actions.push('return')
   return [...new Set(actions)]
 }
 
@@ -161,6 +166,8 @@ function detail(mode, { stage: currentStage, phase, status, pending, owners }) {
     approvals: [...(approval ? [approval] : []), ...resolvedGrill], stage_owners: owners,
     results: mode === 'manual' ? { idea: [revision('idea-v1', 'Первая версия идеи', 1), revision('idea-v2', 'Вторая версия идеи', 2)] } : {},
     allowed_actions: allowedActions(pinned, currentStage, phase, approval), delivery: { status: 'not_requested' },
+    // The browser user of this flow holds every function, so the server lets them do all that is offered.
+    viewer_actions: allowedActions(pinned, currentStage, phase, approval),
   }
 }
 
@@ -190,6 +197,10 @@ function installController(page) {
         type: 'run_started', timestamp: now, data: { mode: runID === 'run-auto' ? 'auto' : 'manual' } },
       { version: 1, cursor: 2, run_id: runID, sequence: 2, type: 'transition_selected', stage: 'analysis',
         timestamp: now, data: { outcome: 'continue' } }], next_cursor: 2 } })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/tracker')) {
+      await route.fulfill({ json: { configured: false, sync_status: 'not_configured' } })
       return
     }
     if (request.method() === 'GET' && pathname.endsWith('/gates')) {
@@ -263,19 +274,20 @@ test('task detail traverses the manual and automatic templates using allowed act
 
     const actionsSeen = installController(page)
     await page.goto(`${baseURL}/tasks/run-manual`)
-    await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Ручной маршрут', level: 1 })).toBeVisible()
+    await page.getByRole('button', { name: 'Полное описание' }).click()
     await expect(page.getByRole('link', { name: 'https://tracker.example/TASK-62' })).toBeVisible()
+    await page.getByRole('tab', { name: 'Результат' }).click()
     await page.getByText('Сравнить версии 1 и 2').click()
     await expect(page.getByText('Первая версия идеи')).toHaveCount(2)
     await expect(page.getByText('Вторая версия идеи').first()).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Завершить грилл без ответа' })).toHaveCount(0)
 
     // Human input, then agent work and its question/check reviews.
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toBeVisible()
     await page.getByRole('button', { name: 'Сдать результат' }).click()
     await page.getByLabel('Результат в Markdown').fill('Идея подтверждена')
-    await page.getByRole('button', { name: 'Отправить результат' }).click()
+    await page.getByRole('button', { name: 'Сдать результат' }).click()
     await expect(page.getByRole('heading', { name: 'Анализ', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
@@ -285,46 +297,47 @@ test('task detail traverses the manual and automatic templates using allowed act
     await expect(page.getByRole('region', { name: 'Грилл: вопросы и ответы' }).getByText('Какой сегмент проверяем первым?')).toBeVisible()
     await page.getByLabel('Ваш ответ').fill('Малый бизнес')
     await page.getByRole('button', { name: 'Ответить и продолжить' }).click()
-    await expect(page.getByRole('button', { name: /Подтвердить и перейти/ })).toBeVisible()
-    await page.getByText('Другие действия: пропуск, обход проверки, возврат').click()
+    await expect(page.getByRole('button', { name: /Принять и перейти/ })).toBeVisible()
+    // The exceptional actions are always visible in the actions column, not behind a menu.
     await expect(page.getByRole('button', { name: 'Обойти проверку' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Решения' }).click()
     await expect(page.getByText('История грилла')).toBeVisible()
     await expect(page.getByText('Сегмент малого бизнеса')).toBeVisible()
-    await page.getByText('Журнал задачи: таймлайн, этапы, логи и лента событий').click()
-    await expect(page.getByRole('link', { name: 'Открыть лог этапа' })).toBeVisible()
+    await page.getByRole('tab', { name: 'Журнал' }).click()
+    await expect(page.getByRole('link', { name: 'Открыть лог' })).toBeVisible()
     await page.getByRole('button', { name: 'Этап analysis: показать детали' }).click()
     await expect(page.getByText('required-sections', { exact: true })).toBeVisible()
 
     await page.getByLabel('Причина обхода проверки').fill('Проверено вручную')
     await page.getByRole('button', { name: 'Обойти проверку' }).click()
     await expect(page.getByRole('heading', { name: 'Проверка', level: 2, exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Вернуть этап' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Вернуть на доработку/ })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Пропустить этап' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Подтвердить этап' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Принять и перейти' })).toHaveCount(0)
     await page.getByLabel('Причина возврата').fill('Перепроверить предпосылку')
-    await page.getByRole('button', { name: 'Вернуть этап' }).click()
+    await page.getByRole('button', { name: /Вернуть на доработку/ }).click()
     await expect(page.getByRole('heading', { name: 'Идея', level: 2, exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Пропустить этап' })).toBeVisible()
     await page.getByLabel('Причина пропуска').fill('Результат уже проверен')
     await page.getByRole('button', { name: 'Пропустить этап' }).click()
     await expect(page.getByRole('heading', { name: 'План доставки', level: 2, exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Подтвердить план' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Принять план доставки' })).toBeVisible()
     const planContent = page.getByRole('region', { name: 'Содержимое плана доставки' })
     await expect(planContent.getByText('ai-team/run-manual', { exact: true })).toBeVisible()
     await expect(planContent.getByText('docs/analysis.md', { exact: true })).toBeVisible()
     await expect(planContent.getByText('Выкладываем после подтверждения.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Подтвердить план' }).click()
+    await page.getByRole('button', { name: 'Принять план доставки' }).click()
     await expect(page.getByRole('heading', { name: 'Задача завершена' })).toBeVisible()
 
     // Automatic tasks expose only the two agent actions and finish without human controls.
     await page.goto(`${baseURL}/tasks/run-auto`)
-    await expect(page.getByRole('heading', { name: 'Бизнес-идея', exact: true })).toBeVisible()
-    await page.getByRole('region', { name: 'Бизнес-идея' }).getByText('Подробности').click()
-    await expect(page.getByRole('region', { name: 'Бизнес-идея' }).getByText('Авто', { exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Автоматический маршрут', level: 1 })).toBeVisible()
+    await page.getByRole('button', { name: 'Полное описание' }).click()
+    await expect(page.getByRole('tabpanel').getByText('Авто', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
-    for (const invalidAction of ['Взять этап', 'Сдать результат', 'Подтвердить этап', 'Обойти проверку', 'Пропустить этап', 'Вернуть этап', 'Подтвердить план']) {
+    for (const invalidAction of ['Взять этап', 'Сдать результат', 'Принять и перейти', 'Обойти проверку', 'Пропустить этап', 'Вернуть на доработку', 'Принять план доставки']) {
       await expect(page.getByRole('button', { name: invalidAction })).toHaveCount(0)
     }
     await page.getByRole('button', { name: /поручить агенту/i }).click()

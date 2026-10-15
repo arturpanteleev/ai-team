@@ -38,6 +38,14 @@ vi.mock('../api', () => ({
   submitTaskGrillVersion: vi.fn().mockResolvedValue({}),
   submitTaskStageResult: vi.fn().mockResolvedValue({}),
   takeTaskStage: vi.fn().mockResolvedValue({}),
+  isAuthenticationRequired: () => false,
+  getRunTracker: vi.fn().mockResolvedValue({ configured: false, sync_status: 'not_configured' }),
+  getTrackerOverview: vi.fn().mockResolvedValue({ configured: false }),
+  setRunTrackerLink: vi.fn().mockResolvedValue({}),
+  removeRunTrackerLink: vi.fn().mockResolvedValue({}),
+  retryRunTrackerDeliveries: vi.fn().mockResolvedValue({}),
+  dismissTrackerInbound: vi.fn().mockResolvedValue({}),
+  syncTrackerNow: vi.fn().mockResolvedValue({}),
 }));
 
 const baseDetails: TaskRunDetails = {
@@ -133,18 +141,21 @@ describe('Task detail', () => {
   it('shows the pinned task, result history and comparison, event feed, and only allowed stage actions', async () => {
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Бизнес-идея' })).toBeInTheDocument();
-    expect(screen.getByText('Сократить путь до первой ценности')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByText('Подробности', { selector: 'summary' })[0]);
-    expect(await screen.findByText(/Закреплённый маршрут/)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/Сократить путь до первой ценности/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Полное описание' }));
+    expect(await screen.findByText(/Закреплённый маршрут/, { selector: 'dd' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Результат' }));
+    expect(screen.getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /поручить агенту/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Подтвердить этап' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Принять и перейти' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Обойти проверку' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Пропустить этап' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Журнал' }));
     expect(screen.getByText('Задача создана')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Результат' }));
 
     fireEvent.click(screen.getByText('Сравнить версии 1 и 2'));
     expect(screen.getAllByText('Первая версия').length).toBeGreaterThan(1);
@@ -156,7 +167,7 @@ describe('Task detail', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Сдать результат' }));
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Проверенная идея' } });
     fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Описаны ограничения' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
 
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
@@ -185,12 +196,13 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(report);
     renderDetail();
 
-    expect(await screen.findByRole('button', { name: 'Подтвердить и перейти: Релиз' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Принять и перейти: Релиз' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Открыть лог этапа' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Открыть лог' })).toHaveAttribute(
       'href', '/api/runs/run-detail-1/logs/agent-attempt-8',
     );
+    fireEvent.click(screen.getByRole('tab', { name: 'Журнал' }));
     fireEvent.click(screen.getByRole('button', { name: 'Этап analysis: показать детали' }));
     expect(await screen.findByText('Проверки')).toBeInTheDocument();
     expect(screen.getByText('required-sections')).toBeInTheDocument();
@@ -250,7 +262,7 @@ describe('Task detail', () => {
     expect(content).toHaveTextContent('Страница задачи');
     expect(content).toHaveTextContent('Добавлена панель этапа.');
     expect(content).not.toHaveTextContent('В плане нет ни ветки');
-    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить план' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Принять план доставки' }));
     await waitFor(() => expect(api.approveTaskDeliveryPlan).toHaveBeenCalledWith('run-detail-1', planHash));
   });
 
@@ -269,6 +281,7 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(resolved);
     renderDetail();
 
+    fireEvent.click(await screen.findByRole('tab', { name: 'Решения' }));
     expect(await screen.findByRole('heading', { name: 'История грилла' })).toBeInTheDocument();
     expect(screen.getByText('Что проверить перед релизом?')).toBeInTheDocument();
     expect(screen.getByText('Проверить миграцию базы')).toBeInTheDocument();
@@ -317,6 +330,8 @@ describe('Task detail', () => {
         { from: 'qa', to: 'intent' }, { from: 'qa', to: 'analysis' },
       ] },
       state: { ...baseDetails.state!, next_stage: stage },
+      // The pending input belongs to the stage the run is at.
+      approvals: baseDetails.approvals.map((value) => ({ ...value, from_stage: stage, to_stage: stage })),
       allowed_actions: ['return'],
     });
     const api = await import('../api');
@@ -325,7 +340,7 @@ describe('Task detail', () => {
     renderDetail();
 
     fireEvent.change(await screen.findByLabelText('Причина возврата'), { target: { value: 'Не тот объём' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Вернуть этап' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Вернуть на доработку/ }));
     await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'release', 'intent', 'Не тот объём'));
 
     fireEvent.change(screen.getByLabelText('Вернуть на этап'), { target: { value: 'analysis' } });
@@ -338,8 +353,61 @@ describe('Task detail', () => {
     expect(await screen.findByRole('heading', { name: 'Проверка', level: 2 })).toBeInTheDocument();
     expect(screen.getByLabelText('Вернуть на этап')).toHaveValue('intent');
     fireEvent.change(screen.getByLabelText('Причина возврата'), { target: { value: 'Повторить' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Вернуть этап' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Вернуть на доработку/ }));
     await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'qa', 'intent', 'Повторить'));
+  });
+
+  it('addresses return and the confirmation to the completed stage while a transition confirmation waits', async () => {
+    const api = await import('../api');
+    const confirmation = {
+      id: 'gate-1', run_id: 'run-detail-1', attempt_id: 'attempt-release', kind: 'approve' as const,
+      from_stage: 'release', to_stage: 'analysis', trigger: 'graph_outcome:passed', subject_hash: 'c'.repeat(64),
+      required_roles: ['release_manager'], quorum: 'any' as const,
+      actions: ['approve', 'reject', 'return_to_intent'], targets: { approve: 'analysis', return_to_intent: 'intent' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.returnTaskStage).mockClear();
+    vi.mocked(api.skipTaskStage).mockClear();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      template: { ...baseDetails.template!, returns: [{ from: 'release', to: 'intent' }, { from: 'analysis', to: 'release' }] },
+      // The run moves on to analysis, but the person confirms release.
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: 'gate-1' },
+      approvals: [confirmation],
+      allowed_actions: ['confirm', 'return'],
+    });
+    renderDetail();
+
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).getByRole('region', { name: 'Этап «Релиз»' })).toBeInTheDocument();
+    // Routes start at the confirmed stage (release), not at the destination (analysis).
+    const select = await within(actions).findByLabelText('Вернуть на этап');
+    expect([...select.querySelectorAll('option')].map((option) => option.textContent)).toEqual(['Идея']);
+    // One return path: the exceptions form; the decision card has no second «Вернуть …» button.
+    expect(within(actions).getAllByRole('button', { name: /^Вернуть на доработку/ })).toHaveLength(1);
+    expect(within(actions).queryByRole('button', { name: 'Пропустить этап' })).not.toBeInTheDocument();
+    fireEvent.change(within(actions).getByLabelText('Причина возврата'), { target: { value: 'Не хватает данных' } });
+    fireEvent.click(within(actions).getByRole('button', { name: /^Вернуть на доработку/ }));
+    await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'release', 'intent', 'Не хватает данных'));
+  });
+
+  it('offers a stage action only when the server says this viewer may perform it', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, allowed_actions: ['take', 'results'], viewer_actions: [] });
+    renderDetail();
+
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
+    expect(within(actions).queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
+    expect(within(actions).getByTestId('role-needed')).toHaveTextContent('Нужна роль: Владелец продукта');
+
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, allowed_actions: ['take', 'results'], viewer_actions: ['take'] });
+    renderDetail();
+    const owner = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(owner).getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(within(owner).queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
+    expect(within(owner).getByTestId('role-needed')).toHaveTextContent('Сдать результат');
   });
 
   it('shows when the responsible person took the stage', async () => {
@@ -350,9 +418,8 @@ describe('Task detail', () => {
     });
     renderDetail();
 
-    const owner = await screen.findByText(/Ответственный: alice/);
-    expect(owner).toHaveTextContent('взял этап');
-    expect(owner.querySelector('time')).toHaveAttribute('dateTime', '2026-10-12T09:05:00Z');
+    const owner = await screen.findByText(/ответственный: alice/);
+    expect(owner).toHaveTextContent('Человек');
   });
 
   it('does not turn a scheme-only external link into a clickable link', async () => {
@@ -360,6 +427,7 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, external_links: ['https:tracker.example/JIRA-52'] });
     renderDetail();
 
+    fireEvent.click(await screen.findByRole('button', { name: 'Полное описание' }));
     expect(await screen.findByText('https:tracker.example/JIRA-52')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'https:tracker.example/JIRA-52' })).not.toBeInTheDocument();
   });
@@ -494,7 +562,7 @@ describe('Browser stage submission', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр' }));
     expect(screen.getByRole('heading', { name: 'План', level: 1 })).toBeInTheDocument();
     expect(screen.queryByLabelText('Результат в Markdown')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
 
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', {
@@ -526,7 +594,7 @@ describe('Browser stage submission', () => {
     // 5.5M Cyrillic characters fit a character limit but are 11 MB of UTF-8.
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'я'.repeat(5_500_000) } });
     expect(screen.getByRole('alert')).toHaveTextContent('Результат больше 10.0 МиБ');
-    expect(screen.getByRole('button', { name: 'Отправить результат' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeDisabled();
   });
 
   it('submits a link with the stage link kind after validating the URL', async () => {
@@ -536,7 +604,7 @@ describe('Browser stage submission', () => {
     await openResultForm();
     expect(screen.getByText('Вид ссылки: Сборка')).toBeInTheDocument();
     const url = screen.getByLabelText('Ссылка на результат');
-    const submit = screen.getByRole('button', { name: 'Отправить результат' });
+    const submit = screen.getByRole('button', { name: 'Сдать результат' });
     expect(submit).toBeDisabled();
 
     fireEvent.change(url, { target: { value: 'ftp://ci.example/build/7' } });
@@ -567,7 +635,7 @@ describe('Browser stage submission', () => {
     expect(screen.getByText(/не похожа на pull request/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Ссылка на результат'), { target: { value: 'https://github.com/org/repo/pull/12' } });
     expect(screen.queryByText(/не похожа на pull request/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Отправить результат' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Сдать результат' })).toBeEnabled();
   });
 
   it('approves with confirmation text', async () => {
@@ -578,7 +646,7 @@ describe('Browser stage submission', () => {
     expect(screen.queryByLabelText('Результат в Markdown')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Текст подтверждения'), { target: { value: 'Релиз согласован' } });
     fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Проверен чек-лист' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'release', {
       result: 'approve', note: 'Релиз согласован', description: 'Проверен чек-лист',
     }));
@@ -591,7 +659,7 @@ describe('Browser stage submission', () => {
     fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: '   ' } });
     expect(screen.getByText(warning)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Итог' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Итог' }));
 
@@ -632,7 +700,7 @@ describe('Browser stage submission', () => {
     vi.mocked(api.submitTaskStageResult).mockRejectedValueOnce(new Error('human markdown is missing required section "## Цель"'));
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Без раздела' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
 
     expect(await screen.findByText('human markdown is missing required section "## Цель"')).toBeInTheDocument();
     expect(screen.getByLabelText('Результат в Markdown')).toHaveValue('Без раздела');
@@ -649,7 +717,7 @@ describe('Browser stage submission', () => {
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Без хранилища' } });
     hidePage();
     expect(screen.getByText(/Черновик не удаётся сохранить в браузере/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     const api = await import('../api');
     await waitFor(() => expect(api.submitTaskStageResult).toHaveBeenCalledWith('run-detail-1', 'intent', { result: 'md', content: 'Без хранилища' }));
     expect(await screen.findByText('Результат принят')).toBeInTheDocument();
@@ -697,7 +765,7 @@ describe('Browser stage submission', () => {
   it('does not write the draft back after an accepted submission', async () => {
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Сдаю без паузы' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     expect(await screen.findByText('Результат принят')).toBeInTheDocument();
     expect(storage.getItem(draftKey())).toBeNull();
     cleanup();
@@ -713,7 +781,7 @@ describe('Browser stage submission', () => {
     try {
       fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Отправляемый текст' } });
       fireEvent.change(screen.getByLabelText('Что сделано'), { target: { value: 'Готово' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
       expect(screen.getByLabelText('Результат в Markdown')).toBeDisabled();
       expect(screen.getByLabelText('Что сделано')).toBeDisabled();
       expect(screen.getByLabelText('Заметка')).toBeDisabled();
@@ -739,7 +807,7 @@ describe('Browser stage submission', () => {
     vi.mocked(api.submitTaskStageResult).mockRejectedValueOnce(new Error('rejected'));
     await openResultForm();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Первая попытка' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Отправить результат' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сдать результат' }));
     expect(await screen.findByText('rejected')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Результат в Markdown'), { target: { value: 'Вторая попытка' } });
     cleanup();
@@ -785,9 +853,9 @@ describe('Task page controls moved from the old pipeline page', () => {
     });
     renderDetail();
 
-    expect(await screen.findByText('Что произойдёт после подтверждения: Анализ')).toBeInTheDocument();
+    expect(await screen.findByText('После принятия откроется этап «Анализ».')).toBeInTheDocument();
     expect(screen.getAllByText('Ожидает').length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: 'Подтвердить и перейти: Анализ' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Принять и перейти: Анализ' })).toBeInTheDocument();
   });
 
   it('offers the manual path and the agent path as separate choices with the route states', async () => {
@@ -800,10 +868,11 @@ describe('Task page controls moved from the old pipeline page', () => {
     });
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Сделать самому' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Агент analyst сделает этап' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Поручить агенту' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).getByRole('button', { name: 'Сдать результат' })).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: 'Поручить агенту' })).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(within(actions).getByText(/Агент: analyst/)).toBeInTheDocument();
     expect(screen.getAllByText('пройден')).toHaveLength(1);
     expect(screen.getAllByText('текущий')).toHaveLength(1);
     expect(screen.getAllByText('впереди')).toHaveLength(1);
@@ -811,12 +880,13 @@ describe('Task page controls moved from the old pipeline page', () => {
 
   it('keeps service fields out of the main view until the details block is opened', async () => {
     renderDetail();
-    await screen.findByRole('heading', { name: 'Бизнес-идея' });
+    await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 });
+    expect(screen.queryByText('Длительность')).not.toBeInTheDocument();
 
-    const details = screen.getAllByText('Подробности', { selector: 'summary' })[0].closest('details');
-    expect(details).not.toBeNull();
-    expect(details).toHaveTextContent('run-detail-1');
-    expect(details).toHaveTextContent('Длительность');
+    fireEvent.click(screen.getByRole('button', { name: 'Полное описание' }));
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveTextContent('run-detail-1');
+    expect(panel).toHaveTextContent('Длительность');
   });
 
   it('shows the intention text on the page and not only as a file link', async () => {
@@ -849,8 +919,8 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     await screen.findByRole('button', { name: 'Принять и перейти: Анализ' });
-    const current = document.getElementById('current-stage')!;
-    fireEvent.click(within(current).getByRole('button', { name: 'Принять и перейти: Анализ' }));
+    const actions = screen.getByRole('complementary', { name: 'Действия' });
+    fireEvent.click(within(actions).getByRole('button', { name: 'Принять и перейти: Анализ' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
       action: 'approve', actor_role: 'product_owner', actor_id: 'local-user',
     })));
@@ -883,16 +953,17 @@ describe('Task page controls moved from the old pipeline page', () => {
       : path === 'brief/0001-intention.md' ? '# Исходное намерение\n\nВойти через Google.' : 'Ответ владельца и длинные вопросы.');
     renderDetail();
 
-    const idea = await screen.findByRole('region', { name: 'Бизнес-идея' });
-    expect(await within(idea).findByText('Войти через Google.')).toBeInTheDocument();
-    expect(idea).not.toHaveTextContent('Ответ владельца');
-    const stage = screen.getByRole('region', { name: 'Анализ' });
-    expect(await within(stage).findByRole('heading', { name: 'Результат этапа' })).toBeInTheDocument();
-    expect(stage).not.toHaveTextContent('Критерии приёмки: Google вход.');
-    expect(within(stage).getByRole('link', { name: 'Открыть proposal.md' })).toBeInTheDocument();
-    expect(within(stage).getByRole('button', { name: 'Принять и перейти: Релиз' })).toBeInTheDocument();
-    expect(within(stage).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
-    expect(stage).not.toHaveTextContent('Версий результата пока нет');
+    const header = (await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 })).closest('header')!;
+    expect(await within(header).findByText(/Войти через Google\./)).toBeInTheDocument();
+    expect(header).not.toHaveTextContent('Ответ владельца');
+    const panel = screen.getByRole('tabpanel');
+    expect(await within(panel).findByRole('heading', { name: 'Результат этапа' })).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent('Критерии приёмки: Google вход.');
+    expect(within(panel).getByRole('link', { name: 'Открыть proposal.md' })).toBeInTheDocument();
+    const actions = screen.getByRole('complementary', { name: 'Действия' });
+    expect(within(actions).getByRole('button', { name: 'Принять и перейти: Релиз' })).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent('Версий результата пока нет');
   });
 
   it('puts a failed checker decision in the current stage with a reasoned override', async () => {
@@ -908,20 +979,20 @@ describe('Task page controls moved from the old pipeline page', () => {
       approvals: [approval], allowed_actions: ['override'] });
     renderDetail();
 
-    const stage = await screen.findByRole('region', { name: 'Анализ' });
-    expect(within(stage).getByRole('heading', { name: 'Твоё решение по этапу' })).toBeInTheDocument();
-    expect(within(stage).getByRole('button', { name: 'Изменить: доработать и проверить снова' })).toBeInTheDocument();
-    const returnButton = within(stage).getByRole('button', { name: 'Изменить: вернуть этап на доработку' });
+    const stage = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(screen.getByRole('region', { name: 'Проверка не пройдена' })).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Отправить новую версию' })).toBeInTheDocument();
+    const returnButton = within(stage).getByRole('button', { name: /^Вернуть на доработку/ });
     expect(returnButton).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Комментарий для доработки или возврата'), { target: { value: 'Уточнить роли' } });
     expect(returnButton).toBeEnabled();
     vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...approval, status: 'resolved', resolved_action: 'new_version' } as never);
-    fireEvent.click(within(stage).getByRole('button', { name: 'Изменить: доработать и проверить снова' }));
+    fireEvent.click(within(stage).getByRole('button', { name: 'Отправить новую версию' }));
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith('run-detail-1', approval, expect.objectContaining({
       action: 'new_version', actor_id: 'owner', actor_role: 'po',
     })));
     await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
-    const override = within(stage).getByRole('button', { name: 'Подтвердить без проверки' });
+    const override = within(stage).getByRole('button', { name: 'Обойти проверку' });
     expect(override).toBeDisabled();
     fireEvent.change(within(stage).getByLabelText('Причина обхода проверки'), { target: { value: 'Проверка недоступна' } });
     fireEvent.click(override);
@@ -950,16 +1021,15 @@ describe('Task page controls moved from the old pipeline page', () => {
       delivery: { status: 'failed', error: 'push rejected' },
     });
     renderDetail();
-    fireEvent.click(await screen.findByRole('button', { name: 'Повторить одобренную Git-доставку' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Повторить Git-доставку' }));
     await waitFor(() => expect(api.retryDelivery).toHaveBeenCalledWith('run-detail-1'));
   });
   it('moves the back link out of the header and names the idea block without the intention wording', async () => {
     renderDetail();
-    await screen.findByRole('heading', { name: 'Бизнес-идея' });
+    await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 });
 
     expect(screen.queryByRole('link', { name: '← К задачам' })).not.toBeInTheDocument();
     expect(screen.getByText('Бизнес-идея')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Бизнес-идея' })).toBeInTheDocument();
     expect(screen.queryByText('Исходное намерение')).not.toBeInTheDocument();
     expect(screen.queryByText(/Бизнес-намерение/)).not.toBeInTheDocument();
   });
@@ -983,7 +1053,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     expect(await screen.findByText('Агент работает…')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Открыть лог' })).toHaveAttribute(
       'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
     );
   });
@@ -1022,7 +1092,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(banner).toHaveTextContent('Этап «Анализ» упал');
     expect(banner).toHaveTextContent('Не найден файл спецификации Нужен docs/spec.md в ветке');
     expect(banner).not.toHaveTextContent('хвост трассировки');
-    expect(within(banner).getByRole('link', { name: 'Открыть лог агента' })).toHaveAttribute(
+    expect(within(banner).getByRole('link', { name: 'Открыть лог' })).toHaveAttribute(
       'href', '/api/runs/run-detail-1/logs/agent-attempt-9',
     );
     expect(screen.getByText('Упал')).toBeInTheDocument();
@@ -1061,11 +1131,12 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.decideApproval).mockImplementationOnce(() => new Promise(() => undefined) as never);
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение Product Owner' })).toBeInTheDocument();
-    const card = document.getElementById('current-stage');
-    expect(card).toHaveTextContent('Какой сегмент выбрать?');
-    fireEvent.change(screen.getAllByLabelText('Ответ на вопрос')[0], { target: { value: 'Малый бизнес' } });
-    fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
+    expect(await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение владельца продукта' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: /нужно уточнение/ })).toHaveTextContent('Какой сегмент выбрать?');
+    const card = screen.getByRole('complementary', { name: 'Действия' });
+    expect(card).not.toHaveTextContent('Какой сегмент выбрать?');
+    fireEvent.change(within(card).getAllByLabelText('Ответ на вопрос')[0], { target: { value: 'Малый бизнес' } });
+    fireEvent.click(within(card).getByRole('button', { name: 'Ответить и продолжить' }));
 
     expect(await screen.findByText('Ждём ответ сервера…')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Сохраняем…' })[0]).toBeDisabled();
@@ -1087,10 +1158,10 @@ describe('Task page controls moved from the old pipeline page', () => {
     vi.mocked(api.decideApproval).mockResolvedValueOnce({ ...question, status: 'resolved', resolved_action: 'answer_questions' });
     renderDetail();
 
-    await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение Product Owner' });
-    const card = document.getElementById('current-stage');
-    fireEvent.change(within(card!).getByLabelText('Ответ на вопрос'), { target: { value: 'B2B' } });
-    fireEvent.click(within(card!).getByRole('button', { name: 'Ответить и продолжить' }));
+    await screen.findByRole('heading', { name: 'Для этапа «Идея» нужно уточнение владельца продукта' });
+    const card = screen.getByRole('complementary', { name: 'Действия' });
+    fireEvent.change(within(card).getByLabelText('Ответ на вопрос'), { target: { value: 'B2B' } });
+    fireEvent.click(within(card).getByRole('button', { name: 'Ответить и продолжить' }));
 
     await waitFor(() => expect(api.resumeRun).toHaveBeenCalledWith('run-detail-1'));
   });
@@ -1134,12 +1205,11 @@ describe('Task page controls moved from the old pipeline page', () => {
     renderDetail();
 
     expect(await screen.findByText(/Ждёт вашего решения/)).toBeInTheDocument();
-    const card = document.getElementById('current-stage')!;
+    const card = screen.getByRole('complementary', { name: 'Действия' });
     expect(within(card).getByRole('button', { name: 'Поручить агенту' })).toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+    expect(within(card).getAllByRole('button', { name: 'Отклонить' })).toHaveLength(1);
     expect(within(card).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
-    const approvals = document.getElementById('approvals-heading')!.closest('section')!;
-    expect(within(approvals).queryByRole('button', { name: 'Отклонить' })).not.toBeInTheDocument();
+    expect(within(card).queryByRole('region', { name: 'Другие запросы решения' })).not.toBeInTheDocument();
   });
 });
 
@@ -1195,7 +1265,8 @@ describe('gate state on the task page (S06)', () => {
     expect(within(panel).queryByText('Пройден')).not.toBeInTheDocument();
     expect(within(panel).getByText('Обойдён администратором, исход прежний')).toBeInTheDocument();
     expect(document.querySelector('[data-gate-flag="override"]')).not.toBeNull();
-    const history = screen.getByRole('heading', { name: 'Обходы и рекомендации гейтов' }).closest('section')!;
+    fireEvent.click(screen.getByRole('tab', { name: /Гейты/ }));
+    const history = screen.getByRole('heading', { name: 'Обходы и рекомендации по всей задаче' }).closest('div')!;
     expect(history).toHaveTextContent('обход провала администратором admin-1');
   });
 
@@ -1220,7 +1291,7 @@ describe('gate state on the task page (S06)', () => {
 
     const panel = await screen.findByTestId('gate-panel');
     expect(within(panel).getByText('Ошибка запуска')).toBeInTheDocument();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Повторить на той же версии' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить гейт: review' }));
     await waitFor(() => expect(api.retryTaskGate).toHaveBeenCalledWith('run-detail-1', 'analysis', 'review'));
   });
 
@@ -1231,7 +1302,8 @@ describe('gate state on the task page (S06)', () => {
     await arrange(gatesFor(wave), ['gate-retry']);
     renderDetail();
     const panel = await screen.findByTestId('gate-panel');
-    expect(within(panel).queryByRole('button', { name: 'Повторить на той же версии' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Повторить гейт/ })).not.toBeInTheDocument();
+    expect(panel).toBeInTheDocument();
   });
 
   it('shows a legacy override as history and not as a blocked wave', async () => {
@@ -1248,17 +1320,18 @@ describe('gate state on the task page (S06)', () => {
     const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')], transition: resolution('blocked', false, { blocking: ['review'] }) };
     await arrange(gatesFor(wave, { can_override: false }), ['override']);
     renderDetail();
-    const stage = await screen.findByRole('region', { name: 'Анализ' });
-    expect(within(stage).queryByLabelText('Причина обхода проверки')).not.toBeInTheDocument();
-    expect(within(stage).getByText(/может только администратор/)).toBeInTheDocument();
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).queryByLabelText('Причина обхода проверки')).not.toBeInTheDocument();
+    expect(within(actions).getByText(/может только администратор/)).toBeInTheDocument();
   });
 
   it('shows the override form to an administrator with the red-outcome warning', async () => {
     const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')], transition: resolution('blocked', false, { blocking: ['review'] }) };
     await arrange(gatesFor(wave, { can_override: true }), ['override']);
     renderDetail();
-    const stage = await screen.findByRole('region', { name: 'Анализ' });
-    expect(within(stage).getByLabelText('Причина обхода проверки')).toBeInTheDocument();
-    expect(within(stage).getByText(/Исход гейта останется «провал»/)).toBeInTheDocument();
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).getByLabelText('Причина обхода проверки')).toBeInTheDocument();
+    expect(within(actions).getByText(/Исход гейта останется «провал»/)).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: 'Обойти проверку' })).toBeInTheDocument();
   });
 });

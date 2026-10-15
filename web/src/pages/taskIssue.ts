@@ -18,17 +18,17 @@ export function classifyIssue(text: string): IssueClass {
   if (value.includes('claude-authentication') || value.includes('not logged in') || value.includes('аутентификац')) {
     return {
       code: 'auth',
-      explanation: 'Агент не смог войти в Claude. Проверьте, что сервер запущен с рабочим входом, и запустите агента заново кнопкой ниже.',
+      explanation: 'Агент не смог войти в Claude. Проверьте, что сервер запущен с рабочим входом, и запустите агента заново кнопкой в колонке «Действия».',
     };
   }
   if (value.includes('агент') || value.includes('claude') || value.includes('infra_failed') || value.includes('exit status')) {
     return {
       code: 'agent',
-      explanation: 'Агент завершился с ошибкой до получения результата. Запустите агента заново кнопкой ниже. Если ошибка повторяется, откройте подробности.',
+      explanation: 'Агент завершился с ошибкой до получения результата. Запустите агента заново в колонке «Действия». Если ошибка повторяется, откройте подробности и лог.',
     };
   }
   return {
     code: 'other',
-    explanation: 'Этап остановился. Откройте подробности, чтобы увидеть причину.',
+    explanation: 'Этап остановился. Исправьте причину и продолжите задачу в колонке «Действия» или откройте подробности.',
   };
 }

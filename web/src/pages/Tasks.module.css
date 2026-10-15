@@ -235,6 +235,17 @@
 }
 
 /* Пустой проект: объяснение и один понятный следующий шаг. */
+.retryLink {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+}
+
 .emptyProject {
   display: grid;
   justify-items: center;

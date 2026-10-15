@@ -23,6 +23,8 @@ vi.mock('../api', () => ({
   getTaskRuns: vi.fn(),
   getTemplatesList: vi.fn(),
   getProjects: vi.fn(),
+  getActivePrincipal: () => null,
+  isAuthenticationRequired: () => false,
 }));
 
 const boardRun: TaskRun = {
@@ -175,7 +177,7 @@ describe('Tasks board', () => {
     await screen.findByText('Идея роста');
 
     vi.mocked(api.cancelRun).mockRejectedValueOnce(new Error('нельзя отменить'));
-    fireEvent.click(screen.getByRole('button', { name: 'Отменить' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить задачу' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('нельзя отменить'));
     expect(api.cancelRun).toHaveBeenCalledWith('run-queued');
   });
@@ -211,7 +213,7 @@ describe('Tasks projects', () => {
     const empty = await screen.findByLabelText('Пустой проект');
     expect(empty).toHaveTextContent('В проекте «Платформа» пока нет задач');
     expect(empty).toHaveTextContent('Задачи платформы');
-    expect(within(empty).getByRole('link', { name: 'Создать первую задачу' })).toHaveAttribute('href', '/tasks/new?project=2');
+    expect(empty).toHaveTextContent('Нажмите «Новая задача»');
   });
 
   it('пустой архивный проект не предлагает создавать задачи', async () => {
@@ -221,14 +223,15 @@ describe('Tasks projects', () => {
 
     const empty = await screen.findByLabelText('Пустой проект');
     expect(empty).toHaveTextContent('Проект в архиве');
-    expect(within(empty).queryByRole('link', { name: 'Создать первую задачу' })).toBeNull();
+    expect(empty).not.toHaveTextContent('Нажмите «Новая задача»');
   });
 
   it('без выбранного проекта пустой результат остаётся обычным пустым списком', async () => {
     vi.mocked(getTaskRuns).mockResolvedValue({ runs: [], total: 0, limit: 50, offset: 0 });
     render(<Tasks />);
 
-    await screen.findByLabelText('Этап: В очереди');
+    expect(await screen.findByLabelText('Задач пока нет')).toHaveTextContent('Новая задача');
+    expect(screen.getByLabelText('Этап: В очереди')).toBeInTheDocument();
     expect(screen.queryByLabelText('Пустой проект')).toBeNull();
   });
 });

@@ -108,7 +108,7 @@ test('tasks board creates a task from the browser and shows it by stage', async 
     expect(created.feature).toBe('browser-board-task')
     expect(created.external_links).toEqual(['JIRA-77 https://tracker.example/JIRA-77'])
 
-    await page.getByRole('link', { name: 'Доска' }).click()
+    await page.getByRole('link', { name: 'Задачи', exact: true }).click()
     const card = page.locator('article[aria-label="Задача Создать задачу из браузерной формы."]')
     await expect(card).toBeVisible({ timeout: 10_000 })
     await expect(card.getByText('JIRA-77 https://tracker.example/JIRA-77')).toBeVisible()

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from '../router';
 import { getRunLog } from '../api';
 import type { Stage, Artifact, CheckEvidence, DeliveryEvidence } from '../types';
+import { httpLink } from '../safeLink';
 import { StatusBadge } from './StatusBadge';
 import styles from './StageRow.module.css';
 
@@ -111,7 +112,7 @@ export function StageRow({ stage, artifacts, runId }: StageRowProps) {
           {delivery && (
             <section className={styles.evidence}>
               <h4>Выкладка</h4>
-              {delivery.pr_url && <a href={delivery.pr_url}>{delivery.pr_url}</a>}
+              {delivery.pr_url && (httpLink(delivery.pr_url) ? <a href={delivery.pr_url} rel="noreferrer">{delivery.pr_url}</a> : <code>{delivery.pr_url}</code>)}
               {delivery.steps?.map((step) => (
                 <div key={step.step} className={styles.evidenceRow}>
                   <strong>{step.step}</strong>

@@ -45,20 +45,24 @@ describe('McpAccess', () => {
   it('revokes a token after confirmation using a button named after the token', async () => {
     vi.mocked(api.listMcpTokens).mockResolvedValueOnce({ tokens: [live], max_active: 20 })
       .mockResolvedValue({ tokens: [{ ...live, revoked_at: '2026-10-15T01:00:00Z' }], max_active: 20 });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirm = vi.spyOn(window, 'confirm');
     render(<McpAccess />);
     fireEvent.click(await screen.findByRole('button', { name: 'Отозвать токен «laptop»' }));
+    // The confirmation is inline (no browser dialog) and nothing is sent before it.
+    expect(api.revokeMcpToken).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Да, отозвать токен' }));
     await waitFor(() => expect(api.revokeMcpToken).toHaveBeenCalledWith('t1'));
-    expect(confirm).toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Отозвать токен «laptop»' })).toBeDisabled());
     expect(screen.getByText(/отозван/)).toBeInTheDocument();
   });
 
   it('does not revoke when the confirmation is declined', async () => {
     vi.mocked(api.listMcpTokens).mockResolvedValue({ tokens: [live], max_active: 20 });
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
     render(<McpAccess />);
     fireEvent.click(await screen.findByRole('button', { name: 'Отозвать токен «laptop»' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Отмена' }));
     expect(api.revokeMcpToken).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Отозвать токен «laptop»' })).toBeEnabled();
   });
 });

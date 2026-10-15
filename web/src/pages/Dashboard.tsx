@@ -1,14 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import type { FormEvent } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { PipelineRun, PipelineStatus, PreflightReport } from '../types';
-import { cancelRun, getActivePrincipal, getPipelineRuns, getPreflight, startRun } from '../api';
+import { cancelRun, getPipelineRuns, getPreflight } from '../api';
+import { actionVerbs } from '../actionLabels';
+import { mayPerform, permissionRoles } from '../permissions';
+import { getActivePrincipal } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
 import { Link } from '../router';
 import { statusLabels } from '../statusLabels';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { projectLabel, useProjects } from '../hooks/useProjects';
-import { identifierError, identifierFromTitle, identifierHint, isIdentifierServerError } from '../identifier';
 import styles from './Dashboard.module.css';
 
 type Filter = 'all' | PipelineStatus;
@@ -43,36 +44,19 @@ const filterLabels: Record<Filter, string> = {
 
 const activeStatuses: PipelineStatus[] = ['queued', 'running', 'waiting_for_approval'];
 
+// «Очередь»: что сейчас в работе и что ждёт решения. Доска по этапам и список всех
+// задач — на странице «Задачи». Задача создаётся одним путём: страница «Новая задача».
 export function Dashboard() {
-  usePageTitle('Задачи');
-  const principal = getActivePrincipal();
-  const canSubmitIntention = !principal || principal.roles.includes('product_owner');
+  usePageTitle('Очередь');
+  const canStart = mayPerform(getActivePrincipal(), 'run:start');
   const [runs, setRuns] = useState<PipelineRun[]>([]);
-  const { projects, active: activeProjects } = useProjects();
-  // Проект новой задачи обязателен; пока не выбран явно, берётся первый активный.
-  const [chosenProject, setChosenProject] = useState('');
+  const { projects } = useProjects();
   const [projectFilter, setProjectFilter] = useState('');
-  const projectId = chosenProject || (activeProjects[0] ? String(activeProjects[0].id) : '');
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [createdRunID, setCreatedRunID] = useState('');
-  const [createdName, setCreatedName] = useState('');
-  // Пузырь «задача создана» гаснет сам.
-  useEffect(() => {
-    if (!createdRunID) return undefined;
-    const timer = window.setTimeout(() => setCreatedRunID(''), 3500);
-    return () => window.clearTimeout(timer);
-  }, [createdRunID]);
-  const [name, setName] = useState('');
-  const [feature, setFeature] = useState('');
-  // Пока пользователь не правил идентификатор вручную, он следует за названием.
-  const [featureEdited, setFeatureEdited] = useState(false);
-  const [featureError, setFeatureError] = useState('');
-  const featureRef = useRef<HTMLInputElement>(null);
-  const [task, setTask] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [commandStatus, setCommandStatus] = useState('');
   const [preflight, setPreflight] = useState<PreflightReport | null>(null);
 
@@ -80,8 +64,9 @@ export function Dashboard() {
     try {
       const data = await getPipelineRuns();
       setRuns(data ?? []);
+      setLoadError('');
     } catch (err) {
-      console.error('Failed to fetch pipelines:', err);
+      setLoadError(err instanceof Error ? err.message : 'Не удалось загрузить задачи.');
     } finally {
       setLoading(false);
     }
@@ -134,84 +119,12 @@ export function Dashboard() {
       ? failedCheck?.message || 'Исправьте блокеры, иначе задачи не стартуют.'
       : 'Проверка окружения не вернула результат. Задача может подождать worker.';
 
-  const submitRun = async (event: FormEvent) => {
-    event.preventDefault();
-    const idError = identifierError(feature);
-    if (idError) {
-      setFeatureError(idError);
-      featureRef.current?.focus();
-      return;
-    }
-    if (!projectId) {
-      setCommandStatus('Выберите проект для задачи.');
-      return;
-    }
-    setCommandStatus('Создаём задачу…');
-    try {
-      const result = await startRun(Number(projectId), feature, task);
-      setCreatedRunID(result.run_id);
-      setCreatedName(name.trim() || feature);
-      setCommandStatus('');
-      setCreating(false);
-      setName('');
-      setFeature('');
-      setFeatureEdited(false);
-      setFeatureError('');
-      setTask('');
-      fetchRuns();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Команда не принята';
-      if (isIdentifierServerError(message)) {
-        setFeatureError(message);
-        featureRef.current?.focus();
-      } else {
-        setCommandStatus(message);
-      }
-    }
-  };
-
-  const createForm = (
-    <form className={styles.createCard} onSubmit={submitRun} aria-labelledby="create-heading">
-      <div className={styles.createHead}>
-        <h2 id="create-heading">Новая задача</h2>
-        <button type="button" className={styles.cancelCreate} onClick={() => { setCreating(false); setCommandStatus(''); }}>Отмена</button>
-      </div>
-      <label htmlFor="initiative-project">Проект</label>
-      <select id="initiative-project" value={projectId} onChange={(event) => setChosenProject(event.target.value)} required>
-        {activeProjects.length === 0 && <option value="">Нет доступных проектов</option>}
-        {activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-      </select>
-      <label htmlFor="initiative-name">Название задачи</label>
-      <input id="initiative-name" value={name} onChange={(event) => {
-        setName(event.target.value);
-        setFeatureError('');
-        if (!featureEdited) setFeature(identifierFromTitle(event.target.value));
-      }} placeholder="например, вход через Google" required />
-      <label htmlFor="feature-name">Короткий идентификатор</label>
-      <input id="feature-name" ref={featureRef} value={feature} onChange={(event) => {
-        setFeatureEdited(true);
-        setFeatureError('');
-        setFeature(event.target.value);
-      }} placeholder="google-auth" aria-invalid={featureError ? true : undefined}
-        aria-describedby="feature-name-hint feature-name-error" />
-      <small id="feature-name-hint">{identifierHint}</small>
-      {featureError && <span id="feature-name-error" role="alert" className={styles.fieldError}>{featureError}</span>}
-      <label htmlFor="business-intention">Какого результата хотите достичь?</label>
-      <textarea id="business-intention" value={task} onChange={(event) => setTask(event.target.value)}
-        placeholder="Опишите цель, ограничения и ожидаемый результат. Аналитик уточнит недостающие детали."
-        rows={5} required />
-      <button type="submit" className={styles.createSubmit} disabled={readiness === 'blocked' || !projectId}>Создать задачу</button>
-      <small>Намерение и уточнения сохраняются в истории задачи. До технического планирования Product Owner согласует спецификацию.</small>
-      {commandStatus && <span role="status">{commandStatus}</span>}
-    </form>
-  );
-
   return (
     <div className={styles.container}>
       <div className={styles.main}>
         <header className={styles.header}>
           <div>
-            <h1 className={styles.title}>Задачи</h1>
+            <h1 className={styles.title}>Очередь</h1>
             <p className={styles.subtitle}>Что в работе и что ждёт вашего решения.</p>
           </div>
         </header>
@@ -252,11 +165,18 @@ export function Dashboard() {
           </div>
         </div>
 
+        {loadError && <p className={styles.commandError} role="alert">
+          Не удалось загрузить задачи: {loadError} Список может быть неполным.{' '}
+          <button type="button" className={styles.retryLink} onClick={() => void fetchRuns()}>Повторить загрузку</button>
+        </p>}
+
         {loading ? (
           <div className={styles.loading}>Загружаем задачи…</div>
         ) : filtered.length === 0 ? (
           <div className={styles.empty}>
-            {runs.length === 0 ? 'Задач пока нет. Создайте первую справа.' : 'Ничего не найдено по этим условиям.'}
+            {runs.length === 0
+              ? `Задач пока нет.${canStart ? ` Нажмите «${actionVerbs.newTask}» справа — это первый шаг.` : ''}`
+              : 'Ничего не найдено по этим условиям.'}
           </div>
         ) : (
           <div className={styles.pipelines}>
@@ -271,32 +191,19 @@ export function Dashboard() {
       </div>
 
       <aside className={styles.side} aria-label="Создание и состояние">
-        {canSubmitIntention ? (
-          creating ? createForm : (
-            <div className={styles.createWrap}>
-              <button type="button" className={styles.createBig} onClick={() => setCreating(true)}>
-                <span aria-hidden="true" className={styles.plus}>+</span>
-                Создать задачу
-              </button>
-              {createdRunID && (
-                <div className={styles.thought} role="status">
-                  <strong>{createdName}</strong>
-                  <Link to={`/tasks/${encodeURIComponent(createdRunID)}`}>Открыть</Link>
-                  <span className={styles.tailLg} aria-hidden="true" />
-                  <span className={styles.tailSm} aria-hidden="true" />
-                </div>
-              )}
-            </div>
-          )
+        {canStart ? (
+          <Link to="/tasks/new" className={styles.createBig}>
+            <span aria-hidden="true" className={styles.plus}>+</span>
+            {actionVerbs.newTask}
+          </Link>
         ) : (
           <section className={styles.intakeNotice} aria-label="Создание задач">
-            <strong>Создать задачу может Product Owner.</strong>
-            <span>Передайте бизнес-цель Product Owner. После уточнения требований он согласует спецификацию до старта архитектора.</span>
+            <strong>Создать задачу могут: {permissionRoles['run:start']}.</strong>
+            <span>Передайте бизнес-цель одной из этих ролей. После уточнения требований владелец продукта согласует спецификацию до старта архитектора.</span>
           </section>
         )}
 
-
-        {!creating && commandStatus && <p className={styles.commandError} role="alert">{commandStatus}</p>}
+        {commandStatus && <p className={styles.commandError} role="alert">{commandStatus}</p>}
 
         <section className={styles.readiness} data-state={readiness} aria-labelledby="readiness-heading">
           <div className={styles.readinessHead}>

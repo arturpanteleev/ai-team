@@ -414,6 +414,8 @@ export interface TaskStageTemplate {
   id: string;
   title: string;
   function: string;
+  /** Optional confirming function; confirm and return belong to it when set. */
+  approver_function?: string;
   result: 'md' | 'link' | 'approve';
   executor: 'human' | 'agent';
   agent?: string;
@@ -484,6 +486,9 @@ export interface TaskRunDetails {
   stage_owners: Record<string, StageOwner>;
   results: Record<string, TaskResultRevision[]>;
   allowed_actions: string[];
+  // The part of allowed_actions the requesting principal may perform (stage
+  // function, administrator right, plan roles). Absent from an older server.
+  viewer_actions?: string[];
   delivery: DeliveryProjection;
   stage_statuses?: StageStatusProjection;
 }

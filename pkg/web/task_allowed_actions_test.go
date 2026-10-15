@@ -92,6 +92,14 @@ func TestTaskAllowedActionsByPhaseMatchesBrowserContract(t *testing.T) {
 			checkDecision("check-3", "analysis", "idea"), []string{}},
 		{"returnable human stage", "run-manual", "qa", lifecycle.PhaseWaiting,
 			pending("input-2", "qa", humanInputTrigger, approval.KindInput, "submit"), []string{"take", "results", "skip", "return"}},
+		// While a transition confirmation waits, the run's next stage is the
+		// destination; the return route and the confirmation belong to the stage
+		// that was completed (from_stage), and a skippable completed stage is
+		// not offered for skipping.
+		{"transition confirmation names the completed stage", "run-manual", "delivery", lifecycle.PhaseWaiting,
+			&approval.PendingApproval{ID: "gate-9", FromStage: "qa", ToStage: "delivery", Trigger: "stage_completed",
+				Kind: approval.KindApprove, Actions: []string{"approve", "reject"}, Status: approval.StatusPending},
+			[]string{"confirm", "return"}},
 		{"delivery plan awaits approval", "run-manual", "delivery", lifecycle.PhaseWaiting,
 			pending("plan-1", "delivery", "delivery_plan", approval.KindApprove, "approve", "reject"), []string{"plan/approve"}},
 		{"terminal run", "run-manual", "", lifecycle.PhaseTerminal, nil, []string{}},

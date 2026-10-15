@@ -10,6 +10,9 @@
 }
 
 .banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   margin: 0;
   padding: 10px 12px;
   border-radius: var(--radius-md);
@@ -38,7 +41,7 @@
   font-size: 14px;
 }
 
-.decision[data-allowed='false'] {
+.decision[data-allowed='false']:is([data-state='blocked'], [data-state='error'], [data-state='incomplete']) {
   color: var(--danger-fg);
 }
 
@@ -95,10 +98,65 @@
   color: var(--danger-fg);
 }
 
-.technical,
+/* Technical error of a required gate blocks the move: a real failure, red; dashed to tell it from a content fail. */
+.technical {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  outline: 1px dashed var(--danger-fg);
+  outline-offset: -1px;
+}
+
+/* Amber is reserved for recommendations. */
 .warningTag {
   background: var(--warning-bg);
   color: var(--warning-fg);
+}
+
+.bannerIcon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.panel[data-compact='true'] {
+  margin: 0;
+  width: 100%;
+}
+
+/* In the status column the block title is a label like «Кто действует», not a heading of its own. */
+.panel[data-compact='true'] h3 {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.panel[data-compact='true'] .decision {
+  font-size: 13px;
+}
+
+.panel[data-compact='true'] .gates {
+  gap: 4px;
+}
+
+.panel[data-compact='true'] .gate {
+  gap: 4px 6px;
+  padding: 6px 8px;
+}
+
+.panel[data-compact='true'] .name {
+  flex-basis: 100%;
+  font-size: 13px;
+}
+
+.panel[data-compact='true'] .tag {
+  padding: 1px 7px;
+  font-size: 11px;
 }
 
 .neutral {

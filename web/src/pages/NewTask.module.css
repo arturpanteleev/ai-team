@@ -102,9 +102,19 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   margin-top: 10px;
+}
+
+.actions a {
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.actions button {
+  white-space: nowrap;
 }
 
 .actions button {

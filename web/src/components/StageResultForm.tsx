@@ -8,6 +8,7 @@ import type { StageResultDraft } from '../stageResultDraft';
 import { MarkdownPreview } from './MarkdownPreview';
 import { MAX_MARKDOWN_BYTES, MAX_TEXT_BYTES, formatBytes, linkError, linkHint, linkKindTitles, utf8Length } from '../stageResultValidation';
 import type { StageResultSubmission } from '../stageResultValidation';
+import { actionVerbs } from '../actionLabels';
 import styles from './StageResultForm.module.css';
 
 // Draft writes serialise the whole form, which is slow for multi-megabyte
@@ -204,7 +205,7 @@ export function StageResultForm({ runId, stage, working, onSubmit, onCancel }: {
 
       <div className={styles.actions}>
         <button disabled={working || missingValue || errors.length > 0}>
-          {working ? 'Отправляем…' : kind === 'approve' ? 'Подтвердить результат' : 'Отправить результат'}
+          {working ? 'Отправляем…' : actionVerbs.submitResult}
         </button>
         <button type="button" disabled={working} onClick={onCancel}>Свернуть</button>
         <button type="button" disabled={working} onClick={discard}>Очистить черновик</button>

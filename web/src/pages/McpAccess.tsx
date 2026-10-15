@@ -18,6 +18,7 @@ export function McpAccess() {
   const [secret, setSecret] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [revoking, setRevoking] = useState('');
   const endpoint = `${window.location.origin}/mcp`;
 
   const refresh = async () => setTokens((await listMcpTokens()).tokens);
@@ -44,11 +45,11 @@ export function McpAccess() {
   };
 
   const revoke = async (token: McpToken) => {
-    if (!window.confirm(`Отозвать токен «${token.label}»?`)) return;
     setBusy(true);
     setError('');
     try {
       await revokeMcpToken(token.id);
+      setRevoking('');
       await refresh();
     } catch (value) {
       setError(value instanceof Error ? value.message : 'Не удалось отозвать токен.');
@@ -95,8 +96,16 @@ export function McpAccess() {
               </small>
             </div>
             <div>
-              <button aria-label={`Отозвать токен «${token.label}»`} disabled={busy || token.revoked_at !== undefined} onClick={() => void revoke(token)}>Отозвать</button>
+              {revoking !== token.id && <button aria-label={`Отозвать токен «${token.label}»`} disabled={busy || token.revoked_at !== undefined}
+                onClick={() => setRevoking(token.id)}>Отозвать</button>}
             </div>
+            {revoking === token.id && <div className={styles.editor} role="group" aria-label={`Отзыв токена «${token.label}»`}>
+              <p>Отозвать токен «{token.label}»? Клиент с этим токеном перестанет работать сразу.</p>
+              <div className={styles.editorActions}>
+                <button disabled={busy} onClick={() => void revoke(token)}>Да, отозвать токен</button>
+                <button disabled={busy} onClick={() => setRevoking('')}>Отмена</button>
+              </div>
+            </div>}
           </article>
         ))}
       </div>

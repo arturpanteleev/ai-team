@@ -1,28 +1,54 @@
 import { useEffect, useState } from 'react';
-import { getTeamAudit, getTeamMembers, inviteTeamMember, revokeTeamMember, setTeamMemberRoles } from '../api';
+import { getActivePrincipal, getTeamAudit, getTeamMembers, inviteTeamMember, revokeTeamMember, setTeamMemberRoles } from '../api';
 import type { TeamAuditEvent, TeamMember } from '../api';
+import { mayPerform, roleLabels } from '../permissions';
 import { usePageTitle } from '../hooks/usePageTitle';
 import styles from './Team.module.css';
 
-const roleLabels: Record<string, string> = {
-  product_owner: 'Владелец продукта',
-  architect: 'Архитектор',
-  developer: 'Разработчик',
-  reviewer: 'Ревьюер',
-  qa: 'Тестировщик',
-  release_manager: 'Менеджер выпуска',
-  // A system right, not a process function: it alone lets a task pass after a failed required gate.
-  admin: 'Администратор (обход проваленных гейтов)',
-};
+// Роли процесса и одна системная: «Администратор» не функция этапа, а право
+// провести задачу после проваленного обязательного гейта (S06).
 const roles = Object.keys(roleLabels);
+const adminHelp = 'Администратор может провести задачу дальше после проваленного обязательного гейта; обход всегда остаётся красным в истории. Право выдаёт и снимает только администратор.';
 const memberStatusLabels: Record<string, string> = {
   invited: 'приглашён',
   active: 'активен',
   revoked: 'доступ отозван',
 };
+const auditActionLabels: Record<string, string> = {
+  bootstrap: 'создал команду',
+  roles_changed: 'изменил роли',
+  membership_revoked: 'отозвал доступ',
+  invited: 'пригласил',
+  member_invited: 'пригласил',
+  member_activated: 'активировал приглашение',
+};
+
+function RoleChecklist({ legend, selected, onToggle, canGrantAdmin, name }: {
+  legend: string;
+  selected: string[];
+  onToggle: (role: string) => void;
+  canGrantAdmin: boolean;
+  name: string;
+}) {
+  return (
+    <fieldset>
+      <legend>{legend}</legend>
+      {roles.map((role) => (
+        <label key={role} title={role === 'admin' ? adminHelp : undefined}>
+          <input type="checkbox" name={name} checked={selected.includes(role)} onChange={() => onToggle(role)}
+            disabled={role === 'admin' && !canGrantAdmin} />
+          {roleLabels[role]}{role === 'admin' ? ' (обход проваленных гейтов)' : ''}
+        </label>
+      ))}
+      {!canGrantAdmin && <small className={styles.adminNote}>{adminHelp}</small>}
+    </fieldset>
+  );
+}
 
 export function Team() {
   usePageTitle('Команда');
+  const principal = getActivePrincipal();
+  const canGrantAdmin = mayPerform(principal, 'gate:override');
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [audit, setAudit] = useState<TeamAuditEvent[]>([]);
   const [email, setEmail] = useState('');
@@ -30,6 +56,8 @@ export function Team() {
   const [invite, setInvite] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<{ actorId: string; roles: string[] } | null>(null);
+  const [revoking, setRevoking] = useState('');
 
   const refresh = async () => {
     const [memberData, auditData] = await Promise.all([getTeamMembers(), getTeamAudit()]);
@@ -41,8 +69,8 @@ export function Team() {
     void refresh().catch((value: unknown) => setError(value instanceof Error ? value.message : 'Не удалось загрузить команду.'));
   }, []);
 
-  const toggleRole = (role: string) => setSelected((current) =>
-    current.includes(role) ? current.filter((item) => item !== role) : [...current, role]);
+  const toggle = (current: string[], role: string) =>
+    current.includes(role) ? current.filter((item) => item !== role) : [...current, role];
 
   const createInvite = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -61,18 +89,17 @@ export function Team() {
     }
   };
 
-  const editRoles = async (member: TeamMember) => {
-    const input = window.prompt(`Роли для ${member.email}, через запятую`, member.roles.join(', '));
-    if (input === null) return;
-    const nextRoles = input.split(',').map((value) => value.trim()).filter(Boolean);
-    if (nextRoles.length === 0) {
+  const saveRoles = async () => {
+    if (!editing) return;
+    if (editing.roles.length === 0) {
       setError('Укажите хотя бы одну роль.');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      await setTeamMemberRoles(member.actor_id, nextRoles);
+      await setTeamMemberRoles(editing.actorId, editing.roles);
+      setEditing(null);
       await refresh();
     } catch (value) {
       setError(value instanceof Error ? value.message : 'Не удалось изменить роли.');
@@ -82,11 +109,11 @@ export function Team() {
   };
 
   const revoke = async (member: TeamMember) => {
-    if (!window.confirm(`Отозвать доступ у ${member.email}?`)) return;
     setBusy(true);
     setError('');
     try {
       await revokeTeamMember(member.actor_id);
+      setRevoking('');
       await refresh();
     } catch (value) {
       setError(value instanceof Error ? value.message : 'Не удалось отозвать доступ.');
@@ -105,15 +132,8 @@ export function Team() {
         <label htmlFor="invite-email">Электронная почта
           <input id="invite-email" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
         </label>
-        <fieldset>
-          <legend>Роли</legend>
-          {roles.map((role) => (
-            <label key={role}>
-              <input type="checkbox" checked={selected.includes(role)} onChange={() => toggleRole(role)} />
-              {roleLabels[role]}
-            </label>
-          ))}
-        </fieldset>
+        <RoleChecklist legend="Роли" name="invite-role" selected={selected} canGrantAdmin={canGrantAdmin}
+          onToggle={(role) => setSelected((current) => toggle(current, role))} />
         <button disabled={busy || selected.length === 0}>{busy ? 'Сохраняем…' : 'Создать приглашение'}</button>
       </form>
       {invite && (
@@ -126,18 +146,50 @@ export function Team() {
       <h2>Участники</h2>
       <div className={styles.members}>
         {members.length === 0 && <p>Пока нет участников.</p>}
-        {members.map((member) => (
-          <article key={member.actor_id}>
-            <div>
-              <strong>{member.email}</strong>
-              <small>{memberStatusLabels[member.status] ?? member.status} · {member.roles.map((role) => roleLabels[role] ?? role).join(', ') || 'без ролей'}</small>
-            </div>
-            <div>
-              <button disabled={busy || member.actor_id === ''} onClick={() => void editRoles(member)}>Изменить роли</button>
-              <button disabled={busy || member.status === 'revoked'} onClick={() => void revoke(member)}>Отозвать доступ</button>
-            </div>
-          </article>
-        ))}
+        {members.map((member) => {
+          const isEditing = editing?.actorId === member.actor_id;
+          const isSelf = principal?.actor_id === member.actor_id;
+          const holdsAdmin = member.roles.includes('admin');
+          return (
+            <article key={member.actor_id} data-editing={isEditing ? 'true' : undefined}>
+              <div>
+                <strong>{member.email}{isSelf ? ' (вы)' : ''}</strong>
+                <small>{memberStatusLabels[member.status] ?? member.status}</small>
+                <span className={styles.roleChips}>
+                  {member.roles.length === 0 && <small>без ролей</small>}
+                  {member.roles.map((role) => <span key={role} className={styles.roleChip} data-role={role}>{roleLabels[role] ?? role}</span>)}
+                </span>
+              </div>
+              <div>
+                {/* The server refuses only a change of the administrator right itself; the other roles of an
+                    administrator may be edited by a product owner, so the checklist locks just that box. */}
+                {!isEditing && <button disabled={busy || member.status !== 'active'}
+                  title={member.status !== 'active' ? 'Роли меняются после активации приглашения.' : undefined}
+                  aria-label={`Изменить роли: ${member.email}`}
+                  onClick={() => { setError(''); setEditing({ actorId: member.actor_id, roles: [...member.roles] }); }}>Изменить роли</button>}
+                {revoking !== member.actor_id && <button disabled={busy || member.status === 'revoked' || isSelf || (holdsAdmin && !canGrantAdmin)}
+                  title={isSelf ? 'Собственный доступ отозвать нельзя.' : holdsAdmin && !canGrantAdmin ? 'Доступ администратора отзывает только администратор.' : undefined}
+                  aria-label={`Отозвать доступ: ${member.email}`}
+                  onClick={() => setRevoking(member.actor_id)}>Отозвать доступ</button>}
+              </div>
+              {isEditing && editing && <div className={styles.editor} aria-label={`Редактор ролей: ${member.email}`}>
+                <RoleChecklist legend={`Роли: ${member.email}`} name={`roles-${member.actor_id}`} selected={editing.roles} canGrantAdmin={canGrantAdmin}
+                  onToggle={(role) => setEditing({ actorId: editing.actorId, roles: toggle(editing.roles, role) })} />
+                <div className={styles.editorActions}>
+                  <button disabled={busy || editing.roles.length === 0} onClick={() => void saveRoles()}>Сохранить роли</button>
+                  <button disabled={busy} onClick={() => setEditing(null)}>Отмена</button>
+                </div>
+              </div>}
+              {revoking === member.actor_id && <div className={styles.editor} role="group" aria-label={`Отзыв доступа: ${member.email}`}>
+                <p>Отозвать доступ у {member.email}? Его веб-сессии и MCP-токены перестанут работать сразу.</p>
+                <div className={styles.editorActions}>
+                  <button disabled={busy} onClick={() => void revoke(member)}>Да, отозвать доступ</button>
+                  <button disabled={busy} onClick={() => setRevoking('')}>Отмена</button>
+                </div>
+              </div>}
+            </article>
+          );
+        })}
       </div>
       <h2>Журнал действий</h2>
       {audit.length === 0 ? <p>Записей пока нет.</p> : (
@@ -145,7 +197,7 @@ export function Team() {
           {audit.map((item) => (
             <li key={item.id}>
               <time>{new Date(item.created_at).toLocaleString('ru-RU')}</time>
-              <span>{item.actor_id}: {item.action} → {item.target_actor_id}</span>
+              <span>{item.actor_id}: {auditActionLabels[item.action] ?? item.action} → {item.target_actor_id}</span>
             </li>
           ))}
         </ol>

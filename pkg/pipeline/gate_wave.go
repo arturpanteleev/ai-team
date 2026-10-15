@@ -206,6 +206,21 @@ func (rs *runState) gateJournal() *gatesched.EventJournal {
 	})
 }
 
+// waveKey identifies the result version a wave (and the human decision on the
+// same version) is bound to: task, stage, visit, the stage attempt as scope,
+// and the result hash.
+func (rs *runState) waveKey(stage config.TemplateStage, result notifier.StageResult, sha string) gatesched.WaveKey {
+	visit := rs.visits[stage.ID]
+	if visit < 1 {
+		visit = 1
+	}
+	scope := result.AttemptID
+	if scope == "" {
+		scope = fmt.Sprintf("%s-visit-%d", stage.ID, visit)
+	}
+	return gatesched.WaveKey{TaskID: rs.runID, Stage: stage.ID, Visit: visit, Scope: scope, ArtifactSHA256: sha}
+}
+
 // runGateWave executes the automatic chain of the stage over the result
 // version sha. It returns an error only when the wave could not be carried
 // out reliably or a gate needs the run to stop (a grill question, a failure
@@ -220,14 +235,7 @@ func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage,
 		}
 		definitions[ref.Key()] = definition
 	}
-	visit := rs.visits[stage.ID]
-	if visit < 1 {
-		visit = 1
-	}
-	scope := result.AttemptID
-	if scope == "" {
-		scope = fmt.Sprintf("%s-visit-%d", stage.ID, visit)
-	}
+	key := rs.waveKey(stage, result, sha)
 	state := &waveState{hard: &hardWaveState{}, reports: map[string]stagecheck.Report{}}
 	runners := map[workflow.GateKind]gatesched.Runner{
 		workflow.GateKindBuiltin: rs.builtinGateRunner(stage, result, state),
@@ -242,7 +250,7 @@ func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage,
 		return waveOutcome{}, fmt.Errorf("планировщик гейтов этапа %s: %w", stage.ID, err)
 	}
 	res, err := scheduler.Run(ctx, gatesched.Wave{
-		Key:    gatesched.WaveKey{TaskID: rs.runID, Stage: stage.ID, Visit: visit, Scope: scope, ArtifactSHA256: sha},
+		Key:    key,
 		Groups: groups, Definitions: definitions,
 	})
 	if state.fatal != nil {
@@ -347,7 +355,7 @@ func (rs *runState) agentGateRunner(stage config.TemplateStage, result notifier.
 				return gatesched.TechnicalError(err.Error())
 			}
 		}
-		report := rs.runAgentCheck(ctx, gateStage, result)
+		report := rs.runAgentGate(ctx, gateStage, result, check)
 		state.setReport(in.Ref.InstanceName(), report)
 		return outcomeFromReport(ctx, report)
 	})

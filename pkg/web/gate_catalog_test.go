@@ -33,7 +33,13 @@ func TestGateCatalogIsReadOnlyAndListsPinnedDefinitions(t *testing.T) {
 	}
 	found := map[string]bool{}
 	for _, gate := range body.Gates {
-		if gate.Digest == "" || gate.Version != 1 || !gate.Latest {
+		// The decision gates have a second published version (S05); every
+		// other gate has only version 1. Only the highest version is latest.
+		latestVersion := 1
+		if gate.ID == "agent_review" || gate.ID == "human_approval" {
+			latestVersion = 2
+		}
+		if gate.Digest == "" || gate.Version < 1 || gate.Version > latestVersion || gate.Latest != (gate.Version == latestVersion) {
 			t.Fatalf("incomplete catalog entry: %+v", gate)
 		}
 		found[gate.ID+"/"+gate.Kind] = true

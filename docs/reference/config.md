@@ -1109,7 +1109,7 @@ exit_gate_groups:
 проваленного обязательного гейта (`POST …/stages/{stage}/override`) — только
 системное право администратора (роль `admin`), с обязательной причиной; исход
 гейта он не меняет и действует только на проверенную версию результата.
-Подробности — в [TASK-FLOW-WEB-API.md](TASK-FLOW-WEB-API.md#gate-state-retry-and-override).
+Подробности — в `docs/reference/TASK-FLOW-WEB-API.md` (раздел «Gate state, retry and override»).
 
 **LLM-гейт (`agent_review@2`).** Проверяющий получает фиксированный вход
 (свои объявленные входы и выходы проверяемого этапа) и обязан ответить по

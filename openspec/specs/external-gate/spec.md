@@ -34,7 +34,10 @@ working directory, with exactly the environment made of `env_allow` variables
 set in the controller and the reserved `AI_TEAM_GATE_PROTOCOL` and
 `AI_TEAM_GATE_ATTEMPT_ID`; no other controller variable MAY be inherited. The
 program MUST run in its own process group, and that whole group MUST be killed
-on timeout, cancellation, and exceeding the output limit. Stdout and stderr MUST
+on timeout, cancellation, and exceeding the output limit, and what remains of
+the group after the program exits on its own MUST be killed as well (on
+platforms where the group can still be addressed). A relative program path MUST
+stay inside the repository. Stdout and stderr MUST
 each be bounded by `max_output_bytes`.
 
 #### Scenario: Environment isolation
@@ -47,6 +50,11 @@ each be bounded by `max_output_bytes`.
 - **КОГДА** the program starts a background child and exceeds its timeout
 - **ТОГДА** the attempt MUST end `timeout` and no process of the group MAY survive
 
+#### Scenario: Background child after a clean exit
+
+- **КОГДА** the program exits normally leaving a background child
+- **ТОГДА** the child MUST be killed
+
 ### Requirement: The JSON protocol separates input and result
 
 The controller MUST write one `ai-team.gate/v1` input document to stdin with the
@@ -55,11 +63,18 @@ SHA-256, readable paths, and limits. The program MUST print exactly one result
 document to stdout with `verdict` (`pass`, `fail`, `not_applicable`), a `reason`
 (required for `fail`, at most 2000 bytes), and at most 20 evidence references
 with relative clean paths. Unknown fields, a second document, trailing text, a
-wrong protocol, and an unknown verdict MUST make the result invalid.
+wrong protocol, and an unknown verdict MUST make the result invalid. A
+duplicated key (also after escape decoding) or a key spelled in a different
+case than the protocol's MUST make the result invalid.
 
 #### Scenario: Malformed result
 
 - **КОГДА** stdout is text, two documents, or has an unknown verdict
+- **ТОГДА** the attempt MUST end `error` with no verdict
+
+#### Scenario: Ambiguous keys
+
+- **КОГДА** stdout has `verdict` twice (`fail` then `pass`) or the key `Verdict`
 - **ТОГДА** the attempt MUST end `error` with no verdict
 
 ### Requirement: A valid fail is distinct from a technical failure
@@ -91,7 +106,7 @@ stored only if it is a plain text regular file inside the evidence directory
 without symlinks, within 1 MiB, matching a declared digest, and free of secrets;
 otherwise the attempt MUST end `error` and the file MUST NOT be stored. Reasons,
 logs, and the invocation record MUST have credential patterns and the values of
-secret-named allowed variables replaced.
+all allowed variables of at least 4 bytes replaced, whatever their names.
 
 #### Scenario: Secret in the program output
 
@@ -113,7 +128,22 @@ error. A record MUST be committed last, and an uncommitted directory MUST be
 discarded and re-run. A launcher MUST be replaceable behind one interface that
 receives the input document and returns stdout, stderr, exit status, and the
 output-limit flag, while parsing, classification, redaction, and evidence storage
-stay in the runner.
+stay in the runner. The idempotence guarantee is per controller process; two
+processes sharing one evidence root are not coordinated.
+
+The program MUST NOT be given, and MUST NOT be able to use, the directory where
+the controller keeps the attempt record: its evidence directory MUST be a
+separate directory outside it, anything found in the attempt directory after the
+run MUST be discarded and the attempt MUST end `error`, and a stored record
+MUST be trusted only when its signature, made with a key the program does not
+receive, verifies; otherwise reading it MUST fail.
+
+#### Scenario: Forged attempt record
+
+- **КОГДА** the program writes a passing `attempt.json` into the attempt directory
+  and prints a failing result
+- **ТОГДА** the attempt MUST NOT be `pass` and a repeated run MUST NOT return the
+  forged record
 
 #### Scenario: Repeated call
 

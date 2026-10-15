@@ -68,6 +68,16 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	}
 }
 
+// KillGroup SIGKILLs whatever is still left in the process group the command
+// led, after the leader itself has exited. A group with no members left is a
+// success. The command must have been started by Run (its own group).
+func KillGroup(command *exec.Cmd) error {
+	if command.Process == nil {
+		return nil
+	}
+	return killProcessGroup(command.Process.Pid)
+}
+
 // killProcessGroup SIGKILLs the whole supervised process group. An already
 // finished group (ESRCH) is a success, not an error.
 func killProcessGroup(pgid int) error {

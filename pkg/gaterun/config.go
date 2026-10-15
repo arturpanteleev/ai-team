@@ -91,6 +91,11 @@ func (c Config) Validate() error {
 	if err := validRelDir(c.CWD); err != nil {
 		return fmt.Errorf("external gate: cwd %q: %w", c.CWD, err)
 	}
+	if first := c.Command[0]; strings.Contains(first, "/") && !filepath.IsAbs(first) {
+		if cleaned := path.Clean(first); cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+			return fmt.Errorf("external gate: command[0] %q must stay inside the repository", first)
+		}
+	}
 	for _, name := range c.EnvAllow {
 		if !envNamePattern.MatchString(name) {
 			return fmt.Errorf("external gate: env_allow name %q is not a valid variable name", name)
@@ -120,20 +125,6 @@ func containsSecret(arg string) bool {
 	}
 	for _, candidate := range candidates {
 		if len(redact.Scan([]byte(candidate)).Findings) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// secretEnvMarkers mark variable names whose values are masked verbatim in
-// logs and evidence, on top of pattern-based scanning.
-var secretEnvMarkers = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY", "PRIVATE_KEY", "CREDENTIAL", "AUTH", "COOKIE", "SESSION", "KEY"}
-
-func secretEnvName(name string) bool {
-	upper := strings.ToUpper(name)
-	for _, marker := range secretEnvMarkers {
-		if strings.Contains(upper, marker) {
 			return true
 		}
 	}

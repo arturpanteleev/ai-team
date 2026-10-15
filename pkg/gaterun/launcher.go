@@ -59,7 +59,8 @@ type Launcher interface {
 
 // HostLauncher runs the argv directly on the host without a shell, in its own
 // process group (killed as a group on cancellation), with exactly the
-// environment from the spec.
+// environment from the spec. Whatever is left of the process group after the
+// program exits (background descendants) is killed.
 type HostLauncher struct{}
 
 // Kind implements Launcher.
@@ -88,6 +89,11 @@ func (HostLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	command.WaitDelay = descendantGrace
 
 	err := process.Run(inner, command)
+	// process.Run kills the group only when ctx ends. A program that exits on
+	// its own may still have left background descendants: no gate leaves
+	// processes behind, so the group is killed after every end. Their pipe
+	// holding was already bounded by WaitDelay.
+	_ = process.KillGroup(command)
 	outcome := Outcome{
 		Stdout:         stdout.bytes(),
 		Stderr:         stderr.bytes(),

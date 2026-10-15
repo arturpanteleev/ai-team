@@ -64,6 +64,11 @@ func run(ctx context.Context, command *exec.Cmd, grace time.Duration) error {
 	}
 }
 
+// KillGroup is a no-op on this platform: once the leader has exited its tree
+// can no longer be addressed (the PID may already belong to another process),
+// so descendants of a program that exits on its own are not killed here.
+func KillGroup(*exec.Cmd) error { return nil }
+
 // stopTree requests a graceful stop of a process tree without force
 // (`taskkill /T`, no /F). Best-effort: the caller force-kills via killTree
 // when the grace window expires, and a command that cannot be stopped

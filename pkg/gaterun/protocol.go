@@ -142,6 +142,9 @@ func ParseResult(stdout []byte, limit int64) (Result, error) {
 	if err := strictjson.Unmarshal(stdout, limit, &result); err != nil {
 		return Result{}, err
 	}
+	if err := rejectAmbiguousKeys(stdout, resultShape); err != nil {
+		return Result{}, fmt.Errorf("ambiguous document: %w", err)
+	}
 	if result.Protocol != Protocol {
 		return Result{}, fmt.Errorf("result.protocol must be %q", Protocol)
 	}

@@ -2,6 +2,10 @@ package gaterun
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,14 +37,26 @@ type Request struct {
 //
 // Layout (everything below EvidenceRoot/<attempt_id>/):
 //
+//	attempt.sig       HMAC of attempt.json under the key in EvidenceRoot
 //	attempt.json      the immutable attempt record, written last
 //	stdout.log        redacted stdout (the result document)
 //	stderr.log        redacted stderr
 //	invocation.json   redacted record of how the program was run
 //	evidence/...      evidence files named by the program, verified and scanned
+//
+// The program never sees the attempt directory: its evidence_dir is a fresh
+// private directory under WorkRoot, removed after the run. A program that
+// nevertheless finds and writes into the attempt directory makes the attempt
+// an error, and attempt.json is trusted on reload only when its HMAC (key
+// kept in EvidenceRoot/.gaterun.key, never passed to the program) matches.
+// This is defence in depth for the host launcher, which shares the user with
+// the program; real isolation is the container launcher's job.
 type Runner struct {
 	// EvidenceRoot is an existing directory the runner owns.
 	EvidenceRoot string
+	// WorkRoot is the parent of the programs' private evidence directories;
+	// it must be outside EvidenceRoot. Defaults to os.TempDir().
+	WorkRoot string
 	// Launcher defaults to HostLauncher.
 	Launcher Launcher
 	// LookupEnv reads the controller environment for env_allow; defaults to
@@ -88,7 +104,11 @@ func (r *Runner) lock(id string) func() {
 // the stored attempt is returned without starting the program, provided the
 // identity matches; the same ID with a different task, stage, visit, artifact
 // hash or gate is an error (an ID must never be reused for another check).
-// Concurrent calls with one ID run the program once.
+// Concurrent calls with one ID run the program once. That guarantee rests on
+// an in-process mutex: two controller processes sharing one EvidenceRoot are
+// not coordinated and may both run the program for the same ID (the second
+// commit then fails because attempt.json is immutable). A deployment runs one
+// controller per EvidenceRoot.
 //
 // A returned error means the request was invalid or the controller could not
 // store the record; the gate has then not produced an attempt. Everything the
@@ -166,6 +186,9 @@ func (r *Runner) loadStored(identity workflow.GateAttempt) (workflow.GateAttempt
 	if err != nil {
 		return workflow.GateAttempt{}, false, fmt.Errorf("gaterun: reading stored attempt: %w", err)
 	}
+	if err := r.verifyMAC(dir, identity.AttemptID, data); err != nil {
+		return workflow.GateAttempt{}, false, fmt.Errorf("gaterun: stored attempt %s failed its integrity check: %w", identity.AttemptID, err)
+	}
 	var stored workflow.GateAttempt
 	if err := json.Unmarshal(data, &stored); err != nil {
 		return workflow.GateAttempt{}, false, fmt.Errorf("gaterun: stored attempt %s is corrupt: %w", identity.AttemptID, err)
@@ -192,13 +215,17 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 	if err != nil {
 		return workflow.GateAttempt{}, fmt.Errorf("gaterun: attempt directory: %w", err)
 	}
-	workDir, err := safeio.EnsureDir(dir, "work")
+	workRoot := r.WorkRoot
+	if workRoot == "" {
+		workRoot = os.TempDir()
+	}
+	workDir, err := os.MkdirTemp(workRoot, "ai-team-gate-work-")
 	if err != nil {
 		return workflow.GateAttempt{}, fmt.Errorf("gaterun: work directory: %w", err)
 	}
+	defer func() { _ = os.RemoveAll(workDir) }()
 	cwd, err := safeio.ExistingDir(req.RepoRoot, cwdComponents(cfg.CWD)...)
 	if err != nil {
-		_ = os.RemoveAll(workDir)
 		return r.finish(dir, attempt, now, nil, fmt.Errorf("working directory %q is missing or unsafe", cfg.CWD), workflow.GateExecutionError, "")
 	}
 	repoRoot, _ := filepath.Abs(req.RepoRoot)
@@ -212,9 +239,7 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 			continue
 		}
 		env = append(env, name+"="+value)
-		if secretEnvName(name) {
-			secrets = append(secrets, value)
-		}
+		secrets = append(secrets, value)
 	}
 	clean := newSanitizer(secrets)
 
@@ -234,6 +259,9 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 		return workflow.GateAttempt{}, err
 	}
 
+	// Config.Validate guarantees a relative program path stays lexically inside
+	// the repository. Symlinks inside the repository are not resolved: the
+	// repository content is part of the trusted configuration.
 	argv := append([]string{}, cfg.Command...)
 	if strings.Contains(argv[0], "/") && !filepath.IsAbs(argv[0]) {
 		argv[0] = filepath.Join(repoRoot, filepath.FromSlash(argv[0]))
@@ -250,6 +278,15 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 	cancel()
 
 	execution, result, reasonErr := classify(ctx, timedOut, outcome, cfg)
+	// The attempt directory was empty and its path was never given to the
+	// program. Anything in it now was put there by the program: discard it
+	// and refuse the result, whatever the program printed.
+	if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) > 0 {
+		for _, entry := range entries {
+			_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+		}
+		execution, reasonErr = workflow.GateExecutionError, errors.New("the program wrote into the controller's attempt directory; result discarded")
+	}
 	var evidence []workflow.GateEvidenceRef
 	if execution == workflow.GateExecutionSucceeded {
 		var evErr error
@@ -276,7 +313,7 @@ func (r *Runner) execute(ctx context.Context, launcher Launcher, lookup func(str
 		}
 	}
 	evidence = append(extra.refs, evidence...)
-	_ = os.RemoveAll(workDir) // the program's raw output dir is never kept: only verified copies are
+	// The program's raw output dir is removed on return: only verified copies are kept.
 	return r.finish(dir, attempt, now, evidence, errors.New(reason), execution, verdict)
 }
 
@@ -438,8 +475,72 @@ func (r *Runner) finish(dir string, attempt workflow.GateAttempt, now func() tim
 	if err != nil {
 		return workflow.GateAttempt{}, err
 	}
+	mac, err := r.macOf(attempt.AttemptID, data)
+	if err != nil {
+		return workflow.GateAttempt{}, fmt.Errorf("gaterun: signing attempt: %w", err)
+	}
+	if err := safeio.WriteRegularFileNoFollow(filepath.Join(dir, "attempt.sig"), []byte(mac), safeio.ReadOnlyFileMode); err != nil {
+		return workflow.GateAttempt{}, fmt.Errorf("gaterun: committing attempt: %w", err)
+	}
 	if err := safeio.WriteRegularFileNoFollow(filepath.Join(dir, "attempt.json"), data, safeio.ReadOnlyFileMode); err != nil {
 		return workflow.GateAttempt{}, fmt.Errorf("gaterun: committing attempt: %w", err)
 	}
 	return attempt, nil
+}
+
+const keyFile = ".gaterun.key"
+
+// macKey returns the HMAC key of the evidence root, creating it on first use.
+// The name starts with a dot, which no attempt ID may.
+func (r *Runner) macKey() ([]byte, error) {
+	path := filepath.Join(r.EvidenceRoot, keyFile)
+	for range 2 {
+		key, err := safeio.ReadRegularFile(path, 1024)
+		if err == nil {
+			if len(key) < 32 {
+				return nil, errors.New("key file is too short")
+			}
+			return key, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		// Losing the creation race to another process just means reading its key.
+		if err := safeio.WriteRegularFileNoFollow(path, key, 0o400); err != nil {
+			if _, statErr := os.Lstat(path); statErr != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, errors.New("cannot create the key file")
+}
+
+func (r *Runner) macOf(id string, data []byte) (string, error) {
+	key, err := r.macKey()
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id + "\n"))
+	mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (r *Runner) verifyMAC(dir, id string, data []byte) error {
+	stored, err := safeio.ReadRegularFile(filepath.Join(dir, "attempt.sig"), 1024)
+	if err != nil {
+		return fmt.Errorf("signature unreadable: %w", err)
+	}
+	want, err := r.macOf(id, data)
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal([]byte(strings.TrimSpace(string(stored))), []byte(want)) {
+		return errors.New("signature does not match")
+	}
+	return nil
 }

@@ -37,6 +37,13 @@ func TestParseResultRejects(t *testing.T) {
 		"backslash":        `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"log","path":"a\\b"}]}`,
 		"bad kind":         `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"Log!","path":"a"}]}`,
 		"bad sha":          `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"log","path":"a","sha256":"zz"}]}`,
+		"dup verdict":      `{"protocol":"ai-team.gate/v1","verdict":"fail","reason":"x","verdict":"pass"}`,
+		"dup escaped key":  `{"protocol":"ai-team.gate/v1","verdict":"fail","reason":"x","verdict":"pass"}`,
+		"dup case key":     `{"protocol":"ai-team.gate/v1","verdict":"fail","reason":"x","Verdict":"pass"}`,
+		"other case key":   `{"protocol":"ai-team.gate/v1","Verdict":"pass"}`,
+		"upper protocol":   `{"PROTOCOL":"ai-team.gate/v1","verdict":"pass"}`,
+		"evidence case":    `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"log","Path":"a"}]}`,
+		"evidence dup key": `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"log","path":"a","path":"b"}]}`,
 		"dup path":         `{"protocol":"ai-team.gate/v1","verdict":"pass","evidence":[{"kind":"log","path":"a"},{"kind":"log","path":"a"}]}`,
 	}
 	for name, doc := range cases {

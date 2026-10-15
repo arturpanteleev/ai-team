@@ -206,7 +206,7 @@ func TestEnvironmentAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(log)
-	for _, want := range []string{"PLAIN=plain-value", "AI_TEAM_GATE_ATTEMPT_ID=" + attempt.AttemptID, "AI_TEAM_GATE_PROTOCOL=" + Protocol} {
+	for _, want := range []string{"PLAIN=[REDACTED:env]", "AI_TEAM_GATE_ATTEMPT_ID=" + attempt.AttemptID, "AI_TEAM_GATE_PROTOCOL=" + Protocol} {
 		if !strings.Contains(text, want) {
 			t.Errorf("env lacks %q:\n%s", want, text)
 		}

@@ -15,7 +15,8 @@ const minMaskedSecret = 4
 // sanitizer removes secrets from everything the runner stores or returns:
 // logs, reason, invocation record. Two layers: the shared pattern scanner of
 // pkg/redact (tokens, keys, assignments, basic-auth URLs) and literal masking
-// of the values of the allowed environment variables whose names look secret.
+// of the values of all allowed environment variables (of at least
+// minMaskedSecret bytes), whatever their names.
 type sanitizer struct {
 	literals []string
 }

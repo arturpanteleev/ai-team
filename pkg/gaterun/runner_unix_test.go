@@ -423,6 +423,68 @@ func TestRetryGetsNewAttemptAndKeepsOld(t *testing.T) {
 	}
 }
 
+func fastRequest(f *fixture, id string) Request {
+	return f.request("pass", func(r *Request) {
+		r.Attempt.AttemptID = id
+		r.Config.Command = []string{"/bin/sh", "-c", `cat >/dev/null; printf '{"protocol":"ai-team.gate/v1","verdict":"pass"}'`}
+	})
+}
+
+func TestKeyCreationRaceFreshEvidenceRoot(t *testing.T) {
+	for iter := 0; iter < 60; iter++ {
+		f := newFixture(t)
+		var wg sync.WaitGroup
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := f.runner.Run(context.Background(), fastRequest(f, fmt.Sprintf("race-%d-%d", iter, g))); err != nil {
+					t.Errorf("iteration %d: %v", iter, err)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+}
+
+func TestKeyCreationRaceSeparateRunners(t *testing.T) {
+	for iter := 0; iter < 40; iter++ {
+		f := newFixture(t)
+		var wg sync.WaitGroup
+		for g := 0; g < 6; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r := &Runner{EvidenceRoot: f.evidence, LookupEnv: f.runner.LookupEnv}
+				if _, err := r.Run(context.Background(), fastRequest(f, fmt.Sprintf("multi-%d-%d", iter, g))); err != nil {
+					t.Errorf("iteration %d: %v", iter, err)
+				}
+			}()
+		}
+		wg.Wait()
+		// Every Runner must have converged on one key: a fresh one verifies all.
+		fresh := &Runner{EvidenceRoot: f.evidence, LookupEnv: f.runner.LookupEnv}
+		for g := 0; g < 6; g++ {
+			if _, err := fresh.Run(context.Background(), fastRequest(f, fmt.Sprintf("multi-%d-%d", iter, g))); err != nil {
+				t.Fatalf("iteration %d: stored attempt does not verify: %v", iter, err)
+			}
+		}
+		if left, _ := filepath.Glob(filepath.Join(f.evidence, keyFile+".tmp-*")); len(left) != 0 {
+			t.Fatalf("temporary key files left: %v", left)
+		}
+	}
+}
+
+func TestWrongSizeKeyIsRejected(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.evidence, keyFile), []byte("short"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.runner.Run(context.Background(), fastRequest(f, "bad-key-1")); err == nil {
+		t.Fatal("a key of the wrong length was accepted")
+	}
+}
+
 func TestUncommittedAttemptIsRerun(t *testing.T) {
 	f := newFixture(t)
 	dir := filepath.Join(f.evidence, "half")

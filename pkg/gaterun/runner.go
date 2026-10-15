@@ -49,8 +49,11 @@ type Request struct {
 // nevertheless finds and writes into the attempt directory makes the attempt
 // an error, and attempt.json is trusted on reload only when its HMAC (key
 // kept in EvidenceRoot/.gaterun.key, never passed to the program) matches.
-// This is defence in depth for the host launcher, which shares the user with
-// the program; real isolation is the container launcher's job.
+// The host launcher runs the program as the same user, so the key file is
+// readable by it: this protects against writes into the attempt directory
+// during the run, accidental corruption and processes without access to the
+// key, not against a hostile program. That needs isolation (container
+// launcher, separate uid).
 type Runner struct {
 	// EvidenceRoot is an existing directory the runner owns.
 	EvidenceRoot string
@@ -67,6 +70,10 @@ type Runner struct {
 
 	mu    sync.Mutex
 	locks map[string]*keyLock
+
+	keyMu   sync.Mutex
+	key     []byte
+	keyRoot string
 }
 
 type keyLock struct {
@@ -146,6 +153,12 @@ func (r *Runner) Run(ctx context.Context, req Request) (workflow.GateAttempt, er
 	}
 	if _, err := safeio.ExistingDir(req.RepoRoot); err != nil {
 		return workflow.GateAttempt{}, fmt.Errorf("gaterun: repo root: %w", err)
+	}
+
+	// Create the key before any program of this Runner can run, so a program
+	// cannot plant its own key on the first run.
+	if _, err := r.macKey(); err != nil {
+		return workflow.GateAttempt{}, fmt.Errorf("gaterun: signing key: %w", err)
 	}
 
 	unlock := r.lock(base.AttemptID)
@@ -488,35 +501,62 @@ func (r *Runner) finish(dir string, attempt workflow.GateAttempt, now func() tim
 	return attempt, nil
 }
 
-const keyFile = ".gaterun.key"
+const (
+	keyFile = ".gaterun.key"
+	keyLen  = 32
+)
 
-// macKey returns the HMAC key of the evidence root, creating it on first use.
-// The name starts with a dot, which no attempt ID may.
+// macKey returns the HMAC key of the evidence root, creating it if absent.
+// The name starts with a dot, which no attempt ID may. Creation is atomic: the
+// key is written to a private temporary file and published with a hard link,
+// which fails if the name exists, so no reader ever sees a partial key and
+// concurrent creators (goroutines, Runners, processes) converge on one key.
+// A key of the wrong length is an error, never silently replaced or used.
 func (r *Runner) macKey() ([]byte, error) {
+	r.keyMu.Lock()
+	defer r.keyMu.Unlock()
+	if r.keyRoot == r.EvidenceRoot && len(r.key) == keyLen {
+		return r.key, nil
+	}
 	path := filepath.Join(r.EvidenceRoot, keyFile)
-	for range 2 {
+	for range 3 {
 		key, err := safeio.ReadRegularFile(path, 1024)
 		if err == nil {
-			if len(key) < 32 {
-				return nil, errors.New("key file is too short")
+			if len(key) != keyLen {
+				return nil, fmt.Errorf("gaterun: key file %s has %d bytes, want %d", path, len(key), keyLen)
 			}
+			r.key, r.keyRoot = key, r.EvidenceRoot
 			return key, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		key = make([]byte, 32)
-		if _, err := rand.Read(key); err != nil {
+		if err := publishKey(r.EvidenceRoot, path); err != nil {
 			return nil, err
 		}
-		// Losing the creation race to another process just means reading its key.
-		if err := safeio.WriteRegularFileNoFollow(path, key, 0o400); err != nil {
-			if _, statErr := os.Lstat(path); statErr != nil {
-				return nil, err
-			}
-		}
 	}
-	return nil, errors.New("cannot create the key file")
+	return nil, errors.New("gaterun: cannot create the key file")
+}
+
+// publishKey creates the key file unless it already exists.
+func publishKey(root, path string) error {
+	key := make([]byte, keyLen)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	tmp := filepath.Join(root, keyFile+".tmp-"+hex.EncodeToString(suffix[:]))
+	if err := safeio.WriteRegularFileNoFollow(tmp, key, 0o400); err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Link(tmp, path); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) macOf(id string, data []byte) (string, error) {

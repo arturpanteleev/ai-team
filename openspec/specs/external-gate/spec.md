@@ -135,8 +135,14 @@ The program MUST NOT be given, and MUST NOT be able to use, the directory where
 the controller keeps the attempt record: its evidence directory MUST be a
 separate directory outside it, anything found in the attempt directory after the
 run MUST be discarded and the attempt MUST end `error`, and a stored record
-MUST be trusted only when its signature, made with a key the program does not
-receive, verifies; otherwise reading it MUST fail.
+MUST be trusted only when its signature, made with a key the program is not
+given, verifies; otherwise reading it MUST fail. The key MUST be created
+atomically (never observable partially written) before any program runs, and a
+key of the wrong length MUST be an error. The host launcher runs the program as
+the same user, so this signature protects against writes into the attempt
+directory during a run, accidental corruption, and processes without access to
+the key; it does not protect against a hostile program, which requires
+isolation (container launcher or a separate uid).
 
 #### Scenario: Forged attempt record
 

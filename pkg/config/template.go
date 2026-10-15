@@ -34,9 +34,10 @@ type TemplateStage struct {
 	Adapter  string `yaml:"adapter,omitempty"`
 	LinkKind string `yaml:"link_kind,omitempty"`
 	// RequiredSections, Check and Confirm are the schema-v5 spelling of what a
-	// stage must satisfy. In v6 YAML they are rejected; the stage declares
-	// ExitGateGroups instead and these fields hold only the engine projection
-	// of that chain (see projectGates) until the group scheduler lands.
+	// stage must satisfy. In v6 YAML they are rejected and the stage declares
+	// ExitGateGroups instead. Code that needs "what does this stage check"
+	// reads EffectiveGateGroups or the derived accessors (SectionsRequired,
+	// CodeRules, AgentChecks, NeedsConfirmation), never these fields.
 	RequiredSections []string       `yaml:"required_sections,omitempty"`
 	Check            *TemplateCheck `yaml:"check,omitempty"`
 	Confirm          string         `yaml:"confirm,omitempty"`
@@ -317,7 +318,7 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 			}
 		}
 	}
-	c.validateGates(add)
+	c.validateGates(reg, add)
 	projectCheckNames := make(map[string]bool, len(c.Checks))
 	projectChecks := make(map[string]checks.Definition, len(c.Checks))
 	for _, check := range c.Checks {
@@ -474,9 +475,9 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			next = c.Stages[i+1].ID
 		}
 		edge := workflow.Edge{From: stage.ID, Outcome: workflow.OutcomePassed, To: next}
-		confirm := stage.Confirm
-		if confirm == "" {
-			confirm = defaultConfirmForResult(stage.Result)
+		confirm := "auto"
+		if stage.NeedsConfirmation() {
+			confirm = "required"
 		}
 		// A configured return is a human stage action as well as a rejected
 		// outcome route. Keep it available even when the forward transition is
@@ -596,9 +597,11 @@ func (c *Config) templateAgentNames() []string {
 				names = append(names, name)
 			}
 		}
-		if stage.Check != nil && stage.Check.Agent != "" && !seen[stage.Check.Agent] {
-			seen[stage.Check.Agent] = true
-			names = append(names, stage.Check.Agent)
+		for _, check := range stage.AgentChecks() {
+			if check.Agent != "" && !seen[check.Agent] {
+				seen[check.Agent] = true
+				names = append(names, check.Agent)
+			}
 		}
 	}
 	sort.Strings(names)

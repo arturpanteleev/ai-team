@@ -315,7 +315,7 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "stage result revision requires edited content", http.StatusBadRequest)
 			return
 		}
-		if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, command.Content, stage.RequiredSections); err != nil {
+		if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, command.Content, stage.SectionsRequired()); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -471,7 +471,7 @@ func pendingAttemptGrill(approvals []approval.PendingApproval, attemptID, artifa
 // file.
 func (s *Server) validateGrillAttemptRevision(runID, attemptID string, stage config.TemplateStage, artifactPath, content string) error {
 	if stage.Result != "md" {
-		return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, content, stage.RequiredSections)
+		return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, content, stage.SectionsRequired())
 	}
 	if !isMarkdownArtifact(artifactPath) {
 		return nil
@@ -479,7 +479,7 @@ func (s *Server) validateGrillAttemptRevision(runID, attemptID string, stage con
 	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, content); err != nil {
 		return err
 	}
-	if len(stage.RequiredSections) == 0 {
+	if len(stage.SectionsRequired()) == 0 {
 		return nil
 	}
 	runDir := filepath.Join(s.runRoot, runID)
@@ -503,7 +503,7 @@ func (s *Server) validateGrillAttemptRevision(runID, attemptID string, stage con
 		}
 		combined.WriteString("\n\n")
 	}
-	return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, combined.String(), stage.RequiredSections)
+	return humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, combined.String(), stage.SectionsRequired())
 }
 
 // currentAttemptOutput returns the latest human revision of an agent output or

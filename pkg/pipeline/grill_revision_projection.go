@@ -89,7 +89,7 @@ func (rs *runState) projectGrillRevisionInputs(replayed evidence.ReplayedRun, so
 		return nil
 	}
 	stage, ok := rs.p.templateStage(sourceStage)
-	if !ok || stage.Check == nil || stage.Check.Kind != "agent" || stage.Check.Mode != grillMode {
+	if !ok || stage.GrillCheck() == nil {
 		return nil
 	}
 	selection, err := rs.grillRevisionSelection(replayed, sourceStage, attemptID)

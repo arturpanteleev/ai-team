@@ -65,6 +65,9 @@ type Config struct {
 	Model          string          `yaml:"model,omitempty"`
 	Effort         string          `yaml:"effort,omitempty"`
 	StageTimeout   string          `yaml:"stage_timeout,omitempty"`
+	// GateConcurrency limits how many gates of one group run at the same time
+	// (pkg/gatesched). Zero means gatesched.DefaultMaxParallel.
+	GateConcurrency int `yaml:"gate_concurrency,omitempty" json:",omitempty"`
 	// PreflightTimeout — бюджет одной внешней команды preflight (опрос версии
 	// CLI-рантайма, git, gh). Холодный старт CLI-рантайма на порядок дороже
 	// прогретого, поэтому бюджет вынесен в конфигурацию: слишком тесный делает
@@ -725,7 +728,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"schema_version": true, "template": true, "title": true,
 		"stall_after": true, "forbid_self_approval": true, "stages": true, "returns": true,
 		"max_visits": true, "checks": true, "cli": true, "model": true,
-		"effort": true, "stage_timeout": true, "preflight_timeout": true,
+		"effort": true, "stage_timeout": true, "preflight_timeout": true, "gate_concurrency": true,
 		"delivery_timeout": true, "containment": true, "usage": true,
 		"tree_hash": true, "budget": true, "auto_pickup": true, "tracker": true, "cicd": true, "notifications": true, "redaction": true, "retention": true,
 		"mcp_servers": true, "executor_adapters": true,
@@ -748,6 +751,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Model              string                             `yaml:"model"`
 		Effort             string                             `yaml:"effort"`
 		StageTimeout       string                             `yaml:"stage_timeout"`
+		GateConcurrency    int                                `yaml:"gate_concurrency"`
 		PreflightTimeout   string                             `yaml:"preflight_timeout"`
 		DeliveryTimeout    string                             `yaml:"delivery_timeout"`
 		Containment        *ContainmentConfig                 `yaml:"containment"`
@@ -779,8 +783,17 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		case version == CurrentSchemaVersion:
 			// v6: the gate chain is the single source; the absence of a human
 			// gate means no confirmation (v5's per-result default is gone).
-			c.Stages[index].applyGateProjection()
 		}
+	}
+	if version == CurrentSchemaVersion {
+		// v6: confirmation exists only as a human_approval gate; a stage that
+		// declares no chain has no gates and no per-result default.
+		for index := range c.Stages {
+			if len(c.Stages[index].ExitGateGroups) == 0 {
+				c.Stages[index].Confirm = "auto"
+			}
+		}
+		c.NormalizeGates()
 	}
 	c.Returns = raw.Returns
 	c.MaxVisits = raw.MaxVisits
@@ -791,6 +804,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Model = raw.Model
 	c.Effort = raw.Effort
 	c.StageTimeout = raw.StageTimeout
+	c.GateConcurrency = raw.GateConcurrency
 	c.PreflightTimeout = raw.PreflightTimeout
 	c.DeliveryTimeout = raw.DeliveryTimeout
 	c.Containment = raw.Containment
@@ -1122,6 +1136,9 @@ func (c *Config) Validate(reg AgentLookup) error {
 		if duration, err := time.ParseDuration(c.StageTimeout); err != nil || duration <= 0 {
 			errs = append(errs, fmt.Sprintf("stage_timeout %q не парсится (пример: 30m)", c.StageTimeout))
 		}
+	}
+	if c.GateConcurrency < 0 || c.GateConcurrency > 64 {
+		errs = append(errs, fmt.Sprintf("gate_concurrency %d вне диапазона 1..64 (0 — значение по умолчанию)", c.GateConcurrency))
 	}
 	if c.PreflightTimeout != "" {
 		if duration, err := time.ParseDuration(c.PreflightTimeout); err != nil || duration <= 0 {

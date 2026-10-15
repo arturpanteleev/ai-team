@@ -326,9 +326,6 @@ func (c *Config) MarshalYAML() (any, error) {
 		if c.SchemaVersion == CurrentSchemaVersion {
 			stage.ExitGateGroups = stage.EffectiveGateGroups()
 			stage.RequiredSections, stage.Check, stage.Confirm = nil, nil, ""
-		} else if len(stage.ExitGateGroups) > 0 {
-			stage.applyGateProjection()
-			stage.ExitGateGroups = nil
 		}
 		out.Stages[i] = stage
 	}

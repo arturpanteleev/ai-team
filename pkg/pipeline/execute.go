@@ -31,6 +31,9 @@ import (
 // execute.go — исполнение графа workflow и lifecycle-переходы.
 
 func (rs *runState) execute(ctx context.Context) error {
+	if err := rs.recordGatePins(); err != nil {
+		return err
+	}
 	rs.replayTypedEvents()
 	if err := rs.applyBudgetAllowanceGrant(); err != nil {
 		return err

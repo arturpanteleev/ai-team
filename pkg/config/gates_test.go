@@ -71,14 +71,15 @@ stages:
 	if len(stage.ExitGateGroups) != 3 || stage.ExitGateGroups[1][0].InstanceName() != "spec_llm_review" {
 		t.Fatalf("groups not decoded: %+v", stage.ExitGateGroups)
 	}
-	// Engine projection equals the legacy product_spec shape.
-	if !reflect.DeepEqual(stage.RequiredSections, []string{"Критерии приёмки"}) ||
-		stage.Check == nil || stage.Check.Kind != "agent" || stage.Check.Agent != "spec-checker" || stage.Check.Mode != "grill" || stage.Check.MaxRounds != 3 ||
-		stage.Confirm != "required" {
-		t.Fatalf("projection differs from legacy shape: %+v", stage)
+	// The derived accessors describe the legacy product_spec shape.
+	grill := stage.GrillCheck()
+	if !reflect.DeepEqual(stage.SectionsRequired(), []string{"Критерии приёмки"}) ||
+		grill == nil || grill.Kind != "agent" || grill.Agent != "spec-checker" || grill.Mode != "grill" || grill.MaxRounds != 3 ||
+		!stage.NeedsConfirmation() {
+		t.Fatalf("accessors differ from the legacy shape: %+v", stage)
 	}
-	if cfg.Stages[1].Confirm != "auto" {
-		t.Fatalf("a stage without a human gate must not require confirmation, got %q", cfg.Stages[1].Confirm)
+	if cfg.Stages[1].NeedsConfirmation() {
+		t.Fatal("a stage without a human gate must not require confirmation")
 	}
 }
 
@@ -207,8 +208,8 @@ stages:
 	if len(cfg.Stages[2].EffectiveGateGroups()) != 0 {
 		t.Fatalf("a stage selects gates explicitly: none selected means no gates")
 	}
-	if cfg.Stages[1].Confirm != "auto" || cfg.Stages[0].Confirm != "required" {
-		t.Fatalf("confirm projection: review=%s impl=%s", cfg.Stages[0].Confirm, cfg.Stages[1].Confirm)
+	if cfg.Stages[1].NeedsConfirmation() || !cfg.Stages[0].NeedsConfirmation() {
+		t.Fatalf("confirmation: review=%v impl=%v", cfg.Stages[0].NeedsConfirmation(), cfg.Stages[1].NeedsConfirmation())
 	}
 }
 
@@ -217,37 +218,123 @@ func TestSameDefinitionTwiceNeedsDistinctNames(t *testing.T) {
       - - {gate: required_sections, version: 1, name: core, params: {sections: [A]}}
         - {gate: required_sections, version: 1, name: extra, params: {sections: [B]}}
 `))
-	err := cfg.Validate(gateAgents())
-	// Valid shape, but the pre-scheduler engine cannot run two section gates.
-	if err == nil || !strings.Contains(err.Error(), "не более одного required_sections") {
-		t.Fatalf("got %v", err)
+	// The scheduler runs both section gates; distinct names are all it needs.
+	if err := cfg.Validate(gateAgents()); err != nil {
+		t.Fatalf("two instances of one definition with distinct names must be valid: %v", err)
 	}
-	if strings.Contains(err.Error(), "повторяется на этапе") {
-		t.Fatalf("distinct names must not be reported as duplicates: %v", err)
+	if got := cfg.Stages[0].SectionsRequired(); !reflect.DeepEqual(got, []string{"A", "B"}) {
+		t.Fatalf("sections = %v", got)
 	}
 }
 
-func TestAdvisoryAndUnexecutableChainsFailClosedUntilTheScheduler(t *testing.T) {
+func TestMixedKindsInOneGroupAndRepeatedAgentGates(t *testing.T) {
+	cfg := mustParse(t, v6Doc(`    exit_gate_groups:
+      - - {gate: required_sections, version: 1, params: {sections: [A]}}
+        - {gate: verdict_marker, version: 1}
+        - {gate: agent_review, version: 1, name: first_review, params: {agent: verifier}}
+      - - {gate: agent_review, version: 1, name: second_review, params: {agent: reviewer}}
+      - [human_approval@1]
+`))
+	if err := cfg.Validate(gateAgents()); err != nil {
+		t.Fatalf("arbitrary chains of code, LLM and human gates must be accepted: %v", err)
+	}
+	if got := len(cfg.Stages[0].AgentChecks()); got != 2 {
+		t.Fatalf("agent checks = %d", got)
+	}
+}
+
+func TestAdvisoryAndHumanGateOrderFailClosedUntilTheirTasks(t *testing.T) {
 	cfg := mustParse(t, v6Doc("    exit_gate_groups:\n      - - {gate: verdict_marker, version: 1, mode: advisory}\n"))
 	err := cfg.Validate(gateAgents())
-	if err == nil || !strings.Contains(err.Error(), "advisory пока не исполняется") {
+	if err == nil || !strings.Contains(err.Error(), "advisory пока не доступен") {
 		t.Fatalf("advisory must not silently run as required: %v", err)
 	}
 	cfg = mustParse(t, v6Doc("    exit_gate_groups:\n      - [human_approval@1]\n      - [verdict_marker@1]\n"))
-	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "порядок групп пока фиксирован") {
+	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "human_approval допускается только в последней группе") {
+		t.Fatalf("got %v", err)
+	}
+	cfg = mustParse(t, v6Doc("    exit_gate_groups:\n      - - {gate: agent_review, version: 1, name: a, params: {agent: verifier, mode: grill}}\n        - {gate: agent_review, version: 1, name: b, params: {agent: reviewer, mode: grill}}\n"))
+	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "не более одного agent_review с mode grill") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestOutOfSyncProjectionIsRejected(t *testing.T) {
+func TestChainAndLegacyFieldsTogetherAreRejected(t *testing.T) {
 	cfg := mustParse(t, v6Doc("    exit_gate_groups:\n      - [verdict_marker@1]\n"))
-	cfg.Stages[0].Confirm = "required"
-	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "рассогласованы") {
+	cfg.Stages[0].RequiredSections = []string{"A"}
+	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "заданы одновременно") {
 		t.Fatalf("got %v", err)
 	}
 	cfg.NormalizeGates()
 	if err := cfg.Validate(gateAgents()); err != nil {
-		t.Fatalf("NormalizeGates must restore consistency: %v", err)
+		t.Fatalf("NormalizeGates must clear the legacy fields: %v", err)
+	}
+}
+
+// A v5 file that validated before the gate library existed keeps validating:
+// padded section titles are normalized, and a rule that does not fit the
+// result type is not an applicability error (it reports at run time).
+func TestV5ValidationIsNotStricterThanBefore(t *testing.T) {
+	doc := `schema_version: 5
+template: legacy
+title: Legacy
+stages:
+  - id: spec
+    title: Spec
+    function: po
+    result: md
+    required_sections: ["  Критерии приёмки ", "Критерии приёмки", "Риски"]
+    check: {kind: hard, rules: [verdict_marker]}
+  - id: impl
+    title: Impl
+    function: developer
+    result: link
+    link_kind: pr
+    executor: agent
+    agent: coder
+    check: {kind: hard, rules: [verdict_marker]}
+  - id: ship
+    title: Ship
+    function: qa
+    result: md
+    check: {kind: hard, rules: [pr_exists]}
+`
+	cfg := mustParse(t, doc)
+	if err := cfg.Validate(gateAgents()); err != nil {
+		t.Fatalf("a v5 file valid before the library must stay valid: %v", err)
+	}
+	groups := cfg.Stages[0].EffectiveGateGroups()
+	if got := gatelib.StringListParam(groups[0][0].Params, "sections"); !reflect.DeepEqual(got, []string{"Критерии приёмки", "Риски"}) {
+		t.Fatalf("sections not normalized: %q", got)
+	}
+}
+
+func TestV5GateErrorsAreMarkedAsTranslated(t *testing.T) {
+	doc := `schema_version: 5
+template: legacy
+title: Legacy
+stages:
+  - id: spec
+    title: Spec
+    function: po
+    result: md
+    check: {kind: hard, rules: [no_such_rule]}
+`
+	cfg := mustParse(t, doc)
+	err := cfg.Validate(gateAgents())
+	if err == nil || !strings.Contains(err.Error(), "no_such_rule") || !strings.Contains(err.Error(), "(из required_sections/check v5)") {
+		t.Fatalf("a translated v5 path must be marked: %v", err)
+	}
+}
+
+func TestGateConcurrencyIsValidated(t *testing.T) {
+	good := mustParse(t, v6Doc("")+"gate_concurrency: 8\n")
+	if err := good.Validate(gateAgents()); err != nil || good.GateConcurrency != 8 {
+		t.Fatalf("concurrency %d err %v", good.GateConcurrency, err)
+	}
+	bad := mustParse(t, v6Doc("")+"gate_concurrency: 100\n")
+	if err := bad.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "gate_concurrency") {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -360,9 +447,11 @@ func TestIdeaToProdV5AndV6AreEquivalent(t *testing.T) {
 			}
 			for i := range fromV5.Stages {
 				a, b := fromV5.Stages[i], fromV6.Stages[i]
-				if !reflect.DeepEqual(a.RequiredSections, b.RequiredSections) || !reflect.DeepEqual(a.Check, b.Check) || a.Confirm != b.Confirm {
-					t.Fatalf("stage %s differs:\n v5 sections=%v check=%+v confirm=%s\n v6 sections=%v check=%+v confirm=%s",
-						a.ID, a.RequiredSections, a.Check, a.Confirm, b.RequiredSections, b.Check, b.Confirm)
+				if !reflect.DeepEqual(a.SectionsRequired(), b.SectionsRequired()) || !reflect.DeepEqual(a.AgentChecks(), b.AgentChecks()) ||
+					!reflect.DeepEqual(a.CodeRules(), b.CodeRules()) || a.NeedsConfirmation() != b.NeedsConfirmation() {
+					t.Fatalf("stage %s differs:\n v5 sections=%v agents=%+v rules=%v confirm=%v\n v6 sections=%v agents=%+v rules=%v confirm=%v",
+						a.ID, a.SectionsRequired(), a.AgentChecks(), a.CodeRules(), a.NeedsConfirmation(),
+						b.SectionsRequired(), b.AgentChecks(), b.CodeRules(), b.NeedsConfirmation())
 				}
 				if !reflect.DeepEqual(a.EffectiveGateGroups(), b.EffectiveGateGroups()) {
 					t.Fatalf("stage %s effective gate groups differ: %+v vs %+v", a.ID, a.EffectiveGateGroups(), b.EffectiveGateGroups())

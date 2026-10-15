@@ -4,7 +4,9 @@
 
 Контракт гейта: определение в общей версионированной библиотеке, ссылка этапа с
 точной версией и параметрами, группы, раздельные результаты исполнения и
-вердикта. Исполнение групп планировщиком определяется отдельной возможностью.
+вердикта, а также исполнение цепочки гейтов: последовательные группы,
+параллельные гейты группы, фиксация хеша результата, durable-журнал попыток и
+восстановление после перезапуска.
 
 ## Requirements
 
@@ -118,3 +120,128 @@ earlier attempt. A required attempt MUST block unless it succeeded with `pass` o
   `succeeded` with `fail`
 - **ТОГДА** it MUST block the transition
 - **И** an advisory attempt with the same outcome MUST NOT block
+
+### Requirement: Groups run sequentially and gates of a group run in parallel
+
+The controller MUST execute the exit chain of a stage group by group in the
+listed order, and MUST start the gates of one group together, running at most
+the configured concurrency limit (`gate_concurrency`, default 4, range 1 to 64)
+at the same time. A group MAY mix gate kinds (code and LLM) and a stage MAY have
+several LLM gates; a `human_approval` gate MUST be the transition approval of the
+stage and therefore MUST NOT precede an automatic group. The next group MUST
+start only after every gate of the previous group reached a terminal outcome and
+every required gate passed (or was `not_applicable`). When a required gate does
+not pass, the following groups MUST NOT start, but every gate of the current
+group that was started MUST be awaited and its own outcome recorded. An advisory
+gate MUST be awaited with its group but MUST NOT decide whether the chain
+continues. LLM gates of one group MUST run one at a time.
+
+#### Scenario: Dependent gate after a failure
+
+- **КОГДА** a chain has two gates in the first group and a third gate in the
+  second group and one of the first two returns `fail`
+- **ТОГДА** both first gates MUST finish with their own outcomes
+- **И** the third gate MUST NOT start and MUST NOT have an attempt
+
+#### Scenario: Dependent gate after success
+
+- **КОГДА** both gates of the first group pass
+- **ТОГДА** the gate of the second group MUST start exactly once, after both
+  first gates finished
+
+#### Scenario: Concurrency limit
+
+- **КОГДА** a group has more gates than `gate_concurrency`
+- **ТОГДА** no more than `gate_concurrency` of them MUST run at the same time
+
+### Requirement: A wave is bound to one result version and an edit voids it
+
+A wave MUST be bound to one result version: the SHA-256 of the declared outputs
+of the checked stage attempt. The controller does not physically forbid writes to
+the result files (other processes own them); the binding is detective and
+fail-closed. The controller MUST verify before the wave, after
+every gate, and at the end of the wave that the hash did not change. A change MUST
+be detected and MUST void the wave: no outcome of it MAY be used, no following group MAY start, and a
+`gate_wave_aborted` record MUST be written. A recorded outcome MUST be read only
+for the exact stage, visit, stage attempt, and hash of the wave: an outcome of an
+earlier version MUST NOT count for a new one, so a new version MUST run every
+group again from the first.
+
+#### Scenario: Result edited during the wave
+
+- **КОГДА** the checked result changes while gates run
+- **ТОГДА** the wave MUST be aborted with an error naming the change
+- **И** the next group MUST NOT start
+
+#### Scenario: New version after a partial success
+
+- **КОГДА** the first group passed for hash A and the result then changes to hash B
+- **ТОГДА** every group MUST run again for hash B, and the outcomes recorded for
+  hash A MUST remain in the history without deciding the transition of hash B
+
+### Requirement: Every attempt is a durable record
+
+Before a gate is invoked the controller MUST record `gate_attempt_started`, and
+when the gate reaches a terminal state it MUST record `gate_attempt_finished`; a
+gate that waits for an external answer MUST be recorded as `gate_attempt_waiting`
+and keep the same attempt. The records MUST be events of the hash-chained run
+log carrying the task, stage, visit, stage attempt, result hash, gate ID, version
+and instance name, mode, group, executor kind, attempt ID, start and finish
+times, technical `execution`, content `verdict`, and reason. The attempt ID MUST
+be deterministic for the wave key, gate instance and ordinal, and a terminal
+record MUST be final: a redelivered earlier record MUST NOT reopen the attempt.
+When the controller cannot write the start record it MUST NOT invoke the gate.
+At task start the controller MUST record `gate_pins_recorded` with the ID,
+version, kind and digest of every pinned definition, and on a later start MUST
+refuse to continue when a definition's digest differs from the recorded one.
+
+#### Scenario: History of attempts
+
+- **КОГДА** a wave finishes
+- **ТОГДА** the run log MUST show, for every attempt, its start and finish times
+  and its execution and verdict, and a failed gate MUST be distinguishable from
+  an errored or timed-out one
+
+#### Scenario: Pins at task start
+
+- **КОГДА** a task starts
+- **ТОГДА** exactly one `gate_pins_recorded` record MUST list the pinned
+  definitions with their digests
+
+### Requirement: Restart neither repeats nor loses gate work
+
+After a restart or a redelivered resume the controller MUST NOT invoke a gate
+whose latest attempt for the wave already succeeded, and MUST NOT retry a
+recorded technical failure (`error`, `timeout`) unless a retry of exactly that
+gate was requested; a retry MUST add a new attempt and MUST keep the earlier one.
+An attempt recorded as started without a terminal record MUST be closed as
+`canceled` with a reason stating the interruption, and a new attempt MUST run.
+An attempt that waits for an answer MUST be continued, not restarted. A panic of
+a gate MUST NOT be converted into an outcome.
+
+#### Scenario: Restart after a completed gate
+
+- **КОГДА** the controller restarts after the first group finished
+- **ТОГДА** the gates of the first group MUST NOT be invoked again and the wave
+  MUST continue with the next group
+
+#### Scenario: Interrupted attempt
+
+- **КОГДА** an attempt has a start record and no finish record at restart
+- **ТОГДА** it MUST be recorded as `canceled` and a new attempt MUST run
+
+### Requirement: Gate outcomes drive the legacy stage-check flow
+
+The controller MUST project a finished wave onto the stage-check records so that
+stages keep their behavior: a failed or errored required gate MUST block the
+transition and raise a `check_decision` request with the report of the wave and
+the kind of the gates that blocked (`hard` for code gates, `agent` for LLM
+gates); `check_started`, `check_passed`, `check_failed`, and `check_error` MUST
+carry the hash of the checked result; a recorded check for another hash MUST be
+ignored. A stage whose chain has no automatic gate MUST run no check.
+
+#### Scenario: Failed code gate blocks the transition
+
+- **КОГДА** a required code gate returns `fail`
+- **ТОГДА** the transition MUST be blocked pending a `check_decision` and the
+  report MUST list the gates that did not start

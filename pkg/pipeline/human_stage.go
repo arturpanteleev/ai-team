@@ -627,7 +627,7 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 	if decision.Action == "skip" {
 		return nil, errors.New("skipped human stage has no result artifact")
 	}
-	if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, decision.Comment, stage.RequiredSections); err != nil {
+	if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, decision.Comment, stage.SectionsRequired()); err != nil {
 		return nil, err
 	}
 	switch stage.Result {

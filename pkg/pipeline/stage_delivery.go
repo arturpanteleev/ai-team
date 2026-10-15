@@ -262,11 +262,10 @@ func (r singleApprovalReader) List(runID string) ([]approval.PendingApproval, er
 // delivery stages retain the terminal-delivery behavior and do not publish a
 // PR before their graph reaches the existing delivery point.
 func stageRequiresControllerPRDelivery(stage config.TemplateStage) bool {
-	if stage.Delivery == nil || stage.Result != "link" || stage.LinkKind != "pr" || stage.Executor != "agent" ||
-		stage.Check == nil || stage.Check.Kind != "hard" {
+	if stage.Delivery == nil || stage.Result != "link" || stage.LinkKind != "pr" || stage.Executor != "agent" {
 		return false
 	}
-	for _, rule := range stage.Check.Rules {
+	for _, rule := range stage.CodeRules() {
 		if rule == "pr_exists" {
 			return true
 		}

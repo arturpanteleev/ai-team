@@ -2,12 +2,17 @@ package pipeline
 
 import (
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/gatesched"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 )
 
 var taskWarningEventTypes = map[string]struct{}{
 	"check_error": {}, "check_overridden": {}, "description_missing": {}, "stage_skipped": {},
 	"budget_exceeded": {},
+	// The gate attempt history: every attempt shows its start, wait and
+	// outcome with times in the task feed, and is repaired from evidence.
+	gatesched.EventAttemptStarted: {}, gatesched.EventAttemptWaiting: {}, gatesched.EventAttemptFinished: {},
+	gatesched.EventWaveAborted: {},
 }
 
 // eventRecorder is optional so external Recorder implementations retain

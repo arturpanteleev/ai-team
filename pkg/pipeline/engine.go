@@ -109,7 +109,7 @@ func (e *RunEngine) pinRunMode(runID, targetDir, mode string) error {
 		if stage.Agent != "" {
 			stage.Executor = "agent"
 		}
-		stage.Confirm = "auto"
+		stage.DisableConfirmation()
 	}
 	var registry config.AgentLookup
 	if e.pipeline.reg != nil {

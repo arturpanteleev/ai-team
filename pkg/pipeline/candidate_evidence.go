@@ -567,11 +567,8 @@ func (rs *runState) preparePRDiffInput(ctx context.Context, reviewerStage string
 }
 
 func (rs *runState) prIdentityFromAcceptedChecks(stage config.TemplateStage, result notifier.StageResult) (*prchecks.PullRequest, error) {
-	if stage.Check == nil {
-		return nil, nil
-	}
 	projectRules := false
-	for _, rule := range stage.Check.Rules {
+	for _, rule := range stage.CodeRules() {
 		if rule == "project_checks" || rule == "pr_checks_green" {
 			projectRules = true
 			break

@@ -15,6 +15,11 @@ type StageContext struct {
 	Result string
 	// LinkKind is pr, build or other for result link.
 	LinkKind string
+	// Lenient skips the result-type and link-kind applicability checks. It is
+	// used for chains translated from schema v5, which never checked whether a
+	// rule fits the result type (the rule reports skipped or failed at run
+	// time). Parameters are still validated.
+	Lenient bool
 }
 
 // Resolved is a reference bound to its exact pinned definition.
@@ -35,10 +40,10 @@ func (r *Registry) Resolve(ref workflow.GateRef, stage StageContext) (Resolved, 
 	if err != nil {
 		return Resolved{}, err
 	}
-	if len(def.ResultTypes) > 0 && !contains(def.ResultTypes, stage.Result) {
+	if !stage.Lenient && len(def.ResultTypes) > 0 && !contains(def.ResultTypes, stage.Result) {
 		return Resolved{}, fmt.Errorf("гейт %s применим только к result %s, у этапа result %q", def.Ref(), strings.Join(def.ResultTypes, "|"), stage.Result)
 	}
-	if stage.Result == "link" && len(def.LinkKinds) > 0 && !contains(def.LinkKinds, stage.LinkKind) {
+	if !stage.Lenient && stage.Result == "link" && len(def.LinkKinds) > 0 && !contains(def.LinkKinds, stage.LinkKind) {
 		return Resolved{}, fmt.Errorf("гейт %s применим только к link_kind %s, у этапа link_kind %q", def.Ref(), strings.Join(def.LinkKinds, "|"), stage.LinkKind)
 	}
 	if err := ValidateParams(def, ref.Params); err != nil {

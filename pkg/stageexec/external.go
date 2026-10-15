@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arturpanteleev/ai-team/pkg/dockerrun"
 	"github.com/arturpanteleev/ai-team/pkg/process"
 	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -61,13 +62,16 @@ type AdapterSpec struct {
 	// EnvAllow lists the only controller environment variables handed to the
 	// program. Everything else is dropped.
 	EnvAllow []string `yaml:"env_allow,omitempty"`
+	// Docker runs the program in a container instead of on the host: argv is
+	// then the command inside the image. The JSON contract is unchanged.
+	Docker *DockerSpec `yaml:"docker,omitempty"`
 }
 
 // UnmarshalYAML rejects unknown keys: a typo in a limit name would otherwise
 // silently run the program without that limit.
 func (s *AdapterSpec) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.MappingNode {
-		allowed := map[string]bool{"argv": true, "timeout": true, "max_output_bytes": true, "max_result_bytes": true, "env_allow": true}
+		allowed := map[string]bool{"argv": true, "timeout": true, "max_output_bytes": true, "max_result_bytes": true, "env_allow": true, "docker": true}
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			if key := node.Content[index].Value; !allowed[key] {
 				return fmt.Errorf("config: executor adapter: неизвестный ключ %q", key)
@@ -131,6 +135,16 @@ func (s AdapterSpec) Validate(name string) error {
 		}
 		seen[env] = true
 	}
+	if s.Docker != nil {
+		if err := s.Docker.Validate(); err != nil {
+			add("docker: %v", err)
+		}
+		for _, env := range s.EnvAllow {
+			if dockerrun.ClientEnvName(env) {
+				add("env_allow: %q зарезервирована клиентом docker и не передаётся в контейнер", env)
+			}
+		}
+	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
 	}
@@ -174,6 +188,18 @@ type Launch struct {
 	Stdin  []byte
 	Stdout *LimitedBuffer
 	Stderr *LimitedBuffer
+	// Request is the stage request the launch serves. A container launcher
+	// rebuilds the JSON request from it with container paths, so no host path
+	// reaches the program.
+	Request Request
+	// Provenance is filled by the launcher with what the controller observed
+	// about the execution environment (image, network, mounts). It is merged
+	// into the attempt metadata and wins over program-supplied keys.
+	Provenance map[string]string
+	// StagedFiles is filled by a container launcher with result files the
+	// program wrote (output name to bytes). Execute writes them to the declared
+	// paths only after the response passed the contract check.
+	StagedFiles map[string][]byte
 }
 
 // HostLauncher runs the program on the host under process-group supervision.
@@ -204,7 +230,11 @@ type External struct {
 
 // NewExternal creates the host executor for an adapter spec.
 func NewExternal(name string, spec AdapterSpec) *External {
-	return &External{name: name, spec: spec, launcher: HostLauncher{}, environ: os.Environ}
+	var launcher Launcher = HostLauncher{}
+	if spec.Docker != nil {
+		launcher = DockerLauncher{Settings: *spec.Docker}
+	}
+	return &External{name: name, spec: spec, launcher: launcher, environ: os.Environ}
 }
 
 // WithLauncher replaces the process launcher (container executors, tests).
@@ -266,19 +296,7 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	if request.WorkDir == "" {
 		return result, errors.New("stage executor: workdir обязателен")
 	}
-	doc := requestDocument{
-		SchemaVersion: ProtocolVersion, RunID: request.RunID, AttemptID: request.AttemptID,
-		Stage: request.Stage, Feature: request.Feature, Task: request.Task, Instructions: request.Instructions,
-		WorkDir: request.WorkDir, ArtifactRoot: request.ArtifactRoot, Outputs: request.Outputs,
-		Mutation: request.Mutation, AllowedPaths: request.AllowedPaths,
-		Inputs: make([]requestInput, 0, len(request.Inputs)),
-	}
-	if doc.Outputs == nil {
-		doc.Outputs = []Output{}
-	}
-	for _, input := range request.Inputs {
-		doc.Inputs = append(doc.Inputs, requestInput{Name: input.Name, Path: input.Path, Size: input.Size})
-	}
+	doc := newRequestDocument(request)
 	stdin, err := jsonMarshal(doc)
 	if err != nil {
 		return result, fmt.Errorf("stage executor: сериализация запроса: %w", err)
@@ -290,9 +308,15 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	runCtx, cancel := context.WithTimeout(ctx, e.spec.timeout())
 	defer cancel()
 	started := time.Now()
+	provenance := map[string]string{}
+	staged := map[string][]byte{}
 	runErr := e.launcher.Run(runCtx, Launch{
 		Argv: e.spec.Argv, Dir: request.WorkDir, Env: env, Stdin: stdin, Stdout: stdout, Stderr: stderr,
+		Request: request, Provenance: provenance, StagedFiles: staged,
 	})
+	if len(provenance) > 0 {
+		result.Metadata = provenance
+	}
 	result.LogPath = e.writeLog(request, started, runErr, stdout, stderr, secrets)
 
 	if runErr != nil {
@@ -320,6 +344,12 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	if err != nil {
 		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
 	}
+	for key, value := range provenance {
+		if metadata == nil {
+			metadata = map[string]string{}
+		}
+		metadata[key] = value
+	}
 	result.Metadata = metadata
 	result.Summary = truncateString(redactText(parsed.Summary, secrets), maxSummaryBytes)
 	result.Verdict = strings.TrimSpace(parsed.Verdict)
@@ -334,10 +364,33 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	default:
 		return result, fmt.Errorf("внешний исполнитель %s: status %q недопустим (ok|error)", e.name, parsed.Status)
 	}
+	if err := validateContentOutputs(request, parsed.Outputs); err != nil {
+		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
+	}
 	if err := writeContentOutputs(request, parsed.Outputs); err != nil {
 		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
 	}
+	if err := writeStagedFiles(request, staged); err != nil {
+		return result, fmt.Errorf("внешний исполнитель %s: %w", e.name, err)
+	}
 	return result, nil
+}
+
+func newRequestDocument(request Request) requestDocument {
+	doc := requestDocument{
+		SchemaVersion: ProtocolVersion, RunID: request.RunID, AttemptID: request.AttemptID,
+		Stage: request.Stage, Feature: request.Feature, Task: request.Task, Instructions: request.Instructions,
+		WorkDir: request.WorkDir, ArtifactRoot: request.ArtifactRoot, Outputs: request.Outputs,
+		Mutation: request.Mutation, AllowedPaths: request.AllowedPaths,
+		Inputs: make([]requestInput, 0, len(request.Inputs)),
+	}
+	if doc.Outputs == nil {
+		doc.Outputs = []Output{}
+	}
+	for _, input := range request.Inputs {
+		doc.Inputs = append(doc.Inputs, requestInput{Name: input.Name, Path: input.Path, Size: input.Size})
+	}
+	return doc
 }
 
 // buildEnv returns the process environment and the secret values to redact.
@@ -415,6 +468,24 @@ func (e *External) writeLog(request Request, started time.Time, runErr error, st
 		return ""
 	}
 	return path
+}
+
+// validateContentOutputs checks every content output before any is written, so
+// a response with one bad entry writes nothing.
+func validateContentOutputs(request Request, outputs map[string]resultOutput) error {
+	declared := make(map[string]bool, len(request.Outputs))
+	for _, output := range request.Outputs {
+		declared[output.Name] = true
+	}
+	for name, output := range outputs {
+		if !declared[name] {
+			return fmt.Errorf("результат содержит необъявленный output %q", name)
+		}
+		if output.Content == nil {
+			return fmt.Errorf("output %q: ожидается content", name)
+		}
+	}
+	return nil
 }
 
 func writeContentOutputs(request Request, outputs map[string]resultOutput) error {

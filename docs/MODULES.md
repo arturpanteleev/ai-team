@@ -233,7 +233,7 @@ subject. Delivery исполняет уже проверенный план. Н�
 
 ### stageexec — Исполнитель этапа
 
-Интерфейс `StageExecutor` создаёт результат этапа: `InternalAgent` оборачивает `runtime.Runtime`, `External` запускает доверенный argv из `executor_adapters` по JSON-контракту (лимиты времени и вывода, allowlist окружения, redaction лога). Отделён от гейтов: исполнитель только создаёт выходы, а тип результата, mutation scope и verdict проверяет контроллер.
+Интерфейс `StageExecutor` создаёт результат этапа: `InternalAgent` оборачивает `runtime.Runtime`, `External` запускает доверенный argv из `executor_adapters` по JSON-контракту (лимиты времени и вывода, allowlist окружения, redaction лога); при `docker:` в адаптере тот же контракт исполняет `DockerLauncher` (pkg/dockerrun: входы только на чтение, приватный каталог результата, сеть none, образ по digest). Отделён от гейтов: исполнитель только создаёт выходы, а тип результата, mutation scope и verdict проверяет контроллер.
 
 Исходники: [pkg/stageexec](../pkg/stageexec/).
 

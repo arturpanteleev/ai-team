@@ -1164,22 +1164,10 @@ func looksBinary(data []byte) bool {
 	return false
 }
 
-func (rs *runState) runAgentCheck(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) stagecheck.Report {
-	agentName := stage.Check.Agent
-	output, err := rs.runCheckerAgent(ctx, stage, result)
-	if err != nil {
-		return stagecheck.Report{Kind: "agent", Status: "error", Notes: err.Error()}
-	}
-	return stagecheck.RunAgent(stage.ID, agentName, output)
-}
-
-// runCheckerAgent запускает агента-проверяющего на результате этапа и
+// runCheckerAgentWithInputs запускает агента-проверяющего на результате этапа и
 // возвращает его md-отчёт. Проверяющий получает свои декларированные входы
-// плюс выходы проверяемого этапа; отчёт читается из декларированных выходов.
-func (rs *runState) runCheckerAgent(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) (string, error) {
-	return rs.runCheckerAgentWithInputs(ctx, stage, result, result.Outputs, 0)
-}
-
+// плюс выходы проверяемого этапа (checkInputs); отчёт читается из
+// декларированных выходов. Контракт вердикта и повторы — pkg/llmgate.
 func (rs *runState) runCheckerAgentWithInputs(ctx context.Context, stage config.TemplateStage, result notifier.StageResult, checkInputs []runtime.Artifact, checkerRound int) (string, error) {
 	check := stage.Check
 	definition, err := rs.p.reg.Load(check.Agent)

@@ -12,6 +12,8 @@
   - `verdict/` — verdict-контракт (парсер вердиктов, BLOCKED-протокол)
   - `runtime/` — Runtime interface + AgentCLI (промпт, логи, model/effort)
   - `stageexec/` — StageExecutor: внутренний агент и внешний исполнитель этапа
+  - `llmgate/` — контракт LLM-гейта: схема вердикта, попытки, error вместо pass
+  - `humandecision/` — единый сервис решения человека (роли, точный хеш, самоподтверждение, аудит)
   - `agent/` — Agent struct + Registry
   - `pipeline/` — оркестрация, enforcement вердиктов, гейты, loopback
   - `workflow/` — доменные state/outcome типы и чистые переходы

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/arturpanteleev/ai-team/pkg/gatelib"
+	"github.com/arturpanteleev/ai-team/pkg/llmgate"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -238,9 +239,13 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 // validateChainConstraints enforces what the controller can honestly execute
 // today. They are properties of the executor, not of the gate library:
 //
-//   - a human_approval gate is realized by the transition approval of the
-//     stage, which happens after the whole automatic chain, so it can only sit
-//     in the last group (S05 moves the human decision into the chain);
+//   - a human_approval gate is the transition decision of the stage: it is
+//     requested only after every automatic gate of the chain ended, so it can
+//     only sit in the last group; a gate that shares that group with
+//     automatic ones simply waits for them (the human is asked after the
+//     automatic gates of the group end). An automatic gate after the human
+//     decision would need a second pause inside the transition and is not
+//     offered (see docs/reference/config.md);
 //   - agent_review with mode grill keeps its question rounds in per-stage
 //     approvals, so one stage can have at most one;
 //   - mode advisory is carried by the contract and honored by the scheduler,
@@ -256,7 +261,7 @@ func (c *Config) validateChainConstraints(reg AgentLookup, prefix string, groups
 			switch ref.Gate {
 			case gatelib.GateHumanApproval:
 				if i != len(groups)-1 {
-					add("%s: %s: human_approval допускается только в последней группе (решение человека — барьер после автоматических проверок)", prefix, path)
+					add("%s: %s: human_approval допускается только в последней группе: решение человека — переход этапа, он запрашивается после всех автоматических гейтов, а гейт после решения человека не исполняется", prefix, path)
 				}
 			case gatelib.GateAgentReview:
 				agent := gatelib.StringParam(ref.Params, "agent")
@@ -268,8 +273,16 @@ func (c *Config) validateChainConstraints(reg AgentLookup, prefix string, groups
 					if grills > 1 {
 						add("%s: %s: на этапе допускается не более одного agent_review с mode grill", prefix, path)
 					}
+					for _, name := range []string{"verdict_schema", "max_attempts"} {
+						if _, set := ref.Params[name]; set {
+							add("%s: %s: %s не применим к mode grill: у грилла свой протокол раундов (max_rounds)", prefix, path, name)
+						}
+					}
 				} else if gatelib.IntParam(ref.Params, "max_rounds") > 0 {
 					add("%s: %s: max_rounds допустим только для mode grill", prefix, path)
+				}
+				if attempts := gatelib.IntParam(ref.Params, "max_attempts"); attempts > llmgate.MaxAttempts {
+					add("%s: %s: max_attempts %d больше допустимого %d", prefix, path, attempts, llmgate.MaxAttempts)
 				}
 			}
 		}
@@ -336,7 +349,29 @@ func AgentCheckOf(ref workflow.GateRef) TemplateCheck {
 	return TemplateCheck{
 		Kind: "agent", Agent: gatelib.StringParam(ref.Params, "agent"),
 		Mode: gatelib.StringParam(ref.Params, "mode"), MaxRounds: gatelib.IntParam(ref.Params, "max_rounds"),
+		VerdictSchema: gatelib.StringParam(ref.Params, "verdict_schema"), MaxAttempts: gatelib.IntParam(ref.Params, "max_attempts"),
 	}
+}
+
+// RejectStays reports whether a rejection of the stage's human_approval gate
+// keeps the task at the stage (on_reject: stay) instead of ending the run.
+func (s TemplateStage) RejectStays() bool {
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ref.Gate == gatelib.GateHumanApproval && gatelib.StringParam(ref.Params, "on_reject") == gatelib.OnRejectStay {
+			return true
+		}
+	}
+	return false
+}
+
+// HumanGateRef returns the stage's human_approval gate reference.
+func (s TemplateStage) HumanGateRef() (workflow.GateRef, bool) {
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ref.Gate == gatelib.GateHumanApproval {
+			return ref, true
+		}
+	}
+	return workflow.GateRef{}, false
 }
 
 // GrillCheck returns the agent_review gate that runs in grill mode, if any.

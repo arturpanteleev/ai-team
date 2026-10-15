@@ -346,6 +346,17 @@ func (s *Store) ResolveDeferred(runID, approvalID string, decision Decision) (Pe
 	return value, nil
 }
 
+// IsFeedbackRoute reports whether the action sends the result back for
+// rework with a reason: a return_to_* route, or a rejection that keeps the
+// task at its own stage (human_approval on_reject: stay). Such an action needs
+// the person's reason, which becomes the feedback of the next attempt.
+func IsFeedbackRoute(value PendingApproval, action string) bool {
+	if strings.HasPrefix(action, "return_to_") {
+		return true
+	}
+	return action == "reject" && value.FromStage != "" && value.Targets[action] == value.FromStage
+}
+
 func applyDecision(value PendingApproval, approvalID string, decision Decision) (PendingApproval, error) {
 	if value.Deferred {
 		return PendingApproval{}, errors.New("deferred approval разрешается consolidated delivery-решением (ResolveDeferred)")
@@ -672,7 +683,7 @@ func validate(value PendingApproval) error {
 		}
 	}
 	for _, action := range value.FeedbackActions {
-		if !contains(value.Actions, action) || !strings.HasPrefix(action, "return_to_") {
+		if !contains(value.Actions, action) || !IsFeedbackRoute(value, action) {
 			return fmt.Errorf("approval feedback action %q is not an allowed return route", action)
 		}
 	}

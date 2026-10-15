@@ -781,8 +781,9 @@ export function TaskDetail() {
             </div>}
 
             {currentStage && allowed.size > 0 && <div className={styles.actions}>
-              {allowed.has('confirm') && <button type="button" disabled={working}
-                onClick={() => void perform('Этап подтверждён', () => confirmTaskStage(run.run_id, currentStage.id), 'confirm')}><BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `Подтвердить и перейти: ${stageTitle(confirmTargetID)}` : 'Подтвердить и завершить задачу'}</BusyLabel></button>}
+              {allowed.has('confirm') && <button type="button" disabled={working || !pending?.subject_hash}
+                title={pending?.subject_hash ? undefined : 'Запрос решения ещё не загружен: подождите обновления страницы'}
+                onClick={() => void perform('Этап подтверждён', () => confirmTaskStage(run.run_id, currentStage.id, pending?.subject_hash ?? ''), 'confirm')}><BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `Подтвердить и перейти: ${stageTitle(confirmTargetID)}` : 'Подтвердить и завершить задачу'}</BusyLabel></button>}
               {(allowed.has('grill/answer') || allowed.has('grill/new-version') || allowed.has('grill/done')) && pending &&
                 <GrillPanel approval={pending} answer={grillAnswer} setAnswer={setGrillAnswer} disabled={working} activeKey={activeKey}
                 canAnswer={allowed.has('grill/answer')} canNewVersion={allowed.has('grill/new-version')} canDone={allowed.has('grill/done')}

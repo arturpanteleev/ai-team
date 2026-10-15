@@ -57,6 +57,11 @@ type TemplateCheck struct {
 	Mode      string   `yaml:"mode,omitempty"`
 	MaxRounds int      `yaml:"max_rounds,omitempty"`
 	Rules     []string `yaml:"rules,omitempty"`
+	// VerdictSchema and MaxAttempts are the contract of a plain LLM gate
+	// (agent_review@2). They come from the gate reference only; schema v5
+	// files cannot set them.
+	VerdictSchema string `yaml:"-"`
+	MaxAttempts   int    `yaml:"-"`
 }
 
 // TemplateDelivery declares controller checks and optional earlier verdict
@@ -485,6 +490,11 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		// forward and backward targets.
 		if (next != workflow.TerminalComplete && confirm == "required") || len(bySource[stage.ID]) > 0 {
 			edge.Approval = generatedApprovalWithReturns(stage.DecisionFunction(), next, bySource[stage.ID])
+			if stage.RejectStays() {
+				// human_approval on_reject: stay — a rejection is recorded and
+				// the task waits at this stage for a new version.
+				edge.Approval.Actions["reject"] = stage.ID
+			}
 		}
 		if stage.Skippable {
 			graph.Edges = append(graph.Edges, workflow.Edge{

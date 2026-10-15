@@ -561,16 +561,7 @@ func (s *Scheduler) store(sl *slot, attempt workflow.GateAttempt) {
 }
 
 func (s *Scheduler) newAttempt(wave Wave, sl *slot) workflow.GateAttempt {
-	return workflow.GateAttempt{
-		TaskID: wave.Key.TaskID, Stage: wave.Key.Stage, Visit: wave.Key.Visit,
-		ArtifactSHA256: wave.Key.ArtifactSHA256,
-		Gate:           sl.ref.Gate, GateVersion: sl.ref.Version, GateName: sl.ref.InstanceName(),
-		Mode:      sl.ref.Mode.Effective(),
-		AttemptID: AttemptID(wave.Key, sl.ref.InstanceName(), len(sl.attempts)+1),
-		Executor:  sl.def.Kind, Group: sl.group,
-		Execution: workflow.GateExecutionRunning,
-		StartedAt: s.opts.Clock(),
-	}
+	return NewAttempt(wave.Key, sl.ref, sl.def, sl.group, len(sl.attempts)+1, s.opts.Clock())
 }
 
 // AttemptID is the deterministic ID of the n-th (1-based) attempt of a gate

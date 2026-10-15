@@ -21,6 +21,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/humandecision"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
@@ -258,11 +259,12 @@ func (s *Server) localApprovalRole(runID, approvalID, action, actorID string) (s
 		if action == "approve_spec" || payload.Kind == "agreed_spec" {
 			return string(cloudidentity.RoleProductOwner), cloudidentity.RoleProductOwner, nil
 		}
+		// The decision service refuses a vote in a role somebody already
+		// covered, so the local owner (who holds every role) votes in the first
+		// role nobody voted for.
 		votedRoles := make(map[string]bool)
 		for _, decision := range pending.Decisions {
-			if decision.ActorID == actorID {
-				votedRoles[decision.ActorRole] = true
-			}
+			votedRoles[decision.ActorRole] = true
 		}
 		for _, roleName := range pending.RequiredRoles {
 			authorizationRole := canonicalStageRole(roleName)
@@ -762,16 +764,27 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "approve_spec разрешён только для Product Owner согласования ТЗ", http.StatusConflict)
 				return
 			}
-			if (command.Action == "approve" || command.Action == "approve_spec") && isStageConfirmation(*matched) {
-				if err := s.selfApprovalViolation(chi.URLParam(r, "runID"), *matched, actorID); err != nil {
-					http.Error(w, err.Error(), http.StatusForbidden)
-					return
-				}
-			}
+			// forbid_self_approval is enforced by the decision service below.
 		} else if command.Action == "answer_questions" || command.Action == "approve_spec" {
 			http.Error(w, "не найден соответствующий Product Owner approval", http.StatusConflict)
 			return
 		}
+	}
+	// A decision on a stage transition goes through the one decision service
+	// (roles, exact hash, self-approval, audit) shared with REST and MCP.
+	if pending, found := approvalByID(values, chi.URLParam(r, "approvalID")); found && humandecision.IsTransition(pending) {
+		decided, ok := s.decideTransition(w, humandecision.Request{
+			RunID: chi.URLParam(r, "runID"), ApprovalID: pending.ID, Action: command.Action,
+			SubjectHash: command.SubjectHash, Comment: command.Comment, ArtifactRevisions: command.ArtifactRevisions,
+			Channel: humandecision.ChannelREST, RequestKey: r.Header.Get("Idempotency-Key"),
+			Actor: humandecision.Actor{ID: actorID, Authenticated: s.authenticator != nil,
+				HasRole: func(required string) bool { return required == actorRole }},
+		})
+		if !ok {
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, decided.Approval)
+		return
 	}
 	selectedRevisions := command.ArtifactRevisions
 	pinnedSelection := false

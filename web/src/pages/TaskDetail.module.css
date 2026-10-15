@@ -1219,6 +1219,19 @@
   display: grid;
   gap: 2px;
   justify-items: center;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Чип статуса и подписи не должны шире колонки маршрута: переносим по символам. */
+.routeText > * {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.routeText > span[class*='chip'] {
+  white-space: normal;
+  text-align: center;
 }
 
 .routeTitle {
@@ -1236,6 +1249,7 @@
 .routeState {
   font-size: 11px;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .routeDot {

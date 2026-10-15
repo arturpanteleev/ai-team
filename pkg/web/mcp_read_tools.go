@@ -38,7 +38,7 @@ func registerMCPReadTools(registry *mcpRegistry) {
 		Path:        "/api/backlog", ArrayKey: "items", Params: []mcpParam{projectID}})
 
 	registry.add(mcpOperation{Name: "list_tasks", Title: "Tasks",
-		Description: "Tasks (runs) newest first with filters. Each item carries status, phase, current stage and function, executor and the actions the caller may take. Paginated by limit (1-100, default 50) and offset; total is the filtered count.",
+		Description: "Tasks (runs) newest first with filters. Each item carries status, phase, current stage and function, executor, the actions the caller may take and stage_status (the current stage in full and a route of every stage with its computed status). Paginated by limit (1-100, default 50) and offset; total is the filtered count.",
 		Path:        "/api/runs",
 		Params: []mcpParam{
 			projectID,
@@ -50,7 +50,7 @@ func registerMCPReadTools(registry *mcpRegistry) {
 			{Name: "offset", Kind: mcpInteger, Min: intPtr(0), Description: "Entries to skip."},
 		}})
 	registry.add(mcpOperation{Name: "get_task", Title: "Task snapshot",
-		Description: "Full task snapshot, identical to the REST task view: run, stage attempts, lifecycle state, approvals, stage owners, human results, pinned template, delivery plan and the actions the caller may take.",
+		Description: "Full task snapshot, identical to the REST task view: run, stage attempts, lifecycle state, approvals, stage owners, human results, pinned template, delivery plan, stage_statuses (computed status, executor and visits of every stage) and the actions the caller may take.",
 		Path:        "/api/runs/{run_id}", Resource: "aiteam://tasks/{run_id}", Params: []mcpParam{runID}})
 	registry.add(mcpOperation{Name: "get_task_stage_result", Title: "Stage result",
 		Description: "One version of a human stage result (the submitted artifact text).",
@@ -67,6 +67,9 @@ func registerMCPReadTools(registry *mcpRegistry) {
 	registry.add(mcpOperation{Name: "get_task_gates", Title: "Task gates",
 		Description: "The real gates of every result version of the task: attempts (technical execution and verdict kept apart), the advisory warnings, the administrator overrides (an override never turns a failed gate into a pass) and the aggregated transition decision with its reasons.",
 		Path:        "/api/runs/{run_id}/gates", Resource: "aiteam://tasks/{run_id}/gates", Params: []mcpParam{runID}})
+	registry.add(mcpOperation{Name: "get_task_stage_statuses", Title: "Stage statuses",
+		Description: "Where every stage of the task stands, derived on each read from the durable journal (never set by a client): status (not_reached, ready, in_progress, checking, awaiting_human, passed, rejected, failed, blocked, skipped, canceled), readiness, phase, who works (human, internal or external agent, with the actual executor of finished attempts), outcome, whether the stage was ever active and every visit of it (a return starts a new visit; the earlier one stays inactive with its attempts), what blocks the current stage and the actions open on it. Same JSON as the stage_statuses field of get_task.",
+		Path:        "/api/runs/{run_id}/stage-statuses", Resource: "aiteam://tasks/{run_id}/stage-statuses", Params: []mcpParam{runID}})
 	registry.add(mcpOperation{Name: "list_task_events", Title: "Task events",
 		Description: "Append-only event feed of one task: stage transitions, checks, decisions, overrides. Cursor paging: pass next_cursor as after (asc) or before (desc) while has_more is true.",
 		Path:        "/api/runs/{run_id}/events", Params: append([]mcpParam{runID}, eventParams...)})

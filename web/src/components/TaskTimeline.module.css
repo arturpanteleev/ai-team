@@ -46,9 +46,9 @@
 
 .markSwatch[data-kind='override'],
 .mark[data-kind='override'] {
-  border-color: var(--warning-fg);
-  background: var(--warning-bg);
-  color: var(--warning-fg);
+  border-color: var(--danger-fg);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .markSwatch[data-kind='skip'],
@@ -239,4 +239,54 @@
   .textAlternative {
     overflow-x: auto;
   }
+}
+
+.trackColumn {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+/* Посещения этапа: полоска под шкалой. Активное — сплошное, завершённое
+   неактивное — контур; посещение, начатое возвратом, помечено рамкой слева. */
+.visits {
+  position: relative;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.visit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 8px;
+  border: 1px solid var(--text-muted);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  line-height: 12px;
+  text-align: center;
+  overflow: hidden;
+}
+
+.visit[data-active] {
+  border-color: var(--text-primary);
+  background: var(--tint-indigo);
+  color: var(--ink-indigo);
+}
+
+.visit[data-returned] {
+  border-left-width: 4px;
+}
+
+.visit[data-outcome='rejected'],
+.visit[data-outcome='failed'] {
+  border-color: var(--danger-fg);
+}
+
+.visitText {
+  padding: 0 2px;
 }

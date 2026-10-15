@@ -269,6 +269,118 @@ export interface WsEvent extends TaskEvent {
 }
 
 // Элемент GET /api/runs: карточка доски/списка задач (B-70 task API).
+// Вычисляемые статусы этапов (S11). Сервер выводит их из журнала событий,
+// клиент их только показывает: записи статуса в API нет.
+export type StageStatusKey = 'not_reached' | 'ready' | 'in_progress' | 'checking' | 'awaiting_human'
+  | 'passed' | 'rejected' | 'failed' | 'blocked' | 'skipped' | 'canceled';
+export type StageReadiness = 'not_reached' | 'ready' | 'engaged' | 'left';
+export type StagePhase = 'none' | 'working' | 'checking' | 'awaiting_human';
+export type StageExecutorKind = 'human' | 'internal_agent' | 'external_agent' | 'unknown';
+
+export interface StageStatusExecutor {
+  kind: StageExecutorKind;
+  name?: string;
+  agent?: string;
+  actor?: string;
+  // attempt — фактический исполнитель из доказательств попытки; configured — по шаблону; override — выбор человека.
+  source: 'attempt' | 'configured' | 'override';
+}
+
+export interface StageStatusBlock {
+  kind: string;
+  reason?: string;
+  approval_id?: string;
+  roles?: string[];
+  gates?: string[];
+  actions?: string[];
+}
+
+export interface StageVisitAttempt {
+  attempt_id: string;
+  executor: StageStatusExecutor;
+  execution?: string;
+  outcome: string;
+  verdict?: string;
+  superseded?: boolean;
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface StageVisit {
+  number: number;
+  active: boolean;
+  entered_at: string;
+  entered_from?: string;
+  entered_via: 'start' | 'transition' | 'return' | 'inferred';
+  left_at?: string;
+  left_to?: string;
+  left_action?: string;
+  returned?: boolean;
+  outcome: string;
+  superseded?: boolean;
+  overridden?: boolean;
+  skipped?: boolean;
+  warnings?: number;
+  executor: StageStatusExecutor;
+  attempts: StageVisitAttempt[];
+}
+
+export interface StageStatusEntry {
+  stage_id: string;
+  title?: string;
+  function?: string;
+  index: number;
+  status: StageStatusKey;
+  readiness: StageReadiness;
+  phase: StagePhase;
+  outcome: string;
+  executor: StageStatusExecutor;
+  current: boolean;
+  visited: boolean;
+  visit_count: number;
+  active_visit: number;
+  visits: StageVisit[];
+  overridden?: boolean;
+  warnings?: number;
+  blocked_by?: StageStatusBlock;
+  allowed_actions: string[];
+  action_stage_id?: string;
+}
+
+export interface StageStatusProjection {
+  schema_version: number;
+  run_status?: string;
+  terminal: boolean;
+  current_stage?: string;
+  stages: StageStatusEntry[];
+}
+
+export interface StageRouteItem {
+  stage_id: string;
+  status: StageStatusKey;
+  readiness: StageReadiness;
+  visited: boolean;
+  visit_count: number;
+  current?: boolean;
+}
+
+// Сжатая проекция для карточки в списке: текущий этап и маршрут.
+export interface StageStatusSummary {
+  schema_version: number;
+  terminal: boolean;
+  current_stage?: string;
+  status?: StageStatusKey;
+  readiness?: StageReadiness;
+  phase?: StagePhase;
+  outcome?: string;
+  executor?: StageStatusExecutor;
+  visit?: number;
+  visit_count?: number;
+  returned?: boolean;
+  blocked_by?: StageStatusBlock;
+  route: StageRouteItem[];
+}
+
 export interface TaskRun {
   id: number;
   run_id: string;
@@ -288,6 +400,7 @@ export interface TaskRun {
   stage_entered_at?: string;
   warnings: number;
   external_links?: string[];
+  stage_status?: StageStatusSummary;
 }
 
 export interface TaskRunsResponse {
@@ -372,6 +485,7 @@ export interface TaskRunDetails {
   results: Record<string, TaskResultRevision[]>;
   allowed_actions: string[];
   delivery: DeliveryProjection;
+  stage_statuses?: StageStatusProjection;
 }
 
 export interface TaskRunEventsResponse {

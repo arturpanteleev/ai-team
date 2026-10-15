@@ -248,6 +248,7 @@ func TestMCPReadToolsMatchRESTUnderEachUsersIdentity(t *testing.T) {
 			{"get_task_workflow", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/workflow"},
 			{"get_task_template_version", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/template-version"},
 			{"get_task_gates", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/gates"},
+			{"get_task_stage_statuses", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/stage-statuses"},
 			{"list_task_events", map[string]any{"run_id": mcpTestRun, "after": 0}, "/api/runs/" + mcpTestRun + "/events?after=0"},
 			{"list_events", map[string]any{"limit": 5, "order": "desc"}, "/api/events?limit=5&order=desc"},
 			{"get_task_log", map[string]any{"run_id": mcpTestRun, "attempt_id": "attempt-1"}, "/api/runs/" + mcpTestRun + "/logs/attempt-1"},
@@ -727,11 +728,12 @@ func TestMCPResourcesServeTheSameData(t *testing.T) {
 		t.Fatalf("resources: %v %+v", err, resources)
 	}
 	for uri, rest := range map[string]string{
-		"aiteam://tasks/" + mcpTestRun: "/api/runs/" + mcpTestRun,
-		"aiteam://gates/catalog":       "/api/gates/catalog",
-		"aiteam://projects":            "/api/projects",
-		"aiteam://projects/1":          "/api/projects/1",
-		"aiteam://template/versions":   "/api/template/versions",
+		"aiteam://tasks/" + mcpTestRun:                     "/api/runs/" + mcpTestRun,
+		"aiteam://tasks/" + mcpTestRun + "/stage-statuses": "/api/runs/" + mcpTestRun + "/stage-statuses",
+		"aiteam://gates/catalog":                           "/api/gates/catalog",
+		"aiteam://projects":                                "/api/projects",
+		"aiteam://projects/1":                              "/api/projects/1",
+		"aiteam://template/versions":                       "/api/template/versions",
 	} {
 		result, readErr := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: uri})
 		if readErr != nil || len(result.Contents) != 1 {

@@ -13,6 +13,8 @@ import {
   timelineStateLabels,
 } from '../timeline';
 import type { TimelineLane, TimelineMark, TimelineSegment, TimelineState } from '../timeline';
+import { StageStatusChip } from './StageStatusChip';
+import { executorText, stageStatusEntry, visitText } from '../stageStatus';
 import styles from './TaskTimeline.module.css';
 
 const finishedStatuses = new Set(['completed', 'completed_with_warnings', 'failed', 'canceled', 'stopped', 'interrupted']);
@@ -152,8 +154,17 @@ export function TaskTimeline({ details, events, eventTitle, clock = Date.now, ti
               aria-expanded={lane.stageId === selected} aria-controls="timeline-stage-card"
               onClick={() => setSelected(lane.stageId === selected ? null : lane.stageId)} onKeyDown={onLaneKey(index)}>
               <span className={styles.laneTitle}>{lane.title}</span>
-              <span className={styles.laneMeta}>{lane.started ? `${lane.segments.length} интервал(ов)` : 'не начат'}</span>
+              {(() => {
+                const entry = stageStatusEntry(details.stage_statuses, lane.stageId);
+                if (!entry) return <span className={styles.laneMeta}>{lane.started ? `${lane.segments.length} интервал(ов)` : 'не начат'}</span>;
+                return <span className={styles.laneMeta}>
+                  <StageStatusChip status={entry.status} />
+                  {entry.visit_count > 1 ? ` посещений: ${entry.visit_count}` : ''}
+                  {entry.status === 'not_reached' && entry.visited ? ' · бывал активен' : ''}
+                </span>;
+              })()}
             </button>
+            <div className={styles.trackColumn}>
             <div className={styles.track} role="img" aria-label={laneSummary(lane)}>
               {lane.segments.map((segment, segmentIndex) => {
                 const left = timelinePosition(segment.start, start, end);
@@ -164,6 +175,24 @@ export function TaskTimeline({ details, events, eventTitle, clock = Date.now, ti
               })}
               {lane.marks.map((mark) => <span key={`${mark.kind}-${mark.cursor}`} className={styles.mark} data-kind={mark.kind}
                 style={{ left: `${timelinePosition(mark.at, start, end)}%` }} title={markText(mark, titleOf)}>{markSymbols[mark.kind]}</span>)}
+            </div>
+            {(() => {
+              // Visits come from the server projection: a left visit stays on the
+              // scale as inactive, a return starts a new one.
+              const entry = stageStatusEntry(details.stage_statuses, lane.stageId);
+              if (!entry || entry.visits.length === 0) return null;
+              return <ol className={styles.visits} aria-label={`Посещения этапа «${lane.title}»`}>
+                {entry.visits.map((visit) => {
+                  const from = timelinePosition(Date.parse(visit.entered_at), start, end);
+                  const to = visit.left_at ? timelinePosition(Date.parse(visit.left_at), start, end) : 100;
+                  return <li key={visit.number} className={styles.visit} data-active={visit.active || undefined}
+                    data-outcome={visit.outcome} data-returned={visit.entered_via === 'return' || undefined}
+                    style={{ left: `${from}%`, width: `${Math.max(1.2, Math.min(to, 100) - from)}%` }} title={visitText(visit, titleOf)}>
+                    <span className={styles.visitText}>{visit.number}</span>
+                  </li>;
+                })}
+              </ol>;
+            })()}
             </div>
           </li>
         ))}
@@ -235,6 +264,16 @@ function StageCard({ lane, details, events, eventTitle, titleOf, stats, metrics,
           lane.segments.at(-1)?.open ? 'идёт' : formatTime(lane.segments.at(-1)?.end ?? lane.lastAt)}</dd></div>
         <div><dt>Время по состояниям</dt><dd>{states.filter((state) => lane.durationByState[state] !== undefined)
           .map((state) => `${timelineStateLabels[state]}: ${formatStageDuration(lane.durationByState[state]!)}`).join('; ') || 'нет данных'}</dd></div>
+        {(() => {
+          const entry = stageStatusEntry(details.stage_statuses, lane.stageId);
+          if (!entry) return null;
+          return <>
+            <div><dt>Статус</dt><dd><StageStatusChip status={entry.status} /> {executorText(entry.executor)}</dd></div>
+            <div><dt>Посещения</dt><dd>{entry.visits.length > 0 ? <ol className={styles.inlineList}>
+              {entry.visits.map((visit) => <li key={visit.number}>{visitText(visit, titleOf)}</li>)}
+            </ol> : 'этап ещё не посещался'}</dd></div>
+          </>;
+        })()}
         <div><dt>Результат</dt><dd>{lane.lastOutcome ?? 'нет данных'}</dd></div>
         <div><dt>Версии результата</dt><dd>{versions.length > 0
           ? versions.map((version) => `v${version.revision} (${version.actor_id})`).join(', ')

@@ -34,6 +34,7 @@ fields.
 | `POST /api/runs/{runID}/stages/{stageID}/results` | Submit a typed human result |
 | `GET /api/runs/{runID}/stages/{stageID}/results/{version}` | Read one immutable result revision |
 | `POST /api/runs/{runID}/stages/{stageID}/override` | Pass a task on after a failed required gate; system administrator only, reason required |
+| `GET /api/runs/{runID}/stage-statuses` | Computed status of every stage: readiness, phase, executor, outcome, visit history (read-only; see Stage statuses) |
 | `GET /api/runs/{runID}/gates` | Gates of every result version, attempts, overrides, advisory warnings, aggregated transition decision |
 | `POST /api/runs/{runID}/stages/{stageID}/gates/{gate}/retry` | Run a technically failed gate again on the same result version |
 | `POST /api/runs/{runID}/gate-attempts/{attemptID}/retry` | The same retry addressed by the failed attempt |
@@ -249,6 +250,72 @@ disabled while metrics are loading, after a load error, or when the period has
 no data. Text cells in the CSV that start with `=`, `+`, `-`, `@`, tab or
 carriage return are prefixed with `'` so spreadsheets do not evaluate them as
 formulas.
+
+## Stage statuses
+
+`GET /api/runs/{runID}/stage-statuses` (MCP: `get_task_stage_statuses`), the
+`stage_statuses` field of `GET /api/runs/{runID}` and the compact `stage_status`
+of every task in `GET /api/runs` are one projection. It is **computed on every
+read** from the event journal, the approvals, the lifecycle checkpoint and the
+pinned template; nothing is stored and there is no route that writes a status
+(`PUT`/`PATCH`/`POST`/`DELETE` on the route are refused, and a status in the body
+of an action is rejected like any unknown field). The same journal always gives
+the same answer, after a reload or a restart too; a journal without transition
+events still projects. A task without a valid pinned template answers the
+dedicated route with `409 template_pin_unavailable` and has no `stage_statuses`.
+
+```json
+{"schema_version": 1, "run_status": "running", "terminal": false, "current_stage": "implementation",
+ "stages": [{
+   "stage_id": "implementation", "title": "...", "function": "developer", "index": 3,
+   "status": "in_progress", "readiness": "engaged", "phase": "working", "outcome": "pending",
+   "executor": {"kind": "internal_agent", "agent": "coder", "name": "agentcli", "source": "configured"},
+   "current": true, "visited": true, "visit_count": 2, "active_visit": 2,
+   "visits": [
+     {"number": 1, "active": false, "entered_at": "...", "entered_from": "tech_design", "entered_via": "transition",
+      "left_at": "...", "left_to": "code_review", "outcome": "passed",
+      "executor": {"kind": "internal_agent", "agent": "coder", "name": "agentcli", "source": "attempt"},
+      "attempts": [{"attempt_id": "...", "outcome": "passed", "executor": {"...": "..."}, "started_at": "...", "finished_at": "..."}]},
+     {"number": 2, "active": true, "entered_from": "code_review", "entered_via": "return", "outcome": "pending", "attempts": []}],
+   "allowed_actions": ["run-agent"]}]}
+```
+
+`status` is one of `not_reached`, `ready`, `in_progress`, `checking`,
+`awaiting_human`, `passed`, `rejected`, `failed`, `blocked`, `skipped`,
+`canceled`. It is derived from separate fields that are also served:
+
+- `readiness`: `not_reached`, `ready` (current, nobody started), `engaged`
+  (current, work, checks or a decision are under way), `left`;
+- `phase` (of the open visit): `none`, `working`, `checking`, `awaiting_human`.
+  `checking` (stage checks, gates) is never reported as `in_progress`; a stage
+  waiting for a person's decision, answer or confirmation is `awaiting_human`;
+  a human stage that nobody took is `ready` (`blocked_by.kind: human_input`) and
+  `in_progress` once taken;
+- `executor`: `kind` (`human`, `internal_agent`, `external_agent`), `name` (the
+  runtime or the adapter), `actor` (the person) and `source`: `attempt` is the
+  actual executor of a finished attempt, `configured` the template's, `override`
+  a person's choice for this visit;
+- `outcome`: the outcome of the open or latest visit (`pending` while open);
+- `visited`, `visit_count`, `visits`: the history. A visit is one time the stage
+  was entered; leaving it makes it inactive, a return starts a new visit, earlier
+  attempts stay (an attempt invalidated by a return is `superseded`). A stage
+  returned from is `not_reached` yet `visited`; a finished task has no
+  `current_stage` and no active visit.
+
+`blocked_by` (current stage only) names what the stage waits for: `kind`
+`human_input`, `approval`, `check_decision` (with the failed required `gates`),
+`grill_questions`, `delivery_plan`, `gate` (gates running or a human gate
+waiting) or `run_state` (the task is stopped or interrupted); with the
+`approval_id`, the `roles` and the offered `actions`. `allowed_actions` carries
+the actions open on the current stage; `action_stage_id` is set when the action
+routes address another stage than this one (the confirmation of a stage result
+is a decision on the move to the next stage, so the checkpoint and the routes
+already name the next stage while the confirmed stage is the one that waits).
+
+The list card carries `stage_status`: the current stage's `status`, `readiness`,
+`phase`, `outcome`, `executor`, `visit`/`visit_count`, `returned` (entered by a
+return) and `blocked_by`, and `route`, one `{stage_id, status, readiness, visited,
+visit_count, current}` per stage. Only the listed page is projected.
 
 ## Gate state, retry and override
 

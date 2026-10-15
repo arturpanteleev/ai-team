@@ -182,3 +182,57 @@
   color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
+
+/* Полоса маршрута: по сегменту на этап, цвет статуса; текущий этап в рамке,
+   не достигнутый, но уже бывавший активным этап (вернулись назад) — с точкой. */
+.route {
+  display: flex;
+  gap: 3px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routeItem {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 6px;
+  height: 8px;
+  border-radius: 3px;
+  background: var(--surface-muted);
+}
+
+.routeItem[data-status='ready'] { background: var(--info-bg); }
+.routeItem[data-status='in_progress'],
+.routeItem[data-status='checking'] { background: var(--ink-indigo); }
+.routeItem[data-status='awaiting_human'] { background: var(--tint-teal); }
+.routeItem[data-status='passed'] { background: var(--success-fg); }
+.routeItem[data-status='rejected'],
+.routeItem[data-status='failed'],
+.routeItem[data-status='blocked'] { background: var(--danger-fg); }
+.routeItem[data-status='skipped'] { background: repeating-linear-gradient(90deg, var(--border-strong) 0 3px, transparent 3px 6px); }
+
+.routeItem[data-current] {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 1px;
+}
+
+.routeItem[data-status='not_reached'][data-visited]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

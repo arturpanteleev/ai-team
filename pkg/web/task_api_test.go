@@ -607,7 +607,7 @@ func TestTaskConfirmPinsAndReusesFirstVotedArtifactRevision(t *testing.T) {
 	controller := &fakeRunController{approvals: []approval.PendingApproval{{
 		ID: "approval-confirm", RunID: runID, AttemptID: "attempt-1", Status: approval.StatusPending,
 		FromStage: stageID, ToStage: stageID, Trigger: "stage_completed", SubjectHash: testSubjectHash,
-		RequiredRoles: []string{"architect"}, Actions: []string{"approve"},
+		RequiredRoles: []string{"architect", "operator"}, Quorum: approval.QuorumAll, Actions: []string{"approve"},
 		Targets: map[string]string{"approve": stageID},
 	}}}
 	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
@@ -667,7 +667,7 @@ func TestTaskConfirmPinsAndReusesFirstVotedArtifactRevision(t *testing.T) {
 	// Model the durable post-vote state, then append a newer human edit while
 	// the approval stays pending.
 	controller.approvals[0].Decisions = []approval.Decision{{
-		ActorID: "architect-1", ActorRole: "architect", Action: "approve",
+		ActorID: "operator-1", ActorRole: "operator", Action: "approve", SubjectHash: testSubjectHash,
 		ArtifactRevisions: map[string]string{relative: pinned.ID},
 	}}
 	newer, err := humanStore.Append(runID, relative, pinned.ID, pinned.SHA256, "design B\n", "later edit", "architect-2")

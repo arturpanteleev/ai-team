@@ -346,8 +346,11 @@ export function submitTaskStageResult(runId: string, stageId: string, value: {
   return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/results`, value);
 }
 
-export function confirmTaskStage(runId: string, stageId: string): Promise<unknown> {
-  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/confirm`);
+// subjectHash is the hash of the decision subject the person saw; the server
+// refuses the confirmation when the result changed in the meantime.
+export function confirmTaskStage(runId: string, stageId: string, subjectHash?: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/confirm`,
+    subjectHash ? { subject_hash: subjectHash } : undefined);
 }
 
 export function overrideTaskStageCheck(runId: string, stageId: string, reason: string): Promise<unknown> {

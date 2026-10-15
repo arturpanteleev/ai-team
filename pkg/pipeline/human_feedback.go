@@ -18,7 +18,7 @@ import (
 // writeReturnFeedback materializes the persisted human return reason as a
 // read-only run input. It never edits the artifact or evidence being reviewed.
 func writeReturnFeedback(targetDir string, value approval.PendingApproval) (runtime.Artifact, error) {
-	if !strings.HasPrefix(value.ResolvedAction, "return_to_") {
+	if !approval.IsFeedbackRoute(value, value.ResolvedAction) {
 		return runtime.Artifact{}, fmt.Errorf("approval action is not a return")
 	}
 	var reason string

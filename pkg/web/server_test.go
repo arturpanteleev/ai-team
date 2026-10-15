@@ -122,7 +122,7 @@ func TestDecisionPinsLatestImmutableArtifactRevision(t *testing.T) {
 	target := t.TempDir()
 	approvalValue := approval.PendingApproval{
 		ID: "approval-1", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
-		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer"},
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer"}, SubjectHash: testSubjectHash,
 		Actions: []string{"return_to_coder"}, Targets: map[string]string{"return_to_coder": "coder"},
 	}
 	controller := &fakeRunController{approvals: []approval.PendingApproval{approvalValue}}
@@ -890,8 +890,8 @@ func mustJSONString(t *testing.T, value string) string {
 func TestQuorumVotesReuseFirstPinnedArtifactRevisionAfterNewerEdit(t *testing.T) {
 	target := t.TempDir()
 	approvalValue := approval.PendingApproval{
-		ID: "approval-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
-		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "operator"},
+		ID: "approval-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending, SubjectHash: testSubjectHash,
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "architect"},
 		Quorum: approval.QuorumAll, Actions: []string{"return_to_coder"},
 		Targets: map[string]string{"return_to_coder": "coder"},
 	}
@@ -961,8 +961,8 @@ func TestQuorumVotesReuseFirstPinnedArtifactRevisionAfterNewerEdit(t *testing.T)
 func TestQuorumVotesKeepFirstEmptyArtifactRevisionSelection(t *testing.T) {
 	target := t.TempDir()
 	approvalValue := approval.PendingApproval{
-		ID: "approval-empty-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending,
-		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "operator"},
+		ID: "approval-empty-quorum", RunID: "run-1", AttemptID: "attempt-1", Status: approval.StatusPending, SubjectHash: testSubjectHash,
+		FromStage: "reviewer", ToStage: "coder", RequiredRoles: []string{"reviewer", "architect"},
 		Quorum: approval.QuorumAll, Actions: []string{"return_to_coder"},
 		Targets: map[string]string{"return_to_coder": "coder"},
 	}

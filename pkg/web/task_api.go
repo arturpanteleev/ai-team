@@ -21,6 +21,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/humandecision"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
@@ -72,6 +73,9 @@ type taskStageActionCommand struct {
 	ToStage  string `json:"to_stage,omitempty"`
 	Answer   string `json:"answer,omitempty"`
 	PlanHash string `json:"plan_hash,omitempty"`
+	// SubjectHash is the hash of the decision subject the person reviewed
+	// (confirm); it must equal the hash the approval is bound to.
+	SubjectHash string `json:"subject_hash,omitempty"`
 }
 
 type taskRunListItem struct {
@@ -768,7 +772,11 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		s.taskConflict(w, runID, stageID, "stage has no confirmation pending")
 		return
 	}
-	if err := requireEmptyCommand(w, r); err != nil {
+	// The body is optional: a client that names the subject hash it reviewed
+	// (subject_hash) confirms exactly that version; an older client sends
+	// nothing and the pending hash is used, which the audit records.
+	var command taskStageActionCommand
+	if err := decodeOptionalCommand(w, r, &command); err != nil {
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
@@ -792,22 +800,19 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 	if !authOK {
 		return
 	}
-	if err := s.selfApprovalViolation(runID, *pending, actorID); err != nil {
-		writeJSONAPIError(w, http.StatusForbidden, err.Error(), "self_approval_forbidden")
+	hash, hashFromServer := command.SubjectHash, false
+	if hash == "" {
+		hash, hashFromServer = pending.SubjectHash, true
+	}
+	decided, ok := s.decideTransition(w, humandecision.Request{
+		RunID: runID, ApprovalID: pending.ID, Action: "approve", SubjectHash: hash, HashFromServer: hashFromServer,
+		Channel: humandecision.ChannelWeb, RequestKey: r.Header.Get("Idempotency-Key"),
+		Actor: humandecision.Actor{ID: actorID, Authenticated: true, HasRole: func(required string) bool { return required == actorRole }},
+	})
+	if !ok {
 		return
 	}
-	revisions, err := s.confirmationArtifactRevisions(runID, pending)
-	if err != nil {
-		s.taskConflict(w, runID, stageID, err.Error())
-		return
-	}
-	decision := approval.Decision{ActorID: actorID, ActorRole: actorRole, Action: "approve",
-		SubjectHash: pending.SubjectHash, ArtifactRevisions: revisions, ControllerAuthenticated: true}
-	resolved, err := s.controller.Decide(runID, pending.ID, decision)
-	if err != nil {
-		s.taskConflict(w, runID, stageID, err.Error())
-		return
-	}
+	resolved := decided.Approval
 	if resolved.Status != approval.StatusResolved {
 		writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID,
 			"approval": resolved, "actor_id": actorID})
@@ -888,28 +893,6 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "from_stage": stageID, "to_stage": command.ToStage, "actor_id": actorID})
-}
-
-// confirmationArtifactRevisions mirrors the legacy quorum decision path for the
-// task confirm endpoint. The first vote pins the exact artifact revisions that
-// were reviewed (including an intentionally empty selection); later voters reuse
-// that binding even if newer human revisions appeared while the approval stayed
-// pending. A human revision appended after the first vote is therefore never
-// silently adopted.
-func (s *Server) confirmationArtifactRevisions(runID string, pending *approval.PendingApproval) (map[string]string, error) {
-	if len(pending.Decisions) > 0 {
-		pinned := pending.Decisions[0].ArtifactRevisions
-		revisions := make(map[string]string, len(pinned))
-		for path, revisionID := range pinned {
-			revisions[path] = revisionID
-		}
-		return revisions, nil
-	}
-	attemptID, err := s.approvalAttemptID(runID, pending.ID)
-	if err != nil {
-		return nil, err
-	}
-	return s.latestAttemptRevisions(runID, attemptID)
 }
 
 func (s *Server) taskReturnAllowed(runID, from, to string) bool {

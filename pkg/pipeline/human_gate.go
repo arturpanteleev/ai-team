@@ -174,6 +174,41 @@ func (rs *runState) recordHumanGateOutcome(stageID string, edge workflow.Edge, k
 	return rs.recordHumanGate(stage, result, edge.To, "graph_outcome:"+string(edge.Outcome), action, decisionErr)
 }
 
+// rejectKeepsStage reports whether the resolved approval is a rejection that
+// leaves the task at its stage (human_approval on_reject: stay) instead of
+// ending the run: the rework starts from a new version, which repeats the
+// whole chain.
+func rejectKeepsStage(value *approval.PendingApproval) bool {
+	return value != nil && value.Kind == approval.KindApprove && value.ResolvedAction == "reject" &&
+		approval.IsFeedbackRoute(*value, "reject")
+}
+
+// recordResumedHumanDecision records the human_approval attempt for a decision
+// the person made while the process was not running (Web, REST): the run
+// resumes straight into the target of the decision, so the in-process
+// transition code never sees it.
+func (rs *runState) recordResumedHumanDecision() error {
+	value := rs.resumedApproval
+	if value == nil || value.Kind != approval.KindApprove || value.Status != approval.StatusResolved ||
+		value.Trigger != "graph_outcome:"+string(workflow.OutcomePassed) || value.ResolvedAction == "" {
+		return nil
+	}
+	stage, ok := rs.p.templateStage(value.FromStage)
+	if !ok {
+		return nil
+	}
+	if _, has := stage.HumanGateRef(); !has {
+		return nil
+	}
+	for i := len(rs.results) - 1; i >= 0; i-- {
+		result := rs.results[i]
+		if result.AttemptID == value.AttemptID && result.Name == value.FromStage {
+			return rs.recordHumanGate(stage, result, value.ToStage, value.Trigger, value.ResolvedAction, nil)
+		}
+	}
+	return nil
+}
+
 // resolvedTransitionApproval returns the latest resolved transition approval
 // of the stage attempt.
 func (rs *runState) resolvedTransitionApproval(stageID, attemptID, trigger string) *approval.PendingApproval {

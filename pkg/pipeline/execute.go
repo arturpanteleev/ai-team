@@ -38,7 +38,11 @@ func (rs *runState) execute(ctx context.Context) error {
 	if err := rs.applyBudgetAllowanceGrant(); err != nil {
 		return err
 	}
-	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) {
+	if err := rs.recordResumedHumanDecision(); err != nil {
+		return err
+	}
+	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) &&
+		!rejectKeepsStage(rs.resumedApproval) {
 		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
 	}
 	return rs.executeGraph(ctx)

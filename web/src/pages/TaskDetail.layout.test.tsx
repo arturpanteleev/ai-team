@@ -93,6 +93,9 @@ describe('Task page columns keep their purpose (S16)', () => {
     expect(within(actions).getByRole('button', { name: 'Пропустить этап' })).toBeInTheDocument();
     expect(within(actions).getByRole('button', { name: /^Вернуть на доработку/ })).toBeInTheDocument();
     expect(within(context).queryByLabelText('Причина пропуска')).not.toBeInTheDocument();
+    // The skip link reaches the actions without tabbing through the route and the status.
+    expect(screen.getByRole('link', { name: 'К действиям' })).toHaveAttribute('href', '#task-actions');
+    expect(actions).toHaveAttribute('id', 'task-actions');
   });
 
   it('keeps one button per meaning: no stage action is offered twice', async () => {

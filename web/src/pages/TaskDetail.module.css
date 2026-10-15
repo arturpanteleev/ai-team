@@ -77,7 +77,38 @@
   text-transform: uppercase;
 }
 
-.container .linkButton {
+.container /* «К действиям»: a skip link for the keyboard everywhere and a visible jump on narrow screens,
+   where the actions come after the status and the route. */
+.skipToActions {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skipToActions:focus {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+}
+
+@media (max-width: 899px) {
+  .skipToActions {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    flex-basis: 100%;
+    font-weight: 650;
+  }
+}
+
+.linkButton {
   min-height: 0;
   padding: 0;
   border: 0;

@@ -754,6 +754,7 @@ export function TaskDetail() {
           {template ? ` · ${template.title || template.template}` : ''} · {new Date(run.started_at).toLocaleDateString('ru-RU')}</span>
         <p className={styles.idea}><span className={styles.ideaLabel}>Бизнес-идея</span> {ideaTitle}
           {' '}<button type="button" className={styles.linkButton} onClick={() => setActiveTab('idea')}>Полное описание</button></p>
+        <a className={styles.skipToActions} href="#task-actions">К действиям</a>
       </header>
 
       <section className={styles.routePanel} aria-labelledby="route-heading">
@@ -842,7 +843,7 @@ export function TaskDetail() {
           )}
         </aside>
 
-        <aside className={styles.actionCol} aria-label="Действия" data-testid="action-column">
+        <aside className={styles.actionCol} id="task-actions" tabIndex={-1} aria-label="Действия" data-testid="action-column">
           <h2>Действия</h2>
           {actionStatus && <p className={styles.actionStatus} role="status">{actionStatus}</p>}
           {working && <p className={styles.waiting} role="status"><span className={styles.buttonSpinner} aria-hidden="true" />Ждём ответ сервера…</p>}

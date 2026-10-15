@@ -257,3 +257,39 @@ func mustJSONRoundTrip(t *testing.T, event evidence.Event) evidence.Event {
 	event.Data = decoded
 	return event
 }
+
+// An advisory gate with a technical error is a warning, not a retry target:
+// the retry would be refused (no decision is ever opened for it).
+func TestResolveAdvisoryTechnicalErrorIsNotRetryable(t *testing.T) {
+	refs := []workflow.GateRef{ref("a"), advisory("b")}
+	attempts := []workflow.GateAttempt{
+		attemptOf("a", "", 0, 1, workflow.GateExecutionError, ""),
+		attemptOf("b", workflow.GateModeAdvisory, 0, 1, workflow.GateExecutionError, ""),
+	}
+	statuses, res := Resolve(refs, nil, hashV1, attempts, nil)
+	if !statuses[0].Retryable || statuses[1].Retryable {
+		t.Fatalf("only the blocking gate is retryable: %+v", statuses)
+	}
+	if len(res.Retryable) != 1 || res.Retryable[0] != "a" || len(res.Warnings) != 1 {
+		t.Fatalf("resolution = %+v", res)
+	}
+}
+
+// An override recorded before S06 (no version, no gates) is shown as legacy
+// history: the wave of a task that really passed must not look blocked.
+func TestResolveLegacyOverrideIsShownAsHistory(t *testing.T) {
+	refs := []workflow.GateRef{ref("a")}
+	attempts := []workflow.GateAttempt{attemptOf("a", "", 0, 1, workflow.GateExecutionSucceeded, workflow.GateVerdictFail)}
+	legacy, ok := DecodeOverride(evidence.Event{Type: EventCheckOverridden, Stage: "spec", AttemptID: "attempt-1",
+		Data: map[string]any{"reason": "старый обход", "actor_id": "alice"}})
+	if !ok || !legacy.Legacy || legacy.Authority != "" {
+		t.Fatalf("legacy override = %+v", legacy)
+	}
+	statuses, res := Resolve(refs, nil, hashV1, attempts, &legacy)
+	if res.Allowed || res.State != ResolutionLegacyOverride || len(res.Reasons) == 0 || !strings.Contains(res.Reasons[0], "legacy") {
+		t.Fatalf("resolution = %+v", res)
+	}
+	if statuses[0].Attempt.Verdict != workflow.GateVerdictFail {
+		t.Fatal("the legacy override does not rewrite the attempt")
+	}
+}

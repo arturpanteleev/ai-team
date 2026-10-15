@@ -916,7 +916,17 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if version == SchemaVersion {
-		return nil
+		// The version mark is not proof that the administrator was granted (a
+		// build with a later schema may have marked it without this step):
+		// look at the actual state, read-only, and take the lock only if a
+		// grant is due.
+		owner, ownerErr := adminOwnerCandidate(ctx, db)
+		if ownerErr != nil {
+			return ownerErr
+		}
+		if owner == "" {
+			return nil
+		}
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -943,6 +953,9 @@ func migrate(db *sql.DB) error {
 		if err := applyMigrations(ctx, conn); err != nil {
 			return err
 		}
+	}
+	if err := grantAdminToOwner(ctx, conn); err != nil {
+		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
@@ -1082,51 +1095,72 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 // the first bootstrap audit record (or, for a registry that predates the
 // audit, the earliest active product_owner). Other product owners do not get
 // it. Version 16 belongs to the task tracker (S14).
+//
+// The grant looks at the actual state, not at the version mark: it is also run
+// on every open (ensureSystemAdmin), so a database that a build with a later
+// schema version brought up without this step still gets its administrator.
 func migrateV17(ctx context.Context, tx schemaQuerier) error {
-	var admins int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM team_members WHERE status='active' AND roles_json LIKE '%"admin"%'`).Scan(&admins); err != nil {
+	if err := grantAdminToOwner(ctx, tx); err != nil {
 		return err
 	}
-	if admins == 0 {
-		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT m.actor_id FROM team_members m
-			JOIN team_audit a ON a.action='bootstrap' AND a.target_actor_id=m.actor_id
-			WHERE m.status='active' AND m.roles_json LIKE '%"product_owner"%'
-			ORDER BY a.id LIMIT 1`).Scan(&owner)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = tx.QueryRowContext(ctx, `SELECT actor_id FROM team_members
-				WHERE status='active' AND roles_json LIKE '%"product_owner"%'
-				ORDER BY created_at, actor_id LIMIT 1`).Scan(&owner)
-		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if owner != "" {
-			var rolesJSON string
-			if err := tx.QueryRowContext(ctx, `SELECT roles_json FROM team_members WHERE actor_id=?`, owner).Scan(&rolesJSON); err != nil {
-				return err
-			}
-			var roles []string
-			if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
-				return err
-			}
-			roles = append(roles, "admin")
-			sort.Strings(roles)
-			encoded, err := json.Marshal(roles)
-			if err != nil {
-				return err
-			}
-			// A bumped session epoch makes live sessions re-read the roles.
-			if _, err := tx.ExecContext(ctx, `UPDATE team_members SET roles_json=?, session_epoch=session_epoch+1, updated_at=CURRENT_TIMESTAMP WHERE actor_id=?`, string(encoded), owner); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO team_audit(actor_id, action, target_actor_id, detail_json, created_at)
-				VALUES('system', 'admin_granted_by_migration', ?, ?, CURRENT_TIMESTAMP)`, owner, `{"roles":`+string(encoded)+`}`); err != nil {
-				return err
-			}
-		}
-	}
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, CURRENT_TIMESTAMP)`)
+	return err
+}
+
+// adminOwnerCandidate returns the member who must receive the administrator
+// right: empty when the team has an active administrator already or has no
+// owner to give it to. It reads only.
+func adminOwnerCandidate(ctx context.Context, q schemaQuerier) (string, error) {
+	var admins int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM team_members WHERE status='active' AND roles_json LIKE '%"admin"%'`).Scan(&admins); err != nil {
+		return "", err
+	}
+	if admins > 0 {
+		return "", nil
+	}
+	var owner string
+	err := q.QueryRowContext(ctx, `SELECT m.actor_id FROM team_members m
+		JOIN team_audit a ON a.action='bootstrap' AND a.target_actor_id=m.actor_id
+		WHERE m.status='active' AND m.roles_json LIKE '%"product_owner"%'
+		ORDER BY a.id LIMIT 1`).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = q.QueryRowContext(ctx, `SELECT actor_id FROM team_members
+			WHERE status='active' AND roles_json LIKE '%"product_owner"%'
+			ORDER BY created_at, actor_id LIMIT 1`).Scan(&owner)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return owner, nil
+}
+
+// grantAdminToOwner is idempotent: with an active administrator it does
+// nothing.
+func grantAdminToOwner(ctx context.Context, tx schemaQuerier) error {
+	owner, err := adminOwnerCandidate(ctx, tx)
+	if err != nil || owner == "" {
+		return err
+	}
+	var rolesJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT roles_json FROM team_members WHERE actor_id=?`, owner).Scan(&rolesJSON); err != nil {
+		return err
+	}
+	var roles []string
+	if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
+		return err
+	}
+	roles = append(roles, "admin")
+	sort.Strings(roles)
+	encoded, err := json.Marshal(roles)
+	if err != nil {
+		return err
+	}
+	// A bumped session epoch makes live sessions re-read the roles.
+	if _, err := tx.ExecContext(ctx, `UPDATE team_members SET roles_json=?, session_epoch=session_epoch+1, updated_at=CURRENT_TIMESTAMP WHERE actor_id=?`, string(encoded), owner); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO team_audit(actor_id, action, target_actor_id, detail_json, created_at)
+		VALUES('system', 'admin_granted_by_migration', ?, ?, CURRENT_TIMESTAMP)`, owner, `{"roles":`+string(encoded)+`}`)
 	return err
 }
 

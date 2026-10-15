@@ -1224,6 +1224,26 @@ describe('gate state on the task page (S06)', () => {
     await waitFor(() => expect(api.retryTaskGate).toHaveBeenCalledWith('run-detail-1', 'analysis', 'review'));
   });
 
+  it('offers no retry for an advisory gate with an error or when the retry is not offered', async () => {
+    const wave = { ...baseWave,
+      gates: [status('review', 'succeeded', 'pass'), { ...status('style', 'error', undefined), mode: 'advisory', blocking: false, warning: true, retryable: false }],
+      transition: resolution('passed_with_warnings', true, { warnings: ['style'] }) };
+    await arrange(gatesFor(wave), ['gate-retry']);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(within(panel).queryByRole('button', { name: 'Повторить на той же версии' })).not.toBeInTheDocument();
+  });
+
+  it('shows a legacy override as history and not as a blocked wave', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')],
+      transition: resolution('legacy_overridden', false, { reasons: ['legacy: переход был разрешён обходом без привязки к версии результата (alice): старый'] }) };
+    await arrange(gatesFor(wave), [], false);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(panel).toHaveTextContent('Legacy: задача прошла по обходу');
+    expect(panel).not.toHaveTextContent('Переход заблокирован');
+  });
+
   it('hides the override from anybody but an administrator', async () => {
     const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')], transition: resolution('blocked', false, { blocking: ['review'] }) };
     await arrange(gatesFor(wave, { can_override: false }), ['override']);

@@ -127,3 +127,56 @@ func TestMigrationV17GrantsAdminToTheTeamOwnerOnly(t *testing.T) {
 		t.Fatalf("migration reran: epoch %d -> %d", before, again.SessionEpoch)
 	}
 }
+
+// A database that a build with a later schema version brought up without the
+// v17 step (the version is marked, the administrator is not) still gets its
+// administrator on the next open: the grant looks at the state, not the mark.
+func TestMigrationV17GrantIsStateBasedNotVersionMarked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v18-without-v17.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := s.BootstrapTeamAdmin("owner@example.com", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InviteTeamMember("po2@example.com", "po2@example.com", []string{"product_owner"}, "hash", now.Add(time.Hour), now, "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`UPDATE team_members SET roles_json='["product_owner"]', status='active'`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, CURRENT_TIMESTAMP)`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner, _ := s.TeamMember("owner@example.com")
+	other, _ := s.TeamMember("po2@example.com")
+	if !containsRole(owner.Roles, "admin") || containsRole(other.Roles, "admin") {
+		t.Fatalf("owner=%v other=%v: only the owner must get admin", owner.Roles, other.Roles)
+	}
+	// Idempotent: a further open changes nothing.
+	epoch := owner.SessionEpoch
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	again, _ := s.TeamMember("owner@example.com")
+	if again.SessionEpoch != epoch {
+		t.Fatalf("grant reran: %d -> %d", epoch, again.SessionEpoch)
+	}
+}

@@ -57,7 +57,14 @@ type Override struct {
 	At             time.Time        `json:"at"`
 	CheckStatus    string           `json:"check_status,omitempty"`
 	Gates          []OverriddenGate `json:"gates"`
+	// Legacy marks an override recorded before S06: it has no result version,
+	// no gate list and no authority. It is shown as history only and never
+	// extends any right.
+	Legacy bool `json:"legacy,omitempty"`
 }
+
+// IsLegacy reports an override recorded before the version binding.
+func (o Override) IsLegacy() bool { return o.ArtifactSHA256 == "" && len(o.Gates) == 0 }
 
 // DecodeOverride reads an Override from a check_overridden event. Events
 // written before S06 carry no version or gate list: they decode with empty
@@ -95,6 +102,7 @@ func DecodeOverride(event evidence.Event) (Override, bool) {
 		gate.Reason, _ = entry["reason"].(string)
 		override.Gates = append(override.Gates, gate)
 	}
+	override.Legacy = override.IsLegacy()
 	return override, true
 }
 
@@ -147,10 +155,13 @@ const (
 	ResolutionPassed             = "passed"
 	ResolutionPassedWithWarnings = "passed_with_warnings"
 	ResolutionOverridden         = "overridden"
-	ResolutionBlocked            = "blocked"
-	ResolutionWaiting            = "waiting"
-	ResolutionError              = "error"
-	ResolutionIncomplete         = "incomplete"
+	// ResolutionLegacyOverride: the wave carries a pre-S06 override (no version,
+	// no gate list). It explains why the task moved on and is not a right.
+	ResolutionLegacyOverride = "legacy_overridden"
+	ResolutionBlocked        = "blocked"
+	ResolutionWaiting        = "waiting"
+	ResolutionError          = "error"
+	ResolutionIncomplete     = "incomplete"
 )
 
 // Resolution answers whether the stage may transition on one result version.
@@ -178,6 +189,7 @@ func Resolve(refs []workflow.GateRef, groupOf func(workflow.GateRef) int, sha st
 		byName[attempt.GateName] = append(byName[attempt.GateName], attempt)
 	}
 	valid := override != nil && override.ArtifactSHA256 != "" && override.ArtifactSHA256 == sha
+	legacy := override != nil && override.IsLegacy()
 	covered := map[string]bool{}
 	if valid {
 		for _, gate := range override.Gates {
@@ -210,7 +222,9 @@ func Resolve(refs []workflow.GateRef, groupOf func(workflow.GateRef) int, sha st
 		status.Group = latest.Group
 		status.Mode = latest.Mode.Effective()
 		status.Blocking = latest.Blocking()
-		status.Retryable = latest.Execution.Technical()
+		// Only a blocking gate is retried: the advisory one never opens a
+		// decision, so offering a retry for it would end in a conflict.
+		status.Retryable = latest.Execution.Technical() && status.Blocking
 		if status.Mode == workflow.GateModeAdvisory && !passed(latest) {
 			status.Warning = true
 			resolution.Warnings = append(resolution.Warnings, name)
@@ -247,6 +261,15 @@ func Resolve(refs []workflow.GateRef, groupOf func(workflow.GateRef) int, sha st
 			resolution.State = ResolutionPassedWithWarnings
 			resolution.Reasons = append(resolution.Reasons, "рекомендательные гейты не прошли, переход не заблокирован: "+strings.Join(resolution.Warnings, ", "))
 		}
+	case legacy:
+		// History only: the task already moved on under an override recorded
+		// before S06 (no version, no gate list). The wave must not look blocked
+		// for a task that really passed; no right is derived from it.
+		resolution.Allowed = false
+		resolution.State = ResolutionLegacyOverride
+		resolution.Reasons = append(resolution.Reasons, fmt.Sprintf(
+			"legacy: переход был разрешён обходом без привязки к версии результата (%s): %s",
+			override.ActorID, strings.TrimSpace(override.Reason)))
 	case valid && allCovered:
 		// Gates that never started are skipped by the override as well: it was
 		// made knowing which groups had not run.

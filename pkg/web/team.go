@@ -251,8 +251,18 @@ func (s *Server) handleTeamRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "нельзя отзывать собственное членство", http.StatusConflict)
 		return
 	}
-	if target, lookupErr := s.store.TeamMember(actorID); lookupErr == nil && target != nil &&
-		containsString(target.Roles, string(cloudidentity.RoleAdmin)) && !s.mayChangeAdminRight(w, r, true) {
+	// Fail closed: when the target cannot be read, whether it holds the
+	// administrator right is unknown, and the right check must not be skipped.
+	lookup := s.store.TeamMember
+	if s.teamMemberLookup != nil {
+		lookup = s.teamMemberLookup
+	}
+	target, lookupErr := lookup(actorID)
+	if lookupErr != nil {
+		http.Error(w, "не удалось прочитать участника", http.StatusInternalServerError)
+		return
+	}
+	if target != nil && containsString(target.Roles, string(cloudidentity.RoleAdmin)) && !s.mayChangeAdminRight(w, r, true) {
 		return
 	}
 	if err := s.store.SetTeamMember(actorID, nil, false, session.Principal.ActorID, "membership_revoked", time.Now().UTC()); err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -252,6 +253,11 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 	if err != nil {
 		return response, err
 	}
+	var pending []approval.PendingApproval
+	if s.controller != nil {
+		// Fail closed: without the approval state no retry is offered.
+		pending, _ = s.controller.Approvals(runID)
+	}
 	if overrides != nil {
 		response.Overrides = overrides
 	}
@@ -269,14 +275,28 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 			}
 		}
 		refs := groups.Refs()
+		var stageWaves []gatesched.RecordedWave
 		for _, wave := range waves {
-			if wave.Key.Stage != stage.ID {
-				continue
+			if wave.Key.Stage == stage.ID {
+				stageWaves = append(stageWaves, wave)
 			}
+		}
+		lastOfScope := map[string]int{}
+		for index, wave := range stageWaves {
+			lastOfScope[wave.Key.Scope] = index
+		}
+		for waveIndex, wave := range stageWaves {
 			var override *gatesched.Override
 			for index := range overrides {
 				candidate := overrides[index]
-				if candidate.Stage == stage.ID && candidate.Scope == wave.Key.Scope && candidate.ArtifactSHA256 == wave.Key.ArtifactSHA256 {
+				if candidate.Stage != stage.ID || candidate.Scope != wave.Key.Scope {
+					continue
+				}
+				if candidate.ArtifactSHA256 == wave.Key.ArtifactSHA256 && !candidate.IsLegacy() {
+					override = &candidate
+				} else if candidate.IsLegacy() && lastOfScope[wave.Key.Scope] == waveIndex && override == nil {
+					// A pre-S06 override has no version: it is attached to the
+					// last version of its stage attempt, as history only.
 					override = &candidate
 				}
 			}
@@ -289,6 +309,13 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 		}
 		if count := len(view.Waves); count > 0 {
 			view.Waves[count-1].Current = true
+			offered := offeredGateRetries(pending, stage.ID, view.Waves[count-1].ArtifactSHA256)
+			for index := range view.Waves {
+				for position := range view.Waves[index].Gates {
+					status := &view.Waves[index].Gates[position]
+					status.Retryable = status.Retryable && index == count-1 && offered[status.GateName]
+				}
+			}
 			current := view.Waves[count-1]
 			view.Current = &current
 			for _, status := range current.Gates {
@@ -303,4 +330,28 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 		response.Stages = append(response.Stages, view)
 	}
 	return response, nil
+}
+
+// offeredGateRetries lists the gates a pending check decision of the stage
+// really offers to retry on the given result version. A gate that is
+// technically failed but not in the payload (an advisory one, an older
+// version, no pending decision) must not get a retry button: the retry would
+// end in a conflict.
+func offeredGateRetries(pending []approval.PendingApproval, stageID, sha string) map[string]bool {
+	offered := map[string]bool{}
+	for _, value := range pending {
+		if value.Kind != approval.KindCheckDecision || value.Trigger != approval.StageCheckTrigger ||
+			value.FromStage != stageID || value.Status != approval.StatusPending ||
+			!actionAllowed(value.Actions, approval.ActionRetryGate) {
+			continue
+		}
+		var payload approval.CheckDecisionPayload
+		if json.Unmarshal(value.Payload, &payload) != nil || (payload.ArtifactSHA256 != "" && payload.ArtifactSHA256 != sha) {
+			continue
+		}
+		for _, gate := range payload.RetryableGates {
+			offered[gate] = true
+		}
+	}
+	return offered
 }

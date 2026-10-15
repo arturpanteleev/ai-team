@@ -780,7 +780,14 @@ func TestCheckDecisionOverrideRequiresReason(t *testing.T) {
 	if _, err := store.Decide(created.RunID, created.ID, Decision{
 		ActorID: "local-user", ActorRole: "architect", Action: "override",
 		Comment: "риск принят", SubjectHash: created.SubjectHash, DecidedAt: time.Now().UTC(),
+	}); err == nil || !strings.Contains(err.Error(), "системному администратору") {
+		t.Fatalf("override без authority должен быть отклонён: %v", err)
+	}
+	if _, err := store.Decide(created.RunID, created.ID, Decision{
+		ActorID: "local-user", ActorRole: "architect", Action: "override",
+		Comment: "риск принят", SubjectHash: created.SubjectHash, DecidedAt: time.Now().UTC(),
+		Authority: AuthoritySystemAdmin, ControllerAuthenticated: true,
 	}); err != nil {
-		t.Fatalf("override с причиной должен быть принят: %v", err)
+		t.Fatalf("override с причиной и authority должен быть принят: %v", err)
 	}
 }

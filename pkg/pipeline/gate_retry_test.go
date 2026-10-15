@@ -67,6 +67,11 @@ func decideCheck(t *testing.T, dir string, value *approval.PendingApproval, deci
 	if decision.ActorRole == "" {
 		decision.ActorRole = "architect"
 	}
+	// What the authenticated controller sets: retry and override come only
+	// through it; the CLI path (without these fields) is refused by the store.
+	if decision.Action == approval.ActionRetryGate || decision.Action == "override" {
+		decision.ControllerAuthenticated = true
+	}
 	if _, err := store.Decide(value.RunID, value.ID, decision); err != nil {
 		t.Fatalf("decide %s: %v", decision.Action, err)
 	}
@@ -390,5 +395,52 @@ func TestFoldStageCheck_OverrideAndRetryAreBoundToTheVersion(t *testing.T) {
 	legacy := evidence.Event{Type: "check_overridden", Stage: "tech", AttemptID: "att-1", Data: map[string]any{}}
 	if _, found := foldStageCheck([]evidence.Event{failed, legacy}, "tech", "att-1", shaA); !found {
 		t.Fatal("an override recorded before versions existed keeps its meaning")
+	}
+}
+
+// Regression (M1): the override is bound to the system administrator right at
+// the enforcement point. A decision without the server-confirmed authority is
+// refused by the store (CLI path) and, if one reached the run anyway, by the
+// pipeline: it is never applied.
+func TestGateOverride_WithoutAdminAuthorityDoesNotAdvance(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "# Решение\n\nбез раздела\n\n**Verdict:** APPROVED\n"}
+	rt.contentFn["verifier"] = passingReviewer
+	cfg := waveConfig(codeGatesThenVerifier(verifierGate()))
+	if err := runWave(t, dir, cfg, rt); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("a failed required gate must block: %v", err)
+	}
+	value := findCheckDecision(t, dir, approval.StageCheckTrigger)
+	store, err := approval.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, decision := range map[string]approval.Decision{
+		"cli like (no authority)":  {ActorID: "anyone", ActorRole: "architect", Action: "override", Comment: "x", SubjectHash: value.SubjectHash},
+		"authority not confirmed":  {ActorID: "anyone", ActorRole: "architect", Action: "override", Comment: "x", SubjectHash: value.SubjectHash, Authority: approval.AuthoritySystemAdmin},
+		"authenticated, no rights": {ActorID: "anyone", ActorRole: "architect", Action: "override", Comment: "x", SubjectHash: value.SubjectHash, ControllerAuthenticated: true},
+		"retry from the CLI":       {ActorID: "anyone", ActorRole: "architect", Action: approval.ActionRetryGate, Comment: "x", SubjectHash: value.SubjectHash, Gates: []string{"g"}},
+	} {
+		if _, err := store.Decide(value.RunID, value.ID, decision); err == nil {
+			t.Fatalf("%s: the store must refuse the decision", name)
+		}
+	}
+	runID := filepath.Base(onlyRunDir(t, dir))
+	err = resumeWave(t, dir, rt, cfg, runID)
+	if err == nil {
+		t.Fatal("the run must not advance without a valid override")
+	}
+	if overrides := eventsOfType(gateEvents(t, dir), "check_overridden"); len(overrides) != 0 {
+		t.Fatalf("no override may be recorded: %d", len(overrides))
+	}
+
+	// Enforcement point inside the pipeline: an override decision that reached
+	// the run without the confirmed authority is refused, not applied.
+	rs := &runState{resumedApproval: &approval.PendingApproval{ID: "a", Decisions: []approval.Decision{
+		{ActorID: "anyone", Action: "override", Comment: "причина"},
+	}}}
+	if _, err := rs.applyCheckOverride("tech"); err == nil || !strings.Contains(err.Error(), "system_admin") {
+		t.Fatalf("applyCheckOverride must refuse a decision without authority: %v", err)
 	}
 }

@@ -962,6 +962,16 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	if reason == "" {
 		return notifier.StageResult{}, errors.New("обход проверки требует причину")
 	}
+	// The enforcement point of the right to override: the decision must carry
+	// the authority the authenticated controller sets after checking the
+	// system administrator right. A decision from the CLI or any store write
+	// without it is refused, never applied.
+	if decision.Authority != approval.AuthoritySystemAdmin || !decision.ControllerAuthenticated {
+		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не подтверждено сервером как действие системного администратора (authority=system_admin); используйте Web/REST под администратором")
+	}
+	if trusted, ok := rs.approvalStore.(approval.TrustedDecisionAuthority); ok && !trusted.HasAuthenticatedControllerDecision(*rs.resumedApproval) {
+		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не принято аутентифицированным контроллером")
+	}
 	var result *notifier.StageResult
 	for index := len(rs.results) - 1; index >= 0; index-- {
 		if rs.results[index].Name == stageID && rs.results[index].AttemptID == rs.resumedApproval.AttemptID {
@@ -1008,9 +1018,7 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 		"approval_id": rs.resumedApproval.ID,
 		"check_kind":  checkKind,
 	}
-	if decision.Authority != "" {
-		eventData["authority"] = decision.Authority
-	}
+	eventData["authority"] = decision.Authority
 	bound, err := rs.overrideEvidence(stage, *result, sha)
 	if err != nil {
 		return notifier.StageResult{}, err

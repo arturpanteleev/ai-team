@@ -1390,17 +1390,8 @@ func (c *Config) Validate(reg AgentLookup) error {
 	compiledGraph, graphErr := c.CompiledGraph()
 	if graphErr != nil {
 		errs = append(errs, graphErr.Error())
-	} else if c.Template != "" {
-		for _, edge := range compiledGraph.Edges {
-			if edge.Approval == nil {
-				continue
-			}
-			for _, role := range edge.Approval.Roles {
-				if _, err := cloudidentity.ParseRoles([]string{role}); err != nil {
-					errs = append(errs, fmt.Sprintf("workflow: роль approval %q недоступна в cloud", role))
-				}
-			}
-		}
+	} else {
+		errs = append(errs, approvalRoleErrors(compiledGraph, c.Template != "")...)
 	}
 	if c.Tracker != nil {
 		stageIDs := make(map[string]bool, len(c.Stages))
@@ -1478,4 +1469,30 @@ func isOneOf(v string, allowed ...string) bool {
 		}
 	}
 	return false
+}
+
+// approvalRoleErrors checks the roles of the approval edges. admin is a system
+// right (override of a failed gate), not a process function: no edge may name
+// it, whatever the configuration source. With cloud set, every role must also
+// be a known cloud role.
+func approvalRoleErrors(graph workflow.Graph, cloud bool) []string {
+	var errs []string
+	for _, edge := range graph.Edges {
+		if edge.Approval == nil {
+			continue
+		}
+		for _, role := range edge.Approval.Roles {
+			if strings.EqualFold(strings.TrimSpace(role), string(cloudidentity.RoleAdmin)) {
+				errs = append(errs, fmt.Sprintf("workflow: роль %q недопустима в approval ребра %s -> %s: admin — системное право (обход проваленного гейта), а не функция процесса", role, edge.From, edge.To))
+				continue
+			}
+			if !cloud {
+				continue
+			}
+			if _, err := cloudidentity.ParseRoles([]string{role}); err != nil {
+				errs = append(errs, fmt.Sprintf("workflow: роль approval %q недоступна в cloud", role))
+			}
+		}
+	}
+	return errs
 }

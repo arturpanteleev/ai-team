@@ -149,7 +149,10 @@ func WithLocalAuthenticator(verifier *LocalAuthenticator) ServerOption {
 }
 
 type Server struct {
-	store               *store.Store
+	store *store.Store
+	// teamMemberLookup replaces the registry read of a member in the revoke
+	// right check (a test seam for the fail-closed path).
+	teamMemberLookup    func(string) (*store.TeamMember, error)
 	humanArtifacts      *humanartifact.Store
 	hub                 *Hub
 	router              *chi.Mux

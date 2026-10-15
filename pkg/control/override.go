@@ -57,6 +57,11 @@ func (c *Controller) OverrideStageCheck(_ context.Context, runID, stageID, reaso
 	return c.Resume(runID)
 }
 
+// MaxGateRetryRounds bounds the retries of technically failed gates for one
+// stage attempt (one result version): a gate that keeps failing technically
+// must end in a new version, a return or an administrator decision, not loop.
+const MaxGateRetryRounds = 10
+
 // RetryStageGates resolves the pending check_decision with retry_gate: the
 // named gates, whose latest attempt is a technical failure (error/timeout),
 // run again on the SAME result version; gates that already succeeded are not
@@ -98,6 +103,20 @@ func (c *Controller) RetryStageGates(_ context.Context, runID, stageID string, g
 	}
 	if !containsAction(value.Actions, approval.ActionRetryGate) || value.Targets[approval.ActionRetryGate] != stageID {
 		return errors.New("повтор гейта недоступен: нет гейтов, завершившихся технической ошибкой (error/timeout)")
+	}
+	all, err := c.approvals.List(runID)
+	if err != nil {
+		return err
+	}
+	rounds := 0
+	for _, other := range all {
+		if other.Kind == approval.KindCheckDecision && other.FromStage == stageID && other.AttemptID == value.AttemptID &&
+			other.Status == approval.StatusResolved && other.ResolvedAction == approval.ActionRetryGate {
+			rounds++
+		}
+	}
+	if rounds >= MaxGateRetryRounds {
+		return fmt.Errorf("лимит повторов гейтов исчерпан: %d раундов на этап %s; остаются новая версия результата, возврат или обход администратором", MaxGateRetryRounds, stageID)
 	}
 	if _, err := c.approvals.Decide(runID, value.ID, approval.Decision{
 		ActorID: actorID, ActorRole: actorRole, Action: approval.ActionRetryGate, Comment: reason,

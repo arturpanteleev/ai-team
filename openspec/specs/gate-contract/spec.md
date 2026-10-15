@@ -511,7 +511,21 @@ visit, the approval and the exact blocking attempts (gate, attempt ID, execution
 verdict, reason); it MUST NOT change any attempt: a gate that failed stays `fail`
 in the attempts, the events, the API and the UI. The override MUST apply only to
 the result version it names: a result with another hash MUST need a new override,
-and an override made before versions were recorded MUST cover nothing.
+and an override made before versions were recorded MUST cover nothing (it is
+shown only as `legacy` history and MUST NOT extend any right). The right MUST be
+enforced where the decision is taken, not only at the HTTP layer: the approval
+store MUST accept `override` of a `check_decision` only with the authority
+`system_admin` set by the authenticated controller, and the pipeline MUST refuse
+to apply an override decision without it; the CLI `ai-team decision` MUST refuse
+`override` and `retry_gate`. Retries of one stage attempt MUST be bounded (10
+rounds), after which a retry MUST be refused with a reason.
+
+#### Scenario: A decision without the authority does not move the task
+
+- **КОГДА** an `override` decision for a `check_decision` is written through the
+  CLI or the store without the authority confirmed by the controller, and the
+  run is resumed
+- **ТОГДА** the decision MUST be refused and the task MUST NOT transition
 
 #### Scenario: Product owner cannot override
 

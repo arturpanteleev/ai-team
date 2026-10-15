@@ -424,7 +424,7 @@ export interface Project {
 export type GateMode = 'required' | 'advisory';
 export type GateExecution = 'pending' | 'running' | 'succeeded' | 'error' | 'timeout' | 'canceled';
 export type GateVerdict = 'pass' | 'fail' | 'not_applicable';
-export type GateResolutionState = 'passed' | 'passed_with_warnings' | 'overridden' | 'blocked' | 'error' | 'waiting' | 'incomplete';
+export type GateResolutionState = 'passed' | 'passed_with_warnings' | 'overridden' | 'legacy_overridden' | 'blocked' | 'error' | 'waiting' | 'incomplete';
 
 export interface GateAttempt {
   attempt_id: string;

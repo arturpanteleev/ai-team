@@ -351,3 +351,22 @@ func TestGateRetryAdvertisedInAllowedActionsOnlyWhenOffered(t *testing.T) {
 		}
 	}
 }
+
+// A retry button is offered only for a gate the pending decision really offers
+// to retry: a technically failed advisory gate, or a gate of a version without
+// such an offer, gets none (the retry would end in a conflict).
+func TestGatesAPI_RetryableOnlyWhenTheDecisionOffersIt(t *testing.T) {
+	for _, offered := range []bool{true, false} {
+		f := newGatesFixture(t, offered)
+		f.attempt(t, gatesTestSHA1, "required_sections", "required_sections", "", 0, 1, workflow.GateExecutionSucceeded, workflow.GateVerdictPass)
+		f.attempt(t, gatesTestSHA1, "verdict_marker", "verdict_marker", workflow.GateModeAdvisory, 0, 1, workflow.GateExecutionError, "")
+		f.attempt(t, gatesTestSHA1, "second", "required_sections", "", 1, 1, workflow.GateExecutionError, "")
+		stage := f.get(t).Stages[0]
+		if marker := f.gate(stage, "verdict_marker"); marker.Retryable {
+			t.Fatalf("an advisory gate with an error has no retry: %+v", marker)
+		}
+		if second := f.gate(stage, "second"); second.Retryable != offered {
+			t.Fatalf("offered=%v but second.Retryable=%v", offered, second.Retryable)
+		}
+	}
+}

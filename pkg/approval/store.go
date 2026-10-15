@@ -397,7 +397,14 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if value.Kind == KindCheckDecision && decision.Action == "override" && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("обход проверки этапа требует причину")
 	}
+	if value.Kind == KindCheckDecision && decision.Action == "override" &&
+		(!decision.ControllerAuthenticated || decision.Authority != AuthoritySystemAdmin) {
+		return PendingApproval{}, errors.New("обход проверки этапа доступен только системному администратору через Web/REST (ai-team decision его не принимает)")
+	}
 	if value.Kind == KindCheckDecision && decision.Action == ActionRetryGate {
+		if !decision.ControllerAuthenticated {
+			return PendingApproval{}, errors.New("повтор гейта принимается только от аутентифицированного контроллера (Web/REST), а не из ai-team decision")
+		}
 		var payload CheckDecisionPayload
 		if json.Unmarshal(value.Payload, &payload) != nil || len(payload.RetryableGates) == 0 {
 			return PendingApproval{}, errors.New("повтор гейта возможен только после технической ошибки (error/timeout)")

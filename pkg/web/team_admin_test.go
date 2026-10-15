@@ -2,12 +2,14 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
 // activateInvited activates the invitation returned by the invite response.
@@ -87,5 +89,33 @@ func TestTeamAdminRightIsSeparateFromProductOwner(t *testing.T) {
 	if response := teamRequest(srv, ownerCookie, ownerCSRF, http.MethodPatch, "/api/team/members/po2@example.com/roles",
 		`{"roles":["nobody"]}`); response.Code != http.StatusBadRequest {
 		t.Fatalf("an unknown role must be rejected: %d %s", response.Code, response.Body.String())
+	}
+}
+
+// m4: when the member to revoke cannot be read, the administrator-right check
+// must not be skipped: the request fails closed and nothing is revoked.
+func TestTeamRevokeFailsClosedWhenTheMemberCannotBeRead(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("a", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(":memory:", "", t.TempDir(), WithAuthenticator(manager), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	ownerCookie, ownerCSRF := cloudSessionForTest(t, srv, manager, "owner@example.com", cloudidentity.RoleProductOwner)
+	activateInvited(t, srv, teamRequest(srv, ownerCookie, ownerCSRF, http.MethodPost, "/api/team/invitations",
+		`{"email":"po2@example.com","roles":["product_owner"]}`))
+	poCookie, poCSRF := cloudSessionForTest(t, srv, manager, "po2@example.com", cloudidentity.RoleProductOwner)
+
+	srv.teamMemberLookup = func(string) (*store.TeamMember, error) { return nil, errors.New("registry unavailable") }
+	if response := teamRequest(srv, poCookie, poCSRF, http.MethodDelete, "/api/team/members/owner@example.com", ""); response.Code != http.StatusInternalServerError {
+		t.Fatalf("an unreadable member must fail closed: %d %s", response.Code, response.Body.String())
+	}
+	srv.teamMemberLookup = nil
+	member, err := srv.store.TeamMember("owner@example.com")
+	if err != nil || member == nil || member.Status != "active" {
+		t.Fatalf("the administrator must stay: %+v %v", member, err)
 	}
 }

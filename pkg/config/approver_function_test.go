@@ -30,6 +30,7 @@ func TestTemplateApproverFunctionValidation(t *testing.T) {
 		{"deployer alias of release manager", 6, "release_manager", "совпадает с функцией исполнителя"},
 		{"unknown approver", 3, "operator", "не сопоставлен ни одной роли"},
 		{"padded approver", 3, " reviewer", "пробелы"},
+		{"admin is a system right, not an approver function", 3, "admin", "admin"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,5 +113,20 @@ returns:
 		}
 	} else if !strings.Contains(err.Error(), "совпадает") {
 		t.Fatalf("matching executor and approver functions must be rejected, got %v", err)
+	}
+}
+
+// admin is a system right: an approval edge must not name it, with a clear
+// configuration error, whatever produced the graph.
+func TestApprovalRoleErrors_AdminIsNotAProcessRole(t *testing.T) {
+	graph := workflow.Graph{Edges: []workflow.Edge{
+		{From: "build", To: "done", Approval: &workflow.ApprovalPolicy{Roles: []string{"reviewer"}}},
+		{From: "done", To: "stop", Approval: &workflow.ApprovalPolicy{Roles: []string{" Admin "}}},
+	}}
+	for _, cloud := range []bool{true, false} {
+		errs := approvalRoleErrors(graph, cloud)
+		if len(errs) != 1 || !strings.Contains(errs[0], "admin") || !strings.Contains(errs[0], "системное право") {
+			t.Fatalf("cloud=%v: %v", cloud, errs)
+		}
 	}
 }

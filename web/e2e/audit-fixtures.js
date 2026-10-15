@@ -55,9 +55,19 @@ const inputApproval = (stage, roles = ['product_owner']) => ({
   subject_hash: hash('a'), required_roles: roles, quorum: 'any', actions: ['submit', 'run_agent'], status: 'pending', created_at: at,
 })
 
-const checkApproval = (stage, to, roles = ['product_owner'], extra = {}) => ({
-  id: `check-${stage}`, run_id: 'run-audit', attempt_id: `${stage}-attempt`, from_stage: stage, to_stage: to, kind: 'approve', trigger: 'stage_check',
+// The confirmation of a transition as the controller writes it: trigger graph_outcome:<outcome> (a
+// failed check is a check_decision with the trigger stage_check, never this), from_stage is the stage
+// being confirmed, to_stage the stage the task moves to.
+const transitionApproval = (stage, to, roles = ['product_owner'], extra = {}) => ({
+  id: `gate-${stage}`, run_id: 'run-audit', attempt_id: `${stage}-attempt-1`, from_stage: stage, to_stage: to, kind: 'approve', trigger: 'graph_outcome:passed',
   subject_hash: hash('c'), required_roles: roles, quorum: 'any', actions: ['approve', 'reject'], targets: { approve: to }, status: 'pending', created_at: later, ...extra,
+})
+
+// A failed required check: kind check_decision, trigger stage_check, the decision stays at the stage.
+const checkApproval = (stage, roles = ['product_owner'], extra = {}) => ({
+  id: `check-${stage}`, run_id: 'run-audit', attempt_id: `${stage}-attempt-1`, from_stage: stage, to_stage: stage, kind: 'check_decision', trigger: 'stage_check',
+  subject_hash: hash('c'), required_roles: roles, quorum: 'any', actions: ['new_version', 'override', 'return'],
+  targets: { new_version: stage, override: stage, return: stage }, status: 'pending', created_at: later, payload: { kind: 'check_decision', status: 'fail' }, ...extra,
 })
 
 const attempt = (stage, index, status, extra = {}) => ({
@@ -164,14 +174,15 @@ export const scenarios = {
     title: 'Ждёт человека: принять результат',
     roles: ['product_owner'],
     run: { status: 'waiting_for_approval' },
-    state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'check-product_spec' },
+    // While the confirmation waits the checkpoint already points at the next stage; the stage that waits is product_spec.
+    state: { phase: 'waiting', next_stage: 'implementation', pending_approval_id: 'gate-product_spec' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [checkApproval('product_spec', 'implementation')],
+    approvals: [transitionApproval('product_spec', 'implementation')],
     results,
     allowed: ['confirm'],
-    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: ['confirm'] }),
+    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: ['confirm'], action_stage_id: 'implementation' }),
     gates: gatesOf('product_spec', wave('product_spec', [gate('required_sections', 'succeeded', 'pass'), gate('agent_review', 'succeeded', 'pass')], { allowed: true, state: 'passed' })),
-    expect: { chip: 'Ждёт человека', buttons: ['Принять и перейти: Техническая реализация'] },
+    expect: { chip: 'Ждёт человека', buttons: ['Принять и перейти: Техническая реализация'], decides: { stage: 'product_spec', approvalID: 'gate-product_spec', action: 'approve' } },
   },
   grill: {
     title: 'Ждёт человека: вопросы грилла',
@@ -179,7 +190,7 @@ export const scenarios = {
     run: { status: 'waiting_for_approval' },
     state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'grill-1' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [{ ...checkApproval('product_spec', 'product_spec'), id: 'grill-1', kind: 'grill_questions', trigger: 'grill_questions', actions: ['answer', 'new_version', 'done'],
+    approvals: [{ ...checkApproval('product_spec'), id: 'grill-1', kind: 'grill_questions', trigger: 'grill_questions', actions: ['answer', 'new_version', 'done'], targets: {},
       payload: { kind: 'grill_questions', round: 1, markdown: '## Вопросы проверки\n\n1. Какой сегмент пользователей проверяем первым?\n2. Что считаем успехом через месяц?' } }],
     allowed: ['grill/answer', 'grill/new-version', 'grill/done'],
     statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'pending', executor: human('alice'), blocked_by: { kind: 'grill_questions', roles: ['product_owner'] }, allowed_actions: ['grill/answer', 'grill/new-version', 'grill/done'] }),
@@ -201,8 +212,7 @@ export const scenarios = {
     run: { status: 'waiting_for_approval' },
     state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'check-failed' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [{ ...checkApproval('product_spec', 'product_spec', ['product_owner']), id: 'check-failed', kind: 'check_decision', actions: ['new_version', 'override', 'return'],
-      targets: { new_version: 'product_spec', override: 'product_spec', return: 'product_spec' }, payload: { kind: 'check_decision', status: 'fail' } }],
+    approvals: [{ ...checkApproval('product_spec'), id: 'check-failed' }],
     allowed: ['override'],
     statuses: statuses(1, { status: 'blocked', readiness: 'engaged', phase: 'awaiting_human', outcome: 'blocked', executor: human('alice'), blocked_by: { kind: 'check_decision', roles: ['product_owner'] }, allowed_actions: ['override'] }),
     gates: gatesOf('product_spec', wave('product_spec', [gate('required_sections', 'succeeded', 'fail')], { state: 'blocked', reasons: ['нет раздела «Критерии приёмки»'], blocking: ['required_sections'] })),
@@ -273,12 +283,12 @@ export const scenarios = {
     title: 'Рекомендательный гейт не выполнен (янтарный)',
     roles: ['product_owner'],
     run: { status: 'waiting_for_approval' },
-    state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'check-product_spec' },
+    state: { phase: 'waiting', next_stage: 'implementation', pending_approval_id: 'gate-product_spec' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [checkApproval('product_spec', 'implementation')],
+    approvals: [transitionApproval('product_spec', 'implementation')],
     results,
     allowed: ['confirm'],
-    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), warnings: 1, blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: ['confirm'] }),
+    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), warnings: 1, blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: ['confirm'], action_stage_id: 'implementation' }),
     gates: gatesOf('product_spec', wave('product_spec', [gate('required_sections', 'succeeded', 'pass'),
       gate('style_review', 'succeeded', 'fail', { mode: 'advisory', blocking: false, warning: true })], { allowed: true, state: 'passed_with_warnings', warnings: ['style_review'] })),
     expect: { flag: 'advisory', text: 'Рекомендация не выполнена', buttons: ['Принять и перейти: Техническая реализация'] },
@@ -289,7 +299,7 @@ export const scenarios = {
     run: { status: 'waiting_for_approval' },
     state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'check-failed' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [{ ...checkApproval('product_spec', 'product_spec'), id: 'check-failed', kind: 'check_decision', actions: ['new_version', 'return', 'retry_gate'], payload: { kind: 'check_decision', status: 'error' } }],
+    approvals: [{ ...checkApproval('product_spec'), id: 'check-failed', actions: ['new_version', 'return', 'retry_gate'], targets: { new_version: 'product_spec', return: 'product_spec', retry_gate: 'product_spec' }, payload: { kind: 'check_decision', status: 'error' } }],
     allowed: ['gate-retry'],
     statuses: statuses(1, { status: 'blocked', readiness: 'engaged', phase: 'awaiting_human', outcome: 'blocked', executor: human('alice'), blocked_by: { kind: 'check_decision', roles: ['product_owner'] }, allowed_actions: ['gate-retry'] }),
     gates: gatesOf('product_spec', wave('product_spec', [gate('agent_review', 'error', undefined, { retryable: true })], { state: 'error', reasons: ['agent_review: runtime недоступен'], retryable: ['agent_review'] })),
@@ -318,18 +328,44 @@ export const scenarios = {
     tracker: { configured: true, tracker: 'fake', sync_status: 'not_linked', link: null, conflicts: [], deliveries: [], inbound: [] },
     expect: { buttons: ['Связать с карточкой', 'Синхронизировать сейчас'], text: 'Не связана с карточкой' },
   },
+  'developer-on-owner-stage': {
+    title: 'Нет прав: разработчик на этапе владельца продукта',
+    roles: ['developer'],
+    run: { status: 'waiting_for_approval' },
+    state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'input-product_spec' },
+    approvals: [inputApproval('product_spec')],
+    // The server lists what the state offers; the function of the stage is product_owner, so this developer may do none of it.
+    allowed: ['take', 'results', 'executor', 'run-agent'],
+    viewer: [],
+    statuses: statuses(1, { status: 'ready', readiness: 'engaged', phase: 'awaiting_human', outcome: 'pending', executor: human(), blocked_by: { kind: 'human_input' }, allowed_actions: ['take', 'results', 'executor', 'run-agent'] }),
+    expect: { chip: 'Готов к работе', noButtons: ['Сдать результат', 'Взять этап', 'Поручить агенту', 'Пропустить этап'], hint: 'Нужна роль: Владелец продукта' },
+  },
+  // The confirmation of code_review (reviewer) while the task moves to qa: return and skip must address code_review.
+  'transition-return': {
+    title: 'Подтверждение перехода: возврат относится к подтверждаемому этапу',
+    roles: ['reviewer'],
+    run: { status: 'waiting_for_approval' },
+    state: { phase: 'waiting', next_stage: 'qa', pending_approval_id: 'gate-code_review' },
+    stages: [attempt('code_review', 1, 'passed')],
+    approvals: [transitionApproval('code_review', 'qa', ['reviewer'], { actions: ['approve', 'reject', 'return_to_implementation'], targets: { approve: 'qa', return_to_implementation: 'implementation' } })],
+    allowed: ['confirm', 'return'],
+    statuses: statuses(3, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('bob'), blocked_by: { kind: 'approval', roles: ['reviewer'], actions: ['approve'] }, allowed_actions: ['confirm', 'return'], action_stage_id: 'qa' }),
+    expect: { chip: 'Ждёт человека', buttons: ['Принять и перейти: Тестирование', 'Вернуть на доработку: Техническая реализация'], noButtons: ['Пропустить этап'], decides: { stage: 'code_review', approvalID: 'gate-code_review', action: 'approve' }, returns: { stage: 'code_review', to: 'implementation' } },
+  },
   'no-rights': {
     title: 'Нет прав: разработчик смотрит на решение владельца',
     roles: ['developer'],
     run: { status: 'waiting_for_approval' },
-    state: { phase: 'waiting', next_stage: 'product_spec', pending_approval_id: 'check-product_spec' },
+    state: { phase: 'waiting', next_stage: 'implementation', pending_approval_id: 'gate-product_spec' },
     stages: [attempt('product_spec', 1, 'passed')],
-    approvals: [checkApproval('product_spec', 'implementation')],
+    approvals: [transitionApproval('product_spec', 'implementation')],
     results,
-    allowed: [],
-    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: [] }),
+    // The server offers the confirmation to anyone (allowed_actions); viewer_actions is what this principal may do: nothing.
+    allowed: ['confirm'],
+    viewer: [],
+    statuses: statuses(1, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('alice'), blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, allowed_actions: ['confirm'], action_stage_id: 'implementation' }),
     tracker: { configured: true, tracker: 'fake', sync_status: 'ok', link: trackerLink, conflicts: [], deliveries: [], inbound: [] },
-    expect: { chip: 'Ждёт человека', noButtons: ['Принять и перейти'], hint: 'Ответить или решить может участник с ролью: product_owner', trackerHint: 'Связь с карточкой меняют: Владелец продукта, Архитектор' },
+    expect: { chip: 'Ждёт человека', noButtons: ['Принять и перейти'], hint: 'Нужна роль: Владелец продукта. Без неё недоступно: Принять и перейти', trackerHint: 'Связь с карточкой меняют: Владелец продукта, Архитектор' },
   },
 }
 
@@ -341,7 +377,7 @@ export function detail(id, options = {}) {
     template: { valid: true, template: 'idea-to-prod', title: 'От идеи до продакшена', version: 'f'.repeat(64), ...template },
     state: { run_id: 'run-audit', task: 'Добавить приветствие по имени', phase: 'running', next_stage: '', attempt_ordinal: 1, ...scenario.state },
     stages: scenario.stages ?? [], approvals: scenario.approvals ?? [], stage_owners: scenario.owners ?? {}, results: scenario.results ?? {},
-    allowed_actions: scenario.allowed ?? [], delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
+    allowed_actions: scenario.allowed ?? [], viewer_actions: scenario.viewer ?? scenario.allowed ?? [], delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
     ...(options.extra ?? {}),
   }
 }

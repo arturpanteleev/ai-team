@@ -89,6 +89,8 @@ for (const [id, scenario] of Object.entries(scenarios)) {
       if (want.trackerHint) await expect(actions).toContainText(want.trackerHint)
       if (want.flag) await expect(page.locator(`[data-gate-flag="${want.flag}"]`).first()).toBeVisible()
       if (want.noActions) await expect(actions.getByTestId('no-actions')).toBeVisible()
+      // The role hint is shown instead of the buttons the viewer may not use.
+      if (id === 'developer-on-owner-stage') await expect(actions.getByTestId('role-needed')).toBeVisible()
 
       // No two buttons with the same name in the actions column (one meaning, one button).
       const names = (await actions.getByRole('button').allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim()).filter(Boolean)
@@ -119,6 +121,53 @@ for (const [id, scenario] of Object.entries(scenarios)) {
     }
   })
 }
+
+test.describe('real requests of the task page', () => {
+  async function record(page) {
+    const calls = []
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      if (request.method() !== 'GET') {
+        calls.push({ method: request.method(), path: new URL(request.url()).pathname, body: request.postDataJSON?.() ?? null })
+        return route.fulfill({ status: 200, json: { status: 'resolved', approval: { status: 'pending' } } })
+      }
+      return route.fallback()
+    })
+    return calls
+  }
+
+  test('accepting a transition goes through the decision card with the exact subject hash', async ({ page }) => {
+    await page.addInitScript(() => { try { localStorage.setItem('ai-team:theme', 'light') } catch {} })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await installApi(page, 'awaiting-human')
+    const calls = await record(page)
+    await page.goto(`${baseURL}/tasks/run-audit`)
+    const actions = page.getByRole('complementary', { name: 'Действия' })
+    await expect(actions.getByRole('region', { name: 'Этап «Продуктовая спецификация»' })).toBeVisible()
+    await actions.getByRole('button', { name: 'Принять и перейти: Техническая реализация', exact: true }).click()
+    await expect.poll(() => calls.length).toBeGreaterThan(0)
+    const decision = calls.find((call) => call.path === '/api/runs/run-audit/approvals/gate-product_spec/decisions')
+    expect(decision, JSON.stringify(calls)).toBeTruthy()
+    expect(JSON.stringify(decision.body)).toContain('"approve"')
+    expect(JSON.stringify(decision.body)).toContain('cccccccccccccccc')
+  })
+
+  test('a return while a transition waits addresses the completed stage, once, without a skip', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await installApi(page, 'transition-return')
+    const calls = await record(page)
+    await page.goto(`${baseURL}/tasks/run-audit`)
+    const actions = page.getByRole('complementary', { name: 'Действия' })
+    await expect(actions.getByRole('region', { name: 'Этап «Код-ревью»' })).toBeVisible()
+    await expect(actions.getByRole('button', { name: /^Вернуть на доработку/ })).toHaveCount(1)
+    await expect(actions.getByRole('button', { name: 'Пропустить этап' })).toHaveCount(0)
+    await actions.getByLabel('Причина возврата').fill('Не хватает тестов')
+    await actions.getByRole('button', { name: 'Вернуть на доработку: Техническая реализация', exact: true }).click()
+    await expect.poll(() => calls.length).toBeGreaterThan(0)
+    expect(calls[0].path).toBe('/api/runs/run-audit/stages/code_review/return')
+    expect(calls[0].body).toMatchObject({ to_stage: 'implementation', reason: 'Не хватает тестов' })
+  })
+})
 
 test.describe('stable columns', () => {
   test('the actions column does not grow when the log, artifacts and events are huge', async ({ page }) => {
@@ -177,16 +226,40 @@ test.describe('keyboard and focus', () => {
     await expect(page.getByRole('tabpanel')).toBeFocused()
   })
 
-  test('the decision buttons are in the tab order after the status column and before the materials', async ({ page }) => {
-    await open(page, 'awaiting-human', { width: 390, height: 844 })
-    const order = await page.evaluate(() => {
-      const focusable = [...document.querySelectorAll('button, a[href], input, textarea, select, summary, [tabindex="0"]')]
-        .filter((element) => element.getBoundingClientRect().width > 0)
-      const index = (selector) => focusable.findIndex((element) => element.matches(selector) || element.closest(selector))
-      return { route: index('[aria-label="Маршрут процесса"], section[class*="routePanel"]'), actions: index('aside[aria-label="Действия"]'), tabs: index('[role="tablist"]') }
-    })
+  // The focus order is the visual order at every width: status, materials, actions. The skip link
+  // «К действиям» is the first stop in the header and jumps to the actions column.
+  const focusOrder = (page) => page.evaluate(() => {
+    const focusable = [...document.querySelectorAll('button, a[href], input, textarea, select, summary, [tabindex="0"]')]
+      .filter((element) => element.getBoundingClientRect().width > 0)
+    const index = (selector) => focusable.findIndex((element) => element.matches(selector) || element.closest(selector))
+    const position = (selector) => { const box = document.querySelector(selector)?.getBoundingClientRect(); return box ? { x: box.x, y: box.y } : null }
+    return {
+      status: index('aside[aria-label="Статус и контекст"]'), tabs: index('[role="tablist"]'), actions: index('aside[aria-label="Действия"]'),
+      at: { status: position('aside[aria-label="Статус и контекст"]'), tabs: position('[role="tablist"]'), actions: position('aside[aria-label="Действия"]') },
+    }
+  })
+
+  test('on a desktop the tab order is the visual order: status, materials, actions', async ({ page }) => {
+    await open(page, 'awaiting-human', { width: 1600, height: 900 })
+    const order = await focusOrder(page)
     expect(order.actions).toBeGreaterThan(-1)
-    expect(order.actions).toBeLessThan(order.tabs)
+    expect(order.status).toBeLessThan(order.tabs)
+    expect(order.tabs).toBeLessThan(order.actions)
+    // Visually the same: the materials sit between the status column and the actions column.
+    expect(order.at.status.x).toBeLessThan(order.at.tabs.x)
+    expect(order.at.tabs.x).toBeLessThan(order.at.actions.x)
+  })
+
+  test('on a phone the order is the same and the skip link reaches the actions', async ({ page }) => {
+    await open(page, 'awaiting-human', { width: 390, height: 844 })
+    const order = await focusOrder(page)
+    expect(order.status).toBeLessThan(order.tabs)
+    expect(order.tabs).toBeLessThan(order.actions)
+    expect(order.at.tabs.y).toBeLessThan(order.at.actions.y)
+    const skip = page.getByRole('link', { name: 'К действиям' })
+    await expect(skip).toBeVisible()
+    await skip.click()
+    await expect(page).toHaveURL(/#task-actions$/)
   })
 })
 
@@ -274,7 +347,9 @@ test.describe('empty and error states', () => {
     await page.goto(`${baseURL}/team`)
     await page.getByRole('button', { name: 'Изменить роли: qa@example.com' }).click()
     await expect(page.getByRole('group', { name: 'Роли: qa@example.com' }).getByRole('checkbox', { name: /Администратор/ })).toBeDisabled()
-    await expect(page.getByRole('button', { name: 'Изменить роли: owner@example.com' })).toBeDisabled()
+    // The server blocks a product owner only from the administrator right itself and from revoking an administrator.
+    await expect(page.getByRole('button', { name: 'Изменить роли: owner@example.com' })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Отозвать доступ: owner@example.com' })).toBeDisabled()
   })
 
   test('tracker overview lists open requests and failed deliveries', async ({ page }) => {

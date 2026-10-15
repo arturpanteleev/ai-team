@@ -97,9 +97,14 @@ function allowedActions(template, stageID, phase, pending) {
   const actions = []
   if (!stageID) return actions
   const stage = template.stages.find((value) => value.id === stageID)
+  let skipOffered = false
+  // A return route starts at the stage a person confirms: the approval's from_stage.
+  let returnFrom = stageID
   if (phase === 'resumable' && stage?.agent) actions.push('run-agent')
   if (phase === 'waiting' && pending?.status === 'pending') {
+    if (pending.from_stage) returnFrom = pending.from_stage
     if (pending.kind === 'input' && pending.trigger === 'human_input') {
+      skipOffered = true
       actions.push('take', 'results')
       if (stage?.agent) actions.push('executor', 'run-agent')
     } else if (pending.kind === 'grill_questions') {
@@ -114,8 +119,8 @@ function allowedActions(template, stageID, phase, pending) {
       if (stage?.agent && pending.actions.includes('retry')) actions.push('run-agent')
     }
   }
-  if (stage?.skippable && (phase === 'waiting' || phase === 'resumable')) actions.push('skip')
-  if (stage && phase === 'waiting' && template.returns.some((route) => route.from === stageID)) actions.push('return')
+  if (stage?.skippable && ((phase === 'waiting' && skipOffered) || phase === 'resumable')) actions.push('skip')
+  if (stage && phase === 'waiting' && template.returns.some((route) => route.from === returnFrom)) actions.push('return')
   return [...new Set(actions)]
 }
 
@@ -161,6 +166,8 @@ function detail(mode, { stage: currentStage, phase, status, pending, owners }) {
     approvals: [...(approval ? [approval] : []), ...resolvedGrill], stage_owners: owners,
     results: mode === 'manual' ? { idea: [revision('idea-v1', 'Первая версия идеи', 1), revision('idea-v2', 'Вторая версия идеи', 2)] } : {},
     allowed_actions: allowedActions(pinned, currentStage, phase, approval), delivery: { status: 'not_requested' },
+    // The browser user of this flow holds every function, so the server lets them do all that is offered.
+    viewer_actions: allowedActions(pinned, currentStage, phase, approval),
   }
 }
 

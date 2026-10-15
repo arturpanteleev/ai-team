@@ -166,6 +166,7 @@ func (s *SQLiteStore) importLegacy(root string, acquireRunLock func(string) (fun
 			// Never let an imported file claim to have passed the web auth path.
 			for i := range value.Decisions {
 				value.Decisions[i].ControllerAuthenticated = false
+				value.Decisions[i].Authority = ""
 			}
 			legacy = append(legacy, value)
 		}

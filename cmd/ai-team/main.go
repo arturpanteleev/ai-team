@@ -824,6 +824,9 @@ func cmdDecision() {
 	if *runID == "" || *approvalID == "" || *actorID == "" || *role == "" || *action == "" || *subject == "" {
 		fatal("decision требует --run, --approval, --actor, --role, --action и --subject")
 	}
+	if *action == "override" || *action == approval.ActionRetryGate {
+		fatal("Действие %q по проверке этапа недоступно через ai-team decision: обход проваленного гейта — право системного администратора, повтор гейта выполняет аутентифицированный контроллер; используйте Web/REST (POST /api/runs/{id}/stages/{stage}/override и .../gates/{gate}/retry) под нужной учётной записью", *action)
+	}
 	absolute, err := absoluteTarget(*target)
 	if err != nil {
 		fatal("Ошибка target: %v", err)

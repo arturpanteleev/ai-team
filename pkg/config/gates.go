@@ -248,15 +248,22 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 //     offered (see docs/reference/config.md);
 //   - agent_review with mode grill keeps its question rounds in per-stage
 //     approvals, so one stage can have at most one;
-//   - mode advisory is carried by the contract and honored by the scheduler,
-//     but not yet offered to template authors (S06).
+//   - mode advisory (S06) is a recommendation: a fail or a technical error is
+//     recorded as a visible warning and never blocks the transition. It makes
+//     no sense for the human decision (the transition itself) or for a grill
+//     (a question loop that must end before the chain goes on), so those two
+//     are required only.
 func (c *Config) validateChainConstraints(reg AgentLookup, prefix string, groups workflow.GateGroups, add func(format string, args ...any)) {
 	grills := 0
 	for i, group := range groups {
 		for j, ref := range group {
 			path := fmt.Sprintf("exit_gate_groups[%d][%d]", i, j)
-			if ref.Mode.Effective() == workflow.GateModeAdvisory {
-				add("%s: %s: mode advisory пока не доступен; используйте required", prefix, path)
+			advisory := ref.Mode.Effective() == workflow.GateModeAdvisory
+			if advisory && ref.Gate == gatelib.GateHumanApproval {
+				add("%s: %s: human_approval не может быть advisory: решение человека — это сам переход этапа, оно всегда обязательное", prefix, path)
+			}
+			if advisory && ref.Gate == gatelib.GateAgentReview && gatelib.StringParam(ref.Params, "mode") == "grill" {
+				add("%s: %s: agent_review с mode grill не может быть advisory: раунды вопросов должны закончиться до следующей группы", prefix, path)
 			}
 			switch ref.Gate {
 			case gatelib.GateHumanApproval:

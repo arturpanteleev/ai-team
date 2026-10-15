@@ -212,7 +212,9 @@ func TestStageActionsAreAuthorizedByStageFunction(t *testing.T) {
 		{"take", "take", "/api/runs/run-input/stages/build/take", ""},
 		{"executor", "take", "/api/runs/run-executor/stages/build/executor", `{"executor":"human"}`},
 		{"grill done", "submit", "/api/runs/run-grill/stages/build/grill/done", ""},
-		{"override", "bypass", "/api/runs/run-check/stages/build/override", `{"reason":"flaky check"}`},
+		// The override of a failed required gate is the system administrator
+		// right (S06), not a stage function: "bypass" no longer covers it.
+		{"override", "override", "/api/runs/run-check/stages/build/override", `{"reason":"flaky check"}`},
 		{"skip", "bypass", "/api/runs/run-skip/stages/build/skip", `{"reason":"not needed"}`},
 		{"confirm", "confirm", "/api/runs/run-confirm/stages/build/confirm", ""},
 		{"return", "confirm", "/api/runs/run-return/stages/build/return", `{"to_stage":"spec","reason":"spec gap"}`},
@@ -229,6 +231,8 @@ func TestStageActionsAreAuthorizedByStageFunction(t *testing.T) {
 		{"member with both functions", []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer},
 			map[string]bool{"take": true, "submit": true, "bypass": true, "confirm": true}},
 		{"foreign function is denied", []cloudidentity.Role{cloudidentity.RoleQA}, map[string]bool{}},
+		{"system administrator overrides without any stage function", []cloudidentity.Role{cloudidentity.RoleAdmin},
+			map[string]bool{"override": true}},
 		{"product owner without stage function is denied", []cloudidentity.Role{cloudidentity.RoleProductOwner}, map[string]bool{}},
 	}
 	for _, member := range members {

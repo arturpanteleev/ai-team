@@ -70,9 +70,11 @@ type taskStageActionCommand struct {
 	Executor string `json:"executor,omitempty"`
 	Action   string `json:"action,omitempty"`
 	Reason   string `json:"reason,omitempty"`
-	ToStage  string `json:"to_stage,omitempty"`
-	Answer   string `json:"answer,omitempty"`
-	PlanHash string `json:"plan_hash,omitempty"`
+	// Gates names additional gate instances for a gate retry.
+	Gates    []string `json:"gates,omitempty"`
+	ToStage  string   `json:"to_stage,omitempty"`
+	Answer   string   `json:"answer,omitempty"`
+	PlanHash string   `json:"plan_hash,omitempty"`
 	// SubjectHash is the hash of the decision subject the person reviewed
 	// (confirm); it must equal the hash the approval is bound to.
 	SubjectHash string `json:"subject_hash,omitempty"`
@@ -506,6 +508,10 @@ func (s *Server) taskAllowedActionsWith(templates *taskTemplateLookup, runID, st
 					// Template stage checks (check_decision) offer "override"
 					// targeting the stage; that is exactly what the controller's
 					// OverrideStageCheck accepts. override_approve is the legacy form.
+					if pending.Kind == approval.KindCheckDecision && pending.Trigger == approval.StageCheckTrigger &&
+						actionAllowed(pending.Actions, approval.ActionRetryGate) && pending.Targets[approval.ActionRetryGate] == stageID {
+						actions = append(actions, "gate-retry")
+					}
 					if actionAllowed(pending.Actions, "override_approve") || pending.Kind == approval.KindCheckDecision &&
 						pending.Trigger == approval.StageCheckTrigger && actionAllowed(pending.Actions, "override") &&
 						pending.Targets["override"] == stageID {
@@ -727,14 +733,20 @@ func (s *Server) handleTaskStageRunAgent(w http.ResponseWriter, r *http.Request)
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID, "action": command.Action, "actor_id": actorID})
 }
 
+// handleTaskStageOverride passes a task on after a failed (or technically
+// failed) required gate. It is a system administrator action (S06): the right
+// is checked on the server before anything else, so a product owner without it
+// gets 403 whatever the stage function says. A reason is mandatory. The
+// override never turns the gate into a pass: it is recorded as an immutable
+// event bound to the result version and the failed attempts.
 func (s *Server) handleTaskStageOverride(w http.ResponseWriter, r *http.Request) {
 	runID, stageID := chi.URLParam(r, "runID"), chi.URLParam(r, "stageID")
-	state, stage, ok := s.taskStagePreconditions(w, runID, stageID)
+	actorID, ok := s.requireGateOverrideRight(w, r)
 	if !ok {
 		return
 	}
-	if state.Phase != lifecycle.PhaseWaiting {
-		s.taskConflict(w, runID, stageID, "check override requires a failed check awaiting a decision")
+	state, stage, ok := s.taskStagePreconditions(w, runID, stageID)
+	if !ok {
 		return
 	}
 	var command taskStageActionCommand
@@ -746,10 +758,14 @@ func (s *Server) handleTaskStageOverride(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusBadRequest, "override reason is required", "reason_required")
 		return
 	}
-	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionBypass)
-	if !ok {
+	if state.Phase != lifecycle.PhaseWaiting {
+		s.taskConflict(w, runID, stageID, "check override requires a failed check awaiting a decision")
 		return
 	}
+	// The approval records the stage function as the role label (the approval
+	// store knows only the roles the template named); the authority is the
+	// system right, attested by the controller in the decision and the event.
+	actorRole := stage.Function
 	controller, ok := s.controller.(StageOverrideController)
 	if !ok {
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "check override is not connected to the task controller", "controller_action_unavailable")

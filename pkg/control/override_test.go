@@ -90,3 +90,42 @@ func TestControllerOverrideStageCheckResolvesAndResumes(t *testing.T) {
 	close(engine.release)
 	waitControllerIdle(t, controller, "run-override")
 }
+
+// The override sets the confirmed authority; the retry is bounded per stage
+// attempt (m6): after MaxGateRetryRounds the request is refused with a reason.
+func TestControllerOverrideCarriesAdminAuthority(t *testing.T) {
+	engine := &fakeEngine{started: make(chan struct{}), release: make(chan struct{})}
+	store := newRecordingApprovalStore(checkDecisionApproval("run-override", "approval-override", "tech_design", "architect"))
+	controller, _ := newStageActionFixture(t, stageActionState("run-override", "tech_design", "approval-override", lifecycle.PhaseWaiting), engine, store)
+	if err := controller.OverrideStageCheck(context.Background(), "run-override", "tech_design", "риск принят", "admin-1", "architect"); err != nil {
+		t.Fatal(err)
+	}
+	if store.decisions[0].Authority != approval.AuthoritySystemAdmin {
+		t.Fatalf("authority = %q", store.decisions[0].Authority)
+	}
+	<-engine.started
+	close(engine.release)
+	waitControllerIdle(t, controller, "run-override")
+}
+
+func TestControllerRetryStageGatesIsBounded(t *testing.T) {
+	pending := checkDecisionApproval("run-retry", "approval-now", "tech_design", "architect")
+	pending.Actions = append(pending.Actions, approval.ActionRetryGate)
+	pending.Targets[approval.ActionRetryGate] = "tech_design"
+	values := []approval.PendingApproval{pending}
+	for index := 0; index < MaxGateRetryRounds; index++ {
+		old := checkDecisionApproval("run-retry", "approval-old-"+string(rune('a'+index)), "tech_design", "architect")
+		old.Status, old.ResolvedAction = approval.StatusResolved, approval.ActionRetryGate
+		values = append(values, old)
+	}
+	engine := &fakeEngine{}
+	store := newRecordingApprovalStore(values...)
+	controller, _ := newStageActionFixture(t, stageActionState("run-retry", "tech_design", "approval-now", lifecycle.PhaseWaiting), engine, store)
+	err := controller.RetryStageGates(context.Background(), "run-retry", "tech_design", []string{"g"}, "", "actor-1", "architect")
+	if err == nil || !strings.Contains(err.Error(), "лимит повторов") {
+		t.Fatalf("the round above the limit must be refused with a reason: %v", err)
+	}
+	if len(store.decisions) != 0 {
+		t.Fatalf("no decision may be recorded: %+v", store.decisions)
+	}
+}

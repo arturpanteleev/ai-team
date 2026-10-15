@@ -682,6 +682,21 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "grill approvals must use the stage-scoped grill action endpoint", http.StatusConflict)
 				return
 			}
+			// The override of a failed required gate is a system administrator
+			// action with its own endpoint (and a mandatory reason, an immutable
+			// record bound to the result version). The generic endpoint must not
+			// be a way around the right; a retry names gates and has its own too.
+			if pending.ID == chi.URLParam(r, "approvalID") && pending.Kind == approval.KindCheckDecision &&
+				(command.Action == "override" || command.Action == approval.ActionRetryGate) {
+				if command.Action == "override" {
+					if err := s.authorize(r, cloudidentity.PermissionGateOverride, ""); err != nil {
+						http.Error(w, "only a system administrator may override a failed gate: "+err.Error(), http.StatusForbidden)
+						return
+					}
+				}
+				http.Error(w, "check decisions must use the stage-scoped override and gate retry endpoints", http.StatusConflict)
+				return
+			}
 		}
 	}
 	actorID := command.ActorID

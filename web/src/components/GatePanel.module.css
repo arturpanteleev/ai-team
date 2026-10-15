@@ -1,0 +1,128 @@
+.panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.panel h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.banner {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* Red: a failed required gate was let through by an administrator. */
+.override {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-fg);
+  font-weight: 600;
+}
+
+/* Amber: a recommendation did not pass; it never blocked anything. */
+.advisory {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  border-color: var(--warning-fg);
+}
+
+.decision {
+  margin: 0;
+  font-size: 14px;
+}
+
+.decision[data-allowed='false'] {
+  color: var(--danger-fg);
+}
+
+.gates {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.gate[data-tone='fail'],
+.gate[data-overridden='true'] {
+  border-color: var(--danger-fg);
+}
+
+.gate[data-tone='warning'] {
+  border-color: var(--warning-fg);
+}
+
+.name {
+  font-weight: 650;
+}
+
+.tag {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 650;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.pass {
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.fail,
+.overriddenTag {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.technical,
+.warningTag {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.neutral {
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.reason {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.history {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

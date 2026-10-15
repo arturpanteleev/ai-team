@@ -102,6 +102,7 @@ func decideOverride(t *testing.T, dir string, decision *approval.PendingApproval
 	if _, err := store.Decide(decision.RunID, decision.ID, approval.Decision{
 		ActorID: "local-user", ActorRole: "architect", Action: "override",
 		Comment: reason, SubjectHash: decision.SubjectHash, DecidedAt: time.Now().UTC(),
+		Authority: approval.AuthoritySystemAdmin, ControllerAuthenticated: true,
 	}); err != nil {
 		t.Fatalf("resolve override: %v", err)
 	}
@@ -200,6 +201,7 @@ func TestRun_CheckOverrideHumanStage(t *testing.T) {
 	if _, err := store.Decide(runID, check.ID, approval.Decision{
 		ActorID: "alice", ActorRole: "product_owner", Action: "override",
 		Comment: "владелец принял риск", SubjectHash: check.SubjectHash,
+		Authority: approval.AuthoritySystemAdmin, ControllerAuthenticated: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

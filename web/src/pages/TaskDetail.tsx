@@ -14,23 +14,27 @@ import {
   getArtifact,
   getPipelineArtifacts,
   getPipelineRun,
+  getTaskGates,
   getTaskRunDetails,
   getTaskRunEvents,
   overrideTaskStageCheck,
   resumeRun,
   resumeRunWithRuntimeUpgrade,
   retryDelivery,
+  retryTaskGate,
   returnTaskStage,
   runTaskStageAgent,
   skipTaskStage,
   submitTaskGrillVersion,
   submitTaskStageResult,
 } from '../api';
-import type { Approval, Artifact, Stage, TaskEvent, TaskResultRevision, TaskRunDetails, WorkflowGraph } from '../types';
+import type { Approval, Artifact, Stage, TaskEvent, TaskGates, TaskResultRevision, TaskRunDetails, WorkflowGraph } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { Bubble } from '../components/Bubble';
 import { CopyableHash } from '../components/CopyableHash';
+import { GateHistory, GatePanel } from '../components/GatePanel';
+import { stageGateFlag } from '../gateView';
 import { StageResultForm } from '../components/StageResultForm';
 import { hasHttpPrefix } from '../stageResultValidation';
 import type { StageResultSubmission } from '../stageResultValidation';
@@ -44,19 +48,20 @@ interface TaskDetailSnapshot {
   detail: TaskRunDetails;
   artifacts: Artifact[];
   events: TaskEvent[];
+  gates: TaskGates | null;
 }
 
 type RouteState = 'passed' | 'current' | 'upcoming' | 'failed';
 type AgentLaunch = { phase: 'idle' | 'starting' | 'started'; at: number; previous: string };
 const idleLaunch: AgentLaunch = { phase: 'idle', at: 0, previous: '' };
 type ActionKey = 'take' | 'run-agent' | 'results' | 'confirm' | 'answer' | 'new-version' | 'done' | 'plan' | 'skip' | 'override'
-  | 'return' | 'executor' | 'decision' | 'resume' | 'grant' | 'cancel' | 'delivery';
+  | 'return' | 'executor' | 'decision' | 'resume' | 'grant' | 'cancel' | 'delivery' | 'gate-retry';
 type ErrorScope = 'stage' | 'control' | 'delivery';
 // Where an action error is shown: next to the block that ran the action.
 const actionScopes: Record<ActionKey, ErrorScope> = {
   take: 'stage', 'run-agent': 'stage', results: 'stage', confirm: 'stage', answer: 'stage', 'new-version': 'stage',
   done: 'stage', plan: 'stage', skip: 'stage', override: 'stage', return: 'stage', executor: 'stage', decision: 'stage',
-  resume: 'control', grant: 'control', cancel: 'control', delivery: 'delivery',
+  resume: 'control', grant: 'control', cancel: 'control', delivery: 'delivery', 'gate-retry': 'stage',
 };
 
 const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'stopped', 'failed'];
@@ -95,7 +100,8 @@ function eventTitle(type: string): string {
     approval_requested: 'Запрошено решение', approval_decided: 'Решение принято',
     transition_selected: 'Выбран переход', stage_taken: 'Этап взят участником', stage_agent_requested: 'Участник запустил агента',
     executor_changed: 'Сменён исполнитель этапа', stage_skipped: 'Этап пропущен',
-    stage_returned: 'Выполнен возврат', stage_stalled: 'Этап остановился', check_overridden: 'Проверка обойдена',
+    stage_returned: 'Выполнен возврат', stage_stalled: 'Этап остановился', check_overridden: 'Проверка обойдена администратором', gate_retry_requested: 'Повтор гейта на той же версии',
+    gate_attempt_started: 'Гейт запущен', gate_attempt_waiting: 'Гейт ждёт решения', gate_attempt_finished: 'Гейт завершён',
     integration_error: 'Ошибка интеграции', description_missing: 'Нет описания результата',
   };
   return titles[type] ?? type;
@@ -201,12 +207,15 @@ export function TaskDetail() {
       const details = await getTaskRunDetails(requestedRunID);
       if (!isCurrent()) return;
       if (details.run.run_id !== requestedRunID) throw new Error('Сервер вернул данные другой задачи.');
-      const [artifacts, events] = await Promise.all([
+      const [artifacts, events, gates] = await Promise.all([
         getPipelineArtifacts(details.run.id),
         loadRunEvents(requestedRunID),
+        // The gate state is an addition to the page: when it cannot be read the
+        // task stays usable and simply shows no gate block.
+        getTaskGates(requestedRunID).catch(() => null),
       ]);
       if (!isCurrent()) return;
-      const next = { detail: details, artifacts, events };
+      const next = { detail: details, artifacts, events, gates };
       snapshotRef.current = next;
       setSnapshot(next);
       setError('');
@@ -434,6 +443,9 @@ export function TaskDetail() {
   const resumable = resumableStatuses.includes(run.status);
   const cancelable = cancelableStatuses.includes(run.status);
   const finished = finishedStatuses.includes(run.status);
+  // Only a system administrator passes a task on after a failed gate (S06); the
+  // server decides, the page just does not offer the action to everybody else.
+  const canOverride = visibleSnapshot.gates?.can_override === true;
   const canAct = (role: string) => !principal || principal.roles.some((heldRole) => heldRole === canonicalApprovalRole(role));
   const attemptArtifacts = (stage: Stage) => visibleSnapshot.artifacts.filter((artifact) =>
     artifact.path.includes(`attempts/${stage.attempt_id}/`));
@@ -497,7 +509,7 @@ export function TaskDetail() {
     if (finished || (currentIndex >= 0 && index < currentIndex)) state = 'passed';
     else if (index === currentIndex) state = 'current';
     if (latestAttemptFor(stage.id)?.status === 'failed') state = 'failed';
-    return { stage, state, current: index === currentIndex };
+    return { stage, state, current: index === currentIndex, gateFlag: stageGateFlag(visibleSnapshot.gates, stage.id) };
   });
 
   const sendDecision = (value: Approval, role: string, action: string, comment?: string) => perform(
@@ -575,7 +587,7 @@ export function TaskDetail() {
     ? approval.actions.filter((action) => action !== 'submit'
       && !(action === 'approve' && stageNeedsContent(approval.from_stage))
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
-    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override') : approval.actions);
+    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions);
 
   const renderDecision = (approval: Approval) => {
     const markdown = payloadMarkdown(approval.payload);
@@ -706,6 +718,10 @@ export function TaskDetail() {
               </div>
             </div>
 
+            {currentStage && <GatePanel stage={visibleSnapshot.gates?.stages.find((stage) => stage.stage_id === currentStage.id)}
+              canRetry={allowed.has('gate-retry')} working={working}
+              onRetry={(gate) => void perform('Гейт запущен повторно', () => retryTaskGate(run.run_id, currentStage.id, gate), 'gate-retry')} />}
+
             {questionDecisions.length > 0 && <section className={styles.questions} aria-labelledby="question-heading">
               <h3 id="question-heading">Для этапа «{currentStage?.title ?? currentStageID}» нужно уточнение Product Owner</h3>
               {!principal && <label className={styles.questionLabel}>Ваш идентификатор
@@ -723,8 +739,11 @@ export function TaskDetail() {
               </>}
               {currentOutputArtifacts.length > 0 && <p><a href="#current-result-heading">Посмотреть результат этапа ниже</a></p>}
               {renderDecision(currentDecision)}
-              {currentDecision.kind === 'check_decision' && allowed.has('override') && <details className={styles.moreActions}>
+              {currentDecision.kind === 'check_decision' && allowed.has('override') && !canOverride && <p className={styles.questionLabel}>
+                Провести задачу дальше после провала обязательного гейта может только администратор.</p>}
+              {currentDecision.kind === 'check_decision' && allowed.has('override') && canOverride && <details className={styles.moreActions}>
                 <summary>Дополнительное действие: обойти проверку</summary>
+                <p>Только для администратора. Исход гейта останется «провал», обход будет записан с вашим именем, причиной и версией результата.</p>
                 <form className={styles.reasonForm} onSubmit={submitReason('override')}>
                   <label>Причина обхода проверки
                     <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
@@ -807,7 +826,7 @@ export function TaskDetail() {
                 working={working} onSubmit={(value) => void submitResult(value)} onCancel={() => setShowResultForm(false)} />
             )}
 
-            {currentStage && allowed.size > 0 && (allowed.has('skip') || allowed.has('override') || (allowed.has('return') && returnOptions.length > 0)) && (
+            {currentStage && allowed.size > 0 && (allowed.has('skip') || (allowed.has('override') && canOverride) || (allowed.has('return') && returnOptions.length > 0)) && (
               <details className={styles.moreActions}>
                 <summary>Другие действия: пропуск, обход проверки, возврат</summary>
                 {allowed.has('skip') && <form className={styles.reasonForm} onSubmit={submitReason('skip')}>
@@ -816,7 +835,7 @@ export function TaskDetail() {
                   </label>
                   <button disabled={working || !skipReason.trim()}>Пропустить этап</button>
                 </form>}
-                {allowed.has('override') && currentDecision?.kind !== 'check_decision' && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
+                {allowed.has('override') && canOverride && currentDecision?.kind !== 'check_decision' && <form className={styles.reasonForm} onSubmit={submitReason('override')}>
                   <label>Причина обхода проверки
                     <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
                   </label>
@@ -849,8 +868,8 @@ export function TaskDetail() {
             {routeRows.map((row, rowIndex) => (
               <ol key={rowIndex} className={`${styles.routeRow} ${rowIndex === 0 ? styles.rowTop : styles.rowBottom}`}
                 style={{ '--cols': row.length } as CSSProperties}>
-                {row.map(({ stage, state, current }, index) => (
-                  <li key={stage.id} className={styles.routeItem} data-state={state}
+                {row.map(({ stage, state, current, gateFlag }, index) => (
+                  <li key={stage.id} className={styles.routeItem} data-state={state} data-gate-flag={gateFlag}
                     data-turn={rowIndex === 0 && routeRows.length > 1 && index === row.length - 1 ? 'true' : undefined}
                     aria-current={current ? 'step' : undefined}>
                     <span className={styles.routeDot} aria-hidden="true">
@@ -861,6 +880,8 @@ export function TaskDetail() {
                         {stage.title}
                       </a>
                       <span className={styles.routeState}>{routeLabels[state]}</span>
+                      {gateFlag === 'override' && <span className={`${styles.gateFlag} ${styles.gateFlagOverride}`}>Обход провала</span>}
+                      {gateFlag === 'advisory' && <span className={`${styles.gateFlag} ${styles.gateFlagAdvisory}`}>Рекомендация не выполнена</span>}
                     </span>
                   </li>
                 ))}
@@ -971,6 +992,11 @@ export function TaskDetail() {
         />
       </section>
 
+      <section className={styles.panel} aria-labelledby="gate-history-heading">
+        <h2 id="gate-history-heading">Обходы и рекомендации гейтов</h2>
+        <GateHistory gates={visibleSnapshot.gates} />
+      </section>
+
       <details className={styles.techGroup}>
         <summary className={styles.techSummary}>Журнал задачи: таймлайн, этапы, логи и лента событий</summary>
       <section className={styles.panel} aria-labelledby="timeline-heading">
@@ -1005,7 +1031,8 @@ export function TaskDetail() {
             <time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleString('ru-RU')}</time>
             <strong>{eventTitle(event.type)}</strong>
             <span>{[event.stage, event.actor, event.executor, event.attempt_id].filter(Boolean).join(' · ')}</span>
-            {event.severity === 'warning' && <span className={styles.warning}>Предупреждение</span>}
+            {event.type === 'check_overridden' && <span className={styles.overrideEvent}>Обход провала: исход гейта остаётся «провал»</span>}
+            {event.type !== 'check_overridden' && event.severity === 'warning' && <span className={styles.warning}>Предупреждение</span>}
             {Object.keys(event.data).length > 0 && <details>
               <summary>Подробности</summary><pre>{JSON.stringify(event.data, null, 2)}</pre>
             </details>}

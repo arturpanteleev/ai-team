@@ -111,6 +111,33 @@ func CheckSelfApproval(forbid bool, approverID string, authors []string) error {
 	return nil
 }
 
+// ParseTeamRoles разбирает роли участника команды: функции процесса
+// (ParseFunctions) и системное право admin. Только управление командой
+// принимает admin; шаблон и RBAC этапов остаются на функциях.
+func ParseTeamRoles(values []string) ([]Role, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("cloud identity: требуется хотя бы одна функция")
+	}
+	unique := make(map[Role]bool, len(values))
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), string(RoleAdmin)) {
+			unique[RoleAdmin] = true
+			continue
+		}
+		role, ok := FunctionRole(value)
+		if !ok {
+			return nil, fmt.Errorf("cloud identity: неизвестная функция %q", value)
+		}
+		unique[role] = true
+	}
+	roles := make([]Role, 0, len(unique))
+	for role := range unique {
+		roles = append(roles, role)
+	}
+	sort.Slice(roles, func(i, j int) bool { return roles[i] < roles[j] })
+	return roles, nil
+}
+
 // ParseFunctions разбирает функции участника команды. Принимаются
 // канонические роли и синонимы функций шаблона (bo, po, deployer); результат
 // нормализован, отсортирован и без повторов.

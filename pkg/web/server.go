@@ -116,6 +116,9 @@ func NewLocalAuthenticator(token string) (*LocalAuthenticator, error) {
 		cloudidentity.RoleProductOwner, cloudidentity.RoleArchitect,
 		cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer,
 		cloudidentity.RoleQA, cloudidentity.RoleReleaseManager,
+		// The local owner holds the system administrator right explicitly
+		// (S06); it is not derived from product_owner.
+		cloudidentity.RoleAdmin,
 	})
 	if err != nil {
 		return nil, err
@@ -146,7 +149,10 @@ func WithLocalAuthenticator(verifier *LocalAuthenticator) ServerOption {
 }
 
 type Server struct {
-	store               *store.Store
+	store *store.Store
+	// teamMemberLookup replaces the registry read of a member in the revoke
+	// right check (a test seam for the fail-closed path).
+	teamMemberLookup    func(string) (*store.TeamMember, error)
 	humanArtifacts      *humanartifact.Store
 	hub                 *Hub
 	router              *chi.Mux
@@ -335,6 +341,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/runs", srv.handleListTaskRuns)
 		router.Get("/api/runs/{runID}", srv.handleGetTaskRun)
 		router.Get("/api/runs/{runID}/events", srv.handleGetRunEvents)
+		router.Get("/api/runs/{runID}/gates", srv.handleGetTaskGates)
 		router.Get("/api/runs/{runID}/stages/{stageID}/results/{version}", srv.handleGetTaskStageResult)
 		router.Get("/api/events", srv.handleGetGlobalEvents)
 		router.Get("/api/metrics/flow", srv.handleGetFlowMetrics)
@@ -390,6 +397,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/runs/{runID}/stages/{stageID}/run-agent", srv.handleTaskStageRunAgent)
 		router.Post("/api/runs/{runID}/stages/{stageID}/results", srv.handleSubmitHumanStage)
 		router.Post("/api/runs/{runID}/stages/{stageID}/override", srv.handleTaskStageOverride)
+		router.Post("/api/runs/{runID}/stages/{stageID}/gates/{gate}/retry", srv.handleTaskStageGateRetry)
+		router.Post("/api/runs/{runID}/gate-attempts/{attemptID}/retry", srv.handleTaskGateAttemptRetry)
 		router.Post("/api/runs/{runID}/stages/{stageID}/confirm", srv.handleTaskStageConfirm)
 		router.Post("/api/runs/{runID}/stages/{stageID}/skip", srv.handleTaskStageSkip)
 		router.Post("/api/runs/{runID}/stages/{stageID}/return", srv.handleTaskStageReturn)

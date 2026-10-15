@@ -5,7 +5,7 @@ export type PipelineStatus = 'queued' | 'running' | 'waiting_for_approval' | 'co
 
 export type StageStatus = 'running' | 'passed' | 'failed' | 'blocked' | 'rejected' | 'canceled' | 'warning' | 'skipped' | 'invalidated';
 
-export type CloudRole = 'product_owner' | 'architect' | 'developer' | 'reviewer' | 'qa' | 'release_manager';
+export type CloudRole = 'product_owner' | 'architect' | 'developer' | 'reviewer' | 'qa' | 'release_manager' | 'admin';
 
 export interface Principal {
   actor_id: string;
@@ -418,4 +418,96 @@ export interface Project {
   created_by?: string;
   created_at: string;
   updated_at: string;
+}
+
+// Gate state of a task (S06): GET /api/runs/{id}/gates.
+export type GateMode = 'required' | 'advisory';
+export type GateExecution = 'pending' | 'running' | 'succeeded' | 'error' | 'timeout' | 'canceled';
+export type GateVerdict = 'pass' | 'fail' | 'not_applicable';
+export type GateResolutionState = 'passed' | 'passed_with_warnings' | 'overridden' | 'legacy_overridden' | 'blocked' | 'error' | 'waiting' | 'incomplete';
+
+export interface GateAttempt {
+  attempt_id: string;
+  gate: string;
+  gate_name: string;
+  mode: GateMode;
+  group: number;
+  execution: GateExecution;
+  verdict?: GateVerdict;
+  reason?: string;
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface GateStatus {
+  gate_name: string;
+  gate: string;
+  gate_version: number;
+  mode: GateMode;
+  group: number;
+  attempt?: GateAttempt;
+  attempts: number;
+  blocking: boolean;
+  warning: boolean;
+  retryable: boolean;
+  overridden: boolean;
+}
+
+export interface GateResolution {
+  allowed: boolean;
+  state: GateResolutionState;
+  reasons: string[];
+  blocking: string[];
+  warnings: string[];
+  retryable: string[];
+  overridden: string[];
+}
+
+export interface GateOverride {
+  stage: string;
+  scope: string;
+  visit?: number;
+  artifact_sha256: string;
+  reason: string;
+  actor_id: string;
+  authority: string;
+  at: string;
+  gates: { gate_name: string; attempt_id: string; execution: GateExecution; verdict?: GateVerdict; reason?: string }[];
+}
+
+export interface GateWave {
+  stage_id: string;
+  visit: number;
+  stage_attempt_id: string;
+  artifact_sha256: string;
+  current: boolean;
+  gates: GateStatus[];
+  transition: GateResolution;
+  override?: GateOverride;
+  attempts: GateAttempt[];
+}
+
+export interface GateStage {
+  stage_id: string;
+  title?: string;
+  groups: string[][];
+  current?: GateWave;
+  waves: GateWave[];
+}
+
+export interface GateWarning {
+  stage_id: string;
+  gate: string;
+  attempt_id: string;
+  execution: GateExecution;
+  verdict?: GateVerdict;
+  reason?: string;
+}
+
+export interface TaskGates {
+  run_id: string;
+  can_override: boolean;
+  stages: GateStage[];
+  overrides: GateOverride[];
+  warnings: GateWarning[];
 }

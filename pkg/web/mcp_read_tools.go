@@ -64,6 +64,9 @@ func registerMCPReadTools(registry *mcpRegistry) {
 	registry.add(mcpOperation{Name: "get_task_template_version", Title: "Pinned template version",
 		Description: "The process template version this task is pinned to, with its stages and gates.",
 		Path:        "/api/runs/{run_id}/template-version", Params: []mcpParam{runID}})
+	registry.add(mcpOperation{Name: "get_task_gates", Title: "Task gates",
+		Description: "The real gates of every result version of the task: attempts (technical execution and verdict kept apart), the advisory warnings, the administrator overrides (an override never turns a failed gate into a pass) and the aggregated transition decision with its reasons.",
+		Path:        "/api/runs/{run_id}/gates", Resource: "aiteam://tasks/{run_id}/gates", Params: []mcpParam{runID}})
 	registry.add(mcpOperation{Name: "list_task_events", Title: "Task events",
 		Description: "Append-only event feed of one task: stage transitions, checks, decisions, overrides. Cursor paging: pass next_cursor as after (asc) or before (desc) while has_more is true.",
 		Path:        "/api/runs/{run_id}/events", Params: append([]mcpParam{runID}, eventParams...)})

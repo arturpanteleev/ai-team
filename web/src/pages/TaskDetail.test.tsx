@@ -25,7 +25,9 @@ vi.mock('../api', () => ({
   resumeRun: vi.fn().mockResolvedValue({}),
   retryDelivery: vi.fn().mockResolvedValue({}),
   getRunLog: vi.fn().mockResolvedValue({ content: 'agent log', truncated: false }),
+  getTaskGates: vi.fn(),
   getTaskRunDetails: vi.fn(),
+  retryTaskGate: vi.fn().mockResolvedValue({}),
   getTaskRunEvents: vi.fn().mockResolvedValue({ events: [], next_cursor: 0 }),
   getTaskFlowMetrics: vi.fn().mockResolvedValue({ by_stage: [] }),
   overrideTaskStageCheck: vi.fn().mockResolvedValue({}),
@@ -112,6 +114,8 @@ beforeEach(async () => {
   const api = await import('../api');
   vi.mocked(api.getActivePrincipal).mockReturnValue(null);
   vi.mocked(api.getTaskRunDetails).mockResolvedValue(baseDetails);
+  vi.mocked(api.getTaskGates).mockReset().mockResolvedValue({ run_id: 'run-detail-1', can_override: true, stages: [], overrides: [], warnings: [] });
+  vi.mocked(api.retryTaskGate).mockReset().mockResolvedValue({});
   vi.mocked(api.getPipelineArtifacts).mockReset().mockResolvedValue([]);
   vi.mocked(api.getArtifact).mockReset().mockResolvedValue('');
   vi.mocked(api.decideApproval).mockReset().mockResolvedValue({} as never);
@@ -1136,5 +1140,125 @@ describe('Task page controls moved from the old pipeline page', () => {
     expect(within(card).queryByRole('button', { name: 'submit' })).not.toBeInTheDocument();
     const approvals = document.getElementById('approvals-heading')!.closest('section')!;
     expect(within(approvals).queryByRole('button', { name: 'Отклонить' })).not.toBeInTheDocument();
+  });
+});
+
+describe('gate state on the task page (S06)', () => {
+  const checkDecision = {
+    id: 'check-failed', run_id: 'run-detail-1', attempt_id: 'analysis-agent-1',
+    from_stage: 'analysis', to_stage: 'analysis', trigger: 'stage_check', kind: 'check_decision',
+    subject_hash: 'f'.repeat(64), required_roles: ['po'], quorum: 'any' as const,
+    actions: ['new_version', 'override', 'return', 'retry_gate'],
+    targets: { new_version: 'analysis', override: 'analysis', return: 'analysis', retry_gate: 'analysis' },
+    payload: { kind: 'check_decision', status: 'error' }, status: 'pending' as const, created_at: '2026-10-12T09:12:00Z',
+  };
+  const attempt = (name: string, execution: string, verdict: string | undefined, mode = 'required') => ({
+    attempt_id: `gate-${name}-1`, gate: name, gate_name: name, mode, group: 0, execution, verdict,
+    reason: `причина ${name}`, started_at: '2026-10-12T09:10:00Z', finished_at: '2026-10-12T09:11:00Z',
+  });
+  const status = (name: string, execution: string, verdict: string | undefined, extra: Record<string, unknown> = {}) => ({
+    gate_name: name, gate: name, gate_version: 1, mode: 'required', group: 0, attempt: attempt(name, execution, verdict),
+    attempts: 1, blocking: execution !== 'succeeded' || verdict === 'fail', warning: false, retryable: false, overridden: false, ...extra,
+  });
+  const gatesFor = (wave: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    run_id: 'run-detail-1', can_override: false, overrides: [], warnings: [],
+    stages: [{ stage_id: 'analysis', title: 'Анализ', groups: [['review']], waves: [wave], current: wave }], ...extra,
+  });
+  const resolution = (state: string, allowed: boolean, extra: Record<string, unknown> = {}) => ({
+    allowed, state, reasons: [], blocking: [], warnings: [], retryable: [], overridden: [], ...extra,
+  });
+  const baseWave = { stage_id: 'analysis', visit: 1, stage_attempt_id: 'analysis-agent-1', artifact_sha256: 'a'.repeat(64), current: true, attempts: [] };
+
+  async function arrange(gates: unknown, allowedActions: string[], withDecision = true) {
+    const api = await import('../api');
+    vi.mocked(api.getActivePrincipal).mockReturnValue({ actor_id: 'owner', roles: ['product_owner'] });
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails,
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: withDecision ? checkDecision.id : undefined },
+      approvals: withDecision ? [checkDecision] : [], allowed_actions: allowedActions });
+    vi.mocked(api.getTaskGates).mockResolvedValue(gates as never);
+    return api;
+  }
+
+  it('shows a red banner for an override and keeps the failed outcome visible', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail', { overridden: true })], transition: resolution('overridden', true, { overridden: ['review'] }),
+      override: { stage: 'analysis', scope: 'analysis-agent-1', artifact_sha256: 'a'.repeat(64), reason: 'срочный релиз', actor_id: 'admin-1', authority: 'system_admin',
+        at: '2026-10-12T09:20:00Z', gates: [{ gate_name: 'review', attempt_id: 'gate-review-1', execution: 'succeeded', verdict: 'fail' }] } };
+    await arrange(gatesFor(wave, { overrides: [wave.override] }), [], false);
+    renderDetail();
+
+    const banner = await screen.findByTestId('gate-override-banner');
+    expect(banner).toHaveTextContent('администратор admin-1');
+    expect(banner).toHaveTextContent('срочный релиз');
+    expect(banner).toHaveTextContent('review — провал');
+    const panel = screen.getByTestId('gate-panel');
+    expect(within(panel).getByText('Провал')).toBeInTheDocument();
+    expect(within(panel).queryByText('Пройден')).not.toBeInTheDocument();
+    expect(within(panel).getByText('Обойдён администратором, исход прежний')).toBeInTheDocument();
+    expect(document.querySelector('[data-gate-flag="override"]')).not.toBeNull();
+    const history = screen.getByRole('heading', { name: 'Обходы и рекомендации гейтов' }).closest('section')!;
+    expect(history).toHaveTextContent('обход провала администратором admin-1');
+  });
+
+  it('shows an amber banner for a recommendation that did not pass', async () => {
+    const wave = { ...baseWave,
+      gates: [status('review', 'succeeded', 'pass'), { ...status('style', 'succeeded', 'fail'), mode: 'advisory', blocking: false, warning: true }],
+      transition: resolution('passed_with_warnings', true, { warnings: ['style'] }) };
+    await arrange(gatesFor(wave), [], false);
+    renderDetail();
+
+    const banner = await screen.findByTestId('gate-advisory-banner');
+    expect(banner).toHaveTextContent('Рекомендация не выполнена: style (провал)');
+    expect(screen.getByTestId('gate-panel')).toHaveTextContent('Переход разрешён, есть замечания рекомендательных гейтов');
+    expect(document.querySelector('[data-gate-flag="advisory"]')).not.toBeNull();
+    expect(screen.queryByTestId('gate-override-banner')).not.toBeInTheDocument();
+  });
+
+  it('offers a retry for a technical error and calls the API for exactly that gate', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'error', undefined, { retryable: true })], transition: resolution('error', false, { retryable: ['review'] }) };
+    const api = await arrange(gatesFor(wave), ['retry', 'gate-retry']);
+    renderDetail();
+
+    const panel = await screen.findByTestId('gate-panel');
+    expect(within(panel).getByText('Ошибка запуска')).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Повторить на той же версии' }));
+    await waitFor(() => expect(api.retryTaskGate).toHaveBeenCalledWith('run-detail-1', 'analysis', 'review'));
+  });
+
+  it('offers no retry for an advisory gate with an error or when the retry is not offered', async () => {
+    const wave = { ...baseWave,
+      gates: [status('review', 'succeeded', 'pass'), { ...status('style', 'error', undefined), mode: 'advisory', blocking: false, warning: true, retryable: false }],
+      transition: resolution('passed_with_warnings', true, { warnings: ['style'] }) };
+    await arrange(gatesFor(wave), ['gate-retry']);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(within(panel).queryByRole('button', { name: 'Повторить на той же версии' })).not.toBeInTheDocument();
+  });
+
+  it('shows a legacy override as history and not as a blocked wave', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')],
+      transition: resolution('legacy_overridden', false, { reasons: ['legacy: переход был разрешён обходом без привязки к версии результата (alice): старый'] }) };
+    await arrange(gatesFor(wave), [], false);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(panel).toHaveTextContent('Legacy: задача прошла по обходу');
+    expect(panel).not.toHaveTextContent('Переход заблокирован');
+  });
+
+  it('hides the override from anybody but an administrator', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')], transition: resolution('blocked', false, { blocking: ['review'] }) };
+    await arrange(gatesFor(wave, { can_override: false }), ['override']);
+    renderDetail();
+    const stage = await screen.findByRole('region', { name: 'Анализ' });
+    expect(within(stage).queryByLabelText('Причина обхода проверки')).not.toBeInTheDocument();
+    expect(within(stage).getByText(/может только администратор/)).toBeInTheDocument();
+  });
+
+  it('shows the override form to an administrator with the red-outcome warning', async () => {
+    const wave = { ...baseWave, gates: [status('review', 'succeeded', 'fail')], transition: resolution('blocked', false, { blocking: ['review'] }) };
+    await arrange(gatesFor(wave, { can_override: true }), ['override']);
+    renderDetail();
+    const stage = await screen.findByRole('region', { name: 'Анализ' });
+    expect(within(stage).getByLabelText('Причина обхода проверки')).toBeInTheDocument();
+    expect(within(stage).getByText(/Исход гейта останется «провал»/)).toBeInTheDocument();
   });
 });

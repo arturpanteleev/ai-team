@@ -11,9 +11,13 @@ import (
 )
 
 var (
-	ErrInvalidInvitation       = errors.New("invalid or expired team invitation")
-	ErrTeamMemberNotFound      = errors.New("team member not found")
-	ErrLastTeamAdmin           = errors.New("cannot remove the last active Product Owner")
+	ErrInvalidInvitation  = errors.New("invalid or expired team invitation")
+	ErrTeamMemberNotFound = errors.New("team member not found")
+	ErrLastTeamAdmin      = errors.New("cannot remove the last active Product Owner")
+	// ErrLastSystemAdmin: the team must keep at least one active member with the
+	// system administrator right (gate override), otherwise nobody could ever
+	// pass a task after a required gate failed.
+	ErrLastSystemAdmin         = errors.New("cannot remove the last active system administrator")
 	ErrTeamMemberRolesRequired = errors.New("team member must have at least one role")
 	// ErrOIDCAccountMismatch is returned when a provider account (iss, sub)
 	// does not match the account bound to the member, or is already bound to
@@ -95,7 +99,10 @@ func (s *Store) TeamMemberCount() (int, error) {
 // BootstrapTeamAdmin installs the first Product Owner as the single-team
 // administrator. It succeeds only while the registry is empty.
 func (s *Store) BootstrapTeamAdmin(actorID string, now time.Time) error {
-	roles, _ := json.Marshal([]string{"product_owner"})
+	// The creator of the team is the owner: product_owner plus the system
+	// administrator right (S06), which is a separate right and not implied by
+	// product_owner for anybody invited later.
+	roles, _ := json.Marshal([]string{"admin", "product_owner"})
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -112,7 +119,7 @@ func (s *Store) BootstrapTeamAdmin(actorID string, now time.Time) error {
 	if _, err = tx.Exec(`INSERT INTO team_members(actor_id,email,roles_json,status,session_epoch,created_at,updated_at) VALUES(?,?,?,'active',1,?,?)`, actorID, email, string(roles), now, now); err != nil {
 		return err
 	}
-	if err = teamAudit(tx, actorID, "bootstrap", actorID, `{"roles":["product_owner"]}`, now); err != nil {
+	if err = teamAudit(tx, actorID, "bootstrap", actorID, `{"roles":["admin","product_owner"]}`, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -248,6 +255,16 @@ func (s *Store) SetTeamMember(actorID string, roles []string, active bool, by, a
 		}
 		if ownerCount <= 1 {
 			return ErrLastTeamAdmin
+		}
+	}
+	removesAdmin := containsRole(oldRoles, "admin") && (!active || !containsRole(roles, "admin") || previousStatus != "active")
+	if removesAdmin && previousStatus == "active" {
+		var adminCount int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM team_members WHERE status='active' AND roles_json LIKE '%"admin"%'`).Scan(&adminCount); err != nil {
+			return err
+		}
+		if adminCount <= 1 {
+			return ErrLastSystemAdmin
 		}
 	}
 	status := "active"

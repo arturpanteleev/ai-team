@@ -243,13 +243,28 @@ func TestMixedKindsInOneGroupAndRepeatedAgentGates(t *testing.T) {
 	}
 }
 
-func TestAdvisoryAndHumanGateOrderFailClosedUntilTheirTasks(t *testing.T) {
-	cfg := mustParse(t, v6Doc("    exit_gate_groups:\n      - - {gate: verdict_marker, version: 1, mode: advisory}\n"))
-	err := cfg.Validate(gateAgents())
-	if err == nil || !strings.Contains(err.Error(), "advisory пока не доступен") {
-		t.Fatalf("advisory must not silently run as required: %v", err)
+func TestAdvisoryModeIsAcceptedForAutomaticGatesOnly(t *testing.T) {
+	cfg := mustParse(t, v6Doc(`    exit_gate_groups:
+      - - {gate: required_sections, version: 1, params: {sections: [A]}}
+        - {gate: verdict_marker, version: 1, mode: advisory}
+        - {gate: agent_review, version: 1, name: soft_review, mode: advisory, params: {agent: verifier}}
+      - - {gate: human_approval, version: 1}
+`))
+	if err := cfg.Validate(gateAgents()); err != nil {
+		t.Fatalf("advisory automatic gates mixed with required ones must be accepted: %v", err)
 	}
-	cfg = mustParse(t, v6Doc("    exit_gate_groups:\n      - [human_approval@1]\n      - [verdict_marker@1]\n"))
+	cfg = mustParse(t, v6Doc("    exit_gate_groups:\n      - - {gate: human_approval, version: 1, mode: advisory}\n"))
+	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "human_approval не может быть advisory") {
+		t.Fatalf("an advisory human decision must be rejected: %v", err)
+	}
+	cfg = mustParse(t, v6Doc("    exit_gate_groups:\n      - - {gate: agent_review, version: 1, mode: advisory, params: {agent: verifier, mode: grill}}\n"))
+	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "grill не может быть advisory") {
+		t.Fatalf("an advisory grill must be rejected: %v", err)
+	}
+}
+
+func TestHumanGateOrderAndRepeatedGrillFailClosed(t *testing.T) {
+	cfg := mustParse(t, v6Doc("    exit_gate_groups:\n      - [human_approval@1]\n      - [verdict_marker@1]\n"))
 	if err := cfg.Validate(gateAgents()); err == nil || !strings.Contains(err.Error(), "human_approval допускается только в последней группе") {
 		t.Fatalf("got %v", err)
 	}

@@ -16,11 +16,18 @@ const (
 	RoleReviewer       Role = "reviewer"
 	RoleQA             Role = "qa"
 	RoleReleaseManager Role = "release_manager"
+	// RoleAdmin is the system administrator right (S06). It is not a process
+	// function: a template stage cannot name it as `function` or
+	// `approver_function`, and holding product_owner never implies it. It
+	// grants only PermissionGateOverride (passing a task on after a required
+	// gate failed) and the right to grant or revoke itself in the team.
+	RoleAdmin Role = "admin"
 )
 
 var knownRoles = map[Role]bool{
 	RoleProductOwner: true, RoleArchitect: true, RoleDeveloper: true,
 	RoleReviewer: true, RoleQA: true, RoleReleaseManager: true,
+	RoleAdmin: true,
 }
 
 type Principal struct {
@@ -76,6 +83,9 @@ func FunctionRole(function string) (Role, bool) {
 		return RoleProductOwner, true
 	case "deployer":
 		return RoleReleaseManager, true
+	case string(RoleAdmin):
+		// A system right, not a process function (see RoleAdmin).
+		return "", false
 	default:
 		roles, err := ParseRoles([]string{value})
 		if err != nil {
@@ -109,6 +119,10 @@ const (
 	PermissionProjectManage Permission = "project:manage"
 	// PermissionTrackerLink — связь задачи с карточкой трекера и повтор доставки.
 	PermissionTrackerLink Permission = "tracker:link"
+	// PermissionGateOverride — провести задачу дальше после провала
+	// обязательного гейта (S06). Принадлежит только системной роли admin;
+	// product_owner его не получает.
+	PermissionGateOverride Permission = "gate:override"
 )
 
 func Authorize(principal Principal, permission Permission, selectedRole Role) error {
@@ -134,6 +148,8 @@ func Authorize(principal Principal, permission Permission, selectedRole Role) er
 		allowed = principal.Has(RoleProductOwner)
 	case PermissionProjectManage, PermissionTrackerLink:
 		allowed = principal.Has(RoleProductOwner) || principal.Has(RoleArchitect)
+	case PermissionGateOverride:
+		allowed = principal.Has(RoleAdmin)
 	default:
 		return fmt.Errorf("cloud RBAC: неизвестное permission %q", permission)
 	}

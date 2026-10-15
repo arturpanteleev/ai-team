@@ -175,6 +175,27 @@ func (w *waveState) setFatal(err error) {
 	w.mu.Unlock()
 }
 
+// Warnings is the compact record of the recommendations that did not pass. It
+// goes into the check event next to the summary: an advisory fail or technical
+// error never blocks, but evidence always shows it.
+func (o waveOutcome) Warnings() []map[string]any {
+	out := make([]map[string]any, 0, len(o.Result.Warnings))
+	for _, attempt := range o.Result.Warnings {
+		item := map[string]any{
+			"gate": attempt.GateName, "group": attempt.Group, "execution": string(attempt.Execution),
+			"attempt_id": attempt.AttemptID, "mode": string(workflow.GateModeAdvisory),
+		}
+		if attempt.Verdict != "" {
+			item["verdict"] = string(attempt.Verdict)
+		}
+		if attempt.Reason != "" {
+			item["reason"] = attempt.Reason
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 // waveOutcome is the pipeline view of a finished wave.
 type waveOutcome struct {
 	Result gatesched.Result
@@ -188,7 +209,7 @@ func (o waveOutcome) Summary() []map[string]any {
 	for _, attempt := range o.Result.Attempts {
 		item := map[string]any{
 			"gate": attempt.GateName, "group": attempt.Group, "execution": string(attempt.Execution),
-			"attempt_id": attempt.AttemptID,
+			"attempt_id": attempt.AttemptID, "mode": string(attempt.Mode.Effective()),
 		}
 		if attempt.Verdict != "" {
 			item["verdict"] = string(attempt.Verdict)
@@ -225,7 +246,7 @@ func (rs *runState) waveKey(stage config.TemplateStage, result notifier.StageRes
 // version sha. It returns an error only when the wave could not be carried
 // out reliably or a gate needs the run to stop (a grill question, a failure
 // of the grill machinery); gate verdicts are in the outcome.
-func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage, result notifier.StageResult, groups workflow.GateGroups, sha string) (waveOutcome, error) {
+func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage, result notifier.StageResult, groups workflow.GateGroups, sha string, retry map[string]bool) (waveOutcome, error) {
 	library := rs.p.cfg.GateLibrary()
 	definitions := map[string]workflow.GateDefinition{}
 	for _, ref := range groups.Refs() {
@@ -251,7 +272,7 @@ func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage,
 	}
 	res, err := scheduler.Run(ctx, gatesched.Wave{
 		Key:    key,
-		Groups: groups, Definitions: definitions,
+		Groups: groups, Definitions: definitions, Retry: retry,
 	})
 	if state.fatal != nil {
 		return waveOutcome{}, state.fatal
@@ -415,7 +436,10 @@ func reportReason(report stagecheck.Report) string {
 func (rs *runState) waveReport(stage config.TemplateStage, state *waveState, res gatesched.Result) stagecheck.Report {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(res.Attempts) == 1 {
+	if len(res.Attempts) == 1 && res.Attempts[0].Blocking() || len(res.Attempts) == 1 && passedAttempt(res.Attempts[0]) {
+		// A single required gate (or a passed one) keeps its own report
+		// verbatim. A lone advisory gate that did not pass goes the general
+		// way below: its report says failed, but the stage check does not.
 		if report, ok := state.reports[res.Attempts[0].GateName]; ok {
 			report.Stage = stage.ID
 			return report
@@ -436,18 +460,34 @@ func (rs *runState) waveReport(stage config.TemplateStage, state *waveState, res
 	status := stagecheck.StatusPassed
 	for _, attempt := range res.Attempts {
 		detailed, fresh := state.reports[attempt.GateName]
+		var rules []stagecheck.RuleResult
 		switch {
 		case fresh && detailed.Kind == stagecheck.KindAgent:
-			report.Rules = append(report.Rules, stagecheck.RuleResult{Rule: attempt.GateName, Status: ruleStatus(attempt), Reason: attempt.Reason})
-			report.Verdict = detailed.Verdict
+			rules = []stagecheck.RuleResult{{Rule: attempt.GateName, Status: ruleStatus(attempt), Reason: attempt.Reason}}
+			if attempt.Blocking() {
+				report.Verdict = detailed.Verdict
+			}
 		case fresh:
-			report.Rules = append(report.Rules, detailed.Rules...)
+			rules = append(rules, detailed.Rules...)
 			if detailed.PRIdentity != nil {
 				report.PRIdentity = detailed.PRIdentity
 			}
 		default:
-			report.Rules = append(report.Rules, stagecheck.RuleResult{Rule: attempt.GateName, Status: ruleStatus(attempt), Reason: attempt.Reason})
+			rules = []stagecheck.RuleResult{{Rule: attempt.GateName, Status: ruleStatus(attempt), Reason: attempt.Reason}}
 		}
+		if !attempt.Blocking() {
+			// A recommendation never changes the verdict of the stage check: a
+			// fail or an error stays visible in the rules as an advisory
+			// outcome, and the check passes (or fails) on the required gates.
+			for index := range rules {
+				if rules[index].Status == stagecheck.RuleFailed || rules[index].Status == "error" {
+					rules[index].Status = advisoryRuleStatus(rules[index].Status)
+				}
+			}
+			report.Rules = append(report.Rules, rules...)
+			continue
+		}
+		report.Rules = append(report.Rules, rules...)
 		switch ruleStatus(attempt) {
 		case "error":
 			status = stagecheck.StatusError
@@ -457,12 +497,29 @@ func (rs *runState) waveReport(stage config.TemplateStage, state *waveState, res
 			}
 		}
 	}
+	if len(res.Warnings) > 0 {
+		names := make([]string, 0, len(res.Warnings))
+		for _, warning := range res.Warnings {
+			names = append(names, warning.GateName)
+		}
+		notes = append(notes, "рекомендательные гейты не прошли, переход ими не блокируется: "+strings.Join(names, ", "))
+	}
 	if len(res.NotStarted) > 0 {
 		notes = append(notes, "не запущены из-за отказа предыдущей группы: "+strings.Join(res.NotStarted, ", "))
 	}
 	report.Notes = strings.Join(notes, "\n")
 	report.Status = status
 	return report
+}
+
+// advisoryRuleStatus labels an outcome of a recommendation that did not pass:
+// the rule keeps what it said (failed or error) but cannot be mistaken for a
+// blocking one.
+func advisoryRuleStatus(status string) string { return "advisory_" + status }
+
+func passedAttempt(attempt workflow.GateAttempt) bool {
+	return attempt.Execution == workflow.GateExecutionSucceeded &&
+		(attempt.Verdict == workflow.GateVerdictPass || attempt.Verdict == workflow.GateVerdictNotApplicable)
 }
 
 func ruleStatus(attempt workflow.GateAttempt) string {

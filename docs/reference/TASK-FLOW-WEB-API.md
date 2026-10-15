@@ -33,7 +33,10 @@ fields.
 | `POST /api/runs/{runID}/stages/{stageID}/run-agent` | Run or refine with the stage agent |
 | `POST /api/runs/{runID}/stages/{stageID}/results` | Submit a typed human result |
 | `GET /api/runs/{runID}/stages/{stageID}/results/{version}` | Read one immutable result revision |
-| `POST /api/runs/{runID}/stages/{stageID}/override` | Override a failed check with a reason |
+| `POST /api/runs/{runID}/stages/{stageID}/override` | Pass a task on after a failed required gate; system administrator only, reason required |
+| `GET /api/runs/{runID}/gates` | Gates of every result version, attempts, overrides, advisory warnings, aggregated transition decision |
+| `POST /api/runs/{runID}/stages/{stageID}/gates/{gate}/retry` | Run a technically failed gate again on the same result version |
+| `POST /api/runs/{runID}/gate-attempts/{attemptID}/retry` | The same retry addressed by the failed attempt |
 | `POST /api/runs/{runID}/stages/{stageID}/confirm` | Confirm a checked stage |
 | `POST /api/runs/{runID}/stages/{stageID}/skip` | Skip a skippable stage with a reason |
 | `POST /api/runs/{runID}/stages/{stageID}/return` | Return to a configured earlier stage |
@@ -85,7 +88,8 @@ with `baseline_tokens` equal to the uncovered stop. See
 
 Stage actions are authorized by the functions of the run's pinned template
 (B-82). `take`, `executor`, `run-agent`, `results`/`submit`, `grill/*`,
-`override` and `skip` require the stage `function`; `confirm` and `return`
+`skip` requires the stage `function` (the gate `retry` needs the same function as
+`take`); `override` is not a stage function at all (see below); `confirm` and `return`
 require `approver_function` when the stage declares one, otherwise `function`.
 A member without the required function receives `403 forbidden` before the
 controller is called. When the template sets `forbid_self_approval: true`,
@@ -245,3 +249,50 @@ disabled while metrics are loading, after a load error, or when the period has
 no data. Text cells in the CSV that start with `=`, `+`, `-`, `@`, tab or
 carriage return are prefixed with `'` so spreadsheets do not evaluate them as
 formulas.
+
+## Gate state, retry and override
+
+`GET /api/runs/{runID}/gates` (MCP: `get_task_gates`) returns, for every stage
+with a gate chain, the configured `groups` and every recorded result version
+(`waves`, newest last; the newest also as `current`). A wave carries the
+`artifact_sha256`, the stage `visit` and attempt, the gates, the full `attempts`
+history (retried and superseded attempts included), the `override` recorded for
+exactly that version and the aggregated decision `transition`:
+
+```json
+{"allowed": true, "state": "overridden",
+ "reasons": ["переход разрешён администратором admin-1 несмотря на review; исход гейтов не изменён: срочный релиз"],
+ "blocking": ["review"], "warnings": ["style"], "retryable": [], "overridden": ["review"]}
+```
+
+`state` is `passed`, `passed_with_warnings`, `overridden`, `blocked` (a required
+`fail`), `error` (a required technical failure), `waiting` or `incomplete`.
+Each gate reports its `mode`, `group`, effective `attempt` (technical `execution`
+and content `verdict` are separate fields), the number of `attempts`, and the
+flags `blocking`, `warning` (an advisory gate that did not pass), `retryable`
+(latest attempt `error` or `timeout`) and `overridden`. Top-level `overrides`
+lists every override (author, `authority: system_admin`, time, reason, version
+hash, the failed attempts), `warnings` the advisory outcomes of the current
+versions, and `can_override` whether the caller holds the administrator right.
+
+**An override never changes an outcome.** A gate that returned `fail` is still
+`fail` with `overridden: true`; the UI shows a red warning for it (card, route,
+history) and an amber one for an advisory outcome.
+
+`POST …/stages/{stageID}/override` (body `{"reason": "..."}`): the caller needs
+the system administrator right (`admin`, permission `gate:override`) — a product
+owner without it gets `403 admin_required`, whatever stage functions they hold;
+an empty reason is `400 reason_required`; a stage that is not waiting on a failed
+check is `409`. The override is bound to the result version that was checked:
+a result with another hash needs its own override. The generic
+`POST /api/runs/{runID}/approvals/{approvalID}/decisions` refuses `override` and
+`retry_gate` on a check decision (`403` for a non-administrator, `409` pointing
+at the stage endpoints).
+
+`POST …/stages/{stageID}/gates/{gate}/retry` (optional body
+`{"gates": ["other"], "reason": "..."}`) and `POST …/gate-attempts/{attemptID}/retry`
+resolve the pending check decision with `retry_gate`: the named gates, whose
+latest attempt is `error` or `timeout`, run again on the same result version
+(a new attempt; the earlier one stays; gates that already passed do not run
+again). The action is listed as `gate-retry` in `allowed_actions` only while the
+decision offers it. A gate with a negative verdict is not retryable (`409`).

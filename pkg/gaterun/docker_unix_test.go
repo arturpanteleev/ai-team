@@ -588,6 +588,15 @@ func TestDockerWritableRepoKeepsGitReadOnly(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.repo, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Docker Desktop keeps the read-only mountpoint busy for a moment after the
+	// container is gone; retry the removal so the temp dir cleanup succeeds.
+	t.Cleanup(func() {
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			if os.RemoveAll(filepath.Join(f.repo, ".git")) == nil {
+				return
+			}
+		}
+	})
 	probe := `#!/bin/sh
 cat >/dev/null
 bad=""

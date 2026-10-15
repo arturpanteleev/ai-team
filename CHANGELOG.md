@@ -24,7 +24,6 @@
 
 ### Added
 
-<<<<<<< HEAD
 - **Гейт внешней программы с JSON-контрактом (S07).** В библиотеке появился
   `external_program@1`: доверенная команда из конфига репозитория (argv без
   shell, `timeout_seconds`, `cwd`, `env_allow`, `max_output_bytes`) получает
@@ -43,7 +42,7 @@
   маскируются в логах; относительный путь программы не выходит за репозиторий. Планировщик гейтов пока не
   подключён. Справочник — `docs/reference/gate-protocol.md`, демо —
   `pkg/gaterun/testdata/demo-gate.sh`.
-=======
+
 - **Внешний исполнитель этапа (S09).** Этап `executor: agent` можно отдать
   именованному внешнему адаптеру (`executor_adapters` + `adapter` на этапе):
   доверенный argv без shell получает JSON-запрос (входы, объявленные выходы,
@@ -56,7 +55,6 @@
   выходы, mutation scope и verdict проверяются тем же путём, что у внутреннего
   агента. Фактический исполнитель попытки (`executor_info`) записан в манифест
   и в `attempt_finished` (`executor_kind`, `executor_name`).
->>>>>>> 0ca71e5 (feat(stageexec): external stage executor contract and StageExecutor interface (S09))
 - **Контракт гейтов и версионированная библиотека (S02).** Введены типы
   определения гейта, ссылки этапа (`ID@версия`, параметры, `required|advisory`),
   групп (`exit_gate_groups`: группы последовательны, гейты внутри независимы) и

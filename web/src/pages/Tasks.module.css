@@ -233,3 +233,29 @@
     padding: 16px;
   }
 }
+
+/* Пустой проект: объяснение и один понятный следующий шаг. */
+.emptyProject {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 40px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.emptyProject h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.emptyProject p {
+  max-width: 480px;
+  margin: 0;
+  font-size: 14px;
+}

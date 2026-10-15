@@ -100,7 +100,7 @@ func (s *Server) runAutoPickup(ctx context.Context) (autopickup.Decision, error)
 	if !claimed {
 		return autopickup.Decision{Reason: autopickup.ReasonNoReadyItems}, nil
 	}
-	command := startRunCommand{Feature: item.Feature, Task: item.Title, Title: item.Title, Idea: item.Idea, Mode: "auto"}
+	command := startRunCommand{ProjectID: item.ProjectID, Feature: item.Feature, Task: item.Title, Title: item.Title, Idea: item.Idea, Mode: "auto"}
 	runID, _, _, startErr := s.startTask(ctx, command, autoPickupActor, func(runID string) error {
 		return s.store.BindBacklogRun(item.ID, runID, now)
 	})
@@ -241,9 +241,10 @@ func (s *Server) reconcileBacklogClaims(now time.Time) error {
 }
 
 type backlogCreateCommand struct {
-	Title   string `json:"title"`
-	Idea    string `json:"idea,omitempty"`
-	Feature string `json:"feature"`
+	ProjectID int64  `json:"project_id"`
+	Title     string `json:"title"`
+	Idea      string `json:"idea,omitempty"`
+	Feature   string `json:"feature"`
 }
 
 type backlogStatusCommand struct {
@@ -257,11 +258,24 @@ type autoPickupPolicyView struct {
 	MaxDailyTokens   int64 `json:"max_daily_tokens"`
 }
 
-func (s *Server) handleListBacklog(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleListBacklog(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := projectFilter(w, r)
+	if !ok {
+		return
+	}
 	items, err := s.store.ListBacklogItems()
 	if err != nil {
 		writeJSONAPIError(w, http.StatusInternalServerError, "backlog is unavailable", "backlog_unavailable")
 		return
+	}
+	if projectID != 0 {
+		filtered := make([]store.BacklogItem, 0, len(items))
+		for _, item := range items {
+			if item.ProjectID == projectID {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
 	}
 	writeJSONResponse(w, http.StatusOK, map[string]any{
 		"items": items,
@@ -294,13 +308,20 @@ func (s *Server) handleCreateBacklogItem(w http.ResponseWriter, r *http.Request)
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
+	if command.ProjectID <= 0 {
+		writeProjectError(w, store.ErrProjectRequired)
+		return
+	}
 	if !workflow.ValidFeature(command.Feature) || !store.ValidBacklogText(command.Title, maxBacklogTitleBytes) ||
 		len(command.Idea) > maxBacklogIdeaBytes {
 		writeJSONAPIError(w, http.StatusBadRequest, "backlog item requires a valid feature, a title and an idea within limits", "bad_backlog_item")
 		return
 	}
-	item, err := s.store.CreateBacklogItem(strings.TrimSpace(command.Title), command.Idea, command.Feature, actorID, s.clock())
+	item, err := s.store.CreateBacklogItem(command.ProjectID, strings.TrimSpace(command.Title), command.Idea, command.Feature, actorID, s.clock())
 	if err != nil {
+		if writeProjectError(w, err) {
+			return
+		}
 		writeJSONAPIError(w, http.StatusInternalServerError, "backlog item could not be saved", "backlog_unavailable")
 		return
 	}

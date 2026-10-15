@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NewTask } from './NewTask';
 import { MemoryRouter } from '../router';
-import { createTask, getTemplatesList } from '../api';
+import { createTask, getProjects, getTemplatesList } from '../api';
 
 const session = vi.hoisted(() => ({
   principal: { actor_id: 'product-1', roles: ['product_owner'] } as { actor_id: string; roles: string[] } | null,
@@ -11,6 +11,7 @@ const session = vi.hoisted(() => ({
 
 vi.mock('../api', () => ({
   createTask: vi.fn(),
+  getProjects: vi.fn(),
   getActivePrincipal: () => session.principal,
   isAuthenticationRequired: () => session.authenticationRequired,
   getTemplatesList: vi.fn(),
@@ -28,11 +29,18 @@ const templatesResponse = {
   versions: [],
 };
 
+const projectsFixture = [
+  { id: 1, name: 'Основной', description: '', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+  { id: 2, name: 'Платформа', description: '', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+  { id: 3, name: 'Старый', description: '', archived: true, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+];
+
 beforeEach(() => {
   vi.mocked(createTask).mockClear();
   session.principal = { actor_id: 'product-1', roles: ['product_owner'] };
   session.authenticationRequired = true;
   vi.mocked(getTemplatesList).mockResolvedValue(templatesResponse);
+  vi.mocked(getProjects).mockResolvedValue({ projects: projectsFixture });
   vi.mocked(createTask).mockResolvedValue({ run_id: 'run-new-1' });
 });
 
@@ -53,6 +61,7 @@ describe('New task screen', () => {
 
     await waitFor(() => expect(createTask).toHaveBeenCalledWith(
       expect.objectContaining({
+        project_id: 1,
         feature: 'onbording',
         title: 'Онбординг',
         idea: 'Сократить путь до первой ценности',
@@ -132,5 +141,29 @@ describe('New task screen', () => {
 
     expect(await screen.findByLabelText('Название')).toBeInTheDocument();
     expect(screen.queryByText('Войдите, чтобы создавать задачи.')).not.toBeInTheDocument();
+  });
+
+  it('требует проект: предлагает только активные и берёт выбранный из ссылки', async () => {
+    render(<MemoryRouter initialEntries={['/tasks/new?project=2']}><NewTask /></MemoryRouter>);
+    const select = await screen.findByLabelText('Проект');
+    await waitFor(() => expect(select).toHaveValue('2'));
+    expect(screen.getByRole('option', { name: 'Платформа' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Старый' })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Задача проекта' } });
+    fireEvent.change(screen.getByLabelText('Текст идеи'), { target: { value: 'Текст' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ project_id: 2 }),
+      expect.stringMatching(/^create-task-/),
+    ));
+  });
+
+  it('без активных проектов не даёт создать задачу и ведёт к созданию проекта', async () => {
+    vi.mocked(getProjects).mockResolvedValue({ projects: [] });
+    render(<MemoryRouter><NewTask /></MemoryRouter>);
+
+    expect(await screen.findByRole('link', { name: 'Создайте проект' })).toHaveAttribute('href', '/projects');
+    expect(screen.getByRole('button', { name: 'Создать задачу' })).toBeDisabled();
   });
 });

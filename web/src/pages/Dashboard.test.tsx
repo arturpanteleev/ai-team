@@ -12,6 +12,9 @@ vi.mock('../api', () => ({
   getPipelineRuns: vi.fn().mockResolvedValue([]),
   getPreflight: vi.fn().mockResolvedValue({ ready: true, checks: [] }),
   startRun: vi.fn(),
+  getProjects: vi.fn().mockResolvedValue({ projects: [
+    { id: 1, name: 'Основной', description: '', archived: false, created_at: '2026-10-15T09:00:00Z', updated_at: '2026-10-15T09:00:00Z' },
+  ] }),
 }));
 
 afterEach(cleanup);
@@ -38,6 +41,7 @@ describe('Dashboard business intake', () => {
     render(<Dashboard />);
 
     openCreateForm();
+    await waitFor(() => expect(screen.getByLabelText('Проект')).toHaveValue('1'));
     fireEvent.change(screen.getByLabelText('Название задачи'), { target: { value: 'Рост продаж' } });
     fireEvent.change(screen.getByLabelText('Короткий идентификатор'), { target: { value: 'рост продаж' } });
     fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Цель' } });
@@ -85,10 +89,11 @@ describe('Dashboard business intake', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
     openCreateForm();
+    await waitFor(() => expect(screen.getByLabelText('Проект')).toHaveValue('1'));
     fireEvent.change(screen.getByLabelText('Название задачи'), { target: { value: 'Mobile flow' } });
     fireEvent.change(screen.getByLabelText('Какого результата хотите достичь?'), { target: { value: 'Согласовать требования с телефона' } });
     fireEvent.click(screen.getByRole('button', { name: 'Создать задачу' }));
-    await waitFor(() => expect(startRun).toHaveBeenCalledWith('mobile-flow', 'Согласовать требования с телефона'));
+    await waitFor(() => expect(startRun).toHaveBeenCalledWith(1, 'mobile-flow', 'Согласовать требования с телефона'));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Mobile flow'));
     expect(screen.getByRole('link', { name: 'Открыть' })).toHaveAttribute('href', '/tasks/run-mobile-created');
 

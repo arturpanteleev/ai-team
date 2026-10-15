@@ -14,7 +14,7 @@ describe('write API client', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'approval-1', status: 'resolved' }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await startRun('feature', 'задача');
+    await startRun(1, 'feature', 'задача');
     const approval = {
       id: 'approval-1',
       run_id: 'run-1',
@@ -88,7 +88,7 @@ describe('cloud authentication client', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await api.openSession();
-    await api.startRun('feature', 'task');
+    await api.startRun(1, 'feature', 'task');
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
     expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe('same-origin');
@@ -107,9 +107,9 @@ describe('cloud authentication client', () => {
     const onExpired = vi.fn();
     window.addEventListener(api.SESSION_EXPIRED_EVENT, onExpired);
 
-    await expect(api.startRun('feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
+    await expect(api.startRun(1, 'feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
     expect(onExpired).toHaveBeenCalledTimes(1);
-    await expect(api.startRun('feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
+    await expect(api.startRun(1, 'feature', 'task')).rejects.toThrow('Сессия истекла. Войдите снова.');
     expect(onExpired).toHaveBeenCalledTimes(2);
 
     window.removeEventListener(api.SESSION_EXPIRED_EVENT, onExpired);

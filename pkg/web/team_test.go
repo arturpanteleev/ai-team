@@ -157,7 +157,7 @@ func TestTeamInviteCanonicalRolesAndImmediateSessionRevocation(t *testing.T) {
 	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"roles":["qa"]`) {
 		t.Fatalf("token claims overrode member role: %d %s", me.Code, me.Body.String())
 	}
-	start := teamRequest(srv, qaCookie, qaCSRF, http.MethodPost, "/api/runs", `{"feature":"f","task":"t"}`)
+	start := teamRequest(srv, qaCookie, qaCSRF, http.MethodPost, "/api/runs", `{"project_id":1,"feature":"f","task":"t"}`)
 	if start.Code != http.StatusForbidden {
 		t.Fatalf("QA inherited Product Owner start permission: %d %s", start.Code, start.Body.String())
 	}

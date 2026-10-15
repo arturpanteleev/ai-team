@@ -18,6 +18,7 @@ var ErrBacklogTransition = errors.New("backlog status transition is not allowed"
 // захвата подборщиком.
 type BacklogItem struct {
 	ID        int64      `json:"id"`
+	ProjectID int64      `json:"project_id"`
 	Title     string     `json:"title"`
 	Idea      string     `json:"idea"`
 	Feature   string     `json:"feature"`
@@ -31,13 +32,13 @@ type BacklogItem struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-const backlogColumns = `id, title, idea, feature, status, created_by, created_at, updated_at,
+const backlogColumns = `id, project_id, title, idea, feature, status, created_by, created_at, updated_at,
 	ready_by, ready_at, run_id, error`
 
 func scanBacklogItem(scanner interface{ Scan(...any) error }) (BacklogItem, error) {
 	var item BacklogItem
 	var readyAt sql.NullTime
-	if err := scanner.Scan(&item.ID, &item.Title, &item.Idea, &item.Feature, &item.Status, &item.CreatedBy,
+	if err := scanner.Scan(&item.ID, &item.ProjectID, &item.Title, &item.Idea, &item.Feature, &item.Status, &item.CreatedBy,
 		&item.CreatedAt, &item.UpdatedAt, &item.ReadyBy, &readyAt, &item.RunID, &item.Error); err != nil {
 		return BacklogItem{}, err
 	}
@@ -50,16 +51,28 @@ func scanBacklogItem(scanner interface{ Scan(...any) error }) (BacklogItem, erro
 }
 
 // CreateBacklogItem сохраняет новую идею всегда как черновик: создание не
-// может сразу сделать её доступной для автоподбора.
-func (s *Store) CreateBacklogItem(title, idea, feature, actorID string, at time.Time) (BacklogItem, error) {
+// может сразу сделать её доступной для автоподбора. Идея принадлежит ровно
+// одному активному проекту.
+func (s *Store) CreateBacklogItem(projectID int64, title, idea, feature, actorID string, at time.Time) (BacklogItem, error) {
 	at = at.UTC()
-	result, err := s.db.Exec(`INSERT INTO backlog_items (title, idea, feature, status, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, title, idea, feature, autopickup.StatusDraft, actorID, at, at)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return BacklogItem{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := requireActiveProject(tx, projectID); err != nil {
+		return BacklogItem{}, err
+	}
+	result, err := tx.Exec(`INSERT INTO backlog_items (project_id, title, idea, feature, status, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, projectID, title, idea, feature, autopickup.StatusDraft, actorID, at, at)
 	if err != nil {
 		return BacklogItem{}, err
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		return BacklogItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return BacklogItem{}, err
 	}
 	return s.GetBacklogItem(id)

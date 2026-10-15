@@ -10,8 +10,14 @@ fields.
 | Method and path | Purpose |
 |---|---|
 | `GET /api/templates` | Current project template and immutable versions |
-| `GET /api/runs?status=&stage=&function=&mode=&limit=&offset=` | Filtered, paginated task list |
-| `POST /api/runs` | Create a task |
+| `GET /api/runs?project_id=&status=&stage=&function=&mode=&limit=&offset=` | Filtered, paginated task list |
+| `POST /api/runs` | Create a task; `project_id` is required |
+| `GET /api/projects?include_archived=` | Project folders (archived hidden by default) |
+| `GET /api/projects/{projectID}` | One project, archived ones included |
+| `POST /api/projects` | Create a project (`name`, `description`); needs `project:manage` |
+| `PATCH /api/projects/{projectID}` | Rename or change the description; needs `project:manage` |
+| `POST /api/projects/{projectID}/archive` | Archive a project (idempotent); needs `project:manage` |
+| `POST /api/projects/{projectID}/unarchive` | Return a project from the archive; needs `project:manage` |
 | `GET /api/runs/{runID}` | Task, stages, approvals, ownership, results, allowed actions |
 | `POST /api/runs/{runID}/cancel` | Cancel a task |
 | `POST /api/runs/{runID}/stages/{stageID}/executor` | Change stage executor |
@@ -31,9 +37,22 @@ fields.
 | `GET /api/events?after=&limit=&warnings=&run_id=&order=&before=` | Global event feed |
 | `GET /api/metrics/flow?from=&to=&run_id=` | Flow metrics JSON |
 | `GET /api/metrics/flow.csv?from=&to=&run_id=` | Flow metrics CSV |
-| `GET /api/backlog` | Draft idea backlog and the instance auto-pickup policy |
-| `POST /api/backlog` | Add an idea (`title`, `idea`, `feature`); always created as `draft` |
+| `GET /api/backlog?project_id=` | Draft idea backlog and the instance auto-pickup policy |
+| `POST /api/backlog` | Add an idea (`project_id`, `title`, `idea`, `feature`); always created as `draft` |
 | `POST /api/backlog/{itemID}/status` | Set `draft`, `ready` or `discarded` (human transitions only) |
+
+A project is a folder for tasks: ID, name, description and an archived flag
+(no repository, template or members of its own). Every task and every backlog
+item belongs to exactly one project, so `POST /api/runs` and `POST /api/backlog`
+without `project_id` are `400 project_required`, an unknown project is
+`404 project_not_found`, and an archived project does not accept new tasks
+(`409 project_archived`); its history stays readable. Projects are never
+deleted, only archived. Project names are unique ignoring case. The migration
+creates the project «Основной» (ID 1) for records that predate projects; a clean
+install gets the same project. Auto pickup keeps the item's project, and an item
+whose project was archived after it became `ready` fails with a visible reason.
+Creating, renaming and archiving projects needs the `project:manage` permission
+(Product Owner or Architect).
 
 The idea backlog is stored separately from tasks. Only an explicit human
 `ready` marks an item as available for auto pickup; `starting`, `started` and

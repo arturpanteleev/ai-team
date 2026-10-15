@@ -262,8 +262,8 @@ func TestNewerSchemaRefusedWithoutWriting(t *testing.T) {
 // digest): the version 13 step adds them, keeps runs, events, members and
 // sessions, and the existing member can bind on the next SSO sign-in.
 func TestVersion12DatabaseMigratesTo13WithData(t *testing.T) {
-	if SchemaVersion != 13 {
-		t.Fatalf("test written for the 12 -> 13 step, SchemaVersion=%d", SchemaVersion)
+	if SchemaVersion < 13 {
+		t.Fatalf("test written for the 12 -> 13 step (SchemaVersion must stay >= 13), SchemaVersion=%d", SchemaVersion)
 	}
 	path := filepath.Join(t.TempDir(), "web.db")
 	s, err := New(path)
@@ -317,8 +317,8 @@ func TestVersion12DatabaseMigratesTo13WithData(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	var latest int64
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 13 {
-		t.Fatalf("schema version after migration = %d (%v), want 13", latest, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != SchemaVersion {
+		t.Fatalf("schema version after migration = %d (%v), want %d", latest, err, SchemaVersion)
 	}
 	var runs, events int
 	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pipeline_runs WHERE run_uid = 'run-kept'), (SELECT COUNT(*) FROM events WHERE run_uid = 'run-kept')`).Scan(&runs, &events); err != nil || runs != 1 || events != 1 {
@@ -360,8 +360,8 @@ func TestVersion13DatabaseRefusedByVersion12Binary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 13 {
-		t.Fatalf("migrated database version = %d, want 13", version)
+	if version < 13 {
+		t.Fatalf("migrated database version = %d, want >= 13", version)
 	}
 	const previousBinarySchemaVersion = 12
 	if version <= previousBinarySchemaVersion {

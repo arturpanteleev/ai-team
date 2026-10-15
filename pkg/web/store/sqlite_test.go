@@ -362,7 +362,7 @@ func TestUpdatePipelineRun(t *testing.T) {
 func TestStartingRunClearsStaleAdmissionError(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now().UTC()
-	run := &PipelineRun{RunID: "retry-admission", Feature: "feature", Status: "queued", StartedAt: now}
+	run := &PipelineRun{RunID: "retry-admission", ProjectID: 1, Feature: "feature", Status: "queued", StartedAt: now}
 	if err := s.AdmitPipelineRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +384,7 @@ func TestStartingRunClearsStaleAdmissionError(t *testing.T) {
 func TestQueueRunningProjectionClearsStaleAdmissionError(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now().UTC()
-	if err := s.AdmitPipelineRun(&PipelineRun{RunID: "queue-retry", Feature: "feature", Status: "queued", StartedAt: now}); err != nil {
+	if err := s.AdmitPipelineRun(&PipelineRun{RunID: "queue-retry", ProjectID: 1, Feature: "feature", Status: "queued", StartedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkRunQueued("queue-retry", 71); err != nil {

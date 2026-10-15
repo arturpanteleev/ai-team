@@ -850,6 +850,12 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	hash, hashFromServer := command.SubjectHash, false
+	if _, viaMCP := mcpCallMetaFromRequest(r); viaMCP && hash == "" {
+		// The server must not fill in the hash for an MCP client: the agent has to
+		// name the exact result version it reviewed.
+		writeJSONAPIError(w, http.StatusBadRequest, "subject_hash is required: confirm the exact result version you reviewed", "subject_hash_required")
+		return
+	}
 	if hash == "" {
 		hash, hashFromServer = pending.SubjectHash, true
 		// Deprecated path: the person did not confirm the exact version. The
@@ -857,9 +863,10 @@ func (s *Server) handleTaskStageConfirm(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Deprecation", "true")
 		w.Header().Set("Warning", `299 - "confirm without subject_hash is deprecated: send the hash of the reviewed result"`)
 	}
+	channel, requestKey := decisionOrigin(r, humandecision.ChannelWeb)
 	decided, ok := s.decideTransition(w, humandecision.Request{
 		RunID: runID, ApprovalID: pending.ID, Action: "approve", SubjectHash: hash, HashFromServer: hashFromServer,
-		Channel: humandecision.ChannelWeb, RequestKey: r.Header.Get("Idempotency-Key"),
+		Channel: channel, RequestKey: requestKey,
 		Actor: humandecision.Actor{ID: actorID, Authenticated: true, HasRole: func(required string) bool { return required == actorRole }},
 	})
 	if !ok {

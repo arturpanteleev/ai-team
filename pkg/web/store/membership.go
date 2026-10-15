@@ -402,6 +402,19 @@ func (s *Store) ValidateTeamSession(actorID string, epoch int64) (*TeamMember, e
 	return m, nil
 }
 
+// AppendAudit records one audit entry outside a membership transaction. The
+// MCP server uses it for actions that have no run to hang an event on
+// (projects, backlog, template, team), so every MCP action is attributable.
+func (s *Store) AppendAudit(actor, action, target string, details any, at time.Time) error {
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO team_audit(actor_id,action,target_actor_id,detail_json,created_at) VALUES(?,?,?,?,?)`,
+		actor, action, target, string(encoded), at)
+	return err
+}
+
 func teamAudit(tx *sql.Tx, actor, action, target, details string, at time.Time) error {
 	_, err := tx.Exec(`INSERT INTO team_audit(actor_id,action,target_actor_id,detail_json,created_at) VALUES(?,?,?,?,?)`, actor, action, target, details, at)
 	return err

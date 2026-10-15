@@ -29,15 +29,18 @@ import (
 
 const (
 	mcpPath = "/mcp"
-	// mcpMaxRequestBody bounds one JSON-RPC request. Read tools take small
-	// arguments; S13 raises it for result submission if needed.
-	mcpMaxRequestBody = 1 << 20
+	// mcpMaxRequestBody bounds one JSON-RPC request: read tools take small
+	// arguments, a submitted stage result or template may be a few MiB.
+	mcpMaxRequestBody = 4 << 20
 	mcpServerName     = "ai-team"
 )
 
 const mcpInstructions = `ai-team: process-gated delivery of tasks through a configurable template. ` +
 	`Everything here acts as the person who owns the access token, with exactly that person's roles; ` +
 	`you cannot see or do more than they can in the web UI. Start with whoami, then list_projects and list_tasks. ` +
+	`Actions (start_task, confirm_stage, decide_approval, ...) need an idempotency_key: resending a call with the same key never repeats the action. ` +
+	`Confirmations and decisions need the exact subject_hash you reviewed (read it from get_task); an override of a failed gate needs the administrator right and a reason; ` +
+	`a task action returns at once with the task ID - follow it with get_task, get_task_gates and list_task_events. ` +
 	`Lists are paginated (limit/offset, or next_cursor for events); results larger than 256 KiB are cut and ` +
 	`continue with byte_offset=next_byte_offset. Errors are returned as {"error","code","status"} with isError=true.`
 
@@ -49,6 +52,8 @@ type mcpIdentity struct {
 	Session browserSession
 	Host    string
 	TokenID string // personal token ID; empty for other bearer kinds
+	// UserAgent names the client (Claude Code, Codex, ...) for the audit trail.
+	UserAgent string
 }
 
 func mcpIdentityFromContext(ctx context.Context) (mcpIdentity, bool) {
@@ -160,7 +165,7 @@ func (s *Server) mcpGuard(next http.Handler) http.Handler {
 			http.Error(w, "invalid or missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		identity := mcpIdentity{Session: session, Host: r.Host, TokenID: tokenID}
+		identity := mcpIdentity{Session: session, Host: r.Host, TokenID: tokenID, UserAgent: auditClientName(r.UserAgent())}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpIdentityContextKey{}, identity)))
 	})
 }
@@ -227,11 +232,27 @@ func (s *Server) newMCPHandler() http.Handler {
 			Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}, Resources: &mcp.ResourceCapabilities{}}})
 	registry := newMCPRegistry()
 	registerMCPReadTools(registry)
+	registerMCPActionTools(registry)
 	registry.register(sdk, s)
 	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return sdk }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, MaxRequestBodyBytes: mcpMaxRequestBody,
 	})
 	return s.mcpGuard(streamable)
+}
+
+// auditClientName keeps a client's User-Agent short and single-line so it can
+// sit in an audit record.
+func auditClientName(agent string) string {
+	agent = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(agent))
+	if len(agent) > 120 {
+		agent = agent[:120]
+	}
+	return strings.ToValidUTF8(agent, "")
 }
 
 func mcpServerVersion() string {

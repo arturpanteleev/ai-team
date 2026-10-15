@@ -34,6 +34,8 @@ type mockJira struct {
 	omitTotal bool // comment pages carry no total (some Jira variants)
 	legacy    bool // only the old /search endpoint exists (Server/Data Center)
 	jql       string
+	jqls      []string // every search query seen
+	noMyself  bool     // /myself answers 500
 	server    *httptest.Server
 }
 
@@ -109,6 +111,8 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		m.comments = append(m.comments, body.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":"1"}`))
+	case r.Method == http.MethodGet && r.URL.Path == prefix+"myself" && m.noMyself:
+		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodGet && r.URL.Path == prefix+"myself":
 		_, _ = w.Write([]byte(`{"accountId":"bot-1","emailAddress":""}`))
 	case r.Method == http.MethodGet && r.URL.Path == prefix+"search/jql" && m.legacy:
@@ -117,6 +121,11 @@ func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusGone)
 	case r.Method == http.MethodGet && (r.URL.Path == prefix+"search" || r.URL.Path == prefix+"search/jql"):
 		m.jql = r.URL.Query().Get("jql")
+		m.jqls = append(m.jqls, m.jql)
+		if !strings.Contains(m.jql, "APP-1") && !strings.Contains(m.jql, "APP-1,") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"issues": []map[string]any{}})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"issues": []map[string]any{{
 			"key": "APP-1", "changelog": map[string]any{"histories": append(append([]map[string]any{}, m.histories...), map[string]any{
 				"id": "900", "created": m.personAt,
@@ -489,5 +498,92 @@ func TestJiraChangeOriginUsesAuthenticatedAccountNotConfiguredEmail(t *testing.T
 	}
 	if origins["Bot"] != OriginAITeam || origins["Person"] != OriginExternal {
 		t.Fatalf("origins=%v", origins)
+	}
+}
+
+func TestJiraChangesFailWhenOwnAccountIsUnknown(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	start, err := adapter.Changes(context.Background(), ChangeQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.noMyself = true
+	page, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}})
+	if err == nil || len(page.Changes) != 0 || page.Cursor != "" {
+		t.Fatalf("an unknown own account must be an error without changes or a moved cursor: %+v, %v", page, err)
+	}
+	// The failure is not cached: once /myself works the same cursor yields
+	// the change with the right origin.
+	mock.noMyself = false
+	page, err = adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}})
+	if err != nil || len(page.Changes) != 1 || page.Changes[0].Origin != OriginExternal {
+		t.Fatalf("recovery: %+v, %v", page, err)
+	}
+}
+
+func TestJiraChangesBatchManyKeysUnderOneCursor(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	start, err := adapter.Changes(context.Background(), ChangeQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, 120)
+	for i := 0; i < 119; i++ {
+		keys = append(keys, fmt.Sprintf("ZZ-%d", i+1))
+	}
+	keys = append(keys, "APP-1") // lands in the third batch
+	page, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.jqls) != 3 {
+		t.Fatalf("120 keys must go in 3 queries of at most 50, got %d", len(mock.jqls))
+	}
+	for _, jql := range mock.jqls {
+		if got := strings.Count(jql, ",") + 1; got > 50 {
+			t.Fatalf("batch of %d keys: %s", got, jql)
+		}
+	}
+	if len(page.Changes) != 1 || page.Changes[0].IssueKey != "APP-1" || page.Cursor == start.Cursor {
+		t.Fatalf("merged result: %+v", page)
+	}
+}
+
+func TestJiraChangesKeepAllStatusItemsOfOneRecordAcrossLimit(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	start, err := adapter.Changes(context.Background(), ChangeQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Add(time.Second).Format("2006-01-02T15:04:05.000-0700")
+	mock.histories = append(mock.histories, map[string]any{
+		"id": "800", "created": created,
+		"author": map[string]any{"accountId": "acc-person", "displayName": "Person"},
+		"items": []map[string]any{
+			{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+			{"field": "status", "fromString": "In Progress", "toString": "Done"},
+		},
+	})
+	first, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Changes) != 2 || first.Changes[0].To != "In Progress" || first.Changes[1].To != "Done" {
+		t.Fatalf("a record must not be split by the limit: %+v", first.Changes)
+	}
+	if first.Changes[0].ID == first.Changes[1].ID || first.Changes[0].ID != "800" {
+		t.Fatalf("each status item needs its own idempotency key: %q %q", first.Changes[0].ID, first.Changes[1].ID)
+	}
+	rest, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: first.Cursor, Keys: []string{"APP-1"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range rest.Changes {
+		if change.ID == "800" || change.ID == first.Changes[1].ID {
+			t.Fatalf("an already returned change came back: %+v", rest.Changes)
+		}
 	}
 }

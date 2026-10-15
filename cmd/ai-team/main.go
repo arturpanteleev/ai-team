@@ -2475,6 +2475,13 @@ func cmdWeb() {
 		serverOptions = append(serverOptions, web.WithTracker(trackerAdapter, tracker.Maps{
 			OnEnter: cfg.Tracker.OnEnter, OnPass: cfg.Tracker.EffectiveOnPass(),
 		}, cfg.Tracker.EffectiveWebBaseURL()))
+		if inbound := cfg.Tracker.Inbound; inbound != nil && trackerAdapter != nil {
+			rules := make([]tracker.InboundRule, 0, len(inbound.Rules))
+			for _, rule := range inbound.Rules {
+				rules = append(rules, tracker.InboundRule{Status: rule.Status, Action: rule.Action, Stage: rule.Stage, ToStage: rule.ToStage})
+			}
+			serverOptions = append(serverOptions, web.WithTrackerInbound(rules, inbound.EffectivePollInterval()))
+		}
 	}
 	if dispatcher := web.NotificationDispatcherFromConfig(cfg, os.Getenv, nil); dispatcher != nil {
 		serverOptions = append(serverOptions, web.WithNotifications(dispatcher))

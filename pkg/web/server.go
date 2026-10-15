@@ -165,6 +165,10 @@ type Server struct {
 	eventWorkers        sync.WaitGroup
 	controller          RunController
 	trackerSync         *trackerSync
+	trackerInbound      *trackerInboundPolicy
+	trackerSyncMu       sync.Mutex
+	trackerManualAt     *time.Time
+	trackerManualResult trackerSyncResult
 	notifications       *notifier.Dispatcher
 	notificationWorker  *NotificationWorker
 	templateAgentLookup config.AgentLookup
@@ -282,6 +286,10 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	if srv.trackerSync != nil {
 		srv.importLegacyTrackerLinks()
 		srv.startIntegrationConsumer(eventContext, trackerIntegrationName, eventCursor, srv.deliverTrackerEvent)
+		if srv.trackerInbound != nil {
+			srv.eventWorkers.Add(1)
+			go srv.monitorTrackerInbound(eventContext)
+		}
 	}
 	if srv.notifications != nil {
 		srv.notificationWorker = &NotificationWorker{store: s, dispatcher: srv.notifications}
@@ -366,6 +374,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/tracker/conflicts", srv.handleTrackerConflicts)
 		router.Get("/api/tracker/deliveries", srv.handleTrackerDeliveries)
 		router.Get("/api/runs/{runID}/tracker", srv.handleRunTracker)
+		router.Get("/api/tracker/sync", srv.handleTrackerSync)
+		router.Get("/api/tracker/inbound", srv.handleTrackerInbound)
 	})
 	srv.router.Method(http.MethodGet, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(false, srv.handleListMCPTokens)))
 	srv.router.Method(http.MethodPost, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleIssueMCPToken)))
@@ -383,6 +393,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Post("/api/projects/{projectID}/unarchive", srv.handleArchiveProject(false))
 		router.Put("/api/runs/{runID}/tracker/link", srv.handleSetTrackerLink)
 		router.Delete("/api/runs/{runID}/tracker/link", srv.handleDeleteTrackerLink)
+		router.Post("/api/tracker/sync", srv.handleTrackerSyncNow)
+		router.Post("/api/runs/{runID}/tracker/inbound/{changeID}/dismiss", srv.handleDismissTrackerInbound)
 		router.Post("/api/runs/{runID}/tracker/retry", srv.handleRetryTrackerDeliveries)
 		router.Post("/api/runs/{runID}/tracker/deliveries/{eventID}/retry", srv.handleRetryTrackerDelivery)
 		router.Post("/api/backlog", srv.handleCreateBacklogItem)

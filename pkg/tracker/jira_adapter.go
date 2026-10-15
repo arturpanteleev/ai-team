@@ -322,24 +322,29 @@ func (u jiraUser) matches(author jiraUser) bool {
 // authenticatedUser asks Jira who the credentials belong to (/myself), which
 // works for API tokens and personal access tokens alike and does not rely on
 // jira.email matching the profile e-mail (Cloud often hides e-mail). The
-// answer is cached; when it cannot be read the configured e-mail is the only
-// signal.
-func (a *JiraAdapter) authenticatedUser(ctx context.Context) jiraUser {
+// answer is cached. When it cannot be read there is no safe fallback (Jira
+// Cloud hides e-mail, so the configured address would not match ai-team's own
+// transitions and they would be read back as external requests), so the error
+// is returned and the caller must not classify any change.
+func (a *JiraAdapter) authenticatedUser(ctx context.Context) (jiraUser, error) {
 	a.selfMu.Lock()
 	defer a.selfMu.Unlock()
 	if a.selfKnown {
-		return a.self
+		return a.self, nil
 	}
 	var me jiraUser
 	endpoint := fmt.Sprintf("%s/rest/api/%d/myself", a.baseURL(), a.apiVersion())
 	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &me); err != nil {
-		return jiraUser{Email: strings.TrimSpace(a.settings.Email)}
+		return jiraUser{}, fmt.Errorf("jira account behind the credentials could not be determined: %w", err)
 	}
 	if me.Email == "" {
 		me.Email = strings.TrimSpace(a.settings.Email)
 	}
+	if me.AccountID == "" && me.Name == "" && me.Key == "" && me.Email == "" {
+		return jiraUser{}, errors.New("jira account behind the credentials could not be determined: empty /myself answer")
+	}
 	a.self, a.selfKnown = me, true
-	return me
+	return me, nil
 }
 
 type jiraSearchResponse struct {
@@ -370,7 +375,9 @@ type jiraSearchResponse struct {
 // last status change returned. An empty cursor starts at the current time and
 // returns nothing. Jira's search filters by issue update time, so the query
 // reaches back a minute before the cursor and changes at or before the cursor
-// are dropped locally; the cursor therefore never repeats a change. Only the
+// are dropped locally; the cursor therefore never repeats a change. A page
+// is cut on a history-record boundary, so it may exceed Limit by the extra
+// status items of the last record. Only the
 // changelog page that Jira embeds in the search result is read. A change is
 // AITeam-origin when its author is the account behind the credentials
 // (/myself), not when jira.email happens to equal a profile e-mail.
@@ -394,6 +401,13 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 	if a.baseURL() == "" {
 		return ChangePage{}, errors.New("jira base URL is empty")
 	}
+	// The own account must be known before any change is classified: a wrong
+	// guess would turn ai-team's own transitions into external requests. The
+	// error leaves the cursor where it was.
+	self, err := a.authenticatedUser(ctx)
+	if err != nil {
+		return ChangePage{}, err
+	}
 	// JQL date literals have no time zone (Jira reads them in the user's
 	// zone), so the window is a relative offset in minutes, which does not
 	// depend on any zone: from a minute before the cursor until now.
@@ -401,55 +415,56 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 	if window < 1 {
 		window = 1
 	}
-	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY updated ASC`, strings.Join(query.Keys, ","), window)
-	values := url.Values{"jql": {jql}, "fields": {"status"}, "expand": {"changelog"}, "maxResults": {"100"}}
-	var response jiraSearchResponse
-	// /search/jql replaces the removed /search on Jira Cloud; Jira Server and
-	// Data Center only know /search, so a 404 falls back to it.
-	endpoint := fmt.Sprintf("%s/rest/api/%d/search/jql?%s", a.baseURL(), a.apiVersion(), values.Encode())
-	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-		if !errors.Is(err, ErrNotFound) {
-			return ChangePage{}, err
-		}
-		response = jiraSearchResponse{}
-		endpoint = fmt.Sprintf("%s/rest/api/%d/search?%s", a.baseURL(), a.apiVersion(), values.Encode())
-		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-			return ChangePage{}, err
-		}
-	}
-	self := a.authenticatedUser(ctx)
 	type found struct {
 		change Change
 		ms, id int64
 	}
 	var all []found
-	for _, issue := range response.Issues {
-		for _, history := range issue.Changelog.Histories {
-			created, err := parseJiraTime(history.Created)
-			if err != nil {
-				continue
-			}
-			id, _ := strconv.ParseInt(history.ID, 10, 64)
-			ms := created.UnixMilli()
-			if ms < afterMS || (ms == afterMS && id <= afterID) {
-				continue
-			}
-			for _, item := range history.Items {
-				if item.Field != "status" {
+	// Keys go to Jira in batches so the JQL and URL stay short; the results
+	// are merged and ordered below, so the cursor is shared by all batches.
+	for start := 0; start < len(query.Keys); start += jiraChangeKeyBatch {
+		end := min(start+jiraChangeKeyBatch, len(query.Keys))
+		response, err := a.searchChanges(ctx, query.Keys[start:end], window)
+		if err != nil {
+			return ChangePage{}, err
+		}
+		for _, issue := range response.Issues {
+			for _, history := range issue.Changelog.Histories {
+				created, err := parseJiraTime(history.Created)
+				if err != nil {
 					continue
 				}
-				origin := OriginExternal
-				if self.matches(jiraUser{AccountID: history.Author.AccountID, Name: history.Author.Login, Key: history.Author.Key, Email: history.Author.Email}) {
-					origin = OriginAITeam
+				id, _ := strconv.ParseInt(history.ID, 10, 64)
+				ms := created.UnixMilli()
+				if ms < afterMS || (ms == afterMS && id <= afterID) {
+					continue
 				}
-				author := history.Author.Name
-				if author == "" {
-					author = history.Author.Email
+				statusItems := 0
+				for _, item := range history.Items {
+					if item.Field != "status" {
+						continue
+					}
+					// One history record may carry several status items. The
+					// first keeps the history ID; the others get a suffix, so
+					// each change has its own idempotency key.
+					changeID := history.ID
+					if statusItems > 0 {
+						changeID = fmt.Sprintf("%s.%d", history.ID, statusItems)
+					}
+					statusItems++
+					origin := OriginExternal
+					if self.matches(jiraUser{AccountID: history.Author.AccountID, Name: history.Author.Login, Key: history.Author.Key, Email: history.Author.Email}) {
+						origin = OriginAITeam
+					}
+					author := history.Author.Name
+					if author == "" {
+						author = history.Author.Email
+					}
+					all = append(all, found{ms: ms, id: id, change: Change{
+						ID: changeID, IssueKey: issue.Key, From: item.FromString, To: item.ToString,
+						At: created.UTC(), Author: author, Origin: origin,
+					}})
 				}
-				all = append(all, found{ms: ms, id: id, change: Change{
-					ID: history.ID, IssueKey: issue.Key, From: item.FromString, To: item.ToString,
-					At: created.UTC(), Author: author, Origin: origin,
-				}})
 			}
 		}
 	}
@@ -459,14 +474,41 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 		}
 		return all[i].id < all[j].id
 	})
-	for _, item := range all {
-		if query.Limit > 0 && len(page.Changes) >= query.Limit {
+	for i, item := range all {
+		// The cursor is (time, history ID), so a page is cut only on a record
+		// boundary: the items of one history record are never split between
+		// pages, or the cursor would skip the rest of the record.
+		if query.Limit > 0 && len(page.Changes) >= query.Limit && (all[i-1].ms != item.ms || all[i-1].id != item.id) {
 			break
 		}
 		page.Changes = append(page.Changes, item.change)
 		page.Cursor = formatJiraCursor(item.ms, item.id)
 	}
 	return page, nil
+}
+
+// jiraChangeKeyBatch is how many issue keys one change query carries.
+const jiraChangeKeyBatch = 50
+
+// searchChanges reads the status changelogs of one batch of issues.
+func (a *JiraAdapter) searchChanges(ctx context.Context, keys []string, window int) (jiraSearchResponse, error) {
+	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY updated ASC`, strings.Join(keys, ","), window)
+	values := url.Values{"jql": {jql}, "fields": {"status"}, "expand": {"changelog"}, "maxResults": {"100"}}
+	var response jiraSearchResponse
+	// /search/jql replaces the removed /search on Jira Cloud; Jira Server and
+	// Data Center only know /search, so a 404 falls back to it.
+	endpoint := fmt.Sprintf("%s/rest/api/%d/search/jql?%s", a.baseURL(), a.apiVersion(), values.Encode())
+	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			return jiraSearchResponse{}, err
+		}
+		response = jiraSearchResponse{}
+		endpoint = fmt.Sprintf("%s/rest/api/%d/search?%s", a.baseURL(), a.apiVersion(), values.Encode())
+		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+			return jiraSearchResponse{}, err
+		}
+	}
+	return response, nil
 }
 
 func formatJiraCursor(ms, id int64) string { return fmt.Sprintf("%d:%d", ms, id) }

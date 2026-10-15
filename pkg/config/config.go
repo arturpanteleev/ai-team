@@ -249,9 +249,11 @@ type TrackerConfig struct {
 	OnEnter map[string]string `yaml:"on_enter,omitempty"`
 	// OnPass maps a stage ID to the tracker status/transition name that is
 	// requested when the stage finishes successfully.
-	OnPass map[string]string  `yaml:"on_pass,omitempty"`
-	Jira   *JiraConfig        `yaml:"jira,omitempty"`
-	Fake   *FakeTrackerConfig `yaml:"fake,omitempty"`
+	OnPass map[string]string `yaml:"on_pass,omitempty"`
+	// Inbound maps external statuses to requests to the controller (S15).
+	Inbound *TrackerInboundConfig `yaml:"inbound,omitempty"`
+	Jira    *JiraConfig           `yaml:"jira,omitempty"`
+	Fake    *FakeTrackerConfig    `yaml:"fake,omitempty"`
 }
 
 // JiraConfig configures the Jira adapter.
@@ -333,7 +335,7 @@ func (tc *TrackerConfig) EffectiveOnPass() map[string]string {
 
 func (tc *TrackerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
-		"adapter": true, "web_base_url": true, "on_enter": true, "on_pass": true, "jira": true, "fake": true,
+		"adapter": true, "web_base_url": true, "on_enter": true, "on_pass": true, "inbound": true, "jira": true, "fake": true,
 	}, "config: tracker"); err != nil {
 		return err
 	}
@@ -430,6 +432,7 @@ func (tc *TrackerConfig) Validate(stageIDs map[string]bool) error {
 			problems = append(problems, err.Error())
 		}
 	}
+	problems = append(problems, tc.Inbound.validateInbound(stageIDs)...)
 	if tc.Fake != nil {
 		for _, issue := range tc.Fake.Issues {
 			if strings.TrimSpace(issue.Key) == "" {

@@ -114,6 +114,29 @@ func registerMCPReadTools(registry *mcpRegistry) {
 			{Name: "to", Kind: mcpString, Description: "Period end (exclusive), RFC3339 or YYYY-MM-DD."},
 			{Name: "run_id", Kind: mcpString, Description: "Restrict to one run (whole run unless a period is given)."}}})
 
+	registry.add(mcpOperation{Name: "get_tracker_status", Title: "Tracker status",
+		Description: "Task tracker integration: adapter, outbound stage maps, failed deliveries, link conflicts and the inbound block (poll interval, last poll, delay, errors, pending requests, conflicts). configured=false when no tracker is set up.",
+		Path:        "/api/tracker"})
+	registry.add(mcpOperation{Name: "get_tracker_sync", Title: "Tracker sync state",
+		Description: "Inbound synchronization state: poll interval, cursor, last poll and success time, delay in seconds, consecutive failures and last error and the status map rules.",
+		Path:        "/api/tracker/sync"})
+	registry.add(mcpOperation{Name: "list_tracker_inbound", Title: "Tracker inbound requests",
+		Description: "Status changes made in the tracker and what became of them. state=open lists requests that wait for an operator (pending: conditions not met, with the reason and the actions allowed now; conflict: ambiguous status or impossible route). Other states: applied, ignored (own echo, unmapped status), superseded, dismissed.",
+		Path:        "/api/tracker/inbound", ArrayKey: "requests",
+		Params: []mcpParam{{Name: "state", Kind: mcpString, Enum: []string{"open", "pending", "conflict", "applied", "ignored", "superseded", "dismissed"},
+			Description: "Only requests in this state; open = pending and conflict."}}})
+	registry.add(mcpOperation{Name: "list_tracker_link_conflicts", Title: "Tracker link conflicts",
+		Description: "Old external links that could not be linked to a tracker issue unambiguously.",
+		Path:        "/api/tracker/conflicts", ArrayKey: "conflicts"})
+	registry.add(mcpOperation{Name: "list_tracker_deliveries", Title: "Tracker deliveries",
+		Description: "Outbound deliveries of stage events to the tracker, optionally only failed, delivered, abandoned or superseded ones.",
+		Path:        "/api/tracker/deliveries", ArrayKey: "deliveries",
+		Params: []mcpParam{{Name: "status", Kind: mcpString, Enum: []string{"failed", "delivered", "abandoned", "superseded"},
+			Description: "Only deliveries with this status."}}})
+	registry.add(mcpOperation{Name: "get_task_tracker", Title: "Task tracker sync",
+		Description: "Link of one task to its tracker issue, link conflicts, recent deliveries, inbound requests (with allowed actions for open ones) and the one-word sync status.",
+		Path:        "/api/runs/{run_id}/tracker", Params: []mcpParam{runID}})
+
 	registry.add(mcpOperation{Name: "list_team_members", Title: "Team and roles",
 		Description: "Team members with status and roles. Requires the team management right; others get a forbidden error.",
 		Path:        "/api/team/members", ArrayKey: "members"})

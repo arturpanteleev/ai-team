@@ -69,7 +69,7 @@ func TestPrincipalRolesAndRBAC(t *testing.T) {
 	if err := Authorize(reviewer, PermissionDeliver, ""); err == nil {
 		t.Fatal("reviewer must not execute Git delivery")
 	}
-	if _, err := NewPrincipal("x", []Role{"admin"}); err == nil {
+	if _, err := NewPrincipal("x", []Role{"superuser"}); err == nil {
 		t.Fatal("неизвестная роль должна быть отклонена")
 	}
 }
@@ -113,5 +113,42 @@ func TestSessionBindingDependsOnSecretAndLabel(t *testing.T) {
 	}
 	if strings.Contains(a.SessionBinding("token"), "0123456789abcdef") {
 		t.Fatal("binding must not reveal the secret")
+	}
+}
+
+func TestGateOverrideIsAdminOnlyAndNotImpliedByProductOwner(t *testing.T) {
+	owner, err := NewPrincipal("po", []Role{RoleProductOwner, RoleArchitect, RoleReleaseManager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Authorize(owner, PermissionGateOverride, ""); err == nil {
+		t.Fatal("product_owner must not get the gate override right")
+	}
+	admin, err := NewPrincipal("admin-1", []Role{RoleAdmin})
+	if err != nil {
+		t.Fatalf("admin is a valid system role: %v", err)
+	}
+	if err := Authorize(admin, PermissionGateOverride, ""); err != nil {
+		t.Fatalf("admin must override: %v", err)
+	}
+	// The system right grants nothing else.
+	if err := Authorize(admin, PermissionTeamManage, ""); err == nil {
+		t.Fatal("admin alone must not manage the team")
+	}
+}
+
+func TestAdminIsNotAProcessFunction(t *testing.T) {
+	if _, ok := FunctionRole("admin"); ok {
+		t.Fatal("admin must not be usable as a stage function")
+	}
+	if _, err := ParseFunctions([]string{"admin"}); err == nil {
+		t.Fatal("ParseFunctions must reject admin")
+	}
+	roles, err := ParseTeamRoles([]string{"po", "ADMIN"})
+	if err != nil || len(roles) != 2 || roles[0] != RoleAdmin || roles[1] != RoleProductOwner {
+		t.Fatalf("ParseTeamRoles = %v, %v", roles, err)
+	}
+	if _, err := ParseTeamRoles([]string{"nobody"}); err == nil {
+		t.Fatal("unknown role must be rejected")
 	}
 }

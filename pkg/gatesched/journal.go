@@ -85,6 +85,13 @@ func (j *EventJournal) Record(rec Record) error {
 			data["verdict"] = string(rec.Attempt.Verdict)
 		}
 		data["severity"] = severityOf(rec.Attempt)
+		data["mode"] = string(rec.Attempt.Mode.Effective())
+		if rec.Attempt.Mode.Effective() == workflow.GateModeAdvisory && !passed(rec.Attempt) &&
+			rec.Attempt.Execution.Terminal() {
+			// A recommendation that did not pass is a visible warning, never a
+			// silent success; the transition is not blocked by it.
+			data["advisory_warning"] = true
+		}
 	}
 	at := time.Now().UTC()
 	switch {

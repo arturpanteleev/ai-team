@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 16
+const SchemaVersion = 17
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -1070,7 +1071,63 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 	if err := migrateV15(ctx, tx); err != nil {
 		return err
 	}
-	return migrateV16(ctx, tx)
+	if err := migrateV16(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV17(ctx, tx)
+}
+
+// migrateV17 (S06) introduces the system administrator right. It is granted
+// to exactly one existing member: the owner of the team, found as the actor of
+// the first bootstrap audit record (or, for a registry that predates the
+// audit, the earliest active product_owner). Other product owners do not get
+// it. Version 16 belongs to the task tracker (S14).
+func migrateV17(ctx context.Context, tx schemaQuerier) error {
+	var admins int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM team_members WHERE status='active' AND roles_json LIKE '%"admin"%'`).Scan(&admins); err != nil {
+		return err
+	}
+	if admins == 0 {
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT m.actor_id FROM team_members m
+			JOIN team_audit a ON a.action='bootstrap' AND a.target_actor_id=m.actor_id
+			WHERE m.status='active' AND m.roles_json LIKE '%"product_owner"%'
+			ORDER BY a.id LIMIT 1`).Scan(&owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = tx.QueryRowContext(ctx, `SELECT actor_id FROM team_members
+				WHERE status='active' AND roles_json LIKE '%"product_owner"%'
+				ORDER BY created_at, actor_id LIMIT 1`).Scan(&owner)
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if owner != "" {
+			var rolesJSON string
+			if err := tx.QueryRowContext(ctx, `SELECT roles_json FROM team_members WHERE actor_id=?`, owner).Scan(&rolesJSON); err != nil {
+				return err
+			}
+			var roles []string
+			if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
+				return err
+			}
+			roles = append(roles, "admin")
+			sort.Strings(roles)
+			encoded, err := json.Marshal(roles)
+			if err != nil {
+				return err
+			}
+			// A bumped session epoch makes live sessions re-read the roles.
+			if _, err := tx.ExecContext(ctx, `UPDATE team_members SET roles_json=?, session_epoch=session_epoch+1, updated_at=CURRENT_TIMESTAMP WHERE actor_id=?`, string(encoded), owner); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO team_audit(actor_id, action, target_actor_id, detail_json, created_at)
+				VALUES('system', 'admin_granted_by_migration', ?, ?, CURRENT_TIMESTAMP)`, owner, `{"roles":`+string(encoded)+`}`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, CURRENT_TIMESTAMP)`)
+	return err
 }
 
 // migrateV15 (S12) добавляет персональные MCP-токены: в базе лежит только

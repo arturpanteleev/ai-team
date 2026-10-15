@@ -93,7 +93,7 @@ func (s *Server) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "нужен корректный email", http.StatusBadRequest)
 		return
 	}
-	roles, err := cloudidentity.ParseFunctions(command.Roles)
+	roles, err := cloudidentity.ParseTeamRoles(command.Roles)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -101,6 +101,9 @@ func (s *Server) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 	roleNames := make([]string, len(roles))
 	for i, role := range roles {
 		roleNames[i] = string(role)
+	}
+	if !s.mayChangeAdminRight(w, r, containsString(roleNames, string(cloudidentity.RoleAdmin))) {
+		return
 	}
 	actorID := strings.ToLower(address.Address)
 	activation, err := randomToken()
@@ -186,7 +189,7 @@ func (s *Server) handleTeamRoles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	roles, err := cloudidentity.ParseFunctions(command.Roles)
+	roles, err := cloudidentity.ParseTeamRoles(command.Roles)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -213,6 +216,14 @@ func (s *Server) handleTeamRoles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "сначала активируйте приглашение", http.StatusConflict)
 		return
 	}
+	// Granting or taking away the system administrator right is itself an
+	// administrator action; a product owner cannot give it to himself or
+	// strip it from the owner.
+	hadAdmin := containsString(existing.Roles, string(cloudidentity.RoleAdmin))
+	wantsAdmin := containsString(roleNames, string(cloudidentity.RoleAdmin))
+	if hadAdmin != wantsAdmin && !s.mayChangeAdminRight(w, r, true) {
+		return
+	}
 	if err = s.store.SetTeamMember(actorID, roleNames, true, session.Principal.ActorID, "roles_changed", time.Now().UTC()); err != nil {
 		if errors.Is(err, store.ErrTeamMemberNotFound) {
 			http.Error(w, "участник не найден", http.StatusNotFound)
@@ -220,6 +231,10 @@ func (s *Server) handleTeamRoles(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, store.ErrLastTeamAdmin) {
 			http.Error(w, "нельзя удалить последнего Product Owner", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, store.ErrLastSystemAdmin) {
+			http.Error(w, "нельзя снять право администратора у последнего администратора", http.StatusConflict)
 			return
 		}
 		http.Error(w, "не удалось изменить роли", http.StatusInternalServerError)
@@ -236,6 +251,10 @@ func (s *Server) handleTeamRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "нельзя отзывать собственное членство", http.StatusConflict)
 		return
 	}
+	if target, lookupErr := s.store.TeamMember(actorID); lookupErr == nil && target != nil &&
+		containsString(target.Roles, string(cloudidentity.RoleAdmin)) && !s.mayChangeAdminRight(w, r, true) {
+		return
+	}
 	if err := s.store.SetTeamMember(actorID, nil, false, session.Principal.ActorID, "membership_revoked", time.Now().UTC()); err != nil {
 		if errors.Is(err, store.ErrTeamMemberNotFound) {
 			http.Error(w, "участник не найден", http.StatusNotFound)
@@ -245,8 +264,40 @@ func (s *Server) handleTeamRevoke(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "нельзя удалить последнего Product Owner", http.StatusConflict)
 			return
 		}
+		if errors.Is(err, store.ErrLastSystemAdmin) {
+			http.Error(w, "нельзя отозвать последнего администратора", http.StatusConflict)
+			return
+		}
 		http.Error(w, "не удалось отозвать членство", http.StatusInternalServerError)
 		return
 	}
 	writeJSONResponse(w, http.StatusOK, map[string]string{"actor_id": actorID, "status": "revoked"})
+}
+
+// mayChangeAdminRight enforces that only a system administrator grants or
+// revokes the administrator right. needed is false for requests that do not
+// touch it. A refusal is written as 403.
+func (s *Server) mayChangeAdminRight(w http.ResponseWriter, r *http.Request, needed bool) bool {
+	if !needed {
+		return true
+	}
+	session, ok := s.requestSession(r)
+	if !ok {
+		http.Error(w, "требуется активная web session", http.StatusUnauthorized)
+		return false
+	}
+	if err := cloudidentity.Authorize(session.Principal, cloudidentity.PermissionGateOverride, ""); err != nil {
+		http.Error(w, "право администратора выдаёт и снимает только администратор", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }

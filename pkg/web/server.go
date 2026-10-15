@@ -116,6 +116,9 @@ func NewLocalAuthenticator(token string) (*LocalAuthenticator, error) {
 		cloudidentity.RoleProductOwner, cloudidentity.RoleArchitect,
 		cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer,
 		cloudidentity.RoleQA, cloudidentity.RoleReleaseManager,
+		// The local owner holds the system administrator right explicitly
+		// (S06); it is not derived from product_owner.
+		cloudidentity.RoleAdmin,
 	})
 	if err != nil {
 		return nil, err

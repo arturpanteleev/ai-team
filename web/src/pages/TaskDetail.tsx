@@ -733,7 +733,10 @@ export function TaskDetail() {
   const viewAttempt = viewID ? latestAttemptFor(viewID) : undefined;
   const viewFiles = viewAttempt ? visibleSnapshot.artifacts.filter((artifact) =>
     artifact.run_id === run.run_id && isStageResultArtifact(artifact, viewAttempt.attempt_id)) : [];
-  const currentGateStage = currentStage ? visibleSnapshot.gates?.stages.find((stage) => stage.stage_id === currentStage.id) : undefined;
+  // The gates shown are those of the stage the page is about: while the result of a stage awaits the
+  // confirmation of its transition, that is the stage being confirmed, not the one that comes next.
+  const gateStageID = serverCurrent?.stage_id || actionStageID || currentStage?.id;
+  const currentGateStage = gateStageID ? visibleSnapshot.gates?.stages.find((stage) => stage.stage_id === gateStageID) : undefined;
   const trackerOn = tracker.data?.configured === true;
   const gateAttention = visibleSnapshot.gates?.stages.some((stage) => stageGateFlag(visibleSnapshot.gates, stage.stage_id) !== undefined) ?? false;
   const tabs: { key: TabKey; label: string; flag?: 'danger' | 'warning' }[] = [
@@ -861,7 +864,7 @@ export function TaskDetail() {
               <summary>Посещения этапа ({serverCurrent.visit_count})</summary>
               <ol>{serverCurrent.visits.map((visit) => <li key={visit.number}>{visitText(visit, stageTitle)}</li>)}</ol>
             </details>}
-            {currentStage && <GatePanel stage={currentGateStage} compact />}
+            {currentGateStage && <GatePanel stage={currentGateStage} compact />}
           </section>
 
           <TrackerSummary tracker={tracker} />
@@ -952,7 +955,7 @@ export function TaskDetail() {
               </div>}
 
               {tab === 'gates' && <div className={styles.gatesTab}>
-                {currentStage && currentGateStage?.current
+                {currentGateStage?.current
                   ? <GatePanel stage={currentGateStage} />
                   : <p>У текущего этапа нет гейтов или они ещё не запускались.</p>}
                 <h3>Обходы и рекомендации по всей задаче</h3>

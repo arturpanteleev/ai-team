@@ -130,6 +130,36 @@ describe('Task detail stage statuses (S11)', () => {
     expect(screen.getByText(/нужно подтверждение результата \(роли: product_owner\)/)).toBeInTheDocument();
   });
 
+  it('shows the gates of the stage whose transition awaits confirmation, not of the next one (S17)', async () => {
+    const api = await import('../api');
+    const waiting: TaskRunDetails = {
+      ...baseDetails,
+      state: { ...baseDetails.state!, phase: 'waiting', next_stage: 'release', pending_approval_id: 'c1' },
+      stage_statuses: {
+        ...baseDetails.stage_statuses!, current_stage: 'analysis',
+        stages: baseDetails.stage_statuses!.stages.map((entry) => entry.stage_id === 'analysis'
+          ? { ...entry, status: 'awaiting_human' as const, phase: 'awaiting_human' as const, outcome: 'passed',
+            blocked_by: { kind: 'approval', roles: ['product_owner'], actions: ['approve'] }, action_stage_id: 'release' }
+          : entry),
+      },
+    };
+    const wave = {
+      stage_id: 'analysis', visit: 1, stage_attempt_id: 'a1', artifact_sha256: 'b'.repeat(64), current: true,
+      gates: [{ gate_name: 'required_sections', gate: 'required_sections', gate_version: 1, mode: 'required' as const, group: 0, attempts: 1,
+        blocking: false, warning: false, retryable: false, overridden: false,
+        attempt: { attempt_id: 'g1', execution: 'succeeded', verdict: 'pass', started_at: '2026-10-12T09:00:00Z' } }],
+      transition: { allowed: true, state: 'allowed', reasons: [], blocking: [], warnings: [], retryable: [], overridden: [] }, attempts: [],
+    };
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(waiting);
+    vi.mocked(api.getTaskGates).mockResolvedValue({
+      run_id: 'run-detail-1', can_override: false, overrides: [], warnings: [],
+      stages: [{ stage_id: 'analysis', groups: [['required_sections']], current: wave, waves: [wave] }],
+    } as never);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(within(panel).getByText('required_sections')).toBeInTheDocument();
+  });
+
   it('keeps the old route when the server sent no projection', async () => {
     const api = await import('../api');
     vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, stage_statuses: undefined });

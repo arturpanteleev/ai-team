@@ -204,7 +204,8 @@ func (s *Server) mcpAuthenticate(r *http.Request) (browserSession, string, error
 			return browserSession{}, "", errMCPUnauthorized
 		}
 	}
-	principal, epoch, err := s.resolveTeamPrincipal(principal)
+	// No bootstrap: an MCP request must never create the first team member.
+	principal, epoch, err := s.resolveTeamPrincipalOpts(principal, false)
 	if err != nil {
 		return browserSession{}, "", errMCPUnauthorized
 	}

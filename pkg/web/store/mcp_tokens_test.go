@@ -87,3 +87,73 @@ func TestMCPTokenCapCountsOnlyLiveTokens(t *testing.T) {
 		t.Fatal("a secret without the aitm_ prefix must be rejected")
 	}
 }
+
+func TestRevokingAMemberRevokesTheirMCPTokensForGood(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	if err := s.BootstrapTeamAdmin("owner@example.test", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InviteTeamMember("dev@example.test", "dev@example.test", []string{"developer"}, "hash-dev", now.Add(time.Hour), now, "owner@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateTeamInvitation("hash-dev", now, func(*TeamMember) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	devRaw := MCPTokenPrefix + strings.Repeat("d", 43)
+	ownerRaw := MCPTokenPrefix + strings.Repeat("o", 43)
+	if err := s.CreateMCPToken(testMCPToken("dev1", "dev@example.test", now), devRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMCPToken(testMCPToken("own1", "owner@example.test", now), ownerRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTeamMember("dev@example.test", []string{"developer"}, false, "owner@example.test", "member_revoked", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MCPTokenByRaw(devRaw, now); !errors.Is(err, ErrMCPTokenNotFound) {
+		t.Fatalf("a revoked member's token must stop working: %v", err)
+	}
+	if _, err := s.MCPTokenByRaw(ownerRaw, now); err != nil {
+		t.Fatalf("other members' tokens must stay live: %v", err)
+	}
+	// Restoring the member must not resurrect the old token.
+	if err := s.SetTeamMember("dev@example.test", []string{"developer"}, true, "owner@example.test", "member_restored", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MCPTokenByRaw(devRaw, now.Add(time.Minute)); !errors.Is(err, ErrMCPTokenNotFound) {
+		t.Fatalf("restoring a member must not revive old tokens: %v", err)
+	}
+}
+
+func TestMigrationV15IsIdempotentAndKeepsTokens(t *testing.T) {
+	path := t.TempDir() + "/mcp.db"
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	raw := MCPTokenPrefix + strings.Repeat("m", 43)
+	if err = s.CreateMCPToken(testMCPToken("m1", "qa@example.test", now), raw); err != nil {
+		t.Fatal(err)
+	}
+	// Pretend the file was left by a version-14 binary, then reopen twice.
+	if _, err = s.db.Exec(`DELETE FROM schema_migrations WHERE version >= 15`); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	for range 2 {
+		reopened, openErr := New(path)
+		if openErr != nil {
+			t.Fatalf("reapplying v15: %v", openErr)
+		}
+		var latest int
+		if err = reopened.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != SchemaVersion {
+			t.Fatalf("version %d err %v, want %d", latest, err, SchemaVersion)
+		}
+		if _, err = reopened.MCPTokenByRaw(raw, now); err != nil {
+			t.Fatalf("token lost across reapplied migration: %v", err)
+		}
+		_ = reopened.Close()
+	}
+}

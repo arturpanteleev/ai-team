@@ -76,7 +76,7 @@ export function McpAccess() {
         <button disabled={busy || label.trim() === ''}>{busy ? 'Сохраняем…' : 'Выпустить токен'}</button>
       </form>
       {secret && (
-        <div className={styles.invitation}>
+        <div className={styles.invitation} role="status" aria-live="polite">
           <strong>Скопируйте токен сейчас — повторно он не показывается:</strong>
           <code>{secret}</code>
           <small>Передайте его клиенту как заголовок Authorization: Bearer … (см. docs/reference/mcp.md).</small>
@@ -95,7 +95,7 @@ export function McpAccess() {
               </small>
             </div>
             <div>
-              <button disabled={busy || token.revoked_at !== undefined} onClick={() => void revoke(token)}>Отозвать</button>
+              <button aria-label={`Отозвать токен «${token.label}»`} disabled={busy || token.revoked_at !== undefined} onClick={() => void revoke(token)}>Отозвать</button>
             </div>
           </article>
         ))}

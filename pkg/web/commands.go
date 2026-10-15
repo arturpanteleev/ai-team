@@ -39,6 +39,13 @@ type sessionResponse struct {
 }
 
 func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudidentity.Principal, int64, error) {
+	return s.resolveTeamPrincipalOpts(principal, true)
+}
+
+// resolveTeamPrincipalOpts is resolveTeamPrincipal with an explicit switch for
+// the first-admin bootstrap. Only an interactive sign-in may create the first
+// team member; the MCP endpoint never does.
+func (s *Server) resolveTeamPrincipalOpts(principal cloudidentity.Principal, bootstrap bool) (cloudidentity.Principal, int64, error) {
 	if s.authenticator == nil || s.localAuth {
 		return principal, 0, nil
 	}
@@ -51,7 +58,7 @@ func (s *Server) resolveTeamPrincipal(principal cloudidentity.Principal) (cloudi
 		if countErr != nil {
 			return cloudidentity.Principal{}, 0, countErr
 		}
-		if count == 0 && principal.Has(cloudidentity.RoleProductOwner) {
+		if bootstrap && count == 0 && principal.Has(cloudidentity.RoleProductOwner) {
 			if err = s.store.BootstrapTeamAdmin(principal.ActorID, time.Now().UTC()); err != nil {
 				// Another first login may have won the bootstrap race.
 				member, err = s.store.TeamMember(principal.ActorID)

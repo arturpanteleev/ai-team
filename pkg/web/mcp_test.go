@@ -950,3 +950,40 @@ func stripPagination(t *testing.T, text []byte, tool string) []byte {
 	}
 	return text
 }
+
+// An MCP request must never create the first team member, even with a valid
+// server token that carries the Product Owner role.
+func TestMCPNeverBootstrapsTheTeam(t *testing.T) {
+	manager, err := cloudidentity.NewTokenManager([]byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	srv, err := NewServer(":memory:", "", filepath.Join(dir, "artifacts"), WithTargetDir(dir), WithAuthenticator(manager), WithRunController(&fakeRunController{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	owner, _ := cloudidentity.NewPrincipal("owner@example.com", []cloudidentity.Role{cloudidentity.RoleProductOwner})
+	token, err := manager.Issue(owner, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(srv.router)
+	t.Cleanup(httpServer.Close)
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401", response.StatusCode)
+	}
+	if count, countErr := srv.store.TeamMemberCount(); countErr != nil || count != 0 {
+		t.Fatalf("MCP created a team member: count=%d err=%v", count, countErr)
+	}
+}

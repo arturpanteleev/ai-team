@@ -307,6 +307,30 @@ func Default() *Config {
 }
 
 // Marshal serializes the project template and supported configuration fields.
+//
+// The stages are written in the spelling of the config's schema version (see
+// MarshalYAML), so yaml.Marshal(cfg) and cfg.Marshal() are equivalent.
 func (c *Config) Marshal() ([]byte, error) {
 	return yaml.Marshal(c)
+}
+
+// MarshalYAML writes the stages in the spelling of the config's schema
+// version: v6 writes exit_gate_groups (translating legacy fields when the
+// config was built in memory from them) and never the v5 keys; v5 writes the
+// legacy keys only.
+func (c *Config) MarshalYAML() (any, error) {
+	type plain Config
+	out := plain(*c)
+	out.Stages = make([]TemplateStage, len(c.Stages))
+	for i, stage := range c.Stages {
+		if c.SchemaVersion == CurrentSchemaVersion {
+			stage.ExitGateGroups = stage.EffectiveGateGroups()
+			stage.RequiredSections, stage.Check, stage.Confirm = nil, nil, ""
+		} else if len(stage.ExitGateGroups) > 0 {
+			stage.applyGateProjection()
+			stage.ExitGateGroups = nil
+		}
+		out.Stages[i] = stage
+	}
+	return out, nil
 }

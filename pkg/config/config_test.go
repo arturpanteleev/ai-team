@@ -13,12 +13,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestDefaultProfileWritesOneV5Template(t *testing.T) {
+func TestDefaultProfileWritesOneV6Template(t *testing.T) {
 	cfg, err := DefaultProfile(ProfileStandard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SchemaVersion != 5 || cfg.Template != "idea-to-prod" || len(cfg.Stages) != 9 {
+	if cfg.SchemaVersion != CurrentSchemaVersion || cfg.Template != "idea-to-prod" || len(cfg.Stages) != 9 {
 		t.Fatalf("unexpected standard template: schema=%d template=%q stages=%d", cfg.SchemaVersion, cfg.Template, len(cfg.Stages))
 	}
 	if err := cfg.Validate(nil); err != nil {
@@ -31,13 +31,13 @@ func TestDefaultProfileWritesOneV5Template(t *testing.T) {
 	}
 	var loaded Config
 	if err := yaml.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("v5 round-trip failed: %v\n%s", err, data)
+		t.Fatalf("v6 round-trip failed: %v\n%s", err, data)
 	}
 	if loaded.Template != cfg.Template || len(loaded.Stages) != len(cfg.Stages) || len(loaded.PipelineAgents) != len(cfg.Stages) {
 		t.Fatalf("template lost in round-trip: template=%q stages=%d runtime projection=%d", loaded.Template, len(loaded.Stages), len(loaded.PipelineAgents))
 	}
 	if strings.Contains(string(data), "pipeline:") || strings.Contains(string(data), "workflow:") {
-		t.Fatalf("legacy v4 sections serialized in v5 output:\n%s", data)
+		t.Fatalf("legacy v4 sections serialized in v6 output:\n%s", data)
 	}
 }
 

@@ -8,7 +8,7 @@
 #### Scenario: Структура конфига
 - **КОГДА** `ai-team init` запускается
 - **ТОГДА** config.yaml MUST содержать:
-  - `schema_version: 5`
+  - `schema_version: 6`
   - one `template` ID and `title`
   - ordered `stages` with unique `id` values and human-readable `title`
   - `returns` that reference existing stages and point only backward
@@ -70,7 +70,7 @@
 - **И** `.ai-team/` MUST быть исключён выбранной Git ignore policy
 
 ### Requirement: Обновлённый конфиг по умолчанию
-Конфиг по умолчанию MUST включать schema v5, один процессный шаблон, `effort`, stage timeout и стек-специфичные deterministic checks.
+Конфиг по умолчанию MUST включать schema v6, один процессный шаблон, `effort`, stage timeout и стек-специфичные deterministic checks.
 
 #### Scenario: Структура конфига
 - **КОГДА** `ai-team init` запускается

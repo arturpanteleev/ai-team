@@ -24,6 +24,20 @@
 
 ### Added
 
+- **Контракт гейтов и версионированная библиотека (S02).** Введены типы
+  определения гейта, ссылки этапа (`ID@версия`, параметры, `required|advisory`),
+  групп (`exit_gate_groups`: группы последовательны, гейты внутри независимы) и
+  попытки с раздельными `execution` (`pending/running/succeeded/error/timeout/canceled`)
+  и `verdict` (`pass/fail/not_applicable`). Реестр именованных гейтов в Go
+  (`pkg/gatelib`: `required_sections`, `verdict_marker`, `pr_*`, `project_checks`,
+  `pr_checks_green`, `agent_review`, `human_approval`) читается через
+  `GET /api/gates/catalog`; редактировать его из UI/API нельзя. Схема конфига
+  **v6** заменяет `required_sections`/`check`/`confirm` одним `exit_gate_groups`;
+  v5 продолжает загружаться и даёт тот же путь и вердикты, `init` создаёт v6.
+  Неизвестный ID, версия или параметр отклоняются до запуска с путём вида
+  `stages[1] (product_spec): exit_gate_groups[0][0]`; шаблон закрепляет точные
+  версии определений, поэтому новая версия библиотеки не меняет идущие задачи.
+  Исполнение групп планировщиком — отдельная задача.
 - **Уведомления из `ai-team run` и `scheduler-worker` (B-81).** Каналы из
   раздела `notifications` теперь получают события не только от `ai-team web`:
   локальный `ai-team run` и `ai-team scheduler-worker` отправляют их тем же

@@ -11,16 +11,11 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
 	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
+	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/redact"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
-)
-
-// Допустимые значения полей (валидируются в Validate).
-const (
-	// CurrentSchemaVersion — единственная поддерживаемая конфигурационная схема.
-	CurrentSchemaVersion = 5
 )
 
 type AgentConfig struct {
@@ -39,6 +34,10 @@ type Config struct {
 	// (ask_questions). Заполняется пайплайном из реестра агентов; по нему
 	// шаблон добавляет переход blocked → тот же этап с согласованием ответа.
 	QuestionStages map[string]bool `yaml:"-" json:"-"`
+
+	// gateLibrary overrides the built-in gate library during
+	// ValidateWithLibrary; nil means gatelib.Default().
+	gateLibrary *gatelib.Registry
 
 	SchemaVersion int    `yaml:"schema_version"`
 	Template      string `yaml:"template"`
@@ -703,11 +702,20 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if version == 4 {
 		return fmt.Errorf("config: схема v4 больше не поддерживается; выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md")
 	}
-	if version != CurrentSchemaVersion {
+	if !supportedSchemaVersion(version) {
 		if version == 0 {
-			return fmt.Errorf("config: schema_version обязателен (поддерживается только %d)", CurrentSchemaVersion)
+			return fmt.Errorf("config: schema_version обязателен (поддерживаются %d и %d)", LegacySchemaVersion, CurrentSchemaVersion)
 		}
-		return fmt.Errorf("config: schema_version %d не поддерживается (поддерживается только %d); выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md", version, CurrentSchemaVersion)
+		return fmt.Errorf("config: schema_version %d не поддерживается (поддерживаются %d и %d); выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md", version, LegacySchemaVersion, CurrentSchemaVersion)
+	}
+	if version == CurrentSchemaVersion {
+		for index := 0; index+1 < len(value.Content); index += 2 {
+			if value.Content[index].Value == "stages" {
+				if err := rejectLegacyGateKeys(value.Content[index+1]); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if err := validateMappingKeys(value, map[string]bool{
 		"schema_version": true, "template": true, "title": true,
@@ -759,6 +767,16 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.StallAfter = raw.StallAfter
 	c.ForbidSelfApproval = raw.ForbidSelfApproval
 	c.Stages = raw.Stages
+	for index := range c.Stages {
+		switch {
+		case len(c.Stages[index].ExitGateGroups) > 0 && version == LegacySchemaVersion:
+			return fmt.Errorf("config: stages[%d] (%s): exit_gate_groups доступен со schema_version %d; в v5 используйте required_sections, check, confirm", index, c.Stages[index].ID, CurrentSchemaVersion)
+		case version == CurrentSchemaVersion:
+			// v6: the gate chain is the single source; the absence of a human
+			// gate means no confirmation (v5's per-result default is gone).
+			c.Stages[index].applyGateProjection()
+		}
+	}
 	c.Returns = raw.Returns
 	c.MaxVisits = raw.MaxVisits
 	c.Checks = raw.Checks
@@ -913,7 +931,7 @@ func (c *Config) CompiledGraph() (workflow.Graph, error) {
 	if c.Template != "" || len(c.Stages) > 0 {
 		return c.TemplateGraph()
 	}
-	graph := workflow.Graph{SchemaVersion: CurrentSchemaVersion}
+	graph := workflow.Graph{SchemaVersion: GraphSchemaVersion}
 	for _, stage := range c.PipelineAgents {
 		graph.Nodes = append(graph.Nodes, workflow.Node{Name: stage.Name})
 	}
@@ -1077,14 +1095,14 @@ func (c *Config) Validate(reg AgentLookup) error {
 			errs = append(errs, fmt.Sprintf(format, args...))
 		}
 	}
-	if c.SchemaVersion != CurrentSchemaVersion {
+	if !supportedSchemaVersion(c.SchemaVersion) {
 		if c.SchemaVersion == 4 {
 			addMigration := "схема v4 больше не поддерживается; выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md"
 			errs = append(errs, addMigration)
 		} else {
 			validate(false,
-				"schema_version %d не поддерживается (поддерживается только %d)",
-				c.SchemaVersion, CurrentSchemaVersion)
+				"schema_version %d не поддерживается (поддерживаются %d и %d)",
+				c.SchemaVersion, LegacySchemaVersion, CurrentSchemaVersion)
 		}
 	}
 

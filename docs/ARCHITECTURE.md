@@ -15,7 +15,8 @@ pkg/
 ├── agent/          Agent struct + Registry (резолюция definition-слоёв)
 ├── runtime/         Runtime interface + AgentCLI (prompt, логи, model/effort)
 ├── pipeline/        оркестрация, enforcement вердиктов, гейты, loopback
-├── workflow/        доменные state/outcome типы и чистые переходы
+├── workflow/        доменные state/outcome типы и чистые переходы; контракт гейта
+├── gatelib/         версионированная библиотека определений гейтов (реестр)
 ├── verdict/         verdict-контракт: парсер маркеров, BLOCKED-протокол
 ├── checks/          deterministic verification runner и evidence
 ├── scope/           repository-relative mutation path policy (glob-матчинг)
@@ -88,6 +89,42 @@ Compiler до run проверяет references, достижимость, termi
 SQLite/WebSocket projection, а lifecycle сохраняет exact следующий узел.
 Resolved `workflow.json` содержит фактически исполненный graph; web detail
 читает этот immutable snapshot и показывает текущую позицию и policies.
+
+## Гейты: контракт и библиотека
+
+Гейт проверяет одну неизменяемую версию результата этапа (по хешу) и возвращает
+исход с доказательствами; следующий этап выбирает только контроллер по
+конфигу. Модель разведена на три сущности, чтобы не смешивать «что это»,
+«как этап это использует» и «что произошло»:
+
+- **`workflow.GateDefinition`** — ID, точная версия, вид (`builtin`, `llm`,
+  `human`, `external`, `docker`), схема параметров, применимость к типу
+  результата. Живёт в Go-реестре `pkg/gatelib` (`Default()`), меняется через
+  PR, неизменяема после публикации: изменение — новая версия, старые версии
+  остаются. Каталог читается через `GET /api/gates/catalog`, записи нет.
+- **`workflow.GateRef`** — ссылка этапа: `gate`, точная `version` (без
+  «latest»), `params`, `name`, `mode` (`required|advisory`). Цепочка этапа —
+  `exit_gate_groups` (`GateGroups`): группы последовательны, внутри группы
+  гейты независимы. Валидация (`gatelib.Registry.ResolveGroups`) отклоняет
+  неизвестные ID/версии/параметры до запуска.
+- **`workflow.GateAttempt`** — попытка на конкретном хеше результата с раздельными
+  `Execution` (`pending|running|succeeded|error|timeout|canceled`) и `Verdict`
+  (`pass|fail|not_applicable`, только при `succeeded`), идентификацией (задача,
+  этап, посещение, хеш, определение, `attempt_id`, группа, время, исполнитель)
+  и ссылками на очищенные evidence. `error`/`timeout` — технические сбои,
+  допускающие повтор того же гейта на том же хеше; `Blocking()` кодирует
+  правило required/advisory.
+
+Схема конфига v6 заменяет разрозненные `required_sections`, `check` и `confirm`
+этапа одним `exit_gate_groups`; v5 грузится совместимым загрузчиком
+(`TemplateStage.LegacyGateGroups`, `Config.MigrateToCurrent`). Шаблон закрепляет
+версии определений своим YAML (`Config.GatePins` даёт `id`, версию и SHA-256
+определения), поэтому новая версия библиотеки не меняет идущие задачи.
+
+Планировщик групп (параллельный запуск внутри группы, durable evidence,
+recovery) — отдельная задача: пока контроллер исполняет прежний движок этапа,
+а `pkg/config` проецирует цепочку на его поля (`projectGates`) и отклоняет в
+`Validate` цепочки, которые движок не умеет исполнять.
 
 ## Evidence и наблюдаемость
 

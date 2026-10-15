@@ -23,17 +23,24 @@ type TemplateStage struct {
 	Function string `yaml:"function"`
 	// ApproverFunction — необязательная функция подтверждающего (B-82). Если
 	// задана, подтверждение и возврат этапа принадлежат ей, а не исполнителю.
-	ApproverFunction string            `yaml:"approver_function,omitempty"`
-	Result           string            `yaml:"result"`
-	Executor         string            `yaml:"executor,omitempty"`
-	Agent            string            `yaml:"agent,omitempty"`
-	LinkKind         string            `yaml:"link_kind,omitempty"`
-	RequiredSections []string          `yaml:"required_sections,omitempty"`
-	Check            *TemplateCheck    `yaml:"check,omitempty"`
-	Confirm          string            `yaml:"confirm,omitempty"`
-	Skippable        bool              `yaml:"skippable,omitempty"`
-	Delivery         *TemplateDelivery `yaml:"delivery,omitempty"`
-	MCPServers       []string          `yaml:"mcp_servers,omitempty"`
+	ApproverFunction string `yaml:"approver_function,omitempty"`
+	Result           string `yaml:"result"`
+	Executor         string `yaml:"executor,omitempty"`
+	Agent            string `yaml:"agent,omitempty"`
+	LinkKind         string `yaml:"link_kind,omitempty"`
+	// RequiredSections, Check and Confirm are the schema-v5 spelling of what a
+	// stage must satisfy. In v6 YAML they are rejected; the stage declares
+	// ExitGateGroups instead and these fields hold only the engine projection
+	// of that chain (see projectGates) until the group scheduler lands.
+	RequiredSections []string       `yaml:"required_sections,omitempty"`
+	Check            *TemplateCheck `yaml:"check,omitempty"`
+	Confirm          string         `yaml:"confirm,omitempty"`
+	// ExitGateGroups is the gate chain checked before the stage may be left:
+	// groups run sequentially, gates inside a group are independent. Schema v6.
+	ExitGateGroups workflow.GateGroups `yaml:"exit_gate_groups,omitempty"`
+	Skippable      bool                `yaml:"skippable,omitempty"`
+	Delivery       *TemplateDelivery   `yaml:"delivery,omitempty"`
+	MCPServers     []string            `yaml:"mcp_servers,omitempty"`
 }
 
 // TemplateCheck keeps the result check declarative. Execution is introduced by
@@ -67,6 +74,7 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		"executor": true, "agent": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
 		"skippable": true, "delivery": true, "mcp_servers": true,
+		"exit_gate_groups": true,
 	}, "config: stage"); err != nil {
 		return err
 	}
@@ -291,6 +299,7 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 			}
 		}
 	}
+	c.validateGates(add)
 	projectCheckNames := make(map[string]bool, len(c.Checks))
 	projectChecks := make(map[string]checks.Definition, len(c.Checks))
 	for _, check := range c.Checks {
@@ -411,7 +420,7 @@ func indexContains(index map[string]int, key string) bool { _, ok := index[key];
 // order; return actions are grouped by source so several backward choices do
 // not create ambiguous outcome edges.
 func (c *Config) TemplateGraph() (workflow.Graph, error) {
-	graph := workflow.Graph{SchemaVersion: CurrentSchemaVersion}
+	graph := workflow.Graph{SchemaVersion: GraphSchemaVersion}
 	if len(c.Stages) == 0 {
 		return graph, fmt.Errorf("workflow graph: stages пуст")
 	}

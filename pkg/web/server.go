@@ -331,6 +331,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Use(srv.apiJSONErrors)
 		router.Use(srv.readSecurity)
 		router.Get("/api/templates", srv.handleListTemplates)
+		router.Get("/api/gates/catalog", srv.handleGateCatalog)
 		router.Get("/api/runs", srv.handleListTaskRuns)
 		router.Get("/api/runs/{runID}", srv.handleGetTaskRun)
 		router.Get("/api/runs/{runID}/events", srv.handleGetRunEvents)

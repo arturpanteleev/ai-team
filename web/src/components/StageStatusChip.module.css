@@ -1,0 +1,57 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.4;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.glyph {
+  font-size: 10px;
+}
+
+.chip[data-tone='blue'] {
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+
+.chip[data-tone='yellow'] {
+  background: var(--tint-yellow);
+  color: var(--ink-yellow);
+}
+
+.chip[data-tone='teal'] {
+  background: var(--tint-teal);
+  color: var(--ink-teal);
+}
+
+.chip[data-tone='green'] {
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.chip[data-tone='danger'] {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.chip[data-tone='gray'] {
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.chip[data-status='checking'] .glyph {
+  letter-spacing: 0;
+}
+
+.chip[data-status='skipped'],
+.chip[data-status='not_reached'] {
+  outline: 1px dashed var(--border-strong);
+  outline-offset: -1px;
+}

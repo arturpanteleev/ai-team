@@ -3,6 +3,8 @@ import { formatStageDuration } from '../duration';
 import { useNavigate } from '../router';
 import { shortenHash } from '../hash';
 import { statusLabels } from '../statusLabels';
+import { blockText, executorText, stageStatusLabels } from '../stageStatus';
+import { StageStatusChip } from './StageStatusChip';
 import { taskCardTitle } from '../boardTitle';
 import styles from './TaskCard.module.css';
 
@@ -72,6 +74,9 @@ export function TaskCard({ run, templateTitle, stageTitle, now, onCancel }: Task
   const stageLabel = run.current_stage ? (stageTitle?.(run.current_stage) ?? run.current_stage) : '';
   const executor = executorLabel(run);
   const links = run.external_links ?? [];
+  // Вычисленный сервером статус текущего этапа заменяет догадку по полям задачи.
+  const status = run.stage_status;
+  const routeTitle = (stageId: string) => stageTitle?.(stageId) ?? stageId;
 
   return (
     <article
@@ -91,11 +96,31 @@ export function TaskCard({ run, templateTitle, stageTitle, now, onCancel }: Task
         {statusLabels[run.status] ?? run.status}
       </span>
       <h3 className={styles.title}>{title}</h3>
-      {(stageLabel || executor) && (
+      {status?.status && stageLabel ? (
+        <dl className={styles.meta}>
+          <div><dt>Этап</dt><dd>{stageLabel} <StageStatusChip status={status.status} /></dd></div>
+          <div><dt>Исполнитель</dt><dd>{executorText(status.executor)}</dd></div>
+          {(status.visit_count ?? 0) > 1 && <div><dt>Посещение</dt><dd>
+            {status.visit} из {status.visit_count}{status.returned ? ' · возврат' : ''}</dd></div>}
+          {status.blocked_by && blockText(status.blocked_by) && <div><dt>Ждёт</dt><dd>{blockText(status.blocked_by)}</dd></div>}
+        </dl>
+      ) : !status && (stageLabel || executor) && (
         <dl className={styles.meta}>
           {stageLabel && <div><dt>Этап</dt><dd>{stageLabel}</dd></div>}
           {executor && <div><dt>Исполнитель</dt><dd>{executor}</dd></div>}
         </dl>
+      )}
+      {status && status.route.length > 0 && (
+        <ol className={styles.route} aria-label="Статус каждого этапа маршрута">
+          {status.route.map((item) => (
+            <li key={item.stage_id} className={styles.routeItem} data-status={item.status} data-current={item.current || undefined}
+              data-visited={item.visited || undefined} title={`${routeTitle(item.stage_id)}: ${stageStatusLabels[item.status]}${
+                item.visit_count > 1 ? `, посещений: ${item.visit_count}` : ''}`}>
+              <span className={styles.hidden}>{routeTitle(item.stage_id)}: {stageStatusLabels[item.status]}{
+                item.visit_count > 1 ? `, посещений: ${item.visit_count}` : ''}</span>
+            </li>
+          ))}
+        </ol>
       )}
       <div className={styles.service} onClick={(event) => event.stopPropagation()}>
         <dl className={styles.details}>

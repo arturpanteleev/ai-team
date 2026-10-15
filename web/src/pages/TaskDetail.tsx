@@ -40,6 +40,8 @@ import { hasHttpPrefix } from '../stageResultValidation';
 import type { StageResultSubmission } from '../stageResultValidation';
 import { StageRow } from '../components/StageRow';
 import { StatusBadge } from '../components/StatusBadge';
+import { StageStatusChip } from '../components/StageStatusChip';
+import { blockText, executorText, stageStatusEntry, stageSummaryText, visitText } from '../stageStatus';
 import { TaskTimeline } from '../components/TaskTimeline';
 import { clearStageResultDraft, loadStageResultDraft } from '../stageResultDraft';
 import styles from './TaskDetail.module.css';
@@ -68,6 +70,12 @@ const resumableStatuses = ['waiting_for_approval', 'interrupted', 'blocked', 'st
 const cancelableStatuses = ['queued', 'running', 'waiting_for_approval'];
 const finishedStatuses = ['completed', 'completed_with_warnings'];
 const routeLabels: Record<RouteState, string> = { passed: 'пройден', current: 'текущий', upcoming: 'впереди', failed: 'Упал' };
+// Действия, открытые на этапе, как их называет API; показываются рядом со статусом.
+const actionLabels: Record<string, string> = {
+  take: 'взять этап', results: 'сдать результат', 'run-agent': 'поручить агенту', executor: 'сменить исполнителя',
+  confirm: 'подтвердить', override: 'обойти проверку', 'gate-retry': 'повторить гейт', skip: 'пропустить', return: 'вернуть',
+  'grill/answer': 'ответить на вопросы', 'grill/new-version': 'новая версия', 'grill/done': 'завершить вопросы', 'plan/approve': 'утвердить план',
+};
 
 async function loadRunEvents(runId: string): Promise<TaskEvent[]> {
   const events: TaskEvent[] = [];
@@ -509,7 +517,15 @@ export function TaskDetail() {
     if (finished || (currentIndex >= 0 && index < currentIndex)) state = 'passed';
     else if (index === currentIndex) state = 'current';
     if (latestAttemptFor(stage.id)?.status === 'failed') state = 'failed';
-    return { stage, state, current: index === currentIndex, gateFlag: stageGateFlag(visibleSnapshot.gates, stage.id) };
+    // The server projection (S11) is the one source of the status when it is there.
+    const server = stageStatusEntry(details.stage_statuses, stage.id);
+    if (server) {
+      if (server.current) state = 'current';
+      else if (server.status === 'passed' || server.status === 'skipped') state = 'passed';
+      else if (server.status === 'rejected' || server.status === 'failed' || server.status === 'blocked') state = 'failed';
+      else state = 'upcoming';
+    }
+    return { stage, state, server, current: server ? server.current : index === currentIndex, gateFlag: stageGateFlag(visibleSnapshot.gates, stage.id) };
   });
 
   const sendDecision = (value: Approval, role: string, action: string, comment?: string) => perform(
@@ -564,7 +580,11 @@ export function TaskDetail() {
     (details.delivery.status === 'pending' || details.delivery.status === 'failed');
   const prURL = safePullRequestURL(details.delivery.record?.pr_url);
 
-  const stageState = (() => {
+  // The stage the server says the task is at; it can be the stage before the
+  // one the checkpoint points to while a confirmation of its result is open.
+  const serverCurrent = stageStatusEntry(details.stage_statuses, details.stage_statuses?.current_stage ?? '');
+  const serverCurrentReturned = serverCurrent?.visits[serverCurrent.active_visit - 1]?.entered_via === 'return';
+  const stageState = serverCurrent ? stageSummaryText(serverCurrent, serverCurrentReturned) : (() => {
     if (currentDecision && lastAgentAttempt && ['passed', 'warning'].includes(lastAgentAttempt.status)) {
       return 'Результат готов · ждёт решения';
     }
@@ -703,7 +723,16 @@ export function TaskDetail() {
               <div>
                 <p className={styles.eyebrow}>Текущий этап</p>
                 <h2 id="current-stage-heading">{currentStage?.title || (finished ? 'Задача завершена' : currentStageID || 'Этап не выбран')}</h2>
-                <p className={styles.stageState} data-state={stageState}>{stageState}</p>
+                <p className={styles.stageState} data-state={serverCurrent ? serverCurrent.status : stageState}>{stageState}</p>
+                {serverCurrent && serverCurrent.stage_id !== currentStageID && <p className={styles.stageGuidance}>
+                  Сейчас ждёт этап «{stageTitle(serverCurrent.stage_id)}»; после решения откроется «{stageTitle(currentStageID)}».</p>}
+                {serverCurrent?.blocked_by && blockText(serverCurrent.blocked_by) && <p className={styles.stageGuidance}>
+                  Ждёт: {blockText(serverCurrent.blocked_by)}{serverCurrent.blocked_by.roles && serverCurrent.blocked_by.roles.length > 0
+                    ? ` (роли: ${serverCurrent.blocked_by.roles.join(', ')})` : ''}</p>}
+                {serverCurrent && serverCurrent.visit_count > 1 && <details className={styles.history}>
+                  <summary>Посещения этапа ({serverCurrent.visit_count})</summary>
+                  <ol>{serverCurrent.visits.map((visit) => <li key={visit.number}>{visitText(visit, stageTitle)}</li>)}</ol>
+                </details>}
                 {nextStep && <p className={styles.stageGuidance}>{nextStep}</p>}
                 {details.stage_owners[currentStageID] && <p>Ответственный: {details.stage_owners[currentStageID].actor_id}
                   {details.stage_owners[currentStageID].taken_at && <> · взял этап <time dateTime={details.stage_owners[currentStageID].taken_at}>
@@ -868,7 +897,7 @@ export function TaskDetail() {
             {routeRows.map((row, rowIndex) => (
               <ol key={rowIndex} className={`${styles.routeRow} ${rowIndex === 0 ? styles.rowTop : styles.rowBottom}`}
                 style={{ '--cols': row.length } as CSSProperties}>
-                {row.map(({ stage, state, current, gateFlag }, index) => (
+                {row.map(({ stage, state, server, current, gateFlag }, index) => (
                   <li key={stage.id} className={styles.routeItem} data-state={state} data-gate-flag={gateFlag}
                     data-turn={rowIndex === 0 && routeRows.length > 1 && index === row.length - 1 ? 'true' : undefined}
                     aria-current={current ? 'step' : undefined}>
@@ -879,7 +908,15 @@ export function TaskDetail() {
                       <a className={styles.routeTitle} href={current ? '#current-stage' : `#result-${stage.id}`}>
                         {stage.title}
                       </a>
-                      <span className={styles.routeState}>{routeLabels[state]}</span>
+                      {server ? <>
+                        <StageStatusChip status={server.status} />
+                        {server.status !== 'not_reached' && <span className={styles.routeState}>{executorText(server.executor)}</span>}
+                        {server.visit_count > 1 && <span className={styles.routeState}>
+                          Посещений: {server.visit_count}{server.current ? `, сейчас ${server.active_visit}-е` : ''}</span>}
+                        {server.status === 'not_reached' && server.visited && <span className={styles.routeState}>Бывал активен ранее</span>}
+                        {server.current && server.allowed_actions.length > 0 && <span className={styles.routeState}>
+                          Доступно: {server.allowed_actions.map((action) => actionLabels[action] ?? action).join(', ')}</span>}
+                      </> : <span className={styles.routeState}>{routeLabels[state]}</span>}
                       {gateFlag === 'override' && <span className={`${styles.gateFlag} ${styles.gateFlagOverride}`}>Обход провала</span>}
                       {gateFlag === 'advisory' && <span className={`${styles.gateFlag} ${styles.gateFlagAdvisory}`}>Рекомендация не выполнена</span>}
                     </span>

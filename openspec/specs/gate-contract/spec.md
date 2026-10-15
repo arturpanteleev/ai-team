@@ -424,3 +424,137 @@ through Web or REST keeps the visit allowance.
   carries the old hash
 - **ТОГДА** the decision MUST be refused with `subject_hash_mismatch` and MUST
   neither be stored nor audited
+
+### Requirement: Advisory gates warn and never block
+
+A gate reference with `mode: advisory` MUST run in its group like any other gate
+and MUST be awaited with the whole group, but its outcome MUST NOT decide
+whether the chain continues or the stage may transition. An advisory `fail`, and
+an advisory technical failure (`error`, `timeout`, `canceled`), MUST stay a
+visible warning: the attempt keeps its own execution and verdict (an error is
+never reported as a success), the attempt events carry `mode: advisory` and
+`advisory_warning`, the stage check event carries the list of `warnings`, and the
+rules of the check report show the outcome as `advisory_failed` or
+`advisory_error`. A group MAY mix required and advisory gates; the transition
+MUST depend only on the required ones. Validation MUST reject `mode: advisory`
+on `human_approval` (the decision of a person is the transition itself) and on
+`agent_review` with mode `grill` (its question rounds must end before the chain
+goes on).
+
+#### Scenario: Advisory fail in a mixed group
+
+- **КОГДА** a group has a required gate that passes and an advisory gate that
+  returns `fail`
+- **ТОГДА** the next group MUST start after both finished and the stage MUST be
+  able to transition without a `check_decision`
+- **И** the passed check MUST list the advisory gate with its `fail` verdict as a
+  warning, and the advisory attempt MUST still be recorded as `fail`
+
+#### Scenario: Advisory technical error
+
+- **КОГДА** an advisory gate ends in `timeout`
+- **ТОГДА** the transition MUST NOT be blocked
+- **И** the warning MUST say `timeout` without a verdict
+
+#### Scenario: Advisory human or grill gate
+
+- **КОГДА** a template marks `human_approval` or a grill `agent_review` advisory
+- **ТОГДА** validation MUST fail naming the gate path
+
+### Requirement: Technically failed gates can be retried on the same version
+
+A `check_decision` MUST offer the action `retry_gate` when a technical failure
+of a required gate (latest attempt `error` or `timeout`) raised it, and MUST list the
+retryable gates and the hash of the checked result in its payload; a
+`check_decision` without such a gate MUST NOT offer it. Resolving it MUST name
+the gates to retry; a gate whose latest attempt is not a technical failure MUST
+be refused (a negative verdict is content, not a technical failure). The
+controller MUST record `gate_retry_requested` bound to the hash, the approval,
+the gates and the actor, and MUST run the chain again on the same result version
+with exactly those gates retried: every retried gate MUST get a new attempt, the
+earlier attempt MUST stay in the history, and gates that already succeeded,
+including the other gates of the same group, MUST NOT run again. A request
+recorded before a crash MUST be applied again on the next resume, and the stage
+MUST NOT run again. A retry that fails technically again MUST raise its own
+`check_decision`, even when the report is byte-identical. The retry MUST be
+refused when the checked result changed (a changed result is a new version and
+runs every group again). Web and REST expose it as
+`POST /api/runs/{run}/stages/{stage}/gates/{gate}/retry` (optional body
+`{"gates":[...],"reason":"..."}`) and
+`POST /api/runs/{run}/gate-attempts/{attempt}/retry`; the permission is the one of
+taking the stage.
+
+#### Scenario: Retry keeps the successful gates
+
+- **КОГДА** the first group passed and the LLM gate of the second group ended
+  `error`, and the retry of that gate is requested
+- **ТОГДА** only that gate MUST get a new attempt on the same hash, the passed
+  gates MUST NOT run again and the stage agent MUST NOT run again
+- **И** both attempts of the retried gate MUST be in the history
+
+#### Scenario: A verdict is not retried
+
+- **КОГДА** a required gate returned `fail`
+- **ТОГДА** `retry_gate` MUST NOT be offered and a request naming that gate MUST be refused
+
+### Requirement: Only a system administrator overrides a failed required gate
+
+Moving a task on after a required gate failed MUST require the system administrator right
+(`gate:override`, role `admin`; also for a technical failure nobody retried), checked on the server for every channel; the
+`product_owner` function MUST NOT imply it, and the generic decision endpoint
+MUST NOT be a way around it. A non-administrator MUST get `403` before any other
+check, an administrator without a reason MUST get a validation error, and an
+administrator with a reason MUST pass the task on. The override MUST be recorded
+as an immutable `check_overridden` event with the author, the authority
+`system_admin`, the time, the reason, the hash of the checked result, the stage
+visit, the approval and the exact blocking attempts (gate, attempt ID, execution,
+verdict, reason); it MUST NOT change any attempt: a gate that failed stays `fail`
+in the attempts, the events, the API and the UI. The override MUST apply only to
+the result version it names: a result with another hash MUST need a new override,
+and an override made before versions were recorded MUST cover nothing.
+
+#### Scenario: Product owner cannot override
+
+- **КОГДА** a member who holds product_owner and every stage function, but not
+  the administrator right, requests an override
+- **ТОГДА** the response MUST be `403` and the controller MUST NOT be called
+
+#### Scenario: Administrator needs a reason
+
+- **КОГДА** an administrator requests an override without a reason
+- **ТОГДА** the response MUST be a validation error and nothing MUST be recorded
+
+#### Scenario: The outcome stays red
+
+- **КОГДА** an administrator overrides a failed gate with a reason
+- **ТОГДА** the task MUST transition
+- **И** the failed attempt MUST still be `succeeded` with verdict `fail` in the
+  attempt history and in the API, marked as overridden
+
+#### Scenario: Another version is not covered
+
+- **КОГДА** the result changes after an override and the new version fails
+- **ТОГДА** the transition MUST be blocked until a new override of that version
+
+### Requirement: The API tells whether the task may move on and why
+
+`GET /api/runs/{run}/gates` (and the MCP tool `get_task_gates`) MUST return, for
+every stage with a gate chain, the configured groups and every recorded result
+version with its gates (instance, mode, group, effective attempt, number of
+attempts, `blocking`, `warning`, `retryable`, `overridden`), the full attempt
+history of the version, the override recorded for exactly that version and the
+aggregated transition decision: `allowed`, a `state` (`passed`,
+`passed_with_warnings`, `overridden`, `blocked`, `error`, `waiting`,
+`incomplete`) and the reasons. The response MUST also list every override, the
+advisory warnings of the current versions and whether the caller may override.
+The decision MUST be a pure function of the recorded attempts and overrides of
+that version: an older version MUST NOT resolve a newer one, and an override
+MUST NOT hide the outcome of the gate it let pass. The UI MUST show an override
+of a failure as a prominent red warning and an advisory outcome as an amber one
+in the task card, the route and the history.
+
+#### Scenario: Aggregated decision
+
+- **КОГДА** a required gate failed and an advisory gate failed
+- **ТОГДА** the decision MUST be `blocked` with the failed required gate as the
+  reason and the advisory gate listed as a warning

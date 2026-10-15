@@ -155,10 +155,10 @@ type gateWarningView struct {
 }
 
 type gateStageView struct {
-	StageID string       `json:"stage_id"`
-	Title   string       `json:"title,omitempty"`
-	Groups  [][]string   `json:"groups"`
-	Current *gateWaveView `json:"current,omitempty"`
+	StageID string         `json:"stage_id"`
+	Title   string         `json:"title,omitempty"`
+	Groups  [][]string     `json:"groups"`
+	Current *gateWaveView  `json:"current,omitempty"`
 	Waves   []gateWaveView `json:"waves"`
 }
 

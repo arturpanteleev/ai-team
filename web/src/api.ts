@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskGates, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
 import type { FlowMetrics } from './types/flowMetrics';
 
 const API_BASE = '/api';
@@ -325,6 +325,15 @@ export function getTaskRunDetails(runId: string): Promise<TaskRunDetails> {
 export function getTaskRunEvents(runId: string, after = 0, limit = 1000): Promise<TaskRunEventsResponse> {
   const query = new URLSearchParams({ after: String(after), limit: String(limit) });
   return fetchJson(`/runs/${encodeURIComponent(runId)}/events?${query.toString()}`);
+}
+
+export function getTaskGates(runId: string): Promise<TaskGates> {
+  return fetchJson(`/runs/${encodeURIComponent(runId)}/gates`);
+}
+
+export function retryTaskGate(runId: string, stageId: string, gate: string, reason?: string): Promise<unknown> {
+  return command(`/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/gates/${encodeURIComponent(gate)}/retry`,
+    reason ? { reason } : undefined);
 }
 
 export function takeTaskStage(runId: string, stageId: string): Promise<unknown> {

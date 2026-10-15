@@ -11,13 +11,13 @@ import (
 )
 
 var (
-	ErrInvalidInvitation       = errors.New("invalid or expired team invitation")
-	ErrTeamMemberNotFound      = errors.New("team member not found")
-	ErrLastTeamAdmin           = errors.New("cannot remove the last active Product Owner")
+	ErrInvalidInvitation  = errors.New("invalid or expired team invitation")
+	ErrTeamMemberNotFound = errors.New("team member not found")
+	ErrLastTeamAdmin      = errors.New("cannot remove the last active Product Owner")
 	// ErrLastSystemAdmin: the team must keep at least one active member with the
 	// system administrator right (gate override), otherwise nobody could ever
 	// pass a task after a required gate failed.
-	ErrLastSystemAdmin = errors.New("cannot remove the last active system administrator")
+	ErrLastSystemAdmin         = errors.New("cannot remove the last active system administrator")
 	ErrTeamMemberRolesRequired = errors.New("team member must have at least one role")
 	// ErrOIDCAccountMismatch is returned when a provider account (iss, sub)
 	// does not match the account bound to the member, or is already bound to

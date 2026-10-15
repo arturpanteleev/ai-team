@@ -351,4 +351,3 @@ func TestGateRetryAdvertisedInAllowedActionsOnlyWhenOffered(t *testing.T) {
 		}
 	}
 }
-

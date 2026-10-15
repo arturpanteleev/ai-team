@@ -71,10 +71,10 @@ type taskStageActionCommand struct {
 	Action   string `json:"action,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	// Gates names additional gate instances for a gate retry.
-	Gates   []string `json:"gates,omitempty"`
-	ToStage string   `json:"to_stage,omitempty"`
-	Answer   string `json:"answer,omitempty"`
-	PlanHash string `json:"plan_hash,omitempty"`
+	Gates    []string `json:"gates,omitempty"`
+	ToStage  string   `json:"to_stage,omitempty"`
+	Answer   string   `json:"answer,omitempty"`
+	PlanHash string   `json:"plan_hash,omitempty"`
 	// SubjectHash is the hash of the decision subject the person reviewed
 	// (confirm); it must equal the hash the approval is bound to.
 	SubjectHash string `json:"subject_hash,omitempty"`

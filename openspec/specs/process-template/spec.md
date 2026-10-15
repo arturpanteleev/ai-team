@@ -296,11 +296,12 @@ identical engine stage fields and an identical compiled graph.
 Until the group scheduler executes arbitrary chains, validation MUST reject any
 chain the controller cannot execute faithfully (more than one `agent_review` or
 `human_approval`, code gates combined with `agent_review` through hard rules,
-groups mixing gate kinds, an order other than code, LLM, human, or `mode:
-advisory`), so that no configured gate is silently ignored. The legacy engine
+groups mixing gate kinds, an order other than code, LLM, human), so that no
+configured gate is silently ignored. The legacy engine
 fields of a stage with explicit groups MUST equal the projection of its groups.
 
-#### Scenario: Advisory gate before enforcement exists
+#### Scenario: Advisory mode of automatic gates
 
-- **КОГДА** a stage references a gate with `mode: advisory`
-- **ТОГДА** validation MUST fail instead of treating it as required
+- **КОГДА** a stage references an automatic gate (code or LLM) with `mode: advisory`
+- **ТОГДА** validation MUST accept it and the gate MUST warn without blocking
+- **И** `mode: advisory` on `human_approval` or on a grill `agent_review` MUST be rejected

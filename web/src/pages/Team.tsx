@@ -11,6 +11,8 @@ const roleLabels: Record<string, string> = {
   reviewer: 'Ревьюер',
   qa: 'Тестировщик',
   release_manager: 'Менеджер выпуска',
+  // A system right, not a process function: it alone lets a task pass after a failed required gate.
+  admin: 'Администратор (обход проваленных гейтов)',
 };
 const roles = Object.keys(roleLabels);
 const memberStatusLabels: Record<string, string> = {

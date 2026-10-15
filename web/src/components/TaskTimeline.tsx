@@ -151,7 +151,7 @@ export function TaskTimeline({ details, events, eventTitle, clock = Date.now, ti
           <li key={lane.stageId} className={styles.lane} data-selected={lane.stageId === selected || undefined}>
             <button type="button" className={styles.laneButton}
               ref={(element) => { if (element) laneButtons.current.set(lane.stageId, element); else laneButtons.current.delete(lane.stageId); }}
-              aria-expanded={lane.stageId === selected} aria-controls="timeline-stage-card"
+              aria-expanded={lane.stageId === selected} aria-controls={lane.stageId === selected ? 'timeline-stage-card' : undefined}
               onClick={() => setSelected(lane.stageId === selected ? null : lane.stageId)} onKeyDown={onLaneKey(index)}>
               <span className={styles.laneTitle}>{lane.title}</span>
               {(() => {

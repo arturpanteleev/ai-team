@@ -77,8 +77,8 @@
   text-transform: uppercase;
 }
 
-.container /* «К действиям»: a skip link for the keyboard everywhere and a visible jump on narrow screens,
-   where the actions come after the status and the route. */
+/* «К действиям»: a skip link for the keyboard everywhere and a visible jump on narrow screens,
+   where the actions come after the status and the materials (the DOM order is the visual order). */
 .skipToActions {
   position: absolute;
   width: 1px;
@@ -283,11 +283,13 @@
   color: var(--warning-fg);
 }
 
-/* Сетка: контекст | материалы | действия. */
+/* Сетка: контекст | материалы | действия.
+   Порядок в DOM совпадает с визуальным на каждой ширине: статус, внимание, материалы, действия.
+   Клавиша Tab идёт по тому же порядку, ссылка «К действиям» в шапке прыгает сразу к колонке действий. */
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: 'ctx' 'act' 'attn' 'main';
+  grid-template-areas: 'ctx' 'attn' 'main' 'act';
   align-items: start;
   gap: 16px;
 }
@@ -310,8 +312,16 @@
 
 @media (min-width: 900px) {
   .workspace {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-areas: 'ctx act' 'attn attn' 'main main';
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-areas: 'ctx act' 'attn act' 'main act';
+    grid-template-rows: auto auto 1fr;
+  }
+
+  .actionCol {
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
   }
 }
 
@@ -329,10 +339,6 @@
 
   .actionCol {
     grid-row: 1 / span 2;
-    position: sticky;
-    top: 12px;
-    max-height: calc(100vh - 24px);
-    overflow-y: auto;
   }
 }
 

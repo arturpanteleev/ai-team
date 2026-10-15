@@ -63,9 +63,22 @@ describe('Team role editing', () => {
     const editor = screen.getByRole('group', { name: 'Роли: qa@example.com' });
     expect(within(editor).getByRole('checkbox', { name: /Администратор/ })).toBeDisabled();
     expect(within(editor).getByText(/Право выдаёт и снимает только администратор/)).toBeInTheDocument();
-    // The member who holds the admin right cannot be edited or revoked by a plain product owner.
-    expect(screen.getByRole('button', { name: 'Изменить роли: root@example.com' })).toBeDisabled();
+    // The server refuses a plain product owner only to revoke an administrator or to change the right itself.
     expect(screen.getByRole('button', { name: 'Отозвать доступ: root@example.com' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Изменить роли: root@example.com' })).toBeEnabled();
+  });
+
+  it('lets a product owner edit the other roles of an administrator but not the admin right', async () => {
+    const api = await import('../api');
+    render(<Team />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Изменить роли: root@example.com' }));
+    const editor = screen.getByRole('group', { name: 'Роли: root@example.com' });
+    const admin = within(editor).getByRole('checkbox', { name: /Администратор/ });
+    expect(admin).toBeChecked();
+    expect(admin).toBeDisabled();
+    fireEvent.click(within(editor).getByRole('checkbox', { name: /Архитектор/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить роли' }));
+    await waitFor(() => expect(api.setTeamMemberRoles).toHaveBeenCalledWith('root@example.com', ['product_owner', 'admin', 'architect']));
   });
 
   it('gives an administrator the admin checkbox', async () => {

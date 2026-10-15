@@ -330,6 +330,8 @@ describe('Task detail', () => {
         { from: 'qa', to: 'intent' }, { from: 'qa', to: 'analysis' },
       ] },
       state: { ...baseDetails.state!, next_stage: stage },
+      // The pending input belongs to the stage the run is at.
+      approvals: baseDetails.approvals.map((value) => ({ ...value, from_stage: stage, to_stage: stage })),
       allowed_actions: ['return'],
     });
     const api = await import('../api');
@@ -353,6 +355,59 @@ describe('Task detail', () => {
     fireEvent.change(screen.getByLabelText('Причина возврата'), { target: { value: 'Повторить' } });
     fireEvent.click(screen.getByRole('button', { name: /^Вернуть на доработку/ }));
     await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'qa', 'intent', 'Повторить'));
+  });
+
+  it('addresses return and the confirmation to the completed stage while a transition confirmation waits', async () => {
+    const api = await import('../api');
+    const confirmation = {
+      id: 'gate-1', run_id: 'run-detail-1', attempt_id: 'attempt-release', kind: 'approve' as const,
+      from_stage: 'release', to_stage: 'analysis', trigger: 'graph_outcome:passed', subject_hash: 'c'.repeat(64),
+      required_roles: ['release_manager'], quorum: 'any' as const,
+      actions: ['approve', 'reject', 'return_to_intent'], targets: { approve: 'analysis', return_to_intent: 'intent' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    vi.mocked(api.returnTaskStage).mockClear();
+    vi.mocked(api.skipTaskStage).mockClear();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      template: { ...baseDetails.template!, returns: [{ from: 'release', to: 'intent' }, { from: 'analysis', to: 'release' }] },
+      // The run moves on to analysis, but the person confirms release.
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: 'gate-1' },
+      approvals: [confirmation],
+      allowed_actions: ['confirm', 'return'],
+    });
+    renderDetail();
+
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).getByRole('region', { name: 'Этап «Релиз»' })).toBeInTheDocument();
+    // Routes start at the confirmed stage (release), not at the destination (analysis).
+    const select = await within(actions).findByLabelText('Вернуть на этап');
+    expect([...select.querySelectorAll('option')].map((option) => option.textContent)).toEqual(['Идея']);
+    // One return path: the exceptions form; the decision card has no second «Вернуть …» button.
+    expect(within(actions).getAllByRole('button', { name: /^Вернуть на доработку/ })).toHaveLength(1);
+    expect(within(actions).queryByRole('button', { name: 'Пропустить этап' })).not.toBeInTheDocument();
+    fireEvent.change(within(actions).getByLabelText('Причина возврата'), { target: { value: 'Не хватает данных' } });
+    fireEvent.click(within(actions).getByRole('button', { name: /^Вернуть на доработку/ }));
+    await waitFor(() => expect(api.returnTaskStage).toHaveBeenLastCalledWith('run-detail-1', 'release', 'intent', 'Не хватает данных'));
+  });
+
+  it('offers a stage action only when the server says this viewer may perform it', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, allowed_actions: ['take', 'results'], viewer_actions: [] });
+    renderDetail();
+
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(actions).queryByRole('button', { name: 'Взять этап' })).not.toBeInTheDocument();
+    expect(within(actions).queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
+    expect(within(actions).getByTestId('role-needed')).toHaveTextContent('Нужна роль: Владелец продукта');
+
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, allowed_actions: ['take', 'results'], viewer_actions: ['take'] });
+    renderDetail();
+    const owner = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(within(owner).getByRole('button', { name: 'Взять этап' })).toBeInTheDocument();
+    expect(within(owner).queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
+    expect(within(owner).getByTestId('role-needed')).toHaveTextContent('Сдать результат');
   });
 
   it('shows when the responsible person took the stage', async () => {

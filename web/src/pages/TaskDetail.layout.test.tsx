@@ -271,6 +271,32 @@ describe('Task page tabs (S16)', () => {
     expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', tabs.at(-1)!.id);
   });
 
+  it('points aria-controls only at the panel that exists', async () => {
+    renderDetail();
+    const tablist = await screen.findByRole('tablist', { name: 'Материалы задачи' });
+    for (const tab of within(tablist).getAllByRole('tab')) {
+      const controls = tab.getAttribute('aria-controls');
+      if (tab.getAttribute('aria-selected') === 'true') {
+        expect(controls).not.toBeNull();
+        expect(document.getElementById(controls!)).not.toBeNull();
+      } else {
+        expect(controls).toBeNull();
+      }
+    }
+  });
+
+  it('keeps the focus order equal to the visual order: status, materials, actions', async () => {
+    renderDetail();
+    const status = await screen.findByTestId('context-column');
+    const materials = screen.getByRole('tabpanel').closest('section')!;
+    const actions = screen.getByTestId('action-column');
+    const follows = (first: Element, second: Element) => Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(status, materials)).toBe(true);
+    expect(follows(materials, actions)).toBe(true);
+    // The grid areas name the same order at every width: the DOM is not reordered by CSS.
+    expect(status.parentElement).toBe(actions.parentElement);
+  });
+
   it('marks the gates tab with a red dot for an override and an amber one for a recommendation', async () => {
     const api = await import('../api');
     const wave = {

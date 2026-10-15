@@ -161,8 +161,10 @@ export function Team() {
                 </span>
               </div>
               <div>
-                {!isEditing && <button disabled={busy || member.status !== 'active' || (holdsAdmin && !canGrantAdmin)}
-                  title={holdsAdmin && !canGrantAdmin ? 'Роли администратора меняет только администратор.' : member.status !== 'active' ? 'Роли меняются после активации приглашения.' : undefined}
+                {/* The server refuses only a change of the administrator right itself; the other roles of an
+                    administrator may be edited by a product owner, so the checklist locks just that box. */}
+                {!isEditing && <button disabled={busy || member.status !== 'active'}
+                  title={member.status !== 'active' ? 'Роли меняются после активации приглашения.' : undefined}
                   aria-label={`Изменить роли: ${member.email}`}
                   onClick={() => { setError(''); setEditing({ actorId: member.actor_id, roles: [...member.roles] }); }}>Изменить роли</button>}
                 {revoking !== member.actor_id && <button disabled={busy || member.status === 'revoked' || isSelf || (holdsAdmin && !canGrantAdmin)}

@@ -63,10 +63,15 @@ func (s *Server) handleTrackerStatus(w http.ResponseWriter, _ *http.Request) {
 		writeJSONAPIError(w, http.StatusInternalServerError, "tracker state is unavailable", "tracker_unavailable")
 		return
 	}
+	inbound, err := s.inboundSummary()
+	if err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "tracker state is unavailable", "tracker_unavailable")
+		return
+	}
 	writeJSONResponse(w, http.StatusOK, map[string]any{
 		"configured": true, "tracker": s.trackerSync.tracker.Name(),
 		"on_enter": s.trackerSync.maps.OnEnter, "on_pass": s.trackerSync.maps.OnPass,
-		"failed_deliveries": len(failed), "link_conflicts": len(conflicts),
+		"failed_deliveries": len(failed), "link_conflicts": len(conflicts), "inbound": inbound,
 	})
 }
 
@@ -111,12 +116,24 @@ func (s *Server) handleRunTracker(w http.ResponseWriter, r *http.Request) {
 		if conflicts, err = s.store.ListTrackerLinkConflicts(run.ID); err == nil {
 			var deliveries []store.TrackerDelivery
 			if deliveries, err = s.store.ListTrackerDeliveries(run.ID, "", 50); err == nil {
-				writeJSONResponse(w, http.StatusOK, map[string]any{
-					"configured": true, "tracker": s.trackerSync.tracker.Name(), "link": link,
-					"conflicts": conflicts, "deliveries": deliveries,
-					"sync_status": trackerSyncStatus(link, conflicts, deliveries),
-				})
-				return
+				var inbound []store.TrackerInbound
+				if inbound, err = s.store.ListTrackerInbound(run.ID, nil, 50); err == nil {
+					status := trackerSyncStatus(link, conflicts, deliveries)
+					if status == "ok" {
+						for _, item := range inbound {
+							if item.State == store.TrackerInboundPending || item.State == store.TrackerInboundConflict {
+								status = "inbound_pending"
+								break
+							}
+						}
+					}
+					writeJSONResponse(w, http.StatusOK, map[string]any{
+						"configured": true, "tracker": s.trackerSync.tracker.Name(), "link": link,
+						"conflicts": conflicts, "deliveries": deliveries,
+						"inbound": s.inboundViews(inbound), "sync_status": status,
+					})
+					return
+				}
 			}
 		}
 	}

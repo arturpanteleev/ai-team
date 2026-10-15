@@ -55,6 +55,22 @@
   режиме локальный владелец получает право явно. UI: красное предупреждение
   об обходе провала и янтарное о рекомендации в карточке задачи, маршруте и
   истории; форма обхода видна только администратору.
+- **Трекер: входящие изменения через контроллер (S15).** Блок
+  `tracker.inbound` (`poll_interval`, `rules[]` с `status`, `action:
+  advance|return`, необязательными `stage` и `to_stage`) превращает смену
+  статуса в трекере в запрос, а не в команду: опрос с durable-курсором и ручной
+  `POST /api/tracker/sync`; идемпотентность по ID внешнего изменения; собственные
+  переходы ai-team (`origin: ai-team`) не вызывают входящих запросов. Автоматически
+  выполняется только продолжение готового этапа (`run-agent`); подтверждения,
+  решения по проваленным гейтам и возвраты остаются ожидающим запросом или
+  конфликтом с причиной и допустимыми действиями (преждевременный «Done»
+  ничего не обходит), неоднозначный статус графа не двигает. Сбой трекера
+  оставляет курсор на месте и виден; повтор восстанавливает без дублей. REST:
+  `GET /api/tracker/sync`, `GET /api/tracker/inbound`, `POST
+  /api/tracker/sync`, `POST /api/runs/{runID}/tracker/inbound/{id}/dismiss`;
+  MCP: `get_tracker_status`, `get_tracker_sync`, `list_tracker_inbound`,
+  `list_tracker_link_conflicts`, `list_tracker_deliveries`, `get_task_tracker`.
+  Схема SQLite v18 (`tracker_inbound_changes`, `tracker_sync_state`).
 - **Встроенные кодовые гейты на общем контракте (S04).** `required_sections`,
   `verdict_marker`, `pr_exists`, `pr_open`, `pr_base_branch`, `project_checks`,
   `pr_checks_green` исполняются только планировщиком гейтов (попытка с

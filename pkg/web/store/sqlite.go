@@ -17,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 17
+const SchemaVersion = 18
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -1087,7 +1087,10 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 	if err := migrateV16(ctx, tx); err != nil {
 		return err
 	}
-	return migrateV17(ctx, tx)
+	if err := migrateV17(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV18(ctx, tx)
 }
 
 // migrateV17 (S06) introduces the system administrator right. It is granted

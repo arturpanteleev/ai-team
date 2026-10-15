@@ -2,8 +2,8 @@
 
 Defines the abstract task tracker, the explicit one-to-one link between a task
 and a tracker issue, and the outbound synchronization contract with its failure
-isolation. Inbound synchronization is out of scope here and builds on the
-tracker's change-reading method.
+isolation, and the inbound synchronization contract: tracker status changes
+become durable requests that only the existing controller paths may act on.
 
 ## Requirements
 
@@ -206,3 +206,109 @@ delivered idempotently). A retry racing with link removal MUST NOT turn an
 
 - **WHEN** a transport failure echoes the request URL or Authorization header
 - **THEN** the recorded error MUST contain only the failure class
+
+### Requirement: Inbound status changes are polled with a durable cursor
+
+When `tracker.inbound` is configured, the server MUST poll the adapter's change
+reader for the linked issues every `poll_interval` (default one minute, at least
+five seconds) and MUST offer a manual `sync now` that runs the same pass under
+the same lock. The cursor MUST be stored durably per adapter. The first pass on
+an empty cursor MUST only record the tracker's current tail and MUST NOT replay
+earlier history. The cursor MUST advance only after the outcome of every change
+on the page is stored. A tracker or storage failure MUST leave the cursor
+unchanged and MUST be recorded visibly (time, consecutive failures, error text
+without credentials); the next pass MUST repeat the read. The API MUST expose the poll
+interval, the status map, the last poll and last success time, the delay since
+the last success and the last error.
+
+#### Scenario: Temporary tracker outage
+
+- **WHEN** reading changes fails and later succeeds, and an external status
+  change happened in between
+- **THEN** the change MUST be decided exactly once after recovery
+- **AND** the failure MUST have been visible in the sync state until recovery
+- **AND** repeating the sync MUST produce no second request
+
+### Requirement: An inbound status is an explicit request, not a graph command
+
+The server MUST treat an inbound status as a request defined by an explicit map.
+`tracker.inbound.rules` maps an external status (case-insensitive) to a request:
+`advance` (continue the current stage) or `return` with a `to_stage`, each
+optionally limited to a current `stage`. A status that no rule names MUST be
+recorded as ignored and MUST NOT move the graph. If several rules with
+different requests match a status at the current stage, the change MUST be
+stored as a conflict that names the options and MUST NOT move the graph.
+Configuration MUST reject an unknown action or stage, a missing `to_stage` for
+`return`, an identical status and stage named twice, and a poll interval below the
+minimum. Every outcome MUST be one durable record keyed by the tracker's change
+ID (`applied`, `pending`, `conflict`, `ignored`, `superseded`, `dismissed`), so
+a replayed change is never decided twice.
+
+#### Scenario: Ambiguous status
+
+- **WHEN** a wildcard rule and a stage-specific rule with different requests
+  both match the arriving status
+- **THEN** a conflict MUST be stored
+- **AND** the controller MUST NOT be called
+
+### Requirement: Inbound requests act only through the controller's own paths
+
+Inbound requests MUST act only through the controller's own paths. The only
+graph action an inbound request may perform automatically is
+continuing a stage that is ready (the same controller call as the `run-agent`
+action, under the actor `tracker:<adapter>:<author>`). The server MUST NOT
+confirm a stage, decide an approval, override or skip a gate, submit a result
+or return a task on behalf of a tracker status, so required gates, human
+confirmations, the configured return routes and visit limits cannot be bypassed.
+When the conditions are not met (a failed gate, a pending confirmation or
+input, a running stage, a return that needs the approver, a controller
+refusal), the request MUST be stored as `pending` with the reason and the actions
+the controller allows right now, and a return without a configured route MUST be
+stored as a conflict. An operator MUST be able to dismiss an open request with a
+reason, which changes nothing in the task. An open request MUST become
+`superseded` when the task moves to another stage, finishes, or loses its link.
+The local state MUST never be replaced by the tracker's status.
+
+#### Scenario: Allowed change moves the task
+
+- **WHEN** an external status mapped to `advance` arrives while the current
+  stage is ready to continue
+- **THEN** the controller MUST continue that stage
+- **AND** the request MUST be `applied` and visible through REST and MCP
+
+#### Scenario: Premature Done
+
+- **WHEN** a status mapped to `advance` arrives while the stage waits for a
+  failed-gate decision or a human confirmation
+- **THEN** the request MUST be `pending` with the reason and the allowed actions
+- **AND** no approval, override, skip or resume MUST be performed
+
+### Requirement: Inbound and outbound updates do not loop
+
+A change whose origin is ai-team's own account MUST be recorded as ignored and
+MUST NOT create a request. Changes of unknown origin MUST be treated as
+external. A change for an issue that has no link MUST NOT be processed.
+
+#### Scenario: Own transition
+
+- **WHEN** ai-team moves the issue on stage entry and the next sync reads that
+  change
+- **THEN** it MUST be ignored as an echo and the controller MUST NOT be called
+
+### Requirement: Inbound state is readable over REST and MCP
+
+The server MUST expose the sync state (`GET /api/tracker/sync`, also inside
+`GET /api/tracker`), the list of inbound requests filtered by state with `open`
+meaning pending and conflict (`GET /api/tracker/inbound`), and the inbound
+requests of one task inside `GET /api/runs/{runID}/tracker` with the task's
+sync status `inbound_pending` while a request is open and no delivery has
+failed. Running `sync now` and dismissing a request require the `tracker:link`
+permission. The MCP server MUST provide read tools for tracker status, sync
+state, inbound requests, link conflicts, deliveries and a task's tracker state,
+returning the same data as REST.
+
+#### Scenario: Operator sees what waits
+
+- **WHEN** a request is pending or in conflict
+- **THEN** the task view, the inbound list and the MCP tools MUST show it with
+  its reason and the actions allowed now

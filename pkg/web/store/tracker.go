@@ -241,6 +241,11 @@ func (s *Store) DeleteTrackerLink(taskID int64) (bool, error) {
 	if _, err := tx.Exec(`DELETE FROM tracker_link_conflicts WHERE task_id = ?`, taskID); err != nil {
 		return false, err
 	}
+	// Открытые входящие запросы относились к снятой карточке.
+	if _, err := tx.Exec(`UPDATE tracker_inbound_changes SET state = ?, reason = 'link removed' WHERE task_id = ? AND state IN (?, ?)`,
+		TrackerInboundSuperseded, taskID, TrackerInboundPending, TrackerInboundConflict); err != nil {
+		return false, err
+	}
 	// Неудавшиеся доставки относились к снятой карточке: после повторной
 	// связи они не должны уйти на новую без явного решения оператора.
 	if _, err := tx.Exec(`UPDATE tracker_deliveries SET status = ? WHERE task_id = ? AND status = ?`,

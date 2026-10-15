@@ -11,6 +11,7 @@
   - `evidence/` — immutable run/attempt manifests и append-only events
   - `verdict/` — verdict-контракт (парсер вердиктов, BLOCKED-протокол)
   - `runtime/` — Runtime interface + AgentCLI (промпт, логи, model/effort)
+  - `stageexec/` — StageExecutor: внутренний агент и внешний исполнитель этапа
   - `agent/` — Agent struct + Registry
   - `pipeline/` — оркестрация, enforcement вердиктов, гейты, loopback
   - `workflow/` — доменные state/outcome типы и чистые переходы

@@ -27,7 +27,12 @@ type TemplateStage struct {
 	Result           string `yaml:"result"`
 	Executor         string `yaml:"executor,omitempty"`
 	Agent            string `yaml:"agent,omitempty"`
-	LinkKind         string `yaml:"link_kind,omitempty"`
+	// Adapter selects a named external executor (Config.ExecutorAdapters) for
+	// an executor: agent stage instead of the internal LLM runtime. The agent
+	// definition still supplies the stage contract (inputs, outputs, verdict,
+	// mutation scope).
+	Adapter  string `yaml:"adapter,omitempty"`
+	LinkKind string `yaml:"link_kind,omitempty"`
 	// RequiredSections, Check and Confirm are the schema-v5 spelling of what a
 	// stage must satisfy. In v6 YAML they are rejected; the stage declares
 	// ExitGateGroups instead and these fields hold only the engine projection
@@ -71,7 +76,7 @@ type TemplateReturn struct {
 func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 	if err := validateMappingKeys(node, map[string]bool{
 		"id": true, "title": true, "function": true, "approver_function": true, "result": true,
-		"executor": true, "agent": true, "link_kind": true,
+		"executor": true, "agent": true, "adapter": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
 		"skippable": true, "delivery": true, "mcp_servers": true,
 		"exit_gate_groups": true,
@@ -190,6 +195,14 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 		if stage.Executor == "agent" && stage.Agent == "" {
 			add("%s: executor agent требует agent", prefix)
+		}
+		if stage.Adapter != "" {
+			if stage.Executor != "agent" || stage.Agent == "" {
+				add("%s: adapter допустим только для executor agent с agent-контрактом", prefix)
+			}
+			if _, exists := c.ExecutorAdapters[stage.Adapter]; !exists {
+				add("%s: adapter %q не объявлен в executor_adapters", prefix, stage.Adapter)
+			}
 		}
 		if stage.Agent != "" {
 			if !templateIDPattern.MatchString(stage.Agent) {

@@ -33,8 +33,10 @@ func TestHumanResultContentValidatesTypedResults(t *testing.T) {
 			want:  "\n## Acceptance criteria\n\n- exact bytes  \n",
 		},
 		{
-			name: "missing required section", stage: config.TemplateStage{ID: "spec", Result: "md", RequiredSections: []string{"Acceptance criteria"}},
-			input: approval.Decision{Action: "submit", Comment: "# Spec\n"}, wantErr: true,
+			// The sections are checked by the required_sections gate on the stored
+			// version, so the submission itself is accepted (S17).
+			name: "missing required section is the gate's verdict", stage: config.TemplateStage{ID: "spec", Result: "md", RequiredSections: []string{"Acceptance criteria"}},
+			input: approval.Decision{Action: "submit", Comment: "# Spec\n"}, want: "# Spec\n",
 		},
 		{
 			name: "PR URL", stage: config.TemplateStage{ID: "implementation", Result: "link", LinkKind: "pr"},

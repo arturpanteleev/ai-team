@@ -21,9 +21,9 @@
   color: var(--info-fg);
 }
 
-.chip[data-tone='yellow'] {
-  background: var(--tint-yellow);
-  color: var(--ink-yellow);
+.chip[data-tone='indigo'] {
+  background: var(--tint-indigo);
+  color: var(--ink-indigo);
 }
 
 .chip[data-tone='teal'] {

@@ -204,7 +204,7 @@
 
 .routeItem[data-status='ready'] { background: var(--info-bg); }
 .routeItem[data-status='in_progress'],
-.routeItem[data-status='checking'] { background: var(--tint-yellow); }
+.routeItem[data-status='checking'] { background: var(--ink-indigo); }
 .routeItem[data-status='awaiting_human'] { background: var(--tint-teal); }
 .routeItem[data-status='passed'] { background: var(--success-fg); }
 .routeItem[data-status='rejected'],

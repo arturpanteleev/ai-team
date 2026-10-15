@@ -274,8 +274,8 @@
 
 .visit[data-active] {
   border-color: var(--text-primary);
-  background: var(--tint-yellow);
-  color: var(--ink-yellow);
+  background: var(--tint-indigo);
+  color: var(--ink-indigo);
 }
 
 .visit[data-returned] {

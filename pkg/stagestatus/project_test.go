@@ -597,3 +597,57 @@ func TestSummaryCompactsTheCurrentStageAndTheRoute(t *testing.T) {
 		t.Fatalf("%+v", finished)
 	}
 }
+
+func TestInterruptedMidAttemptIsReadyNotInProgress(t *testing.T) {
+	feed := (&journal{}).started().move("spec", "design", "").begin("design", "d1")
+	// The evidence journal also says the attempt was abandoned.
+	evidence := (&journal{}).started().move("spec", "design", "").begin("design", "d1").
+		add("attempt_abandoned", "", "d1", map[string]any{"reason": "interrupted"})
+	for _, status := range []string{"interrupted", "stopped"} {
+		t.Run(status, func(t *testing.T) {
+			byFeed := project(feed, func(in *Input) { in.RunStatus = status })
+			got := stageOf(t, byFeed, "design")
+			if got.Status != StatusReady || got.Phase != PhaseNone || got.Readiness != ReadinessReady || got.Outcome != "pending" ||
+				got.BlockedBy == nil || got.BlockedBy.Kind != BlockRunState || !got.Current {
+				t.Fatalf("nobody works on an interrupted attempt: %+v", got)
+			}
+			if got.Visits[0].Outcome != "pending" || got.Visits[0].Attempts[0].FinishedAt != nil {
+				t.Fatalf("the attempt has no end: %+v", got.Visits[0])
+			}
+			byEvidence := project(evidence, func(in *Input) { in.RunStatus = status })
+			if !reflect.DeepEqual(byFeed, byEvidence) {
+				t.Fatalf("the feed and the evidence journal disagree:\n%+v\n%+v", byFeed, byEvidence)
+			}
+		})
+	}
+	// While the run is alive the same journal is work in progress.
+	if got := stageOf(t, project(feed), "design"); got.Status != StatusInProgress || got.BlockedBy != nil {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestFailedRunDoesNotCancelTheOpenAttempt(t *testing.T) {
+	j := (&journal{}).started().move("spec", "design", "").begin("design", "d1").move("design", "$fail", "")
+	got := stageOf(t, project(j, func(in *Input) { in.RunStatus = "failed" }), "design")
+	if got.Status != StatusFailed || got.Outcome != "failed" {
+		t.Fatalf("a task that failed did not cancel anything: %+v", got)
+	}
+}
+
+func TestVisitedStageWithoutAttemptsIsNeverNotReached(t *testing.T) {
+	j := (&journal{}).started().move("spec", "design", "").move("design", "impl", "").move("impl", "design", "return_to_design")
+	p := project(j)
+	spec := stageOf(t, p, "spec")
+	if !spec.Visited || spec.Status != StatusPassed || spec.Visits[0].Outcome != "passed" {
+		t.Fatalf("moved on without attempts: passed by the transition: %+v", spec)
+	}
+	impl := stageOf(t, p, "impl")
+	if !impl.Visited || impl.Status != StatusRejected {
+		t.Fatalf("sent back without attempts: %+v", impl)
+	}
+	for _, stage := range p.Stages {
+		if stage.Visited && stage.Status == StatusNotReached && !stage.Current {
+			t.Fatalf("visited yet not reached: %+v", stage)
+		}
+	}
+}

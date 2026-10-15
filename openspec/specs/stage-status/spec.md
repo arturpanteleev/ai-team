@@ -74,6 +74,27 @@ with the block `human_input`, and `in_progress` once a person has taken it.
 - **И** the stage MUST name `action_stage_id` when the action routes address
   the next stage
 
+### Requirement: An interrupted attempt is not work in progress
+
+An attempt without an end MUST be `in_progress` only while a worker can execute
+it. When the run is `interrupted` or `stopped` (or the evidence journal records
+`attempt_abandoned`), the open stage MUST be `ready` with the block `run_state`,
+its outcome MUST stay `pending` and the attempt MUST be listed unfinished with
+execution `canceled`. The SQLite feed does not record `attempt_abandoned`, so
+the projection MUST derive this from the run status; the projection of the feed
+and the projection of the evidence journal MUST be equal. A visit that was
+closed by a failed task MUST end `failed`, not `canceled`; `canceled` is only
+for a canceled task. A visited stage whose visit has no attempt and was left by
+a transition MUST NOT be `not_reached`: it is `passed` (moved on) or `rejected`
+(left by a return).
+
+#### Scenario: Interruption in the middle of an attempt
+
+- **КОГДА** the journal has an attempt without an end and the run is
+  `interrupted`
+- **ТОГДА** the stage MUST be `ready` with `blocked_by.kind` `run_state`, also
+  after a server restart that reconciled the run
+
 ### Requirement: The executor is the actual one
 
 The projection MUST tell a person, an internal agent and an external agent apart

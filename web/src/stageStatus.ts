@@ -35,14 +35,16 @@ export const stageStatusGlyphs: Record<StageStatusKey, string> = {
   canceled: '–',
 };
 
-// Красный — только реальные отказы и ошибки; янтарного среди статусов нет:
-// он остаётся за рекомендациями гейтов.
-export type StageStatusTone = 'gray' | 'blue' | 'yellow' | 'teal' | 'green' | 'danger';
+// Красный — только реальные отказы и ошибки; янтарного/жёлтого среди статусов
+// нет: он остаётся за рекомендациями гейтов (--warning-bg). Рабочие статусы
+// («В работе», «Проверяется») — индиго, заметно отличается и от янтаря, и от
+// циановой «Готов к запуску».
+export type StageStatusTone = 'gray' | 'blue' | 'indigo' | 'teal' | 'green' | 'danger';
 export const stageStatusTones: Record<StageStatusKey, StageStatusTone> = {
   not_reached: 'gray',
   ready: 'blue',
-  in_progress: 'yellow',
-  checking: 'yellow',
+  in_progress: 'indigo',
+  checking: 'indigo',
   awaiting_human: 'teal',
   passed: 'green',
   rejected: 'danger',

@@ -34,7 +34,13 @@ const (
 type attemptRec struct {
 	VisitAttempt
 	finished bool
-	visit    *visitRec
+	// abandoned: the evidence journal says the attempt was cut short (the run
+	// was interrupted or stopped). The SQLite feed has no such event, so the
+	// flag changes nothing that is visible on its own: the projection treats an
+	// unfinished attempt of a run without a worker the same way (see
+	// deriveCurrent), which keeps the feed and the evidence projections equal.
+	abandoned bool
+	visit     *visitRec
 }
 
 type visitRec struct {
@@ -203,10 +209,7 @@ func (b *builder) apply(event Event) {
 		b.finishAttempt(attempt, event, at)
 	case eventAttemptAbandoned:
 		if attempt := b.attempts[event.AttemptID]; attempt != nil && !attempt.finished {
-			attempt.finished = true
-			finished := at
-			attempt.FinishedAt = &finished
-			attempt.Execution, attempt.Outcome = "canceled", "canceled"
+			b.abandon(attempt)
 		}
 	case eventAttemptsInvalid:
 		for _, id := range stringsOf(event.Data["attempt_ids"]) {
@@ -453,7 +456,25 @@ func (b *builder) liveRun() bool {
 	return true
 }
 
+// abandon marks an attempt that was cut short. It stays unfinished (it has no
+// end time and no verdict) but its history entry says it did not complete.
+func (b *builder) abandon(attempt *attemptRec) {
+	attempt.abandoned = true
+	attempt.Execution, attempt.Outcome = "canceled", "canceled"
+}
+
 func (b *builder) project() Projection {
+	if !b.liveRun() {
+		// The SQLite feed has no attempt_abandoned event (the reconcile of an
+		// interrupted run only touches the run and stage tables), the evidence
+		// journal does. A run without a worker has no attempt in flight, so
+		// both sources give the same answer here.
+		for _, attempt := range b.attempts {
+			if !attempt.finished {
+				b.abandon(attempt)
+			}
+		}
+	}
 	terminal := b.terminalRun()
 	if terminal && b.open != nil {
 		b.open.closedByRun = true
@@ -546,6 +567,14 @@ func (b *builder) finalize(v *visitRec) {
 			v.Outcome = "pending"
 		case v.closedByRun && b.canceled:
 			v.Outcome = "canceled"
+		case !v.closedByRun && v.LeftTo != "" && v.Returned:
+			// Visited, no attempt journaled (an older journal or a stage the
+			// task passed through): the transition is the only fact. Moving
+			// back means the stage's result was not accepted.
+			v.Outcome = "rejected"
+		case !v.closedByRun && v.LeftTo != "":
+			// Never "not reached" for a visited stage: the task moved on.
+			v.Outcome = "passed"
 		default:
 			v.Outcome = "none"
 		}
@@ -554,8 +583,20 @@ func (b *builder) finalize(v *visitRec) {
 	last := v.attempts[len(v.attempts)-1]
 	v.Executor = last.Executor
 	v.Outcome = last.Outcome
+	if v.open && !last.finished {
+		v.Outcome = "pending"
+	}
 	if !last.finished && !v.open {
-		v.Outcome = "canceled"
+		// The visit is closed but its attempt never reported. Say what ended
+		// the task; an attempt is not canceled unless the task was.
+		switch {
+		case b.canceled || b.in.RunStatus == "canceled":
+			v.Outcome = "canceled"
+		case b.in.RunStatus == "failed":
+			v.Outcome = "failed"
+		default:
+			v.Outcome = "canceled"
+		}
 	}
 	v.Superseded = true
 	for _, attempt := range v.attempts {
@@ -656,6 +697,12 @@ func (b *builder) deriveCurrent(stage *Stage, def StageDef, v *visitRec) {
 	gatesRunning, gatesHuman, failed := b.gateState(v)
 
 	switch {
+	case lastAttempt != nil && !lastAttempt.finished && (lastAttempt.abandoned || !b.liveRun()):
+		// Nobody is working: the run was interrupted or stopped in the middle
+		// of the attempt and waits to be resumed. The outcome is not final.
+		stage.Status, stage.Readiness, stage.Phase = StatusReady, ReadinessReady, PhaseNone
+		stage.Outcome = "pending"
+		stage.BlockedBy = &Block{Kind: BlockRunState, Reason: "the attempt was interrupted; the task is " + firstText(b.in.RunStatus, "paused") + " and waits to be resumed"}
 	case lastAttempt != nil && !lastAttempt.finished:
 		stage.Status, stage.Phase = StatusInProgress, PhaseWorking
 		stage.Outcome = "pending"

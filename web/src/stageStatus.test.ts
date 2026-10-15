@@ -33,6 +33,14 @@ describe('stage status vocabulary', () => {
     expect(red).toEqual(['blocked', 'failed', 'rejected']);
     expect(Object.values(stageStatusTones)).not.toContain('amber');
     expect(Object.values(stageStatusTones)).not.toContain('warning');
+    expect(Object.values(stageStatusTones)).not.toContain('yellow');
+  });
+
+  it('gives working statuses a tone of their own, apart from ready and the amber advisory', () => {
+    expect(stageStatusTones.in_progress).toBe('indigo');
+    expect(stageStatusTones.checking).toBe('indigo');
+    expect(stageStatusTones.in_progress).not.toBe(stageStatusTones.ready);
+    expect(stageStatusTones.in_progress).not.toBe(stageStatusTones.awaiting_human);
   });
 });
 

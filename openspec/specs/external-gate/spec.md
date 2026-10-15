@@ -160,3 +160,79 @@ isolation (container launcher or a separate uid).
 
 - **КОГДА** a Docker-kind launcher returns a valid result document
 - **ТОГДА** the attempt MUST carry executor `docker` and the same classification
+
+### Requirement: The Docker gate runs the same protocol in a pinned container under strict defaults
+
+The built-in library MUST contain `docker_program@1` of kind `docker` with the
+parameters of `external_program@1` plus `image` (required), `allow_unpinned_image`,
+`pull` (`missing`|`never`), `network` (`none`|`bridge`), `cpus`, `memory_mb`,
+`pids_limit`, `tmpfs_mb`, `user`, `repo_access` (`ro`|`rw`), and `mounts`
+(`<repository path>:<container path>[:ro|rw]`). `image` MUST carry a sha256
+digest; a reference without one MUST be rejected before a run unless
+`allow_unpinned_image` is set. The launcher MUST run `docker run` as an argv
+without a shell with `--rm`, a unique container name, a read-only root file
+system, `--cap-drop ALL`, `no-new-privileges`, an explicit non-root user (the
+controller's uid:gid, or `65534:65534` when that is root, unless configured),
+`--network none` unless `bridge` is configured, and CPU, memory (without swap) and
+PID limits. It MUST NOT pass the Docker socket, the home directory, controller
+credentials, or any controller environment variable other than `env_allow` and
+the reserved protocol variables, and MUST NOT mount anything but the repository
+(read-only unless `repo_access` is `rw`), the private evidence directory, the
+stage result file (read-only, when it lies outside the repository), and the
+configured `mounts`. A mount source MUST be a repository subpath without a
+symlink component; a writable mount of `.git`, a mount target under `/proc`,
+`/sys`, `/dev` or the reserved gate directories, and an `env_allow` name of the
+Docker client environment MUST be rejected before a run. The input document MUST
+carry container paths only. Environment values MUST NOT appear in the `docker`
+argv or in any stored record.
+
+#### Scenario: Unpinned image
+
+- **КОГДА** `image` is `alpine:3.20`
+- **ТОГДА** validation MUST reject the configuration unless `allow_unpinned_image`
+  is true, and the exception MUST be recorded in the attempt's `invocation.json`
+
+#### Scenario: Declared mounts and variables only
+
+- **КОГДА** a gate is launched with no `mounts` and no `env_allow`
+- **ТОГДА** the `docker run` argv MUST contain exactly two `--mount` options (the
+  repository read-only and the evidence directory) and only the two reserved
+  variables
+
+#### Scenario: Closed sandbox
+
+- **КОГДА** a program inside the container tries to write to the repository or the
+  root file system, reach the network, read a controller variable, find the Docker
+  socket, or run as root
+- **ТОГДА** each attempt MUST fail
+
+### Requirement: Docker failures are technical errors; a timeout removes the container
+
+The attempt MUST end `error` without a verdict when the Docker daemon is
+unreachable, the image is missing or cannot be pulled, the runtime cannot start the
+command, the container is killed (including out of memory), the `docker` binary is
+missing, or the output limit is exceeded; its reason MUST name the failure class. A
+valid result document from a container that exited with code 0 MUST be classified
+exactly as a host result. On timeout the attempt MUST end `timeout` and on
+cancellation `canceled`; in both cases the `docker` process MUST be killed and the
+container MUST be force-removed by name, and a failed removal MUST be stated in the
+reason. `invocation.json` MUST record the executor, image, network, user, mounts
+(source, target, mode), variable names, limits, the `docker run` argv, and a list of
+every exception to the defaults, and MUST NOT contain secret values or host paths of
+the controller.
+
+#### Scenario: Daemon down or wrong image
+
+- **КОГДА** `docker run` exits with 125
+- **ТОГДА** the attempt MUST end `error`, not `fail`
+
+#### Scenario: Same fixture on both adapters
+
+- **КОГДА** one gate fixture runs through the host and the Docker launcher
+- **ТОГДА** the execution, verdict, reason, and the evidence files (except
+  `invocation.json`) MUST be identical
+
+#### Scenario: Timeout
+
+- **КОГДА** the containerized program exceeds `timeout_seconds`
+- **ТОГДА** the attempt MUST end `timeout` and no container with its name MAY remain

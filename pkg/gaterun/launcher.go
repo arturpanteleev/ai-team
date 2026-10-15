@@ -31,6 +31,9 @@ type LaunchSpec struct {
 	// Input is the decoded protocol input, for adapters that must rewrite
 	// paths (a container adapter mounts directories elsewhere).
 	Input Input
+	// Docker carries the container settings of a docker_program gate; nil for
+	// host gates. A launcher that cannot honor them must refuse the run.
+	Docker *DockerSettings
 }
 
 // Outcome is what a Launcher observed. Err is nil only when the program
@@ -44,6 +47,12 @@ type Outcome struct {
 	ExitCode       int
 	OutputExceeded bool
 	Err            error
+	// Detail explains the end in words (docker failure class, container
+	// removal); the runner appends it to the reason.
+	Detail string
+	// Record is launcher-specific evidence stored in invocation.json under
+	// "launcher": what the program was allowed to see. Names only, no values.
+	Record map[string]any
 }
 
 // Launcher runs one gate program. The host adapter below runs an argv on the
@@ -74,6 +83,9 @@ const descendantGrace = 2 * time.Second
 func (HostLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	if len(spec.Argv) == 0 {
 		return Outcome{ExitCode: -1, Err: errors.New("empty argv")}
+	}
+	if spec.Docker != nil {
+		return Outcome{ExitCode: -1, Err: errors.New("host launcher refuses a docker gate: the container settings would be ignored")}
 	}
 	inner, cancel := context.WithCancel(ctx)
 	defer cancel()

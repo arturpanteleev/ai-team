@@ -624,15 +624,17 @@ func (o mcpOperation) runAction(ctx context.Context, server *Server, identity mc
 	meta := &mcpCallMeta{Tool: o.Name, Key: args.key, TokenID: identity.TokenID, UserAgent: identity.UserAgent}
 	outcome := server.mcpDispatch(ctx, identity, o.Method, path, query, body, meta)
 	if args.key != "" {
-		if outcome.status >= 500 {
-			// A server failure may be transient and the action may not have
-			// happened: release the key so the retry is a real retry.
-			_ = server.store.DeletePendingIdempotency(scope, args.key, fingerprint)
-		} else if err := server.store.CompleteIdempotency(scope, args.key, fingerprint, outcome.status, nil, redactMCPFields(outcome.body, o.Redact)); err != nil {
+		// Every response after the dispatch is stored, a 5xx included, exactly
+		// like the REST policy: the action may already have had durable side
+		// effects, so a retry with the same key replays the answer instead of
+		// doing it twice. Only failures before the dispatch release the key.
+		if err := server.store.CompleteIdempotency(scope, args.key, fingerprint, outcome.status, nil, redactMCPFields(outcome.body, o.Redact)); err != nil {
 			return mcpResult{Err: mcpErrorText(http.StatusServiceUnavailable, "idempotency_unavailable", "response could not be recorded for retry")}
 		}
 	}
-	if o.mutating() && outcome.status >= 200 && outcome.status <= 299 {
+	if o.mutating() && (outcome.status >= 200 && outcome.status <= 299 || outcome.status == http.StatusUnauthorized || outcome.status == http.StatusForbidden) {
+		// Successes and authorization denials are journaled; the record never
+		// carries arguments and a failed write never breaks the call.
 		server.auditMCPAction(identity, o, args, outcome)
 	}
 	return o.finish(outcome, args)
@@ -747,6 +749,9 @@ func (s *Server) auditMCPAction(identity mcpIdentity, o mcpOperation, args mcpAr
 	data := map[string]any{
 		"actor_id": identity.Session.Principal.ActorID, "channel": humandecisionChannelMCP, "tool": o.Name,
 		"method": o.Method, "status": outcome.status,
+	}
+	if outcome.status == http.StatusUnauthorized || outcome.status == http.StatusForbidden {
+		data["denied"] = true
 	}
 	if identity.TokenID != "" {
 		data["token_id"] = identity.TokenID

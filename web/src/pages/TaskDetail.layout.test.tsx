@@ -170,6 +170,84 @@ describe('Task page columns keep their purpose (S16)', () => {
   });
 });
 
+describe('Duplicates found on real data (S16)', () => {
+  it('offers one «Принять и перейти» when both the confirm action and an approve decision exist for the same approval', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, pending_approval_id: 'g1' },
+      approvals: [{
+        id: 'g1', run_id: 'run-detail-1', attempt_id: 'a1', from_stage: 'analysis', to_stage: 'intent', trigger: 'graph_outcome:passed', kind: 'approve',
+        subject_hash: 'c'.repeat(64), required_roles: ['product_owner'], quorum: 'any', actions: ['approve', 'reject'], targets: { approve: 'intent', reject: '$stop' },
+        status: 'pending', created_at: '2026-10-12T09:00:00Z',
+      }],
+      allowed_actions: ['confirm'],
+    });
+    renderDetail();
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(await within(actions).findAllByRole('button', { name: /Принять и перейти/ })).toHaveLength(1);
+    expect(within(actions).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+  });
+
+  it('accepts an approve-only stage by the decision itself and says «Принять», not «перейти: этот же этап»', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      state: { ...baseDetails.state!, phase: 'waiting', next_stage: 'intent', pending_approval_id: 'i1' },
+      template: { ...baseDetails.template!, stages: [{ id: 'intent', title: 'Бизнес-идея', function: 'product_owner', result: 'approve', executor: 'human' },
+        ...baseDetails.template!.stages.slice(1)] },
+      approvals: [{
+        id: 'i1', run_id: 'run-detail-1', attempt_id: '', from_stage: 'intent', to_stage: 'intent', trigger: 'human_input', kind: 'input',
+        subject_hash: 'a'.repeat(64), required_roles: ['product_owner'], quorum: 'any', actions: ['approve', 'reject'], targets: { approve: 'intent', reject: 'intent' },
+        status: 'pending', created_at: '2026-10-12T09:00:00Z',
+      }],
+      allowed_actions: ['take', 'results'],
+    });
+    renderDetail();
+    const actions = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(await within(actions).findByRole('button', { name: 'Принять' })).toBeInTheDocument();
+    expect(within(actions).queryByRole('button', { name: 'Сдать результат' })).not.toBeInTheDocument();
+    expect(within(actions).queryByRole('button', { name: /Принять и перейти/ })).not.toBeInTheDocument();
+  });
+
+  it('names the stage a failed run stopped at and keeps its results reachable', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...baseDetails,
+      run: { ...baseDetails.run, status: 'failed', error: 'human markdown is missing required section "Критерии приёмки"' },
+      state: { ...baseDetails.state!, phase: 'terminal', next_stage: '', pending_approval_id: undefined },
+      approvals: [],
+      allowed_actions: [],
+      stage_statuses: { schema_version: 1, terminal: false, stages: [
+        { stage_id: 'intent', index: 1, status: 'passed', readiness: 'left', phase: 'none', outcome: 'passed', executor: { kind: 'human', source: 'attempt' }, current: false, visited: true, visit_count: 1, active_visit: 0, allowed_actions: [], visits: [] },
+        { stage_id: 'analysis', index: 2, status: 'failed', readiness: 'left', phase: 'none', outcome: 'failed', executor: { kind: 'human', source: 'attempt' }, current: false, visited: true, visit_count: 1, active_visit: 0, allowed_actions: [], visits: [] },
+      ] },
+    });
+    renderDetail();
+    const status = await screen.findByRole('region', { name: 'Анализ' });
+    expect(within(status).getByText('Остановилась на этапе')).toBeInTheDocument();
+    // The reason is visible without opening anything.
+    expect(within(status).getAllByText(/missing required section/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { name: 'Этап «Анализ»' })).toBeInTheDocument();
+  });
+
+  it('does not paint a waiting transition red: only a blocked or failed one is red', async () => {
+    const api = await import('../api');
+    const wave = {
+      stage_id: 'analysis', visit: 1, stage_attempt_id: 'a1', artifact_sha256: 'a'.repeat(64), current: true, attempts: [],
+      gates: [{ gate_name: 'agent_review', gate: 'agent_review', gate_version: 1, mode: 'required', group: 0, attempts: 1, blocking: true, warning: false, retryable: false, overridden: false,
+        attempt: { attempt_id: 'g1', gate: 'agent_review', gate_name: 'agent_review', mode: 'required', group: 0, execution: 'pending', started_at: '2026-10-12T09:10:00Z' } }],
+      transition: { allowed: false, state: 'waiting', reasons: ['ждём завершения или решения: agent_review'], blocking: ['agent_review'], warnings: [], retryable: [], overridden: [] },
+    };
+    vi.mocked(api.getTaskGates).mockResolvedValue({ run_id: 'run-detail-1', can_override: false, overrides: [], warnings: [],
+      stages: [{ stage_id: 'analysis', title: 'Анализ', groups: [['agent_review']], waves: [wave], current: wave }] } as never);
+    renderDetail();
+    const panel = await screen.findByTestId('gate-panel');
+    expect(panel.querySelector('[data-state="waiting"]')).not.toBeNull();
+    expect(panel.querySelector('p[data-state="waiting"]')?.className).toContain('decision');
+  });
+});
+
 describe('Task page tabs (S16)', () => {
   it('switches tabs with arrow keys, Home and End and keeps only the active tab in the tab order', async () => {
     renderDetail();

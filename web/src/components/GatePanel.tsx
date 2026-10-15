@@ -87,7 +87,7 @@ export function GatePanel({ stage, compact = false }: {
     <h3>{compact ? 'Что проверяется' : 'Гейты этапа'}</h3>
     <OverrideBanner wave={wave} />
     <AdvisoryBanner wave={wave} />
-    <p className={styles.decision} data-allowed={wave.transition.allowed ? 'true' : 'false'}>
+    <p className={styles.decision} data-allowed={wave.transition.allowed ? 'true' : 'false'} data-state={wave.transition.state}>
       {stateLabels[wave.transition.state] ?? wave.transition.state}
       {wave.transition.reasons.length > 0 && <> · {wave.transition.reasons.join(' · ')}</>}
     </p>

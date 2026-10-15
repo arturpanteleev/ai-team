@@ -513,6 +513,11 @@
   font-weight: 750;
 }
 
+/* The short reason is always visible: the person should not have to open anything to learn what failed. */
+.failureReason {
+  font-weight: 600;
+}
+
 .failureHead {
   display: flex;
   align-items: center;
@@ -638,7 +643,8 @@
 .tab {
   position: relative;
   min-height: 40px;
-  padding: 8px 10px;
+  padding: 8px 9px;
+  font-size: 14px;
   border: 0;
   border-bottom: 3px solid transparent;
   border-radius: 0;
@@ -1167,6 +1173,11 @@
 
   .route span[data-status] {
     white-space: normal;
+  }
+
+  /* Only the current stage keeps its detail lines: the strip stays short before the actions. */
+  .routeItem:not([aria-current]) .routeState {
+    display: none;
   }
 
   .actionCol {

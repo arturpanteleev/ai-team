@@ -600,7 +600,7 @@ test('Chromium viewport flow reads, decides, resumes and reloads the persisted i
     expect(detail.run.run_id).toBe(runID)
 
     await page.reload()
-    await page.getByRole('tab', { name: 'Решения и вопросы' }).click()
+    await page.getByRole('tab', { name: 'Решения' }).click()
     await expect(page.getByText('local-user (product_owner): approve_spec', { exact: true })).toBeVisible()
     detail = await readDetail()
     expect(detail.run.run_id).toBe(runID)

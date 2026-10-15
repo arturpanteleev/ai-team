@@ -268,7 +268,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     const actionsSeen = installController(page)
     await page.goto(`${baseURL}/tasks/run-manual`)
     await expect(page.getByRole('heading', { name: 'Ручной маршрут', level: 1 })).toBeVisible()
-    await page.getByRole('button', { name: 'Подробности' }).click()
+    await page.getByRole('button', { name: 'Полное описание' }).click()
     await expect(page.getByRole('link', { name: 'https://tracker.example/TASK-62' })).toBeVisible()
     await page.getByRole('tab', { name: 'Результат' }).click()
     await page.getByText('Сравнить версии 1 и 2').click()
@@ -294,7 +294,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     // The exceptional actions are always visible in the actions column, not behind a menu.
     await expect(page.getByRole('button', { name: 'Обойти проверку' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Сдать результат' })).toHaveCount(0)
-    await page.getByRole('tab', { name: 'Решения и вопросы' }).click()
+    await page.getByRole('tab', { name: 'Решения' }).click()
     await expect(page.getByText('История грилла')).toBeVisible()
     await expect(page.getByText('Сегмент малого бизнеса')).toBeVisible()
     await page.getByRole('tab', { name: 'Журнал' }).click()
@@ -327,7 +327,7 @@ test('task detail traverses the manual and automatic templates using allowed act
     // Automatic tasks expose only the two agent actions and finish without human controls.
     await page.goto(`${baseURL}/tasks/run-auto`)
     await expect(page.getByRole('heading', { name: 'Автоматический маршрут', level: 1 })).toBeVisible()
-    await page.getByRole('button', { name: 'Подробности' }).click()
+    await page.getByRole('button', { name: 'Полное описание' }).click()
     await expect(page.getByRole('tabpanel').getByText('Авто', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /поручить агенту/i })).toBeVisible()
     for (const invalidAction of ['Взять этап', 'Сдать результат', 'Принять и перейти', 'Обойти проверку', 'Пропустить этап', 'Вернуть на доработку', 'Принять план доставки']) {

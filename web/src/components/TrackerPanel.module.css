@@ -5,6 +5,14 @@
   gap: 8px;
 }
 
+/* The tracker state in the status column is a card like the other blocks there. */
+.summary {
+  padding: 16px 20px;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
 .summary h3,
 .actions h3,
 .details h3 {
@@ -82,6 +90,25 @@
   gap: 4px;
   font-size: 13px;
   font-weight: 600;
+}
+
+.linkForm input,
+.dismiss input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  font-weight: 400;
+}
+
+.dismiss {
+  margin-top: 6px;
+}
+
+.dismiss button {
+  width: fit-content;
 }
 
 .details {

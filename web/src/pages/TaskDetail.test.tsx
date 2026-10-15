@@ -143,7 +143,7 @@ describe('Task detail', () => {
 
     expect(await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 })).toBeInTheDocument();
     expect(screen.getByText(/Сократить путь до первой ценности/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Подробности' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Полное описание' }));
     expect(await screen.findByText(/Закреплённый маршрут/, { selector: 'dd' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'https://tracker.example/JIRA-51' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('tab', { name: 'Результат' }));
@@ -281,7 +281,7 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue(resolved);
     renderDetail();
 
-    fireEvent.click(await screen.findByRole('tab', { name: 'Решения и вопросы' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Решения' }));
     expect(await screen.findByRole('heading', { name: 'История грилла' })).toBeInTheDocument();
     expect(screen.getByText('Что проверить перед релизом?')).toBeInTheDocument();
     expect(screen.getByText('Проверить миграцию базы')).toBeInTheDocument();
@@ -372,7 +372,7 @@ describe('Task detail', () => {
     vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...baseDetails, external_links: ['https:tracker.example/JIRA-52'] });
     renderDetail();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Подробности' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Полное описание' }));
     expect(await screen.findByText('https:tracker.example/JIRA-52')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'https:tracker.example/JIRA-52' })).not.toBeInTheDocument();
   });
@@ -828,7 +828,7 @@ describe('Task page controls moved from the old pipeline page', () => {
     await screen.findByRole('heading', { name: 'Новый маршрут', level: 1 });
     expect(screen.queryByText('Длительность')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Подробности' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Полное описание' }));
     const panel = screen.getByRole('tabpanel');
     expect(panel).toHaveTextContent('run-detail-1');
     expect(panel).toHaveTextContent('Длительность');

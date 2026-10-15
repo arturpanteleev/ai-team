@@ -505,6 +505,10 @@ export function TaskDetail() {
     ? latestResumeOutcome : undefined;
   const resumeFailureReason = resumeFailure && typeof resumeFailure.data.error === 'string'
     ? resumeFailure.data.error : 'Сервер не записал причину ошибки возобновления.';
+  // A task that waits for a person is resumed by that person's decision: «Продолжить задачу» is
+  // offered there only after a failed resume or when nobody is asked.
+  const resumeOffered = resumable && (run.status !== 'waiting_for_approval' || resumeFailure !== undefined
+    || (pendingDecisions.length === 0 && questionDecisions.length === 0));
   // One place for the failure: a resume failure wins over the stage failure it follows.
   // The stage that failed keeps its heading; the newest error (a failed resume, when there is one) is the text.
   const issueSource = showFailure
@@ -529,6 +533,9 @@ export function TaskDetail() {
     }
     return { stage, state, server, current: server ? server.current : index === currentIndex, gateFlag: stageGateFlag(visibleSnapshot.gates, stage.id) };
   });
+
+  // The yellow main button never is a refusal: «Отклонить», a return or a bypass are secondary.
+  const isAffirmative = (action: string) => !['reject', 'stop', 'override'].includes(action) && !action.startsWith('return');
 
   const sendDecision = (value: Approval, role: string, action: string, comment?: string) => perform(
     `Решение: ${approvalLabel(action)}`,
@@ -559,7 +566,10 @@ export function TaskDetail() {
 
   const decisionButtonLabel = (approval: Approval, action: string): string => {
     const target = approval.targets?.[action];
-    if ((action === 'approve' || action === 'approve_spec') && target) return `${actionVerbs.accept}: ${stageTitle(target)}`;
+    if ((action === 'approve' || action === 'approve_spec') && target) {
+      // A decision that stays at the stage (the human input itself) is plain «Принять»; moving on names where.
+      return target === approval.from_stage && approval.trigger === 'human_input' ? actionVerbs.acceptHere : `${actionVerbs.accept}: ${stageTitle(target)}`;
+    }
     return approvalLabel(action);
   };
 
@@ -603,11 +613,14 @@ export function TaskDetail() {
   // "submit" and "approve" of a human input go through the stage result form, not the approvals list.
   // A stage whose result is only an approval has no content to submit, so «Принять» is the decision itself.
   const stageNeedsContent = (stageID: string) => (template?.stages.find((stage) => stage.id === stageID)?.result ?? 'md') !== 'approve';
+  // The «confirm» action of the task API accepts the pending approval with its hash: the decision card then keeps only the other actions (no second «Принять»).
+  const confirmsPending = (approval: Approval) => allowed.has('confirm') && approval.id === pending?.id;
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
     ? approval.actions.filter((action) => action !== 'submit'
       && !(action === 'approve' && stageNeedsContent(approval.from_stage))
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
-    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions);
+    : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions)
+    .filter((action) => !(confirmsPending(approval) && action === 'approve'));
 
   const renderDecision = (approval: Approval) => {
     const answer = approvalAnswers[approval.id] ?? '';
@@ -635,9 +648,9 @@ export function TaskDetail() {
             Only when every role must decide (quorum «all») the button is per role. */}
         {(approval.quorum === 'all' ? approval.required_roles.filter((role) => canAct(role))
           : approval.required_roles.filter((role) => canAct(role)).slice(0, 1))
-          .flatMap((role, roleIndex) => decisionActions(approval).map((action, actionIndex) => (
+          .flatMap((role, roleIndex) => decisionActions(approval).map((action) => (
             <button key={`${role}:${action}`} type="button"
-              className={roleIndex === 0 && actionIndex === 0 && (approval.id === currentDecision?.id || questionDecisions.some((item) => item.id === approval.id)) ? styles.primary : undefined}
+              className={approval.trigger !== 'human_input' && roleIndex === 0 && decisionActions(approval).find(isAffirmative) === action && (approval.id === currentDecision?.id || questionDecisions.some((item) => item.id === approval.id)) ? styles.primary : undefined}
               disabled={working ||
               (action === 'answer_questions' && !answer.trim()) ||
               (requiresReturnReason(approval, action) && !reason.trim())}
@@ -669,10 +682,15 @@ export function TaskDetail() {
   // Одна строка о том, что сделать прямо сейчас; подробности — в блоках ниже.
   // A pending result decision (approve / decline) is the one action left: start-work cards would only duplicate it.
   const choiceOwnsStage = Boolean(currentDecision && currentDecision.trigger !== 'human_input');
+  // A stage whose result is only an approval is accepted by the decision itself: no second «Сдать результат» for it.
+  const approveDecidesStage = currentStage?.result === 'approve' && currentDecision?.trigger === 'human_input'
+    && decisionActions(currentDecision).includes('approve');
   const nextStep = (() => {
     if (issue) return null;
-    if (currentDecision?.kind === 'check_decision') return 'Проверка не прошла или не завершилась. Откройте отчёт и отправьте результат на повторную проверку.';
-    if (currentDecision) return 'Результат ждёт вашего решения: проверьте его и выберите действие ниже.';
+    // The computed status (S11) leads: while the gates run nobody has a decision to make yet.
+    if (serverCurrent?.status === 'checking') return 'Идут гейты этапа. Страница обновится, когда они закончатся.';
+    if (currentDecision?.kind === 'check_decision') return 'Проверка не прошла или не завершилась: выберите действие в колонке «Действия».';
+    if (currentDecision) return 'Результат ждёт вашего решения: проверьте его и выберите действие в колонке «Действия».';
     if (runningAttempt) return 'Агент работает. Страница обновится, когда он закончит.';
     if (currentStage?.agent && allowed.has('run-agent')) return `Сделайте этап сами или поручите агенту ${currentStage.agent}: потом вы примете результат или измените его.`;
     if (allowed.has('results')) return 'Сдайте результат текстом или ссылкой.';
@@ -680,7 +698,10 @@ export function TaskDetail() {
     return null;
   })();
 
-  const viewID = viewStageID && template?.stages.some((stage) => stage.id === viewStageID) ? viewStageID : currentStageID;
+  // A run that stopped without a current stage (failed, visit limit) shows the stage it stopped at.
+  const stoppedAt = !currentStageID && !finished
+    ? [...(details.stage_statuses?.stages ?? [])].filter((entry) => entry.visited).sort((left, right) => left.index - right.index).at(-1) : undefined;
+  const viewID = viewStageID && template?.stages.some((stage) => stage.id === viewStageID) ? viewStageID : currentStageID || stoppedAt?.stage_id || '';
   const viewStageDef = template?.stages.find((stage) => stage.id === viewID);
   const viewAttempt = viewID ? latestAttemptFor(viewID) : undefined;
   const viewFiles = viewAttempt ? visibleSnapshot.artifacts.filter((artifact) =>
@@ -691,7 +712,7 @@ export function TaskDetail() {
   const tabs: { key: TabKey; label: string; flag?: 'danger' | 'warning' }[] = [
     { key: 'result', label: 'Результат' },
     { key: 'gates', label: 'Гейты', flag: gateAttention ? (route.some((item) => item.gateFlag === 'override') ? 'danger' : 'warning') : undefined },
-    { key: 'decisions', label: 'Решения и вопросы' },
+    { key: 'decisions', label: 'Решения' },
     ...(trackerOn ? [{ key: 'tracker' as const, label: 'Трекер' }] : []),
     { key: 'idea', label: 'Описание' },
     { key: 'journal', label: 'Журнал' },
@@ -711,10 +732,12 @@ export function TaskDetail() {
   const exceptionsVisible = Boolean(currentStage) && (allowed.has('skip') || (allowed.has('override') && canOverride)
     || (allowed.has('return') && returnOptions.length > 0));
   const needActor = !principal && (questionDecisions.length > 0 || otherDecisions.length > 0);
-  const stageName = currentStage?.title ?? stageTitle(currentStageID);
+  // Where the task is: the stage the computed status (S11) names; the checkpoint may already point at the next one.
+  const shownStageID = serverCurrent?.stage_id || currentStageID;
+  const stageName = stageTitle(shownStageID);
   const hasStageActions = (allowed.size > 0 || Boolean(currentDecision) || questionDecisions.length > 0);
   const gateRetries = currentGateStage?.current?.gates.some((status) => status.retryable) && allowed.has('gate-retry');
-  const nothingToDo = !hasStageActions && otherDecisions.length === 0 && !resumable && !cancelable && !canRetryDelivery
+  const nothingToDo = !hasStageActions && otherDecisions.length === 0 && !resumeOffered && !cancelable && !canRetryDelivery
     && !(issue?.code === 'version') && !gateRetries;
 
   return (
@@ -725,7 +748,7 @@ export function TaskDetail() {
         <span className={styles.taskMeta}>{details.mode === 'auto' ? 'Авто' : 'Вручную'}
           {template ? ` · ${template.title || template.template}` : ''} · {new Date(run.started_at).toLocaleDateString('ru-RU')}</span>
         <p className={styles.idea}><span className={styles.ideaLabel}>Бизнес-идея</span> {ideaTitle}
-          {' '}<button type="button" className={styles.linkButton} onClick={() => setActiveTab('idea')}>Подробности</button></p>
+          {' '}<button type="button" className={styles.linkButton} onClick={() => setActiveTab('idea')}>Полное описание</button></p>
       </header>
 
       <section className={styles.routePanel} aria-labelledby="route-heading">
@@ -763,8 +786,8 @@ export function TaskDetail() {
       <div className={styles.workspace}>
         <aside className={styles.contextCol} aria-label="Статус и контекст" data-testid="context-column">
           <section id="current-stage" className={`${styles.panel} ${styles.statusCard}`} aria-labelledby="current-stage-heading">
-            <p className={styles.eyebrow}>Где задача</p>
-            <h2 id="current-stage-heading">{currentStage?.title || (finished ? 'Задача завершена' : currentStageID || 'Этап не выбран')}</h2>
+            <p className={styles.eyebrow}>{stoppedAt ? 'Остановилась на этапе' : 'Где задача'}</p>
+            <h2 id="current-stage-heading">{finished ? 'Задача завершена' : stoppedAt ? stageTitle(stoppedAt.stage_id) : shownStageID ? stageName : 'Этап не выбран'}</h2>
             {serverCurrent ? <StageStatusChip status={serverCurrent.status} /> : null}
             {serverCurrent
               ? serverCurrent.visit_count > 1 && <p className={styles.stageState} data-quiet="true">
@@ -814,6 +837,143 @@ export function TaskDetail() {
           )}
         </aside>
 
+        <aside className={styles.actionCol} aria-label="Действия" data-testid="action-column">
+          <h2>Действия</h2>
+          {actionStatus && <p className={styles.actionStatus} role="status">{actionStatus}</p>}
+          {working && <p className={styles.waiting} role="status"><span className={styles.buttonSpinner} aria-hidden="true" />Ждём ответ сервера…</p>}
+          {actionError && <p className={styles.actionError} role="alert">{actionError}</p>}
+          {resultAccepted && <p className={styles.resultAccepted} role="status">Результат принят</p>}
+          {needActor && <label className={styles.questionLabel}>Ваш идентификатор
+            <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Идентификатор участника" />
+          </label>}
+
+          {nothingToDo && <p className={styles.noActions} data-testid="no-actions">
+            {finished ? 'Задача завершена: действий нет.' : `Сейчас у вас нет доступных действий. ${waitingFor ? `Ждём: ${waitingFor}.` : stageState + '.'}`}
+            {principal && principal.roles.length > 0 ? ` Ваши роли: ${principal.roles.map((role) => roleLabels[role] ?? role).join(', ')}.` : ''}
+            {resumableStatuses.includes(run.status) && !canResume ? ` Продолжить задачу могут: ${permissionRoles['run:resume']}.` : ''}
+            {cancelableStatuses.includes(run.status) && !canCancel ? ` Отменить задачу могут: ${permissionRoles['run:cancel']}.` : ''}
+          </p>}
+
+          {hasStageActions && <section className={styles.group} aria-label={`Этап «${stageName}»`}>
+            <h3>Этап «{stageName}»</h3>
+            {allowed.has('confirm') && <button type="button" className={styles.primary} disabled={working || !pending?.subject_hash}
+              title={pending?.subject_hash ? undefined : 'Запрос решения ещё не загружен: подождите обновления страницы'}
+              onClick={() => void perform('Этап принят', () => confirmTaskStage(run.run_id, currentStageID, pending?.subject_hash ?? ''), 'confirm')}>
+              <BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `${actionVerbs.accept}: ${stageTitle(confirmTargetID)}` : actionVerbs.acceptFinal}</BusyLabel></button>}
+            {confirmHint && <p className={styles.sectionNote}>{confirmHint}</p>}
+            {questionDecisions.map(renderDecision)}
+            {currentDecision && decisionActions(currentDecision).length > 0 && renderDecision(currentDecision)}
+
+            {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && !choiceOwnsStage && <>
+              {allowed.has('results') && !showResultForm && !approveDecidesStage && <button type="button" className={currentExecutor !== 'agent' ? styles.primary : undefined} disabled={working}
+                onClick={() => setShowResultForm(true)}><Icon name="human" size={14} /> {actionVerbs.submitResult}</button>}
+              {allowed.has('results') && showResultForm && <p className={styles.sectionNote}>Форма результата открыта в основной области.</p>}
+              {allowed.has('take') && !details.stage_owners[currentStageID] && <button type="button" disabled={working}
+                onClick={() => void perform('Этап взят', () => takeTaskStage(run.run_id, currentStageID), 'take')}>
+                <BusyLabel busy={working && activeKey === 'take'} text="Сохраняем…">{actionVerbs.takeStage}</BusyLabel>
+              </button>}
+              {allowed.has('run-agent') && currentStage?.agent && <button type="button" className={currentExecutor === 'agent' ? styles.primary : undefined} disabled={working}
+                onClick={() => void startAgent(pending?.actions.includes('retry') ? 'refine' : 'run')}>
+                <BusyLabel busy={working && activeKey === 'run-agent'} text="Запускаем…"><Icon name="agent" size={14} /> {pending?.actions.includes('retry') ? actionVerbs.refineWithAgent : actionVerbs.runAgent}</BusyLabel>
+              </button>}
+              {allowed.has('run-agent') && currentStage?.agent && <p className={styles.sectionNote}>Агент: {currentStage?.agent}. Результат вы примете сами.</p>}
+            </>}
+
+            {allowed.has('executor') && currentStage?.agent && currentExecutor === 'agent' && <div className={styles.inlineRow}>
+              <span>Исполнитель этапа</span>
+              <button type="button" disabled={working}
+                onClick={() => void perform('Исполнитель сменён', () => setTaskStageExecutor(run.run_id, currentStageID, 'human'), 'executor')}>
+                {actionVerbs.changeExecutor}: на человека
+              </button>
+            </div>}
+
+            {grillAllowed && pending && <GrillAnswerForm approval={pending} answer={grillAnswer} setAnswer={setGrillAnswer} disabled={working} activeKey={activeKey}
+              canAnswer={allowed.has('grill/answer')} canNewVersion={allowed.has('grill/new-version')} canDone={allowed.has('grill/done')}
+              onAnswer={() => void perform('Ответ отправлен', () => answerTaskGrill(run.run_id, currentStageID, grillAnswer.trim()), 'answer')}
+              onNewVersion={() => void perform('Новая версия отправлена', () =>
+                submitTaskGrillVersion(run.run_id, currentStageID, grillAnswer.trim()), 'new-version')}
+              onDone={() => void perform('Грилл завершён', () => finishTaskGrill(run.run_id, currentStageID), 'done')} />}
+
+            {allowed.has('plan/approve') && pending?.trigger === 'delivery_plan' && <div className={styles.planApproval}>
+              <p>Хеш плана: <CopyableHash value={pending.subject_hash} label="хеш плана" /></p>
+              <button type="button" className={styles.primary} disabled={working} onClick={() => void perform('План принят', () =>
+                approveTaskDeliveryPlan(run.run_id, pending.subject_hash), 'plan')}><BusyLabel busy={working && activeKey === 'plan'} text="Сохраняем…">{actionVerbs.acceptPlan}</BusyLabel></button>
+            </div>}
+
+            {currentStage && gateRetries && <GateRetryActions stage={currentGateStage} working={working}
+              onRetry={(gate) => void perform('Гейт запущен повторно', () => retryTaskGate(run.run_id, currentStageID, gate), 'gate-retry')} />}
+          </section>}
+
+          {issue?.code === 'version' && <section className={styles.group} aria-label="Версия задачи">
+            <h3>Версия задачи</h3>
+            <button type="button" disabled={working}
+              onClick={() => void perform('Задача продолжена на текущей версии', () => resumeRunWithRuntimeUpgrade(run.run_id), 'resume')}>
+              <BusyLabel busy={working && activeKey === 'resume'} text="Запускаем…">{actionVerbs.resumeOnCurrentVersion}</BusyLabel>
+            </button>
+          </section>}
+
+          {currentStage && exceptionsVisible && <section className={`${styles.group} ${styles.exceptions}`} aria-label="Исключения">
+            <h3>Исключения</h3>
+            <p className={styles.sectionNote}>Нужна причина: она попадёт в журнал.</p>
+            {allowed.has('skip') && <form className={styles.reasonForm} onSubmit={submitReason('skip')}>
+              <label>Причина пропуска
+                <input value={skipReason} onChange={(event) => setSkipReason(event.target.value)} required maxLength={4000} />
+              </label>
+              <button disabled={working || !skipReason.trim()}>{actionVerbs.skip}</button>
+            </form>}
+            {allowed.has('return') && returnOptions.length > 0 && <form className={styles.reasonForm} onSubmit={submitReason('return')}>
+              <label>Вернуть на этап
+                <select value={effectiveReturnTarget} onChange={(event) => setReturnTarget(event.target.value)}>
+                  {returnOptions.map((route) => <option key={route.to} value={route.to}>{stageTitle(route.to)}</option>)}
+                </select>
+              </label>
+              <label>Причина возврата
+                <input value={returnReason} onChange={(event) => setReturnReason(event.target.value)} required maxLength={4000} />
+              </label>
+              <button disabled={working || !returnReason.trim()}>{actionVerbs.returnStage}</button>
+            </form>}
+            {allowed.has('override') && canOverride && <form className={`${styles.reasonForm} ${styles.overrideForm}`} onSubmit={submitReason('override')}>
+              <p>Только для администратора. Исход гейта останется «провал»; обход запишется с вашим именем, причиной и версией результата.</p>
+              <label>Причина обхода проверки
+                <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
+              </label>
+              <button disabled={working || !overrideReason.trim()}>{actionVerbs.overrideCheck}</button>
+            </form>}
+          </section>}
+          {currentStage && allowed.has('override') && !canOverride && <p className={styles.noActions}>
+            Провести задачу дальше после провала обязательного гейта может только администратор.</p>}
+
+          {otherDecisions.length > 0 && <section className={styles.group} aria-label="Другие запросы решения">
+            <h3>Другие запросы решения</h3>
+            {otherDecisions.map(renderDecision)}
+          </section>}
+
+          {(resumeOffered || cancelable || canRetryDelivery) && <section className={styles.group} aria-label="Управление задачей">
+            <h3>Задача целиком</h3>
+            {resumeOffered && <>
+              <button type="button" className={hasStageActions ? undefined : styles.primary} disabled={working} onClick={() => void sendRunCommand('resume')}><BusyLabel busy={working && activeKey === 'resume'} text="Запускаем…">{actionVerbs.resumeTask}</BusyLabel></button>
+              <p className={styles.sectionNote}>Запускает задачу снова с закреплённой версией шаблона и с текущего места.</p>
+              {run.status === 'stopped' && budgetGrantable && (
+                <div className={styles.budgetGrant}>
+                  <p>Задачу остановил бюджет. «{actionVerbs.resumeTask}» новый бюджет не выдаёт. Выдать ещё один бюджет того же размера можно явным решением с причиной; дневной бюджет не выдаётся.</p>
+                  <input value={budgetReason} onChange={(event) => setBudgetReason(event.target.value)}
+                    aria-label="Причина выдачи бюджета" placeholder="Причина выдачи бюджета" />
+                  <button type="button" disabled={working || budgetReason.trim() === ''} onClick={() => void sendRunCommand('grant')}>
+                    <BusyLabel busy={working && activeKey === 'grant'} text="Запускаем…">{actionVerbs.grantBudget}</BusyLabel>
+                  </button>
+                </div>
+              )}
+            </>}
+            {canRetryDelivery && <button type="button" disabled={working}
+              onClick={() => void perform('Доставка повторена', () => retryDelivery(run.run_id), 'delivery')}>
+              <BusyLabel busy={working && activeKey === 'delivery'} text="Запускаем…">{actionVerbs.retryDelivery}</BusyLabel>
+            </button>}
+            {cancelable && <button type="button" disabled={working} onClick={() => void sendRunCommand('cancel')}>
+              <BusyLabel busy={working && activeKey === 'cancel'} text="Сохраняем…">{actionVerbs.cancelTask}</BusyLabel></button>}
+          </section>}
+
+          <TrackerActions runId={run.run_id} tracker={tracker} />
+        </aside>
         <>
           {(questionDecisions.length > 0 || (grillAllowed && pending) || (currentDecision?.kind === 'check_decision')
             || (allowed.has('plan/approve') && pending?.trigger === 'delivery_plan') || (showResultForm && allowed.has('results'))) && (
@@ -865,9 +1025,9 @@ export function TaskDetail() {
                     </div> : (details.results[currentStageID] ?? []).at(-1)?.result === 'link' &&
                       <a href={(details.results[currentStageID] ?? []).at(-1)?.content} target="_blank" rel="noreferrer">Открыть результат</a>}
                   </section>}
-                <h3 className={styles.viewHeading}>Этап «{viewStageDef?.title ?? viewID}»{viewID !== currentStageID ? ' (не текущий)' : ''}</h3>
+                <h3 className={styles.viewHeading}>Этап «{viewStageDef?.title ?? viewID}»{currentStageID && viewID !== currentStageID ? ' (не текущий)' : ''}</h3>
                 <ResultHistory title={viewStageDef?.title ?? viewID} stageID={viewID} revisions={details.results[viewID] ?? []}
-                  artifacts={viewFiles} runID={run.run_id} />
+                  artifacts={viewID === currentStageID && currentOutputArtifacts.length > 0 ? [] : viewFiles} runID={run.run_id} />
                 {briefArtifacts.length > 1 && <details className={styles.briefHistory}>
                   <summary>Ответы и уточнения ({briefArtifacts.length - 1})</summary>
                   <div className={styles.resultFiles}>{briefArtifacts.slice(1).map((artifact, index) =>
@@ -968,145 +1128,6 @@ export function TaskDetail() {
           </section>
         </>
 
-        <aside className={styles.actionCol} aria-label="Действия" data-testid="action-column">
-          <h2>Действия</h2>
-          {actionStatus && <p className={styles.actionStatus} role="status">{actionStatus}</p>}
-          {working && <p className={styles.waiting} role="status"><span className={styles.buttonSpinner} aria-hidden="true" />Ждём ответ сервера…</p>}
-          {actionError && <p className={styles.actionError} role="alert">{actionError}</p>}
-          {resultAccepted && <p className={styles.resultAccepted} role="status">Результат принят</p>}
-          {needActor && <label className={styles.questionLabel}>Ваш идентификатор
-            <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Идентификатор участника" />
-          </label>}
-
-          {nothingToDo && <p className={styles.noActions} data-testid="no-actions">
-            {finished ? 'Задача завершена: действий нет.' : `Сейчас у вас нет доступных действий. ${waitingFor ? `Ждём: ${waitingFor}.` : stageState + '.'}`}
-            {principal && principal.roles.length > 0 ? ` Ваши роли: ${principal.roles.map((role) => roleLabels[role] ?? role).join(', ')}.` : ''}
-            {resumableStatuses.includes(run.status) && !canResume ? ` Продолжить задачу могут: ${permissionRoles['run:resume']}.` : ''}
-            {cancelableStatuses.includes(run.status) && !canCancel ? ` Отменить задачу могут: ${permissionRoles['run:cancel']}.` : ''}
-          </p>}
-
-          {hasStageActions && <section className={styles.group} aria-label={`Этап «${stageName}»`}>
-            <h3>Этап «{stageName}»</h3>
-            {questionDecisions.map(renderDecision)}
-            {currentDecision && decisionActions(currentDecision).length > 0 && renderDecision(currentDecision)}
-
-            {currentStage && (allowed.has('take') || allowed.has('results') || allowed.has('run-agent')) && !choiceOwnsStage && <>
-              {allowed.has('results') && !showResultForm && <button type="button" className={currentExecutor !== 'agent' ? styles.primary : undefined} disabled={working}
-                onClick={() => setShowResultForm(true)}><Icon name="human" size={14} /> {actionVerbs.submitResult}</button>}
-              {allowed.has('results') && showResultForm && <p className={styles.sectionNote}>Форма результата открыта в основной области.</p>}
-              {allowed.has('take') && !details.stage_owners[currentStageID] && <button type="button" disabled={working}
-                onClick={() => void perform('Этап взят', () => takeTaskStage(run.run_id, currentStageID), 'take')}>
-                <BusyLabel busy={working && activeKey === 'take'} text="Сохраняем…">{actionVerbs.takeStage}</BusyLabel>
-              </button>}
-              {allowed.has('run-agent') && currentStage?.agent && <button type="button" className={currentExecutor === 'agent' ? styles.primary : undefined} disabled={working}
-                onClick={() => void startAgent(pending?.actions.includes('retry') ? 'refine' : 'run')}>
-                <BusyLabel busy={working && activeKey === 'run-agent'} text="Запускаем…"><Icon name="agent" size={14} /> {pending?.actions.includes('retry') ? actionVerbs.refineWithAgent : actionVerbs.runAgent}</BusyLabel>
-              </button>}
-              {allowed.has('run-agent') && currentStage?.agent && <p className={styles.sectionNote}>Агент: {currentStage?.agent}. Результат вы примете сами.</p>}
-            </>}
-
-            {allowed.has('executor') && currentStage?.agent && <div className={styles.inlineRow}>
-              <span>Исполнитель этапа</span>
-              <button type="button" disabled={working}
-                onClick={() => void perform('Исполнитель сменён', () => setTaskStageExecutor(run.run_id, currentStageID,
-                  currentExecutor === 'agent' ? 'human' : 'agent'), 'executor')}>
-                {actionVerbs.changeExecutor}: {currentExecutor === 'agent' ? 'на человека' : 'на агента'}
-              </button>
-            </div>}
-
-            {allowed.has('confirm') && <button type="button" className={styles.primary} disabled={working || !pending?.subject_hash}
-              title={pending?.subject_hash ? undefined : 'Запрос решения ещё не загружен: подождите обновления страницы'}
-              onClick={() => void perform('Этап принят', () => confirmTaskStage(run.run_id, currentStageID, pending?.subject_hash ?? ''), 'confirm')}>
-              <BusyLabel busy={working && activeKey === 'confirm'} text="Сохраняем…">{confirmTargetID ? `${actionVerbs.accept}: ${stageTitle(confirmTargetID)}` : actionVerbs.acceptFinal}</BusyLabel></button>}
-            {confirmHint && <p className={styles.sectionNote}>{confirmHint}</p>}
-
-            {grillAllowed && pending && <GrillAnswerForm approval={pending} answer={grillAnswer} setAnswer={setGrillAnswer} disabled={working} activeKey={activeKey}
-              canAnswer={allowed.has('grill/answer')} canNewVersion={allowed.has('grill/new-version')} canDone={allowed.has('grill/done')}
-              onAnswer={() => void perform('Ответ отправлен', () => answerTaskGrill(run.run_id, currentStageID, grillAnswer.trim()), 'answer')}
-              onNewVersion={() => void perform('Новая версия отправлена', () =>
-                submitTaskGrillVersion(run.run_id, currentStageID, grillAnswer.trim()), 'new-version')}
-              onDone={() => void perform('Грилл завершён', () => finishTaskGrill(run.run_id, currentStageID), 'done')} />}
-
-            {allowed.has('plan/approve') && pending?.trigger === 'delivery_plan' && <div className={styles.planApproval}>
-              <p>Хеш плана: <CopyableHash value={pending.subject_hash} label="хеш плана" /></p>
-              <button type="button" className={styles.primary} disabled={working} onClick={() => void perform('План принят', () =>
-                approveTaskDeliveryPlan(run.run_id, pending.subject_hash), 'plan')}><BusyLabel busy={working && activeKey === 'plan'} text="Сохраняем…">{actionVerbs.acceptPlan}</BusyLabel></button>
-            </div>}
-
-            {currentStage && gateRetries && <GateRetryActions stage={currentGateStage} working={working}
-              onRetry={(gate) => void perform('Гейт запущен повторно', () => retryTaskGate(run.run_id, currentStageID, gate), 'gate-retry')} />}
-          </section>}
-
-          {issue?.code === 'version' && <section className={styles.group} aria-label="Версия задачи">
-            <h3>Версия задачи</h3>
-            <button type="button" disabled={working}
-              onClick={() => void perform('Задача продолжена на текущей версии', () => resumeRunWithRuntimeUpgrade(run.run_id), 'resume')}>
-              <BusyLabel busy={working && activeKey === 'resume'} text="Запускаем…">{actionVerbs.resumeOnCurrentVersion}</BusyLabel>
-            </button>
-          </section>}
-
-          {currentStage && exceptionsVisible && <section className={`${styles.group} ${styles.exceptions}`} aria-label="Исключения">
-            <h3>Исключения</h3>
-            <p className={styles.sectionNote}>Нужна причина: она попадёт в журнал.</p>
-            {allowed.has('skip') && <form className={styles.reasonForm} onSubmit={submitReason('skip')}>
-              <label>Причина пропуска
-                <input value={skipReason} onChange={(event) => setSkipReason(event.target.value)} required maxLength={4000} />
-              </label>
-              <button disabled={working || !skipReason.trim()}>{actionVerbs.skip}</button>
-            </form>}
-            {allowed.has('return') && returnOptions.length > 0 && <form className={styles.reasonForm} onSubmit={submitReason('return')}>
-              <label>Вернуть на этап
-                <select value={effectiveReturnTarget} onChange={(event) => setReturnTarget(event.target.value)}>
-                  {returnOptions.map((route) => <option key={route.to} value={route.to}>{stageTitle(route.to)}</option>)}
-                </select>
-              </label>
-              <label>Причина возврата
-                <input value={returnReason} onChange={(event) => setReturnReason(event.target.value)} required maxLength={4000} />
-              </label>
-              <button disabled={working || !returnReason.trim()}>{actionVerbs.returnStage}</button>
-            </form>}
-            {allowed.has('override') && canOverride && <form className={`${styles.reasonForm} ${styles.overrideForm}`} onSubmit={submitReason('override')}>
-              <p>Только для администратора. Исход гейта останется «провал»; обход запишется с вашим именем, причиной и версией результата.</p>
-              <label>Причина обхода проверки
-                <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} required maxLength={4000} />
-              </label>
-              <button disabled={working || !overrideReason.trim()}>{actionVerbs.overrideCheck}</button>
-            </form>}
-          </section>}
-          {currentStage && allowed.has('override') && !canOverride && <p className={styles.noActions}>
-            Провести задачу дальше после провала обязательного гейта может только администратор.</p>}
-
-          {otherDecisions.length > 0 && <section className={styles.group} aria-label="Другие запросы решения">
-            <h3>Другие запросы решения</h3>
-            {otherDecisions.map(renderDecision)}
-          </section>}
-
-          {(resumable || cancelable || canRetryDelivery) && <section className={styles.group} aria-label="Управление задачей">
-            <h3>Задача целиком</h3>
-            {resumable && <>
-              <button type="button" className={hasStageActions ? undefined : styles.primary} disabled={working} onClick={() => void sendRunCommand('resume')}><BusyLabel busy={working && activeKey === 'resume'} text="Запускаем…">{actionVerbs.resumeTask}</BusyLabel></button>
-              <p className={styles.sectionNote}>Запускает задачу снова с закреплённой версией шаблона и с текущего места.</p>
-              {run.status === 'stopped' && budgetGrantable && (
-                <div className={styles.budgetGrant}>
-                  <p>Задачу остановил бюджет. «{actionVerbs.resumeTask}» новый бюджет не выдаёт. Выдать ещё один бюджет того же размера можно явным решением с причиной; дневной бюджет не выдаётся.</p>
-                  <input value={budgetReason} onChange={(event) => setBudgetReason(event.target.value)}
-                    aria-label="Причина выдачи бюджета" placeholder="Причина выдачи бюджета" />
-                  <button type="button" disabled={working || budgetReason.trim() === ''} onClick={() => void sendRunCommand('grant')}>
-                    <BusyLabel busy={working && activeKey === 'grant'} text="Запускаем…">{actionVerbs.grantBudget}</BusyLabel>
-                  </button>
-                </div>
-              )}
-            </>}
-            {canRetryDelivery && <button type="button" disabled={working}
-              onClick={() => void perform('Доставка повторена', () => retryDelivery(run.run_id), 'delivery')}>
-              <BusyLabel busy={working && activeKey === 'delivery'} text="Запускаем…">{actionVerbs.retryDelivery}</BusyLabel>
-            </button>}
-            {cancelable && <button type="button" disabled={working} onClick={() => void sendRunCommand('cancel')}>
-              <BusyLabel busy={working && activeKey === 'cancel'} text="Сохраняем…">{actionVerbs.cancelTask}</BusyLabel></button>}
-          </section>}
-
-          <TrackerActions runId={run.run_id} tracker={tracker} />
-        </aside>
       </div>
     </main>
   );
@@ -1177,6 +1198,7 @@ function IssuePanel({ runID, issue }: {
       <Icon name="failed" size={18} />
       <p className={styles.failureTitle}>{issue.heading}</p>
     </div>
+    <p className={styles.failureReason}>{issue.text}</p>
     <p>{issue.explanation}</p>
     <details className={styles.details}>
       <summary>Подробности</summary>

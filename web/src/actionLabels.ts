@@ -9,6 +9,7 @@ export const actionVerbs = {
   refineWithAgent: 'Доработать агентом',
   changeExecutor: 'Сменить исполнителя',
   accept: 'Принять и перейти',
+  acceptHere: 'Принять',
   acceptFinal: 'Принять и завершить задачу',
   acceptPlan: 'Принять план доставки',
   reject: 'Отклонить',

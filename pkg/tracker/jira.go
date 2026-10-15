@@ -13,10 +13,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
-
-	"github.com/arturpanteleev/ai-team/pkg/config"
-	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 const jiraResponseLimit = 1 << 20
@@ -26,87 +22,6 @@ const jiraResponseLimit = 1 << 20
 // configured Jira host, never searched for inside arbitrary text: substrings
 // such as UTF-8, SHA-256 or CVE-2024 have the same shape as issue keys.
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]*$`)
-
-// JiraAdapter changes Jira Cloud status and posts stage comments. It only
-// sends data from ai-team to Jira and never polls or mutates ai-team state.
-type JiraAdapter struct {
-	settings config.JiraConfig
-	token    string
-	client   *http.Client
-}
-
-// NewJiraAdapter keeps the HTTP client injectable so callers and tests can
-// control all network effects. A missing token is reported per event, which
-// lets the web task service start and record integration errors without
-// blocking task execution.
-func NewJiraAdapter(settings config.JiraConfig, token string, client *http.Client) *JiraAdapter {
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &JiraAdapter{settings: settings, token: token, client: client}
-}
-
-func (a *JiraAdapter) HandleTaskEvent(ctx context.Context, event TaskEvent) error {
-	if a == nil || event.Type != "attempt_finished" {
-		return nil
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(a.settings.BaseURL), "/")
-	issueKey, err := issueKeyFromLinks(event.ExternalLinks, baseURL)
-	if err != nil {
-		return err
-	}
-	if issueKey == "" {
-		return nil
-	}
-	if strings.TrimSpace(a.token) == "" {
-		return fmt.Errorf("jira credential environment variable %s is empty", a.settings.TokenEnv)
-	}
-	if event.TaskID <= 0 {
-		return errors.New("ai-team task link is unavailable")
-	}
-	if baseURL == "" {
-		return errors.New("jira base URL is empty")
-	}
-	targetStatus := strings.TrimSpace(a.settings.StageStatuses[event.Stage])
-	// attempt_finished is emitted for failed, rejected, infra-failed and
-	// skipped attempts too. Only a successful stage may move the issue; every
-	// outcome is still reported in the comment.
-	if targetStatus != "" && attemptSucceeded(event.Data) {
-		if err := a.transitionStatus(ctx, baseURL, issueKey, targetStatus); err != nil {
-			return err
-		}
-	}
-	return a.addComment(ctx, baseURL, issueKey, event, a.taskURL(event.TaskID))
-}
-
-// attemptSucceeded reports whether attempt_finished data describes a passed
-// stage. Missing fields are treated as unsuccessful.
-func attemptSucceeded(data map[string]any) bool {
-	field := func(key string) string {
-		value, _ := data[key].(string)
-		return strings.TrimSpace(value)
-	}
-	return field("status") == workflow.StatusPassed &&
-		field("outcome") == string(workflow.OutcomePassed) &&
-		field("decision") != string(workflow.DecisionRejected)
-}
-
-// issueKeyFromLinks accepts a key only from a field that is exactly KEY-N or
-// from a URL on the configured Jira host whose path is <base path>/browse/KEY-N.
-func issueKeyFromLinks(links []string, baseURL string) (string, error) {
-	var found string
-	for _, link := range links {
-		match := issueKeyFromLink(strings.TrimSpace(link), baseURL)
-		if match == "" {
-			continue
-		}
-		if found != "" && found != match {
-			return "", errors.New("external links contain multiple Jira issue keys")
-		}
-		found = match
-	}
-	return found, nil
-}
 
 func issueKeyFromLink(link, baseURL string) string {
 	if issueKeyPattern.MatchString(link) {
@@ -162,131 +77,6 @@ func explicitPort(u *url.URL) string {
 	return port
 }
 
-func (a *JiraAdapter) taskURL(taskID int64) string {
-	base := strings.TrimRight(strings.TrimSpace(a.settings.WebBaseURL), "/")
-	return fmt.Sprintf("%s/pipelines/%d", base, taskID)
-}
-
-type jiraIssueResponse struct {
-	Fields struct {
-		Status struct {
-			Name string `json:"name"`
-		} `json:"status"`
-	} `json:"fields"`
-}
-
-type jiraTransitionsResponse struct {
-	Transitions []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		To   struct {
-			Name string `json:"name"`
-		} `json:"to"`
-	} `json:"transitions"`
-}
-
-func (a *JiraAdapter) transitionStatus(ctx context.Context, baseURL, issueKey, target string) error {
-	issuePath := "/rest/api/3/issue/" + url.PathEscape(issueKey)
-	var current jiraIssueResponse
-	if err := a.requestJSON(ctx, http.MethodGet, baseURL+issuePath+"?fields=status", nil, &current); err != nil {
-		return err
-	}
-	if strings.EqualFold(strings.TrimSpace(current.Fields.Status.Name), target) {
-		return nil
-	}
-	var transitions jiraTransitionsResponse
-	if err := a.requestJSON(ctx, http.MethodGet, baseURL+issuePath+"/transitions", nil, &transitions); err != nil {
-		return err
-	}
-	transitionID := ""
-	for _, candidate := range transitions.Transitions {
-		if strings.EqualFold(strings.TrimSpace(candidate.To.Name), target) {
-			transitionID = candidate.ID
-			break
-		}
-	}
-	if transitionID == "" {
-		return fmt.Errorf("jira has no available transition to status %q", target)
-	}
-	body := struct {
-		Transition struct {
-			ID string `json:"id"`
-		} `json:"transition"`
-	}{}
-	body.Transition.ID = transitionID
-	return a.requestJSON(ctx, http.MethodPost, baseURL+issuePath+"/transitions", body, nil)
-}
-
-// jiraCommentLookback is how many of the newest issue comments are checked
-// for an attempt marker before posting. A replay happens right after the
-// original comment, so it is among the newest ones.
-const jiraCommentLookback = 50
-
-func (a *JiraAdapter) addComment(ctx context.Context, baseURL, issueKey string, event TaskEvent, taskURL string) error {
-	result := stageResult(event)
-	blocks := []adfBlock{{
-		Type: "paragraph",
-		Content: []adfText{
-			{Type: "text", Text: "ai-team task: " + taskURL},
-		},
-	}, {
-		Type:    "paragraph",
-		Content: []adfText{{Type: "text", Text: result}},
-	}}
-	path := "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment"
-	marker := attemptMarker(event.AttemptID)
-	if marker != "" {
-		// The marker makes the comment idempotent per attempt: a replay after
-		// a crash between Jira accepting the comment and the local cursor
-		// commit finds it and does not post a second one.
-		posted, err := a.hasRecentComment(ctx, baseURL+path, marker)
-		if err != nil {
-			return err
-		}
-		if posted {
-			return nil
-		}
-		blocks = append(blocks, adfBlock{Type: "paragraph", Content: []adfText{{Type: "text", Text: marker}}})
-	}
-	body := struct {
-		Body adfDocument `json:"body"`
-	}{Body: adfDocument{Version: 1, Type: "doc", Content: blocks}}
-	return a.requestJSON(ctx, http.MethodPost, baseURL+path, body, nil)
-}
-
-// attemptMarker is the text node that identifies the comment of one attempt.
-func attemptMarker(attemptID string) string {
-	attemptID = strings.TrimSpace(attemptID)
-	if attemptID == "" {
-		return ""
-	}
-	return "ai-team attempt: " + attemptID
-}
-
-type jiraCommentsResponse struct {
-	Comments []struct {
-		Body json.RawMessage `json:"body"`
-	} `json:"comments"`
-}
-
-func (a *JiraAdapter) hasRecentComment(ctx context.Context, endpoint, marker string) (bool, error) {
-	query := url.Values{"orderBy": {"-created"}, "maxResults": {fmt.Sprint(jiraCommentLookback)}}
-	var comments jiraCommentsResponse
-	if err := a.requestJSON(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil, &comments); err != nil {
-		return false, err
-	}
-	for _, comment := range comments.Comments {
-		var body any
-		if err := json.Unmarshal(comment.Body, &body); err != nil {
-			continue
-		}
-		if adfHasText(body, marker) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // adfHasText reports whether an ADF tree has a text node equal to want.
 func adfHasText(node any, want string) bool {
 	switch value := node.(type) {
@@ -321,19 +111,6 @@ type adfText struct {
 	Text string `json:"text"`
 }
 
-func stageResult(event TaskEvent) string {
-	parts := []string{"Stage result: " + event.Stage}
-	for _, key := range []string{"status", "outcome", "decision", "execution"} {
-		if value, ok := event.Data[key]; ok && value != nil {
-			text := strings.TrimSpace(fmt.Sprint(value))
-			if text != "" {
-				parts = append(parts, key+"="+text)
-			}
-		}
-	}
-	return strings.Join(parts, "; ")
-}
-
 func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, requestBody, responseBody any) error {
 	var body io.Reader
 	if requestBody != nil {
@@ -342,6 +119,9 @@ func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, 
 			return fmt.Errorf("encode jira request: %w", err)
 		}
 		body = bytes.NewReader(encoded)
+	}
+	if strings.TrimSpace(a.token) == "" {
+		return fmt.Errorf("jira credential environment variable %s is empty", a.settings.TokenEnv)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
@@ -358,7 +138,14 @@ func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, 
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("jira %s %s returned HTTP %d", method, request.URL.EscapedPath(), response.StatusCode)
+		err := fmt.Errorf("jira %s %s returned HTTP %d", method, request.URL.EscapedPath(), response.StatusCode)
+		switch response.StatusCode {
+		case http.StatusNotFound:
+			return fmt.Errorf("%w: %w", err, ErrNotFound)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf("%w: %w", err, ErrForbidden)
+		}
+		return err
 	}
 	if responseBody == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, jiraResponseLimit))

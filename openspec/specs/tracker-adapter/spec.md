@@ -1,128 +1,208 @@
 ## Purpose
 
-Defines one-way task tracker adapters and their failure isolation contract.
+Defines the abstract task tracker, the explicit one-to-one link between a task
+and a tracker issue, and the outbound synchronization contract with its failure
+isolation. Inbound synchronization is out of scope here and builds on the
+tracker's change-reading method.
 
 ## Requirements
 
-### Requirement: Task tracker adapter consumes durable events
+### Requirement: Task tracker is an abstract adapter interface
 
-The web task service MUST deliver completed `attempt_finished` events to its
-configured tracker adapter outside the pipeline execution path. Adapter
-failures MUST NOT change or block a task outcome. The task event remains the
-source input; the adapter MUST NOT write inbound tracker state into ai-team.
+The `tracker` package MUST define a `Tracker` interface with: a key format
+check, reading an issue (existence and accessibility), listing allowed
+transitions, an idempotent transition, a comment carrying an idempotency key,
+and reading status changes after an opaque cursor. Adapters MUST be found by the
+name configured in `tracker.adapter` (or the only configured adapter block)
+through a registry. Built-in adapters are `jira` and `fake`. Adapter failures
+MUST be mapped onto the sentinel classes not-found, forbidden, invalid key and
+no-transition. Reading changes MUST report whether a change was made by
+ai-team's own account, and an empty cursor MUST start from the current tail.
 
-#### Scenario: Completed stage is published
+#### Scenario: Adapter is selected by name
 
-- **WHEN** SQLite stores an `attempt_finished` event for a task
-- **THEN** the configured adapter MUST receive its run, stage, result data, and
-  task external links
-- **AND** adapter work MUST run independently of the task execution result
+- **WHEN** the configuration enables exactly one adapter block, or sets
+  `tracker.adapter`
+- **THEN** the registry MUST build that adapter
+- **AND** an unknown adapter name or a missing adapter block MUST be a
+  configuration error
 
 #### Scenario: Adapter is absent
 
-- **WHEN** no tracker adapter is configured
-- **THEN** task event processing MUST continue without tracker requests
+- **WHEN** no tracker is configured
+- **THEN** task event processing MUST continue without tracker requests and the
+  tracker API MUST report that no tracker is configured
 
-### Requirement: Jira maps configured stages and comments on the task
+### Requirement: A task links to at most one issue and an issue to at most one task
 
-The Jira adapter MUST find the issue key in the task's `external_links`. A key
-is recognized only when an external-link field, after trimming surrounding
-whitespace, is exactly `KEY-N`, or when it is
-an `http`/`https` URL whose host name equals the `base_url` host name
-(case-insensitive), whose port equals the `base_url` port (a scheme's default
-port is equal to an omitted one) and whose path is `<base_url path>/browse/KEY-N`;
-trailing `/` characters, a query string and a `#` fragment are allowed. The key
-in such a URL is matched case-insensitively and normalized to upper case. The
-adapter MUST NOT search for a key inside arbitrary text: a combined field such
-as `APP-12 https://example.atlassian.net/browse/APP-12` or a bare lowercase
-field such as `app-12` is not recognized. For an `attempt_finished`
-event it MUST post a comment containing the ai-team task URL and stage result,
-whatever the outcome. When `tracker.jira.stage_statuses` maps that stage and
-the attempt succeeded (`status` is `passed`, `outcome` is `passed` and
-`decision` is not `rejected`), the adapter MUST transition the issue to the
-configured destination status before posting the comment. Any other outcome
-(failed, infra-failed, skipped, rejected or missing fields) MUST NOT transition
-the issue. A stage without a status mapping still receives a result comment.
-No Jira response or webhook may mutate the ai-team task.
+The task-to-issue link MUST be an explicit record (`tracker` and `issue_key`),
+never derived from `external_links`. The database MUST enforce that a task has
+at most one link and an issue at most one task. Setting a link MUST check the
+key format, that the issue exists and is accessible, and that neither side is
+already linked to something else; setting the same pair again MUST be
+idempotent. A link MUST NOT be replaced silently: the operator removes it
+explicitly first. Setting or removing a link requires the `tracker:link`
+permission and records the actor.
 
-#### Scenario: Mapped stage finishes successfully
+#### Scenario: Valid link
 
-- **WHEN** a task linked to Jira issue `APP-12` finishes a mapped stage with
-  `status=passed`, `outcome=passed` and a decision other than `rejected`
-- **THEN** Jira MUST transition to the configured target status when needed
-- **AND** receive a comment with the ai-team task link and stage result
+- **WHEN** an authorized actor links a task to an existing accessible issue
+- **THEN** the link MUST be stored with the actor and time
 
-#### Scenario: Mapped stage fails or is rejected
+#### Scenario: Link is rejected
 
-- **WHEN** a task linked to Jira issue `APP-12` finishes a mapped stage as
-  failed, infra-failed, skipped or rejected, or without outcome fields
-- **THEN** the adapter MUST NOT request a Jira transition
-- **AND** Jira MUST receive a comment with the ai-team task link and stage
-  result
+- **WHEN** the key has an invalid format, the issue does not exist, the issue is
+  not accessible, or the tracker cannot be reached
+- **THEN** no link MUST be stored and the response MUST name the reason
 
-#### Scenario: External link is not a recognized key format
+#### Scenario: One-to-one violation
+
+- **WHEN** a task that already has a link is linked to another issue, or an
+  issue linked to one task is linked to a second task
+- **THEN** the request MUST be refused with a conflict
+- **AND** the original link MUST remain until it is explicitly removed
+
+### Requirement: Existing external links migrate safely
+
+At the first start with a configured tracker, the server MUST move issue keys
+from legacy `external_links` into explicit links once per tracker, using the
+adapter's recognition of keys. A task MUST be linked only when exactly one
+distinct key is recognized and no other task references that key. Every other
+case MUST be stored as a visible conflict with a reason and MUST NOT create a
+link. Conflicts MUST stay until the operator links or unlinks the task
+explicitly. Later starts MUST NOT repeat the import.
+
+A Jira key is recognized only when a field, after trimming surrounding
+whitespace, is exactly `KEY-N`, or is an `http`/`https` URL whose host name and
+effective port equal those of `base_url` and whose path is
+`<base_url path>/browse/KEY-N` (trailing `/`, a query and a fragment allowed,
+key case-insensitive). The adapter MUST NOT search for a key inside arbitrary
+text.
+
+#### Scenario: Unambiguous link migrates
+
+- **WHEN** a task's external links contain exactly one recognized key that no
+  other task references
+- **THEN** the task MUST be linked to it
+
+#### Scenario: Ambiguity is a conflict
+
+- **WHEN** a task references several keys, or several tasks reference one key
+- **THEN** no link MUST be created for them
+- **AND** each case MUST be listed as a conflict with its reason
+
+#### Scenario: Key inside other text is not recognized
 
 - **WHEN** the only external link mentions a key inside other text, is a bare
-  lowercase key, or points to a host or non-default port other than the
-  `base_url` one
-- **THEN** the adapter MUST make no Jira request and record no
-  `integration_error`
+  lowercase key, or points to another host or non-default port than `base_url`
+- **THEN** the adapter MUST NOT recognize it
 
-#### Scenario: Task has no Jira key
+### Requirement: Stage events produce exactly the configured tracker operations
 
-- **WHEN** a completed stage belongs to a task without a Jira issue key in its
-  external links
-- **THEN** the adapter MUST make no Jira request
+For a task with a link, the server MUST map a stage ID through `tracker.on_enter`
+and `tracker.on_pass` to a tracker status or transition name (the legacy
+`jira.stage_statuses` is read as `on_pass`, and `on_pass` wins). An `attempt_started` event MUST request the
+`on_enter` target of its stage when one is configured and MUST NOT comment. An
+`attempt_finished` event MUST request the `on_pass` target only when the attempt
+passed (`status` is `passed`, `outcome` is `passed` and `decision` is not
+`rejected`), and MUST always post a comment with the honest outcome. A
+`check_overridden` event MUST post a comment with outcome `overridden` and MUST
+NOT request a transition. A failed, rejected, skipped, warning, unknown or
+missing outcome MUST NOT be reported as a pass and MUST NOT move the issue; the
+comment MUST say the stage did not pass. The outcome type MUST be open so new
+outcomes can be added without changing the planner. A failed operation MUST NOT
+prevent the remaining operations of the same event. A task without an explicit
+link MUST cause no tracker request.
 
-### Requirement: Jira failures become durable warnings
+#### Scenario: Stage entry and successful completion
 
-An adapter or Jira HTTP failure MUST append a durable SQLite `integration_error`
-event with warning severity and source event identity. The tracker consumer MUST
-advance its durable cursor only after handling the event or persisting its
-`integration_error`. A later cursor failure MUST leave the source event pending
-for replay. On first enable the cursor MUST start at the current event tail;
-later process starts MUST replay events after the saved cursor.
+- **WHEN** a linked task enters a mapped stage and then passes it
+- **THEN** the issue MUST receive exactly the `on_enter` and `on_pass`
+  transitions of that stage
+- **AND** receive one comment with the task link, the stage, the outcome and the
+  attempt ID
 
-If the integration cursor cannot be read or initialized at start, the
-consumer MUST NOT start in that process; it MUST NOT fall back to replaying
-from the beginning of the event store.
+#### Scenario: Failed, skipped or overridden stage
 
-Delivery is at least once across process crashes. If Jira accepts an operation
-and the process stops before the local cursor commits, that operation MAY be
-sent again after restart. Jira status changes are checked against current
-status. A comment for an event with an attempt ID MUST carry the text node
-`ai-team attempt: <attempt_id>`, and the adapter MUST check the newest issue
-comments for that marker before posting and MUST NOT post a second comment for
-the same attempt. If that check fails, the comment MUST NOT be posted and the
-failure is recorded as an `integration_error`.
+- **WHEN** a linked task finishes a mapped stage as failed, rejected, skipped or
+  with missing outcome fields, or a check is overridden
+- **THEN** no transition MUST be requested
+- **AND** the comment MUST state the real outcome and MUST NOT state `passed`
 
-An `integration_error` MUST NOT contain the Jira token, the Authorization
-header, request URLs or the text of a transport error; transport failures are
-recorded only by class.
+### Requirement: Delivery is idempotent and durable
 
-#### Scenario: Jira request fails
+A comment MUST carry an idempotency key derived from the run and the event ID,
+and the adapter MUST NOT post a second comment with a key it has already
+posted. For Jira the key is a separate text node `ai-team event: <key>`, the
+attempt ID a separate node `ai-team attempt: <attempt_id>`, and the adapter MUST
+page through the issue comments, newest first, until it finds the key or runs
+out of comments before posting (with a finite page limit); if that check fails
+or the limit is reached the comment MUST NOT be posted. A transition to the status the issue
+already has MUST send nothing. The consumer MUST advance its durable
+per-adapter cursor only after the outcome is persisted; on first enable the
+cursor starts at the current event tail, later starts replay events after the
+saved cursor, and if the cursor cannot be read or initialized the consumer MUST
+NOT start and MUST NOT replay from the beginning. Delivery is at least once;
+replaying or manually retrying an event MUST NOT create a duplicate comment.
 
-- **WHEN** Jira rejects a transition or comment request
-- **THEN** the task MUST retain its pipeline result
-- **AND** SQLite MUST contain a durable `integration_error` event
-- **AND** the failed source event MUST not be retried indefinitely in the same
-  process after its warning has been persisted
+#### Scenario: Replay does not duplicate
+
+- **WHEN** an event whose comment was already posted is processed again
+- **THEN** no second comment MUST be posted and the issue status MUST end the
+  same
 
 #### Scenario: Process restarts with a pending event
 
-- **WHEN** an `attempt_finished` event is stored after the tracker consumer
-  stops and before it restarts
-- **THEN** the restarted consumer MUST read it from SQLite after the saved
-  integration cursor
-
-#### Scenario: Replay after a crash does not duplicate the comment
-
-- **WHEN** Jira already has a comment with the marker of attempt `A`
-- **AND** the `attempt_finished` event of attempt `A` is replayed
-- **THEN** the adapter MUST NOT post another comment
+- **WHEN** an event is stored after the consumer stops and before it restarts
+- **THEN** the restarted consumer MUST process it after the saved cursor
 
 #### Scenario: Integration cursor is unavailable at start
 
 - **WHEN** the tracker cursor cannot be read or written at web server start
-- **THEN** the tracker consumer MUST NOT start
-- **AND** no past event MUST be sent to Jira again
+- **THEN** the consumer MUST NOT start
+- **AND** no past event MUST be sent to the tracker again
+
+### Requirement: Tracker failures are visible, durable and retryable
+
+A tracker failure MUST NOT change or block the local run. Every handled event
+MUST leave a durable delivery record (event, task, issue, status, attempts,
+last error), and a failure MUST also append a warning `integration_error` event
+with the source event identity. The error text MUST NOT contain the token, the
+Authorization header, request URLs or the text of a transport error; transport
+failures are recorded only by class. The API MUST expose a per-task state
+(link, conflicts, recent deliveries and a sync status of `ok`, `failed`,
+`conflict`, `not_linked` or `not_configured`), an overview with the counts of
+failed deliveries and conflicts, and lists of conflicts and deliveries. An
+authorized actor MUST be able to retry one failed delivery or all failed
+deliveries of a task; a retry uses the task's current link, increments the
+attempt count, keeps a still-failing delivery visible, and MUST refuse a
+delivery that is not failed. A delivery that failed for a link that was later
+removed MUST become `abandoned` and MUST NOT be sent to a new link or counted as
+a failure. A retry MUST NOT send a transition when a newer event of the
+same task has already performed a transition on the same issue (a newer event
+whose delivery carried only a comment does not count, so its transition is
+retried); a delivery whose stale transition is skipped becomes `superseded`
+with the reason stored apart from the original error (its comment is still
+delivered idempotently). A retry racing with link removal MUST NOT turn an
+`abandoned` delivery back into `delivered` or `failed`.
+
+#### Scenario: Tracker request fails
+
+- **WHEN** the tracker rejects a transition or comment
+- **THEN** the task MUST retain its pipeline result
+- **AND** SQLite MUST contain a failed delivery and a durable `integration_error`
+  event
+- **AND** the task's sync status MUST be `failed`
+
+#### Scenario: Manual retry after recovery
+
+- **WHEN** the tracker recovers and an authorized actor retries the failed
+  delivery
+- **THEN** the missing operations MUST be applied without duplicating the
+  comment
+- **AND** the delivery MUST become delivered and the sync status `ok`
+
+#### Scenario: Transport error does not leak credentials
+
+- **WHEN** a transport failure echoes the request URL or Authorization header
+- **THEN** the recorded error MUST contain only the failure class

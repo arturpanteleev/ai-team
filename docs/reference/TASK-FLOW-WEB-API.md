@@ -18,6 +18,14 @@ fields.
 | `PATCH /api/projects/{projectID}` | Rename or change the description; needs `project:manage` |
 | `POST /api/projects/{projectID}/archive` | Archive a project (idempotent); needs `project:manage` |
 | `POST /api/projects/{projectID}/unarchive` | Return a project from the archive; needs `project:manage` |
+| `GET /api/tracker` | Tracker adapter, `on_enter`/`on_pass` maps, failed-delivery and link-conflict counts |
+| `GET /api/tracker/conflicts` | Ambiguous legacy links that were not guessed |
+| `GET /api/tracker/deliveries?status=` | Outbound tracker deliveries (`failed`, `delivered`, `abandoned` or `superseded`) |
+| `GET /api/runs/{runID}/tracker` | Task link, conflicts, recent deliveries, `sync_status` |
+| `PUT /api/runs/{runID}/tracker/link` | Link the task to one existing tracker issue (`issue_key`); 1:1; needs `tracker:link` |
+| `DELETE /api/runs/{runID}/tracker/link` | Remove the link and its conflicts; needs `tracker:link` |
+| `POST /api/runs/{runID}/tracker/retry` | Retry every failed tracker delivery of the task; needs `tracker:link` |
+| `POST /api/runs/{runID}/tracker/deliveries/{eventID}/retry` | Retry one failed delivery; needs `tracker:link` |
 | `GET /api/runs/{runID}` | Task, stages, approvals, ownership, results, allowed actions |
 | `POST /api/runs/{runID}/cancel` | Cancel a task |
 | `POST /api/runs/{runID}/stages/{stageID}/executor` | Change stage executor |

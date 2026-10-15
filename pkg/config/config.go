@@ -233,25 +233,117 @@ type TariffConfig struct {
 	Source             string   `yaml:"source"`
 }
 
-// TrackerConfig enables optional one-way integrations with external trackers.
-// Credentials are referenced by environment variable name and never stored in
-// the project template.
+// TrackerConfig enables the optional integration with an external task
+// tracker. The tracker is abstract: Adapter names one configured adapter
+// (jira, fake). Credentials are referenced by environment variable name and
+// never stored in the project template.
 type TrackerConfig struct {
-	Jira *JiraConfig `yaml:"jira,omitempty"`
+	// Adapter is the name of the adapter in use. It may be omitted when
+	// exactly one adapter block is configured.
+	Adapter string `yaml:"adapter,omitempty"`
+	// WebBaseURL is the public address of the ai-team dashboard used for the
+	// task link in tracker comments; it defaults to tracker.jira.web_base_url.
+	WebBaseURL string `yaml:"web_base_url,omitempty"`
+	// OnEnter maps a stage ID to the tracker status/transition name that is
+	// requested when the stage is entered (attempt started).
+	OnEnter map[string]string `yaml:"on_enter,omitempty"`
+	// OnPass maps a stage ID to the tracker status/transition name that is
+	// requested when the stage finishes successfully.
+	OnPass map[string]string  `yaml:"on_pass,omitempty"`
+	Jira   *JiraConfig        `yaml:"jira,omitempty"`
+	Fake   *FakeTrackerConfig `yaml:"fake,omitempty"`
 }
 
-// JiraConfig configures Jira Cloud synchronization for completed stages.
+// JiraConfig configures the Jira adapter.
 type JiraConfig struct {
-	BaseURL       string            `yaml:"base_url"`
-	Email         string            `yaml:"email"`
-	TokenEnv      string            `yaml:"token_env"`
-	WebBaseURL    string            `yaml:"web_base_url"`
+	BaseURL    string `yaml:"base_url"`
+	Email      string `yaml:"email"`
+	TokenEnv   string `yaml:"token_env"`
+	WebBaseURL string `yaml:"web_base_url"`
+	// APIVersion selects REST API v2 (plain text comments) or v3 (ADF
+	// comments, the default).
+	APIVersion int `yaml:"api_version,omitempty"`
+	// StageStatuses is the legacy spelling of tracker.on_pass.
 	StageStatuses map[string]string `yaml:"stage_statuses,omitempty"`
 }
 
+// FakeTrackerConfig configures the deterministic in-memory tracker used for
+// tests and demos.
+type FakeTrackerConfig struct {
+	Statuses []string          `yaml:"statuses,omitempty"`
+	Issues   []FakeIssueConfig `yaml:"issues,omitempty"`
+}
+
+// FakeIssueConfig seeds one issue of the fake tracker.
+type FakeIssueConfig struct {
+	Key     string `yaml:"key"`
+	Summary string `yaml:"summary,omitempty"`
+	Status  string `yaml:"status,omitempty"`
+}
+
+// AdapterName returns the configured adapter name, or "" when it is
+// ambiguous or nothing is configured.
+func (tc *TrackerConfig) AdapterName() string {
+	if tc == nil {
+		return ""
+	}
+	if tc.Adapter != "" {
+		return tc.Adapter
+	}
+	switch {
+	case tc.Jira != nil && tc.Fake == nil:
+		return "jira"
+	case tc.Fake != nil && tc.Jira == nil:
+		return "fake"
+	}
+	return ""
+}
+
+// EffectiveWebBaseURL returns the dashboard address for tracker comments.
+func (tc *TrackerConfig) EffectiveWebBaseURL() string {
+	if tc == nil {
+		return ""
+	}
+	if tc.WebBaseURL != "" {
+		return tc.WebBaseURL
+	}
+	if tc.Jira != nil {
+		return tc.Jira.WebBaseURL
+	}
+	return ""
+}
+
+// EffectiveOnPass merges the legacy jira.stage_statuses into on_pass; an
+// explicit on_pass entry wins.
+func (tc *TrackerConfig) EffectiveOnPass() map[string]string {
+	merged := map[string]string{}
+	if tc == nil {
+		return merged
+	}
+	if tc.Jira != nil {
+		for stage, status := range tc.Jira.StageStatuses {
+			merged[stage] = status
+		}
+	}
+	for stage, status := range tc.OnPass {
+		merged[stage] = status
+	}
+	return merged
+}
+
 func (tc *TrackerConfig) UnmarshalYAML(value *yaml.Node) error {
-	if err := validateMappingKeys(value, map[string]bool{"jira": true}, "config: tracker"); err != nil {
+	if err := validateMappingKeys(value, map[string]bool{
+		"adapter": true, "web_base_url": true, "on_enter": true, "on_pass": true, "jira": true, "fake": true,
+	}, "config: tracker"); err != nil {
 		return err
+	}
+	for index := 0; index+1 < len(value.Content); index += 2 {
+		switch value.Content[index].Value {
+		case "on_enter", "on_pass":
+			if err := rejectDuplicateMappingKeys(value.Content[index+1], "config: tracker "+value.Content[index].Value); err != nil {
+				return err
+			}
+		}
 	}
 	type plain TrackerConfig
 	var decoded plain
@@ -265,7 +357,7 @@ func (tc *TrackerConfig) UnmarshalYAML(value *yaml.Node) error {
 func (jc *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"base_url": true, "email": true, "token_env": true, "web_base_url": true,
-		"stage_statuses": true,
+		"stage_statuses": true, "api_version": true,
 	}, "config: tracker jira"); err != nil {
 		return err
 	}
@@ -285,14 +377,71 @@ func (jc *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (fc *FakeTrackerConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := validateMappingKeys(value, map[string]bool{"statuses": true, "issues": true}, "config: tracker fake"); err != nil {
+		return err
+	}
+	type plain FakeTrackerConfig
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*fc = FakeTrackerConfig(decoded)
+	return nil
+}
+
 func (tc *TrackerConfig) Validate(stageIDs map[string]bool) error {
 	if tc == nil {
 		return nil
 	}
-	if tc.Jira == nil {
-		return fmt.Errorf("tracker must configure jira")
+	var problems []string
+	if tc.Jira == nil && tc.Fake == nil {
+		return fmt.Errorf("tracker must configure an adapter (jira or fake)")
 	}
-	return tc.Jira.Validate(stageIDs)
+	if tc.Jira != nil && tc.Fake != nil && tc.Adapter == "" {
+		problems = append(problems, "tracker.adapter обязателен, если настроено несколько адаптеров")
+	}
+	switch tc.Adapter {
+	case "", "jira", "fake":
+	default:
+		problems = append(problems, fmt.Sprintf("tracker.adapter %q неизвестен (jira или fake)", tc.Adapter))
+	}
+	if (tc.Adapter == "jira" && tc.Jira == nil) || (tc.Adapter == "fake" && tc.Fake == nil) {
+		problems = append(problems, fmt.Sprintf("tracker.adapter %q выбран, но блок tracker.%s не задан", tc.Adapter, tc.Adapter))
+	}
+	for field, mapping := range map[string]map[string]string{"on_enter": tc.OnEnter, "on_pass": tc.OnPass} {
+		for stage, status := range mapping {
+			if !stageIDs[stage] {
+				problems = append(problems, fmt.Sprintf("tracker.%s содержит неизвестный этап %q", field, stage))
+			}
+			if strings.TrimSpace(status) == "" || strings.ContainsAny(status, "\r\n\x00") {
+				problems = append(problems, fmt.Sprintf("tracker.%s.%s должен содержать имя статуса трекера", field, stage))
+			}
+		}
+	}
+	if tc.WebBaseURL != "" {
+		if parsed, err := url.Parse(strings.TrimSpace(tc.WebBaseURL)); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			problems = append(problems, "tracker.web_base_url должен быть абсолютным HTTP(S) URL без credentials, query и fragment")
+		}
+	}
+	if tc.Jira != nil {
+		if err := tc.Jira.Validate(stageIDs); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if tc.Fake != nil {
+		for _, issue := range tc.Fake.Issues {
+			if strings.TrimSpace(issue.Key) == "" {
+				problems = append(problems, "tracker.fake.issues[].key обязателен")
+			}
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func (jc *JiraConfig) Validate(stageIDs map[string]bool) error {
@@ -317,6 +466,9 @@ func (jc *JiraConfig) Validate(stageIDs map[string]bool) error {
 	}
 	if !envVariableName.MatchString(jc.TokenEnv) {
 		problems = append(problems, "tracker.jira.token_env должен быть именем переменной окружения")
+	}
+	if jc.APIVersion != 0 && jc.APIVersion != 2 && jc.APIVersion != 3 {
+		problems = append(problems, "tracker.jira.api_version должен быть 2 или 3")
 	}
 	for stage, status := range jc.StageStatuses {
 		if !stageIDs[stage] {

@@ -94,7 +94,7 @@ invocation. Прочие run evidence, manifests, artifacts и файлы target
 `base_url` защищается так же, как сам токен: кто может менять
 `.ai-team/config.yaml`, тот может направить токен на свой сервер. Указывайте
 только `https`-адрес своего Jira Cloud и проверяйте изменения этого поля в
-ревью. Ошибка транспорта записывается в `integration_error` только классом
+ревью. Ошибка трекера (в `integration_error` и в `tracker_deliveries.last_error`) записывается только классом
 («connection failed», «request timed out», «TLS verification failed»): ни URL,
 ни заголовки запроса, ни текст ошибки транспорта туда не попадают.
 

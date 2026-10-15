@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 15
+const SchemaVersion = 16
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -1037,7 +1037,7 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		// SQLite walks the whole events table for every page. IF NOT EXISTS
 		// keeps reopening an upgraded file a no-op.
 		`CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_uid, id)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP), (14, CURRENT_TIMESTAMP), (15, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP), (14, CURRENT_TIMESTAMP), (15, CURRENT_TIMESTAMP), (16, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {
@@ -1067,7 +1067,10 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 	if err := migrateV14(ctx, tx); err != nil {
 		return err
 	}
-	return migrateV15(ctx, tx)
+	if err := migrateV15(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV16(ctx, tx)
 }
 
 // migrateV15 (S12) добавляет персональные MCP-токены: в базе лежит только

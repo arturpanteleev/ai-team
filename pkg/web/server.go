@@ -30,7 +30,6 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
 	"github.com/arturpanteleev/ai-team/pkg/tokenbudget"
-	"github.com/arturpanteleev/ai-team/pkg/tracker"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 )
 
@@ -53,13 +52,6 @@ type RunController interface {
 }
 
 type ServerOption func(*Server)
-
-// WithTrackerAdapter registers a one-way adapter for task lifecycle events.
-// The adapter runs in a separate worker, so external tracker failures cannot
-// change a task's pipeline result.
-func WithTrackerAdapter(adapter tracker.Adapter) ServerOption {
-	return func(server *Server) { server.trackerAdapter = adapter }
-}
 
 // WithStallAfter overrides each run's configured stall_after threshold.
 // It is primarily useful for deployments that set a server-wide policy.
@@ -166,7 +158,7 @@ type Server struct {
 	cancelEvents        context.CancelFunc
 	eventWorkers        sync.WaitGroup
 	controller          RunController
-	trackerAdapter      tracker.Adapter
+	trackerSync         *trackerSync
 	notifications       *notifier.Dispatcher
 	notificationWorker  *NotificationWorker
 	templateAgentLookup config.AgentLookup
@@ -281,7 +273,8 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	}
 	srv.eventWorkers.Add(1)
 	go srv.tailEvents(eventContext, eventCursor)
-	if srv.trackerAdapter != nil {
+	if srv.trackerSync != nil {
+		srv.importLegacyTrackerLinks()
 		srv.startIntegrationConsumer(eventContext, trackerIntegrationName, eventCursor, srv.deliverTrackerEvent)
 	}
 	if srv.notifications != nil {
@@ -362,6 +355,10 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/backlog", srv.handleListBacklog)
 		router.Get("/api/projects", srv.handleListProjects)
 		router.Get("/api/projects/{projectID}", srv.handleGetProject)
+		router.Get("/api/tracker", srv.handleTrackerStatus)
+		router.Get("/api/tracker/conflicts", srv.handleTrackerConflicts)
+		router.Get("/api/tracker/deliveries", srv.handleTrackerDeliveries)
+		router.Get("/api/runs/{runID}/tracker", srv.handleRunTracker)
 	})
 	srv.router.Method(http.MethodGet, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(false, srv.handleListMCPTokens)))
 	srv.router.Method(http.MethodPost, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleIssueMCPToken)))
@@ -377,6 +374,10 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Patch("/api/projects/{projectID}", srv.handleUpdateProject)
 		router.Post("/api/projects/{projectID}/archive", srv.handleArchiveProject(true))
 		router.Post("/api/projects/{projectID}/unarchive", srv.handleArchiveProject(false))
+		router.Put("/api/runs/{runID}/tracker/link", srv.handleSetTrackerLink)
+		router.Delete("/api/runs/{runID}/tracker/link", srv.handleDeleteTrackerLink)
+		router.Post("/api/runs/{runID}/tracker/retry", srv.handleRetryTrackerDeliveries)
+		router.Post("/api/runs/{runID}/tracker/deliveries/{eventID}/retry", srv.handleRetryTrackerDelivery)
 		router.Post("/api/backlog", srv.handleCreateBacklogItem)
 		router.Post("/api/backlog/{itemID}/status", srv.handleSetBacklogItemStatus)
 		router.Post("/api/template/validate", srv.handleValidateTemplate)
@@ -669,41 +670,6 @@ func (s *Server) consumeIntegrationEvents(ctx context.Context, integration strin
 			}
 		}
 	}
-}
-
-func (s *Server) deliverTrackerEvent(ctx context.Context, stored store.Event) bool {
-	if stored.Type != "attempt_finished" {
-		return true
-	}
-	run, err := s.store.GetPipelineRunByRunID(stored.RunID)
-	if err != nil || run == nil {
-		return s.recordIntegrationError(stored, trackerIntegrationName, "tracker task lookup failed")
-	}
-	var task startRunCommand
-	if err := json.Unmarshal([]byte(run.ConfigSnapshot), &task); err != nil {
-		return s.recordIntegrationError(stored, trackerIntegrationName, "task external links are unavailable")
-	}
-	if len(task.ExternalLinks) == 0 {
-		return true
-	}
-	var data map[string]any
-	if stored.DataJSON != "" {
-		if err := json.Unmarshal([]byte(stored.DataJSON), &data); err != nil {
-			return s.recordIntegrationError(stored, trackerIntegrationName, "task event payload is invalid")
-		}
-	}
-	if data == nil {
-		data = map[string]any{}
-	}
-	adapterEvent := tracker.TaskEvent{
-		Cursor: stored.ID, RunID: stored.RunID, TaskID: run.ID, Type: stored.Type,
-		Stage: stored.Stage, AttemptID: stored.AttemptID, Timestamp: stored.Timestamp,
-		Data: data, ExternalLinks: task.ExternalLinks,
-	}
-	if err := s.trackerAdapter.HandleTaskEvent(ctx, adapterEvent); err != nil {
-		return s.recordIntegrationError(stored, trackerIntegrationName, err.Error())
-	}
-	return true
 }
 
 func (s *Server) recordIntegrationError(source store.Event, integration, reason string) bool {

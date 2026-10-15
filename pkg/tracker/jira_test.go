@@ -4,344 +4,342 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
 )
 
-type jiraRequest struct {
-	method, path, user, password string
-	body                         map[string]any
+// mockJira is a small stateful Jira REST double (API v2 or v3) used for the
+// contract tests; it records every request and never reaches a real Jira.
+type mockJira struct {
+	mu        sync.Mutex
+	version   int
+	status    string
+	comments  []json.RawMessage
+	requests  []string
+	auth      [][2]string
+	histories []map[string]any
+	failPath  string
+	failCode  int
+	personAt  string
+	server    *httptest.Server
 }
 
-func TestJiraAdapterTransitionsAndCommentsFromTaskEvent(t *testing.T) {
-	var requests []jiraRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request := jiraRequest{method: r.Method, path: r.URL.Path}
-		request.user, request.password, _ = r.BasicAuth()
-		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&request.body)
+func newMockJira(t *testing.T, version int) *mockJira {
+	t.Helper()
+	m := &mockJira{version: version, status: "To Do", personAt: time.Now().UTC().Add(2 * time.Second).Format("2006-01-02T15:04:05.000-0700")}
+	m.server = httptest.NewServer(http.HandlerFunc(m.serve))
+	t.Cleanup(m.server.Close)
+	return m
+}
+
+func (m *mockJira) serve(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	user, pass, _ := r.BasicAuth()
+	m.auth = append(m.auth, [2]string{user, pass})
+	m.requests = append(m.requests, r.Method+" "+r.URL.Path)
+	w.Header().Set("Content-Type", "application/json")
+	if m.failPath != "" && strings.HasSuffix(r.URL.Path, m.failPath) {
+		w.WriteHeader(m.failCode)
+		return
+	}
+	prefix := fmt.Sprintf("/rest/api/%d/", m.version)
+	issue := prefix + "issue/APP-1"
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == issue:
+		_, _ = fmt.Fprintf(w, `{"fields":{"summary":"Demo","status":{"name":%q}}}`, m.status)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, prefix+"issue/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, prefix+"issue/"), "/"):
+		http.NotFound(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == issue+"/transitions":
+		_, _ = w.Write([]byte(`{"transitions":[{"id":"31","name":"Start Progress","to":{"name":"In Progress"}},{"id":"41","name":"Finish","to":{"name":"Done"}}]}`))
+	case r.Method == http.MethodPost && r.URL.Path == issue+"/transitions":
+		var body struct {
+			Transition struct{ ID string }
 		}
-		requests = append(requests, request)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-12":
-			_, _ = w.Write([]byte(`{"fields":{"status":{"name":"To Do"}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-12/transitions":
-			_, _ = w.Write([]byte(`{"transitions":[{"id":"31","name":"Start Progress","to":{"name":"In Progress"}}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-12/transitions":
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-12/comment":
-			_, _ = w.Write([]byte(`{"comments":[{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"ai-team attempt: attempt-30"}]}]}}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-12/comment":
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"id":"comment-1"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	adapter := NewJiraAdapter(config.JiraConfig{
-		BaseURL: server.URL, Email: "bot@example.test", TokenEnv: "AI_TEAM_JIRA_TOKEN",
-		WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"implementation": "In Progress"},
-	}, "test-token", server.Client())
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		Cursor: 8, RunID: "run-8", TaskID: 42, Type: "attempt_finished", Stage: "implementation",
-		AttemptID: "attempt-3", ExternalLinks: []string{"APP-12", server.URL + "/browse/APP-12"},
-		Data: map[string]any{"status": "passed", "outcome": "passed", "decision": "approved", "execution": "succeeded"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantPaths := []string{
-		"GET /rest/api/3/issue/APP-12",
-		"GET /rest/api/3/issue/APP-12/transitions",
-		"POST /rest/api/3/issue/APP-12/transitions",
-		"GET /rest/api/3/issue/APP-12/comment",
-		"POST /rest/api/3/issue/APP-12/comment",
-	}
-	gotPaths := make([]string, len(requests))
-	for index, request := range requests {
-		gotPaths[index] = request.method + " " + request.path
-		if request.user != "bot@example.test" || request.password != "test-token" {
-			t.Errorf("request %d did not use configured Jira basic auth", index)
-		}
-	}
-	if !reflect.DeepEqual(gotPaths, wantPaths) {
-		t.Fatalf("requests=%v, want %v", gotPaths, wantPaths)
-	}
-	if requests[2].body["transition"].(map[string]any)["id"] != "31" {
-		t.Fatalf("transition payload=%v", requests[2].body)
-	}
-	body, err := json.Marshal(requests[4].body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	comment := string(body)
-	// A comment of another attempt whose ID shares a prefix is not a match.
-	for _, want := range []string{"https://ai-team.example/pipelines/42", "Stage result: implementation", "status=passed", "outcome=passed", `"ai-team attempt: attempt-3"`} {
-		if !strings.Contains(comment, want) {
-			t.Errorf("comment missing %q: %s", want, comment)
-		}
-	}
-}
-
-func TestJiraAdapterSkipsUnmappedStatusAndIgnoresUnlinkedTasks(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-	defer server.Close()
-	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
-	base := TaskEvent{Type: "attempt_finished", Stage: "qa", TaskID: 1, ExternalLinks: []string{"APP-12"}}
-	if err := adapter.HandleTaskEvent(context.Background(), base); err != nil {
-		t.Fatal(err)
-	}
-	if !called {
-		t.Fatal("unmapped stage should still post its result comment")
-	}
-	called = false
-	base.ExternalLinks = []string{"https://example.test/no-tracker-key"}
-	if err := adapter.HandleTaskEvent(context.Background(), base); err != nil {
-		t.Fatal(err)
-	}
-	if called {
-		t.Fatal("task without a Jira issue key must not make HTTP requests")
-	}
-}
-
-func TestJiraAdapterReportsAmbiguousIssueKeysAndHTTPFailures(t *testing.T) {
-	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: "http://jira.example", Email: "bot", TokenEnv: "JIRA_TOKEN", WebBaseURL: "https://ai-team.example"}, "token", nil)
-	event := TaskEvent{Type: "attempt_finished", Stage: "qa", TaskID: 1,
-		ExternalLinks: []string{"APP-1", "APP-2"},
-		Data:          map[string]any{"status": "passed", "outcome": "passed", "decision": "approved"}}
-	if err := adapter.HandleTaskEvent(context.Background(), event); err == nil || !strings.Contains(err.Error(), "multiple Jira issue keys") {
-		t.Fatalf("ambiguous issue keys error=%v", err)
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
-	defer server.Close()
-	adapter = NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", TokenEnv: "JIRA_TOKEN", WebBaseURL: "https://ai-team.example", StageStatuses: map[string]string{"qa": "Done"}}, "token", server.Client())
-	event.ExternalLinks = []string{"APP-1"}
-	if err := adapter.HandleTaskEvent(context.Background(), event); err == nil || !strings.Contains(err.Error(), "HTTP 503") {
-		t.Fatalf("HTTP failure=%v", err)
-	}
-}
-
-func TestJiraAdapterMatchesConfiguredStatusToTransitionDestination(t *testing.T) {
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.Method+" "+r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-17":
-			_, _ = w.Write([]byte(`{"fields":{"status":{"name":"To Do"}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-17/transitions":
-			// Jira transition names may differ from their destination status. A
-			// mapping to "Done" must not select a transition merely named Done.
-			_, _ = w.Write([]byte(`{"transitions":[{"id":"51","name":"Done","to":{"name":"In Progress"}}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	adapter := NewJiraAdapter(config.JiraConfig{
-		BaseURL: server.URL, Email: "bot@example.test", WebBaseURL: "https://ai-team.example",
-		StageStatuses: map[string]string{"qa": "Done"},
-	}, "test-token", server.Client())
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		TaskID: 17, Type: "attempt_finished", Stage: "qa", ExternalLinks: []string{"APP-17"},
-		Data: map[string]any{"status": "passed", "outcome": "passed", "decision": "approved"},
-	})
-	if err == nil || !strings.Contains(err.Error(), `no available transition to status "Done"`) {
-		t.Fatalf("transition-name match must not satisfy target status mapping: %v", err)
-	}
-	want := []string{
-		"GET /rest/api/3/issue/APP-17",
-		"GET /rest/api/3/issue/APP-17/transitions",
-	}
-	if !reflect.DeepEqual(requests, want) {
-		t.Fatalf("requests=%v, want %v", requests, want)
-	}
-}
-
-func TestJiraAdapterRequiresTokenOnlyWhenLinkedEventArrives(t *testing.T) {
-	adapter := NewJiraAdapter(config.JiraConfig{TokenEnv: "JIRA_TOKEN"}, "", nil)
-	event := TaskEvent{Type: "attempt_finished", Stage: "qa", TaskID: 1, ExternalLinks: []string{"APP-1"}}
-	if err := adapter.HandleTaskEvent(context.Background(), event); err == nil || !strings.Contains(err.Error(), "JIRA_TOKEN") {
-		t.Fatalf("missing token error=%v", err)
-	}
-}
-
-func TestJiraAdapterTransitionsOnlyOnSuccessfulAttempt(t *testing.T) {
-	cases := map[string]map[string]any{
-		"failed":                       {"status": "failed", "outcome": "failed", "decision": "not_applicable", "execution": "succeeded"},
-		"infra_failed":                 {"status": "failed", "outcome": "failed", "decision": "not_applicable", "execution": "infra_failed"},
-		"skipped":                      {"status": "skipped", "outcome": "skipped", "decision": "waived", "execution": "succeeded"},
-		"rejected":                     {"status": "rejected", "outcome": "rejected", "decision": "rejected", "execution": "succeeded"},
-		"passed_but_rejected_decision": {"status": "passed", "outcome": "passed", "decision": "rejected"},
-		"missing_data":                 nil,
-	}
-	for name, data := range cases {
-		t.Run(name, func(t *testing.T) {
-			var requests []string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests = append(requests, r.Method+" "+r.URL.Path)
-				if r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/issue/APP-5/comment" {
-					w.WriteHeader(http.StatusCreated)
-					return
-				}
-				http.NotFound(w, r)
-			}))
-			defer server.Close()
-			adapter := NewJiraAdapter(config.JiraConfig{
-				BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example",
-				StageStatuses: map[string]string{"qa": "Done"},
-			}, "token", server.Client())
-			err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-				TaskID: 5, Type: "attempt_finished", Stage: "qa", ExternalLinks: []string{"APP-5"}, Data: data,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := []string{"POST /rest/api/3/issue/APP-5/comment"}
-			if !reflect.DeepEqual(requests, want) {
-				t.Fatalf("requests=%v, want only the result comment and no transitions", requests)
-			}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		from := m.status
+		m.status = map[string]string{"31": "In Progress", "41": "Done"}[body.Transition.ID]
+		m.histories = append(m.histories, map[string]any{
+			"id": fmt.Sprint(100 + len(m.histories)), "created": time.Now().UTC().Add(time.Second).Format("2006-01-02T15:04:05.000-0700"),
+			"author": map[string]any{"emailAddress": "bot@example.test", "displayName": "Bot"},
+			"items":  []map[string]any{{"field": "status", "fromString": from, "toString": m.status}},
 		})
+		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodGet && r.URL.Path == issue+"/comment":
+		newestFirst := make([]json.RawMessage, 0, len(m.comments))
+		for index := len(m.comments) - 1; index >= 0; index-- {
+			newestFirst = append(newestFirst, m.comments[index])
+		}
+		wrapped := make([]map[string]json.RawMessage, 0)
+		for _, body := range newestFirst {
+			wrapped = append(wrapped, map[string]json.RawMessage{"body": body})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"comments": wrapped})
+	case r.Method == http.MethodPost && r.URL.Path == issue+"/comment":
+		var body struct {
+			Body json.RawMessage `json:"body"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		m.comments = append(m.comments, body.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"1"}`))
+	case r.Method == http.MethodGet && r.URL.Path == prefix+"search":
+		_ = json.NewEncoder(w).Encode(map[string]any{"issues": []map[string]any{{
+			"key": "APP-1", "changelog": map[string]any{"histories": append(append([]map[string]any{}, m.histories...), map[string]any{
+				"id": "900", "created": m.personAt,
+				"author": map[string]any{"emailAddress": "person@example.test", "displayName": "Person"},
+				"items":  []map[string]any{{"field": "status", "fromString": "Done", "toString": "In Review"}, {"field": "assignee"}},
+			})},
+		}}})
+	default:
+		http.NotFound(w, r)
 	}
 }
 
-func TestIssueKeyFromLinksIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
-	const base = "https://acme.atlassian.net"
-	for _, links := range [][]string{
-		{"encoding UTF-8"},
-		{"artifact digest SHA-256: abc"},
-		{"see CVE-2024-1234 and ADR-12"},
-		{"timestamp ISO-8601"},
-		{"https://other.example/browse/APP-1"},
-		{"https://acme.atlassian.net.evil.example/browse/APP-1"},
-		{"https://acme.atlassian.net/wiki/UTF-8"},
-		{"https://acme.atlassian.net/browse/APP-1/extra"},
-		{"ftp://acme.atlassian.net/browse/APP-1"},
-		{"APP-1 https://acme.atlassian.net/browse/APP-1"},
-		{"app-1"},
-		{"https://acme.atlassian.net:8443/browse/APP-1"},
-		{"https://acme.atlassian.net/browse/app"},
-	} {
-		key, err := issueKeyFromLinks(links, base)
-		if err != nil || key != "" {
-			t.Errorf("issueKeyFromLinks(%q)=%q, %v; want no key", links, key, err)
+func (m *mockJira) adapter(version int) *JiraAdapter {
+	return NewJiraAdapter(config.JiraConfig{
+		BaseURL: m.server.URL, Email: "bot@example.test", TokenEnv: "T", WebBaseURL: "https://ai-team.example", APIVersion: version,
+	}, "test-token", m.server.Client())
+}
+
+func (m *mockJira) seen() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.requests...)
+}
+
+// trackerContract is the behavior every Tracker adapter must have. It runs
+// against the fake and against Jira API v2 and v3 mocks.
+func trackerContract(t *testing.T, tr Tracker, key string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := tr.ValidateKey(key); err != nil {
+		t.Fatalf("valid key rejected: %v", err)
+	}
+	for _, bad := range []string{"", "app-1", "APP", "APP-0", "APP-1 x", "../APP-1"} {
+		if err := tr.ValidateKey(bad); !errors.Is(err, ErrInvalidKey) {
+			t.Errorf("ValidateKey(%q)=%v, want ErrInvalidKey", bad, err)
 		}
 	}
-	for links, want := range map[string]string{
-		"APP-7":   "APP-7",
-		" APP-7 ": "APP-7",
+	issue, err := tr.GetIssue(ctx, key)
+	if err != nil || issue.Key != key || issue.Status != "To Do" {
+		t.Fatalf("GetIssue=%+v, %v", issue, err)
+	}
+	if _, err := tr.GetIssue(ctx, "NOPE-9"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing issue error=%v, want ErrNotFound", err)
+	}
+	moves, err := tr.Transitions(ctx, key)
+	if err != nil || len(moves) == 0 {
+		t.Fatalf("Transitions=%v, %v", moves, err)
+	}
+	cursor, err := tr.Changes(ctx, ChangeQuery{})
+	if err != nil || cursor.Cursor == "" || len(cursor.Changes) != 0 {
+		t.Fatalf("initial Changes=%+v, %v", cursor, err)
+	}
+	if changed, err := tr.Transition(ctx, key, "In Progress"); err != nil || !changed {
+		t.Fatalf("Transition changed=%v err=%v", changed, err)
+	}
+	if changed, err := tr.Transition(ctx, key, "in progress"); err != nil || changed {
+		t.Fatalf("repeated Transition must be a no-op, changed=%v err=%v", changed, err)
+	}
+	if _, err := tr.Transition(ctx, key, "Nonexistent Status"); !errors.Is(err, ErrNoTransition) {
+		t.Fatalf("impossible transition error=%v, want ErrNoTransition", err)
+	}
+	comment := Comment{Key: "run-1#7", Lines: []string{"ai-team task: https://ai-team.example/pipelines/1", "Stage result: qa; outcome=failed"}}
+	if posted, err := tr.AddComment(ctx, key, comment); err != nil || !posted {
+		t.Fatalf("AddComment posted=%v err=%v", posted, err)
+	}
+	if posted, err := tr.AddComment(ctx, key, comment); err != nil || posted {
+		t.Fatalf("same idempotency key must not post twice, posted=%v err=%v", posted, err)
+	}
+	other := Comment{Key: "run-1#70", Lines: []string{"another"}}
+	if posted, err := tr.AddComment(ctx, key, other); err != nil || !posted {
+		t.Fatalf("a key sharing a prefix is a different comment, posted=%v err=%v", posted, err)
+	}
+	if _, err := tr.AddComment(ctx, "NOPE-9", comment); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("comment on a missing issue error=%v", err)
+	}
+	page, err := tr.Changes(ctx, ChangeQuery{Cursor: cursor.Cursor, Keys: []string{key}})
+	if err != nil || len(page.Changes) == 0 {
+		t.Fatalf("Changes after cursor=%+v, %v", page, err)
+	}
+	if first := page.Changes[0]; first.IssueKey != key || first.To != "In Progress" || first.Origin != OriginAITeam {
+		t.Fatalf("own transition must be reported with ai-team origin: %+v", first)
+	}
+	again, err := tr.Changes(ctx, ChangeQuery{Cursor: page.Cursor, Keys: []string{key}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range again.Changes {
+		for _, old := range page.Changes {
+			if change.ID == old.ID {
+				t.Fatalf("change %s returned twice across cursors", change.ID)
+			}
+		}
+	}
+	if _, err := tr.Changes(ctx, ChangeQuery{Cursor: "garbage"}); err == nil {
+		t.Fatal("invalid cursor must be an error")
+	}
+}
+
+func TestFakeTrackerContract(t *testing.T) {
+	fake := NewFake(nil, FakeIssueSeed{Key: "APP-1", Summary: "Demo"})
+	trackerContract(t, fake, "APP-1")
+}
+
+func TestJiraTrackerContractV3(t *testing.T) {
+	mock := newMockJira(t, 3)
+	trackerContract(t, mock.adapter(3), "APP-1")
+	for index, pair := range mock.auth {
+		if pair != [2]string{"bot@example.test", "test-token"} {
+			t.Fatalf("request %d did not use basic auth: %v", index, pair)
+		}
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if !strings.Contains(string(mock.comments[0]), `"type":"doc"`) || !strings.Contains(string(mock.comments[0]), "ai-team event: run-1#7") {
+		t.Fatalf("v3 comment must be ADF with the idempotency marker: %s", mock.comments[0])
+	}
+}
+
+func TestJiraTrackerContractV2UsesPlainTextComments(t *testing.T) {
+	mock := newMockJira(t, 2)
+	trackerContract(t, mock.adapter(2), "APP-1")
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	var text string
+	if err := json.Unmarshal(mock.comments[0], &text); err != nil || !strings.HasSuffix(text, "ai-team event: run-1#7") {
+		t.Fatalf("v2 comment must be plain text ending with the marker: %s (%v)", mock.comments[0], err)
+	}
+	for _, request := range mock.requests {
+		if !strings.Contains(request, "/rest/api/2/") {
+			t.Fatalf("v2 adapter called %s", request)
+		}
+	}
+}
+
+func TestJiraTransitionMatchesTransitionNameWhenNoStatusMatches(t *testing.T) {
+	mock := newMockJira(t, 3)
+	changed, err := mock.adapter(3).Transition(context.Background(), "APP-1", "Start Progress")
+	if err != nil || !changed || mock.status != "In Progress" {
+		t.Fatalf("changed=%v err=%v status=%s", changed, err, mock.status)
+	}
+}
+
+func TestJiraErrorsMapToSentinelsWithoutLeakingSecrets(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	for code, want := range map[int]error{http.StatusForbidden: ErrForbidden, http.StatusUnauthorized: ErrForbidden, http.StatusNotFound: ErrNotFound} {
+		mock.failPath, mock.failCode = "/issue/APP-1", code
+		_, err := adapter.GetIssue(context.Background(), "APP-1")
+		if !errors.Is(err, want) {
+			t.Errorf("HTTP %d error=%v, want %v", code, err, want)
+		}
+		if err != nil && (strings.Contains(err.Error(), "test-token") || strings.Contains(err.Error(), "bot@example.test")) {
+			t.Errorf("error leaks credentials: %v", err)
+		}
+	}
+	mock.failCode = http.StatusInternalServerError
+	if _, err := adapter.GetIssue(context.Background(), "APP-1"); err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
+		t.Fatalf("HTTP 500 must be a plain failure, got %v", err)
+	}
+}
+
+func TestJiraCommentLookupFailureDoesNotPost(t *testing.T) {
+	mock := newMockJira(t, 3)
+	mock.failPath, mock.failCode = "/comment", http.StatusForbidden
+	posted, err := mock.adapter(3).AddComment(context.Background(), "APP-1", Comment{Key: "run#1", Lines: []string{"x"}})
+	if err == nil || posted {
+		t.Fatalf("posted=%v err=%v", posted, err)
+	}
+	for _, request := range mock.seen() {
+		if request == "POST /rest/api/3/issue/APP-1/comment" {
+			t.Fatal("comment posted although the idempotency lookup failed")
+		}
+	}
+}
+
+func TestJiraChangesIgnoresNonStatusItemsAndMarksExternalAuthors(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	start, err := adapter.Changes(context.Background(), ChangeQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Changes) != 1 || page.Changes[0].To != "In Review" || page.Changes[0].Origin != OriginExternal || page.Changes[0].Author != "Person" {
+		t.Fatalf("changes=%+v", page.Changes)
+	}
+	empty, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: page.Cursor, Keys: []string{"APP-1"}})
+	if err != nil || len(empty.Changes) != 0 || empty.Cursor != page.Cursor {
+		t.Fatalf("replay after cursor=%+v, %v", empty, err)
+	}
+	limited, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}, Limit: 1})
+	if err != nil || len(limited.Changes) != 1 {
+		t.Fatalf("limit=%+v, %v", limited, err)
+	}
+}
+
+func keysFromLinks(adapter *JiraAdapter, links ...string) []string {
+	var keys []string
+	for _, link := range links {
+		if key, ok := adapter.KeyFromLink(link); ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func TestJiraKeyFromLinkIgnoresKeyShapedTextAndForeignHosts(t *testing.T) {
+	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: "https://acme.atlassian.net"}, "", nil)
+	for _, link := range []string{
+		"encoding UTF-8", "artifact digest SHA-256: abc", "see CVE-2024-1234 and ADR-12", "timestamp ISO-8601",
+		"https://other.example/browse/APP-1", "https://acme.atlassian.net.evil.example/browse/APP-1",
+		"https://acme.atlassian.net/wiki/UTF-8", "https://acme.atlassian.net/browse/APP-1/extra",
+		"ftp://acme.atlassian.net/browse/APP-1", "APP-1 https://acme.atlassian.net/browse/APP-1", "app-1",
+		"https://acme.atlassian.net:8443/browse/APP-1", "https://acme.atlassian.net/browse/app",
+	} {
+		if keys := keysFromLinks(adapter, link); len(keys) != 0 {
+			t.Errorf("KeyFromLink(%q)=%v; want no key", link, keys)
+		}
+	}
+	for link, want := range map[string]string{
+		"APP-7": "APP-7", " APP-7 ": "APP-7",
 		"https://acme.atlassian.net/browse/APP-7":                    "APP-7",
 		"https://ACME.atlassian.net/browse/APP-7/":                   "APP-7",
 		"https://acme.atlassian.net/browse/APP-7?focusedCommentId=1": "APP-7",
 		"https://acme.atlassian.net/browse/APP-7#comment-1":          "APP-7",
-		"https://acme.atlassian.net/browse/APP-7//":                  "APP-7",
 		"https://acme.atlassian.net:443/browse/APP-7":                "APP-7",
 		"https://acme.atlassian.net/browse/app-7":                    "APP-7",
 		"http://acme.atlassian.net/browse/App-7":                     "APP-7",
 	} {
-		key, err := issueKeyFromLinks([]string{"https://other.example/browse/OTHER-1", "UTF-8 text", links}, base)
-		if err != nil || key != want {
-			t.Errorf("issueKeyFromLinks(%q)=%q, %v; want %q", links, key, err, want)
+		if keys := keysFromLinks(adapter, link); len(keys) != 1 || keys[0] != want {
+			t.Errorf("KeyFromLink(%q)=%v; want %q", link, keys, want)
 		}
 	}
-	key, err := issueKeyFromLinks([]string{"https://jira.example/jira/browse/OPS-3"}, "https://jira.example/jira/")
-	if err != nil || key != "OPS-3" {
-		t.Errorf("context-path browse URL key=%q, %v", key, err)
+	context := NewJiraAdapter(config.JiraConfig{BaseURL: "https://jira.example/jira/"}, "", nil)
+	if keys := keysFromLinks(context, "https://jira.example/jira/browse/OPS-3"); len(keys) != 1 || keys[0] != "OPS-3" {
+		t.Errorf("context-path browse URL keys=%v", keys)
 	}
-}
-
-func TestJiraAdapterIgnoresForeignHostLinkWithoutHTTP(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-	defer server.Close()
-	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		Type: "attempt_finished", Stage: "qa", TaskID: 1,
-		ExternalLinks: []string{"https://other.example/browse/APP-1", "charset UTF-8", "SHA-256 digest"},
-	})
-	if err != nil {
-		t.Fatal(err)
+	port := NewJiraAdapter(config.JiraConfig{BaseURL: "https://jira.example:443"}, "", nil)
+	if keys := keysFromLinks(port, "https://jira.example/browse/OPS-4"); len(keys) != 1 {
+		t.Errorf("explicit default port in base_url: keys=%v", keys)
 	}
-	if called {
-		t.Fatal("key-shaped text and foreign-host links must not reach Jira")
-	}
-}
-
-func TestIssueKeyFromLinksNormalizesDefaultPortOfBaseURL(t *testing.T) {
-	key, err := issueKeyFromLinks([]string{"https://jira.example/browse/OPS-4"}, "https://jira.example:443")
-	if err != nil || key != "OPS-4" {
-		t.Errorf("explicit default port in base_url: key=%q, %v", key, err)
-	}
-	key, err = issueKeyFromLinks([]string{"https://jira.example:8443/browse/OPS-4"}, "https://jira.example:8443")
-	if err != nil || key != "OPS-4" {
-		t.Errorf("matching non-default port: key=%q, %v", key, err)
-	}
-	key, err = issueKeyFromLinks([]string{"https://jira.example/browse/OPS-4"}, "https://jira.example:8443")
-	if err != nil || key != "" {
-		t.Errorf("default port must not match base_url on :8443: key=%q, %v", key, err)
-	}
-}
-
-func TestJiraAdapterDoesNotRepostCommentOfSameAttempt(t *testing.T) {
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.Method+" "+r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/issue/APP-9/comment":
-			if r.URL.Query().Get("orderBy") != "-created" {
-				t.Errorf("comments must be read newest first, query=%q", r.URL.RawQuery)
-			}
-			_, _ = w.Write([]byte(`{"comments":[
-				{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"unrelated"}]}]}},
-				{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"ai-team task: x"}]},
-					{"type":"paragraph","content":[{"type":"text","text":"ai-team attempt: attempt-9"}]}]}}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		TaskID: 9, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-9", ExternalLinks: []string{"APP-9"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"GET /rest/api/3/issue/APP-9/comment"}; !reflect.DeepEqual(requests, want) {
-		t.Fatalf("requests=%v, want only the lookup and no second comment", requests)
-	}
-}
-
-func TestJiraAdapterCommentLookupFailureDoesNotPost(t *testing.T) {
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.Method+" "+r.URL.Path)
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer server.Close()
-	adapter := NewJiraAdapter(config.JiraConfig{BaseURL: server.URL, Email: "bot", WebBaseURL: "https://ai-team.example"}, "token", server.Client())
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		TaskID: 9, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-9", ExternalLinks: []string{"APP-9"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
-		t.Fatalf("lookup failure error=%v", err)
-	}
-	if want := []string{"GET /rest/api/3/issue/APP-9/comment"}; !reflect.DeepEqual(requests, want) {
-		t.Fatalf("requests=%v, want no comment after a failed lookup", requests)
+	other := NewJiraAdapter(config.JiraConfig{BaseURL: "https://jira.example:8443"}, "", nil)
+	if keys := keysFromLinks(other, "https://jira.example/browse/OPS-4"); len(keys) != 0 {
+		t.Errorf("default port must not match base_url on :8443: keys=%v", keys)
 	}
 }
 
@@ -354,14 +352,12 @@ func (leakyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("refused %s with %s", request.URL, request.Header.Get("Authorization"))}
 }
 
-func TestJiraAdapterTransportErrorDoesNotLeakCredentials(t *testing.T) {
+func TestJiraTransportErrorDoesNotLeakCredentials(t *testing.T) {
 	const token = "jira-secret-token-123"
 	adapter := NewJiraAdapter(config.JiraConfig{
-		BaseURL: "https://jira.example/private-context", Email: "bot@example.test", WebBaseURL: "https://ai-team.example",
+		BaseURL: "https://jira.example/private-context", Email: "bot@example.test",
 	}, token, &http.Client{Transport: leakyTransport{}})
-	err := adapter.HandleTaskEvent(context.Background(), TaskEvent{
-		TaskID: 1, Type: "attempt_finished", Stage: "qa", AttemptID: "attempt-1", ExternalLinks: []string{"APP-1"},
-	})
+	_, err := adapter.GetIssue(context.Background(), "APP-1")
 	if err == nil {
 		t.Fatal("transport failure must be reported")
 	}

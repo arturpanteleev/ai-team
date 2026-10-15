@@ -133,6 +133,80 @@ func TestJiraTrackerConfigRejectsCredentialsInURLAndUnknownFields(t *testing.T) 
 	}
 }
 
+func TestTrackerConfigOnEnterOnPassAndAdapterSelection(t *testing.T) {
+	cfg, err := DefaultProfile(ProfileStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := cfg.Stages[0].ID
+	cfg.Tracker = &TrackerConfig{
+		OnEnter: map[string]string{stage: "In Progress"}, OnPass: map[string]string{stage: "In Review"},
+		Fake: &FakeTrackerConfig{Issues: []FakeIssueConfig{{Key: "APP-1", Status: "To Do"}}},
+	}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("fake tracker with on_enter/on_pass rejected: %v", err)
+	}
+	if cfg.Tracker.AdapterName() != "fake" {
+		t.Fatalf("a single configured adapter must be selected implicitly, got %q", cfg.Tracker.AdapterName())
+	}
+	encoded, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ParseYAML(encoded)
+	if err != nil || loaded.Tracker.OnEnter[stage] != "In Progress" || loaded.Tracker.OnPass[stage] != "In Review" || loaded.Tracker.Fake == nil {
+		t.Fatalf("round-trip lost the tracker maps: %+v %v", loaded.Tracker, err)
+	}
+
+	cfg.Tracker.OnEnter = map[string]string{"no-such-stage": "X"}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "on_enter") {
+		t.Fatalf("unknown on_enter stage must be rejected: %v", err)
+	}
+	cfg.Tracker.OnEnter = map[string]string{stage: " "}
+	if err := cfg.Validate(nil); err == nil {
+		t.Fatal("blank on_enter status must be rejected")
+	}
+	cfg.Tracker.OnEnter = nil
+	cfg.Tracker.Jira = &JiraConfig{BaseURL: "https://jira.example", Email: "bot@example.test", TokenEnv: "T", WebBaseURL: "https://ai-team.example"}
+	if err := cfg.Validate(nil); err == nil || !strings.Contains(err.Error(), "tracker.adapter") {
+		t.Fatalf("two adapters without tracker.adapter must be rejected: %v", err)
+	}
+	cfg.Tracker.Adapter = "jira"
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("explicit adapter selection rejected: %v", err)
+	}
+	cfg.Tracker.Adapter = "nope"
+	if err := cfg.Validate(nil); err == nil {
+		t.Fatal("unknown adapter must be rejected")
+	}
+	cfg.Tracker.Adapter = ""
+	cfg.Tracker.Fake, cfg.Tracker.Jira = nil, nil
+	if err := cfg.Validate(nil); err == nil {
+		t.Fatal("tracker without an adapter block must be rejected")
+	}
+	if _, err := ParseYAML([]byte("schema_version: 5\ntemplate: x\ntitle: X\nstages: []\ntracker:\n  fake: {}\n  on_pass:\n    a: x\n    a: y\n")); err == nil {
+		t.Fatal("duplicate on_pass keys must be rejected")
+	}
+}
+
+func TestLegacyJiraStageStatusesMergeIntoOnPass(t *testing.T) {
+	tc := &TrackerConfig{
+		OnPass: map[string]string{"qa": "Done"},
+		Jira:   &JiraConfig{StageStatuses: map[string]string{"qa": "Old", "implementation": "In Progress"}},
+	}
+	got := tc.EffectiveOnPass()
+	if got["qa"] != "Done" || got["implementation"] != "In Progress" {
+		t.Fatalf("on_pass must win over the legacy map: %v", got)
+	}
+	if tc.EffectiveWebBaseURL() != "" {
+		t.Fatal("no web base URL configured")
+	}
+	tc.Jira.WebBaseURL = "https://ai-team.example"
+	if tc.EffectiveWebBaseURL() != "https://ai-team.example" {
+		t.Fatal("web_base_url must default to the Jira one")
+	}
+}
+
 func TestBuiltInTemplateAgentContracts(t *testing.T) {
 	registry := agent.NewFS(os.DirFS(filepath.Join("..", "..", "agents")))
 	wantAgents := map[string]string{

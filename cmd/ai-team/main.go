@@ -2464,9 +2464,14 @@ func cmdWeb() {
 	if origins := strings.TrimSpace(*mcpOrigins); origins != "" {
 		serverOptions = append(serverOptions, web.WithMCPAllowedOrigins(strings.Split(origins, ",")...))
 	}
-	if cfg.Tracker != nil && cfg.Tracker.Jira != nil {
-		jira := tracker.NewJiraAdapter(*cfg.Tracker.Jira, os.Getenv(cfg.Tracker.Jira.TokenEnv), nil)
-		serverOptions = append(serverOptions, web.WithTrackerAdapter(jira))
+	if cfg.Tracker != nil {
+		trackerAdapter, err := tracker.NewRegistry().Open(cfg.Tracker, tracker.Deps{Getenv: os.Getenv})
+		if err != nil {
+			fatal("Ошибка трекера задач: %v", err)
+		}
+		serverOptions = append(serverOptions, web.WithTracker(trackerAdapter, tracker.Maps{
+			OnEnter: cfg.Tracker.OnEnter, OnPass: cfg.Tracker.EffectiveOnPass(),
+		}, cfg.Tracker.EffectiveWebBaseURL()))
 	}
 	if dispatcher := web.NotificationDispatcherFromConfig(cfg, os.Getenv, nil); dispatcher != nil {
 		serverOptions = append(serverOptions, web.WithNotifications(dispatcher))

@@ -233,6 +233,54 @@ func AllAttempts(events []evidence.Event, stage string) ([]workflow.GateAttempt,
 	return out, nil
 }
 
+// RecordedWave is the folded record of one wave: the attempts recorded for one
+// result version (hash) of one visit of a stage, in order of first appearance.
+type RecordedWave struct {
+	Key      WaveKey
+	Attempts []workflow.GateAttempt
+}
+
+// RecordedWaves folds the attempts of an event log into waves, ordered by the
+// first attempt of each wave. A wave is the unit a transition decision is
+// made on (Resolve); an older wave of the same stage stays in the list as
+// history and can never resolve a newer version.
+func RecordedWaves(events []evidence.Event) ([]RecordedWave, error) {
+	var order []WaveKey
+	waves := map[WaveKey]*RecordedWave{}
+	attempts := map[WaveKey]map[string]int{}
+	for _, event := range events {
+		if !isAttemptEvent(event.Type) {
+			continue
+		}
+		attempt, scope, err := decodeAttempt(event)
+		if err != nil {
+			return nil, fmt.Errorf("событие %s #%d: %w", event.Type, event.Sequence, err)
+		}
+		key := WaveKey{TaskID: attempt.TaskID, Stage: attempt.Stage, Visit: attempt.Visit, Scope: scope, ArtifactSHA256: attempt.ArtifactSHA256}
+		wave, seen := waves[key]
+		if !seen {
+			wave = &RecordedWave{Key: key}
+			waves[key] = wave
+			attempts[key] = map[string]int{}
+			order = append(order, key)
+		}
+		if index, known := attempts[key][attempt.AttemptID]; known {
+			if wave.Attempts[index].Execution.Terminal() {
+				continue // a terminal record is final
+			}
+			wave.Attempts[index] = attempt
+			continue
+		}
+		attempts[key][attempt.AttemptID] = len(wave.Attempts)
+		wave.Attempts = append(wave.Attempts, attempt)
+	}
+	out := make([]RecordedWave, 0, len(order))
+	for _, key := range order {
+		out = append(out, *waves[key])
+	}
+	return out, nil
+}
+
 // MemoryJournal is an in-memory Journal for tests and tools. It keeps the full
 // record log so tests can assert what was written and in which order.
 type MemoryJournal struct {

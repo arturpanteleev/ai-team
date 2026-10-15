@@ -144,6 +144,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		// skip of this stage must end with OutcomeSkipped.
 		requireSkipped := false
 		skippedByConfig := rs.runCfg.skipStageID == current && executor != "human"
+		retryGateByDecision := rs.runCfg.resumeDecisionAction == approval.ActionRetryGate &&
+			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
+			current == rs.runCfg.retryFrom
 		overriddenByDecision := rs.runCfg.resumeDecisionAction == "override" &&
 			rs.resumedApproval != nil && rs.resumedApproval.Kind == approval.KindCheckDecision &&
 			current == rs.runCfg.retryFrom
@@ -161,6 +164,18 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 			if !replayedHumanAttempt {
 				return fmt.Errorf("grill approval %s has no source result for attempt %s", stageApproval.ID, stageApproval.AttemptID)
 			}
+		} else if retryGateByDecision {
+			// Technically failed gates run again on the SAME result version:
+			// the finished attempt is replayed, its checks run with the retry
+			// set, and the gates that already succeeded are not repeated.
+			var retryErr error
+			result, retryErr = rs.prepareGateRetry(current)
+			if retryErr != nil {
+				return retryErr
+			}
+			replayedHumanAttempt = true
+			rs.runCfg.resumeDecisionAction = ""
+			rs.resumedApproval = nil
 		} else if overriddenByDecision {
 			var overrideErr error
 			result, overrideErr = rs.applyCheckOverride(current)

@@ -247,6 +247,7 @@ func TestMCPReadToolsMatchRESTUnderEachUsersIdentity(t *testing.T) {
 			{"get_task", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun},
 			{"get_task_workflow", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/workflow"},
 			{"get_task_template_version", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/template-version"},
+			{"get_task_gates", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/gates"},
 			{"list_task_events", map[string]any{"run_id": mcpTestRun, "after": 0}, "/api/runs/" + mcpTestRun + "/events?after=0"},
 			{"list_events", map[string]any{"limit": 5, "order": "desc"}, "/api/events?limit=5&order=desc"},
 			{"get_task_log", map[string]any{"run_id": mcpTestRun, "attempt_id": "attempt-1"}, "/api/runs/" + mcpTestRun + "/logs/attempt-1"},

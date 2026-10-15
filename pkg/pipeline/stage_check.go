@@ -18,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/gatesched"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
@@ -99,7 +100,11 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		}
 	}
 
-	outcome, err := rs.runGateWave(ctx, stage, result, groups, sha)
+	retry, err := rs.pendingGateRetry(stageID, result.AttemptID, sha)
+	if err != nil {
+		return err
+	}
+	outcome, err := rs.runGateWave(ctx, stage, result, groups, sha, retry)
 	if err != nil {
 		return err
 	}
@@ -111,12 +116,13 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		report.Kind = kind
 	}
 	isFailure := report.Status != stagecheck.StatusPassed
-	if !isFailure && hasGrill {
+	warnings := outcome.Warnings()
+	if !isFailure && hasGrill && len(warnings) == 0 {
 		// A grill chain that passed completes through its own durable grill
 		// completion record; a check_passed event would only duplicate it.
 		return nil
 	}
-	reportPath, reportSHA, err := rs.writeCheckReport(stageID, report)
+	reportPath, reportSHA, err := rs.writeCheckReport(stageID, report, rs.gateRetryRounds(stageID, result.AttemptID))
 	if err != nil {
 		return fmt.Errorf("сохранение отчёта проверки %s: %w", stageID, err)
 	}
@@ -139,13 +145,20 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	if report.Status == stagecheck.StatusError {
 		eventData["error"] = strings.TrimSpace(report.Notes)
 	}
+	if len(warnings) > 0 {
+		// Recommendations that did not pass: visible in evidence, the API and
+		// the UI, never a silent success and never a block.
+		eventData["warnings"] = warnings
+		eventData["warning"] = true
+		eventData["severity"] = "warning"
+	}
 	checkEvent := evidence.Event{
 		Type: eventType, Stage: stageID, AttemptID: result.AttemptID, Timestamp: time.Now().UTC(), Data: eventData,
 	}
 	if err := rs.evidence.Append(checkEvent); err != nil {
 		return fmt.Errorf("запись %s для %s: %w", eventType, stageID, err)
 	}
-	if eventType == "check_error" {
+	if eventType == "check_error" || len(warnings) > 0 {
 		rs.recordTypedEvent(checkEvent)
 	}
 	logging.Printf("%s проверка %s: %s\n",
@@ -800,6 +813,9 @@ type durableStageCheck struct {
 	Status     string
 	ReportPath string
 	ReportSHA  string
+	// ArtifactSHA is the result version the check was recorded for ("" for
+	// events written before versions were recorded).
+	ArtifactSHA string
 }
 
 // replayedStageCheck returns the completed check already recorded for the
@@ -829,13 +845,42 @@ func (rs *runState) replayedStageCheckVersion(stageID, attemptID, sha string) (d
 	if !found {
 		return durableStageCheck{}, false, nil
 	}
+	check, found := foldStageCheck(events, stageID, attemptID, sha)
+	return check, found, nil
+}
+
+// foldStageCheck rebuilds the effective check of a stage attempt on one result
+// version from the event log:
+//
+//   - the first check_passed/failed/error recorded for the version counts;
+//   - a gate_retry_requested for the version supersedes the check before it,
+//     so the next recorded check is the outcome of the retried chain;
+//   - a check_overridden for the version satisfies the check (an override of
+//     another version is ignored; events written before versions were
+//     recorded carry no hash and keep their meaning).
+func foldStageCheck(events []evidence.Event, stageID, attemptID, sha string) (durableStageCheck, bool) {
 	overridden := false
+	var recorded *durableStageCheck
 	for _, event := range events {
 		if event.AttemptID != attemptID || event.Stage != stageID {
 			continue
 		}
 		if event.Type == "check_overridden" {
-			overridden = true
+			// An override is bound to one result version: it satisfies the
+			// check only for the version it was made for. Events written
+			// before versions were recorded carry no hash and keep their meaning.
+			if recordedSHA := eventDataString(event, "artifact_sha256"); sha == "" || recordedSHA == "" || recordedSHA == sha {
+				overridden = true
+			}
+			continue
+		}
+		if event.Type == gatesched.EventGateRetryRequested {
+			// A request to run technically failed gates again on this very
+			// version supersedes the check recorded before it: the chain runs
+			// again, reusing the attempts that already succeeded.
+			if recordedSHA := eventDataString(event, "artifact_sha256"); sha == "" || recordedSHA == "" || recordedSHA == sha {
+				recorded = nil
+			}
 			continue
 		}
 		if overridden {
@@ -843,21 +888,28 @@ func (rs *runState) replayedStageCheckVersion(stageID, attemptID, sha string) (d
 		}
 		switch event.Type {
 		case "check_passed", "check_failed", "check_error":
-			if recorded := eventDataString(event, "artifact_sha256"); sha != "" && recorded != "" && recorded != sha {
+			if recordedSHA := eventDataString(event, "artifact_sha256"); sha != "" && recordedSHA != "" && recordedSHA != sha {
 				continue
 			}
-			return durableStageCheck{
-				Kind:       eventDataString(event, "check_kind"),
-				Status:     eventDataString(event, "status"),
-				ReportPath: eventDataString(event, "report_path"),
-				ReportSHA:  eventDataString(event, "report_sha256"),
-			}, true, nil
+			if recorded != nil {
+				continue
+			}
+			recorded = &durableStageCheck{
+				Kind:        eventDataString(event, "check_kind"),
+				Status:      eventDataString(event, "status"),
+				ReportPath:  eventDataString(event, "report_path"),
+				ReportSHA:   eventDataString(event, "report_sha256"),
+				ArtifactSHA: eventDataString(event, "artifact_sha256"),
+			}
 		}
 	}
 	if overridden {
-		return durableStageCheck{Status: stagecheck.StatusPassed}, true, nil
+		return durableStageCheck{Status: stagecheck.StatusPassed}, true
 	}
-	return durableStageCheck{}, false, nil
+	if recorded != nil {
+		return *recorded, true
+	}
+	return durableStageCheck{}, false
 }
 
 // blockOnDurableCheckFailure re-establishes the human decision that a prior,
@@ -884,8 +936,12 @@ func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, resul
 		if existing.ResolvedAction == "override" {
 			return nil
 		}
-		return fmt.Errorf("проверка этапа %s (%s) уже разрешена действием %q; требуется повторный прогон этапа",
-			stage.ID, applied.Status, existing.ResolvedAction)
+		if existing.ResolvedAction != approval.ActionRetryGate {
+			return fmt.Errorf("проверка этапа %s (%s) уже разрешена действием %q; требуется повторный прогон этапа",
+				stage.ID, applied.Status, existing.ResolvedAction)
+		}
+		// The earlier request asked for a retry of technically failed gates and
+		// the retried chain ended in a new failure: a new decision is needed.
 	}
 	report := stagecheck.Report{Stage: stage.ID, Kind: applied.Kind, Status: applied.Status}
 	if report.Kind == "" {
@@ -921,13 +977,27 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	if err != nil {
 		return notifier.StageResult{}, err
 	}
+	stage, hasStage := rs.p.templateStage(stageID)
 	checkKind := applied.Kind
 	if checkKind == "" {
-		stage, ok := rs.p.templateStage(stageID)
-		if !ok || len(automaticGateGroups(stage)) == 0 {
+		if !hasStage || len(automaticGateGroups(stage)) == 0 {
 			return notifier.StageResult{}, fmt.Errorf("обход проверки: этап %s не имеет проверки", stageID)
 		}
 		checkKind = stageCheckKind(stage)
+	}
+	if !hasStage {
+		return notifier.StageResult{}, fmt.Errorf("обход проверки: этап %s не найден в шаблоне", stageID)
+	}
+	// The override belongs to the version that was checked and failed. A
+	// result that changed since then is a different version: it needs its own
+	// check and, if it fails, its own override.
+	sha, err := rs.resultVersion(*result)
+	if err != nil {
+		return notifier.StageResult{}, fmt.Errorf("версия результата этапа %s: %w", stageID, err)
+	}
+	if applied.ArtifactSHA != "" && applied.ArtifactSHA != sha {
+		return notifier.StageResult{}, fmt.Errorf("обход проверки: результат этапа %s изменился после проверки (было %s, стало %s); обход действует только на проверенную версию",
+			stageID, short(applied.ArtifactSHA), short(sha))
 	}
 	eventData := map[string]any{
 		"severity":    "warning",
@@ -937,6 +1007,16 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 		"actor_role":  decision.ActorRole,
 		"approval_id": rs.resumedApproval.ID,
 		"check_kind":  checkKind,
+	}
+	if decision.Authority != "" {
+		eventData["authority"] = decision.Authority
+	}
+	bound, err := rs.overrideEvidence(stage, *result, sha)
+	if err != nil {
+		return notifier.StageResult{}, err
+	}
+	for key, value := range bound {
+		eventData[key] = value
 	}
 	if applied.Status != "" {
 		eventData["check_status"] = applied.Status
@@ -964,14 +1044,20 @@ func (rs *runState) checkDecisionForAttempt(stageID, attemptID string) (*approva
 	if err != nil {
 		return nil, fmt.Errorf("list check decisions для %s: %w", stageID, err)
 	}
+	// A stage attempt can collect several decisions: every retry of technically
+	// failed gates that ends in a new failure raises the next one. The latest
+	// is the current one.
+	var latest *approval.PendingApproval
 	for index := range values {
 		value := values[index]
 		if value.Kind == approval.KindCheckDecision && value.Trigger == approval.StageCheckTrigger &&
 			value.FromStage == stageID && value.AttemptID == attemptID {
-			return &value, nil
+			if latest == nil || !value.CreatedAt.Before(latest.CreatedAt) {
+				latest = &value
+			}
 		}
 	}
-	return nil, nil
+	return latest, nil
 }
 
 func eventDataString(event evidence.Event, key string) string {
@@ -1260,9 +1346,17 @@ func (rs *runState) runCheckerAgentWithInputs(ctx context.Context, stage config.
 	return builder.String(), nil
 }
 
-func (rs *runState) writeCheckReport(stageID string, report stagecheck.Report) (string, string, error) {
+// writeCheckReport stores the report of a stage check. The controller's files
+// are immutable, so a chain that runs again on the same attempt (a retry of
+// technically failed gates) writes its report next to the earlier one under
+// the round number instead of replacing it.
+func (rs *runState) writeCheckReport(stageID string, report stagecheck.Report, retryRound int) (string, string, error) {
 	data := report.Markdown()
-	reportPath := filepath.Join(rs.runCfg.Feature, ".stage-check", stageID+".md")
+	name := stageID
+	if retryRound > 0 {
+		name = fmt.Sprintf("%s-retry-%d", stageID, retryRound)
+	}
+	reportPath := filepath.Join(rs.runCfg.Feature, ".stage-check", name+".md")
 	artifactTarget := filepath.Join(rs.task.ArtifactRoot, reportPath)
 	if err := safeio.EnsureDirPath(filepath.Dir(artifactTarget)); err != nil {
 		return "", "", err
@@ -1274,9 +1368,9 @@ func (rs *runState) writeCheckReport(stageID string, report stagecheck.Report) (
 	if _, err := safeio.EnsureDir(runTargetDir, "checks"); err != nil {
 		return "", "", err
 	}
-	runTarget := filepath.Join(runTargetDir, "checks", stageID+".md")
+	runTarget := filepath.Join(runTargetDir, "checks", name+".md")
 	if _, err := os.Lstat(runTarget); err == nil {
-		runTarget = filepath.Join(runTargetDir, "checks", fmt.Sprintf("%s-attempt-%d.md", stageID, rs.attemptOrdinal))
+		runTarget = filepath.Join(runTargetDir, "checks", fmt.Sprintf("%s-attempt-%d.md", name, rs.attemptOrdinal))
 	}
 	if err := safeio.WriteRegularFileNoFollow(runTarget, data, 0644); err != nil {
 		return "", "", err
@@ -1326,29 +1420,49 @@ func (rs *runState) requestCheckDecision(stage config.TemplateStage, result noti
 			failedRules = append(failedRules, rule.Rule)
 		}
 	}
+	sha, shaErr := rs.resultVersion(result)
+	if shaErr != nil {
+		return fmt.Errorf("версия результата этапа %s: %w", stage.ID, shaErr)
+	}
+	retryable := rs.retryableGates(stage, result, sha)
 	payload, err := json.Marshal(approval.CheckDecisionPayload{
 		Kind: string(approval.KindCheckDecision), StageID: stage.ID,
 		CheckKind: report.Kind, Status: report.Status,
 		ReportPath: reportPath, ReportSHA256: reportSHA, FailedRules: failedRules,
+		ArtifactSHA256: sha, RetryableGates: retryable,
 	})
 	if err != nil {
 		return err
 	}
 	actions := []string{"new_version", "override", "return"}
+	if len(retryable) > 0 {
+		actions = append(actions, approval.ActionRetryGate)
+	}
 	targets := make(map[string]string, len(actions))
 	for _, action := range actions {
 		targets[action] = stage.ID
 	}
-	value, err := rs.approvalStore.Create(approval.PendingApproval{
+	request := approval.PendingApproval{
 		Kind: approval.KindCheckDecision, RunID: rs.runID, AttemptID: result.AttemptID,
 		FromStage: stage.ID, ToStage: stage.ID, Trigger: approval.StageCheckTrigger,
 		SubjectHash: reportSHA, RequiredRoles: []string{stage.Function},
 		Quorum: approval.QuorumAny, Actions: actions, Targets: targets, Payload: payload,
-	})
+	}
+	if rounds := rs.gateRetryRounds(stage.ID, result.AttemptID); rounds > 0 {
+		// Every retry of technically failed gates that ends in a new failure
+		// raises its own decision: the identity includes the round, so a
+		// repeated, byte-identical report cannot resolve to the old decision.
+		request.ID = approval.NewID(rs.runID, result.AttemptID, stage.ID, stage.ID, approval.StageCheckTrigger,
+			fmt.Sprintf("%s#retry-%d", reportSHA, rounds))
+	}
+	value, err := rs.approvalStore.Create(request)
 	if err != nil {
 		return fmt.Errorf("create check_decision approval для %s: %w", stage.ID, err)
 	}
 	if value.Status == approval.StatusResolved {
+		if value.ResolvedAction == approval.ActionRetryGate {
+			return fmt.Errorf("решение %s о повторе гейтов уже использовано; повторная проверка завершилась тем же отказом без нового запроса", value.ID)
+		}
 		return nil
 	}
 	requestedAt := time.Now().UTC()

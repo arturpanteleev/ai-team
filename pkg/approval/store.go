@@ -95,8 +95,9 @@ type GrillQuestionsPayload struct {
 }
 
 // CheckDecisionPayload — контракт запроса решения по проваленной проверке
-// этапа. Действия new_version/override/return остаются в actions; семантика
-// override/return наполняется B-41.
+// этапа. Действия new_version/override/return остаются в actions; действие
+// retry_gate (S06) повторяет технически упавшие гейты на той же версии
+// результата и предлагается, только когда такие гейты есть.
 type CheckDecisionPayload struct {
 	Kind         string   `json:"kind"`
 	StageID      string   `json:"stage_id"`
@@ -105,7 +106,19 @@ type CheckDecisionPayload struct {
 	ReportPath   string   `json:"report_path,omitempty"`
 	ReportSHA256 string   `json:"report_sha256,omitempty"`
 	FailedRules  []string `json:"failed_rules,omitempty"`
+	// ArtifactSHA256 is the result version the failed check belongs to.
+	ArtifactSHA256 string `json:"artifact_sha256,omitempty"`
+	// RetryableGates are the gate instances whose latest attempt is a
+	// technical failure (error/timeout) and may be run again.
+	RetryableGates []string `json:"retryable_gates,omitempty"`
 }
+
+// ActionRetryGate repeats technically failed gates on the same result version.
+const ActionRetryGate = "retry_gate"
+
+// AuthoritySystemAdmin marks a decision made under the system administrator
+// right (the gate override of a required failure).
+const AuthoritySystemAdmin = "system_admin"
 
 type Decision struct {
 	ApprovalID              string            `json:"approval_id"`
@@ -120,6 +133,11 @@ type Decision struct {
 	ArtifactRevisions       map[string]string `json:"artifact_revisions,omitempty"`
 	DecidedAt               time.Time         `json:"decided_at"`
 	ControllerAuthenticated bool              `json:"controller_authenticated,omitempty"`
+	// Gates names the gate instances a retry_gate decision applies to.
+	Gates []string `json:"gates,omitempty"`
+	// Authority records the system right the decision was made under; it is
+	// set by the authenticated controller (override: system_admin).
+	Authority string `json:"authority,omitempty"`
 }
 
 // TrustedDecisionAuthority marks an approval store whose reads are backed by
@@ -379,6 +397,20 @@ func applyDecision(value PendingApproval, approvalID string, decision Decision) 
 	if value.Kind == KindCheckDecision && decision.Action == "override" && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("обход проверки этапа требует причину")
 	}
+	if value.Kind == KindCheckDecision && decision.Action == ActionRetryGate {
+		var payload CheckDecisionPayload
+		if json.Unmarshal(value.Payload, &payload) != nil || len(payload.RetryableGates) == 0 {
+			return PendingApproval{}, errors.New("повтор гейта возможен только после технической ошибки (error/timeout)")
+		}
+		if len(decision.Gates) == 0 {
+			return PendingApproval{}, errors.New("повтор гейта требует имя гейта")
+		}
+		for _, gate := range decision.Gates {
+			if !contains(payload.RetryableGates, gate) {
+				return PendingApproval{}, fmt.Errorf("гейт %q не завершился технической ошибкой и не повторяется", gate)
+			}
+		}
+	}
 	if value.Kind == KindGrillQuestions && decision.Action == GrillActionAnswer && strings.TrimSpace(decision.Comment) == "" {
 		return PendingApproval{}, errors.New("ответ на вопросы грилла не может быть пустым")
 	}
@@ -621,7 +653,7 @@ func validate(value PendingApproval) error {
 			return errors.New("check_decision approval must bind a failed stage check and a new_version route")
 		}
 		for _, action := range value.Actions {
-			if action != "new_version" && action != "override" && action != "return" {
+			if action != "new_version" && action != "override" && action != "return" && action != ActionRetryGate {
 				return fmt.Errorf("check_decision approval action %q is unsupported", action)
 			}
 		}

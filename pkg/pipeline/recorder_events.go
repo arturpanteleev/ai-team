@@ -13,6 +13,8 @@ var taskWarningEventTypes = map[string]struct{}{
 	// outcome with times in the task feed, and is repaired from evidence.
 	gatesched.EventAttemptStarted: {}, gatesched.EventAttemptWaiting: {}, gatesched.EventAttemptFinished: {},
 	gatesched.EventWaveAborted: {},
+	// The request to run technically failed gates again (S06).
+	gatesched.EventGateRetryRequested: {},
 }
 
 // eventRecorder is optional so external Recorder implementations retain
@@ -44,6 +46,9 @@ func (rs *runState) replayTypedEvents() {
 	}
 	for _, event := range events {
 		if _, ok := taskWarningEventTypes[event.Type]; ok {
+			rs.recordTypedEvent(event)
+		} else if flagged, _ := event.Data["warning"].(bool); flagged {
+			// e.g. a passed check that carries advisory warnings
 			rs.recordTypedEvent(event)
 		}
 	}

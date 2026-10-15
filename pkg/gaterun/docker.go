@@ -175,7 +175,7 @@ func (d DockerSettings) Validate() error {
 		}
 		targets[m.Target] = true
 		probe.Mounts = append(probe.Mounts, dockerrun.Mount{Source: "/probe/" + m.Path, Target: m.Target, ReadOnly: !m.Writable})
-		if m.Writable && (m.Path == ".git" || strings.HasPrefix(m.Path, ".git/")) {
+		if m.Writable && (strings.EqualFold(m.Path, ".git") || strings.HasPrefix(strings.ToLower(m.Path), ".git/")) {
 			return fmt.Errorf("docker gate: mount %q: a gate must not get write access to .git", m.Path)
 		}
 		if strings.HasPrefix(m.Target, ContainerEvidenceDir+"/") || strings.HasPrefix(m.Target, ContainerArtifact+"/") {

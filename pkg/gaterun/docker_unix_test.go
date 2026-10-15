@@ -75,6 +75,8 @@ func TestParseDockerParamsRejects(t *testing.T) {
 		"mount in evidence":    base(map[string]any{"mounts": []any{"build:/gate/evidence/x"}}),
 		"mount proc":           base(map[string]any{"mounts": []any{"build:/proc/x"}}),
 		"git rw":               base(map[string]any{"mounts": []any{".git:/g:rw"}}),
+		"git rw upper":         base(map[string]any{"mounts": []any{".GIT/hooks:/g:rw"}}),
+		"git rw mixed":         base(map[string]any{"mounts": []any{".Git:/g:rw"}}),
 		"git subpath rw":       base(map[string]any{"mounts": []any{".git/hooks:/g:rw"}}),
 		"cpus text":            base(map[string]any{"cpus": "many"}),
 		"user injection":       base(map[string]any{"user": "1 --privileged"}),

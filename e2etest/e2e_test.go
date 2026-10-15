@@ -648,7 +648,7 @@ func TestE2E_InitCreatesStructure(t *testing.T) {
 	}
 	cfg := string(data)
 	// Init сериализует schema v5 template, стадии, возвраты и проектные checks.
-	for _, want := range []string{"schema_version: 5", "template: idea-to-prod", "id: intent", "id: acceptance", "returns:", "max_visits:", "cli: opencode", "stage_timeout: 30m"} {
+	for _, want := range []string{"schema_version: 6", "template: idea-to-prod", "id: intent", "id: acceptance", "returns:", "max_visits:", "cli: opencode", "stage_timeout: 30m"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config.yaml должен содержать %q:\n%s", want, cfg)
 		}

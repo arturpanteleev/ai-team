@@ -20,7 +20,7 @@
 Контроллер строго проверяет конфиг до первого вызова модели. Отклоняются:
 
 - неизвестные и повторяющиеся поля, несколько YAML-документов в файле;
-- конфиги схемы, отличной от `5`; v4 явно отклоняется с подсказкой о запуске
+- конфиги схемы, отличной от `5` и `6`; v4 явно отклоняется с подсказкой о запуске
   `ai-team init --force` или ручном переносе;
 - уникальность ID этапов, наличие ссылочных агентов и допустимость результатов,
   ссылок и возвратов;
@@ -41,7 +41,7 @@
 Go-проекте:
 
 ```yaml
-schema_version: 5
+schema_version: 6
 template: idea-to-prod
 title: От идеи до продакшена
 stall_after: 24h
@@ -57,14 +57,25 @@ stages:
     result: md
     executor: human
     agent: analyst
-    required_sections: [Критерии приёмки]
+    exit_gate_groups:
+      - - gate: required_sections
+          version: 1
+          params: {sections: [Критерии приёмки]}
+      - - gate: agent_review
+          version: 1
+          params: {agent: spec-checker, mode: grill, max_rounds: 3}
+      - [human_approval@1]
   - id: tech_design
     title: Техническое решение
     function: architect
     result: md
     executor: agent
     agent: architect
-    confirm: required
+    exit_gate_groups:
+      - - gate: agent_review
+          version: 1
+          params: {agent: verifier}
+      - [human_approval@1]
   - id: implementation
     title: Реализация
     function: developer
@@ -72,6 +83,9 @@ stages:
     link_kind: pr
     executor: human
     agent: coder
+    exit_gate_groups:
+      - [pr_exists@1, pr_open@1, pr_base_branch@1]
+      - [human_approval@1]
     delivery:
       require_checks: [go-test, go-vet]
   - id: acceptance
@@ -101,7 +115,7 @@ stage_timeout: 30m
 
 | Поле | Обязательно | По умолчанию | Что задаёт |
 |---|---|---|---|
-| `schema_version` | да | — | версия схемы; поддерживается только `5` |
+| `schema_version` | да | — | версия схемы: `6` (текущая) или `5` (совместимая, см. [перенос v5 → v6](#гейты-этапа-и-перенос-на-схему-v6)) |
 | `template` | да | — | ID единственного шаблона процесса проекта |
 | `title` | да | — | название шаблона для людей |
 | `stages` | да | — | упорядоченные этапы шаблона; см. [ниже](#этапы-шаблона) |
@@ -370,7 +384,7 @@ cicd:
 Порядок работы этапа:
 
 1. Ссылка на PR и коммит PR берутся из controller receipt более раннего
-   PR-этапа (`delivery` + `check: pr_exists`). Без такого этапа выкладка не
+   PR-этапа (`delivery` + гейт `pr_exists@1`; в v5 — `check: pr_exists`). Без такого этапа выкладка не
    начинается.
 2. Контроллер ждёт мержа: опрашивает `gh pr view` раз в `poll_interval` не
    дольше `merge_timeout`. Открытый PR — ожидание, закрытый без мержа или
@@ -471,7 +485,7 @@ ai-team сам PR никогда не мержит: этап выкладки т
 выкладывает вершину ветки. Решение «это можно в прод» — это сам мерж в
 GitHub. Шаблон этого не проверяет и не может проверить:
 
-- этап с `confirm: required` между PR-этапом и выкладкой рекомендуется (ревью,
+- этап с гейтом `human_approval@1` (в v5 — `confirm: required`) между PR-этапом и выкладкой рекомендуется (ревью,
   QA), но валидацией не требуется: `--approve-gates` и auto mode подтверждают
   такие гейты автоматически, поэтому обязательность в шаблоне дала бы ложную
   гарантию;
@@ -666,9 +680,8 @@ tree_hash:
 | `agent` | существующий агент из `ai-team list`, если для этапа доступно исполнение агентом |
 | `mcp_servers` | имена серверов из верхнеуровневого allowlist; применяются только к этому этапу и только с `cli: codex` |
 | `link_kind` | для `result: link`: `pr`, `build` или `other` |
-| `required_sections` | обязательные заголовки, только для `result: md` |
-| `check` | проверка результата: `{kind: hard, rules: [...]}` или `{kind: agent, agent: ...}`; PR-правила `project_checks` и `pr_checks_green` допускаются только на `result: link` с `link_kind: pr` |
-| `confirm` | `required` или `auto`; по умолчанию `auto` для `approve`, иначе `required` |
+| `exit_gate_groups` | (v6) гейты, которые должен пройти результат, чтобы этап можно было покинуть; см. [гейты этапа](#гейты-этапа-и-перенос-на-схему-v6) |
+| `required_sections`, `check`, `confirm` | (только v5, в v6 отклоняются) прежняя запись тех же проверок; заменяются на `exit_gate_groups` |
 | `skippable` | можно ли пропустить этап с причиной; по умолчанию `false` |
 | `delivery` | требования delivery для PR-этапа с указанным `agent`: `require_checks` выбирает controller checks проекта, `require_verdicts` — дополнительные verdict stages |
 
@@ -676,8 +689,8 @@ tree_hash:
 контроллера; см. [выкладку через CI/CD](#выкладка-через-teamcity).
 
 Если указан `executor: agent`, поле `agent` обязательно. Все agent-ссылки,
-включая `check.agent`, проверяются по registry. `required_sections` нельзя
-задавать для `link` или `approve`.
+включая `agent` в параметрах гейта `agent_review`, проверяются по registry.
+Гейт `required_sections` применим только к `result: md`.
 
 Named `delivery.require_checks` запускаются контроллером на указанном PR-этапе
 реализации и должны иметь `policy: required`. Delivery принимает их только
@@ -695,6 +708,67 @@ SHA в отдельном detached worktree PR. Политика `gate.yaml` б�
 результат, контроллер передаёт ревьюеру неизменяемый `gh pr diff` и JSON с PR,
 base и head SHA вместе с объявленными входами спецификации и технического
 решения. Если PR-ссылки нет, reviewer работает по обычным входам шаблона.
+
+### Гейты этапа и перенос на схему v6
+
+Этап производит результат (`result: md|link|approve`). **Гейт** проверяет одну
+версию этого результата (по хешу) и возвращает структурированный исход;
+следующий этап выбирает только контроллер. Определения гейтов живут в
+версионированной библиотеке в коде (`pkg/gatelib`), меняются через PR и
+показываются в только читаемом каталоге `GET /api/gates/catalog`. Загрузить
+или отредактировать определение из UI/API нельзя.
+
+`exit_gate_groups` — список групп. Группы выполняются последовательно, гейты
+внутри группы независимы (параллельное исполнение — задача планировщика).
+Ссылка на гейт — это точные ID и версия, никогда «последняя»:
+
+```yaml
+exit_gate_groups:
+  - [verdict_marker@1]                 # строка: id@версия
+  - - gate: agent_review               # mapping: параметры, имя, режим
+      version: 1
+      name: spec_llm_review            # уникально в этапе; по умолчанию = gate
+      mode: required                   # required (по умолчанию) | advisory
+      params: {agent: spec-checker, mode: grill, max_rounds: 3}
+  - [human_approval@1]
+```
+
+| Гейт@версия | Вид | Параметры | Применим к |
+|---|---|---|---|
+| `required_sections@1` | код | `sections` (список, обязателен) | `md` |
+| `verdict_marker@1` | код | — | `md` |
+| `pr_exists@1`, `pr_open@1`, `pr_base_branch@1` | код | — | `link` |
+| `project_checks@1`, `pr_checks_green@1` | код | — | `link` с `link_kind: pr` |
+| `agent_review@1` | LLM | `agent` (обязателен), `mode` (`grill`), `max_rounds` (≥ 0) | любой |
+| `human_approval@1` | человек | — | любой |
+
+Правила валидации (ошибки называют путь вида
+`stages[1] (product_spec): exit_gate_groups[0][0]` и причину): неизвестный ID,
+версия или параметр, пропущенная версия, обязательный параметр, неверный тип,
+неприменимый результат, пустая группа и повторяющееся имя гейта отклоняют
+шаблон до запуска. Шаблон закрепляет точные версии определений: публикация
+новой версии определения в библиотеке не меняет ни опубликованный шаблон, ни
+начатую задачу, потому что их YAML ссылается на `id@старая_версия`, а старые
+версии остаются в библиотеке навсегда. `Config.GatePins()` возвращает
+закреплённые `id`, `version` и SHA-256 определения.
+
+Отсутствие гейта `human_approval` означает отсутствие подтверждения этапа
+(в v5 это было `confirm: auto`). Пока исполнение групп не реализовано
+планировщиком, контроллер выполняет только цепочки вида «код → один
+`agent_review` → `human_approval`» и отклоняет в `Validate` всё остальное
+(несколько LLM-гейтов, `mode: advisory`, иной порядок), чтобы гейт не был
+молча проигнорирован.
+
+**Перенос v5 → v6.** Файлы `schema_version: 5` продолжают загружаться без
+изменений: ключи `required_sections`, `check` и `confirm` по-прежнему
+действуют, а в гейты переводятся на лету (`required_sections` → гейт
+`required_sections@1`; правила `check.kind: hard` → гейты с теми же именами;
+`check.kind: agent` → `agent_review@1`; `confirm: required` → `human_approval@1`
+в последней группе). Явный перенос — `Config.MigrateToCurrent()`; профили
+`init` создаются сразу в v6, и их путь и вердикты совпадают с v5
+(`TestIdeaToProdV5AndV6AreEquivalent`). В v6 ключи `required_sections`,
+`check` и `confirm` удалены, а `exit_gate_groups` в v5 недоступен: обе ошибки
+подсказывают замену.
 
 Шаблон содержит возвраты между этапами. `to` должен быть раньше `from` в
 списке `stages`; для каждого этапа, в который ведёт возврат, действует лимит
@@ -771,9 +845,9 @@ base и head SHA вместе с объявленными входами спе�
 |---|---|---|---|
 | Профиль | ID шаблона | Отличие |
 |---|---|---|
-| `standard` (по умолчанию) | `idea-to-prod` | стандартные `confirm`, лимит возвратов — 3 |
-| `fast` | `idea-to-prod-fast` | все этапы с `confirm: auto`, лимит возвратов — 2 |
-| `regulated` | `idea-to-prod-regulated` | все этапы с `confirm: required`, лимит возвратов — 2 |
+| `standard` (по умолчанию) | `idea-to-prod` | стандартные подтверждения (`human_approval`), лимит возвратов — 3 |
+| `fast` | `idea-to-prod-fast` | ни одного `human_approval`, лимит возвратов — 2 |
+| `regulated` | `idea-to-prod-regulated` | `human_approval` на каждом этапе, лимит возвратов — 2 |
 
 Каждый профиль хранит обычный список этапов и возвратов; специальные runtime-
 режимы профиля не сохраняются. Встроенный `idea-to-prod` включает этапы от

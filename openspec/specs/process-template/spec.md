@@ -2,7 +2,8 @@
 
 ## Purpose
 
-Schema v5 stores the project's single process template as ordered stages and
+Schema v6 (with schema v5 accepted through a compatibility loader) stores the
+project's single process template as ordered stages, per-stage gate chains and
 explicit backward returns, then compiles that declaration into the workflow
 graph contract.
 
@@ -10,7 +11,8 @@ graph contract.
 
 ### Requirement: One schema v5 template per project
 
-`config.yaml` MUST contain one `template` ID, a human-readable `title`, and an
+`config.yaml` MUST declare `schema_version` 6 or 5 (see requirement
+"Schema v6 replaces ad hoc stage checks with gate chains") and MUST contain one `template` ID, a human-readable `title`, and an
 ordered non-empty `stages` list. Stage IDs MUST be unique. A stage MUST declare
 `id`, `title`, `function`, and `result`; result MUST be `md`, `link`, or
 `approve`. `executor` defaults to `human` and MUST be `human` or `agent`; an
@@ -31,9 +33,10 @@ agent-executed stage MUST reference an existing `agent`.
 ### Requirement: Stage result constraints
 
 `link_kind` MUST be `pr`, `build`, or `other` and is valid only for
-`result: link`. `required_sections` MAY be set only for `result: md`. `confirm` MUST be
-`required` or `auto`; its default MUST be `auto` for `approve` and `required`
-for other results. `skippable` MAY be set to allow an explicit skip with a
+`result: link`. In schema v5, `required_sections` MAY be set only for
+`result: md`, and `confirm` MUST be `required` or `auto` with default `auto` for
+`approve` and `required` for other results; in schema v6 these are expressed by
+gates and the v5 keys are rejected. `skippable` MAY be set to allow an explicit skip with a
 non-empty reason. Optional stage fields MUST be strictly decoded.
 
 #### Scenario: Invalid result metadata
@@ -172,13 +175,13 @@ workflow graphs retain their existing approval validation.
 
 `ai-team init` MUST write the built-in `idea-to-prod` template by default.
 `fast`, `standard`, and `regulated` presets MUST be serialized as ordinary
-schema v5 templates with one template ID each; they MUST NOT require a separate
+schema v6 templates with one template ID each; they MUST NOT require a separate
 runtime profile representation.
 
 #### Scenario: Default init template
 
 - **КОГДА** `ai-team init` runs without a profile override
-- **ТОГДА** it MUST write `schema_version: 5` and `template: idea-to-prod`
+- **ТОГДА** it MUST write `schema_version: 6` and `template: idea-to-prod`
 
 #### Scenario: Profile init
 
@@ -242,3 +245,62 @@ template, so those tasks remain resumable after a server restart.
 
 - **КОГДА** a new task starts after version B becomes active
 - **ТОГДА** it MUST pin and resolve version B
+
+### Requirement: Schema v6 replaces ad hoc stage checks with gate chains
+
+A schema v6 stage MUST describe what its result must satisfy only through
+`exit_gate_groups`, an ordered list of groups of gate references (see the
+`gate-contract` capability). The v5 stage keys `required_sections`, `check`, and
+`confirm` MUST be rejected in v6 with an error naming the stage path, the key,
+and its replacement. `exit_gate_groups` MUST be rejected in schema v5. A v6 stage
+without a `human_approval` gate MUST NOT require confirmation of its forward
+transition; a stage with one MUST require it. Schema versions other than 5 and 6
+MUST be rejected.
+
+#### Scenario: Legacy key in a v6 template
+
+- **КОГДА** a `schema_version: 6` stage declares `check`, `required_sections`, or
+  `confirm`
+- **ТОГДА** loading MUST fail with the path `stages[i] (id)`, the key name, and
+  the gate that replaces it
+
+#### Scenario: Gate chain in a v5 template
+
+- **КОГДА** a `schema_version: 5` stage declares `exit_gate_groups`
+- **ТОГДА** loading MUST fail and state that gate chains require schema 6
+
+### Requirement: Schema v5 templates keep their path and verdicts
+
+A schema v5 template MUST keep loading and MUST behave exactly as before: its
+`required_sections`, `check`, and `confirm` fields remain authoritative and are
+translated on demand into the equivalent gate chain (required sections to
+`required_sections@1`, hard-check rules to gates of the same name, agent check to
+`agent_review@1`, `confirm: required` to a final `human_approval@1`). Loading
+MUST NOT rewrite a file; an explicit migration MUST produce the v6 spelling. For
+every built-in profile the v5 template and its v6 migration MUST produce
+identical engine stage fields and an identical compiled graph.
+
+#### Scenario: Built-in idea-to-prod in both spellings
+
+- **КОГДА** the `idea-to-prod` template is loaded as v5 and as its v6 migration
+- **ТОГДА** each stage MUST have equal required sections, check, and confirmation
+  and the compiled graphs MUST be equal
+
+#### Scenario: Unknown legacy rule
+
+- **КОГДА** a v5 hard check lists a rule that is not a library gate
+- **ТОГДА** validation MUST reject it by name before any run starts
+
+### Requirement: Executable chains are validated before a run
+
+Until the group scheduler executes arbitrary chains, validation MUST reject any
+chain the controller cannot execute faithfully (more than one `agent_review` or
+`human_approval`, code gates combined with `agent_review` through hard rules,
+groups mixing gate kinds, an order other than code, LLM, human, or `mode:
+advisory`), so that no configured gate is silently ignored. The legacy engine
+fields of a stage with explicit groups MUST equal the projection of its groups.
+
+#### Scenario: Advisory gate before enforcement exists
+
+- **КОГДА** a stage references a gate with `mode: advisory`
+- **ТОГДА** validation MUST fail instead of treating it as required

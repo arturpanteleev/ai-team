@@ -168,6 +168,7 @@ func newBuiltin() *Registry {
 			{Name: "max_output_bytes", Type: workflow.GateParamInt, Min: &one, Description: "Лимит stdout и stderr по отдельности, байт (по умолчанию 1 МиБ, максимум 16 МиБ)."},
 		},
 	})
+	registerDecisionGates(r)
 	return r
 }
 

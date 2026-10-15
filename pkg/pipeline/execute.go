@@ -38,7 +38,11 @@ func (rs *runState) execute(ctx context.Context) error {
 	if err := rs.applyBudgetAllowanceGrant(); err != nil {
 		return err
 	}
-	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) {
+	if err := rs.recordResumedHumanDecision(); err != nil {
+		return err
+	}
+	if rs.runCfg.resumeDecisionAction == "reject" && (rs.resumedApproval == nil || rs.resumedApproval.Kind != approval.KindInput) &&
+		!rejectKeepsStage(rs.resumedApproval) {
 		return fmt.Errorf("%w: ожидавшийся переход отклонён человеком", ErrUserStopped)
 	}
 	return rs.executeGraph(ctx)
@@ -359,11 +363,20 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 				edge.Approval.Roles, edge.Approval.Quorum, actions, edge.Approval.Actions,
 				edge.Approval.Deferred, requestKind, transitionPayload,
 			)
+			if recordErr := rs.recordHumanGateOutcome(current, edge, requestKind, result, selected, err); recordErr != nil {
+				return recordErr
+			}
 			if err != nil {
 				return err
 			}
 			action = selected
 			target = edge.Approval.Actions[selected]
+			if target == current && edge.Outcome == workflow.OutcomePassed && action == "reject" && rs.visits[current] > 0 {
+				// human_approval on_reject: stay. The refusal is a decision of
+				// a person, not a loopback: the rework must not consume the
+				// visit allowance of the stage.
+				rs.visits[current]--
+			}
 		}
 		if target == "" {
 			return fmt.Errorf("workflow graph: edge %s/%s выбрал пустой target", current, edge.Outcome)

@@ -50,7 +50,10 @@ func (rs *runState) authorizeTransition(
 	feedbackActions := make([]string, 0)
 	fromIndex := rs.graph.Index(fromStage)
 	for action, target := range targets {
-		if strings.HasPrefix(action, "return_to_") && rs.graph.Index(target) >= 0 && rs.graph.Index(target) <= fromIndex {
+		if rs.graph.Index(target) >= 0 && rs.graph.Index(target) <= fromIndex &&
+			(strings.HasPrefix(action, "return_to_") || (action == "reject" && target == fromStage)) {
+			// A return, or a rejection that keeps the task at the stage
+			// (human_approval on_reject: stay), needs the person's reason.
 			feedbackActions = append(feedbackActions, action)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
@@ -36,26 +37,39 @@ const grillMode = "grill"
 
 const maxCheckReportBytes int64 = 8 << 20
 
-// runStageChecks выполняет декларативную проверку результата только что
-// завершённой попытки. Возвращает ApprovalRequiredError, если проверка не
-// пройдена или не смогла выполниться: переход блокируется до решения человека.
+// runStageChecks executes the stage's exit gate chain over the result of the
+// attempt that has just finished (pkg/gatesched runs the groups in order and
+// the gates of a group in parallel; gate_wave.go adapts it to the pipeline).
+// It returns ApprovalRequiredError when a gate failed or could not run — the
+// transition is then blocked until a human decision — or when a gate waits
+// for an answer (grill).
+//
+// Human gates are not part of the automatic chain: a human_approval gate is
+// the transition approval that the caller requests after this function.
 func (rs *runState) runStageChecks(ctx context.Context, stageID string, result notifier.StageResult) error {
 	stage, ok := rs.p.templateStage(stageID)
-	if !ok || stage.Check == nil || stage.Check.Kind == "" {
+	if !ok {
 		return nil
 	}
-	check := stage.Check
-	if check.Kind == "agent" && check.Mode == grillMode {
-		return rs.runStageGrill(ctx, stage, result)
+	groups := automaticGateGroups(stage)
+	if len(groups) == 0 {
+		return nil
 	}
+	sha, err := rs.resultVersion(result)
+	if err != nil {
+		return fmt.Errorf("версия результата этапа %s: %w", stageID, err)
+	}
+	hasGrill := stage.GrillCheck() != nil
+	kind := stageCheckKind(stage)
 
 	// Replay-safe: a crash can leave an attempt durably finished before its
 	// check ran, or after a failed check but before the human decision was
-	// recorded. Decide from the durable check event (not the attempt replay
-	// flag): no completed check means the check must run again, a passed check
-	// is already satisfied, and a failed/erroring check must still block the
-	// transition instead of silently advancing.
-	if applied, found, err := rs.replayedStageCheck(stageID, result.AttemptID); err != nil {
+	// recorded. Decide from the durable check event for this very result
+	// version (not the attempt replay flag): no completed check means the chain
+	// must run again, a passed check is already satisfied, and a failed or
+	// erroring check must still block the transition instead of silently
+	// advancing. A check recorded for a different hash is never reused.
+	if applied, found, err := rs.replayedStageCheckVersion(stageID, result.AttemptID, sha); err != nil {
 		return err
 	} else if found {
 		if applied.Status == stagecheck.StatusPassed {
@@ -69,27 +83,38 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		return rs.blockOnDurableCheckFailure(stage, result, applied)
 	}
 
-	if check.Kind == "agent" {
+	if chainHasPlainAgentGate(stage) {
 		// Бюджет проверяется до check_started: после resume проверка
 		// повторится целиком, а не останется незавершённой.
 		if err := rs.enforceCheckTokenBudget(stageID, result.AttemptID); err != nil {
 			return err
 		}
 	}
-	startedAt := time.Now().UTC()
-	if err := rs.evidence.Append(evidence.Event{
-		Type: "check_started", Stage: stageID, AttemptID: result.AttemptID, Timestamp: startedAt,
-		Data: map[string]any{"check_kind": check.Kind},
-	}); err != nil {
-		return fmt.Errorf("запись check_started для %s: %w", stageID, err)
+	if !hasGrill {
+		if err := rs.evidence.Append(evidence.Event{
+			Type: "check_started", Stage: stageID, AttemptID: result.AttemptID, Timestamp: time.Now().UTC(),
+			Data: map[string]any{"check_kind": kind, "artifact_sha256": sha},
+		}); err != nil {
+			return fmt.Errorf("запись check_started для %s: %w", stageID, err)
+		}
 	}
 
-	report := rs.evaluateStageCheck(ctx, stage, result)
+	outcome, err := rs.runGateWave(ctx, stage, result, groups, sha)
+	if err != nil {
+		return err
+	}
+	report := outcome.Report
 	if report.Stage == "" {
 		report.Stage = stageID
 	}
 	if report.Kind == "" {
-		report.Kind = check.Kind
+		report.Kind = kind
+	}
+	isFailure := report.Status != stagecheck.StatusPassed
+	if !isFailure && hasGrill {
+		// A grill chain that passed completes through its own durable grill
+		// completion record; a check_passed event would only duplicate it.
+		return nil
 	}
 	reportPath, reportSHA, err := rs.writeCheckReport(stageID, report)
 	if err != nil {
@@ -97,7 +122,6 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	}
 
 	eventType := "check_passed"
-	isFailure := report.Status != stagecheck.StatusPassed
 	if isFailure {
 		eventType = "check_failed"
 	}
@@ -105,10 +129,12 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		eventType = "check_error"
 	}
 	eventData := map[string]any{
-		"check_kind":    report.Kind,
-		"report_path":   reportPath,
-		"report_sha256": reportSHA,
-		"status":        report.Status,
+		"check_kind":      report.Kind,
+		"report_path":     reportPath,
+		"report_sha256":   reportSHA,
+		"status":          report.Status,
+		"artifact_sha256": sha,
+		"gates":           outcome.Summary(),
 	}
 	if report.Status == stagecheck.StatusError {
 		eventData["error"] = strings.TrimSpace(report.Notes)
@@ -138,6 +164,28 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 		return retryErr
 	}
 	return rs.requestCheckDecision(stage, result, report, reportPath, reportSHA)
+}
+
+// stageCheckKind is the check_kind label of a chain in the two values the
+// approval contract knows: "agent" when the chain has an LLM gate, "hard" for
+// code gates only. A failed wave refines it by the kind of the gates that
+// blocked (see waveReport).
+func stageCheckKind(stage config.TemplateStage) string {
+	if len(stage.AgentChecks()) > 0 {
+		return stagecheck.KindAgent
+	}
+	return stagecheck.KindHard
+}
+
+// chainHasPlainAgentGate reports whether the chain has an LLM gate that is not
+// a grill: those spend model tokens in one shot and are budgeted up front.
+func chainHasPlainAgentGate(stage config.TemplateStage) bool {
+	for _, check := range stage.AgentChecks() {
+		if check.Mode != grillMode {
+			return true
+		}
+	}
+	return false
 }
 
 type autoCheckRetryError struct{ input runtime.Artifact }
@@ -761,6 +809,16 @@ type durableStageCheck struct {
 // precedence over the failed check it bypasses: the human decision satisfies
 // the check requirement.
 func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageCheck, bool, error) {
+	return rs.replayedStageCheckVersion(stageID, attemptID, "")
+}
+
+// replayedStageCheckVersion is replayedStageCheck bound to one result version:
+// a recorded check that carries an artifact_sha256 different from sha belongs
+// to an earlier version of the result and is ignored, so a success recorded
+// for old content never satisfies new content. sha == "" accepts any version
+// (callers that only ask whether an attempt was checked at all); events
+// written before versions were recorded carry no hash and keep their meaning.
+func (rs *runState) replayedStageCheckVersion(stageID, attemptID, sha string) (durableStageCheck, bool, error) {
 	if attemptID == "" {
 		return durableStageCheck{}, false, nil
 	}
@@ -785,6 +843,9 @@ func (rs *runState) replayedStageCheck(stageID, attemptID string) (durableStageC
 		}
 		switch event.Type {
 		case "check_passed", "check_failed", "check_error":
+			if recorded := eventDataString(event, "artifact_sha256"); sha != "" && recorded != "" && recorded != sha {
+				continue
+			}
 			return durableStageCheck{
 				Kind:       eventDataString(event, "check_kind"),
 				Status:     eventDataString(event, "status"),
@@ -828,7 +889,7 @@ func (rs *runState) blockOnDurableCheckFailure(stage config.TemplateStage, resul
 	}
 	report := stagecheck.Report{Stage: stage.ID, Kind: applied.Kind, Status: applied.Status}
 	if report.Kind == "" {
-		report.Kind = stage.Check.Kind
+		report.Kind = stageCheckKind(stage)
 	}
 	return rs.requestCheckDecision(stage, result, report, applied.ReportPath, applied.ReportSHA)
 }
@@ -863,10 +924,10 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	checkKind := applied.Kind
 	if checkKind == "" {
 		stage, ok := rs.p.templateStage(stageID)
-		if !ok || stage.Check == nil {
+		if !ok || len(automaticGateGroups(stage)) == 0 {
 			return notifier.StageResult{}, fmt.Errorf("обход проверки: этап %s не имеет проверки", stageID)
 		}
-		checkKind = stage.Check.Kind
+		checkKind = stageCheckKind(stage)
 	}
 	eventData := map[string]any{
 		"severity":    "warning",
@@ -940,48 +1001,58 @@ func stageStatusColor(status string) string {
 	}
 }
 
-// evaluateStageCheck строит отчёт проверки. Ошибки исполнения не возвращаются
-// наружу: они фиксируются как StatusError внутри отчёта и превращаются в
-// check_error событие.
-func (rs *runState) evaluateStageCheck(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) stagecheck.Report {
-	switch stage.Check.Kind {
-	case "hard":
-		return rs.runHardChecks(ctx, stage, result)
-	case "agent":
-		return rs.runAgentCheck(ctx, stage, result)
-	default:
-		return stagecheck.Report{Kind: stage.Check.Kind, Status: "error", Notes: "вид проверки не реализован: " + stage.Check.Kind}
-	}
+func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) stagecheck.Report {
+	return rs.runHardRules(ctx, stage, result, stage.RequiredSections, stage.Check.Rules, &hardWaveState{})
 }
 
-func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStage, result notifier.StageResult) stagecheck.Report {
+// hardWaveState is shared by the code gates of one wave. The gates run in
+// parallel, but the PR identity pinned by the first project check must be the
+// one every later project check compares against, and the pull request is
+// asked for once per wave, not once per gate.
+type hardWaveState struct {
+	mu       sync.Mutex
+	pinnedPR *prchecks.PullRequest
+	prKey    string
+	prRules  []stagecheck.RuleResult
+	prErr    error
+	prDone   bool
+}
+
+// runHardRules evaluates the given section titles and rule names over the
+// result with the deterministic checker. runHardChecks is the legacy single
+// call; the gate wave calls it once per gate with that gate's own rule.
+func (rs *runState) runHardRules(ctx context.Context, stage config.TemplateStage, result notifier.StageResult, sections, rules []string, shared *hardWaveState) stagecheck.Report {
 	content, reference := rs.stageCheckInputs(stage, result)
 	input := stagecheck.HardInput{
 		Stage: stage.ID, ResultType: stage.Result,
 		Content: content, Reference: reference,
-		RequiredSections: stage.RequiredSections,
-		Rules:            stage.Check.Rules,
+		RequiredSections: sections,
+		Rules:            rules,
 	}
-	var pinnedPR *prchecks.PullRequest
-	for _, rule := range stage.Check.Rules {
+	for _, rule := range rules {
 		switch rule {
 		case "pr_exists", "pr_open", "pr_base_branch":
 			base, baseErr := delivery.DetectBaseBranch(ctx, rs.runCfg.TargetDir)
 			input.ExpectedBaseBranch = base
-			input.PRCheck = rs.prCheckClosure(baseErr, base)
+			input.PRCheck = rs.prCheckClosure(baseErr, base, shared)
 		case "project_checks", "pr_checks_green":
 			input.ProjectRuleCheck = func(ctx context.Context, rule, reference string) (stagecheck.RuleResult, error) {
 				repository, err := rs.prTaskRepository()
 				if err != nil {
 					return stagecheck.RuleResult{}, err
 				}
-				status, reason, identity, err := rs.p.prStageChecks.CheckIdentity(ctx, rs.runCfg.TargetDir, repository, reference, rule, pinnedPR)
+				shared.mu.Lock()
+				pinned := shared.pinnedPR
+				shared.mu.Unlock()
+				status, reason, identity, err := rs.p.prStageChecks.CheckIdentity(ctx, rs.runCfg.TargetDir, repository, reference, rule, pinned)
 				if err != nil {
 					return stagecheck.RuleResult{}, err
 				}
-				if pinnedPR == nil {
-					pinnedPR = &identity
-				} else if pinnedPR.URL != identity.URL || pinnedPR.BaseRefOID != identity.BaseRefOID || pinnedPR.HeadRefOID != identity.HeadRefOID {
+				shared.mu.Lock()
+				defer shared.mu.Unlock()
+				if shared.pinnedPR == nil {
+					shared.pinnedPR = &identity
+				} else if shared.pinnedPR.URL != identity.URL || shared.pinnedPR.BaseRefOID != identity.BaseRefOID || shared.pinnedPR.HeadRefOID != identity.HeadRefOID {
 					return stagecheck.RuleResult{}, errors.New("PR rule returned an identity different from the first project check")
 				}
 				return stagecheck.RuleResult{Rule: rule, Status: status, Reason: reason}, nil
@@ -989,26 +1060,40 @@ func (rs *runState) runHardChecks(ctx context.Context, stage config.TemplateStag
 		}
 	}
 	report := stagecheck.RunHard(ctx, input)
-	if pinnedPR != nil {
-		report.PRIdentity = &stagecheck.PRIdentity{URL: pinnedPR.URL, BaseRefOID: pinnedPR.BaseRefOID, HeadRefOID: pinnedPR.HeadRefOID}
+	shared.mu.Lock()
+	pinned := shared.pinnedPR
+	shared.mu.Unlock()
+	if pinned != nil {
+		report.PRIdentity = &stagecheck.PRIdentity{URL: pinned.URL, BaseRefOID: pinned.BaseRefOID, HeadRefOID: pinned.HeadRefOID}
 	}
 	return report
 }
 
-func (rs *runState) prCheckClosure(baseErr error, base string) stagecheck.PRCheckFunc {
+func (rs *runState) prCheckClosure(baseErr error, base string, shared *hardWaveState) stagecheck.PRCheckFunc {
 	return func(ctx context.Context, reference, _ string) ([]stagecheck.RuleResult, error) {
 		if baseErr != nil {
 			return nil, fmt.Errorf("pr_base_branch: %w", baseErr)
 		}
+		// One pull request query per wave: the three pr_* gates read the same
+		// answer, so they cannot disagree because the PR changed in between.
+		shared.mu.Lock()
+		defer shared.mu.Unlock()
+		key := reference + "\x00" + base
+		if shared.prDone && shared.prKey == key {
+			return shared.prRules, shared.prErr
+		}
 		report, err := delivery.CheckPullRequest(ctx, delivery.ExecRunner{}, rs.runCfg.TargetDir, reference, base)
-		if err != nil {
-			return nil, err
+		var results []stagecheck.RuleResult
+		if err == nil {
+			results = make([]stagecheck.RuleResult, 0, len(report.Rules))
+			for _, rule := range report.Rules {
+				results = append(results, stagecheck.RuleResult{Rule: rule.Rule, Status: rule.Status, Reason: rule.Reason})
+			}
 		}
-		results := make([]stagecheck.RuleResult, 0, len(report.Rules))
-		for _, rule := range report.Rules {
-			results = append(results, stagecheck.RuleResult{Rule: rule.Rule, Status: rule.Status, Reason: rule.Reason})
+		if ctx.Err() == nil { // a canceled lookup must not poison the cache
+			shared.prDone, shared.prKey, shared.prRules, shared.prErr = true, key, results, err
 		}
-		return results, nil
+		return results, err
 	}
 }
 

@@ -23,6 +23,9 @@ import (
 // legacy fields stay authoritative and are translated on demand by
 // LegacyGateGroups, so a v5 `idea-to-prod` follows the same path and yields
 // the same verdicts as its v6 translation (TestIdeaToProdV5AndV6AreEquivalent).
+// The group scheduler (pkg/gatesched, wired in pkg/pipeline) executes the
+// effective chain of either spelling; there is no engine-side projection of
+// a v6 chain back to the legacy fields.
 const (
 	LegacySchemaVersion  = 5
 	CurrentSchemaVersion = 6
@@ -46,25 +49,6 @@ func supportedSchemaVersion(version int) bool {
 // legacyGateKeys are the stage keys schema v6 no longer accepts.
 var legacyGateKeys = []string{"required_sections", "check", "confirm"}
 
-// legacyGateView is the engine-facing projection of a stage's gate chain: the
-// shape the current stage executor understands. It exists only until the
-// group scheduler (S03) executes exit_gate_groups directly.
-type legacyGateView struct {
-	RequiredSections []string
-	Check            *TemplateCheck
-	Confirm          string
-}
-
-// gateClass orders what the legacy executor can run: deterministic code first,
-// then one agent review, then the human confirmation.
-type gateClass int
-
-const (
-	gateClassCode gateClass = iota
-	gateClassLLM
-	gateClassHuman
-)
-
 // ruleGateIDs are the v1 code gates that map to hard-check rule names.
 var ruleGateIDs = func() map[string]bool {
 	ids := map[string]bool{gatelib.GateVerdictMarker: true}
@@ -87,12 +71,12 @@ var ruleGateIDs = func() map[string]bool {
 func (s TemplateStage) LegacyGateGroups() workflow.GateGroups {
 	var groups workflow.GateGroups
 	var code workflow.GateGroup
-	if len(s.RequiredSections) > 0 {
-		sections := make([]any, len(s.RequiredSections))
-		for i, section := range s.RequiredSections {
-			sections[i] = section
+	if sections := normalizedSections(s.RequiredSections); len(sections) > 0 {
+		list := make([]any, len(sections))
+		for i, section := range sections {
+			list[i] = section
 		}
-		code = append(code, workflow.GateRef{Gate: gatelib.GateRequiredSections, Version: 1, Params: map[string]any{"sections": sections}})
+		code = append(code, workflow.GateRef{Gate: gatelib.GateRequiredSections, Version: 1, Params: map[string]any{"sections": list}})
 	}
 	if s.Check != nil && s.Check.Kind == "hard" {
 		for _, rule := range s.Check.Rules {
@@ -125,6 +109,25 @@ func (s TemplateStage) LegacyGateGroups() workflow.GateGroups {
 	return groups
 }
 
+// normalizedSections trims the edges of every section title and drops exact
+// duplicates after trimming. A v5 file that master accepted with padded titles
+// (headings are matched case- and edge-insensitively anyway) must keep
+// loading; the gate library itself stays strict for v6 files. Empty titles are
+// kept so that the v5 validation reports them as it always did.
+func normalizedSections(sections []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, section := range sections {
+		trimmed := strings.TrimSpace(section)
+		if trimmed != "" && seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 // EffectiveGateGroups returns the stage's gate chain: the explicit
 // exit_gate_groups when present, otherwise the translation of the legacy
 // fields. It is what catalogs, validation and (later) the scheduler read.
@@ -133,102 +136,6 @@ func (s TemplateStage) EffectiveGateGroups() workflow.GateGroups {
 		return s.ExitGateGroups
 	}
 	return s.LegacyGateGroups()
-}
-
-// projectGates reduces an explicit gate chain to the legacy engine fields.
-// It always returns a best-effort view (so a decoded stage has a consistent
-// confirm value) together with an error when the chain uses something the
-// pre-scheduler executor cannot run. Validate surfaces that error, so a
-// template whose gates would be silently ignored never starts.
-func projectGates(groups workflow.GateGroups) (legacyGateView, error) {
-	var view legacyGateView
-	var problems []string
-	var rules []string
-	var agent *TemplateCheck
-	humanGates, agentGates, sectionGates := 0, 0, 0
-	last := gateClassCode
-	for i, group := range groups {
-		groupClass := gateClass(-1)
-		for j, ref := range group {
-			path := fmt.Sprintf("exit_gate_groups[%d][%d]", i, j)
-			class, ok := classOf(ref)
-			if !ok {
-				problems = append(problems, fmt.Sprintf("%s: гейт %s пока не исполняется контроллером (исполнение произвольных гейтов появится с планировщиком групп)", path, ref.Key()))
-				continue
-			}
-			if ref.Mode.Effective() == workflow.GateModeAdvisory {
-				problems = append(problems, fmt.Sprintf("%s: mode advisory пока не исполняется контроллером; используйте required", path))
-			}
-			if groupClass >= 0 && class != groupClass {
-				problems = append(problems, fmt.Sprintf("exit_gate_groups[%d]: пока группа может содержать гейты только одного вида (код, LLM или человек)", i))
-			}
-			groupClass = class
-			if class < last {
-				problems = append(problems, fmt.Sprintf("%s: порядок групп пока фиксирован: код, затем LLM, затем человек", path))
-			}
-			last = class
-			switch {
-			case ref.Gate == gatelib.GateRequiredSections:
-				sectionGates++
-				view.RequiredSections = gatelib.StringListParam(ref.Params, "sections")
-			case ruleGateIDs[ref.Gate]:
-				rules = append(rules, ref.Gate)
-			case ref.Gate == gatelib.GateAgentReview:
-				agentGates++
-				agent = &TemplateCheck{
-					Kind: "agent", Agent: gatelib.StringParam(ref.Params, "agent"),
-					Mode: gatelib.StringParam(ref.Params, "mode"), MaxRounds: gatelib.IntParam(ref.Params, "max_rounds"),
-				}
-			case ref.Gate == gatelib.GateHumanApproval:
-				humanGates++
-			}
-		}
-	}
-	if sectionGates > 1 || agentGates > 1 || humanGates > 1 {
-		problems = append(problems, "на этапе пока допускается не более одного required_sections, agent_review и human_approval")
-	}
-	if len(rules) > 0 && agent != nil {
-		problems = append(problems, "правила кода (verdict_marker, pr_*) и agent_review на одном этапе пока не исполняются совместно")
-	}
-	switch {
-	case agent != nil:
-		view.Check = agent
-	case len(rules) > 0:
-		view.Check = &TemplateCheck{Kind: "hard", Rules: rules}
-	}
-	view.Confirm = "auto"
-	if humanGates > 0 {
-		view.Confirm = "required"
-	}
-	if len(problems) > 0 {
-		return view, fmt.Errorf("%s", strings.Join(problems, "; "))
-	}
-	return view, nil
-}
-
-func classOf(ref workflow.GateRef) (gateClass, bool) {
-	if ref.Version != 1 {
-		return 0, false
-	}
-	switch {
-	case ref.Gate == gatelib.GateRequiredSections || ruleGateIDs[ref.Gate]:
-		return gateClassCode, true
-	case ref.Gate == gatelib.GateAgentReview:
-		return gateClassLLM, true
-	case ref.Gate == gatelib.GateHumanApproval:
-		return gateClassHuman, true
-	}
-	return 0, false
-}
-
-// applyGateProjection makes a stage with explicit exit_gate_groups consistent
-// for the engine: the legacy fields become the projection of the groups. A
-// projection error is not reported here; Validate reports it.
-func (s *TemplateStage) applyGateProjection() {
-	view, _ := projectGates(s.ExitGateGroups)
-	s.RequiredSections = view.RequiredSections
-	s.Check = view.Check
-	s.Confirm = view.Confirm
 }
 
 // gateStageContext is the applicability context of a stage.
@@ -282,67 +189,203 @@ func (c *Config) library() *gatelib.Registry {
 	return gatelib.Default()
 }
 
+// legacyOrigin marks errors of a gate chain that was translated from the
+// schema-v5 fields: the path in such an error points into a chain the file
+// does not literally contain.
+const legacyOrigin = " (из required_sections/check v5)"
+
 // validateGates checks every stage's gate chain against the library: known
 // ID and exact version, declared parameters of the right type, applicability
-// to the result, unique instance names, and — for explicit chains — that the
-// chain is something the controller can execute and the legacy fields agree
-// with it. Errors carry stages[i] (id) and the exit_gate_groups path.
-func (c *Config) validateGates(add func(format string, args ...any)) {
+// to the result, unique instance names, and the constraints of the current
+// executor. Errors carry stages[i] (id) and the exit_gate_groups path; for a
+// v5 stage the path is marked as translated.
+//
+// A v5 stage is validated no stricter than before the gate library existed:
+// the applicability of a rule to the result type is not checked for it (the
+// rule then reports skipped/failed at run time exactly as it always did), and
+// section titles are normalized by LegacyGateGroups.
+func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...any)) {
 	lib := c.library()
 	for i, stage := range c.Stages {
 		prefix := fmt.Sprintf("stages[%d] (%s)", i, stage.ID)
-		if len(stage.ExitGateGroups) > 0 && c.SchemaVersion == LegacySchemaVersion {
+		explicit := len(stage.ExitGateGroups) > 0
+		if explicit && c.SchemaVersion == LegacySchemaVersion {
 			add("%s: exit_gate_groups требует schema_version %d (в v5 используйте required_sections, check, confirm)", prefix, CurrentSchemaVersion)
 			continue
 		}
+		if explicit && (len(stage.RequiredSections) > 0 || stage.Check != nil) {
+			add("%s: exit_gate_groups и поля required_sections/check заданы одновременно; оставьте один способ (NormalizeGates очищает устаревшие поля)", prefix)
+			continue
+		}
 		groups := stage.EffectiveGateGroups()
-		_, errs := lib.ResolveGroups(groups, stage.gateStageContext())
+		context := stage.gateStageContext()
+		suffix := ""
+		if !explicit {
+			context.Lenient = true
+			suffix = legacyOrigin
+		}
+		_, errs := lib.ResolveGroups(groups, context)
 		for _, err := range errs {
-			add("%s: %v", prefix, err)
+			add("%s: %v%s", prefix, err, suffix)
 		}
-		if len(stage.ExitGateGroups) == 0 || len(errs) > 0 {
-			continue
+		if len(errs) > 0 || !explicit {
+			continue // a translated v5 chain is shaped by construction
 		}
-		view, err := projectGates(stage.ExitGateGroups)
-		if err != nil {
-			add("%s: %v", prefix, err)
-			continue
-		}
-		if stage.Confirm != view.Confirm || !sameCheck(stage.Check, view.Check) || !sameStrings(stage.RequiredSections, view.RequiredSections) {
-			add("%s: exit_gate_groups и поля check/required_sections/confirm рассогласованы; загрузите конфиг через ParseYAML или вызовите NormalizeGates", prefix)
+		c.validateChainConstraints(reg, prefix, groups, add)
+	}
+}
+
+// validateChainConstraints enforces what the controller can honestly execute
+// today. They are properties of the executor, not of the gate library:
+//
+//   - a human_approval gate is realized by the transition approval of the
+//     stage, which happens after the whole automatic chain, so it can only sit
+//     in the last group (S05 moves the human decision into the chain);
+//   - agent_review with mode grill keeps its question rounds in per-stage
+//     approvals, so one stage can have at most one;
+//   - mode advisory is carried by the contract and honored by the scheduler,
+//     but not yet offered to template authors (S06).
+func (c *Config) validateChainConstraints(reg AgentLookup, prefix string, groups workflow.GateGroups, add func(format string, args ...any)) {
+	grills := 0
+	for i, group := range groups {
+		for j, ref := range group {
+			path := fmt.Sprintf("exit_gate_groups[%d][%d]", i, j)
+			if ref.Mode.Effective() == workflow.GateModeAdvisory {
+				add("%s: %s: mode advisory пока не доступен; используйте required", prefix, path)
+			}
+			switch ref.Gate {
+			case gatelib.GateHumanApproval:
+				if i != len(groups)-1 {
+					add("%s: %s: human_approval допускается только в последней группе (решение человека — барьер после автоматических проверок)", prefix, path)
+				}
+			case gatelib.GateAgentReview:
+				agent := gatelib.StringParam(ref.Params, "agent")
+				if reg != nil && agent != "" && !reg.Exists(agent) {
+					add("%s: %s: агент проверки %q не найден в registry", prefix, path, agent)
+				}
+				if gatelib.StringParam(ref.Params, "mode") == "grill" {
+					grills++
+					if grills > 1 {
+						add("%s: %s: на этапе допускается не более одного agent_review с mode grill", prefix, path)
+					}
+				} else if gatelib.IntParam(ref.Params, "max_rounds") > 0 {
+					add("%s: %s: max_rounds допустим только для mode grill", prefix, path)
+				}
+			}
 		}
 	}
 }
 
-// NormalizeGates makes explicit exit_gate_groups of every stage consistent
-// with the engine projection. ParseYAML already does this; programmatic
-// builders of v6 configs call it before Validate.
+// NormalizeGates clears the legacy fields of every stage that declares an
+// explicit exit_gate_groups chain, so that the chain is the only description
+// of what the stage checks. Stages without an explicit chain are untouched:
+// their legacy fields are the chain (see LegacyGateGroups).
 func (c *Config) NormalizeGates() {
 	for i := range c.Stages {
 		if len(c.Stages[i].ExitGateGroups) > 0 {
-			c.Stages[i].applyGateProjection()
+			c.Stages[i].RequiredSections, c.Stages[i].Check, c.Stages[i].Confirm = nil, nil, ""
 		}
 	}
 }
 
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+// SectionsRequired returns the section titles required by the chain: the
+// union of every required_sections gate, in order.
+func (s TemplateStage) SectionsRequired() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ref.Gate != gatelib.GateRequiredSections {
+			continue
+		}
+		for _, section := range gatelib.StringListParam(ref.Params, "sections") {
+			if !seen[section] {
+				seen[section] = true
+				out = append(out, section)
+			}
 		}
 	}
-	return true
+	return out
 }
 
-func sameCheck(a, b *TemplateCheck) bool {
-	if a == nil || b == nil {
-		return a == b
+// CodeRules returns the rule gates of the chain (verdict_marker, pr_*,
+// project_checks, pr_checks_green) in order.
+func (s TemplateStage) CodeRules() []string {
+	var out []string
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ruleGateIDs[ref.Gate] {
+			out = append(out, ref.Gate)
+		}
 	}
-	return a.Kind == b.Kind && a.Agent == b.Agent && a.Mode == b.Mode && a.MaxRounds == b.MaxRounds && sameStrings(a.Rules, b.Rules)
+	return out
 }
+
+// AgentChecks returns the LLM gates of the chain in order, in the form the
+// agent-check runner consumes.
+func (s TemplateStage) AgentChecks() []TemplateCheck {
+	var out []TemplateCheck
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ref.Gate == gatelib.GateAgentReview {
+			out = append(out, AgentCheckOf(ref))
+		}
+	}
+	return out
+}
+
+// AgentCheckOf converts one agent_review reference to its check parameters.
+func AgentCheckOf(ref workflow.GateRef) TemplateCheck {
+	return TemplateCheck{
+		Kind: "agent", Agent: gatelib.StringParam(ref.Params, "agent"),
+		Mode: gatelib.StringParam(ref.Params, "mode"), MaxRounds: gatelib.IntParam(ref.Params, "max_rounds"),
+	}
+}
+
+// GrillCheck returns the agent_review gate that runs in grill mode, if any.
+func (s TemplateStage) GrillCheck() *TemplateCheck {
+	for _, check := range s.AgentChecks() {
+		if check.Mode == "grill" {
+			check := check
+			return &check
+		}
+	}
+	return nil
+}
+
+// NeedsConfirmation reports whether the chain contains the human decision
+// gate, i.e. whether leaving the stage forward requires an approval.
+func (s TemplateStage) NeedsConfirmation() bool {
+	for _, ref := range s.EffectiveGateGroups().Refs() {
+		if ref.Gate == gatelib.GateHumanApproval {
+			return true
+		}
+	}
+	return false
+}
+
+// DisableConfirmation removes the human decision from the stage in either
+// spelling (auto mode runs a template without human confirmations).
+func (s *TemplateStage) DisableConfirmation() {
+	s.Confirm = "auto"
+	if len(s.ExitGateGroups) == 0 {
+		return
+	}
+	var groups workflow.GateGroups
+	for _, group := range s.ExitGateGroups {
+		var kept workflow.GateGroup
+		for _, ref := range group {
+			if ref.Gate != gatelib.GateHumanApproval {
+				kept = append(kept, ref)
+			}
+		}
+		if len(kept) > 0 {
+			groups = append(groups, kept)
+		}
+	}
+	s.ExitGateGroups = groups
+}
+
+// GateLibrary returns the library the template is validated against and the
+// scheduler resolves definitions from.
+func (c *Config) GateLibrary() *gatelib.Registry { return c.library() }
 
 // GatePins resolves every gate reference of the template to the exact
 // definition it is bound to and returns the unique pins sorted by ID and

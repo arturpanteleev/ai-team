@@ -414,7 +414,7 @@ func taskAutoConfig(cfg *config.Config, registry *agent.Registry) (*config.Confi
 		if stage.Agent != "" {
 			stage.Executor = "agent"
 		}
-		stage.Confirm = "auto"
+		stage.DisableConfirmation()
 	}
 	var lookup config.AgentLookup
 	if registry != nil {

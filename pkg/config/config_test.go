@@ -387,10 +387,10 @@ func TestTemplateValidationRules(t *testing.T) {
 			c.Returns[0].MaxVisits = 4
 			c.MaxVisits["product_spec"] = 3
 		}, "не совпадает с лимитом возврата"},
-		{"bad check agent", func(c *Config) { c.Stages[1].Check.Agent = "ghost" }, "агент проверки"},
+		{"bad check agent", func(c *Config) { c.Stages[1].ExitGateGroups[1][0].Params["agent"] = "ghost" }, "агент проверки"},
 		{"project check requires PR link", func(c *Config) {
-			c.Stages[4].Check.Rules = []string{"project_checks"}
-		}, "допустимо только для result link с link_kind pr"},
+			c.Stages[4].ExitGateGroups = workflow.GateGroups{{{Gate: "project_checks", Version: 1}}}
+		}, "применим только к result link"},
 		{"invalid executor", func(c *Config) { c.Stages[0].Executor = "robot" }, "executor"},
 		{"delivery without PR", func(c *Config) { c.Stages[3].LinkKind = "build" }, "delivery допустим"},
 	}

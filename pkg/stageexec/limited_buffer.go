@@ -51,3 +51,6 @@ func (b *LimitedBuffer) Truncated() bool {
 	defer b.mu.Unlock()
 	return b.truncated
 }
+
+// Limit reports the retention limit in bytes.
+func (b *LimitedBuffer) Limit() int64 { return b.limit }

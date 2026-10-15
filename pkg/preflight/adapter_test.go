@@ -113,3 +113,25 @@ func TestMixedStagesStillRequireAgentCLI(t *testing.T) {
 		t.Fatalf("cli check = %+v", cli)
 	}
 }
+
+func TestDockerAdapterChecksCLIAndMountsNotTheProgram(t *testing.T) {
+	stages := []config.TemplateStage{{ID: "code_review", Executor: "agent", Agent: "worker", Adapter: "demo"}}
+	checker := adapterChecker(t, stages, "/bin/sh")
+	checker.config.ExecutorAdapters["demo"] = stageexec.AdapterSpec{
+		Argv:   []string{"/bin/sh", "/agent/review.sh"},
+		Docker: &stageexec.DockerSpec{Image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc", Mounts: []string{"agent:/agent"}},
+	}
+	if check := checkByID(checker.Check(context.Background()), "adapter:demo"); check.Status != StatusFailed {
+		t.Fatalf("a missing mount source must fail: %+v", check)
+	}
+	if err := os.MkdirAll(filepath.Join(checker.target, "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if check := checkByID(checker.Check(context.Background()), "adapter:demo"); check.Status != StatusPassed {
+		t.Fatalf("docker adapter with an existing mount must pass: %+v", check)
+	}
+	checker.lookPath = func(name string) (string, error) { return "", exec.ErrNotFound }
+	if check := checkByID(checker.Check(context.Background()), "adapter:demo"); check.Status != StatusFailed {
+		t.Fatalf("a missing docker CLI must fail: %+v", check)
+	}
+}

@@ -94,3 +94,41 @@ keep the executor identity.
 - **КОГДА** a stage attempt ran through adapter `demo`
 - **ТОГДА** its manifest MUST contain `executor_info.kind = external` and
   `executor_info.name = demo`
+
+### Requirement: Container executor runs the same contract in a sandbox
+
+An adapter with a `docker` block MUST run its `argv` inside the configured
+image through the shared container primitive, speaking the unchanged JSON
+contract. The image MUST be pinned by digest unless `allow_unpinned_image` is
+set; the network MUST be `none` unless `bridge` is configured; CPU, memory and
+process limits, a read-only root file system, dropped capabilities and
+no-new-privileges MUST always apply. The container MUST receive only the declared
+stage inputs mounted read-only, a private per-attempt result directory mounted
+read-write, optionally the repository read-only, read-only repository mounts
+named in the configuration, and the allowlisted environment variables; the
+request MUST name container paths only. A result given as a file in the result
+directory MUST be copied to the declared output only when the program reported
+`status: ok`; an output given both as content and as a file, a container exit
+failure, an unpinned or missing image, a timeout and an output limit hit MUST
+fail the attempt as a technical error, never as a verdict. The container MUST be
+removed on cancellation and timeout, containers of a dead controller MUST be
+removable by the `ai-team.stage-attempt` label, and the attempt `executor_info`
+metadata MUST record the image reference with its digest, network, limits,
+mounts and every exception to the strict defaults, without environment values.
+Selecting another container agent MUST require only configuration or an
+adapter program, not a change of the graph engine.
+
+#### Scenario: Container review follows the existing routes
+
+- **КОГДА** a `code_review` stage runs through a container adapter and the agent
+  reports `CHANGES_REQUESTED` and later `APPROVED`
+- **ТОГДА** the controller MUST offer the configured return to `implementation`
+  for the first result and the approval route for the second, and both attempts
+  MUST record the container image digest in `executor_info`
+
+#### Scenario: Container failure is not a verdict
+
+- **КОГДА** the container exits non-zero, prints invalid JSON, reports
+  `status: error`, or claims a verdict that disagrees with its report
+- **ТОГДА** the attempt MUST fail technically and no review output MUST be
+  recorded as a completed stage

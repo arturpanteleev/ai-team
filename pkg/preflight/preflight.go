@@ -16,6 +16,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/agent"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/runtime"
+	"github.com/arturpanteleev/ai-team/pkg/stageexec"
 )
 
 const maxCommandOutput = 4096
@@ -321,6 +322,9 @@ func (c *Checker) adapterCheck(name string) Check {
 	if !ok || len(spec.Argv) == 0 || strings.TrimSpace(spec.Argv[0]) == "" {
 		return fail("адаптер " + name + " не объявлен в executor_adapters")
 	}
+	if spec.Docker != nil {
+		return c.dockerAdapterCheck(id, spec)
+	}
 	program := spec.Argv[0]
 	path := program
 	switch {
@@ -354,6 +358,30 @@ func (c *Checker) adapterCheck(name string) Check {
 		return fail("программа адаптера " + program + " не исполняема")
 	}
 	return Check{ID: id, Status: StatusPassed, Required: true, Message: program}
+}
+
+// dockerAdapterCheck verifies a container executor: argv is a path inside the
+// image, so only the docker CLI and the repository paths mounted into the
+// container can be checked before a run.
+func (c *Checker) dockerAdapterCheck(id string, spec stageexec.AdapterSpec) Check {
+	fail := func(message string) Check {
+		return Check{ID: id, Status: StatusFailed, Required: true, Message: message}
+	}
+	docker, err := c.lookPath("docker")
+	if err != nil {
+		return fail("docker CLI не найден в PATH (нужен контейнерному исполнителю)")
+	}
+	root, err := filepath.EvalSymlinks(c.target)
+	if err != nil {
+		return fail("каталог проекта недоступен: " + safeError(err))
+	}
+	for _, mount := range spec.Docker.Mounts {
+		source, _, _ := strings.Cut(mount, ":")
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(source))); err != nil {
+			return fail("путь " + source + " для монтирования в контейнер не найден в репозитории")
+		}
+	}
+	return Check{ID: id, Status: StatusPassed, Required: true, Message: "docker: " + docker + ", образ " + spec.Docker.Image}
 }
 
 // hasDelivery reports whether the workflow publishes through the controller

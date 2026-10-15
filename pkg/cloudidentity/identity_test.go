@@ -152,3 +152,18 @@ func TestAdminIsNotAProcessFunction(t *testing.T) {
 		t.Fatal("unknown role must be rejected")
 	}
 }
+
+// A template that names "admin" as a stage function gives stage actions to
+// nobody (fail closed): the administrator right is not a process function.
+func TestStageFunctionAdminGrantsNoStageAction(t *testing.T) {
+	admin, err := NewPrincipal("admin-1", []Role{RoleAdmin, RoleProductOwner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeStageAction(admin, StageActionTake, StageFunctions{Executor: "admin"}); err == nil {
+		t.Fatal("admin must not be usable as a stage function")
+	}
+	if err := ValidateStageFunctions(StageFunctions{Executor: "developer", Approver: "admin"}); err == nil {
+		t.Fatal("admin must not be accepted as approver_function")
+	}
+}

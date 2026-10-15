@@ -281,6 +281,7 @@ codex exec "вызови ai-team whoami"
 | GET | `/api/runs/{runID}/gates` | `get_task_gates` |
 | GET | `/api/runs/{runID}/stages/{stageID}/results/{version}` | `get_task_stage_result` |
 | GET | `/api/runs/{runID}/workflow` | `get_task_workflow` |
+| GET | `/api/runs/{runID}/stage-statuses` | `get_task_stage_statuses` |
 | GET | `/api/runs/{runID}/template-version` | `get_task_template_version` |
 | GET | `/api/runs/{runID}/logs/{attemptID}` | `get_task_log` |
 | GET | `/api/runs/{runID}/artifacts/*` | `read_task_artifact` |

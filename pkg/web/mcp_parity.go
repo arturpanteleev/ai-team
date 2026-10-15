@@ -97,6 +97,7 @@ var mcpParityMatrix = []mcpRouteParity{
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/gates", Tool: "get_task_gates"},
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/stages/{stageID}/results/{version}", Tool: "get_task_stage_result"},
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/workflow", Tool: "get_task_workflow"},
+	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/stage-statuses", Tool: "get_task_stage_statuses"},
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/template-version", Tool: "get_task_template_version"},
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/logs/{attemptID}", Tool: "get_task_log"},
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/artifacts/*", Tool: "read_task_artifact"},

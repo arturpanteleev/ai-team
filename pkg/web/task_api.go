@@ -25,6 +25,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/metrics"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/stagestatus"
 	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/web/store"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -99,6 +100,9 @@ type taskRunListItem struct {
 	StageEnteredAt  *time.Time `json:"stage_entered_at,omitempty"`
 	Warnings        int        `json:"warnings"`
 	ExternalLinks   []string   `json:"external_links,omitempty"`
+	// StageStatus is the compact stage status projection of the task: the
+	// current stage in full and every stage as a route item (S11).
+	StageStatus *stagestatus.Summary `json:"stage_status,omitempty"`
 }
 
 type taskRunDetails struct {
@@ -114,6 +118,9 @@ type taskRunDetails struct {
 	Results        map[string][]humanartifact.Revision `json:"results"`
 	AllowedActions []string                            `json:"allowed_actions"`
 	Delivery       webDeliveryProjection               `json:"delivery"`
+	// StageStatuses is the server-side projection of every stage of the task
+	// from the durable journal (S11). It is read-only: no route sets a status.
+	StageStatuses *stagestatus.Projection `json:"stage_statuses,omitempty"`
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, _ *http.Request) {
@@ -171,7 +178,8 @@ func (s *Server) handleListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		"function": strings.TrimSpace(r.URL.Query().Get("function")),
 		"mode":     strings.TrimSpace(r.URL.Query().Get("mode")),
 	}
-	all, err := s.listTaskRuns()
+	templates := s.newTaskTemplateLookup()
+	all, err := s.listTaskRunsWith(templates)
 	if err != nil {
 		writeJSONAPIError(w, http.StatusInternalServerError, "run list unavailable", "run_list_unavailable")
 		return
@@ -204,6 +212,7 @@ func (s *Server) handleListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		end = total
 	}
 	page := filtered[offset:end]
+	s.attachStageStatuses(templates, page)
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJSONResponse(w, http.StatusOK, map[string]any{"runs": page, "total": total, "limit": limit, "offset": offset})
 }
@@ -262,6 +271,27 @@ func (s *Server) listTaskRunsWith(templates *taskTemplateLookup) ([]taskRunListI
 		}
 	}
 	return items, nil
+}
+
+// attachStageStatuses adds the compact stage status projection to one page of
+// the task list. Only the page is projected: the journal of every task of the
+// list is not read.
+func (s *Server) attachStageStatuses(templates *taskTemplateLookup, items []taskRunListItem) {
+	stateStore, stateErr := lifecycle.NewStore(s.targetDir)
+	for index := range items {
+		item := &items[index]
+		var state *lifecycle.State
+		if stateErr == nil {
+			if loaded, err := stateStore.Load(item.RunID); err == nil {
+				state = &loaded
+			}
+		}
+		run := &store.PipelineRun{ID: item.ID, RunID: item.RunID, Status: item.Status}
+		if projection, ok := s.taskStageStatuses(templates, run, state, item.AllowedActions); ok {
+			summary := projection.Summary()
+			item.StageStatus = &summary
+		}
+	}
 }
 
 func (s *Server) handleGetTaskRun(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +361,9 @@ func (s *Server) loadTaskRunDetails(runID string) (taskRunDetails, int, error) {
 		}
 	}
 	details.Delivery = s.deliveryProjection(run, stages, s.targetDir)
+	if projection, ok := s.taskStageStatuses(s.newTaskTemplateLookup(), run, details.State, details.AllowedActions); ok {
+		details.StageStatuses = &projection
+	}
 	return details, http.StatusOK, nil
 }
 

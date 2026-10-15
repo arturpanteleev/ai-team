@@ -350,6 +350,7 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/runs/{runID}", srv.handleGetTaskRun)
 		router.Get("/api/runs/{runID}/events", srv.handleGetRunEvents)
 		router.Get("/api/runs/{runID}/gates", srv.handleGetTaskGates)
+		router.Get("/api/runs/{runID}/stage-statuses", srv.handleGetTaskStageStatuses)
 		router.Get("/api/runs/{runID}/stages/{stageID}/results/{version}", srv.handleGetTaskStageResult)
 		router.Get("/api/events", srv.handleGetGlobalEvents)
 		router.Get("/api/metrics/flow", srv.handleGetFlowMetrics)

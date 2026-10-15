@@ -152,7 +152,7 @@ codex exec "вызови ai-team whoami"
 | `get_gate_catalog` | `/api/gates/catalog` | каталог гейтов |
 | `get_flow_metrics`, `export_flow_metrics_csv` | `/api/metrics/flow`, `/api/metrics/flow.csv` | метрики потока (JSON и CSV) |
 | `get_version` | `/api/version` | ревизия сервера |
-| `get_task_tracker`, `get_tracker_status`, `list_tracker_conflicts`, `list_tracker_deliveries` | `/api/runs/{id}/tracker`, `/api/tracker…` | связь задачи с трекером, настройка, конфликты связей, исходящие обновления (`status`) |
+| `get_task_tracker`, `get_tracker_status`, `get_tracker_sync`, `list_tracker_inbound`, `list_tracker_link_conflicts`, `list_tracker_deliveries` | `/api/runs/{id}/tracker`, `/api/tracker…` | связь задачи с трекером, настройка, состояние опроса, входящие запросы из трекера, конфликты связей, исходящие обновления |
 | `list_pipelines`, `get_pipeline`, `read_artifact` | `/api/pipelines…`, `/api/artifacts/*` | прежний вид запусков и общее хранилище артефактов |
 | `list_team_members`, `get_team_audit` | `/api/team/…` | команда и роли; только с правом управления командой |
 | `get_preflight` | `/api/preflight` | готовность контроллера |
@@ -162,9 +162,9 @@ codex exec "вызови ai-team whoami"
 `aiteam://template/versions`, `aiteam://gates/catalog`. Отсутствующий, запрещённый и некорректный ресурс одинаково
 дают «Resource not found».
 
-Состояние синхронизации с трекером: `get_task_tracker` (связь, конфликты, последние обновления, одно слово о
-состоянии), `get_tracker_status`, `list_tracker_conflicts`, `list_tracker_deliveries`; ошибки интеграции остаются в
-`list_events` с `warnings=true`.
+Состояние синхронизации с трекером: `get_task_tracker` (связь, конфликты, последние обновления, входящие запросы, одно
+слово о состоянии), `get_tracker_status`, `get_tracker_sync`, `list_tracker_inbound`, `list_tracker_link_conflicts`,
+`list_tracker_deliveries`; ошибки интеграции остаются в `list_events` с `warnings=true`.
 
 ### Размер ответов и пагинация
 
@@ -198,7 +198,7 @@ codex exec "вызови ai-team whoami"
 | Delivery | `approve_delivery_plan`, `retry_delivery` | `plan_hash` — SHA-256 утверждаемого плана; PO/релиз-менеджер |
 | Шаблон | `validate_template` (только чтение), `publish_template` | PO/архитектор; `expected_version` защищает от перезаписи |
 | Команда | `invite_team_member`, `set_team_member_roles`, `revoke_team_member` | право управлять командой; право администратора выдаёт и снимает только администратор |
-| Трекер | `set_task_tracker_link`, `remove_task_tracker_link`, `retry_task_tracker_deliveries`, `retry_task_tracker_delivery` | право связи с трекером (PO, архитектор) |
+| Трекер | `set_task_tracker_link`, `remove_task_tracker_link`, `retry_task_tracker_deliveries`, `retry_task_tracker_delivery`, `sync_tracker_now`, `dismiss_tracker_inbound` | право связи с трекером (PO, архитектор); входящее изменение из трекера двигает задачу только через контроллер |
 
 Что MCP намеренно **не** делает: токены (`/api/mcp/tokens`) управляются только из браузерной сессии с CSRF — MCP-токен
 не может выпускать, перечислять и отзывать токены (маршрут отвечает `403` на любой запрос, пришедший из MCP);
@@ -321,8 +321,12 @@ codex exec "вызови ai-team whoami"
 | PATCH | `/api/team/members/{actorID}/roles` | `set_team_member_roles` |
 | DELETE | `/api/team/members/{actorID}` | `revoke_team_member` |
 | GET | `/api/tracker` | `get_tracker_status` |
-| GET | `/api/tracker/conflicts` | `list_tracker_conflicts` |
+| GET | `/api/tracker/conflicts` | `list_tracker_link_conflicts` |
 | GET | `/api/tracker/deliveries` | `list_tracker_deliveries` |
+| GET | `/api/tracker/sync` | `get_tracker_sync` |
+| GET | `/api/tracker/inbound` | `list_tracker_inbound` |
+| POST | `/api/tracker/sync` | `sync_tracker_now` |
+| POST | `/api/runs/{runID}/tracker/inbound/{changeID}/dismiss` | `dismiss_tracker_inbound` |
 | PUT | `/api/runs/{runID}/tracker/link` | `set_task_tracker_link` |
 | DELETE | `/api/runs/{runID}/tracker/link` | `remove_task_tracker_link` |
 | POST | `/api/runs/{runID}/tracker/retry` | `retry_task_tracker_deliveries` |

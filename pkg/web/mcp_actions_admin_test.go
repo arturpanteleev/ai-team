@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -348,5 +349,56 @@ func TestMCPTrackerActions(t *testing.T) {
 	audit := runEventData(t, env.srv, "run-a", mcpActionEvent)
 	if len(audit) != 3 {
 		t.Fatalf("link, retry and unlink must each be audited: %v", audit)
+	}
+}
+
+// A status change made in the tracker becomes a request the controller judges;
+// an operator reads it, syncs on demand and dismisses it with a reason, all over MCP.
+func TestMCPTrackerInboundSyncAndDismiss(t *testing.T) {
+	env := newMCPActionEnv(t, nil, map[string]lifecycle.State{"run-a": {Phase: lifecycle.PhaseWaiting, NextStage: "build"}})
+	owner, dev := env.as(t, actorOwner), env.as(t, actorDev)
+	owner.do("set_task_tracker_link", map[string]any{"run_id": "run-a", "issue_key": "APP-1"})
+	if failure := dev.refused("sync_tracker_now", nil); failure.Status != 403 {
+		t.Fatalf("a developer must not trigger a sync: %+v", failure)
+	}
+	// The first poll records the tracker tail: only later changes count.
+	if _, err := env.srv.syncTrackerInbound(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.tracker.ExternalTransition("APP-1", "Done", "ivan"); err != nil {
+		t.Fatal(err)
+	}
+	synced := owner.do("sync_tracker_now", nil)
+	if synced["result"] == nil {
+		t.Fatalf("a sync reports what it did: %v", synced)
+	}
+	text, failed := owner.call("list_tracker_inbound", map[string]any{"state": "open"})
+	if failed || !strings.Contains(text, `"to_status":"Done"`) {
+		all, _ := owner.call("list_tracker_inbound", nil)
+		t.Fatalf("the change must wait for an operator, not move the task: %v %s\nsync=%v\nall=%s", failed, text, synced, all)
+	}
+	var open struct {
+		Requests []struct {
+			ChangeID string `json:"change_id"`
+			RunID    string `json:"run_id"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(text), &open); err != nil || len(open.Requests) != 1 {
+		t.Fatalf("open requests: %v %s", err, text)
+	}
+	change := open.Requests[0].ChangeID
+	dismiss := map[string]any{"run_id": "run-a", "change_id": change, "reason": "handled by hand"}
+	if failure := dev.refused("dismiss_tracker_inbound", dismiss); failure.Status != 403 {
+		t.Fatalf("a developer must not dismiss: %+v", failure)
+	}
+	if failure := owner.refused("dismiss_tracker_inbound", map[string]any{"run_id": "run-a", "change_id": change}); failure.Code != "bad_arguments" {
+		t.Fatalf("a dismissal needs a reason: %+v", failure)
+	}
+	owner.do("dismiss_tracker_inbound", dismiss)
+	if failure := owner.refused("dismiss_tracker_inbound", dismiss); failure.Status != 409 || failure.Code != "request_not_open" {
+		t.Fatalf("a closed request cannot be dismissed again: %+v", failure)
+	}
+	if left, _ := owner.call("list_tracker_inbound", map[string]any{"state": "open"}); strings.Contains(left, `"to_status":"Done"`) {
+		t.Fatalf("the dismissed request must not stay open: %s", left)
 	}
 }

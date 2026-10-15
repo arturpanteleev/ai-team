@@ -197,7 +197,8 @@ func newMCPActionEnvFor(t *testing.T, template string, approvals []approval.Pend
 	controller := &actionRecorder{fakeRunController: &fakeRunController{approvals: approvals}}
 	fake := tracker.NewFake(nil, tracker.FakeIssueSeed{Key: "APP-1"}, tracker.FakeIssueSeed{Key: "APP-2"})
 	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"), WithTargetDir(target),
-		WithAuthenticator(manager), WithRunController(controller), WithTracker(fake, trackerTestMaps, "https://ai-team.example"))
+		WithAuthenticator(manager), WithRunController(controller), WithTracker(fake, trackerTestMaps, "https://ai-team.example"),
+		WithTrackerInbound([]tracker.InboundRule{{Status: "Done", Action: tracker.ActionAdvance}}, time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

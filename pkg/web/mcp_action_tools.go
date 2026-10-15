@@ -212,20 +212,18 @@ func registerMCPActionTools(registry *mcpRegistry) {
 		Description: "Retry one failed outgoing tracker update (event ID from get_task_tracker).",
 		Params:      []mcpParam{runID, {Name: "event_id", Kind: mcpString, Required: true, Description: "Delivery event ID."}}})
 
+	registry.add(mcpOperation{Name: "sync_tracker_now", Title: "Sync with the tracker now", Method: http.MethodPost, Path: "/api/tracker/sync",
+		Description: "Poll the tracker for status changes immediately instead of waiting for the next poll. Changes still move tasks only through the controller " +
+			"(allowed route, gates, confirmations); the answer reports what was applied, left pending or found in conflict. Needs the tracker link right."})
+	registry.add(mcpOperation{Name: "dismiss_tracker_inbound", Title: "Dismiss tracker request", Method: http.MethodPost, Path: "/api/runs/{run_id}/tracker/inbound/{change_id}/dismiss",
+		Description: "Close an open (pending or conflicting) request that came from a status change in the tracker, with a mandatory reason; the task is not moved.",
+		Params: []mcpParam{runID,
+			{Name: "change_id", Kind: mcpString, Required: true, Description: "Inbound change ID (list_tracker_inbound or get_task_tracker)."},
+			reason(true, "Why the request is dismissed.")}})
+
 	// --- Reads that S12 did not need --------------------------------------
 	registry.add(mcpOperation{Name: "get_version", Title: "Server version", Path: "/api/version",
 		Description: "Build revision of the running ai-team server."})
-	registry.add(mcpOperation{Name: "get_task_tracker", Title: "Task tracker state",
-		Description: "Tracker link of a task, link conflicts, recent outgoing deliveries and a one-word sync status.",
-		Path:        "/api/runs/{run_id}/tracker", Params: []mcpParam{runID}})
-	registry.add(mcpOperation{Name: "get_tracker_status", Title: "Tracker status",
-		Description: "Whether a task tracker is configured, its transition map and the number of failed deliveries and link conflicts.",
-		Path:        "/api/tracker"})
-	registry.add(mcpOperation{Name: "list_tracker_conflicts", Title: "Tracker link conflicts",
-		Description: "Link conflicts between tasks and tracker issues that need an operator.", Path: "/api/tracker/conflicts"})
-	registry.add(mcpOperation{Name: "list_tracker_deliveries", Title: "Tracker deliveries",
-		Description: "Outgoing tracker updates across tasks, optionally by status.", Path: "/api/tracker/deliveries",
-		Params: []mcpParam{{Name: "status", Kind: mcpString, Enum: []string{"failed", "delivered", "abandoned", "superseded"}, Description: "Only deliveries with this status."}}})
 	registry.add(mcpOperation{Name: "export_flow_metrics_csv", Title: "Flow metrics (CSV)",
 		Description: "The flow metrics of get_flow_metrics as CSV text.", Path: "/api/metrics/flow.csv",
 		Params: []mcpParam{

@@ -151,8 +151,12 @@ var mcpParityMatrix = []mcpRouteParity{
 
 	// --- Task tracker -----------------------------------------------------
 	{Method: http.MethodGet, Pattern: "/api/tracker", Tool: "get_tracker_status"},
-	{Method: http.MethodGet, Pattern: "/api/tracker/conflicts", Tool: "list_tracker_conflicts"},
+	{Method: http.MethodGet, Pattern: "/api/tracker/conflicts", Tool: "list_tracker_link_conflicts"},
 	{Method: http.MethodGet, Pattern: "/api/tracker/deliveries", Tool: "list_tracker_deliveries"},
+	{Method: http.MethodGet, Pattern: "/api/tracker/sync", Tool: "get_tracker_sync"},
+	{Method: http.MethodGet, Pattern: "/api/tracker/inbound", Tool: "list_tracker_inbound"},
+	{Method: http.MethodPost, Pattern: "/api/tracker/sync", Tool: "sync_tracker_now"},
+	{Method: http.MethodPost, Pattern: "/api/runs/{runID}/tracker/inbound/{changeID}/dismiss", Tool: "dismiss_tracker_inbound"},
 	{Method: http.MethodPut, Pattern: "/api/runs/{runID}/tracker/link", Tool: "set_task_tracker_link"},
 	{Method: http.MethodDelete, Pattern: "/api/runs/{runID}/tracker/link", Tool: "remove_task_tracker_link"},
 	{Method: http.MethodPost, Pattern: "/api/runs/{runID}/tracker/retry", Tool: "retry_task_tracker_deliveries"},

@@ -113,11 +113,12 @@ func (s *Server) syncTrackerInbound(ctx context.Context, trigger string) (tracke
 	}
 	s.trackerSyncMu.Lock()
 	defer s.trackerSyncMu.Unlock()
-	if trigger == "manual" && s.trackerManualAt != nil && s.clock().Sub(*s.trackerManualAt) < trackerManualMinGap {
-		// Coalesce: a burst of "sync now" calls is one tracker read.
+	if trigger == "manual" && s.trackerManualAt != nil && s.withinManualGap() {
+		// Coalesce: a burst of "sync now" calls is one tracker read. The
+		// counters describe the previous pass, so they are not repeated: only
+		// the tracker, the cursor and the coalesced mark are returned.
 		last := s.trackerManualResult
-		last.Trigger, last.Coalesced = trigger, true
-		return last, nil
+		return trackerSyncResult{Tracker: last.Tracker, Trigger: trigger, Cursor: last.Cursor, Coalesced: true}, nil
 	}
 	result, err := s.runTrackerInbound(ctx, trigger)
 	if trigger == "manual" && err == nil {
@@ -129,6 +130,13 @@ func (s *Server) syncTrackerInbound(ctx context.Context, trigger string) (tracke
 		s.trackerManualAt = nil
 	}
 	return result, err
+}
+
+// withinManualGap reports whether the last real manual pass is recent enough
+// to be reused. A clock that stepped back (negative distance) never does.
+func (s *Server) withinManualGap() bool {
+	d := s.clock().Sub(*s.trackerManualAt)
+	return d >= 0 && d < trackerManualMinGap
 }
 
 // runTrackerInbound is one pass; the caller holds trackerSyncMu.

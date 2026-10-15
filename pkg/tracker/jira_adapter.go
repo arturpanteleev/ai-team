@@ -375,7 +375,9 @@ type jiraSearchResponse struct {
 // last status change returned. An empty cursor starts at the current time and
 // returns nothing. Jira's search filters by issue update time, so the query
 // reaches back a minute before the cursor and changes at or before the cursor
-// are dropped locally; the cursor therefore never repeats a change. Only the
+// are dropped locally; the cursor therefore never repeats a change. A page
+// is cut on a history-record boundary, so it may exceed Limit by the extra
+// status items of the last record. Only the
 // changelog page that Jira embeds in the search result is read. A change is
 // AITeam-origin when its author is the account behind the credentials
 // (/myself), not when jira.email happens to equal a profile e-mail.
@@ -437,10 +439,19 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 				if ms < afterMS || (ms == afterMS && id <= afterID) {
 					continue
 				}
+				statusItems := 0
 				for _, item := range history.Items {
 					if item.Field != "status" {
 						continue
 					}
+					// One history record may carry several status items. The
+					// first keeps the history ID; the others get a suffix, so
+					// each change has its own idempotency key.
+					changeID := history.ID
+					if statusItems > 0 {
+						changeID = fmt.Sprintf("%s.%d", history.ID, statusItems)
+					}
+					statusItems++
 					origin := OriginExternal
 					if self.matches(jiraUser{AccountID: history.Author.AccountID, Name: history.Author.Login, Key: history.Author.Key, Email: history.Author.Email}) {
 						origin = OriginAITeam
@@ -450,7 +461,7 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 						author = history.Author.Email
 					}
 					all = append(all, found{ms: ms, id: id, change: Change{
-						ID: history.ID, IssueKey: issue.Key, From: item.FromString, To: item.ToString,
+						ID: changeID, IssueKey: issue.Key, From: item.FromString, To: item.ToString,
 						At: created.UTC(), Author: author, Origin: origin,
 					}})
 				}
@@ -463,8 +474,11 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 		}
 		return all[i].id < all[j].id
 	})
-	for _, item := range all {
-		if query.Limit > 0 && len(page.Changes) >= query.Limit {
+	for i, item := range all {
+		// The cursor is (time, history ID), so a page is cut only on a record
+		// boundary: the items of one history record are never split between
+		// pages, or the cursor would skip the rest of the record.
+		if query.Limit > 0 && len(page.Changes) >= query.Limit && (all[i-1].ms != item.ms || all[i-1].id != item.id) {
 			break
 		}
 		page.Changes = append(page.Changes, item.change)

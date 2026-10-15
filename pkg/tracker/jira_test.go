@@ -550,3 +550,40 @@ func TestJiraChangesBatchManyKeysUnderOneCursor(t *testing.T) {
 		t.Fatalf("merged result: %+v", page)
 	}
 }
+
+func TestJiraChangesKeepAllStatusItemsOfOneRecordAcrossLimit(t *testing.T) {
+	mock := newMockJira(t, 3)
+	adapter := mock.adapter(3)
+	start, err := adapter.Changes(context.Background(), ChangeQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Add(time.Second).Format("2006-01-02T15:04:05.000-0700")
+	mock.histories = append(mock.histories, map[string]any{
+		"id": "800", "created": created,
+		"author": map[string]any{"accountId": "acc-person", "displayName": "Person"},
+		"items": []map[string]any{
+			{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+			{"field": "status", "fromString": "In Progress", "toString": "Done"},
+		},
+	})
+	first, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: start.Cursor, Keys: []string{"APP-1"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Changes) != 2 || first.Changes[0].To != "In Progress" || first.Changes[1].To != "Done" {
+		t.Fatalf("a record must not be split by the limit: %+v", first.Changes)
+	}
+	if first.Changes[0].ID == first.Changes[1].ID || first.Changes[0].ID != "800" {
+		t.Fatalf("each status item needs its own idempotency key: %q %q", first.Changes[0].ID, first.Changes[1].ID)
+	}
+	rest, err := adapter.Changes(context.Background(), ChangeQuery{Cursor: first.Cursor, Keys: []string{"APP-1"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range rest.Changes {
+		if change.ID == "800" || change.ID == first.Changes[1].ID {
+			t.Fatalf("an already returned change came back: %+v", rest.Changes)
+		}
+	}
+}

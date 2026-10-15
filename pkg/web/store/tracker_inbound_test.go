@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -99,5 +100,40 @@ func TestTrackerSyncStateKeepsCursorAcrossFailures(t *testing.T) {
 	}
 	if state, _ = s.GetTrackerSyncState("fake"); state.Cursor != "11" || state.LastError != "" || state.ConsecutiveFailures != 0 || state.LastErrorAt != nil {
 		t.Fatalf("after recovery: %+v", state)
+	}
+}
+
+func TestVersion17DatabaseMigratesToTrackerInbound(t *testing.T) {
+	if SchemaVersion < 18 {
+		t.Fatalf("test written for the 17 -> 18 step, SchemaVersion=%d", SchemaVersion)
+	}
+	path := filepath.Join(t.TempDir(), "web.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`DROP TABLE tracker_inbound_changes`, `DROP TABLE tracker_sync_state`, `DELETE FROM schema_migrations WHERE version > 17`,
+	} {
+		if _, err := s.db.Exec(query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(path)
+	if err != nil {
+		t.Fatalf("v17 database must migrate: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var latest, count int64
+	if err := s.db.QueryRow(`SELECT MAX(version), COUNT(*) FROM schema_migrations`).Scan(&latest, &count); err != nil ||
+		latest != SchemaVersion || count != SchemaVersion {
+		t.Fatalf("schema version=%d count=%d (%v)", latest, count, err)
+	}
+	record := TrackerInbound{Tracker: "fake", ChangeID: "1", TaskID: 1, IssueKey: "APP-1", ChangedAt: trackerTestTime}
+	if _, created, err := s.BeginTrackerInbound(record, trackerTestTime); err != nil || !created {
+		t.Fatalf("inbound table unusable after migration: created=%v err=%v", created, err)
 	}
 }

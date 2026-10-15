@@ -310,8 +310,19 @@ the task is no longer ready at that stage instead of launching the next one.
 Fields that come from the tracker (author, statuses, change ID, reason) MUST
 be cleaned of control characters and limited to 256 bytes (reason: 512) when
 stored. A manual `sync now` inside five seconds after a successful manual pass
-MUST return that pass's result (marked `coalesced`) without reading the
-tracker; a failed pass is never reused.
+MUST return that pass (marked `coalesced`, with the tracker and the cursor of
+that pass and zero counters, because nothing was read) without reading the
+tracker; a failed pass is never reused, and a clock that stepped back never
+extends the window.
+
+The staleness check tolerates a tracker clock that runs behind by up to five
+seconds, so the tolerance is asymmetric: a change is stale only when it is
+older than the stage entry by more than five seconds. A tracker clock that runs
+fast can therefore let a stale change through as fresh, and the five-second
+window can let a change made just before the stage entry be treated as fresh;
+this is accepted because the only automatic action is continuing a ready stage.
+A checkpoint written before the stage entry time was recorded falls back to its
+last update time for this comparison.
 
 #### Scenario: Launch is audited and grants no authorship
 

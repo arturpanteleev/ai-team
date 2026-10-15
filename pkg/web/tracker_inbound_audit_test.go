@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -166,13 +167,78 @@ func TestInboundSyncNowIsCoalescedWithinTheMinimumInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, err := f.srv.syncTrackerInbound(context.Background(), "manual")
-	if err != nil || !second.Coalesced || second.Changes != 0 {
+	if err != nil || !second.Coalesced || second.Changes != 0 || second.Applied != 0 || second.Pending != 0 ||
+		second.Conflicts != 0 || second.Ignored != 0 || second.Duplicates != 0 {
 		t.Fatalf("second inside the window must reuse the last pass: %+v %v", second, err)
 	}
+	// A clock stepped back must not freeze the window: the pass is read again.
+	now = now.Add(-time.Hour)
+	back, err := f.srv.syncTrackerInbound(context.Background(), "manual")
+	if err != nil || back.Coalesced || back.Changes != 1 {
+		t.Fatalf("a clock set back must not coalesce: %+v %v", back, err)
+	}
+	now = now.Add(time.Hour)
 	// A later manual call reads the tracker again.
 	now = now.Add(trackerManualMinGap + time.Second)
 	third, err := f.srv.syncTrackerInbound(context.Background(), "manual")
-	if err != nil || third.Coalesced || third.Changes != 1 {
+	if err != nil || third.Coalesced {
 		t.Fatalf("third after the window: %+v %v", third, err)
+	}
+}
+
+// denyInbound makes the database refuse the given statement kind through a
+// trigger created on a second connection.
+func denyInbound(t *testing.T, f *inboundFixture, trigger string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(trigger); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInboundLaunchIsNotStartedWhenTheAuditEventCannotBeWritten(t *testing.T) {
+	f := newInboundFixtureOn(t, true, defaultInboundRules)
+	f.task(t, "inbound-noaudit", "APP-1", lifecycle.PhaseResumable, "implementation", "")
+	f.start(t)
+	denyInbound(t, f, `CREATE TRIGGER deny_launch BEFORE INSERT ON events WHEN NEW.type = 'tracker_inbound_launch'
+		BEGIN SELECT RAISE(ABORT, 'journal unavailable'); END`)
+	if err := f.fake.ExternalTransition("APP-1", "In Progress", "pat"); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.sync(t); result.Applied != 0 || result.Pending != 1 {
+		t.Fatalf("result: %+v", result)
+	}
+	if len(f.controller.agentCalls) != 0 {
+		t.Fatalf("a stage started without its audit record: %v", f.controller.agentCalls)
+	}
+	open := f.requests(t, "pending")
+	if len(open) != 1 || !strings.Contains(open[0].Reason, "could not be recorded in the run journal") {
+		t.Fatalf("request must stay pending with a reason: %+v", open)
+	}
+}
+
+func TestInboundLaunchIsNotStartedWhenTheRequestCannotBePersisted(t *testing.T) {
+	f := newInboundFixtureOn(t, true, defaultInboundRules)
+	f.task(t, "inbound-nopersist", "APP-1", lifecycle.PhaseResumable, "implementation", "")
+	f.start(t)
+	denyInbound(t, f, `CREATE TRIGGER deny_resolve BEFORE UPDATE ON tracker_inbound_changes
+		BEGIN SELECT RAISE(ABORT, 'inbound storage unavailable'); END`)
+	if err := f.fake.ExternalTransition("APP-1", "In Progress", "pat"); err != nil {
+		t.Fatal(err)
+	}
+	// The pass fails as a whole (the outcome cannot be stored either) and
+	// the controller is never called.
+	if _, err := f.srv.syncTrackerInbound(context.Background(), "test"); err == nil {
+		t.Fatal("storage failure must fail the pass so the cursor stays")
+	}
+	if len(f.controller.agentCalls) != 0 {
+		t.Fatalf("a stage started although the request could not be persisted: %v", f.controller.agentCalls)
+	}
+	if launches := inboundEvents(t, f, "inbound-nopersist", trackerInboundLaunchEvent); len(launches) != 0 {
+		t.Fatalf("launch audit written without a persisted request: %+v", launches)
 	}
 }

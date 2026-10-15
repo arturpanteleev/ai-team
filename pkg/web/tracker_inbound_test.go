@@ -37,6 +37,7 @@ type inboundFixture struct {
 	fake       *tracker.Fake
 	controller *inboundController
 	target     string
+	dbPath     string
 }
 
 var defaultInboundRules = []tracker.InboundRule{
@@ -47,7 +48,18 @@ var defaultInboundRules = []tracker.InboundRule{
 
 func newInboundFixture(t *testing.T, rules []tracker.InboundRule, approvals ...approval.PendingApproval) *inboundFixture {
 	t.Helper()
+	return newInboundFixtureOn(t, false, rules, approvals...)
+}
+
+// newInboundFixtureOn is newInboundFixture with an optional on-disk database
+// (target/web.db), so a test can sabotage storage through a second connection.
+func newInboundFixtureOn(t *testing.T, onDisk bool, rules []tracker.InboundRule, approvals ...approval.PendingApproval) *inboundFixture {
+	t.Helper()
 	target := t.TempDir()
+	dbPath := ":memory:"
+	if onDisk {
+		dbPath = filepath.Join(target, "web.db")
+	}
 	controlDir := filepath.Join(target, ".ai-team")
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -66,13 +78,13 @@ func newInboundFixture(t *testing.T, rules []tracker.InboundRule, approvals ...a
 	fake := tracker.NewFake([]string{"To Do", "In Progress", "In Review", "Rework", "Done"},
 		tracker.FakeIssueSeed{Key: "APP-1"}, tracker.FakeIssueSeed{Key: "APP-2"})
 	controller := &inboundController{fakeRunController: &fakeRunController{approvals: approvals}}
-	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"), WithTargetDir(target), WithRunController(controller),
+	srv, err := NewServer(dbPath, "", filepath.Join(controlDir, "artifacts"), WithTargetDir(target), WithRunController(controller),
 		WithTracker(fake, trackerTestMaps, "https://ai-team.example"), WithTrackerInbound(rules, time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = srv.Close() })
-	return &inboundFixture{srv: srv, fake: fake, controller: controller, target: target}
+	return &inboundFixture{srv: srv, fake: fake, controller: controller, target: target, dbPath: dbPath}
 }
 
 // task creates a linked task whose lifecycle is at stage/phase.

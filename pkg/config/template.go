@@ -200,6 +200,11 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 			if stage.Executor != "agent" || stage.Agent == "" {
 				add("%s: adapter допустим только для executor agent с agent-контрактом", prefix)
 			}
+			if lookup, ok := reg.(controllerOperationLookup); ok && stage.Agent != "" {
+				if operation, err := lookup.IsControllerOperation(stage.Agent); err == nil && operation {
+					add("%s: adapter не применим к controller operation (агент %s)", prefix, stage.Agent)
+				}
+			}
 			if _, exists := c.ExecutorAdapters[stage.Adapter]; !exists {
 				add("%s: adapter %q не объявлен в executor_adapters", prefix, stage.Adapter)
 			}

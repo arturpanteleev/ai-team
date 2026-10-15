@@ -32,8 +32,11 @@ const (
 	maxMetadataEntries    = 32
 	maxMetadataValueBytes = 512
 	maxSummaryBytes       = 2048
-	defaultPath           = "/usr/local/bin:/usr/bin:/bin"
-	reservedEnvPrefix     = "AI_TEAM_"
+	// minSecretBytes is the shortest allowed-env value masked in the log; it
+	// matches the gate runner threshold so both redactors behave alike.
+	minSecretBytes    = 4
+	defaultPath       = "/usr/local/bin:/usr/bin:/bin"
+	reservedEnvPrefix = "AI_TEAM_"
 )
 
 var (
@@ -358,7 +361,7 @@ func (e *External) buildEnv(request Request) (env []string, secrets []string) {
 			hasPath = true
 		}
 		env = append(env, name+"="+value)
-		if name != "PATH" && len(value) >= 8 {
+		if name != "PATH" && len(value) >= minSecretBytes {
 			secrets = append(secrets, value)
 		}
 	}

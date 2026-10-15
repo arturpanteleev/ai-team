@@ -1071,6 +1071,12 @@ type AgentLookup interface {
 	Exists(name string) bool
 }
 
+// controllerOperationLookup is implemented by registries that know whether an
+// agent is a controller operation (delivery, deploy).
+type controllerOperationLookup interface {
+	IsControllerOperation(name string) (bool, error)
+}
+
 type pipelineValidator interface {
 	ValidatePipeline(names []string) error
 }

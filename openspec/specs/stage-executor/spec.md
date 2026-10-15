@@ -38,8 +38,14 @@ documents, and an oversized body. The result carries `status` (`ok` or `error`),
 optional `summary`, `verdict`, `metadata` (at most 32 entries, bounded values),
 and `outputs` whose `content` the controller MUST write to the declared output
 path; an undeclared output name MUST be rejected. Values of allowed environment
-variables and secret-like fragments MUST be redacted from the saved log, summary,
-and metadata.
+variables of at least 4 bytes (except `PATH`) and secret-like fragments found by
+the shared redactor MUST be redacted from the saved log, summary, and metadata;
+a secret outside `env_allow` is covered only by the shared redactor. When every
+non-controller agent stage names an adapter, runtime preflight MUST NOT require
+the agent CLI or its credentials and MUST instead verify that each used adapter's
+program exists and is executable, a relative path staying inside the repository.
+Config validation MUST reject `adapter` on a controller operation (`delivery`,
+`deploy`).
 
 #### Scenario: Failure never looks like a completed stage
 

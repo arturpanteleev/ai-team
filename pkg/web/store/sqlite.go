@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -1037,7 +1037,7 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 		// SQLite walks the whole events table for every page. IF NOT EXISTS
 		// keeps reopening an upgraded file a no-op.
 		`CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_uid, id)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP), (14, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP), (2, CURRENT_TIMESTAMP), (3, CURRENT_TIMESTAMP), (4, CURRENT_TIMESTAMP), (5, CURRENT_TIMESTAMP), (6, CURRENT_TIMESTAMP), (7, CURRENT_TIMESTAMP), (8, CURRENT_TIMESTAMP), (9, CURRENT_TIMESTAMP), (10, CURRENT_TIMESTAMP), (11, CURRENT_TIMESTAMP), (12, CURRENT_TIMESTAMP), (13, CURRENT_TIMESTAMP), (14, CURRENT_TIMESTAMP), (15, CURRENT_TIMESTAMP)`,
 	}
 	for _, query := range queries {
 		if strings.Contains(query, "idx_events_dedupe") {
@@ -1064,7 +1064,28 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 	if err := migrateV13(ctx, tx); err != nil {
 		return err
 	}
-	return migrateV14(ctx, tx)
+	if err := migrateV14(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV15(ctx, tx)
+}
+
+// migrateV15 (S12) добавляет персональные MCP-токены: в базе лежит только
+// SHA-256 секрета, срок жизни и отзыв проверяются на каждый вызов.
+func migrateV15(ctx context.Context, tx schemaQuerier) error {
+	for _, query := range []string{
+		`CREATE TABLE IF NOT EXISTS mcp_tokens (
+			id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, actor_id TEXT NOT NULL,
+			label TEXT NOT NULL DEFAULT '', hint TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			last_used_at INTEGER, revoked_at INTEGER)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_tokens_actor ON mcp_tokens(actor_id, created_at)`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV13 (BL-31) adds the SSO account binding of team members, the

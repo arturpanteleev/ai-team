@@ -185,6 +185,7 @@ type Server struct {
 	autoPickup          autopickup.Policy
 	autoPickupInterval  time.Duration
 	tokenLedger         tokenbudget.Ledger
+	mcpAllowedOrigins   []string // canonical scheme://host:port allowed to call /mcp with an Origin header
 }
 
 // NewServer создаёт web-сервер. artifactRoot — корень артефактов
@@ -230,6 +231,10 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	if srv.oidc != nil && (srv.authenticator == nil || srv.localAuth) {
 		_ = s.Close()
 		return nil, errors.New("OIDC sign-in requires cloud authentication")
+	}
+	if srv.mcpAllowedOrigins, err = normalizeMCPOrigins(srv.mcpAllowedOrigins); err != nil {
+		_ = s.Close()
+		return nil, err
 	}
 	target := srv.targetDir
 	if target == "" {
@@ -302,10 +307,12 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 	srv.router = chi.NewRouter()
 	srv.router.Use(middleware.Recoverer)
 	if srv.authenticator == nil || srv.localAuth {
-		srv.router.Use(sameOriginMiddleware)
+		srv.router.Use(exceptMCP(sameOriginMiddleware))
 	} else {
-		srv.router.Use(authenticatedOriginMiddleware)
+		srv.router.Use(exceptMCP(authenticatedOriginMiddleware))
 	}
+	// Network MCP (S12): its own Host/Origin policy and bearer authentication.
+	srv.router.Handle(mcpPath, srv.newMCPHandler())
 
 	srv.router.Get("/api/auth/config", srv.handleAuthConfig)
 	srv.router.Get("/api/session", srv.handleSession)
@@ -356,6 +363,9 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/projects", srv.handleListProjects)
 		router.Get("/api/projects/{projectID}", srv.handleGetProject)
 	})
+	srv.router.Method(http.MethodGet, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(false, srv.handleListMCPTokens)))
+	srv.router.Method(http.MethodPost, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleIssueMCPToken)))
+	srv.router.Method(http.MethodDelete, "/api/mcp/tokens/{tokenID}", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleRevokeMCPToken)))
 	srv.router.Group(func(router chi.Router) {
 		router.Use(srv.apiJSONErrors)
 		router.Use(srv.writeSecurity)

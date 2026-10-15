@@ -7,10 +7,10 @@ import { Bubble } from './Bubble';
 import type { BubbleTone } from './Bubble';
 import styles from './Layout.module.css';
 
-type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team';
+type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team' | 'access';
 
 const navTone: Record<IconName, BubbleTone> = {
-  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow',
+  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow', access: 'mint',
 };
 
 // Иконки намеренно простые: контур 1.8px, наследуют цвет текста (внутри пузыря).
@@ -23,6 +23,7 @@ function NavIcon({ name }: { name: IconName }) {
     feed: <><path d="M4 7h16M4 12h11M4 17h7" /><circle cx="18" cy="16.5" r="2.5" /></>,
     observability: <><path d="M3.5 17l5-5 3.5 3.5 4.5-6 4 4" /><path d="M3.5 20.5h17" /></>,
     team: <><circle cx="9" cy="9" r="3.2" /><path d="M3.5 19.5c.8-3 2.9-4.6 5.5-4.6s4.7 1.6 5.5 4.6" /><path d="M16 6.2a3 3 0 0 1 0 5.6M18.2 14.9c1.3.7 2 2.2 2.3 4.6" /></>,
+    access: <><circle cx="8.5" cy="14.5" r="3.5" /><path d="M11 12l8-8M16 7l2.5 2.5M14 9l2 2" /></>,
   };
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
@@ -76,6 +77,7 @@ export function Layout({ children, teamManagementEnabled }: { children: ReactNod
           <NavItem to="/template" name="template">Шаблоны</NavItem>
           <NavItem to="/events" name="feed">Лента</NavItem>
           <NavItem to="/observability" name="observability">Наблюдаемость</NavItem>
+          {teamManagementEnabled && <NavItem to="/access" name="access">Доступ MCP</NavItem>}
           {teamManagementEnabled && principal?.roles.includes('product_owner') && (
             <NavItem to="/team" name="team">Команда</NavItem>
           )}

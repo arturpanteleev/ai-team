@@ -463,6 +463,13 @@ Model/provider и имена явно разрешённых credential variable
 без секретных значений. `GET /api/preflight` возвращает тот же report, который
 повторно применяется при `POST /api/runs`.
 
+Сетевой MCP (`pkg/web/mcp*.go`, SDK `go-sdk`, спецификация 2026-07-28) — один
+stateless endpoint `POST /mcp` в том же роутере. Bearer-токен (персональный `aitm_…`
+из таблицы `mcp_tokens` или токен `IdentityVerifier`) разрешается в участника команды
+через `resolveTeamPrincipal`; инструменты — декларативный реестр, исполняемый внутренним
+запросом к тому же `chi`-роутеру с личностью в контексте, поэтому RBAC и бизнес-логика
+не дублируются. Контракт — `openspec/specs/mcp-server`, руководство — `docs/reference/mcp.md`.
+
 SQLite `.ai-team/web.db` — восстанавливаемая projection для web UI, а не
 источник истины. Сервер по умолчанию слушает `127.0.0.1`, проверяет
 same-origin для HTTP (`pkg/web/security.go`) и WebSocket. Lifecycle events

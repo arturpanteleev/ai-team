@@ -271,6 +271,13 @@ func (s *Store) SetTeamMember(actorID string, roles []string, active bool, by, a
 	if n == 0 {
 		return ErrTeamMemberNotFound
 	}
+	if status == "revoked" {
+		// Personal MCP tokens die with the membership: re-inviting the same
+		// actor must not bring an old token back to life.
+		if _, err = tx.Exec(`UPDATE mcp_tokens SET revoked_at=? WHERE actor_id=? AND revoked_at IS NULL`, now.UnixMilli(), actorID); err != nil {
+			return err
+		}
+	}
 	if err = teamAudit(tx, by, action, actorID, `{"roles":`+string(encoded)+`}`, now); err != nil {
 		return err
 	}

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 type Verification struct {
@@ -68,8 +69,17 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, fmt.Errorf("delivery planner: baseline HEAD для %s: %w", base, err)
 	}
 	currentHead, err := commandOutput(ctx, targetDir, "git", "rev-parse", "--verify", "HEAD")
-	if err != nil || currentHead != baselineHead {
-		return Plan{}, fmt.Errorf("delivery planner: branch %q содержит commits поверх baseline %s; требуется чистая ветка от base", current, baselineHead)
+	if err != nil || currentHead == "" {
+		return Plan{}, fmt.Errorf("delivery planner: HEAD не определён: %w", err)
+	}
+	if currentHead != baselineHead {
+		// Повторная доставка после возврата из ревью: на planned branch уже лежит
+		// commit, который контроллер сам создал и проверил при прошлой доставке.
+		// Новый commit встаёт поверх него; чужие commits по-прежнему отвергаются.
+		if tipErr := verifyControllerDeliveredTip(ctx, targetDir, feature, current, branch, base, currentHead); tipErr != nil {
+			return Plan{}, fmt.Errorf("delivery planner: branch %q содержит commits поверх baseline %s, не созданные контроллером; требуется чистая ветка от base: %w", current, baselineHead, tipErr)
+		}
+		baselineHead = currentHead
 	}
 	files, err := finalDeltaPaths(ctx, targetDir, baselineHead, attributed)
 	if err != nil {
@@ -116,6 +126,36 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+// verifyControllerDeliveredTip разрешает повторную доставку только когда tip
+// planned branch равен commit, который контроллер записал и проверил в
+// delivery state этой feature (с PR), и tip происходит от base.
+func verifyControllerDeliveredTip(ctx context.Context, targetDir, feature, current, branch, base, head string) error {
+	if current != branch {
+		return fmt.Errorf("текущая branch не %q", branch)
+	}
+	statePath, err := deliveryStatePath(targetDir, feature)
+	if err != nil {
+		return err
+	}
+	data, err := safeio.ReadRegularFile(statePath, maxStateSize)
+	if err != nil {
+		return fmt.Errorf("delivery state не найден: %w", err)
+	}
+	loaded, err := parseState(data)
+	if err != nil {
+		return err
+	}
+	if loaded.CommitSHA != head || !loaded.CommitVerified || loaded.PRURL == "" || loaded.Plan.Branch != branch {
+		return fmt.Errorf("HEAD %s не является завершённой доставкой контроллера", head)
+	}
+	ancestor := exec.CommandContext(ctx, "git", gitCommandArgs("merge-base", "--is-ancestor", base, head)...)
+	ancestor.Dir = targetDir
+	if ancestor.Run() != nil {
+		return fmt.Errorf("HEAD %s не происходит от base %s", head, base)
+	}
+	return nil
 }
 
 func VerifyPreconditions(plan Plan, actual map[string]PreconditionEvidence) error {

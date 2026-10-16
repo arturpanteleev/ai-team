@@ -136,7 +136,11 @@ an edge approval. When return routes exist, the forward decision MUST expose
 `approve` and only the configured `return_to_*` targets, so return remains an
 available stage action even with `confirm: auto`. Backward return edges MUST
 continue to require approval. This rule applies to schema v5 templates; legacy
-workflow graphs retain their existing approval validation.
+workflow graphs retain their existing approval validation. In schema v6 the
+`human_approval` gate takes the place of `confirm: required`: a stage without
+that gate and without return routes MUST NOT wait for a transition approval,
+while a stage with return routes keeps the approval carrying `approve` and the
+`return_to_*` actions.
 
 #### Scenario: Ordered forward transitions
 

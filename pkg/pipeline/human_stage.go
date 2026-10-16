@@ -526,7 +526,7 @@ func transitionRecorded(replayed evidence.ReplayedRun, attemptID string) bool {
 func (rs *runState) humanStageInputs(definition *agent.Agent, stageID string) ([]runtime.Artifact, error) {
 	var inputs []runtime.Artifact
 	if definition != nil {
-		_, collected, err := rs.collectInputs(definition, stageID)
+		_, collected, err := rs.collectInputsMode(definition, stageID, true)
 		if err != nil {
 			return nil, err
 		}

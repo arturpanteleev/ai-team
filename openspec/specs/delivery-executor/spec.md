@@ -54,6 +54,27 @@ Delivery MUST persist step results and safely resume after partial failure.
 - **WHEN** a resumed delivery has a saved commit SHA, regardless of `commit_verified`
 - **THEN** the executor MUST re-verify commit message, parent, paths, modes and blob hashes against the approved plan before push
 
+### Requirement: Повторная доставка после возврата из ревью
+
+Планировщик MUST принять ту же ветку `ai-team/<feature>`, когда задача вернулась
+на реализацию (`code_review` → `implementation`) после завершённой доставки,
+с одним условием: её tip равен commit, который контроллер сам записал и проверил
+в delivery state этой feature вместе с PR, и tip происходит от base. Baseline
+нового плана MUST быть этим tip, новый commit MUST встать поверх него (parent
+равен baseline плана), push MUST быть fast-forward без force, а существующий
+открытый PR MUST быть переиспользован и проверен по новому head. Инвариант
+доставки не меняется: commit, push и PR выполняет только контроллер после
+проверок и подтверждения точного SHA-256 нового canonical plan.
+
+#### Scenario: Второй проход поверх доставленного commit
+- **WHEN** после доставки реализация изменила approved-файлы и план строится заново
+- **THEN** `baseline_head` плана MUST равняться tip ветки, а base-ветка остаться прежней
+- **AND** новый commit MUST иметь прежний tip родителем, а PR MUST остаться тем же
+
+#### Scenario: Чужой commit на ветке
+- **WHEN** tip ветки не записан контроллером как проверенная доставка
+- **THEN** планировщик MUST отклонить план и требовать чистую ветку от base
+
 ### Requirement: Delivery только из candidate
 
 Planner и executor MUST строить, проверять, коммитить и отправлять exact

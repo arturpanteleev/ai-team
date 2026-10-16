@@ -246,3 +246,165 @@ func TestCheckCaseInsensitiveFoldsSigmaAndSharpS(t *testing.T) {
 		t.Error("σ и ς — дубликат при case: insensitive")
 	}
 }
+
+// Edge cases of the phrase list (S22). Each row pins a decision that the
+// documentation states.
+func TestParseEdgeCasesOfThePhraseList(t *testing.T) {
+	cases := []struct {
+		name      string
+		overrides map[string]any
+		wantErr   bool
+	}{
+		{"empty phrase", map[string]any{ParamPhrases: []any{"alpha", ""}}, true},
+		{"blank phrase", map[string]any{ParamPhrases: []any{"   "}}, true},
+		{"no-break space only", map[string]any{ParamPhrases: []any{"\u00a0"}}, true},
+		{"padded with a no-break space", map[string]any{ParamPhrases: []any{"alpha\u00a0"}}, true},
+		{"carriage return inside", map[string]any{ParamPhrases: []any{"alpha\rbeta"}}, true},
+		{"NUL inside", map[string]any{ParamPhrases: []any{"alpha\x00"}}, true},
+		{"newline inside is literal", map[string]any{ParamPhrases: []any{"alpha\nbeta"}}, false},
+		{"inner whitespace is literal", map[string]any{ParamPhrases: []any{"two  spaces"}}, false},
+		{"duplicate ignoring case", map[string]any{ParamPhrases: []any{"Alpha", "ALPHA"}}, true},
+		{"same word in different case is fine when sensitive", map[string]any{ParamPhrases: []any{"Alpha", "ALPHA"}, ParamCase: CaseSensitive}, false},
+		{"overlap is fine for all", map[string]any{ParamPhrases: []any{"API", "API gateway"}}, false},
+		{"overlap is fine for any", map[string]any{ParamPhrases: []any{"API", "API gateway"}, ParamMatch: MatchAny}, false},
+		{"overlap is rejected for at_least", map[string]any{ParamPhrases: []any{"API", "API gateway"}, ParamMatch: MatchAtLeast, ParamMinCount: 2}, true},
+		{"overlap ignoring case is rejected for at_least", map[string]any{ParamPhrases: []any{"api", "The API"}, ParamMatch: MatchAtLeast, ParamMinCount: 2}, true},
+		{"case-different overlap is fine for sensitive at_least", map[string]any{ParamPhrases: []any{"api", "The API"}, ParamCase: CaseSensitive, ParamMatch: MatchAtLeast, ParamMinCount: 2}, false},
+		{"disjoint phrases are fine for at_least", map[string]any{ParamPhrases: []any{"alpha", "beta"}, ParamMatch: MatchAtLeast, ParamMinCount: 2}, false},
+		{"regex phrases are not compared for overlap", map[string]any{ParamPhrases: []any{"api", "api gateway"}, ParamRegex: true, ParamMatch: MatchAtLeast, ParamMinCount: 2}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(params(tc.overrides))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if err != nil {
+				for _, phrase := range []string{"gateway", "alpha", "The API"} {
+					if strings.Contains(err.Error(), phrase) {
+						t.Fatalf("error repeats a phrase value: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCheckOverlappingPhrasesCountEachEntryOnce(t *testing.T) {
+	// One fragment of the text satisfies both entries; all and any report both
+	// as found, at_least is refused at validation time (see above).
+	spec := mustParse(t, params(map[string]any{ParamPhrases: []any{"API", "API gateway"}, ParamCase: CaseSensitive}))
+	result := spec.Check("The API gateway is ready")
+	if !result.Satisfied || len(result.Matched) != 2 {
+		t.Fatalf("both entries are found in one fragment: %+v", result)
+	}
+	if got := spec.Check("The API is ready"); got.Satisfied || len(got.Missing) != 1 || got.Missing[0] != "API gateway" {
+		t.Fatalf("the longer phrase must be reported missing: %+v", got)
+	}
+	// The same phrase occurring twice is still one entry.
+	atLeast := mustParse(t, params(map[string]any{ParamPhrases: []any{"alpha", "beta"}, ParamMatch: MatchAtLeast, ParamMinCount: 2}))
+	if atLeast.Check("alpha alpha alpha").Satisfied {
+		t.Fatal("min_count counts distinct phrases, not occurrences")
+	}
+}
+
+func TestCheckCaseRules(t *testing.T) {
+	insensitive := mustParse(t, params(map[string]any{ParamPhrases: []any{"Срок"}}))
+	sensitive := mustParse(t, params(map[string]any{ParamPhrases: []any{"Срок"}, ParamCase: CaseSensitive}))
+	for content, want := range map[string][2]bool{
+		"срок сдачи": {true, false},
+		"СРОК":       {true, false},
+		"Срок":       {true, true},
+		"сроки":      {true, false}, // substring unit
+	} {
+		if got := insensitive.Check(content).Satisfied; got != want[0] {
+			t.Errorf("insensitive %q = %v", content, got)
+		}
+		if got := sensitive.Check(content).Satisfied; got != want[1] {
+			t.Errorf("sensitive %q = %v", content, got)
+		}
+	}
+	// Simple case folding only: the Turkish dotted capital I is not "i".
+	turkish := mustParse(t, params(map[string]any{ParamPhrases: []any{"istanbul"}}))
+	if turkish.Check("\u0130stanbul").Satisfied {
+		t.Error("U+0130 has no simple case folding to i and must not match silently")
+	}
+	// A regular expression follows the same case switch.
+	pattern := mustParse(t, params(map[string]any{ParamPhrases: []any{"срок\\s+\\d+"}, ParamRegex: true}))
+	if !pattern.Check("СРОК   10 дней").Satisfied {
+		t.Error("case: insensitive applies to regex")
+	}
+	strict := mustParse(t, params(map[string]any{ParamPhrases: []any{"срок\\s+\\d+"}, ParamRegex: true, ParamCase: CaseSensitive}))
+	if strict.Check("СРОК   10 дней").Satisfied {
+		t.Error("case: sensitive applies to regex")
+	}
+}
+
+func TestCheckUnicodeIsComparedWithoutNormalization(t *testing.T) {
+	precomposed, decomposed := "caf\u00e9", "cafe\u0301"
+	spec := mustParse(t, params(map[string]any{ParamPhrases: []any{precomposed}}))
+	if !spec.Check("un " + precomposed + " noir").Satisfied {
+		t.Fatal("identical form must match")
+	}
+	if spec.Check("un " + decomposed + " noir").Satisfied {
+		t.Error("NFC and NFD are different texts: normalization is not applied, and a match must not appear by accident")
+	}
+	other := mustParse(t, params(map[string]any{ParamPhrases: []any{decomposed}}))
+	if other.Check("un " + precomposed + " noir").Satisfied {
+		t.Error("the reverse direction must behave the same")
+	}
+	// Both forms can be required explicitly through a regular expression.
+	both := mustParse(t, params(map[string]any{ParamPhrases: []any{"caf(\u00e9|e\u0301)"}, ParamRegex: true}))
+	if !both.Check(decomposed).Satisfied || !both.Check(precomposed).Satisfied {
+		t.Error("an alternation covers both forms")
+	}
+	// A no-break space is not a space.
+	space := mustParse(t, params(map[string]any{ParamPhrases: []any{"two words"}}))
+	if space.Check("two\u00a0words").Satisfied {
+		t.Error("NBSP must not match a space silently")
+	}
+	// The word boundary is Unicode-aware: a precomposed letter extends a word.
+	word := mustParse(t, params(map[string]any{ParamPhrases: []any{"caf"}, ParamUnit: UnitWord}))
+	if word.Check("caf\u00e9 ok").Satisfied {
+		t.Error("é is a letter: caf is not a whole word in café")
+	}
+}
+
+func TestCheckLineEndingsAndByteOrderMark(t *testing.T) {
+	spec := mustParse(t, params(map[string]any{ParamPhrases: []any{"alpha\nbeta"}}))
+	for _, content := range []string{"alpha\nbeta", "alpha\r\nbeta", "alpha\rbeta"} {
+		if !spec.Check(content).Satisfied {
+			t.Errorf("%q: line endings are unified before the comparison", content)
+		}
+	}
+	section := mustParse(t, params(map[string]any{
+		ParamPhrases: []any{"срок"}, ParamScope: ScopeSection, ParamSection: "Критерии приёмки",
+	}))
+	for name, content := range map[string]string{
+		"lf":    "# Критерии приёмки\nсрок 5 дней\n",
+		"crlf":  "# Критерии приёмки\r\nсрок 5 дней\r\n",
+		"bom":   "\ufeff# Критерии приёмки\nсрок 5 дней\n",
+		"mixed": "\ufeff# Критерии приёмки\r\nсрок 5 дней\r\n# Другое\r\n",
+	} {
+		if !section.Check(content).Satisfied {
+			t.Errorf("%s: heading and body must be found", name)
+		}
+	}
+	// A BOM in the middle is ordinary text and is not removed.
+	if mustParse(t, params(map[string]any{ParamPhrases: []any{"alpha\ufeffbeta"}})).Check("alphabeta").Satisfied {
+		t.Error("only a leading BOM is dropped")
+	}
+}
+
+func TestCheckRepeatedSectionHeadingsAreSearchedTogether(t *testing.T) {
+	spec := mustParse(t, params(map[string]any{
+		ParamPhrases: []any{"first", "second"}, ParamScope: ScopeSection, ParamSection: "Notes",
+	}))
+	content := "# Notes\nfirst\n# Other\nnoise\n# notes:\nsecond\n"
+	if result := spec.Check(content); !result.Satisfied {
+		t.Fatalf("every section with that title is part of the scope: %+v", result)
+	}
+	if mustParse(t, params(map[string]any{ParamPhrases: []any{"noise"}, ParamScope: ScopeSection, ParamSection: "Notes"})).Check(content).Satisfied {
+		t.Error("text of another section is outside the scope")
+	}
+}

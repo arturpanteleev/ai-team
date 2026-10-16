@@ -347,29 +347,54 @@ func (a *JiraAdapter) authenticatedUser(ctx context.Context) (jiraUser, error) {
 	return me, nil
 }
 
-type jiraSearchResponse struct {
-	Issues []struct {
+type jiraHistory struct {
+	ID      string `json:"id"`
+	Created string `json:"created"`
+	Author  struct {
+		AccountID string `json:"accountId"`
+		Login     string `json:"name"`
 		Key       string `json:"key"`
-		Changelog struct {
-			Histories []struct {
-				ID      string `json:"id"`
-				Created string `json:"created"`
-				Author  struct {
-					AccountID string `json:"accountId"`
-					Login     string `json:"name"`
-					Key       string `json:"key"`
-					Email     string `json:"emailAddress"`
-					Name      string `json:"displayName"`
-				} `json:"author"`
-				Items []struct {
-					Field      string `json:"field"`
-					FromString string `json:"fromString"`
-					ToString   string `json:"toString"`
-				} `json:"items"`
-			} `json:"histories"`
-		} `json:"changelog"`
-	} `json:"issues"`
+		Email     string `json:"emailAddress"`
+		Name      string `json:"displayName"`
+	} `json:"author"`
+	Items []struct {
+		Field      string `json:"field"`
+		FromString string `json:"fromString"`
+		ToString   string `json:"toString"`
+	} `json:"items"`
 }
+
+type jiraSearchIssue struct {
+	Key       string `json:"key"`
+	Changelog struct {
+		Total     int           `json:"total"`
+		Histories []jiraHistory `json:"histories"`
+	} `json:"changelog"`
+}
+
+type jiraSearchResponse struct {
+	Issues        []jiraSearchIssue `json:"issues"`
+	NextPageToken string            `json:"nextPageToken"`
+	IsLast        *bool             `json:"isLast"`
+	StartAt       int               `json:"startAt"`
+	Total         int               `json:"total"`
+}
+
+// jiraChangelogPage is one page of GET /issue/{key}/changelog.
+type jiraChangelogPage struct {
+	StartAt int           `json:"startAt"`
+	Total   int           `json:"total"`
+	IsLast  *bool         `json:"isLast"`
+	Values  []jiraHistory `json:"values"`
+}
+
+// Hard stops against a server that never ends a page chain: Changes fails
+// instead of returning a truncated list, because the cursor would then skip
+// the unread changes for good.
+const (
+	jiraSearchPageSize = 100
+	jiraMaxPages       = 200
+)
 
 // Changes implements Tracker. The cursor is "<unix ms>:<history id>" of the
 // last status change returned. An empty cursor starts at the current time and
@@ -377,8 +402,10 @@ type jiraSearchResponse struct {
 // reaches back a minute before the cursor and changes at or before the cursor
 // are dropped locally; the cursor therefore never repeats a change. A page
 // is cut on a history-record boundary, so it may exceed Limit by the extra
-// status items of the last record. Only the
-// changelog page that Jira embeds in the search result is read. A change is
+// status items of the last record. Every page of the search result is read
+// (nextPageToken on /search/jql, startAt on /search), and when the changelog
+// embedded in an issue is cut short (Jira embeds only the oldest histories)
+// the whole changelog is read from /issue/{key}/changelog. A change is
 // AITeam-origin when its author is the account behind the credentials
 // (/myself), not when jira.email happens to equal a profile e-mail.
 func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePage, error) {
@@ -429,7 +456,11 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 			return ChangePage{}, err
 		}
 		for _, issue := range response.Issues {
-			for _, history := range issue.Changelog.Histories {
+			histories, err := a.issueHistories(ctx, issue)
+			if err != nil {
+				return ChangePage{}, err
+			}
+			for _, history := range histories {
 				created, err := parseJiraTime(history.Created)
 				if err != nil {
 					continue
@@ -490,25 +521,77 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 // jiraChangeKeyBatch is how many issue keys one change query carries.
 const jiraChangeKeyBatch = 50
 
-// searchChanges reads the status changelogs of one batch of issues.
+// searchChanges reads the status changelogs of one batch of issues, following
+// every page of the search result.
 func (a *JiraAdapter) searchChanges(ctx context.Context, keys []string, window int) (jiraSearchResponse, error) {
 	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY updated ASC`, strings.Join(keys, ","), window)
-	values := url.Values{"jql": {jql}, "fields": {"status"}, "expand": {"changelog"}, "maxResults": {"100"}}
-	var response jiraSearchResponse
 	// /search/jql replaces the removed /search on Jira Cloud; Jira Server and
-	// Data Center only know /search, so a 404 falls back to it.
-	endpoint := fmt.Sprintf("%s/rest/api/%d/search/jql?%s", a.baseURL(), a.apiVersion(), values.Encode())
-	if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-		if !errors.Is(err, ErrNotFound) {
+	// Data Center only know /search, so a 404 on the first page falls back to
+	// it. The two differ in paging: nextPageToken against startAt.
+	legacy := false
+	var merged jiraSearchResponse
+	token, startAt := "", 0
+	for page := 0; ; page++ {
+		if page >= jiraMaxPages {
+			return jiraSearchResponse{}, errors.New("jira search result has too many pages")
+		}
+		values := url.Values{"jql": {jql}, "fields": {"status"}, "expand": {"changelog"}, "maxResults": {strconv.Itoa(jiraSearchPageSize)}}
+		path := "search/jql"
+		if legacy {
+			path = "search"
+			values.Set("startAt", strconv.Itoa(startAt))
+		} else if token != "" {
+			values.Set("nextPageToken", token)
+		}
+		endpoint := fmt.Sprintf("%s/rest/api/%d/%s?%s", a.baseURL(), a.apiVersion(), path, values.Encode())
+		var response jiraSearchResponse
+		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+			if page == 0 && !legacy && errors.Is(err, ErrNotFound) {
+				legacy = true
+				page = -1
+				continue
+			}
 			return jiraSearchResponse{}, err
 		}
-		response = jiraSearchResponse{}
-		endpoint = fmt.Sprintf("%s/rest/api/%d/search?%s", a.baseURL(), a.apiVersion(), values.Encode())
+		merged.Issues = append(merged.Issues, response.Issues...)
+		if legacy {
+			startAt += len(response.Issues)
+			if len(response.Issues) == 0 || startAt >= response.Total {
+				return merged, nil
+			}
+			continue
+		}
+		if response.NextPageToken == "" || (response.IsLast != nil && *response.IsLast) {
+			return merged, nil
+		}
+		token = response.NextPageToken
+	}
+}
+
+// issueHistories returns the histories embedded in a search result, or, when
+// Jira cut the embedded changelog short, the full changelog of the issue.
+func (a *JiraAdapter) issueHistories(ctx context.Context, issue jiraSearchIssue) ([]jiraHistory, error) {
+	if issue.Changelog.Total <= len(issue.Changelog.Histories) {
+		return issue.Changelog.Histories, nil
+	}
+	path, err := a.issuePath(issue.Key)
+	if err != nil {
+		return nil, err
+	}
+	var all []jiraHistory
+	for page := 0; page < jiraMaxPages; page++ {
+		endpoint := fmt.Sprintf("%s/changelog?startAt=%d&maxResults=%d", path, len(all), jiraSearchPageSize)
+		var response jiraChangelogPage
 		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-			return jiraSearchResponse{}, err
+			return nil, err
+		}
+		all = append(all, response.Values...)
+		if len(response.Values) == 0 || (response.IsLast != nil && *response.IsLast) ||
+			(response.IsLast == nil && len(all) >= response.Total) {
+			return all, nil
 		}
 	}
-	return response, nil
+	return nil, errors.New("jira changelog has too many pages")
 }
 
 func formatJiraCursor(ms, id int64) string { return fmt.Sprintf("%d:%d", ms, id) }

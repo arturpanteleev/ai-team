@@ -134,7 +134,7 @@ var trackerFieldClasses = map[string]fieldClass{
 // process; the base URL, account and token variable stay with the file.
 var jiraFieldClasses = map[string]fieldClass{
 	"BaseURL": trustedField, "Email": trustedField, "TokenEnv": trustedField,
-	"WebBaseURL": trustedField, "APIVersion": trustedField, "StageStatuses": processField,
+	"WebBaseURL": trustedField, "APIVersion": trustedField, "Auth": trustedField, "StageStatuses": processField,
 }
 
 func (c *Config) infrastructureProblems(trusted *Config) []string {

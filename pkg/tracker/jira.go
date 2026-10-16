@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/config"
 )
 
 const jiraResponseLimit = 1 << 20
@@ -127,7 +129,11 @@ func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, 
 	if err != nil {
 		return fmt.Errorf("create jira request: %w", err)
 	}
-	request.SetBasicAuth(a.settings.Email, a.token)
+	if a.settings.Auth == config.JiraAuthBearer {
+		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(a.token))
+	} else {
+		request.SetBasicAuth(a.settings.Email, a.token)
+	}
 	request.Header.Set("Accept", "application/json")
 	if requestBody != nil {
 		request.Header.Set("Content-Type", "application/json")

@@ -651,3 +651,21 @@ func TestVisitedStageWithoutAttemptsIsNeverNotReached(t *testing.T) {
 		}
 	}
 }
+
+// A repeated report of an attempt (its gates failed after the stage reported
+// success) is a second attempt_finished with a higher revision: the attempt
+// keeps one record and the last result wins.
+func TestRevisedAttemptFinishedReplacesTheFirstResultWithoutDuplicatingTheAttempt(t *testing.T) {
+	j := (&journal{}).started().move("spec", "design", "").begin("design", "d1").finish("design", "d1", "passed", nil)
+	j.finish("design", "d1", "failed", map[string]any{"revision": 2})
+	design := stageOf(t, project(j, lifecycleIn("running", "design")), "design")
+	if len(design.Visits) != 1 || len(design.Visits[0].Attempts) != 1 {
+		t.Fatalf("one attempt expected: %+v", design.Visits)
+	}
+	if got := design.Visits[0].Attempts[0].Outcome; got != "failed" {
+		t.Fatalf("the last attempt_finished must win, outcome=%q", got)
+	}
+	if design.Outcome != "failed" {
+		t.Fatalf("stage outcome must follow the revised result: %+v", design)
+	}
+}

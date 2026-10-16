@@ -90,7 +90,8 @@ invocation. Прочие run evidence, manifests, artifacts и файлы target
 [Конфигурация](config.md#уведомления-webhook-slack-e-mail).
 
 `tracker.jira.base_url` — это адрес, на который уходит секрет: каждый запрос
-к Jira несёт Basic-авторизацию с `email` и токеном из `token_env`. Поэтому
+к Jira несёт Basic-авторизацию с `email` и токеном из `token_env` (при
+`tracker.jira.auth: bearer` — заголовок `Authorization: Bearer` с тем же токеном). Поэтому
 `base_url` защищается так же, как сам токен: кто может менять
 `.ai-team/config.yaml`, тот может направить токен на свой сервер. Указывайте
 только `https`-адрес своего Jira Cloud и проверяйте изменения этого поля в

@@ -26,7 +26,7 @@ stages:
           version: 1
           params: {sections: ["Критерии приёмки"]}
         - gate: required_phrases           # рекомендательный: fail не блокирует
-          version: 1
+          version: 2
           name: success_metric
           mode: advisory
           params: {phrases: ["метрика успеха"], case: insensitive, scope: result, match: all}

@@ -189,3 +189,21 @@ func TestOneLineCutsOnRuneBoundary(t *testing.T) {
 		t.Fatalf("oneLine produced invalid UTF-8: %q", got)
 	}
 }
+
+func TestPlanCommentCarriesRevisionOfACorrectedAttempt(t *testing.T) {
+	original := Plan(finished("qa", map[string]any{"status": "passed", "outcome": "passed"}), testMaps, "u")
+	body := strings.Join(original[len(original)-1].Comment.Lines, "\n")
+	if strings.Contains(body, "revision=") {
+		t.Fatalf("the original result has no revision: %s", body)
+	}
+	for _, revision := range []any{float64(2), 2} {
+		ops := Plan(finished("qa", map[string]any{"status": "failed", "outcome": "failed", "revision": revision}), testMaps, "u")
+		if len(ops) != 1 || ops[0].Kind != OpComment {
+			t.Fatalf("a failed revision only comments: %+v", ops)
+		}
+		body := strings.Join(ops[0].Comment.Lines, "\n")
+		if !strings.Contains(body, "revision=2") || !strings.Contains(body, "not rolled back") {
+			t.Fatalf("revision must be named and the missing rollback stated: %s", body)
+		}
+	}
+}

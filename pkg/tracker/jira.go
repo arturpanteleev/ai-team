@@ -13,6 +13,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+
+	"github.com/arturpanteleev/ai-team/pkg/config"
 )
 
 const jiraResponseLimit = 1 << 20
@@ -127,7 +130,19 @@ func (a *JiraAdapter) requestJSON(ctx context.Context, method, endpoint string, 
 	if err != nil {
 		return fmt.Errorf("create jira request: %w", err)
 	}
-	request.SetBasicAuth(a.settings.Email, a.token)
+	if a.settings.Auth == config.JiraAuthBearer {
+		// Surrounding whitespace (a trailing newline from a secret file) is
+		// dropped; whitespace or a control character inside the token would
+		// split or corrupt the header, so it is refused without echoing the
+		// value.
+		bearer := strings.TrimSpace(a.token)
+		if strings.IndexFunc(bearer, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+			return fmt.Errorf("jira credential environment variable %s contains whitespace or control characters", a.settings.TokenEnv)
+		}
+		request.Header.Set("Authorization", "Bearer "+bearer)
+	} else {
+		request.SetBasicAuth(a.settings.Email, a.token)
+	}
 	request.Header.Set("Accept", "application/json")
 	if requestBody != nil {
 		request.Header.Set("Content-Type", "application/json")

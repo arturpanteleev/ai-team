@@ -323,7 +323,7 @@ Controller-owned адаптеры доставки (TeamCity): запуск сб
 
 ### gatelib — Библиотека гейтов
 
-Версионированный реестр определений гейтов (`required_sections`, `verdict_marker`, `pr_*`, `project_checks`, `required_phrases`, `agent_review@1/2`, `human_approval@1/2`, `external_program`, `docker_program`). Меняется только через PR; определение неизменяемо, новая семантика — новая версия. Каталог читают UI, REST (`GET /api/gates/catalog`) и MCP.
+Версионированный реестр определений гейтов (`required_sections`, `verdict_marker`, `pr_*`, `project_checks`, `required_phrases@1/2`, `agent_review@1/2`, `human_approval@1/2`, `external_program`, `docker_program`). Меняется только через PR; определение неизменяемо, новая семантика — новая версия. Каталог читают UI, REST (`GET /api/gates/catalog`) и MCP.
 
 Исходники: [pkg/gatelib](../pkg/gatelib/).
 

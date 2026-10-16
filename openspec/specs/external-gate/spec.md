@@ -196,11 +196,25 @@ Docker client environment (compared without case) MUST be rejected before a run.
 When `repo_access` is `rw`, the launcher MUST additionally mount `.git` (and any
 other git directory inside the repository) read-only over the writable repository,
 MUST NOT mount a git directory outside the repository, and MUST refuse a symlinked
-`.git`. With a remote daemon (`DOCKER_HOST`, `DOCKER_CONTEXT`) mount sources
-resolve on the remote machine; this is unsupported. With `network: bridge` the
-repository content, including `.git/config` remote URLs, is reachable from the
-network, and the exceptions record MUST say so by listing `network=bridge`. The input document MUST
-carry container paths only. Environment values MUST NOT appear in the `docker`
+`.git`. Nested git metadata (the `.git` directory of a nested clone, the gitfile of
+a submodule and the in-repository directory such a gitfile names) MUST be mounted
+read-only as well; a symlinked or malformed nested `.git` and a gitfile naming a
+missing or symlink-reached in-repository directory, or a gitfile path that cannot
+be resolved unambiguously (`..` is applied to the real directory after symlinks,
+never lexically), MUST be refused. The name `.git` of a nested entry is compared
+without case; the top-level `.git` overlay is matched exactly, so a top-level
+`.GIT` directory is itself overlaid. A writable mount with any `.git` path element
+MUST be rejected before a run. Entries below `node_modules` MUST NOT count
+against the 500000-entry limit of the nested-metadata walk; a larger tree is
+refused. Residual risks: a program with a writable repository can create a new
+nested `.git/hooks` that the host may run later, and HFS+/NTFS short names such
+as `GIT~1` are not recognised as `.git`.
+
+With a remote daemon (`DOCKER_HOST`, `DOCKER_CONTEXT`) mount sources resolve on
+the remote machine; this is unsupported. With `network: bridge` the repository
+content, including `.git/config` remote URLs, is reachable from the network, and
+the exceptions record MUST say so by listing `network=bridge`. The input document
+MUST carry container paths only. Environment values MUST NOT appear in the `docker`
 argv or in any stored record.
 
 #### Scenario: Unpinned image

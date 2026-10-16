@@ -19,7 +19,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 IMAGE="alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 PORT="${DEMO_PORT:-18080}"
-DEMO_HOME="${DEMO_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/ai-team-demo-s17.XXXXXX")}"
+# shellcheck source=lib/guard.sh
+source "$HERE/lib/guard.sh"
+if [[ -z "${DEMO_HOME+x}" ]]; then
+  DEMO_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ai-team-demo-s17.XXXXXX")"
+fi
+# Пустой, «/», $HOME и его предки отклоняются до любых действий; каталог получает маркер,
+# без которого cleanup и setup.sh его не удаляют.
+demo_prepare_home "$DEMO_HOME" || exit 2
+DEMO_HOME="$(demo_guard_path "$DEMO_HOME")"
 SERVER_PID=""
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "нужен $1 в PATH" >&2; exit 2; }; }
@@ -29,13 +37,21 @@ docker info >/dev/null 2>&1 || { echo "Docker-демон недоступен" >
 cleanup() {
   local code=$?
   if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
-  # Контейнеры демо несут метки контроллера; после нормального прогона их нет.
-  # shellcheck disable=SC2046
-  docker rm -f $(docker ps -aq --filter label=ai-team.stage-attempt --filter label=ai-team.gate-attempt 2>/dev/null) >/dev/null 2>&1 || true
+  # Контейнеры демо несут метки контроллера; после нормального прогона их нет. Несколько
+  # --filter label=… объединяются по И, поэтому метки опрашиваются двумя отдельными запросами,
+  # а удаляются только контейнеры, у которых смонтирован каталог ЭТОГО демо (его имя из mktemp
+  # уникально): чужие контейнеры ai-team на той же машине не трогаются.
+  local label id mounts
+  for label in ai-team.stage-attempt ai-team.gate-attempt; do
+    for id in $(docker ps -aq --filter "label=$label" 2>/dev/null); do
+      mounts="$(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$id" 2>/dev/null || true)"
+      if [[ "$mounts" == *"$(basename "$DEMO_HOME")"* ]]; then docker rm -f "$id" >/dev/null 2>&1 || true; fi
+    done
+  done
   if [[ "${DEMO_KEEP:-0}" == "1" ]]; then
     echo "окружение оставлено: $DEMO_HOME (сервер остановлен)"
   else
-    rm -rf "$DEMO_HOME"
+    demo_remove_home "$DEMO_HOME" || true
   fi
   exit "$code"
 }

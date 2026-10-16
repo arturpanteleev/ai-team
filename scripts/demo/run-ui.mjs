@@ -328,6 +328,15 @@ checks.check('у этапов с новыми версиями нескольк�
 checks.check('executor implementation — внутренний агент, code_review — внешний', byId.implementation.executor.kind === 'internal_agent' && byId.code_review.executor.kind === 'external_agent')
 const artifacts = await api.must('GET', `/runs/${runId}/events?limit=1000`)
 checks.check('журнал событий задачи не пуст и содержит gate_attempt_finished/check_overridden', artifacts.events.some((e) => e.type === 'gate_attempt_finished') && artifacts.events.some((e) => e.type === 'check_overridden'))
+// Задача терминальна раньше, чем контроллер записывает квитанцию Git-доставки (она выполняется после
+// финализации): пока квитанции нет, карточка честно показывает «ждёт выполнения». Скриншот журнала
+// снимаем после квитанции, иначе он показывает промежуточное состояние.
+let deliveryStatus = ''
+for (let i = 0; i < 120 && deliveryStatus !== 'recorded'; i++) {
+  deliveryStatus = (await api.must('GET', `/runs/${runId}`)).delivery?.status ?? ''
+  if (deliveryStatus !== 'recorded') await new Promise((resolve) => setTimeout(resolve, 500))
+}
+checks.check('квитанция Git-доставки записана контроллером (delivery.status=recorded)', deliveryStatus === 'recorded', deliveryStatus)
 await openTask('Журнал')
 await shot('journal')
 
@@ -393,6 +402,16 @@ async function reviewLoop(kind, label, title) {
   checks.check(`${label}: возврат на implementation, второе посещение, одобрение`, implementation.visit_count === 2 && reviewDone.visit_count === 2 && reviewDone.status === 'passed', `implementation visits=${implementation.visit_count}, code_review visits=${reviewDone.visit_count}`)
 }
 async function loopsFlow() {
+log('Шаблон с командными гейтами через веб отклоняется (они разрешены только в файловом конфиге)')
+{
+  const active = await api.must('GET', '/template')
+  const gated = readFileSync(path.join(repoRoot, 'docs/demo/demo-template.yaml'), 'utf8')
+  const refused = await api.request('POST', '/template/publish', { yaml: gated, expected_version: active.template.version })
+  checks.check('публикация шаблона с external_program/docker_program через REST отклонена: 400 trusted_config_only',
+    refused.status === 400 && refused.data?.code === 'trusted_config_only', `${refused.status} ${refused.data?.code}`)
+  const after = await api.must('GET', '/template')
+  checks.check('активный шаблон после отказа не изменился', after.template.version === active.template.version)
+}
 await reviewLoop('external', 'Внешний Docker-исполнитель code_review', 'Цикл код-ревью: контейнер')
 await reviewLoop('internal', 'Внутренний агент code_review', 'Цикл код-ревью: внутренний агент')
 

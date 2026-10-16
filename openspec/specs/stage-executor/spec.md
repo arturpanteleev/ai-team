@@ -20,6 +20,16 @@ validated. The agent definition MUST remain the stage contract (inputs, outputs,
 verdict, mutation scope) for both executors. An adapter MUST NOT be combined with
 a controller operation (`delivery`, `deploy`).
 
+#### Scenario: A web template cannot add or change an adapter command
+
+- **КОГДА** a template submitted through REST, MCP, or the Web UI declares an
+  `executor_adapters` entry that is absent from the active file configuration or
+  differs from it
+- **ТОГДА** the submission MUST be rejected with the code `trusted_config_only`
+- **И** a stage of a web template MAY name an adapter whose definition is
+  identical to the active file configuration's: the reference is by name to a
+  trusted adapter
+
 #### Scenario: Unknown adapter is rejected before a run
 
 - **КОГДА** a stage names an adapter that is absent from `executor_adapters`

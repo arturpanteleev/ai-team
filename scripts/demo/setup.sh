@@ -15,11 +15,23 @@ DEMO_HOME="${1:?usage: setup.sh <DEMO_HOME>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
-rm -rf "$DEMO_HOME"
+# Каталог пересоздаётся только если он пуст или создан демо (маркер .ai-team-demo);
+# пустое значение, «/», $HOME и его предки отклоняются (lib/guard.sh).
+# shellcheck source=lib/guard.sh
+source "$HERE/lib/guard.sh"
+demo_prepare_home "$DEMO_HOME"
+DEMO_HOME="$(demo_guard_path "$DEMO_HOME")"
 mkdir -p "$DEMO_HOME/bin" "$DEMO_HOME/state" "$DEMO_HOME/repo"
 
 echo "⟶ Сборка ai-team"
+# Тулчейн — пин из .tool-versions, как в Makefile (явный GOTOOLCHAIN в окружении главнее).
+if [[ -z "${GOTOOLCHAIN:-}" ]]; then
+  pin="$(awk '$1 == "golang" { print "go" $2 }' "$REPO_ROOT/.tool-versions" 2>/dev/null || true)"
+  [[ -n "$pin" ]] && export GOTOOLCHAIN="$pin"
+fi
 (cd "$REPO_ROOT" && go build -o "$DEMO_HOME/ai-team" ./cmd/ai-team)
+go_used="$(cd "$REPO_ROOT" && go env GOVERSION)"
+echo "  собрано тулчейном $go_used"
 
 echo "⟶ Мок рантайма и заглушка gh"
 cp "$HERE/bin/opencode" "$HERE/bin/gh" "$DEMO_HOME/bin/"

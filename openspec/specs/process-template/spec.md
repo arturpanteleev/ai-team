@@ -207,6 +207,19 @@ version. Concurrent edits MUST NOT silently overwrite a newer active version.
 - **ТОГДА** validation MUST return a diagnostic and publish MUST leave the
   active template unchanged
 
+#### Scenario: A web template cannot define commands
+
+- **КОГДА** a template submitted through REST, MCP, or the Web UI (validate or
+  publish) contains a gate of kind `external` or `docker`, or an
+  `executor_adapters`, `checks`, or `mcp_servers` definition that is not
+  identical to the same-named definition of the active template
+- **ТОГДА** validation MUST report it and publish MUST answer `400` with the code
+  `trusted_config_only` and leave the active template unchanged
+- **И** a stage MAY still reference an adapter, check, or MCP server of the active
+  (file) configuration by name, because the program it runs is then unchanged
+- **И** reading the active template (editor, task pages) MUST NOT apply this rule,
+  so a file configuration with command gates stays viewable
+
 #### Scenario: Publish with stale active version
 
 - **КОГДА** two editors load one active version and the first publishes a

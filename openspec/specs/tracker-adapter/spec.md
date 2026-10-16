@@ -229,6 +229,26 @@ the last success and the last error.
 - **AND** the failure MUST have been visible in the sync state until recovery
 - **AND** repeating the sync MUST produce no second request
 
+### Requirement: The fake tracker's local bridge is a trusted demo channel
+
+When `AI_TEAM_FAKE_TRACKER_DIR` is set, the fake tracker MUST read external
+status changes from `inbox.jsonl` and append accepted writes to `outbox.jsonl`
+in that directory. The directory is a local trusted channel meant for demos and
+local runs only: whoever can write to it can present an "external" status, which
+still passes through the controller's inbound rules like any other. The files
+MUST be opened without following symlinks, and a truncated inbox MUST be read
+again from its start.
+
+#### Scenario: Symlinked bridge file
+
+- **КОГДА** `inbox.jsonl` or `outbox.jsonl` is a symlink
+- **ТОГДА** the fake tracker MUST NOT read through or write through it
+
+#### Scenario: Truncated inbox
+
+- **КОГДА** the inbox is replaced by a shorter file after changes were read
+- **ТОГДА** its new lines MUST be applied, not skipped by the old offset
+
 ### Requirement: An inbound status is an explicit request, not a graph command
 
 The server MUST treat an inbound status as a request defined by an explicit map.

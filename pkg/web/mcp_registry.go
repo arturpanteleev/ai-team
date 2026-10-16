@@ -16,6 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/arturpanteleev/ai-team/pkg/runid"
 	"github.com/go-chi/chi/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -771,6 +772,16 @@ func (s *Server) auditMCPAction(identity mcpIdentity, o mcpOperation, args mcpAr
 			runID = created.RunID
 		}
 	}
+	if outcome.status == http.StatusUnauthorized || outcome.status == http.StatusForbidden {
+		// A refused call proves nothing about the run named in its arguments:
+		// the run may not exist and the caller had no right to touch it, so the
+		// attempt must not be written into that run's journal. It goes to the
+		// team audit with the claimed run id as plain data.
+		if claimed := auditableClaimedRunID(runID); claimed != "" {
+			data["run_id"] = claimed
+		}
+		runID = ""
+	}
 	if runID != "" {
 		s.appendRunEvent(runID, mcpActionEvent, now, data)
 		return
@@ -778,6 +789,19 @@ func (s *Server) auditMCPAction(identity mcpIdentity, o mcpOperation, args mcpAr
 	if err := s.store.AppendAudit(identity.Session.Principal.ActorID, mcpActionEvent, "", data, now); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ mcp audit: %v\n", err)
 	}
+}
+
+// maxClaimedRunIDLen bounds a run id the caller merely named in a refused call.
+const maxClaimedRunIDLen = 128
+
+// auditableClaimedRunID returns the claimed run id when it has the shape of a
+// real one (a single safe path component, bounded length) and "" otherwise:
+// the team audit is not a place for arbitrary caller-supplied text.
+func auditableClaimedRunID(runID string) string {
+	if len(runID) > maxClaimedRunIDLen || runid.Validate(runID) != nil {
+		return ""
+	}
+	return runID
 }
 
 const (

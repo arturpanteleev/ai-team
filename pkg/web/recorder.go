@@ -181,7 +181,8 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 	// refinal is a repeated report of an attempt whose row is already final: a
 	// human attempt is reported by runHumanStage and once more by the stage loop
 	// after its gates and delivery ran. The second report refreshes the row
-	// (checks, delivery) but is not a second attempt_finished event.
+	// (checks, delivery); it adds an attempt_finished event only when the
+	// reported result differs from the one already published.
 	refinal := false
 	if stored == nil {
 		if existing := r.storedStage(stage.AttemptID); existing != nil {
@@ -224,9 +225,6 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 		r.warn("update stage", err)
 		return
 	}
-	if refinal {
-		return
-	}
 	finished := map[string]any{
 		"stage": stage.Name, "agent": stage.Name, "actor_id": stage.ActorID, "executor": stage.Executor,
 		"status": stage.Status, "execution": stored.Execution,
@@ -239,7 +237,63 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 		finished["executor_kind"] = stage.ExecutorInfo.Kind
 		finished["executor_name"] = stage.ExecutorInfo.Name
 	}
+	if refinal {
+		// The event stream is append-only, so a changed final result (a gate
+		// failed after the stage reported success) is a new attempt_finished
+		// event with a higher revision; consumers and the status projection
+		// take the last one per attempt. An unchanged result adds nothing.
+		previous, revision, found := r.lastAttemptFinished(stage.AttemptID)
+		if found && sameFinishedPayload(previous, finished) {
+			return
+		}
+		finished["revision"] = revision + 1
+	}
 	r.event("attempt_finished", stage.AttemptID, completedAt, finished)
+}
+
+// lastAttemptFinished returns the payload and revision of the newest
+// attempt_finished event of an attempt (revision 1 for the original event).
+func (r *StoreRecorder) lastAttemptFinished(attemptID string) (map[string]any, int, bool) {
+	var last *store.Event
+	for cursor := int64(0); ; {
+		events, err := r.store.GetRunEventsAfter(r.runUID, cursor, 1000)
+		if err != nil || len(events) == 0 {
+			break
+		}
+		for index := range events {
+			if events[index].Type == "attempt_finished" && events[index].AttemptID == attemptID {
+				last = &events[index]
+			}
+		}
+		cursor = events[len(events)-1].ID
+	}
+	if last == nil {
+		return nil, 0, false
+	}
+	var data map[string]any
+	if json.Unmarshal([]byte(last.DataJSON), &data) != nil {
+		return nil, 0, false
+	}
+	revision := 1
+	if value, ok := data["revision"].(float64); ok && value >= 1 {
+		revision = int(value)
+	}
+	return data, revision, true
+}
+
+// sameFinishedPayload compares two attempt_finished payloads by their JSON
+// form, ignoring the revision counter.
+func sameFinishedPayload(previous, next map[string]any) bool {
+	normalize := func(data map[string]any) string {
+		copied := make(map[string]any, len(data))
+		for key, value := range data {
+			if key != "revision" {
+				copied[key] = value
+			}
+		}
+		return marshalJSON(copied)
+	}
+	return normalize(previous) == normalize(next)
 }
 
 // EventRecorded projects selected immutable warning events to the task event

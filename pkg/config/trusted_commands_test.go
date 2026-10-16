@@ -144,6 +144,7 @@ func TestWebSubmissionRefusesInfrastructureChanges(t *testing.T) {
 	cases := map[string]struct{ from, to, field string }{
 		"jira base url":      {"base_url: https://jira.example.test", "base_url: https://evil.example", "tracker.jira.base_url"},
 		"jira token env":     {"token_env: JIRA_TOKEN", "token_env: AWS_SECRET_ACCESS_KEY", "tracker.jira.token_env"},
+		"jira auth":          {"token_env: JIRA_TOKEN", "token_env: JIRA_TOKEN\n    auth: bearer", "tracker.jira.auth"},
 		"jira email":         {"email: bot@example.test", "email: x@example.test", "tracker.jira.email"},
 		"tracker adapter":    {"adapter: jira", "adapter: fake", "tracker.adapter"},
 		"tracker web url":    {"web_base_url: https://ai.example.test\n  on_enter", "web_base_url: https://evil.example\n  on_enter", "tracker.web_base_url"},

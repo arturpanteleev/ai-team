@@ -148,6 +148,15 @@ type TrustedDecisionAuthority interface {
 	HasAuthenticatedControllerDecision(PendingApproval) bool
 }
 
+// IsTrustedControllerDecision is the single fail-closed check of controller
+// provenance: a store that does not implement TrustedDecisionAuthority (the
+// local filesystem Store, whose JSON files can be edited outside the process)
+// never vouches for a decision.
+func IsTrustedControllerDecision(store any, value PendingApproval) bool {
+	trusted, ok := store.(TrustedDecisionAuthority)
+	return ok && trusted.HasAuthenticatedControllerDecision(value)
+}
+
 type PendingApproval struct {
 	SchemaVersion   int               `json:"schema_version"`
 	Kind            Kind              `json:"kind,omitempty"`

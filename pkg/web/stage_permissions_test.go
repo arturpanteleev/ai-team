@@ -338,6 +338,48 @@ func TestForbidSelfApprovalRejectsStageAuthors(t *testing.T) {
 	}
 }
 
+// Returning a stage is a decision on the same visit as confirming it: an
+// author of the stage cannot send their own work back under forbid_self_approval
+// (S21), and the stage-actions list stops offering "return" to them.
+func TestForbidSelfApprovalCoversStageReturn(t *testing.T) {
+	submitted := time.Now().UTC().Add(-time.Hour)
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	runs := map[string]lifecycle.State{
+		"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"},
+	}
+	for _, tc := range []struct {
+		name     string
+		forbid   bool
+		actor    string
+		roles    []cloudidentity.Role
+		wantCode int
+	}{
+		{"author cannot return own result", true, "author@example.test", both, http.StatusForbidden},
+		{"another reviewer returns", true, "reviewer@example.test", []cloudidentity.Role{cloudidentity.RoleReviewer}, http.StatusAccepted},
+		{"policy disabled allows the author to return", false, "author@example.test", both, http.StatusAccepted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			approvals := []approval.PendingApproval{
+				buildInputApproval("input-1", approval.StatusResolved, submitted,
+					approval.Decision{ActorID: "author@example.test", ActorRole: "developer", Action: "submit"}),
+				buildConfirmApproval(submitted.Add(30 * time.Minute)),
+			}
+			fixture := newFunctionPermissionFixture(t, tc.forbid, approvals, runs)
+			response := fixture.requestAs(t, tc.actor, tc.roles, http.MethodPost, "/api/runs/run-confirm/stages/build/return",
+				`{"to_stage":"spec","reason":"spec gap"}`)
+			if response.Code != tc.wantCode {
+				t.Fatalf("return code=%d want %d body=%s", response.Code, tc.wantCode, response.Body.String())
+			}
+			if tc.wantCode == http.StatusForbidden && (!strings.Contains(response.Body.String(), "self_approval_forbidden") || fixture.controller.calls["return"] != 0) {
+				t.Fatalf("self return must be refused before the controller: calls=%v body=%s", fixture.controller.calls, response.Body.String())
+			}
+			if tc.wantCode == http.StatusAccepted && fixture.controller.calls["return"] != 1 {
+				t.Fatalf("return must reach the controller: calls=%v", fixture.controller.calls)
+			}
+		})
+	}
+}
+
 func TestForbidSelfApprovalCoversGenericDecisionRoute(t *testing.T) {
 	submitted := time.Now().UTC().Add(-time.Hour)
 	approvals := []approval.PendingApproval{

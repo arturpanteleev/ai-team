@@ -76,9 +76,22 @@ type Spec struct {
 	patterns []*regexp.Regexp
 }
 
-// Parse validates the parameters and returns the Spec. Every error names the
-// parameter and never repeats a phrase or a pattern value.
+// LatestVersion is the newest required_phrases version. Version 1 keeps the
+// validation it was published with; version 2 adds the stricter checks
+// (control characters in a phrase, overlapping phrases for at_least). A
+// published version never starts to reject configurations it accepted.
+const LatestVersion = 2
+
+// Parse validates the parameters with the rules of the latest version.
 func Parse(params map[string]any) (*Spec, error) {
+	return ParseVersion(LatestVersion, params)
+}
+
+// ParseVersion validates the parameters with the rules of the given
+// required_phrases version and returns the Spec. Every error names the
+// parameter and never repeats a phrase or a pattern value.
+func ParseVersion(version int, params map[string]any) (*Spec, error) {
+	strict := version >= 2
 	spec := &Spec{}
 	for name := range params {
 		switch name {
@@ -104,6 +117,11 @@ func Parse(params map[string]any) (*Spec, error) {
 		}
 		if !utf8.ValidString(phrase) {
 			return nil, fmt.Errorf("параметр %q[%d]: не валидный UTF-8", ParamPhrases, i)
+		}
+		// A control character (CR, NUL, ESC, ...) is a copy-paste accident that
+		// can never match the line-normalized text. Newline and tab are kept.
+		if strict && strings.IndexFunc(phrase, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
+			return nil, fmt.Errorf("параметр %q[%d]: содержит управляющий символ", ParamPhrases, i)
 		}
 	}
 	spec.Phrases = phrases
@@ -177,6 +195,29 @@ func Parse(params map[string]any) (*Spec, error) {
 		seen[key] = true
 	}
 
+	// Phrases are counted by distinct entry, not by position in the text. When
+	// one literal phrase contains another, a single fragment of the text would
+	// satisfy both and at_least would pass on fewer distinct fragments than
+	// min_count says. That is ambiguous, so it is a configuration error for
+	// at_least; all and any are not affected by overlap. Regular expressions
+	// cannot be compared and are not checked.
+	if strict && spec.Match == MatchAtLeast && !spec.Regex {
+		for i := range phrases {
+			for j := range phrases {
+				if i == j {
+					continue
+				}
+				outer, inner := phrases[i], phrases[j]
+				if !spec.CaseSensitive {
+					outer, inner = foldCase(outer), foldCase(inner)
+				}
+				if strings.Contains(outer, inner) {
+					return nil, fmt.Errorf("параметр %q[%d]: содержится во фразе [%d]; при match: %s пересекающиеся фразы считались бы одним фрагментом", ParamPhrases, j, i, MatchAtLeast)
+				}
+			}
+		}
+	}
+
 	if spec.Regex {
 		for i, phrase := range phrases {
 			expression := phrase
@@ -214,10 +255,13 @@ func matchesEmpty(re *regexp.Regexp) bool {
 	return false
 }
 
-// Validate is Parse without the result.
-func Validate(params map[string]any) error {
-	_, err := Parse(params)
-	return err
+// ValidateVersion returns the parameter validator of one required_phrases
+// version (ParseVersion without the result).
+func ValidateVersion(version int) func(map[string]any) error {
+	return func(params map[string]any) error {
+		_, err := ParseVersion(version, params)
+		return err
+	}
 }
 
 // Result is the outcome of one check.
@@ -232,7 +276,14 @@ type Result struct {
 
 // Check evaluates the spec over a Markdown result. An empty result and a
 // missing section fail; a pass needs the phrases the rule requires.
+//
+// The text is compared as it is, except for line endings (CRLF and a lone CR
+// become LF) and a leading byte order mark, which are dropped. Unicode
+// normalization is not applied: a precomposed letter and its decomposed form
+// (base letter plus combining mark) are different texts, as are a no-break
+// space and a space.
 func (s *Spec) Check(content string) Result {
+	content = normalizeContent(content)
 	if strings.TrimSpace(content) == "" {
 		return Result{Reason: "результат пуст", Missing: append([]string(nil), s.Phrases...)}
 	}
@@ -279,6 +330,16 @@ func (s *Spec) Check(content string) Result {
 		}
 	}
 	return result
+}
+
+// normalizeContent unifies line endings and drops a leading byte order mark.
+func normalizeContent(content string) string {
+	content = strings.TrimPrefix(content, "\ufeff")
+	if strings.Contains(content, "\r") {
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+		content = strings.ReplaceAll(content, "\r", "\n")
+	}
+	return content
 }
 
 func (s *Spec) present(haystack string, index int, phrase string) bool {

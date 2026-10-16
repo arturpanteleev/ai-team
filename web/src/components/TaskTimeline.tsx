@@ -95,7 +95,8 @@ export function TaskTimeline({ details, events, eventTitle, clock = Date.now, ti
   }, [details.stages, details.state?.executor_overrides, details.template?.stages, events, finished, now, run.completed_at]);
 
   // Токены меняются только с завершением попыток — по ним и перезапрашиваем.
-  const finishedAttempts = events.filter((event) => event.type === 'attempt_finished').length;
+  // Исправленный итог попытки приходит повторным attempt_finished: считаем попытки, не события.
+  const finishedAttempts = new Set(events.filter((event) => event.type === 'attempt_finished').map((event) => event.attempt_id)).size;
   useEffect(() => {
     let active = true;
     getTaskFlowMetrics(run.run_id)

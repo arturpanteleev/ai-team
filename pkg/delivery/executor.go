@@ -198,6 +198,10 @@ type state struct {
 	Pushed         bool         `json:"pushed,omitempty"`
 	PRURL          string       `json:"pr_url,omitempty"`
 	Steps          []StepResult `json:"steps,omitempty"`
+	// MAC is an HMAC-SHA256 over the rest of the state, keyed outside the
+	// working tree (see state_auth.go). Redelivery trusts a state only with a
+	// valid MAC, so an agent that can write .ai-team/ cannot forge one.
+	MAC string `json:"mac,omitempty"`
 }
 
 func (c *Controller) Execute(ctx context.Context, request Request) (Result, error) {
@@ -950,9 +954,16 @@ func samePaths(first, second []string) bool {
 	return true
 }
 
-func deliveryStatePath(target, feature string) (string, error) {
+func validateFeatureName(feature string) error {
 	if feature == "" || feature == "." || feature == ".." || strings.ContainsAny(feature, `/\\`) || strings.Contains(feature, "..") {
-		return "", fmt.Errorf("delivery: невалидный feature %q", feature)
+		return fmt.Errorf("delivery: невалидный feature %q", feature)
+	}
+	return nil
+}
+
+func deliveryStatePath(target, feature string) (string, error) {
+	if err := validateFeatureName(feature); err != nil {
+		return "", err
 	}
 	dir, err := safeio.EnsureDir(target, ".ai-team", "delivery")
 	if err != nil {
@@ -1065,6 +1076,7 @@ func archiveCompletedState(path string, data []byte) error {
 }
 
 func writeState(path string, value *state) error {
+	value.MAC = signState(value)
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err

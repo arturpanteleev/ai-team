@@ -73,30 +73,36 @@ func newBuiltin() *Registry {
 		ResultTypes: []string{"md"},
 	})
 	one := 1
-	r.MustRegister(workflow.GateDefinition{
-		ID: GateRequiredPhrases, Version: 1, Kind: workflow.GateKindBuiltin,
-		Title:       "Обязательные слова и фрагменты",
-		Description: "Markdown-результат содержит заданные слова или фрагменты. Регистр, область поиска (весь результат или раздел по заголовку) и правило совпадения задаются явно; пустой результат и отсутствующий раздел — fail. Пользовательских скриптов нет; регулярные выражения только RE2 и только с regex: true.",
-		ResultTypes: []string{"md"},
-		Params: []workflow.GateParam{
-			{Name: gatephrases.ParamPhrases, Type: workflow.GateParamStringList, Required: true,
-				Description: "Слова или фрагменты (не больше 50, каждая до 200 байт); при regex: true — выражения RE2."},
-			{Name: gatephrases.ParamCase, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.CaseValues,
-				Description: "Учитывать ли регистр: sensitive или insensitive."},
-			{Name: gatephrases.ParamScope, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.ScopeValues,
-				Description: "Где искать: result — весь результат, section — только в разделе."},
-			{Name: gatephrases.ParamSection, Type: workflow.GateParamString,
-				Description: "Заголовок раздела (обязателен при scope: section); тело раздела — до заголовка того же или более высокого уровня."},
-			{Name: gatephrases.ParamMatch, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.MatchValues,
-				Description: "Правило: all — все фразы, any — любая, at_least — не меньше min_count."},
-			{Name: gatephrases.ParamMinCount, Type: workflow.GateParamInt, Min: &one,
-				Description: "Минимум найденных фраз (обязателен при match: at_least, не больше числа фраз)."},
-			{Name: gatephrases.ParamUnit, Type: workflow.GateParamEnum, Enum: gatephrases.UnitValues,
-				Description: "Единица совпадения: substring (по умолчанию) или word — целое слово."},
-			{Name: gatephrases.ParamRegex, Type: workflow.GateParamBool,
-				Description: "true — фразы это выражения RE2 (линейное время, без скриптов); по умолчанию false."},
-		},
-	})
+	for _, phrasesVersion := range []int{1, 2} {
+		description := "Markdown-результат содержит заданные слова или фрагменты. Регистр, область поиска (весь результат или раздел по заголовку) и правило совпадения задаются явно; пустой результат и отсутствующий раздел — fail. Пользовательских скриптов нет; регулярные выражения только RE2 и только с regex: true."
+		if phrasesVersion >= 2 {
+			description += " Версия 2 дополнительно отклоняет управляющие символы во фразах и пересекающиеся фразы при match: at_least."
+		}
+		r.MustRegister(workflow.GateDefinition{
+			ID: GateRequiredPhrases, Version: phrasesVersion, Kind: workflow.GateKindBuiltin,
+			Title:       "Обязательные слова и фрагменты",
+			Description: description,
+			ResultTypes: []string{"md"},
+			Params: []workflow.GateParam{
+				{Name: gatephrases.ParamPhrases, Type: workflow.GateParamStringList, Required: true,
+					Description: "Слова или фрагменты (не больше 50, каждая до 200 байт); при regex: true — выражения RE2."},
+				{Name: gatephrases.ParamCase, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.CaseValues,
+					Description: "Учитывать ли регистр: sensitive или insensitive."},
+				{Name: gatephrases.ParamScope, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.ScopeValues,
+					Description: "Где искать: result — весь результат, section — только в разделе."},
+				{Name: gatephrases.ParamSection, Type: workflow.GateParamString,
+					Description: "Заголовок раздела (обязателен при scope: section); тело раздела — до заголовка того же или более высокого уровня."},
+				{Name: gatephrases.ParamMatch, Type: workflow.GateParamEnum, Required: true, Enum: gatephrases.MatchValues,
+					Description: "Правило: all — все фразы, any — любая, at_least — не меньше min_count."},
+				{Name: gatephrases.ParamMinCount, Type: workflow.GateParamInt, Min: &one,
+					Description: "Минимум найденных фраз (обязателен при match: at_least, не больше числа фраз)."},
+				{Name: gatephrases.ParamUnit, Type: workflow.GateParamEnum, Enum: gatephrases.UnitValues,
+					Description: "Единица совпадения: substring (по умолчанию) или word — целое слово."},
+				{Name: gatephrases.ParamRegex, Type: workflow.GateParamBool,
+					Description: "true — фразы это выражения RE2 (линейное время, без скриптов); по умолчанию false."},
+			},
+		})
+	}
 	for _, spec := range []struct{ id, title, description string }{
 		{GatePRExists, "PR существует", "Ссылка результата указывает на существующий pull request."},
 		{GatePROpen, "PR открыт", "Pull request из ссылки результата открыт."},
@@ -178,5 +184,6 @@ func newBuiltin() *Registry {
 // rejected by configuration validation before any run starts. The key is the
 // exact "id@version".
 var paramValidators = map[string]func(map[string]any) error{
-	"required_phrases@1": gatephrases.Validate,
+	"required_phrases@1": gatephrases.ValidateVersion(1),
+	"required_phrases@2": gatephrases.ValidateVersion(2),
 }

@@ -186,6 +186,9 @@ func (s Spec) Validate() error {
 				return fmt.Errorf("docker: mount %d target %q is reserved", i, m.Target)
 			}
 		}
+		if !m.ReadOnly && hasGitElement(m.Target) {
+			return fmt.Errorf("docker: mount %d target %q holds git metadata and must be read-only", i, m.Target)
+		}
 		if targets[m.Target] {
 			return fmt.Errorf("docker: mount target %q is used twice", m.Target)
 		}
@@ -214,6 +217,18 @@ func (s Spec) Validate() error {
 		}
 	}
 	return nil
+}
+
+// hasGitElement reports whether a container path has a .git element: a
+// writable .git (or gitfile) lets the program plant hooks or config that the
+// controller later runs.
+func hasGitElement(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if strings.EqualFold(part, ".git") {
+			return true
+		}
+	}
+	return false
 }
 
 func absHostPath(p string) error {

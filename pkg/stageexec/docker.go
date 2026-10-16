@@ -311,6 +311,9 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		if err != nil {
 			return fmt.Errorf("docker executor: workdir: %w", err)
 		}
+		if err := checkRepoGitMetadata(repo); err != nil {
+			return fmt.Errorf("docker executor: репозиторий: %w", err)
+		}
 		mounts = append(mounts, dockerrun.Mount{Source: repo, Target: ContainerRepo, ReadOnly: true})
 		described = append(described, "repo:ro")
 		workdir = ContainerRepo
@@ -322,6 +325,9 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		}
 		if err := noSymlinkBelow(request.WorkDir, mount.Path); err != nil {
 			return fmt.Errorf("docker executor: mount %q: %w", mount.Path, err)
+		}
+		if hasGitElement(mount.Path) {
+			return fmt.Errorf("docker executor: mount %q: git-метаданные не монтируются", mount.Path)
 		}
 		mounts = append(mounts, dockerrun.Mount{Source: filepath.Join(request.WorkDir, filepath.FromSlash(mount.Path)), Target: mount.Target, ReadOnly: true})
 		described = append(described, mount.Target+":ro")

@@ -969,7 +969,7 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	if decision.Authority != approval.AuthoritySystemAdmin || !decision.ControllerAuthenticated {
 		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не подтверждено сервером как действие системного администратора (authority=system_admin); используйте Web/REST под администратором")
 	}
-	if trusted, ok := rs.approvalStore.(approval.TrustedDecisionAuthority); ok && !trusted.HasAuthenticatedControllerDecision(*rs.resumedApproval) {
+	if !approval.IsTrustedControllerDecision(rs.approvalStore, *rs.resumedApproval) {
 		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не принято аутентифицированным контроллером")
 	}
 	var result *notifier.StageResult
@@ -1204,9 +1204,18 @@ func (rs *runState) stageCheckInputs(stage config.TemplateStage, result notifier
 			builder.WriteString("\n\n")
 			continue
 		}
-		if reference == "" && strings.TrimSpace(string(data)) != "" && !looksBinary(data) {
-			reference = strings.TrimSpace(string(data))
+		if reference != "" || strings.TrimSpace(string(data)) == "" || looksBinary(data) {
+			continue
 		}
+		if stage.Result == "link" && stage.LinkKind == "pr" {
+			// PR stage: only a PR URL/number or a structured pr_url field is a
+			// reference; any other extra output (diff, log) is not the PR.
+			if candidate, ok := prReferenceFromOutput(data); ok {
+				reference = candidate
+			}
+			continue
+		}
+		reference = strings.TrimSpace(string(data))
 	}
 	return builder.String(), reference
 }

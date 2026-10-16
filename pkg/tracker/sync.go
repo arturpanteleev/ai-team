@@ -130,7 +130,7 @@ func Plan(event TaskEvent, maps Maps, taskURL string) []Operation {
 func stageComment(event TaskEvent, outcome Outcome, taskURL string) Comment {
 	lines := []string{"ai-team task: " + taskURL}
 	parts := []string{"Stage result: " + event.Stage, "outcome=" + string(outcome)}
-	for _, key := range []string{"status", "decision", "execution", "check_status", "reason"} {
+	for _, key := range []string{"status", "decision", "execution", "check_status", "reason", "revision"} {
 		if value, ok := event.Data[key]; ok && value != nil {
 			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
 				parts = append(parts, key+"="+oneLine(text))
@@ -140,6 +140,9 @@ func stageComment(event TaskEvent, outcome Outcome, taskURL string) Comment {
 	lines = append(lines, strings.Join(parts, "; "))
 	if outcome != OutcomePassed {
 		lines = append(lines, "This stage did not pass; the outcome above is reported as is.")
+	}
+	if revision, ok := event.Data["revision"]; ok && revision != nil && fmt.Sprint(revision) != "1" {
+		lines = append(lines, "This corrects the earlier result of the same attempt; the tracker status is not rolled back.")
 	}
 	if event.AttemptID != "" {
 		lines = append(lines, "ai-team attempt: "+event.AttemptID)

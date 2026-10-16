@@ -126,6 +126,18 @@ func TestCLIDispatchContract(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("help documents web origins and the admin role", func(t *testing.T) {
+		stdout, code, stderr := runCLI(t, "--help")
+		if code != 0 {
+			t.Fatalf("--help: код %d, stderr: %s", code, stderr)
+		}
+		for _, want := range []string{"--mcp-allowed-origins", "AI_TEAM_MCP_ALLOWED_ORIGINS", "release_manager, admin"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("справка не упоминает %q:\n%s", want, stdout)
+			}
+		}
+	})
 }
 
 func TestCLIDatabaseBackupContract(t *testing.T) {

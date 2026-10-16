@@ -265,13 +265,20 @@ Exit-коды run: 0 — успех, 1 — ошибка или негативн�
   --oidc-client-secret-env <name>
                             Env с client secret (по умолчанию
                             AI_TEAM_OIDC_CLIENT_SECRET)
+  --mcp-allowed-origins <csv>
+                            Браузерные Origin (https://host[:port]), которым
+                            разрешён POST /mcp помимо собственного origin
+                            (env AI_TEAM_MCP_ALLOWED_ORIGINS); запросы без
+                            Origin разрешены всегда
   --worker-command <path>   Запускать pipeline в отдельном worker process
   --scheduler-db <path>     Enqueue run в persistent scheduler вместо inline execution
 
 Флаги auth-token:
   --actor <id>              Immutable actor identity
   --roles <csv>             product_owner, architect, developer, reviewer, qa,
-                            release_manager
+                            release_manager, admin (право провести задачу
+                            дальше после провала обязательного гейта; не
+                            функция этапа и не вытекает из product_owner)
   --ttl <duration>          Срок token, максимум 24h (по умолчанию 1h)
   --secret-env <name>       Env с HMAC secret (по умолчанию AI_TEAM_AUTH_SECRET)
 

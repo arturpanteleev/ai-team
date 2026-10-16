@@ -14,15 +14,18 @@ import (
 // bypass, confirm), the system right (override) or the approval's required
 // roles (delivery plan). The same checks run here, so a client can hide a
 // button the server would answer with 403. The list is additive: it never
-// adds an action that is not in allowed_actions.
-func (s *Server) viewerActions(r *http.Request, state *lifecycle.State, approvals []approval.PendingApproval, allowed []string) []string {
+// adds an action that is not in allowed_actions. The second result names the
+// reason for denials that are not a plain missing role (today only
+// self_approval_forbidden), so a client does not infer it from absence.
+func (s *Server) viewerActions(r *http.Request, state *lifecycle.State, approvals []approval.PendingApproval, allowed []string) ([]string, map[string]string) {
 	result := []string{}
+	var reasons map[string]string
 	if state == nil || state.NextStage == "" || len(allowed) == 0 {
-		return result
+		return result, reasons
 	}
 	session, ok := s.requestSession(r)
 	if !ok || session.Principal.ActorID == "" || s.authenticator == nil {
-		return result
+		return result, reasons
 	}
 	principal := session.Principal
 	var pending *approval.PendingApproval
@@ -64,12 +67,20 @@ func (s *Server) viewerActions(r *http.Request, state *lifecycle.State, approval
 			if permitted && pending != nil && isStageConfirmation(*pending) &&
 				s.selfApprovalViolation(state.RunID, *pending, principal.ActorID) != nil {
 				permitted = false
+				if reasons == nil {
+					reasons = map[string]string{}
+				}
+				reasons[action] = "self_approval_forbidden"
 			}
 		case "return":
 			permitted = stageAllowed(confirmed, cloudidentity.StageActionConfirm)
 			if permitted && pending != nil && isStageConfirmation(*pending) &&
 				s.selfApprovalViolation(state.RunID, *pending, principal.ActorID) != nil {
 				permitted = false
+				if reasons == nil {
+					reasons = map[string]string{}
+				}
+				reasons[action] = "self_approval_forbidden"
 			}
 		case "override":
 			permitted = cloudidentity.Authorize(principal, cloudidentity.PermissionGateOverride, "") == nil
@@ -80,7 +91,7 @@ func (s *Server) viewerActions(r *http.Request, state *lifecycle.State, approval
 			result = append(result, action)
 		}
 	}
-	return result
+	return result, reasons
 }
 
 // planApprovalRoleAvailable mirrors handleTaskPlanApprove: the actor needs a

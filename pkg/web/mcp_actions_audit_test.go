@@ -112,3 +112,33 @@ func TestMCPDeniedCallForUnknownRunGoesToTeamAudit(t *testing.T) {
 		t.Fatalf("team audit lacks the denied record: %+v", audit)
 	}
 }
+
+func TestAuditableClaimedRunIDIsBoundedAndShaped(t *testing.T) {
+	for _, bad := range []string{"", strings.Repeat("a", 129), "../etc", "a/b", "line\nbreak", "tab\there", "..", "x\x00y"} {
+		if got := auditableClaimedRunID(bad); got != "" {
+			t.Errorf("%q must not reach the team audit: %q", bad, got)
+		}
+	}
+	if got := auditableClaimedRunID("run-20261016-abc"); got != "run-20261016-abc" {
+		t.Fatalf("a well-formed run id is kept: %q", got)
+	}
+}
+
+// A refused call that claims a garbage run id leaves the record without it.
+func TestMCPDeniedCallDropsMalformedClaimedRunID(t *testing.T) {
+	env := newMCPActionEnv(t, nil, nil)
+	dev := env.as(t, actorDev)
+	long := strings.Repeat("Z", 500)
+	if failure := dev.refused("cancel_task", map[string]any{"run_id": long}); failure.Status != 403 && failure.Status != 400 {
+		t.Fatalf("unexpected status: %+v", failure)
+	}
+	audit, err := env.srv.store.ListTeamAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range audit {
+		if strings.Contains(string(entry.Details), "ZZZZZZZZ") {
+			t.Fatalf("the oversized claimed run id reached the team audit: %s", entry.Details)
+		}
+	}
+}

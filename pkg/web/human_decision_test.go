@@ -151,3 +151,26 @@ func TestHumanDecision_ConfirmWithoutHashIsAuditedAsServerFilled(t *testing.T) {
 		t.Fatalf("a confirmation with the hash is not deprecated: %d %v", named.Code, named.Header())
 	}
 }
+
+// The generic decision door (REST) must not let a stage author send the stage
+// back with return_to_*: that is a decision on the same visit as a confirmation.
+func TestHumanDecision_RESTReturnToRefusedForTheStageAuthor(t *testing.T) {
+	submitted := time.Now().UTC().Add(-time.Hour)
+	approvals := []approval.PendingApproval{
+		buildInputApproval("input-1", approval.StatusResolved, submitted,
+			approval.Decision{ActorID: "author@example.test", ActorRole: "developer", Action: "submit"}),
+		buildConfirmApproval(submitted.Add(30 * time.Minute)),
+	}
+	runs := map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "accept", PendingApprovalID: "gate-1"}}
+	fixture := newFunctionPermissionFixture(t, true, approvals, runs)
+	both := []cloudidentity.Role{cloudidentity.RoleDeveloper, cloudidentity.RoleReviewer}
+	body := `{"action":"return_to_spec","comment":"redo","subject_hash":"` + testSubjectHash + `"}`
+	response := fixture.requestAs(t, "author@example.test", both, http.MethodPost, "/api/runs/run-confirm/approvals/gate-1/decisions", body)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "self_approval_forbidden") || fixture.controller.decisionCalls != 0 {
+		t.Fatalf("the author must not return the own work: %d %s", response.Code, response.Body.String())
+	}
+	other := fixture.requestAs(t, "reviewer@example.test", reviewerRoles, http.MethodPost, "/api/runs/run-confirm/approvals/gate-1/decisions", body)
+	if other.Code != http.StatusOK {
+		t.Fatalf("another reviewer may return: %d %s", other.Code, other.Body.String())
+	}
+}

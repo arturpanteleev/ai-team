@@ -1754,8 +1754,7 @@ func (s *workerAPIServer) validateWorkerDeliveryEvent(event evidence.Event, prio
 }
 
 func hasAuthenticatedControllerDecision(store any, value approval.PendingApproval) bool {
-	trusted, ok := store.(approval.TrustedDecisionAuthority)
-	return ok && trusted.HasAuthenticatedControllerDecision(value)
+	return approval.IsTrustedControllerDecision(store, value)
 }
 
 // validateControllerDeliveryClaims keeps event journals from gaining delivery

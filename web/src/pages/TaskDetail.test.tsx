@@ -427,11 +427,13 @@ describe('Task detail', () => {
       allowed_actions: ['confirm', 'return'],
     };
     // The author: the server leaves confirm and return out of viewer_actions.
-    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...details, viewer_actions: [] });
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...details, viewer_actions: [], viewer_denied_reasons: { confirm: 'self_approval_forbidden', return: 'self_approval_forbidden' } });
     renderDetail();
     const author = await screen.findByRole('complementary', { name: 'Действия' });
     expect(await within(author).findByTestId('self-approval-note')).toHaveTextContent('другой участник');
     expect(within(author).queryByRole('button', { name: /^Принять/ })).not.toBeInTheDocument();
+    expect(within(author).queryByRole('button', { name: /Вернуть/ })).not.toBeInTheDocument();
     expect(within(author).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
 
     // Another member keeps the button and sees no note.

@@ -15,6 +15,8 @@ import (
 type viewerTaskView struct {
 	AllowedActions []string `json:"allowed_actions"`
 	ViewerActions  []string `json:"viewer_actions"`
+	// ViewerDeniedReasons: action -> reason for policy denials.
+	ViewerDeniedReasons map[string]string `json:"viewer_denied_reasons"`
 }
 
 func (f functionPermissionFixture) viewerView(t *testing.T, actorID string, roles []cloudidentity.Role, runID string) viewerTaskView {
@@ -136,6 +138,9 @@ func TestViewerActionsHideConfirmFromTheStageAuthor(t *testing.T) {
 	}
 	if slices.Contains(author.ViewerActions, "return") {
 		t.Fatalf("the author must not be offered return under forbid_self_approval: %v", author.ViewerActions)
+	}
+	if author.ViewerDeniedReasons["confirm"] != "self_approval_forbidden" || author.ViewerDeniedReasons["return"] != "self_approval_forbidden" {
+		t.Fatalf("the server must name the self-approval reason: %v", author.ViewerDeniedReasons)
 	}
 	other := fixture.viewerView(t, "reviewer@example.test", []cloudidentity.Role{cloudidentity.RoleReviewer}, "run-confirm")
 	if !slices.Contains(other.ViewerActions, "confirm") {

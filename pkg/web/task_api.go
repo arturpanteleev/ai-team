@@ -120,8 +120,12 @@ type taskRunDetails struct {
 	// ViewerActions is the part of allowed_actions the requesting principal
 	// may perform (stage function, system right, plan roles). It is computed
 	// by the same checks the action handlers enforce.
-	ViewerActions []string              `json:"viewer_actions"`
-	Delivery      webDeliveryProjection `json:"delivery"`
+	ViewerActions []string `json:"viewer_actions"`
+	// ViewerDeniedReasons names why an offered action is withheld from this
+	// principal when the cause is policy rather than a missing role:
+	// action -> "self_approval_forbidden".
+	ViewerDeniedReasons map[string]string     `json:"viewer_denied_reasons,omitempty"`
+	Delivery            webDeliveryProjection `json:"delivery"`
 	// StageStatuses is the server-side projection of every stage of the task
 	// from the durable journal (S11). It is read-only: no route sets a status.
 	StageStatuses *stagestatus.Projection `json:"stage_statuses,omitempty"`
@@ -304,7 +308,7 @@ func (s *Server) handleGetTaskRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, status, err.Error(), apiErrorCode(status))
 		return
 	}
-	details.ViewerActions = s.viewerActions(r, details.State, details.Approvals, details.AllowedActions)
+	details.ViewerActions, details.ViewerDeniedReasons = s.viewerActions(r, details.State, details.Approvals, details.AllowedActions)
 	writeJSONResponse(w, http.StatusOK, details)
 }
 

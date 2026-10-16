@@ -360,12 +360,13 @@ export const scenarios = {
     run: { status: 'waiting_for_approval' },
     state: { phase: 'waiting', next_stage: 'qa', pending_approval_id: 'gate-code_review' },
     stages: [attempt('code_review', 1, 'passed')],
-    approvals: [transitionApproval('code_review', 'qa', ['reviewer'], { actions: ['approve', 'reject'], targets: { approve: 'qa' } })],
+    approvals: [transitionApproval('code_review', 'qa', ['reviewer'], { actions: ['approve', 'reject', 'return_to_implementation'], targets: { approve: 'qa', return_to_implementation: 'implementation' } })],
     template: { forbid_self_approval: true },
-    allowed: ['confirm'],
+    allowed: ['confirm', 'return'],
     viewer: [],
-    statuses: statuses(3, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('bob'), blocked_by: { kind: 'approval', roles: ['reviewer'], actions: ['approve'] }, allowed_actions: ['confirm'], action_stage_id: 'qa' }),
-    expect: { chip: 'Ждёт человека', buttons: ['Отклонить'], noButtons: ['Принять и перейти', 'Принять'], text: 'Принять этот этап должен другой участник' },
+    denied: { confirm: 'self_approval_forbidden', return: 'self_approval_forbidden' },
+    statuses: statuses(3, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('bob'), blocked_by: { kind: 'approval', roles: ['reviewer'], actions: ['approve'] }, allowed_actions: ['confirm', 'return'], action_stage_id: 'qa' }),
+    expect: { chip: 'Ждёт человека', buttons: ['Отклонить'], noButtons: ['Принять и перейти', 'Принять', 'Вернуть на доработку'], text: 'Принять этот этап должен другой участник' },
   },
   'no-rights': {
     title: 'Нет прав: разработчик смотрит на решение владельца',
@@ -392,7 +393,7 @@ export function detail(id, options = {}) {
     template: { valid: true, template: 'idea-to-prod', title: 'От идеи до продакшена', version: 'f'.repeat(64), ...template, ...(scenario.template ?? {}) },
     state: { run_id: 'run-audit', task: 'Добавить приветствие по имени', phase: 'running', next_stage: '', attempt_ordinal: 1, ...scenario.state },
     stages: scenario.stages ?? [], approvals: scenario.approvals ?? [], stage_owners: scenario.owners ?? {}, results: scenario.results ?? {},
-    allowed_actions: scenario.allowed ?? [], viewer_actions: scenario.viewer ?? scenario.allowed ?? [], delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
+    allowed_actions: scenario.allowed ?? [], viewer_actions: scenario.viewer ?? scenario.allowed ?? [], ...(scenario.denied ? { viewer_denied_reasons: scenario.denied } : {}), delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
     ...(options.extra ?? {}),
   }
 }

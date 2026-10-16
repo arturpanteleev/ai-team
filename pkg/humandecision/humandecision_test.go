@@ -327,3 +327,32 @@ func TestParallelIdenticalRequestsAuditOnce(t *testing.T) {
 		t.Fatalf("decided %d, replayed %d (audits %d)", decided, replayed, len(ports.audits))
 	}
 }
+
+// A return is a decision on the confirmed work just as an approval is: the
+// self-approval policy covers every return_to_* action, not only approve.
+func TestSelfApprovalCoversReturnToActions(t *testing.T) {
+	ports, _ := newPending(t, approval.QuorumAny, "product_owner")
+	value, err := ports.store.Create(approval.PendingApproval{
+		Kind: approval.KindApprove, RunID: runID, AttemptID: "attempt-2", FromStage: "tech_design", ToStage: "build",
+		Trigger: "graph_outcome:passed", SubjectHash: subject, RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+		Actions: []string{"approve", "reject", "return_to_product_spec"},
+		Targets: map[string]string{"approve": "build", "reject": "tech_design", "return_to_product_spec": "product_spec"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports.selfErr = errors.New("автор этапа")
+	req := request(value, actor("po-1", "product_owner"), "return_to_product_spec")
+	req.Comment = "верну себе"
+	if _, err := New(ports).Decide(context.Background(), req); !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("a self return must be refused as self-approval: %v", err)
+	}
+	if ports.decisions != 0 || len(ports.audits) != 0 {
+		t.Fatalf("a refused return must store and audit nothing: %d, %d", ports.decisions, len(ports.audits))
+	}
+	// Another person (no violation) may return.
+	ports.selfErr = nil
+	if _, err := New(ports).Decide(context.Background(), req); err != nil {
+		t.Fatalf("another person must be able to return: %v", err)
+	}
+}

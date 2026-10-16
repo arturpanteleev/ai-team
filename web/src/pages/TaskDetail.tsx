@@ -637,9 +637,11 @@ export function TaskDetail() {
       && returnOptions.some((route) => route.to === target);
   };
   // The server does not offer «confirm» to a stage author under forbid_self_approval and answers the
-  // «approve» decision with 403; the card must not offer a button that is bound to fail (S16 M-a).
+  // «approve» and «return_to_*» decisions with 403; the card must not offer buttons that are bound to
+  // fail (S16 M-a). The cause is the server's explicit reason, not an inference from a missing action.
+  const selfApprovalForbidden = details?.viewer_denied_reasons?.confirm === 'self_approval_forbidden';
   const selfApprovalBlocked = (approval: Approval) => approval.status === 'pending'
-    && Boolean(template?.forbid_self_approval) && deniedActions.includes('confirm')
+    && Boolean(template?.forbid_self_approval) && selfApprovalForbidden
     && approval.id === pending?.id && approval.trigger !== 'human_input' && approval.trigger !== 'delivery_plan'
     && approval.kind !== 'check_decision' && approval.required_roles.some((role) => canAct(role));
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
@@ -648,7 +650,7 @@ export function TaskDetail() {
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
     : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions)
     .filter((action) => !coveredByReturnForm(approval, action))
-    .filter((action) => !(selfApprovalBlocked(approval) && (action === 'approve' || action === 'approve_spec')));
+    .filter((action) => !(selfApprovalBlocked(approval) && (action === 'approve' || action === 'approve_spec' || action.startsWith('return_to_'))));
 
   const renderDecision = (approval: Approval) => {
     const answer = approvalAnswers[approval.id] ?? '';

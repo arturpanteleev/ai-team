@@ -237,7 +237,7 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 		}
 		return Result{}, ErrRoleForbidden
 	}
-	if req.Action == "approve" || req.Action == "approve_spec" {
+	if req.Action == "approve" || req.Action == "approve_spec" || strings.HasPrefix(req.Action, "return_to_") {
 		if err := s.ports.SelfApprovalViolation(req.RunID, *pending, req.Actor.ID); err != nil {
 			// A violation and an unverifiable policy both refuse the decision.
 			return Result{}, fmt.Errorf("%w: %v", ErrSelfApproval, err)

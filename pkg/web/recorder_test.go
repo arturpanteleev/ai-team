@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +182,48 @@ func TestStoreRecorder_PreservesHumanEditLinkInStageEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("missing human attempt_finished event")
+	}
+}
+
+// A human attempt is reported by runHumanStage and again by the stage loop
+// once its gates ran. The second report used to insert the row a second time
+// (UNIQUE constraint failed: stages.attempt_uid) and lose the final checks.
+func TestStoreRecorder_RepeatedStageFinishedUpdatesTheRowOnce(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	r := NewStoreRecorder(s)
+	at := time.Date(2026, 10, 16, 3, 4, 5, 0, time.UTC)
+	r.RunStarted("run-twice", "feature", "", at)
+	r.StageStarted("run-twice", "human-attempt", "spec", 1, at)
+	finished := notifier.StageResult{RunID: "run-twice", AttemptID: "human-attempt", Name: "spec",
+		Status: notifier.StatusPassed, StartedAt: at, FinishedAt: at.Add(time.Minute)}
+	r.StageFinished(finished)
+	finished.Mutations = []string{"gate-mutation"}
+	r.StageFinished(finished)
+
+	stages, err := s.GetStagesByPipelineRunID(r.runID)
+	if err != nil || len(stages) != 1 {
+		t.Fatalf("one row expected: %+v %v", stages, err)
+	}
+	if !strings.Contains(stages[0].MutationsJSON, "gate-mutation") {
+		t.Fatalf("the second report must refresh the row: %q", stages[0].MutationsJSON)
+	}
+	events, err := s.GetRunEventsAfter("run-twice", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Type == "attempt_finished" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("exactly one attempt_finished event expected, got %d", count)
 	}
 }
 

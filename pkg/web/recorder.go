@@ -157,19 +157,44 @@ func (r *StoreRecorder) StageStarted(runID, attemptID, agentName string, index i
 	r.event("attempt_started", attemptID, startedAt, map[string]any{"agent": agentName, "stage_index": index})
 }
 
+// storedStage returns the persisted row of an attempt of this run, or nil. It
+// covers a recorder that did not see StageStarted (another process, a repeated
+// report) so the row is updated instead of inserted twice.
+func (r *StoreRecorder) storedStage(attemptID string) *store.Stage {
+	stages, err := r.store.GetStagesByPipelineRunID(r.runID)
+	if err != nil {
+		return nil
+	}
+	for index := range stages {
+		if stages[index].AttemptID == attemptID {
+			return &stages[index]
+		}
+	}
+	return nil
+}
+
 func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 	if r.runID == 0 || stage.RunID != r.runUID {
 		return
 	}
 	stored := r.current[stage.AttemptID]
+	// refinal is a repeated report of an attempt whose row is already final: a
+	// human attempt is reported by runHumanStage and once more by the stage loop
+	// after its gates and delivery ran. The second report refreshes the row
+	// (checks, delivery) but is not a second attempt_finished event.
+	refinal := false
 	if stored == nil {
-		stored = &store.Stage{
-			PipelineRunID: r.runID, AttemptID: stage.AttemptID, StageIndex: stage.StageIndex,
-			AgentName: stage.Name, Status: "running", StartedAt: stage.StartedAt,
-		}
-		if err := r.store.CreateStage(stored); err != nil {
-			r.warn("create missing stage", err)
-			return
+		if existing := r.storedStage(stage.AttemptID); existing != nil {
+			stored, refinal = existing, existing.CompletedAt != nil
+		} else {
+			stored = &store.Stage{
+				PipelineRunID: r.runID, AttemptID: stage.AttemptID, StageIndex: stage.StageIndex,
+				AgentName: stage.Name, Status: "running", StartedAt: stage.StartedAt,
+			}
+			if err := r.store.CreateStage(stored); err != nil {
+				r.warn("create missing stage", err)
+				return
+			}
 		}
 	}
 	delete(r.current, stage.AttemptID)
@@ -197,6 +222,9 @@ func (r *StoreRecorder) StageFinished(stage notifier.StageResult) {
 	stored.DeliveryJSON = marshalJSON(stage.Delivery)
 	if err := r.store.UpdateStage(stored); err != nil {
 		r.warn("update stage", err)
+		return
+	}
+	if refinal {
 		return
 	}
 	finished := map[string]any{

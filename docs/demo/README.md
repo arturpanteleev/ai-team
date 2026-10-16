@@ -140,6 +140,7 @@ Go-тесты с клиентом официального SDK (`pkg/web/mcp_e2e
 | Дефект | Коммит |
 |---|---|
 | человеческий результат без раздела из `required_sections` завершал задачу ошибкой вместо `fail` гейта (пайплайн-путь и сдача результата через веб; правка черновика во время grill по-прежнему отклоняется до гейта, см. `docs/reference/TASK-FLOW-WEB-API.md`) | `fix(pipeline): a human result without a required section is a gate fail…` |
+| карточка «Git-доставка» завершённой задачи показывала «ждёт выполнения» и кнопку повтора, хотя ветка уже запушена этапом доставки до код-ревью (читалась только терминальная квитанция) | `fix(web): a delivery made by a stage before code review shows as recorded` |
 | гейты `external_program` и `docker_program` не были подключены к планировщику | `fix(pipeline): run external_program and docker_program gates from the stage chain` |
 | вкладка «Гейты» показывала «гейтов нет» для этапа, чей переход ждёт подтверждения | `fix(web): show the gates of the stage whose transition awaits confirmation` |
 | фейковый трекер нельзя было вести из внешнего процесса | `feat(tracker): let a demo drive the fake tracker of a running server` |

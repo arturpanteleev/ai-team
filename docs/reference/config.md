@@ -759,12 +759,23 @@ tree_hash:
 контроллера; см. [выкладку через CI/CD](#выкладка-через-teamcity).
 
 > **Только файловый конфиг.** Команды (`executor_adapters`, `checks`,
-> `mcp_servers`, гейты `external_program` и `docker_program`) задаются в
-> `.ai-team/config.yaml` репозитория. Шаблон, присланный через REST, MCP или
-> страницу «Шаблон», с такими гейтами отклоняется (`400`, `trusted_config_only`);
-> адаптер, проверку и MCP-сервер из веба можно указать только по имени, если
-> определение совпадает с определением в активном (файловом) шаблоне. См.
-> [границу безопасности](security.md#веб-дашборд).
+> `mcp_servers`, гейты `external_program` и `docker_program`) и вся
+> инфраструктура (`tracker`: адаптер, адреса, `token_env`, `inbound`; `cicd`,
+> `notifications`, `containment`, `cli`/`model`/`effort`, таймауты, `budget`,
+> `auto_pickup`, `usage`, `tree_hash`, `redaction`, `retention`, `delivery`
+> этапа) задаются в `.ai-team/config.yaml` репозитория. Шаблон, присланный через
+> REST, MCP или страницу «Шаблон», может менять только процесс: `template`,
+> `title`, `schema_version`, `stall_after`, `forbid_self_approval`, `stages`
+> (названия, функции, результаты, исполнители, агенты, гейты без команд,
+> ссылки на адаптер и MCP-сервер по имени), `returns`, `max_visits` и карты
+> статусов `tracker.on_enter`, `tracker.on_pass`, `tracker.jira.stage_statuses`.
+> Всё остальное в присланном документе должно совпадать с активным (файловым)
+> шаблоном (разобранные структуры равны), иначе `400` с кодом
+> `trusted_config_only` и названием секции или поля. Поскольку веб заменяет
+> весь документ, присылайте инфраструктурные секции без изменений (скопируйте
+> их из текущего шаблона): пропущенная секция считается изменением. Адаптер,
+> проверку и MCP-сервер из веба можно указать только по имени, если определение
+> совпадает с файловым. См. [границу безопасности](security.md#веб-дашборд).
 
 ### Внешний исполнитель этапа
 
@@ -1021,7 +1032,7 @@ exit_gate_groups:
 | `human_approval@1` | человек | — | любой |
 | `human_approval@2` | человек | `on_reject` (`stop` по умолчанию или `stay`) | любой |
 | `external_program@1` | внешняя программа | `command` (обязателен), `timeout_seconds`, `cwd`, `env_allow`, `max_output_bytes`; см. [Протокол гейта](gate-protocol.md) | любой |
-| `docker_program@1` | Docker | `image` (digest, обязателен), `command` (обязателен), `network`, `repo_access`, `mounts`, лимиты; см. [Протокол гейта](gate-protocol.md) | любой |
+| `docker_program@1` | Docker | `image` (`name@sha256:<digest>`, обязателен), `command` (обязателен), `allow_unpinned_image` (bool, исключение), `pull` (`missing` по умолчанию или `never`), `network` (`none` по умолчанию или `bridge`), `cpus` (десятичное, по умолчанию 1), `memory_mb` (≥ 1, по умолчанию 512), `pids_limit` (≥ 1, по умолчанию 128), `tmpfs_mb` (≥ 0, по умолчанию 64; 0 — без `/tmp`), `user` (`uid[:gid]` или имя; по умолчанию uid:gid контроллера), `repo_access` (`ro` по умолчанию или `rw`), `mounts` (`<путь в репозитории>:<абсолютный путь в контейнере>[:ro\|rw]`), `timeout_seconds` (≥ 1, по умолчанию 60, максимум 3600), `cwd`, `env_allow`, `max_output_bytes` (≥ 1, по умолчанию 1 МиБ, максимум 16 МиБ); см. [Протокол гейта](gate-protocol.md) | любой |
 
 **`required_phrases@1`** проверяет, что в md-результате есть заданные слова или
 фрагменты. Всё, что меняет смысл проверки, задаётся явно, без молчаливых

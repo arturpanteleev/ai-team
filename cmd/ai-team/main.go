@@ -2460,6 +2460,7 @@ func cmdWeb() {
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)
 	}
+	warnAboutStoredTemplateCommands(os.Stderr, target)
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
 		web.WithAutoPickup(autopickup.PolicyFromConfig(cfg), cfg.AutoPickup.EffectivePollInterval(), nil),

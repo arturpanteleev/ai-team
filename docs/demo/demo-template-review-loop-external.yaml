@@ -51,3 +51,23 @@ executor_adapters:
 cli: opencode
 effort: medium
 stage_timeout: 30m
+
+# Секция tracker повторяет файловый конфиг слово в слово: адаптер, адреса и
+# inbound-правила веб менять не может (trusted_config_only); карты on_enter и
+# on_pass — процессные и могут отличаться.
+tracker:
+  adapter: fake
+  web_base_url: http://127.0.0.1:8080
+  on_enter:
+    implementation: In Progress
+  on_pass:
+    code_review: In Review
+  inbound:
+    poll_interval: 5s
+    rules:
+      - {status: Done, action: advance}
+  fake:
+    statuses: [To Do, In Progress, In Review, Done]
+    issues:
+      - {key: DEMO-1, summary: Демо-карточка, status: To Do}
+      - {key: DEMO-2, summary: Вторая демо-карточка, status: To Do}

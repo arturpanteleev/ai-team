@@ -67,10 +67,12 @@ func (s *Server) templateStore() (*config.TemplateStore, error) {
 type trustedConfigError struct{ problems []string }
 
 func (e *trustedConfigError) Error() string {
-	return "шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), не может задавать команду, образ или mounts: " +
+	return "шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), может менять только процесс (этапы, возвраты, роли, лимиты посещений, карты статусов трекера); " +
+		"команды, образы, mounts и инфраструктурные настройки должны совпадать с активным файловым конфигом: " +
 		strings.Join(e.problems, "; ") +
-		". Гейты external_program и docker_program, executor_adapters, checks и mcp_servers разрешены только в файловом конфиге репозитория (.ai-team/config.yaml); " +
-		"из веба можно ссылаться на уже объявленные там адаптеры, проверки и серверы по имени, не меняя их определений"
+		". Гейты external_program и docker_program, определения executor_adapters, checks и mcp_servers, tracker (адаптер, URL, токены, inbound), cicd, notifications, containment, runtime, budget и прочие секции " +
+		"меняются только в файловом конфиге репозитория (.ai-team/config.yaml); из веба на уже объявленные адаптеры, проверки и серверы можно ссылаться по имени, " +
+		"а остальные секции нужно присылать без изменений (скопируйте их из текущего шаблона)"
 }
 
 // parseSubmittedTemplateYAML is parseTemplateYAML for YAML that arrives over

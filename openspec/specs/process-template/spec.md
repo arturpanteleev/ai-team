@@ -220,6 +220,30 @@ version. Concurrent edits MUST NOT silently overwrite a newer active version.
 - **И** reading the active template (editor, task pages) MUST NOT apply this rule,
   so a file configuration with command gates stays viewable
 
+#### Scenario: A web template changes only process fields
+
+- **КОГДА** a template is submitted through REST, MCP, or the Web UI (validate
+  or publish)
+- **ТОГДА** only the process fields MAY differ from the active file
+  configuration: `template`, `title`, `schema_version`, `stall_after`,
+  `forbid_self_approval`, `stages` (except a stage's `delivery`), `returns`,
+  `max_visits`, and the tracker status maps `tracker.on_enter`,
+  `tracker.on_pass`, and `tracker.jira.stage_statuses`
+- **И** every other field of the document (tracker adapter, endpoints, token
+  environment names and `inbound`, `cicd`, `notifications`, `containment`,
+  runtime settings, timeouts, `budget`, `auto_pickup`, `usage`, `tree_hash`,
+  `redaction`, `retention`, and a stage's `delivery`) MUST equal the active file
+  configuration; otherwise validation MUST report it and publish MUST answer
+  `400` with the code `trusted_config_only`, naming the section or field, and
+  leave the active template unchanged
+- **И** the allow-list MUST be explicit, so a configuration field that nobody
+  classified is treated as infrastructure and a test MUST fail until it is
+  classified
+- **И** a document identical to the active file configuration, and a document
+  that differs only in process fields, MUST be accepted
+- **И** when no active file configuration is readable, every infrastructure
+  section of a web document MUST be refused
+
 #### Scenario: Publish with stale active version
 
 - **КОГДА** two editors load one active version and the first publishes a

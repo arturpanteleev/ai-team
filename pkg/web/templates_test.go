@@ -52,6 +52,14 @@ func TestTemplateEditorAPIValidatesPublishesAndPinsNewTasks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(controlDir, "config.yaml"), initialYAML, 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A web document replaces the whole file, so it carries the file's
+	// infrastructure settings unchanged (only process fields may differ).
+	architectAnalystTemplateYAML := architectAnalystTemplateYAML
+	for key, value := range map[string]string{"cli": initial.CLI, "model": initial.Model, "effort": initial.Effort, "stage_timeout": initial.StageTimeout} {
+		if value != "" {
+			architectAnalystTemplateYAML += key + ": " + value + "\n"
+		}
+	}
 	controller := &fakeRunController{}
 	srv, err := NewServer(":memory:", "", filepath.Join(controlDir, "artifacts"),
 		WithTargetDir(target), WithRunController(controller), WithTemplateAgentLookup(agent.NewFS(os.DirFS("../../agents"))))

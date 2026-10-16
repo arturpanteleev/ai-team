@@ -291,3 +291,50 @@ func TestStoreRecorder_ResumeUsesExistingRunAndSequence(t *testing.T) {
 		t.Fatalf("approval/resume sequence or timestamps disagree: %+v", events)
 	}
 }
+
+// A repeated report that carries a different final result (gates failed after
+// the human stage reported success) must not leave attempt_finished with the
+// first status: the stream is append-only, so a revision event follows.
+func TestStoreRecorder_RepeatedStageFinishedWithChangedResultAddsRevisionEvent(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	r := NewStoreRecorder(s)
+	at := time.Date(2026, 10, 16, 3, 4, 5, 0, time.UTC)
+	r.RunStarted("run-revised", "feature", "", at)
+	r.StageStarted("run-revised", "human-attempt", "spec", 1, at)
+	finished := notifier.StageResult{RunID: "run-revised", AttemptID: "human-attempt", Name: "spec",
+		Status: notifier.StatusPassed, StartedAt: at, FinishedAt: at.Add(time.Minute)}
+	r.StageFinished(finished)
+	finished.Status = notifier.StatusFailed
+	r.StageFinished(finished)
+	r.StageFinished(finished) // identical to the revision: nothing new
+
+	events, err := s.GetRunEventsAfter("run-revised", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloads []map[string]any
+	for _, event := range events {
+		if event.Type != "attempt_finished" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(event.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, data)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("original and one revision expected, got %d: %+v", len(payloads), payloads)
+	}
+	if payloads[0]["status"] != string(notifier.StatusPassed) || payloads[0]["revision"] != nil {
+		t.Fatalf("original event must stay untouched: %+v", payloads[0])
+	}
+	if payloads[1]["status"] != string(notifier.StatusFailed) || payloads[1]["revision"] != float64(2) {
+		t.Fatalf("revision event must carry the final status: %+v", payloads[1])
+	}
+}

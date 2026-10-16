@@ -143,3 +143,31 @@ func TestPinCarriesExactVersionAndDigest(t *testing.T) {
 		t.Fatalf("pin = %+v", pin)
 	}
 }
+
+// required_phrases@1 keeps the validation it was published with; the stricter
+// rules live in @2 only.
+func TestRequiredPhrasesVersionsDifferInValidationStrictness(t *testing.T) {
+	lib := Default()
+	md := StageContext{Result: "md"}
+	base := func(overrides map[string]any) map[string]any {
+		params := map[string]any{"phrases": []any{"alpha", "beta"}, "case": "sensitive", "scope": "result", "match": "all"}
+		for key, value := range overrides {
+			params[key] = value
+		}
+		return params
+	}
+	for name, params := range map[string]map[string]any{
+		"control character": base(map[string]any{"phrases": []any{"alpha\x1b"}}),
+		"nested at_least":   base(map[string]any{"phrases": []any{"API", "API gateway"}, "match": "at_least", "min_count": 2}),
+	} {
+		if _, err := lib.Resolve(workflow.GateRef{Gate: GateRequiredPhrases, Version: 1, Params: params}, md); err != nil {
+			t.Errorf("%s: @1 must keep accepting it: %v", name, err)
+		}
+		if _, err := lib.Resolve(workflow.GateRef{Gate: GateRequiredPhrases, Version: 2, Params: params}, md); err == nil {
+			t.Errorf("%s: @2 must reject it", name)
+		}
+	}
+	if _, err := lib.Resolve(workflow.GateRef{Gate: GateRequiredPhrases, Version: 2, Params: base(nil)}, md); err != nil {
+		t.Fatalf("a plain configuration is valid in @2: %v", err)
+	}
+}

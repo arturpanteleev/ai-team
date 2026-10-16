@@ -952,3 +952,32 @@ func TestTemplateGraphAddsBlockedAnswerLoopForQuestionStages(t *testing.T) {
 		t.Fatal("этап без вопросов не должен получать blocked-петлю")
 	}
 }
+
+func TestJiraAuthSchemeValidation(t *testing.T) {
+	base := JiraConfig{BaseURL: "https://jira.example.test", WebBaseURL: "https://ai.example.test", TokenEnv: "JIRA_PAT"}
+	cases := []struct {
+		name    string
+		mutate  func(*JiraConfig)
+		wantErr string
+	}{
+		{"basic needs email", func(c *JiraConfig) {}, "tracker.jira.email"},
+		{"basic with email", func(c *JiraConfig) { c.Email = "bot@example.test"; c.Auth = JiraAuthBasic }, ""},
+		{"bearer without email", func(c *JiraConfig) { c.Auth = JiraAuthBearer }, ""},
+		{"bearer rejects control characters in email", func(c *JiraConfig) { c.Auth = JiraAuthBearer; c.Email = "a\nb" }, "tracker.jira.email"},
+		{"unknown scheme", func(c *JiraConfig) { c.Auth = "digest"; c.Email = "bot@example.test" }, "tracker.jira.auth"},
+		{"bearer still needs env variable name", func(c *JiraConfig) { c.Auth = JiraAuthBearer; c.TokenEnv = "ghp_secret value" }, "tracker.jira.token_env"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jc := base
+			tc.mutate(&jc)
+			err := jc.Validate(nil)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("error=%v, want it to mention %s", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -36,7 +36,7 @@ func TestGateCatalogIsReadOnlyAndListsPinnedDefinitions(t *testing.T) {
 		// The decision gates have a second published version (S05); every
 		// other gate has only version 1. Only the highest version is latest.
 		latestVersion := 1
-		if gate.ID == "agent_review" || gate.ID == "human_approval" {
+		if gate.ID == "agent_review" || gate.ID == "human_approval" || gate.ID == "required_phrases" {
 			latestVersion = 2
 		}
 		if gate.Digest == "" || gate.Version < 1 || gate.Version > latestVersion || gate.Latest != (gate.Version == latestVersion) {

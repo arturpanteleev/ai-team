@@ -804,6 +804,15 @@ func (rs *runState) clearStageEphemeral(name string, a *agent.Agent) error {
 }
 
 func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifact, []runtime.Artifact, error) {
+	return rs.collectInputsMode(a, name, false)
+}
+
+// collectInputsMode collects the declared inputs of an agent contract. With
+// skipMissing, an input that does not exist is left out instead of failing:
+// a human stage that merely carries an agent contract works from whatever the
+// earlier stages produced, and the agent contract is enforced only when the
+// agent itself runs. Unsafe paths (symlinks, escapes) always fail.
+func (rs *runState) collectInputsMode(a *agent.Agent, name string, skipMissing bool) ([]runtime.Artifact, []runtime.Artifact, error) {
 	var promptInputs, all []runtime.Artifact
 	for _, inName := range sortedStringMapKeys(a.Inputs) {
 		inPath := a.Inputs[inName]
@@ -815,6 +824,9 @@ func (rs *runState) collectInputs(a *agent.Agent, name string) ([]runtime.Artifa
 			validationRoot = filepath.Join(rs.runCfg.TargetDir, ".ai-team", "runs", rs.runID)
 		}
 		if err := validateExistingArtifactPath(validationRoot, fullPath); err != nil {
+			if skipMissing && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, all, fmt.Errorf("агент %s: вход %s (%s) небезопасен: %w", name, inName, fullPath, err)
 		}
 		info, err := os.Stat(fullPath)

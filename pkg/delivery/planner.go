@@ -4,15 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/arturpanteleev/ai-team/pkg/checks"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 type Verification struct {
@@ -68,8 +71,20 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, fmt.Errorf("delivery planner: baseline HEAD для %s: %w", base, err)
 	}
 	currentHead, err := commandOutput(ctx, targetDir, "git", "rev-parse", "--verify", "HEAD")
-	if err != nil || currentHead != baselineHead {
-		return Plan{}, fmt.Errorf("delivery planner: branch %q содержит commits поверх baseline %s; требуется чистая ветка от base", current, baselineHead)
+	if err != nil || currentHead == "" {
+		return Plan{}, fmt.Errorf("delivery planner: HEAD не определён: %w", err)
+	}
+	if currentHead != baselineHead {
+		// Повторная доставка после возврата из ревью: на planned branch уже лежит
+		// commit, который контроллер сам создал и проверил при прошлой доставке.
+		// Новый commit встаёт поверх него; чужие commits по-прежнему отвергаются.
+		if tipErr := verifyControllerDeliveredTip(ctx, targetDir, feature, current, branch, base, currentHead); tipErr != nil {
+			if errors.Is(tipErr, errBaseAdvanced) {
+				return Plan{}, fmt.Errorf("delivery planner: branch %q создана контроллером, но base %q ушла вперёд; требуется rebase ветки на %q: %w", current, base, base, tipErr)
+			}
+			return Plan{}, fmt.Errorf("delivery planner: branch %q содержит commits поверх baseline %s, не созданные контроллером; требуется чистая ветка от base: %w", current, baselineHead, tipErr)
+		}
+		baselineHead = currentHead
 	}
 	files, err := finalDeltaPaths(ctx, targetDir, baselineHead, attributed)
 	if err != nil {
@@ -116,6 +131,125 @@ func BuildPlan(ctx context.Context, targetDir, feature, task string, attributedF
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+// errBaseAdvanced marks a branch made only of controller commits whose base
+// moved on: the branch is ours, but it has to be rebased before redelivery.
+var errBaseAdvanced = errors.New("base branch ушла вперёд")
+
+const completedArchiveNamePattern = `^%s\.[0-9a-f]{64}\.completed\.json$`
+
+// verifyControllerDeliveredTip разрешает повторную доставку только когда
+// planned branch целиком состоит из commits, которые контроллер создал и
+// проверил. Доверие не опирается на один state-файл:
+//
+//  1. каждый state (текущий и архивные *.completed.json) должен нести валидный
+//     HMAC с ключом вне рабочего дерева (state_auth.go) и быть завершённой
+//     доставкой (commit, push, PR);
+//  2. цепочка записей идёт от tip назад по BaselineHead: tip записи равен HEAD,
+//     baseline каждой записи равен commit предыдущей;
+//  3. каждый commit заново проверяется против своего сохранённого plan
+//     (сообщение, parent, пути, режимы, blob-хеши);
+//  4. `git rev-list H0..HEAD` состоит ровно из этих commits (линейно, без
+//     лишних и merge-commits), где H0 - baseline первой записи.
+//
+// Любая неоднозначность - отказ. Функция ничего не создаёт на диске.
+func verifyControllerDeliveredTip(ctx context.Context, targetDir, feature, current, branch, base, head string) error {
+	if current != branch {
+		return fmt.Errorf("текущая branch не %q", branch)
+	}
+	if err := validateFeatureName(feature); err != nil {
+		return err
+	}
+	dir, err := safeio.ExistingDir(targetDir, ".ai-team", "delivery")
+	if err != nil {
+		return fmt.Errorf("delivery state не найден: %w", err)
+	}
+	tip, err := readAuthenticatedState(filepath.Join(dir, feature+".json"))
+	if err != nil {
+		return err
+	}
+	records := []*state{tip}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	archivePattern := regexp.MustCompile(fmt.Sprintf(completedArchiveNamePattern, regexp.QuoteMeta(feature)))
+	for _, entry := range entries {
+		if !archivePattern.MatchString(entry.Name()) {
+			continue
+		}
+		archived, archiveErr := readAuthenticatedState(filepath.Join(dir, entry.Name()))
+		if archiveErr != nil {
+			return fmt.Errorf("%s: %w", entry.Name(), archiveErr)
+		}
+		records = append(records, archived)
+	}
+	byCommit := make(map[string]*state, len(records))
+	for _, record := range records {
+		if record.CommitSHA == "" || !record.CommitVerified || !record.Pushed || record.PRURL == "" || record.Plan.Branch != branch {
+			return fmt.Errorf("delivery state (plan %s) не является завершённой доставкой контроллера", record.PlanHash)
+		}
+		if _, duplicate := byCommit[record.CommitSHA]; duplicate {
+			return fmt.Errorf("commit %s записан в delivery state неоднозначно", record.CommitSHA)
+		}
+		byCommit[record.CommitSHA] = record
+	}
+	if tip.CommitSHA != head {
+		return fmt.Errorf("HEAD %s не является завершённой доставкой контроллера (state: %s)", head, tip.CommitSHA)
+	}
+	// chain[0] is the newest record.
+	var chain []*state
+	visited := make(map[string]bool)
+	for record := tip; record != nil; record = byCommit[record.Plan.BaselineHead] {
+		if visited[record.CommitSHA] {
+			return fmt.Errorf("delivery state образует цикл")
+		}
+		visited[record.CommitSHA] = true
+		chain = append(chain, record)
+	}
+	root := chain[len(chain)-1].Plan.BaselineHead
+	noRecord := func(StepResult) error { return nil }
+	for _, record := range chain {
+		if err := verifyCommittedChange(ctx, ExecRunner{}, targetDir, record.Plan, record.CommitSHA, record.Trailers, noRecord); err != nil {
+			return fmt.Errorf("commit %s не совпадает со своим сохранённым plan: %w", record.CommitSHA, err)
+		}
+	}
+	listed, err := commandOutput(ctx, targetDir, "git", "rev-list", "--parents", root+".."+head)
+	if err != nil {
+		return fmt.Errorf("не удалось перечислить commits поверх %s: %w", root, err)
+	}
+	lines := strings.Split(strings.TrimSpace(listed), "\n")
+	if len(lines) != len(chain) {
+		return fmt.Errorf("поверх %s лежит %d commits, а контроллер записал %d", root, len(lines), len(chain))
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !visited[fields[0]] || (!visited[fields[1]] && fields[1] != root) {
+			return fmt.Errorf("цепочка commits поверх %s нелинейна или содержит чужой commit", root)
+		}
+	}
+	ancestor := exec.CommandContext(ctx, "git", gitCommandArgs("merge-base", "--is-ancestor", base, root)...)
+	ancestor.Dir = targetDir
+	if ancestor.Run() != nil {
+		return fmt.Errorf("%w: %s не является предком начала цепочки %s", errBaseAdvanced, base, root)
+	}
+	return nil
+}
+
+func readAuthenticatedState(path string) (*state, error) {
+	data, err := safeio.ReadRegularFile(path, maxStateSize)
+	if err != nil {
+		return nil, fmt.Errorf("delivery state не найден: %w", err)
+	}
+	loaded, err := parseState(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyStateMAC(loaded); err != nil {
+		return nil, err
+	}
+	return loaded, nil
 }
 
 func VerifyPreconditions(plan Plan, actual map[string]PreconditionEvidence) error {

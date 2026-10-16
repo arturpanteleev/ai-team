@@ -1204,9 +1204,18 @@ func (rs *runState) stageCheckInputs(stage config.TemplateStage, result notifier
 			builder.WriteString("\n\n")
 			continue
 		}
-		if reference == "" && strings.TrimSpace(string(data)) != "" && !looksBinary(data) {
-			reference = strings.TrimSpace(string(data))
+		if reference != "" || strings.TrimSpace(string(data)) == "" || looksBinary(data) {
+			continue
 		}
+		if stage.Result == "link" && stage.LinkKind == "pr" {
+			// PR stage: only a PR URL/number or a structured pr_url field is a
+			// reference; any other extra output (diff, log) is not the PR.
+			if candidate, ok := prReferenceFromOutput(data); ok {
+				reference = candidate
+			}
+			continue
+		}
+		reference = strings.TrimSpace(string(data))
 	}
 	return builder.String(), reference
 }

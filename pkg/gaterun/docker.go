@@ -463,20 +463,23 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if visited++; visited > maxNestedGitWalk {
-			return fmt.Errorf("more than %d entries: nested git metadata cannot be checked", maxNestedGitWalk)
-		}
 		rel, ok := within(repoRoot, p)
 		if !ok || rel == "." {
 			return nil
 		}
-		if rel == ".git" {
+		if !strings.Contains("/"+rel+"/", "/node_modules/") {
+			visited++ // node_modules is walked but not counted against the limit
+		}
+		if visited > maxNestedGitWalk {
+			return fmt.Errorf("more than %d entries: nested git metadata cannot be checked", maxNestedGitWalk)
+		}
+		if strings.EqualFold(rel, ".git") {
 			if entry.IsDir() {
 				return filepath.SkipDir // the top-level git directory is covered already
 			}
 			return nil
 		}
-		if entry.Name() != ".git" || covered(rel) {
+		if !strings.EqualFold(entry.Name(), ".git") || covered(rel) {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {

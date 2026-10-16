@@ -117,9 +117,16 @@ stage inputs mounted read-only, a private per-attempt result directory mounted
 read-write, optionally the repository read-only, read-only repository mounts
 named in the configuration, and the allowlisted environment variables; the
 request MUST name container paths only. A repository whose `.git` is a symlink,
-that holds a nested `.git` symlink, or a nested gitfile pointing outside the
-repository MUST be refused before the container starts, and a repository mount
-MUST NOT name git metadata. A result given as a file in the result
+that holds a nested `.git` symlink (the name `.git` is compared without case),
+or a malformed nested gitfile, or a nested gitfile whose target lies inside the
+repository but is missing or reached through a symlink MUST be refused before
+the container starts; a gitfile whose target lies outside the repository (the
+submodule of a linked worktree) MUST be allowed, because the read-only mount
+does not resolve it. Entries below `node_modules` MUST NOT count against the
+500000-entry limit of this check (a larger tree is refused). Residual risks: a
+writable repository mount lets the container create a new nested `.git/hooks`,
+and HFS+/NTFS short names such as `GIT~1` are not recognised as `.git`. A
+repository mount MUST NOT name git metadata. A result given as a file in the result
 directory MUST be copied to the declared output only when the program reported
 `status: ok`; an output given both as content and as a file, a container exit
 failure, an unpinned or missing image, a timeout and an output limit hit MUST

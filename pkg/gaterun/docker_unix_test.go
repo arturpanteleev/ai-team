@@ -712,6 +712,12 @@ func TestGitOverlaysRefuseSuspiciousNestedMetadata(t *testing.T) {
 			}
 			return os.Symlink(t.TempDir(), filepath.Join(repo, "sub", ".git"))
 		},
+		"malformed upper-case gitfile": func(repo string) error {
+			if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(repo, "sub", ".GIT"), []byte("not a gitfile"), 0o644)
+		},
 		"malformed gitfile": func(repo string) error {
 			if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
 				return err

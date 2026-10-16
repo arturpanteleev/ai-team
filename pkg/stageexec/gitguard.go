@@ -17,9 +17,16 @@ const maxGitGuardEntries = 500000
 // container reach or alter anything outside the read-only mount. The mount
 // itself is read-only (so `.git` and every nested gitfile cannot be written),
 // but a nested `.git` symlink or a gitfile pointing out of the tree is a
-// pointer someone planted: tools in the container would follow it. The
-// top-level `.git` may be a file (a linked worktree): its target is outside
-// the mount, so it simply does not resolve in the container.
+// pointer someone planted: tools in the container would follow it. A gitfile
+// (the top-level one of a linked worktree, or a submodule's inside a linked
+// worktree) whose target is outside the mount is allowed: the target does not
+// resolve in the container. A gitfile whose target is inside the mount must
+// name an existing path reachable without a symlink; a missing target is
+// refused. Entries below a node_modules directory are not counted against the
+// limit (they are still inspected, so an existing nested .git there is
+// checked). Residual risks: a container with a writable mount can create a
+// new nested .git/hooks that the host would run later, and HFS+/NTFS short
+// names (GIT~1) are not recognised as .git.
 func checkRepoGitMetadata(root string) error {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -34,13 +41,16 @@ func checkRepoGitMetadata(root string) error {
 		if err != nil {
 			return err
 		}
-		if visited++; visited > maxGitGuardEntries {
+		rel, _ := filepath.Rel(root, p)
+		if !hasNodeModules(rel) {
+			visited++
+		}
+		if visited > maxGitGuardEntries {
 			return fmt.Errorf("в репозитории больше %d записей: проверка git-метаданных невозможна", maxGitGuardEntries)
 		}
-		if entry.Name() != ".git" {
+		if !strings.EqualFold(entry.Name(), ".git") {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, p)
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("вложенный %s — символическая ссылка", rel)
 		}
@@ -77,9 +87,33 @@ func checkNestedGitfile(root, p, rel string) error {
 	target = filepath.Clean(target)
 	inside, err := filepath.Rel(root, target)
 	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("gitfile %s указывает за пределы репозитория", rel)
+		return nil // outside the mount: it does not resolve in the container
+	}
+	current := root
+	for _, part := range strings.Split(inside, string(filepath.Separator)) {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("gitfile %s указывает на недоступный путь внутри репозитория %s: %w", rel, inside, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("gitfile %s указывает внутрь репозитория через символическую ссылку %s", rel, inside)
+		}
 	}
 	return nil
+}
+
+// hasNodeModules reports whether a path has a node_modules element.
+func hasNodeModules(rel string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if part == "node_modules" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasGitElement reports whether a slash-separated path names git metadata.

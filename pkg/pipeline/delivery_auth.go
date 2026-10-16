@@ -684,8 +684,7 @@ func ValidateResolvedDeliveryOperationApproval(store DeliveryApprovalReader, sou
 			continue
 		}
 		explicitMatch := explicitPlanHash != "" && strings.ToLower(strings.TrimSpace(explicitPlanHash)) == planHash
-		trustedStore, trusted := store.(approval.TrustedDecisionAuthority)
-		if !explicitMatch && (!trusted || !trustedStore.HasAuthenticatedControllerDecision(value)) {
+		if !explicitMatch && !approval.IsTrustedControllerDecision(store, value) {
 			lastErr = errors.New("deferred delivery requires an authenticated controller decision or the exact current --approve-plan hash")
 			continue
 		}

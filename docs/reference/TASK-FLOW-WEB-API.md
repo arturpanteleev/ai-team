@@ -170,7 +170,10 @@ handlers enforce: the stage function (`take`, `run-agent`, `executor`,
 `confirm` and `return` as confirm on the stage being confirmed), the
 administrator right (`override`), the unvoted required role (`plan/approve`)
 and `forbid_self_approval` for `confirm`. It never adds an action that is not in
-`allowed_actions`. The page offers a button only for an action present in both
+`allowed_actions`. When the cause of a withheld action is policy rather than a
+missing role, run detail also returns `viewer_denied_reasons` (action to
+reason; today `confirm` and `return` map to `self_approval_forbidden`), so a
+client does not infer the cause from an absent action. The page offers a button only for an action present in both
 lists and otherwise names the role that may act. MCP receives the same field.
 While a transition confirmation waits, `confirm` and `return` address the
 approval's `from_stage` (the completed stage), `skip` is offered only at a

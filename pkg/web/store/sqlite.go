@@ -17,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 18
+const SchemaVersion = 19
 
 type PipelineRun struct {
 	ID             int64      `json:"id"`
@@ -916,17 +916,10 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if version == SchemaVersion {
-		// The version mark is not proof that the administrator was granted (a
-		// build with a later schema may have marked it without this step):
-		// look at the actual state, read-only, and take the lock only if a
-		// grant is due.
-		owner, ownerErr := adminOwnerCandidate(ctx, db)
-		if ownerErr != nil {
-			return ownerErr
-		}
-		if owner == "" {
-			return nil
-		}
+		// Opening a current database never changes roles: the administrator
+		// right is granted only by the migration steps (first initialization
+		// and the one-time v19 repair), not on every open.
+		return nil
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -953,9 +946,6 @@ func migrate(db *sql.DB) error {
 		if err := applyMigrations(ctx, conn); err != nil {
 			return err
 		}
-	}
-	if err := grantAdminToOwner(ctx, conn); err != nil {
-		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
@@ -1090,7 +1080,31 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 	if err := migrateV17(ctx, tx); err != nil {
 		return err
 	}
-	return migrateV18(ctx, tx)
+	if err := migrateV18(ctx, tx); err != nil {
+		return err
+	}
+	return migrateV19(ctx, tx)
+}
+
+// migrateV19 (S21) adds the index that lets the lazy expiry of idempotency keys
+// (DELETE ... WHERE created_at < ?) avoid a full table scan on every claim. It
+// is also the last time the administrator grant looks at the actual state: a
+// database that a build with a later schema marked without the v17 step is
+// repaired once, on the upgrade. Opening a database already at this version
+// never grants roles.
+func migrateV19(ctx context.Context, tx schemaQuerier) error {
+	if err := grantAdminToOwner(ctx, tx); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_api_idempotency_created ON api_idempotency(created_at)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (19, CURRENT_TIMESTAMP)`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV17 (S06) introduces the system administrator right. It is granted
@@ -1099,9 +1113,9 @@ func applyMigrations(ctx context.Context, tx schemaQuerier) error {
 // audit, the earliest active product_owner). Other product owners do not get
 // it. Version 16 belongs to the task tracker (S14).
 //
-// The grant looks at the actual state, not at the version mark: it is also run
-// on every open (ensureSystemAdmin), so a database that a build with a later
-// schema version brought up without this step still gets its administrator.
+// The grant looks at the actual state, not at the version mark; it runs only
+// inside migration steps (here and in the one-time repair of v19), never on
+// an ordinary open of a current database.
 func migrateV17(ctx context.Context, tx schemaQuerier) error {
 	if err := grantAdminToOwner(ctx, tx); err != nil {
 		return err

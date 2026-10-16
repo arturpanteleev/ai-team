@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"github.com/arturpanteleev/ai-team/pkg/approval/approvaltest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,7 @@ func runTwoStageOverridePipeline(t *testing.T, dir string, cfg *config.Config, r
 		WithRuntimeFactory(rt.factory),
 		WithNotifier(&captureNotifier{}),
 		WithPrompter(&scriptedPrompter{}),
+		trustedFileApprovals(t, dir),
 	)
 	return p.Run(context.Background(), RunConfig{
 		Feature: "feat", TaskDesc: "тестовая задача", TargetDir: dir, ApproveGates: true,
@@ -114,6 +116,7 @@ func resumeTwoStageOverridePipeline(t *testing.T, dir string, cfg *config.Config
 		WithRuntimeFactory(rt.factory),
 		WithNotifier(&captureNotifier{}),
 		WithPrompter(&scriptedPrompter{}),
+		trustedFileApprovals(t, dir),
 	)
 	result, err := p.RunWithResult(context.Background(), RunConfig{Feature: "", TargetDir: dir, ResumeRunID: runID})
 	return result.Outcome, err
@@ -205,7 +208,8 @@ func TestRun_CheckOverrideHumanStage(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resumeHumanCrashRun(t, newHumanStageCheckPipeline(WithApprovalStore(store)), dir, runID); err != nil {
+	trusted := &approvaltest.Store{Store: store}
+	if _, err := resumeHumanCrashRun(t, newHumanStageCheckPipeline(WithApprovalStore(trusted)), dir, runID); err != nil {
 		t.Fatalf("resume after override must complete: %v", err)
 	}
 	events := readEvents(t, dir)
@@ -292,3 +296,41 @@ func TestRun_CheckOverrideSubsequentStageSeesOverriddenResult(t *testing.T) {
 // вердикт положительный, но обязательной секции нет, поэтому hard-проверка
 // этапа падает и обходится решением человека.
 const deliveryOverrideReviewContent = "**Verdict:** APPROVED\n"
+
+// trustedFileApprovals backs the pipeline with the filesystem approval store
+// that vouches for controller decisions: the production file store never does
+// (fail closed), so override tests opt in explicitly.
+func trustedFileApprovals(t *testing.T, dir string) Option {
+	t.Helper()
+	store, err := approvaltest.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return WithApprovalStore(store)
+}
+
+// The plain filesystem approval store never vouches for controller provenance
+// (its JSON files can be edited outside the process), so an override recorded
+// there is refused at resume: the check is the same for every store and fails
+// closed when the store has no trusted-decision capability.
+func TestRun_CheckOverrideIsRefusedOnAnUntrustedFileStore(t *testing.T) {
+	dir := env(t)
+	rt := newScripted()
+	rt.content["tech"] = map[string]string{"result": "## Решение\n\nбез маркера\n"}
+	rt.content["qa"] = map[string]string{"result": "# QA\n\nок\n"}
+	cfg := twoStageOverrideConfig(&config.TemplateCheck{Kind: "hard", Rules: []string{"verdict_marker"}})
+	if err := runTwoStageOverridePipeline(t, dir, cfg, rt); err == nil || !errors.Is(err, ErrUserStopped) {
+		t.Fatalf("первый запуск должен заблокироваться: %v", err)
+	}
+	decideOverride(t, dir, findOverrideDecision(t, dir), "риск принят владельцем")
+	runID := filepath.Base(onlyRunDir(t, dir))
+	p := New(cfg, twoStageOverrideRegistry(),
+		WithRuntimeFactory(rt.factory), WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}))
+	_, err := p.RunWithResult(context.Background(), RunConfig{Feature: "", TargetDir: dir, ResumeRunID: runID})
+	if err == nil || !strings.Contains(err.Error(), "аутентифицированным контроллером") {
+		t.Fatalf("override on the untrusted file store must be refused: %v", err)
+	}
+	if strings.Contains(strings.Join(rt.executed, ","), "qa") {
+		t.Fatalf("the next stage must not run after a refused override: %v", rt.executed)
+	}
+}

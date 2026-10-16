@@ -746,7 +746,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					if normalized := strings.ToLower(strings.TrimSpace(runCfg.ApprovePlanHash)); normalized != value.SubjectHash {
 						return RunResult{}, fmt.Errorf("resume run: --approve-plan %s не совпадает с subject approval %s", normalized, value.SubjectHash)
 					}
-				} else if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); !trusted || !trustedStore.HasAuthenticatedControllerDecision(value) {
+				} else if !approval.IsTrustedControllerDecision(approvalStore, value) {
 					return RunResult{}, &ApprovalRequiredError{
 						Checkpoint: "delivery требует явного --approve-plan в текущем процессе",
 						RunID:      value.RunID, ApprovalID: value.ID, SubjectHash: value.SubjectHash,
@@ -762,8 +762,7 @@ func (p *Pipeline) RunWithResult(ctx context.Context, runCfg RunConfig) (RunResu
 					return RunResult{}, fmt.Errorf("%w: delivery отклонён человеком", ErrUserStopped)
 				}
 				runCfg.ApprovePlanHash = value.SubjectHash
-				if trustedStore, trusted := approvalStore.(approval.TrustedDecisionAuthority); trusted &&
-					trustedStore.HasAuthenticatedControllerDecision(value) && !approvePlanExplicit {
+				if approval.IsTrustedControllerDecision(approvalStore, value) && !approvePlanExplicit {
 					resumedApproval = &value
 				} else {
 					// Local approvals are not authority after process restart. The

@@ -1,0 +1,35 @@
+# Короткий шаблон демонстрации S17: тот же цикл code_review ⇄ implementation, но
+# этап код-ревью исполняет ВНУТРЕННИЙ агент (мок рантайма демо). Контракт этапа
+# (вход diff, выход review, verdict) тот же, что у внешнего исполнителя, поэтому
+# граф и маршруты не меняются; меняется только то, кто исполняет этап.
+schema_version: 6
+template: review-loop-internal
+title: Цикл код-ревью (внутренний агент)
+stall_after: 24h
+
+stages:
+  - id: implementation
+    title: Техническая реализация
+    function: developer
+    result: md
+    executor: agent
+    agent: demo-coder
+
+  - id: code_review
+    title: Код-ревью
+    function: reviewer
+    result: md
+    executor: agent
+    agent: demo-reviewer
+    exit_gate_groups:
+      - [verdict_marker@1]
+
+returns:
+  - {from: code_review, to: implementation}
+
+max_visits:
+  implementation: 3
+
+cli: opencode
+effort: medium
+stage_timeout: 30m

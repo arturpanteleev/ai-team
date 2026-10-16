@@ -1,0 +1,15 @@
+name: demo-reviewer
+description: Demo Reviewer — ревью diff; тот же контракт, что у контейнерного исполнителя
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: none
+verdict:
+  required: true
+  marker: Verdict
+  values: [APPROVED, CHANGES_REQUESTED, REJECTED]
+inputs:
+  diff: '{feature}/change-diff.md'
+  candidate: '{feature}/.control/review-candidate.json'
+outputs:
+  review: '{feature}/review.md'

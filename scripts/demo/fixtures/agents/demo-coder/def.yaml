@@ -1,0 +1,12 @@
+name: demo-coder
+description: Demo Coder — пишет код и diff для демонстрации (рантайм-мок, не модель)
+runtime: agentcli
+cli: opencode
+prompt_file: prompt.md
+mutation: source
+allowed_paths: ['**']
+require_diff: true
+inputs:
+  task: tasks/{feature}/task.md
+outputs:
+  diff: '{feature}/change-diff.md'

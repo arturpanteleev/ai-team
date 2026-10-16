@@ -1,0 +1,47 @@
+#!/bin/sh
+# Демо-заглушка GitHub CLI (S17). Реального GitHub в демонстрации нет: commit и
+# push контроллер делает настоящим git в локальный bare-репозиторий
+# (state/origin.git), а эта заглушка отвечает только на `gh auth status`,
+# `gh pr create` и `gh pr view`; адреса «PR» выдуманные (https://example.test/…/pull/N,
+# N растёт с каждым `pr create`). Каждый вызов пишется в state/gh.log как
+# свидетельство того, что именно контроллер запросил.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STATE="$HERE/../state"
+REMOTE="$STATE/origin.git"
+mkdir -p "$STATE/pr" "$STATE/pr-by-head"
+echo "$*" >> "$STATE/gh.log"
+
+safe() { printf '%s' "$1" | tr '/' '_'; }
+
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "authenticated (demo stub)"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  head=""
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--head" ]; then head="$2"; fi
+    shift
+  done
+  n=$(( $(ls "$STATE/pr" | wc -l) + 35 ))
+  printf '%s' "$head" > "$STATE/pr/$n"
+  printf '%s' "$n" > "$STATE/pr-by-head/$(safe "$head")"
+  echo "https://example.test/demo/repo/pull/$n"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  ref="$3"
+  case "$ref" in
+    http*) n="${ref##*/}"; head=$(cat "$STATE/pr/$n" 2>/dev/null) ;;
+    *) n=$(cat "$STATE/pr-by-head/$(safe "$ref")" 2>/dev/null); head="$ref" ;;
+  esac
+  if [ -z "$n" ] || [ -z "$head" ]; then
+    echo "no pull requests found for $ref" >&2
+    exit 1
+  fi
+  oid=$(git --git-dir "$REMOTE" rev-parse "refs/heads/$head")
+  printf '{"url":"https://example.test/demo/repo/pull/%s","state":"OPEN","baseRefName":"master","headRefName":"%s","headRefOid":"%s"}\n' "$n" "$head" "$oid"
+  exit 0
+fi
+echo "unexpected gh call: $*" >&2
+exit 2

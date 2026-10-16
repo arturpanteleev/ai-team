@@ -1,0 +1,50 @@
+# Короткий шаблон демонстрации S17: цикл code_review ⇄ implementation с ВНЕШНИМ
+# исполнителем в Docker. Публикуется поверх демо-шаблона обычным действием
+# «опубликовать шаблон» (API/MCP/страница «Шаблон»); уже начатые задачи
+# сохраняют закреплённую версию.
+#
+# Почему отдельный шаблон: в полном шаблоне implementation сдаёт PR, который
+# создаёт контроллер (delivery). Повторная доставка той же ветки после возврата
+# из код-ревью пока не поддерживается (docs/sprint-2026-10-report.md), поэтому
+# цикл «замечания → возврат → одобрение» показан на этапе без доставки.
+schema_version: 6
+template: review-loop-external
+title: Цикл код-ревью (внешний исполнитель в Docker)
+stall_after: 24h
+
+stages:
+  - id: implementation
+    title: Техническая реализация
+    function: developer
+    result: md
+    executor: agent
+    agent: demo-coder
+
+  - id: code_review
+    title: Код-ревью
+    function: reviewer
+    result: md
+    executor: agent
+    agent: demo-reviewer
+    adapter: container-review
+    exit_gate_groups:
+      - [verdict_marker@1]
+
+returns:
+  - {from: code_review, to: implementation}
+
+max_visits:
+  implementation: 3
+
+executor_adapters:
+  container-review:
+    argv: ["/bin/sh", "/agent/review.sh"]
+    timeout: 2m
+    docker:
+      image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      network: none
+      mounts: ["agent:/agent"]
+
+cli: opencode
+effort: medium
+stage_timeout: 30m

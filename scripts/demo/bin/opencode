@@ -1,0 +1,73 @@
+#!/bin/bash
+# Демо-мок рантайма opencode (S17). Не модель: детерминированные ответы, режим
+# читается из файлов в каталоге state/ рядом с этим скриптом (окружение агента
+# контроллер фильтрует, поэтому переменные окружения сюда не доходят).
+#
+#   state/llm-mode        pass (по умолчанию) | fail | garbage — ответ LLM-гейта spec-checker
+#   state/coder-mode      clean (по умолчанию) | fixme-first — первый вызов demo-coder оставляет в diff FIXME
+#   state/coder-calls     счётчик вызовов demo-coder (сбрасывается скриптами демо при смене режима)
+#
+# Остальные агенты делегируются e2etest/mock-opencode.sh (setup.sh кладёт его
+# копию рядом как mock-opencode.sh).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STATE="$HERE/../state"
+mkdir -p "$STATE"
+
+if [[ "${1:-}" == "--version" ]]; then echo "opencode demo-mock 1.0.0"; exit 0; fi
+
+PROMPT=""; PROMPT_FILE=""
+if [[ "${1:-}" == "run" ]]; then
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m|--model) shift 2 ;;
+      -f|--file) PROMPT_FILE="$2"; shift 2 ;;
+      *) PROMPT="$1"; shift ;;
+    esac
+  done
+fi
+if [[ -n "$PROMPT_FILE" ]]; then PROMPT=$(cat "$PROMPT_FILE"); fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --message-file) PROMPT=$(cat "$2"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$PROMPT" ]] || { echo "DEMO-MOCK: no prompt" >&2; exit 1; }
+
+AGENT=$(printf '%s\n' "$PROMPT" | sed -n '1p' | sed 's/^# //')
+FEATURE=$(printf '%s\n' "$PROMPT" | sed -n '/^## Фича$/,/^$/p' | sed -n '2p' | xargs)
+ROOT=".ai-team/artifacts"
+
+write() { mkdir -p "$(dirname "$1")"; printf '%b\n' "$2" > "$1"; echo "DEMO-MOCK: wrote $1" >&2; }
+
+case "$AGENT" in
+  spec-checker)
+    mode=$(cat "$STATE/llm-mode" 2>/dev/null || echo pass)
+    case "$mode" in
+      pass) write "$ROOT/$FEATURE/spec-check.md" '```json\n{"verdict":"pass","reason":"критерии приёмки проверяемы","findings":[{"severity":"info","message":"добавьте метрику успеха"}]}\n```' ;;
+      fail) write "$ROOT/$FEATURE/spec-check.md" '```json\n{"verdict":"fail","reason":"критерии приёмки не покрывают ошибочные сценарии","findings":[{"severity":"major","message":"нет сценария для пустого ввода"}]}\n```' ;;
+      *) write "$ROOT/$FEATURE/spec-check.md" 'Всё выглядит прекрасно, доверьтесь мне.' ;;
+    esac
+    exit 0 ;;
+  demo-coder)
+    calls=$(cat "$STATE/coder-calls" 2>/dev/null || echo 0); calls=$((calls + 1)); echo "$calls" > "$STATE/coder-calls"
+    mode=$(cat "$STATE/coder-mode" 2>/dev/null || echo clean)
+    if [[ "$mode" == "fixme-first" && "$calls" -eq 1 ]]; then body='func Handle(input string) string { return input } // FIXME handle the empty input'
+    else body='func Handle(input string) string { if input == "" { return "empty" }; return input }'; fi
+    printf 'package demo\n\n%s\n' "$body" > demo_feature.go
+    write "$ROOT/$FEATURE/change-diff.md" "# Diff for $FEATURE\n\n\`\`\`diff\n--- /dev/null\n+++ b/demo_feature.go\n+package demo\n+\n+$body\n\`\`\`"
+    exit 0 ;;
+  demo-reviewer)
+    patch="$ROOT/$FEATURE/change-diff.md"
+    if grep -q 'FIXME' "$patch" 2>/dev/null; then
+      write "$ROOT/$FEATURE/review.md" "# Review for $FEATURE\n\n- found a FIXME marker in the diff\n\n**Verdict:** CHANGES_REQUESTED"
+    else
+      write "$ROOT/$FEATURE/review.md" "# Review for $FEATURE\n\n- no blocking findings\n\n**Verdict:** APPROVED"
+    fi
+    exit 0 ;;
+esac
+
+exec "$HERE/mock-opencode.sh" run "$PROMPT"

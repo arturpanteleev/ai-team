@@ -2350,6 +2350,27 @@ func TestGetPipelineProjectsDeliveryRecordSeparatelyFromRunStatus(t *testing.T) 
 	if !ok || deliveryView["status"] != "pending" {
 		t.Fatalf("worker-submitted terminal record must not project a trusted delivery: %v", body["delivery"])
 	}
+	// A delivery stage that ran before code review leaves a stage receipt and
+	// no terminal receipt; the branch is delivered, so the card must say so.
+	stageReceipt, err := delivery.SealStageDeliveryReceipt(delivery.StageDeliveryReceipt{
+		SchemaVersion: 1, RunID: run.RunID, AttemptID: "attempt-1",
+		AttemptManifestSHA256: strings.Repeat("c", 64), PlanHash: strings.Repeat("a", 64), RuntimeIdentity: strings.Repeat("d", 64),
+		ApprovalIdentity: "approval-1", Feature: run.Feature, CommitSHA: strings.Repeat("e", 40),
+		PRURL: "https://example.test/pr/7", PerformedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteControllerStageDeliveryReceipt(target, stageReceipt); err != nil {
+		t.Fatal(err)
+	}
+	body = get()
+	deliveryView, ok = body["delivery"].(map[string]any)
+	stageRecord, _ := deliveryView["record"].(map[string]any)
+	if !ok || deliveryView["status"] != "recorded" || stageRecord["pr_url"] != "https://example.test/pr/7" ||
+		stageRecord["commit_sha"] != strings.Repeat("e", 40) {
+		t.Fatalf("a stage delivery receipt must project recorded Git outcome: %v", body["delivery"])
+	}
 	if err := delivery.WriteControllerDeliveryReceipt(target, record); err != nil {
 		t.Fatal(err)
 	}

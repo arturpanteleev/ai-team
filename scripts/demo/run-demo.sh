@@ -39,15 +39,23 @@ cleanup() {
   if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
   # Контейнеры демо несут метки контроллера; после нормального прогона их нет. Несколько
   # --filter label=… объединяются по И, поэтому метки опрашиваются двумя отдельными запросами,
-  # а удаляются только контейнеры, у которых смонтирован каталог ЭТОГО демо (его имя из mktemp
-  # уникально): чужие контейнеры ai-team на той же машине не трогаются.
-  local label id mounts
-  for label in ai-team.stage-attempt ai-team.gate-attempt; do
-    for id in $(docker ps -aq --filter "label=$label" 2>/dev/null); do
-      mounts="$(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$id" 2>/dev/null || true)"
-      if [[ "$mounts" == *"$(basename "$DEMO_HOME")"* ]]; then docker rm -f "$id" >/dev/null 2>&1 || true; fi
+  # а удаляются только контейнеры, у которых смонтирован сам каталог ЭТОГО демо или вложенный в
+  # него путь: источник mount сравнивается с полным физическим путём DEMO_HOME (pwd -P), а не с
+  # подстрокой имени, поэтому чужие контейнеры ai-team на той же машине не трогаются.
+  local label id source phys match
+  phys="$(cd "$DEMO_HOME" 2>/dev/null && pwd -P || true)"
+  if [[ -n "$phys" && "$phys" != "/" ]]; then
+    for label in ai-team.stage-attempt ai-team.gate-attempt; do
+      for id in $(docker ps -aq --filter "label=$label" 2>/dev/null); do
+        match=0
+        for source in $(docker inspect -f '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$id" 2>/dev/null || true); do
+          source="${source#/host_mnt}" # Docker Desktop показывает путь хоста с этим префиксом
+          if [[ "$source" == "$phys" || "$source" == "$phys"/* ]]; then match=1; fi
+        done
+        if [[ "$match" == "1" ]]; then docker rm -f "$id" >/dev/null 2>&1 || true; fi
+      done
     done
-  done
+  fi
   if [[ "${DEMO_KEEP:-0}" == "1" ]]; then
     echo "окружение оставлено: $DEMO_HOME (сервер остановлен)"
   else

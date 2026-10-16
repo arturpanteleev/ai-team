@@ -94,6 +94,19 @@
   [docs/demo/README.md](demo/README.md) после слияния PR демонстрации и раздел
   «Проверка на реальных клиентах» в [mcp.md](reference/mcp.md)).
 
+Исправлено в S18: строка лога `web store (create missing stage): UNIQUE constraint
+failed: stages.attempt_uid` на успешном демо-сценарии. Причина: `StageFinished` для
+попытки этапа человека вызывается дважды (`pkg/pipeline/human_stage.go` и цикл этапов в
+`pkg/pipeline/execute.go` после гейтов и delivery), а `StoreRecorder.StageFinished`
+второй раз вставлял строку заново и терял итоговые проверки. Теперь строка обновляется
+(`pkg/web/recorder.go`, тест `TestStoreRecorder_RepeatedStageFinishedUpdatesTheRowOnce`).
+
+Остаточное по S18: хранилище версий шаблонов не фиксирует происхождение версии (файл или
+веб), поэтому запуск по сохранённой версии с чужими командами не блокируется, а
+предупреждение печатается при старте `ai-team web`; право `template.edit` по-прежнему
+меняет роли этапов, `forbid_self_approval` и выбор объявленного адаптера или MCP-сервера
+для этапа (это процесс).
+
 Расхождения справочных текстов `ai-team --help` с документацией (в справке нет
 `--mcp-allowed-origins` и права `admin` в списке ролей `auth-token`) — в коде, не в
 документации; код в этом PR не менялся.

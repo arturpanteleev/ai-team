@@ -237,7 +237,23 @@ func (c *Controller) ResumeWithBudgetAllowance(runID, actorID, reason string) er
 	return c.resume(runID, grant, false)
 }
 
+// RequireTrustedPin refuses to continue a run whose pinned template carries
+// command gates or infrastructure settings the file configuration does not
+// contain (*config.TrustedConfigError, code trusted_config_only). A run
+// without a pin has nothing to refuse.
+func (c *Controller) RequireTrustedPin(runID string) error {
+	store, err := config.NewTemplateStore(c.target)
+	if err != nil {
+		return fmt.Errorf("template store: %w", err)
+	}
+	_, _, _, err = store.ReadRunnablePinnedRun(runID)
+	return err
+}
+
 func (c *Controller) resume(runID string, grant *pipeline.BudgetAllowanceGrant, upgradeRuntime bool) error {
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
+	}
 	stateStore, err := lifecycle.NewStore(c.target)
 	if err != nil {
 		return err
@@ -545,6 +561,10 @@ func (c *Controller) ChangeStageExecutor(runID, stageID, executor, actorID strin
 // A pending human input approval is resolved with run_agent (or refine_agent,
 // which feeds the current result back as refinement input) before resuming.
 func (c *Controller) RunStageAgent(_ context.Context, runID, stageID, actorID string, refine bool) error {
+	// Before any decision is recorded: a refusal must not spend the approval.
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
+	}
 	state, err := c.loadLifecycle(runID)
 	if err != nil {
 		return err
@@ -601,6 +621,9 @@ func (c *Controller) SkipStage(_ context.Context, runID, stageID, reason, actorI
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("пропуск этапа требует причину")
 	}
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
+	}
 	state, err := c.loadLifecycle(runID)
 	if err != nil {
 		return err
@@ -655,6 +678,10 @@ func (c *Controller) SkipStage(_ context.Context, runID, stageID, reason, actorI
 func (c *Controller) ReturnStage(_ context.Context, runID, stageID, toStage, reason, actorID, actorRole string) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("для возврата требуется причина")
+	}
+	// Before any decision is recorded: a refusal must not spend the approval.
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
 	}
 	state, err := c.loadLifecycle(runID)
 	if err != nil {

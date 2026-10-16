@@ -95,6 +95,20 @@ func (s *TemplateStore) Publish(data []byte, expectedVersion string) (string, er
 	if err := s.writeImmutableVersion(version, data); err != nil {
 		return "", err
 	}
+	// Provenance (template_provenance.go): keep the file configuration the web
+	// replaces as the trusted baseline, and record the bytes the web writes.
+	// Both happen before the replacement, so a crash leaves at worst a marker
+	// for bytes that are not on disk.
+	if webWritten, err := s.isWebWritten(current); err != nil {
+		return "", err
+	} else if !webWritten {
+		if err := s.saveBaseline(current); err != nil {
+			return "", err
+		}
+	}
+	if err := s.markWebWritten(data); err != nil {
+		return "", err
+	}
 	if string(current) == string(data) {
 		return version, nil
 	}

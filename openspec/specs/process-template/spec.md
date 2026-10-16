@@ -232,10 +232,23 @@ version. Concurrent edits MUST NOT silently overwrite a newer active version.
 - **КОГДА** a template is submitted through REST, MCP, or the Web UI (validate
   or publish)
 - **ТОГДА** only the process fields MAY differ from the active file
-  configuration: `template`, `title`, `schema_version`, `stall_after`,
-  `forbid_self_approval`, `stages` (except a stage's `delivery`), `returns`,
-  `max_visits`, and the tracker status maps `tracker.on_enter`,
+  configuration: `template`, `title`, `schema_version`, `stall_after`, the
+  `id`, `title`, `result`, `link_kind`, `required_sections`, `check`,
+  `confirm`, `exit_gate_groups` and `skippable` of a stage (stages MAY be added
+  or removed), and the tracker status maps `tracker.on_enter`,
   `tracker.on_pass`, and `tracker.jira.stage_statuses`
+- **И** `forbid_self_approval`, `returns` and `max_visits` MAY only become
+  stricter: a switched-on `forbid_self_approval` MUST NOT be switched off, a
+  return route absent from the active file configuration MUST be refused, and
+  the effective visit limit of a return target MUST NOT exceed the active one
+- **И** the `function`, `approver_function`, `executor`, `agent`, `adapter` and
+  `mcp_servers` of a stage that exists in the active file configuration MUST
+  equal it (an adapter MAY be dropped and the MCP server list MAY be narrowed);
+  a stage the active configuration does not have MUST be a `human` stage
+  without `agent`, `adapter` and `mcp_servers` whose roles the active
+  configuration already uses
+- **И** an absent tracker (or `tracker.jira`) section and an empty one MUST be
+  treated as the same configuration
 - **И** every other field of the document (tracker adapter, endpoints, token
   environment names and `inbound`, `cicd`, `notifications`, `containment`,
   runtime settings, timeouts, `budget`, `auto_pickup`, `usage`, `tree_hash`,
@@ -246,10 +259,44 @@ version. Concurrent edits MUST NOT silently overwrite a newer active version.
 - **И** the allow-list MUST be explicit, so a configuration field that nobody
   classified is treated as infrastructure and a test MUST fail until it is
   classified
+- **И** on an existing stage the web MUST NOT make the stage skippable and MUST
+  NOT remove or change a gate without a command (including the transition
+  confirmation); an empty `executor` MUST equal `human`
 - **И** a document identical to the active file configuration, and a document
   that differs only in process fields, MUST be accepted
 - **И** when no active file configuration is readable, every infrastructure
   section of a web document MUST be refused
+
+#### Scenario: A stored template with commands does not run
+
+- **КОГДА** a run is started, resumed, skipped, delivered again or executed by a
+  worker (CLI `run --resume`, REST, MCP, Web UI) and its pinned template
+  contains a gate of kind `external` or `docker` or an infrastructure section
+  that does not equal the active file configuration
+- **ТОГДА** the operation MUST be refused with the code `trusted_config_only`
+  (HTTP `409` for REST and MCP) and MUST NOT start any worker, command or
+  container
+- **И** the trusted file configuration MUST be the active `config.yaml` unless
+  the web wrote it: the controller MUST record, outside the template content
+  (`.ai-team/templates`), the SHA-256 of every byte sequence a web publication
+  writes and the last file configuration it replaced, and an active file whose
+  bytes still hash to a recorded value MUST be compared with that baseline
+  instead of trusting itself; a person editing the file MUST restore trust
+- **И** a pinned command gate MUST be accepted when the trusted file has the
+  same gate (definition, version, name, mode, parameters) in the stage of the
+  same id, and refused otherwise, with a message that names the way out
+- **И** without a file configuration the trusted baseline MUST be empty: a
+  pinned template with commands or infrastructure MUST be refused, one without
+  MUST run
+- **И** the audit of stored versions MUST include the active template when the
+  web wrote it
+- **И** process differences (titles, roles, routes, limits, soft gates),
+  differences in `stage_timeout`, `gate_concurrency`, `preflight_timeout`,
+  `delivery_timeout`, `model` and `effort` MUST NOT be refused; the role,
+  executor and tighten-only checks MUST NOT apply to an already pinned template
+- **И** run-agent and return MUST be refused before any decision is recorded
+- **И** `ai-team web` MUST warn at start about stored versions that would be
+  refused, and MUST print an error when the audit itself cannot be completed
 
 #### Scenario: Publish with stale active version
 

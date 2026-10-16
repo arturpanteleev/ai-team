@@ -48,7 +48,7 @@ DEMO_SKIP_UI=1 bash scripts/demo/run-demo.sh        # без браузерны�
 | `scripts/demo/bin/opencode`, `bin/gh` | мок рантайма (режимы — файлы `state/`) и заглушка GitHub CLI |
 | `scripts/demo/fixtures/` | демо-репозиторий, host- и Docker-гейты, агенты `demo-coder` и `demo-reviewer` |
 | `docs/demo/demo-template.yaml` | 9 этапов `idea-to-prod`, 6 возвратов, гейты всех видов, внешний исполнитель, фейковый трекер; `setup.sh` кладёт его в `.ai-team/config.yaml` (файловый конфиг) |
-| `docs/demo/demo-template-review-loop-{external,internal}.yaml` | короткие шаблоны для цикла код-ревью без командных гейтов; публикуются через страницу «Шаблон» |
+| `docs/demo/demo-template-review-loop-{external,internal}.yaml` | короткие шаблоны для цикла код-ревью без командных гейтов; сценарий сначала кладёт короткий шаблон в `.ai-team/config.yaml` (из веба нельзя убрать гейты файлового конфига), затем публикует тот же документ через страницу «Шаблон» |
 
 ## Что показывает сценарий
 

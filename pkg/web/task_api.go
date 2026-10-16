@@ -976,6 +976,9 @@ func (s *Server) handleTaskStageSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := controller.SkipStage(r.Context(), runID, stageID, command.Reason, actorID, actorRole); err != nil {
+		if writeTrustedConfigRefusal(w, err) {
+			return
+		}
 		s.taskConflict(w, runID, stageID, err.Error())
 		return
 	}

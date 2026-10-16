@@ -169,6 +169,7 @@ func TestRunResumeUsesPinnedTemplatePreflightAfterActiveTemplateChanges(t *testi
 	}
 	pinnedConfig.Title = "Pinned template"
 	pinnedConfig.CLI = "opencode"
+	pinnedConfig.Effort = "low"
 	pinnedYAML, err := pinnedConfig.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +187,7 @@ func TestRunResumeUsesPinnedTemplatePreflightAfterActiveTemplateChanges(t *testi
 	}
 	activeConfig := *pinnedConfig
 	activeConfig.Title = "Changed active template"
-	activeConfig.CLI = "claude"
+	activeConfig.Effort = "high"
 	activeYAML, err := activeConfig.Marshal()
 	if err != nil {
 		t.Fatal(err)

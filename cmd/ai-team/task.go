@@ -188,7 +188,7 @@ func loadPinnedResumeConfig(target, runID string, registry *agent.Registry) (*co
 	if err != nil {
 		return nil, false, fmt.Errorf("open pinned template store: %w", err)
 	}
-	data, _, found, err := store.ReadPinnedRun(runID)
+	data, _, found, err := store.ReadRunnablePinnedRun(runID)
 	if err != nil || !found {
 		return nil, found, err
 	}

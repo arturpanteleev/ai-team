@@ -67,7 +67,8 @@ func (s *Server) templateStore() (*config.TemplateStore, error) {
 type trustedConfigError struct{ problems []string }
 
 func (e *trustedConfigError) Error() string {
-	return "шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), может менять только процесс (этапы, возвраты, роли, лимиты посещений, карты статусов трекера); " +
+	return "шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), может менять только процесс (названия, результаты и гейты без команд у этапов, карты статусов трекера) " +
+		"и только ужесточать forbid_self_approval, returns и max_visits; роли, исполнитель, агент, адаптер и MCP-серверы существующих этапов должны совпадать с файловым конфигом; " +
 		"команды, образы, mounts и инфраструктурные настройки должны совпадать с активным файловым конфигом: " +
 		strings.Join(e.problems, "; ") +
 		". Гейты external_program и docker_program, определения executor_adapters, checks и mcp_servers, tracker (адаптер, URL, токены, inbound), cicd, notifications, containment, runtime, budget и прочие секции " +

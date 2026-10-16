@@ -408,3 +408,25 @@ func TestCheckRepeatedSectionHeadingsAreSearchedTogether(t *testing.T) {
 		t.Error("text of another section is outside the scope")
 	}
 }
+
+func TestParseVersionOneKeepsPublishedValidation(t *testing.T) {
+	for name, overrides := range map[string]map[string]any{
+		"control character": {ParamPhrases: []any{"alpha\x1b"}},
+		"nested at_least":   {ParamPhrases: []any{"API", "API gateway"}, ParamMatch: MatchAtLeast, ParamMinCount: 2},
+	} {
+		if _, err := ParseVersion(1, params(overrides)); err != nil {
+			t.Errorf("%s: version 1 must accept it: %v", name, err)
+		}
+		if _, err := ParseVersion(2, params(overrides)); err == nil {
+			t.Errorf("%s: version 2 must reject it", name)
+		}
+		if _, err := Parse(params(overrides)); err == nil {
+			t.Errorf("%s: Parse uses the latest version", name)
+		}
+	}
+	// Line ending and BOM normalization applies to both versions.
+	spec, err := ParseVersion(1, params(map[string]any{ParamPhrases: []any{"alpha\nbeta"}}))
+	if err != nil || !spec.Check("\ufeffalpha\r\nbeta").Satisfied {
+		t.Fatalf("v1 normalizes line endings and BOM: %v", err)
+	}
+}

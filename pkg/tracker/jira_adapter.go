@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
@@ -31,7 +32,16 @@ type JiraAdapter struct {
 	selfMu    sync.Mutex
 	selfKnown bool
 	self      jiraUser
+
+	// changelogFallbacks counts issues whose full changelog could not be read
+	// (an old Data Center without /changelog) and whose embedded part was used.
+	changelogFallbacks atomic.Int64
 }
+
+// ChangelogFallbacks reports how many times the adapter had to use the
+// truncated changelog embedded in a search result because the server has no
+// /issue/{key}/changelog endpoint.
+func (a *JiraAdapter) ChangelogFallbacks() int64 { return a.changelogFallbacks.Load() }
 
 // NewJiraAdapter keeps the HTTP client injectable so callers and tests can
 // control all network effects. A missing token is reported per call, which
@@ -367,8 +377,9 @@ type jiraHistory struct {
 type jiraSearchIssue struct {
 	Key       string `json:"key"`
 	Changelog struct {
-		Total     int           `json:"total"`
-		Histories []jiraHistory `json:"histories"`
+		Total      int           `json:"total"`
+		MaxResults int           `json:"maxResults"`
+		Histories  []jiraHistory `json:"histories"`
 	} `json:"changelog"`
 }
 
@@ -382,10 +393,11 @@ type jiraSearchResponse struct {
 
 // jiraChangelogPage is one page of GET /issue/{key}/changelog.
 type jiraChangelogPage struct {
-	StartAt int           `json:"startAt"`
-	Total   int           `json:"total"`
-	IsLast  *bool         `json:"isLast"`
-	Values  []jiraHistory `json:"values"`
+	StartAt    int           `json:"startAt"`
+	MaxResults int           `json:"maxResults"`
+	Total      int           `json:"total"`
+	IsLast     *bool         `json:"isLast"`
+	Values     []jiraHistory `json:"values"`
 }
 
 // Hard stops against a server that never ends a page chain: Changes fails
@@ -456,9 +468,12 @@ func (a *JiraAdapter) Changes(ctx context.Context, query ChangeQuery) (ChangePag
 			return ChangePage{}, err
 		}
 		for _, issue := range response.Issues {
-			histories, err := a.issueHistories(ctx, issue)
+			histories, warning, err := a.issueHistories(ctx, issue)
 			if err != nil {
 				return ChangePage{}, err
+			}
+			if warning != "" && len(page.Warnings) < 20 {
+				page.Warnings = append(page.Warnings, warning)
 			}
 			for _, history := range histories {
 				created, err := parseJiraTime(history.Created)
@@ -524,13 +539,17 @@ const jiraChangeKeyBatch = 50
 // searchChanges reads the status changelogs of one batch of issues, following
 // every page of the search result.
 func (a *JiraAdapter) searchChanges(ctx context.Context, keys []string, window int) (jiraSearchResponse, error) {
-	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY updated ASC`, strings.Join(keys, ","), window)
+	// The order is by key, not by update time: the key set is fixed by the
+	// query, so an issue updated between two pages cannot move to another page
+	// and be skipped by startAt paging (Changes sorts the changes itself).
+	jql := fmt.Sprintf(`key in (%s) AND updated >= "-%dm" ORDER BY key ASC`, strings.Join(keys, ","), window)
 	// /search/jql replaces the removed /search on Jira Cloud; Jira Server and
 	// Data Center only know /search, so a 404 on the first page falls back to
 	// it. The two differ in paging: nextPageToken against startAt.
 	legacy := false
 	var merged jiraSearchResponse
 	token, startAt := "", 0
+	seen := map[string]bool{}
 	for page := 0; ; page++ {
 		if page >= jiraMaxPages {
 			return jiraSearchResponse{}, errors.New("jira search result has too many pages")
@@ -553,7 +572,12 @@ func (a *JiraAdapter) searchChanges(ctx context.Context, keys []string, window i
 			}
 			return jiraSearchResponse{}, err
 		}
-		merged.Issues = append(merged.Issues, response.Issues...)
+		for _, issue := range response.Issues {
+			if !seen[issue.Key] {
+				seen[issue.Key] = true
+				merged.Issues = append(merged.Issues, issue)
+			}
+		}
 		if legacy {
 			startAt += len(response.Issues)
 			if len(response.Issues) == 0 || startAt >= response.Total {
@@ -568,30 +592,71 @@ func (a *JiraAdapter) searchChanges(ctx context.Context, keys []string, window i
 	}
 }
 
+// changelogCut reports whether the changelog embedded in a search result may
+// be incomplete. The total is the main signal; when the server omits it (zero
+// with histories present), a full page of histories (the reported maxResults,
+// or the page size) is treated as possibly cut.
+func changelogCut(embedded int, total, maxResults int) bool {
+	if total > embedded {
+		return true
+	}
+	if total > 0 || embedded == 0 {
+		return false
+	}
+	limit := maxResults
+	if limit <= 0 || limit > jiraSearchPageSize {
+		limit = jiraSearchPageSize
+	}
+	return embedded >= limit
+}
+
 // issueHistories returns the histories embedded in a search result, or, when
-// Jira cut the embedded changelog short, the full changelog of the issue.
-func (a *JiraAdapter) issueHistories(ctx context.Context, issue jiraSearchIssue) ([]jiraHistory, error) {
-	if issue.Changelog.Total <= len(issue.Changelog.Histories) {
-		return issue.Changelog.Histories, nil
+// Jira may have cut the embedded changelog short, the full changelog of the
+// issue. A server without /changelog (old Data Center) answers 404: the
+// embedded part is used, the fallback is counted and reported as a warning, so
+// polling keeps working instead of failing forever.
+func (a *JiraAdapter) issueHistories(ctx context.Context, issue jiraSearchIssue) ([]jiraHistory, string, error) {
+	embedded := issue.Changelog.Histories
+	if !changelogCut(len(embedded), issue.Changelog.Total, issue.Changelog.MaxResults) {
+		return embedded, "", nil
 	}
 	path, err := a.issuePath(issue.Key)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var all []jiraHistory
 	for page := 0; page < jiraMaxPages; page++ {
 		endpoint := fmt.Sprintf("%s/changelog?startAt=%d&maxResults=%d", path, len(all), jiraSearchPageSize)
 		var response jiraChangelogPage
 		if err := a.requestJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-			return nil, err
+			if errors.Is(err, ErrNotFound) && page == 0 {
+				a.changelogFallbacks.Add(1)
+				return embedded, "jira: " + issue.Key + ": /changelog is not available, only the changelog embedded in the search result was read; later status changes may be missed", nil
+			}
+			return nil, "", err
 		}
 		all = append(all, response.Values...)
-		if len(response.Values) == 0 || (response.IsLast != nil && *response.IsLast) ||
-			(response.IsLast == nil && len(all) >= response.Total) {
-			return all, nil
+		pageLimit := response.MaxResults
+		if pageLimit <= 0 || pageLimit > jiraSearchPageSize {
+			pageLimit = jiraSearchPageSize
+		}
+		switch {
+		case len(response.Values) == 0:
+			return all, "", nil
+		case response.IsLast != nil:
+			if *response.IsLast {
+				return all, "", nil
+			}
+		case response.Total > 0:
+			if len(all) >= response.Total {
+				return all, "", nil
+			}
+		case len(response.Values) < pageLimit:
+			// No total and no isLast: a short page is the last one.
+			return all, "", nil
 		}
 	}
-	return nil, errors.New("jira changelog has too many pages")
+	return nil, "", errors.New("jira changelog has too many pages")
 }
 
 func formatJiraCursor(ms, id int64) string { return fmt.Sprintf("%d:%d", ms, id) }

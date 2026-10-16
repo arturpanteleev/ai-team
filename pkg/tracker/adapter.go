@@ -85,6 +85,9 @@ const OriginExternal = "external"
 type ChangePage struct {
 	Changes []Change `json:"changes"`
 	Cursor  string   `json:"cursor"`
+	// Warnings are non-fatal notes of the adapter (for example a truncated
+	// changelog on a server without the changelog endpoint).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Tracker is the abstract task management system. Adapters are named in the

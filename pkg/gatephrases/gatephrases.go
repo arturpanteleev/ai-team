@@ -76,9 +76,22 @@ type Spec struct {
 	patterns []*regexp.Regexp
 }
 
-// Parse validates the parameters and returns the Spec. Every error names the
-// parameter and never repeats a phrase or a pattern value.
+// LatestVersion is the newest required_phrases version. Version 1 keeps the
+// validation it was published with; version 2 adds the stricter checks
+// (control characters in a phrase, overlapping phrases for at_least). A
+// published version never starts to reject configurations it accepted.
+const LatestVersion = 2
+
+// Parse validates the parameters with the rules of the latest version.
 func Parse(params map[string]any) (*Spec, error) {
+	return ParseVersion(LatestVersion, params)
+}
+
+// ParseVersion validates the parameters with the rules of the given
+// required_phrases version and returns the Spec. Every error names the
+// parameter and never repeats a phrase or a pattern value.
+func ParseVersion(version int, params map[string]any) (*Spec, error) {
+	strict := version >= 2
 	spec := &Spec{}
 	for name := range params {
 		switch name {
@@ -107,7 +120,7 @@ func Parse(params map[string]any) (*Spec, error) {
 		}
 		// A control character (CR, NUL, ESC, ...) is a copy-paste accident that
 		// can never match the line-normalized text. Newline and tab are kept.
-		if strings.IndexFunc(phrase, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
+		if strict && strings.IndexFunc(phrase, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
 			return nil, fmt.Errorf("параметр %q[%d]: содержит управляющий символ", ParamPhrases, i)
 		}
 	}
@@ -188,7 +201,7 @@ func Parse(params map[string]any) (*Spec, error) {
 	// min_count says. That is ambiguous, so it is a configuration error for
 	// at_least; all and any are not affected by overlap. Regular expressions
 	// cannot be compared and are not checked.
-	if spec.Match == MatchAtLeast && !spec.Regex {
+	if strict && spec.Match == MatchAtLeast && !spec.Regex {
 		for i := range phrases {
 			for j := range phrases {
 				if i == j {
@@ -242,10 +255,13 @@ func matchesEmpty(re *regexp.Regexp) bool {
 	return false
 }
 
-// Validate is Parse without the result.
-func Validate(params map[string]any) error {
-	_, err := Parse(params)
-	return err
+// ValidateVersion returns the parameter validator of one required_phrases
+// version (ParseVersion without the result).
+func ValidateVersion(version int) func(map[string]any) error {
+	return func(params map[string]any) error {
+		_, err := ParseVersion(version, params)
+		return err
+	}
 }
 
 // Result is the outcome of one check.

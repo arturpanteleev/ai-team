@@ -74,7 +74,7 @@ so pinned templates keep their definitions.
 
 ### Requirement: required_phrases checks explicit phrases without scripts
 
-`required_phrases@1` MUST check that configured words or fragments are present
+`required_phrases@1` and `required_phrases@2` MUST check that configured words or fragments are present
 in an `md` result. The parameters `phrases`, `case` (`sensitive|insensitive`),
 `scope` (`result|section`) and `match` (`all|any|at_least`) MUST be required;
 `section` MUST be required exactly for `scope: section` and `min_count` exactly
@@ -94,12 +94,17 @@ rejected before a run starts. An empty result or a missing section MUST be
 `fail`; an unreadable, oversized or absent Markdown output MUST be `error`; the
 gate MUST NOT return `not_applicable`.
 
+Version 1 MUST keep the validation it was published with: the control-character
+and overlap rejections below apply to `required_phrases@2` only, and
+`required_phrases@1` MUST keep accepting configurations it accepted before. Line
+ending and byte order mark normalization applies to both versions.
+
 Phrase edge cases MUST behave as follows. A phrase MUST NOT be empty, MUST NOT
-begin or end with whitespace (including a no-break space) and MUST NOT contain a
+begin or end with whitespace (including a no-break space) and, in `@2`, MUST NOT contain a
 control character other than newline and tab; whitespace inside a phrase is
 literal. Phrases MUST be compared by distinct entry: a phrase found several
 times is one entry, and entries that overlap in the text are each found. For
-`match: at_least` without `regex`, a phrase that contains another phrase (after
+`match: at_least` without `regex`, in `@2` a phrase that contains another phrase (after
 the selected case folding) MUST be rejected during validation, because one
 fragment would satisfy both entries. The text MUST be compared as it is, except
 that CRLF and a lone CR become LF and a leading byte order mark is dropped.
@@ -124,7 +129,7 @@ their bodies.
 
 #### Scenario: Overlapping phrases do not inflate at_least
 
-- **КОГДА** `match: at_least` lists `API` and `API gateway`
+- **КОГДА** `required_phrases@2` with `match: at_least` lists `API` and `API gateway`
 - **ТОГДА** configuration validation MUST fail without repeating the phrases
 - **И** under `match: all` the same list MUST be accepted and one occurrence of
   `API gateway` MUST satisfy both entries

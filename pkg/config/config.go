@@ -262,12 +262,23 @@ type JiraConfig struct {
 	Email      string `yaml:"email"`
 	TokenEnv   string `yaml:"token_env"`
 	WebBaseURL string `yaml:"web_base_url"`
+	// Auth selects the credential scheme: "basic" (default; email plus API
+	// token) or "bearer" (a bare personal access token of Jira Server/Data
+	// Center sent as Authorization: Bearer; email is then optional). The
+	// secret itself always comes from the environment variable token_env.
+	Auth string `yaml:"auth,omitempty"`
 	// APIVersion selects REST API v2 (plain text comments) or v3 (ADF
 	// comments, the default).
 	APIVersion int `yaml:"api_version,omitempty"`
 	// StageStatuses is the legacy spelling of tracker.on_pass.
 	StageStatuses map[string]string `yaml:"stage_statuses,omitempty"`
 }
+
+// Jira credential schemes of JiraConfig.Auth.
+const (
+	JiraAuthBasic  = "basic"
+	JiraAuthBearer = "bearer"
+)
 
 // FakeTrackerConfig configures the deterministic in-memory tracker used for
 // tests and demos.
@@ -359,7 +370,7 @@ func (tc *TrackerConfig) UnmarshalYAML(value *yaml.Node) error {
 func (jc *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := validateMappingKeys(value, map[string]bool{
 		"base_url": true, "email": true, "token_env": true, "web_base_url": true,
-		"stage_statuses": true, "api_version": true,
+		"stage_statuses": true, "api_version": true, "auth": true,
 	}, "config: tracker jira"); err != nil {
 		return err
 	}
@@ -464,8 +475,15 @@ func (jc *JiraConfig) Validate(stageIDs map[string]bool) error {
 			problems = append(problems, "tracker.jira.base_url должен использовать HTTPS для защиты API token")
 		}
 	}
-	if strings.TrimSpace(jc.Email) == "" || strings.ContainsAny(jc.Email, "\r\n\x00") {
-		problems = append(problems, "tracker.jira.email обязателен и не должен содержать управляющие символы")
+	switch jc.Auth {
+	case "", JiraAuthBasic, JiraAuthBearer:
+	default:
+		problems = append(problems, "tracker.jira.auth должен быть basic или bearer")
+	}
+	// Basic needs the account e-mail; Bearer carries only the token, so the
+	// e-mail is optional there but must still not hold control characters.
+	if (jc.Auth != JiraAuthBearer && strings.TrimSpace(jc.Email) == "") || strings.ContainsAny(jc.Email, "\r\n\x00") {
+		problems = append(problems, "tracker.jira.email обязателен (кроме auth: bearer) и не должен содержать управляющие символы")
 	}
 	if !envVariableName.MatchString(jc.TokenEnv) {
 		problems = append(problems, "tracker.jira.token_env должен быть именем переменной окружения")

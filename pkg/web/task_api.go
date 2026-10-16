@@ -120,8 +120,12 @@ type taskRunDetails struct {
 	// ViewerActions is the part of allowed_actions the requesting principal
 	// may perform (stage function, system right, plan roles). It is computed
 	// by the same checks the action handlers enforce.
-	ViewerActions []string              `json:"viewer_actions"`
-	Delivery      webDeliveryProjection `json:"delivery"`
+	ViewerActions []string `json:"viewer_actions"`
+	// ViewerDeniedReasons names why an offered action is withheld from this
+	// principal when the cause is policy rather than a missing role:
+	// action -> "self_approval_forbidden".
+	ViewerDeniedReasons map[string]string     `json:"viewer_denied_reasons,omitempty"`
+	Delivery            webDeliveryProjection `json:"delivery"`
 	// StageStatuses is the server-side projection of every stage of the task
 	// from the durable journal (S11). It is read-only: no route sets a status.
 	StageStatuses *stagestatus.Projection `json:"stage_statuses,omitempty"`
@@ -304,7 +308,7 @@ func (s *Server) handleGetTaskRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, status, err.Error(), apiErrorCode(status))
 		return
 	}
-	details.ViewerActions = s.viewerActions(r, details.State, details.Approvals, details.AllowedActions)
+	details.ViewerActions, details.ViewerDeniedReasons = s.viewerActions(r, details.State, details.Approvals, details.AllowedActions)
 	writeJSONResponse(w, http.StatusOK, details)
 }
 
@@ -1004,6 +1008,14 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 	actorID, actorRole, ok := s.taskActionActor(w, r, stage, cloudidentity.StageActionConfirm)
 	if !ok {
 		return
+	}
+	if pending != nil && isStageConfirmation(*pending) {
+		// A return is a decision on the same stage visit as a confirmation:
+		// forbid_self_approval applies to it (an unverifiable policy fails closed).
+		if err := s.selfApprovalViolation(runID, *pending, actorID); err != nil {
+			writeJSONAPIError(w, http.StatusForbidden, err.Error(), "self_approval_forbidden")
+			return
+		}
 	}
 	controller, ok := s.controller.(StageReturnController)
 	if !ok {

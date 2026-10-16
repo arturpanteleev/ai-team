@@ -854,8 +854,7 @@ func (p *Pipeline) validateControllerBackedLegacyDelivery(targetDir, runDir, run
 				for _, value := range approvals {
 					if value.RunID == runID && value.Trigger == "delivery_plan" && value.SubjectHash == planHash &&
 						value.AttemptID == event.AttemptID && value.Status == approval.StatusResolved && value.ResolvedAction == "approve" {
-						trustedStore, trusted := p.approvals.(approval.TrustedDecisionAuthority)
-						matched = trusted && trustedStore.HasAuthenticatedControllerDecision(value) || p.deliveryApprovalHash == planHash
+						matched = approval.IsTrustedControllerDecision(p.approvals, value) || p.deliveryApprovalHash == planHash
 						break
 					}
 				}

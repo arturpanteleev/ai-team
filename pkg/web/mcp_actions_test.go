@@ -389,3 +389,23 @@ func restStatusAs(t *testing.T, env *mcpActionEnv, actor, method, path, body str
 	t.Helper()
 	return teamRequest(env.srv, env.cookies[actor], env.csrf[actor], method, path, body).Code
 }
+
+// decide_approval with return_to_* is subject to the same self-approval rule.
+func TestMCPDecideReturnToRefusedForTheStageAuthor(t *testing.T) {
+	submitted := time.Now().UTC().Add(-time.Hour)
+	approvals := []approval.PendingApproval{
+		buildInputApproval("input-1", approval.StatusResolved, submitted,
+			approval.Decision{ActorID: actorBoth, ActorRole: "developer", Action: "submit"}),
+		buildConfirmApproval(submitted.Add(30 * time.Minute)),
+	}
+	runs := map[string]lifecycle.State{"run-confirm": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "gate-1"}}
+	env := newMCPActionEnv(t, approvals, runs)
+	args := map[string]any{"run_id": "run-confirm", "approval_id": "gate-1", "action": "return_to_spec",
+		"subject_hash": testSubjectHash, "actor_role": "reviewer", "comment": "redo"}
+	if failure := env.as(t, actorBoth).refused("decide_approval", args); failure.Status != 403 || failure.Code != "self_approval_forbidden" {
+		t.Fatalf("the author must not return the own work over MCP: %+v", failure)
+	}
+	if count, _ := env.ctl.decisions(); count != 0 {
+		t.Fatalf("a refused return must not be decided: %d", count)
+	}
+}

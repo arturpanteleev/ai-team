@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"github.com/arturpanteleev/ai-team/pkg/approval/approvaltest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,11 +36,16 @@ func realControllerEnv(t *testing.T, template string) *mcpActionEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	trustedApprovals, err := approvaltest.New(env.target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine := pipeline.NewRunEngine(pipeline.New(cfg, e2eRegistry(),
 		pipeline.WithRuntimeFactory(func(string) (runtime.Runtime, error) { return resultWithoutSection{}, nil }),
 		pipeline.WithNotifier(e2eNotifier{}),
-		pipeline.WithRecorder(NewStoreRecorder(env.srv.store))))
-	controller, err := control.New(engine, env.target)
+		pipeline.WithRecorder(NewStoreRecorder(env.srv.store)),
+		pipeline.WithApprovalStore(trustedApprovals)))
+	controller, err := control.New(engine, env.target, control.WithApprovalStore(trustedApprovals))
 	if err != nil {
 		t.Fatal(err)
 	}

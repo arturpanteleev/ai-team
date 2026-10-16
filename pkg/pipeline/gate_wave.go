@@ -338,7 +338,7 @@ func (rs *runState) runRequiredPhrases(stage config.TemplateStage, result notifi
 		report.Notes = reason
 		return report
 	}
-	spec, err := gatephrases.Parse(ref.Params)
+	spec, err := gatephrases.ParseVersion(ref.Version, ref.Params)
 	if err != nil {
 		return fail("конфигурация гейта: " + err.Error())
 	}

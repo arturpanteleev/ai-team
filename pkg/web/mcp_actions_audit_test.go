@@ -73,13 +73,72 @@ func TestMCPAuthorizationDenialIsAudited(t *testing.T) {
 		}
 		denied = append(denied, raw)
 	}
-	if len(denied) != 1 || !strings.Contains(denied[0], "sync_tracker_now") || !strings.Contains(denied[0], "token_id") {
-		t.Fatalf("the team journal must hold the denied sync with the token id: %v", denied)
+	if len(denied) != 2 || !strings.Contains(denied[0], "token_id") || !strings.Contains(denied[1], "token_id") {
+		t.Fatalf("the team journal must hold both denials with the token id: %v", denied)
 	}
-	// The denied cancel names a task, so it lands in that task's journal.
-	events := runEventData(t, env.srv, "run-a", mcpActionEvent)
-	if len(events) != 1 || events[0]["tool"] != "cancel_task" || events[0]["denied"] != true ||
-		events[0]["status"] != float64(403) || events[0]["actor_id"] != actorDev || events[0]["token_id"] == nil {
-		t.Fatalf("task journal denial = %v", events)
+	joined := strings.Join(denied, "\n")
+	if !strings.Contains(joined, "sync_tracker_now") || !strings.Contains(joined, "cancel_task") || !strings.Contains(joined, "run-a") {
+		t.Fatalf("the denied cancel names the claimed run as data: %v", denied)
+	}
+	// A refusal never writes into the journal of the run named in its arguments.
+	if events := runEventData(t, env.srv, "run-a", mcpActionEvent); len(events) != 0 {
+		t.Fatalf("denied call leaked into the run journal: %v", events)
+	}
+}
+
+// A denied call that names a run that does not exist (or one the caller has no
+// right to) must not create or touch any run journal: the claimed id is only
+// data in the team audit.
+func TestMCPDeniedCallForUnknownRunGoesToTeamAudit(t *testing.T) {
+	env := newMCPActionEnv(t, nil, map[string]lifecycle.State{"run-a": {Phase: lifecycle.PhaseWaiting, NextStage: "build"}})
+	dev := env.as(t, actorDev)
+	if failure := dev.refused("cancel_task", map[string]any{"run_id": "run-does-not-exist"}); failure.Status != 403 {
+		t.Fatalf("a developer must be refused: %+v", failure)
+	}
+	if events := runEventData(t, env.srv, "run-does-not-exist", mcpActionEvent); len(events) != 0 {
+		t.Fatalf("a journal appeared for an unknown run: %v", events)
+	}
+	audit, err := env.srv.store.ListTeamAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range audit {
+		if entry.Action == mcpActionEvent && strings.Contains(string(entry.Details), "run-does-not-exist") && strings.Contains(string(entry.Details), `"denied":true`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("team audit lacks the denied record: %+v", audit)
+	}
+}
+
+func TestAuditableClaimedRunIDIsBoundedAndShaped(t *testing.T) {
+	for _, bad := range []string{"", strings.Repeat("a", 129), "../etc", "a/b", "line\nbreak", "tab\there", "..", "x\x00y"} {
+		if got := auditableClaimedRunID(bad); got != "" {
+			t.Errorf("%q must not reach the team audit: %q", bad, got)
+		}
+	}
+	if got := auditableClaimedRunID("run-20261016-abc"); got != "run-20261016-abc" {
+		t.Fatalf("a well-formed run id is kept: %q", got)
+	}
+}
+
+// A refused call that claims a garbage run id leaves the record without it.
+func TestMCPDeniedCallDropsMalformedClaimedRunID(t *testing.T) {
+	env := newMCPActionEnv(t, nil, nil)
+	dev := env.as(t, actorDev)
+	long := strings.Repeat("Z", 500)
+	if failure := dev.refused("cancel_task", map[string]any{"run_id": long}); failure.Status != 403 && failure.Status != 400 {
+		t.Fatalf("unexpected status: %+v", failure)
+	}
+	audit, err := env.srv.store.ListTeamAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range audit {
+		if strings.Contains(string(entry.Details), "ZZZZZZZZ") {
+			t.Fatalf("the oversized claimed run id reached the team audit: %s", entry.Details)
+		}
 	}
 }

@@ -969,7 +969,7 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	if decision.Authority != approval.AuthoritySystemAdmin || !decision.ControllerAuthenticated {
 		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не подтверждено сервером как действие системного администратора (authority=system_admin); используйте Web/REST под администратором")
 	}
-	if trusted, ok := rs.approvalStore.(approval.TrustedDecisionAuthority); ok && !trusted.HasAuthenticatedControllerDecision(*rs.resumedApproval) {
+	if !approval.IsTrustedControllerDecision(rs.approvalStore, *rs.resumedApproval) {
 		return notifier.StageResult{}, errors.New("обход проверки отклонён: решение не принято аутентифицированным контроллером")
 	}
 	var result *notifier.StageResult

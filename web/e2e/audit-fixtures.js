@@ -352,6 +352,22 @@ export const scenarios = {
     statuses: statuses(3, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('bob'), blocked_by: { kind: 'approval', roles: ['reviewer'], actions: ['approve'] }, allowed_actions: ['confirm', 'return'], action_stage_id: 'qa' }),
     expect: { chip: 'Ждёт человека', buttons: ['Принять и перейти: Тестирование', 'Вернуть на доработку: Техническая реализация'], noButtons: ['Пропустить этап'], decides: { stage: 'code_review', approvalID: 'gate-code_review', action: 'approve' }, returns: { stage: 'code_review', to: 'implementation' } },
   },
+  // forbid_self_approval (S21 / S16 M-a): the author of code_review is offered neither the stage confirmation nor
+  // «Принять» on the decision card (the server would answer 403); the card says who has to accept instead.
+  'self-approval': {
+    title: 'Автор этапа не может принять свой результат (forbid_self_approval)',
+    roles: ['reviewer'],
+    run: { status: 'waiting_for_approval' },
+    state: { phase: 'waiting', next_stage: 'qa', pending_approval_id: 'gate-code_review' },
+    stages: [attempt('code_review', 1, 'passed')],
+    approvals: [transitionApproval('code_review', 'qa', ['reviewer'], { actions: ['approve', 'reject', 'return_to_implementation'], targets: { approve: 'qa', return_to_implementation: 'implementation' } })],
+    template: { forbid_self_approval: true },
+    allowed: ['confirm', 'return'],
+    viewer: [],
+    denied: { confirm: 'self_approval_forbidden', return: 'self_approval_forbidden' },
+    statuses: statuses(3, { status: 'awaiting_human', readiness: 'engaged', phase: 'awaiting_human', outcome: 'passed', executor: human('bob'), blocked_by: { kind: 'approval', roles: ['reviewer'], actions: ['approve'] }, allowed_actions: ['confirm', 'return'], action_stage_id: 'qa' }),
+    expect: { chip: 'Ждёт человека', buttons: ['Отклонить'], noButtons: ['Принять и перейти', 'Принять', 'Вернуть на доработку'], text: 'Принять этот этап должен другой участник' },
+  },
   'no-rights': {
     title: 'Нет прав: разработчик смотрит на решение владельца',
     roles: ['developer'],
@@ -374,10 +390,10 @@ export function detail(id, options = {}) {
   const run = { id: 7, run_id: 'run-audit', feature: 'greet-by-name', status: 'running', started_at: at, ...scenario.run }
   return {
     run, task: 'Добавить приветствие по имени в CLI.\n\nНужно, чтобы greeter принимал флаг --name и здоровался.', mode: 'manual', external_links: ['https://tracker.example/DEMO-1'],
-    template: { valid: true, template: 'idea-to-prod', title: 'От идеи до продакшена', version: 'f'.repeat(64), ...template },
+    template: { valid: true, template: 'idea-to-prod', title: 'От идеи до продакшена', version: 'f'.repeat(64), ...template, ...(scenario.template ?? {}) },
     state: { run_id: 'run-audit', task: 'Добавить приветствие по имени', phase: 'running', next_stage: '', attempt_ordinal: 1, ...scenario.state },
     stages: scenario.stages ?? [], approvals: scenario.approvals ?? [], stage_owners: scenario.owners ?? {}, results: scenario.results ?? {},
-    allowed_actions: scenario.allowed ?? [], viewer_actions: scenario.viewer ?? scenario.allowed ?? [], delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
+    allowed_actions: scenario.allowed ?? [], viewer_actions: scenario.viewer ?? scenario.allowed ?? [], ...(scenario.denied ? { viewer_denied_reasons: scenario.denied } : {}), delivery: scenario.delivery ?? { status: 'not_requested' }, stage_statuses: scenario.statuses,
     ...(options.extra ?? {}),
   }
 }

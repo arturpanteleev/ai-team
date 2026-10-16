@@ -489,6 +489,9 @@ export interface TaskRunDetails {
   // The part of allowed_actions the requesting principal may perform (stage
   // function, administrator right, plan roles). Absent from an older server.
   viewer_actions?: string[];
+  // Why an offered action is withheld from this viewer when the cause is policy
+  // rather than a missing role (action -> «self_approval_forbidden»).
+  viewer_denied_reasons?: Record<string, string>;
   delivery: DeliveryProjection;
   stage_statuses?: StageStatusProjection;
 }

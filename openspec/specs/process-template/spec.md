@@ -33,7 +33,10 @@ agent-executed stage MUST reference an existing `agent`.
 ### Requirement: Stage result constraints
 
 `link_kind` MUST be `pr`, `build`, or `other` and is valid only for
-`result: link`. In schema v5, `required_sections` MAY be set only for
+`result: link`. On a `link_kind: pr` stage only an output that is wholly a PR URL
+(`.../pull/<n>`) or number, or a JSON object whose `pr_url` field (or, when it is
+absent, `url`) is such a URL or number, MUST be taken as the PR reference; the URL
+host MUST be `github.com` or the host named by `GH_HOST`. In schema v5, `required_sections` MAY be set only for
 `result: md`, and `confirm` MUST be `required` or `auto` with default `auto` for
 `approve` and `required` for other results; in schema v6 these are expressed by
 gates and the v5 keys are rejected. `skippable` MAY be set to allow an explicit skip with a

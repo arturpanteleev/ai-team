@@ -58,8 +58,20 @@ Delivery MUST persist step results and safely resume after partial failure.
 
 Планировщик MUST принять ту же ветку `ai-team/<feature>`, когда задача вернулась
 на реализацию (`code_review` → `implementation`) после завершённой доставки,
-с одним условием: её tip равен commit, который контроллер сам записал и проверил
-в delivery state этой feature вместе с PR, и tip происходит от base. Baseline
+с одним условием: ветка целиком состоит из commits, которые контроллер сам
+записал и проверил. Один state-файл в рабочем дереве доверия не заслуживает,
+поэтому планировщик MUST: (1) принимать только delivery state (текущий и
+архивные `*.completed.json`) с валидным HMAC-SHA256, ключ которого лежит вне
+рабочего дерева (`$AI_TEAM_STATE_KEY_DIR`, иначе `<user config dir>/ai-team`);
+(2) требовать, чтобы каждая запись была завершённой доставкой (commit, push,
+PR), а tip записи равнялся HEAD; (3) пройти цепочку записей назад по baseline
+каждого plan и заново проверить каждый commit против его сохранённого plan
+(сообщение, parent, пути, режимы, blob-хеши); (4) убедиться, что
+`git rev-list <baseline первой записи>..HEAD` состоит ровно из commits цепочки,
+линейно. Любая неоднозначность MUST быть отказом. Проверка MUST NOT создавать
+каталоги. Если цепочка принадлежит контроллеру, но base ушла вперёд (base не
+предок начала цепочки), планировщик MUST отказать отдельным сообщением,
+требующим rebase, а не сообщением о чужом commit. Baseline
 нового плана MUST быть этим tip, новый commit MUST встать поверх него (parent
 равен baseline плана), push MUST быть fast-forward без force, а существующий
 открытый PR MUST быть переиспользован и проверен по новому head. Инвариант
@@ -74,6 +86,14 @@ Delivery MUST persist step results and safely resume after partial failure.
 #### Scenario: Чужой commit на ветке
 - **WHEN** tip ветки не записан контроллером как проверенная доставка
 - **THEN** планировщик MUST отклонить план и требовать чистую ветку от base
+
+#### Scenario: Подделанный state
+- **WHEN** агент сделал commit и записал delivery state без валидной подписи контроллера (или чужим ключом)
+- **THEN** планировщик MUST отклонить повторную доставку
+
+#### Scenario: Base ушла вперёд
+- **WHEN** ветка состоит только из доставленных контроллером commits, но base получила новые commits
+- **THEN** планировщик MUST потребовать rebase ветки на base
 
 ### Requirement: Delivery только из candidate
 

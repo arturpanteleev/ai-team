@@ -1325,14 +1325,18 @@ func setupRepository(t *testing.T) (string, string) {
 	return repo, remote
 }
 
-func installFakeGH(t *testing.T) {
+// installFakeGH puts a fake gh on PATH and returns the file that logs one line
+// per invocation ("pr create ...", "pr view ...").
+func installFakeGH(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-only")
 	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "created")
+	calls := filepath.Join(dir, "calls")
 	script := `#!/bin/sh
+echo "$1 $2" >> "` + calls + `"
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   if [ ! -f "` + marker + `" ]; then
     exit 1
@@ -1355,6 +1359,7 @@ echo "https://example.test/pull/1"
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AI_TEAM_FAKE_GH_FAIL", "0")
+	return calls
 }
 
 func git(t *testing.T, dir string, args ...string) string {

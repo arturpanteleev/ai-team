@@ -35,6 +35,9 @@ func TestPRReferenceFromOutputIsStrict(t *testing.T) {
 		`{"pr_url": "https://github.com/o/r/pull/1"} trailing`,
 		`["https://github.com/o/r/pull/1"]`,
 		"not a url",
+		"https://evil.example/o/r/pull/1",
+		"https://github.com.evil.example/o/r/pull/1",
+		`{"pr_url": "https://evil.example/o/r/pull/1"}`,
 	}
 	for _, input := range rejected {
 		if got, ok := prReferenceFromOutput([]byte(input)); ok {
@@ -72,5 +75,17 @@ func TestStageCheckInputsPRStageSkipsNonPRTextOutputs(t *testing.T) {
 	_, reference = rs.stageCheckInputs(buildStage, notifier.StageResult{Outputs: []runtime.Artifact{diff}})
 	if reference == "" {
 		t.Fatal("non-PR link stages keep the lenient reference")
+	}
+}
+
+func TestPRReferenceHostFollowsGHHost(t *testing.T) {
+	const ghe = "https://ghe.corp.example/o/r/pull/3"
+	t.Setenv("GH_HOST", "")
+	if _, ok := prReferenceFromOutput([]byte(ghe)); ok {
+		t.Fatal("чужой хост без GH_HOST должен отвергаться")
+	}
+	t.Setenv("GH_HOST", "ghe.corp.example")
+	if got, ok := prReferenceFromOutput([]byte(ghe)); !ok || got != ghe {
+		t.Fatalf("хост из GH_HOST должен приниматься: %q %v", got, ok)
 	}
 }

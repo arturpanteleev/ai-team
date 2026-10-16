@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -19,6 +20,10 @@ var prNumberReference = regexp.MustCompile(`^[1-9][0-9]*$`)
 //     PR number;
 //   - the whole content is one JSON object whose `pr_url` (or `url`) field is
 //     such a URL or number.
+//
+// The URL host must be github.com or the GitHub Enterprise host named by the
+// GH_HOST environment variable (the same variable the gh CLI honours); the
+// `url` field is accepted as a fallback when `pr_url` is absent.
 //
 // Anything else yields ok=false and the output is ignored.
 func prReferenceFromOutput(data []byte) (string, bool) {
@@ -59,9 +64,23 @@ func validPRReference(value string) (string, bool) {
 	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil {
 		return "", false
 	}
+	if !allowedPRHost(parsed.Hostname()) {
+		return "", false
+	}
 	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 	if len(parts) < 2 || parts[len(parts)-2] != "pull" || !prNumberReference.MatchString(parts[len(parts)-1]) {
 		return "", false
 	}
 	return value, true
+}
+
+// allowedPRHost limits PR URLs to github.com and the host configured through
+// GH_HOST, so an arbitrary agent-produced URL is never stored as the PR.
+func allowedPRHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "github.com" {
+		return true
+	}
+	configured := strings.ToLower(strings.TrimSpace(os.Getenv("GH_HOST")))
+	return configured != "" && host == configured
 }

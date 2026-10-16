@@ -220,7 +220,7 @@ func (e *RunEngine) resolvePipelineForTask(runID, targetDir string, createPin, f
 	if err != nil {
 		return nil, fmt.Errorf("template task pin store: %w", err)
 	}
-	data, _, found, err := store.ReadPinnedRun(runID)
+	data, _, found, err := store.ReadRunnablePinnedRun(runID)
 	if err != nil {
 		return nil, fmt.Errorf("read template task pin: %w", err)
 	}
@@ -235,7 +235,7 @@ func (e *RunEngine) resolvePipelineForTask(runID, targetDir string, createPin, f
 		if _, err := store.PinDataForRun(runID, runID, data); err != nil {
 			return nil, fmt.Errorf("pin template for new task: %w", err)
 		}
-		data, _, found, err = store.ReadPinnedRun(runID)
+		data, _, found, err = store.ReadRunnablePinnedRun(runID)
 		if err != nil || !found {
 			if err == nil {
 				err = errors.New("task template pin was not created")

@@ -67,15 +67,14 @@ func infraAttempts() map[string]infraAttempt {
 	}
 }
 
-// processOnlyChange edits titles, roles, a return limit and the tracker status
-// maps: everything a template author may change from the web.
+// processOnlyChange edits titles, a stricter return limit, self-approval and the
+// tracker status maps: everything a template author may change from the web.
 func processOnlyChange() string {
 	return strings.NewReplacer(
 		"title: Infra", "title: Infra renamed",
-		"function: developer", "function: architect",
 		"on_enter: {spec: In Spec}", "on_enter: {spec: Elsewhere, build: Doing}",
 		"on_pass: {spec: Spec Done}", "on_pass: {build: Shipped}",
-	).Replace(infraFileConfig) + "max_visits: {spec: 4}\n"
+	).Replace(infraFileConfig) + "max_visits: {spec: 2}\nforbid_self_approval: true\n"
 }
 
 func TestWebTemplateRoutesRefuseInfrastructureChangesREST(t *testing.T) {

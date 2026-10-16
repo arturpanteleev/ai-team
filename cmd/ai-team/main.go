@@ -1256,13 +1256,13 @@ func loadWorkerTemplateConfig(target string, job worker.Job, reg *agent.Registry
 	if err != nil {
 		fatal("Template pin store: %v", err)
 	}
-	data, _, found, err := store.ReadPinnedRun(job.RunID)
+	data, _, found, err := store.ReadRunnablePinnedRun(job.RunID)
 	if err != nil {
 		fatal("Template task pin: %v", err)
 	}
 	if !found && (job.Operation == worker.OperationStart || job.Operation == worker.OperationRecover) {
 		if _, pinErr := store.PinCurrentForRun(job.RunID, job.RunID); pinErr == nil {
-			data, _, found, err = store.ReadPinnedRun(job.RunID)
+			data, _, found, err = store.ReadRunnablePinnedRun(job.RunID)
 			if err != nil || !found {
 				fatal("Template task pin could not be read: %v", err)
 			}
@@ -2460,7 +2460,9 @@ func cmdWeb() {
 	if err != nil {
 		fatal("Ошибка run controller: %v", err)
 	}
-	warnAboutStoredTemplateCommands(os.Stderr, target)
+	if err := warnAboutStoredTemplateCommands(os.Stderr, target); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ не удалось проверить сохранённые версии шаблона на команды: %v\n", err)
+	}
 	serverOptions := []web.ServerOption{
 		web.WithRunController(runController), web.WithTargetDir(target), web.WithTemplateAgentLookup(reg),
 		web.WithAutoPickup(autopickup.PolicyFromConfig(cfg), cfg.AutoPickup.EffectivePollInterval(), nil),

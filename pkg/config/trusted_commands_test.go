@@ -55,7 +55,7 @@ func TestConfigProcessFieldsAreTheReviewedSet(t *testing.T) {
 			process = append(process, name)
 		}
 	}
-	want := "ForbidSelfApproval MaxVisits Returns SchemaVersion StallAfter Template Title"
+	want := "SchemaVersion StallAfter Template Title"
 	sortStrings(process)
 	if got := strings.Join(process, " "); got != want {
 		t.Fatalf("the process allow-list changed (review the security impact first):\n got %s\nwant %s", got, want)
@@ -130,13 +130,12 @@ func TestWebSubmissionAcceptsIdenticalAndProcessChanges(t *testing.T) {
 	}
 	process := strings.NewReplacer(
 		"title: Base", "title: Renamed",
-		"function: developer", "function: architect",
 		"on_enter: {spec: In Spec}", "on_enter: {spec: Elsewhere, build: Doing}",
 		"on_pass: {spec: Done Spec}", "on_pass: {build: Shipped}",
 		"stage_statuses: {build: Done Build}", "stage_statuses: {build: Other}",
-	).Replace(trustedBaseYAML) + "max_visits: {spec: 4}\nforbid_self_approval: true\nstall_after: 2h\n"
+	).Replace(trustedBaseYAML) + "max_visits: {spec: 2}\nforbid_self_approval: true\nstall_after: 2h\n"
 	if problems := parseTrusted(t, process).UntrustedCommandProblems(trusted); len(problems) != 0 {
-		t.Fatalf("process changes (titles, roles, tracker status maps, visits) must be accepted: %v", problems)
+		t.Fatalf("process changes (titles, tracker status maps, stricter limits) must be accepted: %v", problems)
 	}
 }
 
@@ -239,5 +238,79 @@ func TestWebSubmissionDeliveryPolicyMustMatch(t *testing.T) {
 	}
 	if problems := parseTrusted(t, withDelivery).UntrustedCommandProblems(parseTrusted(t, trustedBaseYAML)); len(problems) == 0 {
 		t.Fatal("a new delivery policy must be refused")
+	}
+}
+
+func TestWebSubmissionRefusesLoosenedProcessSecurity(t *testing.T) {
+	strict := strings.Replace(trustedBaseYAML, "returns:", "forbid_self_approval: true\nmax_visits: {spec: 2}\nreturns:", 1)
+	trusted := parseTrusted(t, strict)
+	if problems := parseTrusted(t, strict).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Fatalf("identical document must be accepted: %v", problems)
+	}
+	cases := map[string]struct{ from, to, field string }{
+		"self approval off": {"forbid_self_approval: true\n", "", "forbid_self_approval"},
+		"visits raised":     {"max_visits: {spec: 2}", "max_visits: {spec: 9}", "max_visits[spec]"},
+		"role changed":      {"function: developer", "function: architect", "function"},
+		"approver added":    {"function: developer,", "function: developer, approver_function: po,", "approver_function"},
+		"executor agent":    {"{id: build, title: Build, function: developer, result: md, executor: human}", "{id: build, title: Build, function: developer, result: md, executor: agent, agent: coder}", "executor"},
+		"new return route":  {"- {from: build, to: spec}", "- {from: build, to: spec}\n  - {from: spec, to: spec}", "returns"},
+	}
+	for name, tc := range cases {
+		if !strings.Contains(strict, tc.from) {
+			t.Fatalf("%s: fixture lost %q", name, tc.from)
+		}
+		changed := strings.Replace(strict, tc.from, tc.to, 1)
+		cfg, err := ParseYAML([]byte(changed))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		problems := cfg.UntrustedCommandProblems(trusted)
+		if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), tc.field) {
+			t.Errorf("%s: want a problem naming %s, got %v", name, tc.field, problems)
+		}
+	}
+	// A stage added from the web: human only, known roles.
+	added := strings.Replace(strict, "forbid_self_approval:", "  - {id: review, title: Review, function: developer, result: md, executor: human}\nforbid_self_approval:", 1)
+	if problems := parseTrusted(t, added).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Errorf("a new human stage with known roles is process: %v", problems)
+	}
+	newRole := strings.Replace(added, "id: review, title: Review, function: developer", "id: review, title: Review, function: auditor", 1)
+	if problems := parseTrusted(t, newRole).UntrustedCommandProblems(trusted); len(problems) == 0 {
+		t.Error("a new role must be refused")
+	}
+	withAgent := strings.Replace(added, "id: review, title: Review, function: developer, result: md, executor: human", "id: review, title: Review, function: developer, result: md, executor: agent, agent: coder", 1)
+	if cfg, err := ParseYAML([]byte(withAgent)); err == nil && len(cfg.UntrustedCommandProblems(trusted)) == 0 {
+		t.Error("a new agent stage must be refused")
+	}
+	// Dropping an adapter or narrowing the MCP servers is less privileged.
+	if !subsetOf([]string{"a"}, []string{"a", "b"}) || subsetOf([]string{"c"}, []string{"a"}) {
+		t.Error("subsetOf is wrong")
+	}
+}
+
+// An absent tracker (or jira) section and an empty one are the same
+// configuration: adding or dropping an empty section is not a change.
+func TestWebSubmissionTrackerNilEqualsZero(t *testing.T) {
+	base := strings.SplitN(trustedBaseYAML, "tracker:", 2)[0]
+	trusted := parseTrusted(t, base)
+	for name, extra := range map[string]string{
+		"empty tracker":        "tracker: {}\n",
+		"empty jira":           "tracker:\n  jira: {}\n",
+		"status maps only":     "tracker:\n  on_enter: {spec: Doing}\n  jira:\n    stage_statuses: {build: Done}\n",
+		"tracker without jira": "tracker:\n  on_pass: {spec: Done}\n",
+	} {
+		if problems := parseTrusted(t, base+extra).UntrustedCommandProblems(trusted); len(problems) != 0 {
+			t.Errorf("%s over an empty file section must be accepted: %v", name, problems)
+		}
+	}
+	withEmpty := parseTrusted(t, base+"tracker: {}\n")
+	if problems := parseTrusted(t, base).UntrustedCommandProblems(withEmpty); len(problems) != 0 {
+		t.Errorf("dropping an empty tracker section must be accepted: %v", problems)
+	}
+	if problems := parseTrusted(t, base+"tracker:\n  adapter: fake\n").UntrustedCommandProblems(trusted); len(problems) == 0 {
+		t.Error("a real tracker adapter over an empty file section must still be refused")
+	}
+	if problems := parseTrusted(t, base+"tracker:\n  jira:\n    base_url: https://x.example\n").UntrustedCommandProblems(trusted); len(problems) == 0 {
+		t.Error("a jira endpoint over an empty file section must still be refused")
 	}
 }

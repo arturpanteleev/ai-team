@@ -25,9 +25,10 @@ type TemplateVersionAudit struct {
 // infrastructure section the active template does not contain verbatim.
 //
 // Versions published through the web before the trusted-config rule could hold
-// such definitions. The store records no provenance, so this is an audit for
-// the operator, not an enforcement point: the active template is the baseline
-// and is itself never flagged. Versions that do not parse are skipped.
+// such definitions. The store records no provenance, so the audit is for the
+// operator; running such a version is refused separately (RequireTrusted). The
+// active template is the baseline and is itself never flagged. A version that cannot be read or parsed is reported as a
+// finding, not skipped.
 func (s *TemplateStore) AuditVersions() ([]TemplateVersionAudit, error) {
 	activeData, activeVersion, err := s.ReadCurrent()
 	if err != nil {
@@ -48,10 +49,12 @@ func (s *TemplateStore) AuditVersions() ([]TemplateVersionAudit, error) {
 		}
 		data, readErr := s.readVersion(version.ID)
 		if readErr != nil {
+			findings = append(findings, TemplateVersionAudit{Version: version.ID, Problems: []string{fmt.Sprintf("версию не удалось прочитать: %v", readErr)}})
 			continue
 		}
 		parsed, parseErr := ParseYAML(data)
 		if parseErr != nil {
+			findings = append(findings, TemplateVersionAudit{Version: version.ID, Problems: []string{fmt.Sprintf("версия не разбирается: %v", parseErr)}})
 			continue
 		}
 		if problems := parsed.UntrustedCommandProblems(active); len(problems) > 0 {

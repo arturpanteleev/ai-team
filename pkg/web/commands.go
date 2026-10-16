@@ -508,6 +508,11 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A pinned template with commands the file configuration does not contain
+	// never runs: refuse before anything (authorship record, worker) happens.
+	if s.refuseUntrustedPin(w, runID) {
+		return
+	}
 	// Resuming an agent stage launches its agent: record the actor first so
 	// forbid_self_approval sees the launch; an unrecorded launch must not run.
 	if err := s.recordResumeAgentLaunch(runID, session.Principal.ActorID); errors.Is(err, errResumeAwaitingDecision) || errors.Is(err, errResumeRunActive) {
@@ -531,6 +536,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		err = s.controller.Resume(runID)
 	}
 	if err != nil {
+		if writeTrustedConfigRefusal(w, err) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -937,4 +945,27 @@ func writeJSONResponse(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// refuseUntrustedPin answers 409 trusted_config_only and reports true when the
+// run's pinned template may not run (it carries command gates or
+// infrastructure the file configuration does not contain).
+func (s *Server) refuseUntrustedPin(w http.ResponseWriter, runID string) bool {
+	store, err := s.templateStore()
+	if err != nil {
+		return false
+	}
+	_, _, _, err = store.ReadRunnablePinnedRun(runID)
+	return writeTrustedConfigRefusal(w, err)
+}
+
+// writeTrustedConfigRefusal writes the trusted_config_only API error when err
+// is a *config.TrustedConfigError and reports whether it did.
+func writeTrustedConfigRefusal(w http.ResponseWriter, err error) bool {
+	var refused *config.TrustedConfigError
+	if !errors.As(err, &refused) {
+		return false
+	}
+	writeJSONAPIError(w, http.StatusConflict, refused.Error(), refused.Code())
+	return true
 }

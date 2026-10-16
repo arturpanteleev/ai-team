@@ -29,10 +29,6 @@ stages:
     function: po
     result: md
     executor: human
-returns:
-  - from: analyst
-    to: architect
-    max_visits: 2
 `
 
 func TestTemplateEditorAPIValidatesPublishesAndPinsNewTasks(t *testing.T) {
@@ -98,7 +94,9 @@ func TestTemplateEditorAPIValidatesPublishesAndPinsNewTasks(t *testing.T) {
 		`{"yaml":`+mustJSONTemplate(t, invalid)+`}`)
 	validateResponse := httptest.NewRecorder()
 	srv.router.ServeHTTP(validateResponse, validate)
-	if validateResponse.Code != http.StatusOK || !strings.Contains(validateResponse.Body.String(), "недоступна в cloud") {
+	// A role no stage of the file configuration uses is refused before the
+	// cloud role check is reached (a web template cannot introduce roles).
+	if validateResponse.Code != http.StatusOK || !strings.Contains(validateResponse.Body.String(), config.ErrCodeTrustedConfigOnly) {
 		t.Fatalf("cloud role validation: %d %s", validateResponse.Code, validateResponse.Body.String())
 	}
 
@@ -108,7 +106,8 @@ func TestTemplateEditorAPIValidatesPublishesAndPinsNewTasks(t *testing.T) {
 		`{"yaml":`+mustJSONTemplate(t, missingAgent)+`}`)
 	validateResponse = httptest.NewRecorder()
 	srv.router.ServeHTTP(validateResponse, validate)
-	if validateResponse.Code != http.StatusOK || !strings.Contains(validateResponse.Body.String(), "не найден в registry") {
+	// A new stage from the web cannot be an agent stage.
+	if validateResponse.Code != http.StatusOK || !strings.Contains(validateResponse.Body.String(), config.ErrCodeTrustedConfigOnly) {
 		t.Fatalf("agent registry validation: %d %s", validateResponse.Code, validateResponse.Body.String())
 	}
 

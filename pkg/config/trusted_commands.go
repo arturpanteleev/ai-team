@@ -38,6 +38,16 @@ const ErrCodeTrustedConfigOnly = "trusted_config_only"
 // trusted is the active template parsed from the repository, or nil when there
 // is none; with nil every infrastructure section must be empty.
 func (c *Config) UntrustedCommandProblems(trusted *Config) []string {
+	return c.untrustedProblems(trusted, false)
+}
+
+// untrustedRunProblems is UntrustedCommandProblems for a template about to run
+// rather than to be published: differences in tuningField fields do not count.
+func (c *Config) untrustedRunProblems(trusted *Config) []string {
+	return c.untrustedProblems(trusted, true)
+}
+
+func (c *Config) untrustedProblems(trusted *Config, forRun bool) []string {
 	var problems []string
 	registry := gatelib.Default()
 	for _, stage := range c.Stages {
@@ -47,6 +57,7 @@ func (c *Config) UntrustedCommandProblems(trusted *Config) []string {
 			}
 		}
 	}
+	hasBaseline := trusted != nil
 	if trusted == nil {
 		trusted = &Config{}
 	}
@@ -66,7 +77,7 @@ func (c *Config) UntrustedCommandProblems(trusted *Config) []string {
 			problems = append(problems, fmt.Sprintf("mcp_servers.%s: команда MCP-сервера не совпадает с сервером файлового конфига", name))
 		}
 	}
-	problems = append(problems, c.infrastructureProblems(trusted)...)
+	problems = append(problems, c.infrastructureProblems(trusted, hasBaseline, forRun)...)
 	return problems
 }
 
@@ -87,6 +98,21 @@ const (
 	// partialField mixes process and trusted parts and has a dedicated rule
 	// (stages, tracker).
 	partialField
+	// tightenOnlyField may be changed through the web only towards a stricter
+	// process: forbid_self_approval cannot be switched off, a return route
+	// cannot be added, a visit limit cannot be raised (see tightenProblems).
+	tightenOnlyField
+	// tuningField is infrastructure for the web (it must equal the file
+	// configuration) but only tuning: timeouts, model and effort. They cannot run
+	// a command, reach a host or weaken isolation, so a pinned run whose
+	// template differs from the file only there still runs (a paused task
+	// keeps the limits it started with).
+	tuningField
+	// sameStageField is compared with the stage of the same id of the trusted
+	// template (roles, executor, agent, adapter, MCP servers); a stage the
+	// trusted template does not have may only be a human stage (see
+	// stageProblems).
+	sameStageField
 )
 
 // configFieldClasses is the allow-list of Config fields the web may change. A
@@ -96,12 +122,12 @@ const (
 var configFieldClasses = map[string]fieldClass{
 	"QuestionStages": derivedField, "PipelineAgents": derivedField, "Workflow": derivedField,
 	"SchemaVersion": processField, "Template": processField, "Title": processField,
-	"StallAfter": processField, "ForbidSelfApproval": processField,
-	"Stages": partialField, "Returns": processField, "MaxVisits": processField,
+	"StallAfter": processField, "ForbidSelfApproval": tightenOnlyField,
+	"Stages": partialField, "Returns": tightenOnlyField, "MaxVisits": tightenOnlyField,
 	"Checks": definitionsField, "MCPServers": definitionsField, "ExecutorAdapters": definitionsField,
-	"CLI": trustedField, "Model": trustedField, "Effort": trustedField,
-	"StageTimeout": trustedField, "GateConcurrency": trustedField,
-	"PreflightTimeout": trustedField, "DeliveryTimeout": trustedField,
+	"CLI": trustedField, "Model": tuningField, "Effort": tuningField,
+	"StageTimeout": tuningField, "GateConcurrency": tuningField,
+	"PreflightTimeout": tuningField, "DeliveryTimeout": tuningField,
 	"Containment": trustedField, "TreeHash": trustedField, "Budget": trustedField,
 	"AutoPickup": trustedField, "Usage": trustedField, "CICD": trustedField,
 	"Notifications": trustedField, "Redaction": trustedField, "Retention": trustedField,
@@ -113,11 +139,11 @@ var configFieldClasses = map[string]fieldClass{
 // its delivery policy decides which controller checks guard commit/push/PR and
 // must equal the trusted stage's.
 var stageFieldClasses = map[string]fieldClass{
-	"ID": processField, "Title": processField, "Function": processField,
-	"ApproverFunction": processField, "Result": processField, "Executor": processField,
-	"Agent": processField, "Adapter": processField, "LinkKind": processField,
+	"ID": processField, "Title": processField, "Function": sameStageField,
+	"ApproverFunction": sameStageField, "Result": processField, "Executor": sameStageField,
+	"Agent": sameStageField, "Adapter": sameStageField, "LinkKind": processField,
 	"RequiredSections": processField, "Check": processField, "Confirm": processField,
-	"ExitGateGroups": processField, "Skippable": processField, "MCPServers": processField,
+	"ExitGateGroups": processField, "Skippable": processField, "MCPServers": sameStageField,
 	"Delivery": trustedField,
 }
 
@@ -137,7 +163,7 @@ var jiraFieldClasses = map[string]fieldClass{
 	"WebBaseURL": trustedField, "APIVersion": trustedField, "StageStatuses": processField,
 }
 
-func (c *Config) infrastructureProblems(trusted *Config) []string {
+func (c *Config) infrastructureProblems(trusted *Config, hasBaseline, forRun bool) []string {
 	var problems []string
 	mine, theirs := reflect.ValueOf(c).Elem(), reflect.ValueOf(trusted).Elem()
 	typ := mine.Type()
@@ -146,8 +172,9 @@ func (c *Config) infrastructureProblems(trusted *Config) []string {
 		if !field.IsExported() {
 			continue
 		}
-		switch configFieldClasses[field.Name] {
-		case processField, derivedField, definitionsField, partialField:
+		switch class := configFieldClasses[field.Name]; {
+		case class == processField, class == derivedField, class == definitionsField, class == partialField, class == tightenOnlyField:
+		case class == tuningField && forRun:
 		default:
 			// trustedField, and any field nobody classified: protect by default.
 			problems = append(problems, diffInfrastructure(yamlName(field), mine.Field(i), theirs.Field(i))...)
@@ -155,10 +182,131 @@ func (c *Config) infrastructureProblems(trusted *Config) []string {
 	}
 	problems = append(problems, trackerProblems(c.Tracker, trusted.Tracker)...)
 	problems = append(problems, c.deliveryProblems(trusted)...)
+	if !hasBaseline || forRun {
+		// A template about to run is held to commands and infrastructure only:
+		// roles, routes and limits are process the file may legitimately have
+		// changed since the run was pinned. Without a file configuration there
+		// is nothing to compare them with either; the infrastructure rules
+		// above already refuse every section.
+		return problems
+	}
+	problems = append(problems, c.stageProblems(trusted)...)
+	problems = append(problems, c.tightenProblems(trusted)...)
 	return problems
 }
 
+func subsetOf(items, of []string) bool {
+	allowed := map[string]bool{}
+	for _, item := range of {
+		allowed[item] = true
+	}
+	for _, item := range items {
+		if !allowed[item] {
+			return false
+		}
+	}
+	return true
+}
+
+// stageProblems enforces the sameStageField fields: a stage that exists in the
+// trusted template keeps its roles, executor, agent, adapter and MCP servers;
+// a stage the web adds may only be a human stage whose roles the trusted
+// template already uses, so the web cannot introduce a new executor or a new
+// approver role.
+func (c *Config) stageProblems(trusted *Config) []string {
+	var problems []string
+	known := map[string]TemplateStage{}
+	functions := map[string]bool{}
+	for _, stage := range trusted.Stages {
+		known[stage.ID] = stage
+		functions[stage.Function] = true
+		if stage.ApproverFunction != "" {
+			functions[stage.ApproverFunction] = true
+		}
+	}
+	for _, stage := range c.Stages {
+		want, exists := known[stage.ID]
+		if !exists {
+			if stage.Agent != "" || stage.Adapter != "" || len(stage.MCPServers) > 0 || (stage.Executor != "" && stage.Executor != "human") {
+				problems = append(problems, fmt.Sprintf("этап %q: новый этап из веба может быть только human без agent, adapter и mcp_servers", stage.ID))
+			}
+			for _, function := range []string{stage.Function, stage.ApproverFunction} {
+				if function != "" && !functions[function] {
+					problems = append(problems, fmt.Sprintf("этап %q: роль %q не используется ни одним этапом файлового конфига", stage.ID, function))
+				}
+			}
+			continue
+		}
+		mine, theirs := reflect.ValueOf(stage), reflect.ValueOf(want)
+		for name, class := range stageFieldClasses {
+			if class != sameStageField {
+				continue
+			}
+			a, b := mine.FieldByName(name), theirs.FieldByName(name)
+			if isEmptyValue(a) && isEmptyValue(b) || reflect.DeepEqual(a.Interface(), b.Interface()) {
+				continue
+			}
+			// Dropping an adapter or narrowing the MCP servers makes the stage
+			// less privileged (an internal executor, fewer tools): allowed.
+			if name == "Adapter" && stage.Adapter == "" {
+				continue
+			}
+			if name == "MCPServers" && subsetOf(stage.MCPServers, want.MCPServers) {
+				continue
+			}
+			field, _ := reflect.TypeOf(stage).FieldByName(name)
+			problems = append(problems, fmt.Sprintf("этап %q: %s не совпадает с этапом файлового конфига", stage.ID, yamlName(field)))
+		}
+	}
+	return problems
+}
+
+// tightenProblems enforces the tightenOnlyField fields: through the web the
+// process can only get stricter than the file configuration.
+func (c *Config) tightenProblems(trusted *Config) []string {
+	var problems []string
+	if trusted.ForbidSelfApproval && !c.ForbidSelfApproval {
+		problems = append(problems, "forbid_self_approval: из веба нельзя выключить запрет самоподтверждения, включённый в файловом конфиге")
+	}
+	routes := map[[2]string]bool{}
+	for _, route := range trusted.Returns {
+		routes[[2]string{route.From, route.To}] = true
+	}
+	targets := map[string]bool{}
+	for _, route := range c.Returns {
+		targets[route.To] = true
+		if !routes[[2]string{route.From, route.To}] {
+			problems = append(problems, fmt.Sprintf("returns: маршрут %s → %s отсутствует в файловом конфиге", route.From, route.To))
+		}
+	}
+	for _, id := range sortedMapKeys(targets) {
+		if limit, allowed := c.visitLimit(id), trusted.visitLimit(id); limit > allowed {
+			problems = append(problems, fmt.Sprintf("max_visits[%s]: лимит %d выше лимита файлового конфига (%d)", id, limit, allowed))
+		}
+	}
+	return problems
+}
+
+// visitLimit is the effective visit limit of a return target, as compiled into
+// the graph: an explicit max_visits entry, else the route limit, else 3.
+func (c *Config) visitLimit(id string) int {
+	if visits := c.MaxVisits[id]; visits > 0 {
+		return visits
+	}
+	for _, route := range c.Returns {
+		if route.To == id {
+			if route.MaxVisits > 0 {
+				return route.MaxVisits
+			}
+			return 3
+		}
+	}
+	return 0
+}
+
 func trackerProblems(submitted, trusted *TrackerConfig) []string {
+	// A missing tracker section and an empty one (or one with only an empty
+	// jira) are the same configuration.
 	view := func(t *TrackerConfig) *TrackerConfig {
 		if t == nil {
 			return nil
@@ -221,8 +369,9 @@ func diffInfrastructure(path string, a, b reflect.Value) []string {
 	if aEmpty && bEmpty {
 		return nil
 	}
-	if aEmpty != bEmpty || a.Kind() != reflect.Struct || a.Type() != b.Type() {
-		if !aEmpty && !bEmpty && reflect.DeepEqual(a.Interface(), b.Interface()) {
+	bothStructs := a.IsValid() && b.IsValid() && a.Kind() == reflect.Struct && a.Type() == b.Type()
+	if !bothStructs {
+		if !aEmpty && !bEmpty && a.IsValid() && b.IsValid() && reflect.DeepEqual(a.Interface(), b.Interface()) {
 			return nil
 		}
 		return []string{path + ": инфраструктурная настройка не совпадает с файловым конфигом"}
@@ -244,14 +393,26 @@ func indirect(v reflect.Value) reflect.Value {
 	return v
 }
 
+// isEmptyValue reports whether v carries no configuration: nil, empty and
+// zero values are all the same, and a struct is empty when every exported
+// field is, so an absent section equals a present but zero one.
 func isEmptyValue(v reflect.Value) bool {
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Interface:
-		return v.IsNil()
+		// A pointer to a scalar is a deliberate value (false differs from
+		// unset); only a struct behind it can be "empty".
+		return v.IsNil() || (v.Elem().Kind() == reflect.Struct && isEmptyValue(v.Elem()))
 	case reflect.Slice, reflect.Map:
 		return v.Len() == 0
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if v.Type().Field(i).IsExported() && !isEmptyValue(v.Field(i)) {
+				return false
+			}
+		}
+		return true
 	}
-	return v.IsZero() && v.Kind() != reflect.Struct
+	return v.IsZero()
 }
 
 func isCommandGate(registry *gatelib.Registry, ref workflow.GateRef) bool {

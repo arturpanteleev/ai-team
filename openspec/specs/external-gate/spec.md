@@ -21,6 +21,16 @@ an invalid or reserved (`AI_TEAM_GATE_*`) environment name, an out-of-range
 limit, and an `argv` element that embeds a credential MUST be rejected before a
 run starts.
 
+#### Scenario: A template submitted over the web names a command gate
+
+- **КОГДА** a template submitted through REST, MCP, or the Web UI (validate or
+  publish) references `external_program` or `docker_program`
+- **ТОГДА** validation MUST report it and publish MUST answer `400` with the code
+  `trusted_config_only`, and the active template MUST stay unchanged
+- **И** the message MUST say that such gates are allowed only in the repository's
+  file configuration (`.ai-team/config.yaml`)
+- **И** the same gate in the file configuration MUST still load and validate
+
 #### Scenario: Inline secret in argv
 
 - **КОГДА** `command` contains an argument such as `--token=ghp_…`

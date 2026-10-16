@@ -143,7 +143,11 @@ revision to `/api/runs/{runID}/artifact-revisions` with the stage result path,
 the latest `base_revision` and `base_sha256`, and changed result content. The
 route validates the content against the run's SHA-256-verified pinned stage
 result type and required sections before appending. Comment-only submissions,
-unchanged bytes, and edits that remove a required section are rejected. It
+unchanged bytes, and edits that remove a required section are rejected. This
+is deliberately stricter than a stage submission: a grill edit is a draft that
+no gate has run on, while a submission of a result without a required section
+is accepted and recorded as a `fail` of the `required_sections` gate, so the
+attempt history is kept. It
 accepts stage result edits only while a matching grill question is pending;
 stale revisions and edits after the grill resolves are rejected. Then call
 `grill/new-version` to pin the edited revision. That action also verifies that

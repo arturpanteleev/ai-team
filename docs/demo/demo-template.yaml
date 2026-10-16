@@ -1,0 +1,183 @@
+# Шаблон демонстрации S17: 9 этапов idea-to-prod (pkg/config/load.go) и 6 возвратов.
+# Этапы, их порядок, функции и возвраты те же, что у встроенного шаблона;
+# добавлены только гейты каждого вида, внешний исполнитель этапа code_review и
+# фейковый трекер. Скрипт scripts/demo/run-demo.sh копирует файл в
+# .ai-team/config.yaml временного демо-репозитория.
+schema_version: 6
+template: idea-to-prod
+title: От идеи до продакшена (демо S17)
+stall_after: 24h
+
+stages:
+  - id: intent
+    title: Бизнес-идея
+    function: bo
+    result: approve
+    executor: human
+
+  # Кодовые гейты, LLM-гейт и решение человека (PO) по порядку групп.
+  - id: product_spec
+    title: Продуктовая спецификация
+    function: po
+    result: md
+    executor: human
+    exit_gate_groups:
+      - - gate: required_sections          # обязательный кодовый гейт
+          version: 1
+          params: {sections: ["Критерии приёмки"]}
+        - gate: required_phrases           # рекомендательный: fail не блокирует
+          version: 1
+          name: success_metric
+          mode: advisory
+          params: {phrases: ["метрика успеха"], case: insensitive, scope: result, match: all}
+      - - gate: agent_review               # LLM-гейт (в демо отвечает мок рантайма)
+          version: 2
+          name: spec_llm_review
+          params: {agent: spec-checker, verdict_schema: json, max_attempts: 2}
+      - - gate: human_approval             # решение PO; отказ оставляет на этапе
+          version: 2
+          name: po_approval
+          params: {on_reject: stay}
+
+  # Внешняя программа на хосте и Docker-гейт одного протокола ai-team.gate/v1.
+  - id: tech_design
+    title: Техническая архитектура
+    function: architect
+    result: md
+    executor: human
+    exit_gate_groups:
+      - - gate: external_program
+          version: 1
+          name: host_todo_check
+          params: {command: ["sh", "scripts/host-gate.sh", "todo"], timeout_seconds: 30}
+      - - gate: docker_program
+          version: 1
+          name: docker_fixme_check
+          params:
+            image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+            command: ["/bin/sh", "/gate/repo/scripts/docker-gate.sh", "check"]
+            timeout_seconds: 120
+            network: none
+
+  # Внутренний агент (мок демо-рантайма) пишет код; commit/push/PR делает контроллер.
+  - id: implementation
+    title: Техническая реализация
+    function: developer
+    result: link
+    link_kind: pr
+    executor: agent
+    agent: demo-coder
+    exit_gate_groups:
+      - [pr_exists@1, pr_open@1, pr_base_branch@1]
+    delivery:
+      require_checks: [demo-test]
+
+  # Внешний исполнитель этапа: контейнер alpine с воспроизводимым ревьюером.
+  - id: code_review
+    title: Код-ревью
+    function: reviewer
+    result: md
+    executor: agent
+    agent: demo-reviewer
+    adapter: container-review
+    exit_gate_groups:
+      - [verdict_marker@1]
+      - - gate: human_approval
+          version: 2
+          name: reviewer_approval
+          params: {on_reject: stay}
+
+  # Обязательный провал, который снимает только администратор с причиной.
+  - id: qa
+    title: Тестирование
+    function: qa
+    result: md
+    executor: human
+    exit_gate_groups:
+      - - gate: external_program
+          version: 1
+          name: qa_report_check
+          params: {command: ["sh", "scripts/host-gate.sh", "qa"], timeout_seconds: 30}
+
+  - id: deploy
+    title: Выкладка
+    function: deployer
+    result: link
+    link_kind: build
+    executor: human
+
+  # Технический сбой гейтов (error) и повтор на той же версии.
+  - id: observation
+    title: Наблюдение после выкладки
+    function: deployer
+    result: md
+    executor: human
+    exit_gate_groups:
+      - - gate: external_program
+          version: 1
+          name: host_flaky_check
+          params: {command: ["sh", "scripts/host-gate.sh", "flaky"], timeout_seconds: 30}
+      - - gate: docker_program
+          version: 1
+          name: docker_flaky_check
+          params:
+            image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+            command: ["/bin/sh", "/gate/repo/scripts/docker-gate.sh", "flaky"]
+            timeout_seconds: 120
+
+  - id: acceptance
+    title: Окончательная готовность
+    function: bo
+    result: approve
+    executor: human
+
+returns:
+  - {from: tech_design, to: product_spec}
+  - {from: code_review, to: implementation}
+  - {from: qa, to: implementation}
+  - {from: qa, to: product_spec}
+  - {from: observation, to: implementation}
+  - {from: acceptance, to: product_spec}
+
+max_visits:
+  implementation: 3
+  product_spec: 3
+
+executor_adapters:
+  container-review:
+    argv: ["/bin/sh", "/agent/review.sh"]    # внутри образа; скрипт монтируется только для чтения
+    timeout: 2m
+    docker:
+      image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      network: none
+      mounts: ["agent:/agent"]
+
+checks:
+  - name: demo-test
+    class: unit
+    adapter: go-test-json
+    command: [go, test, -json, -count=1, ./...]
+    policy: required
+    timeout: 5m
+
+tracker:
+  adapter: fake
+  web_base_url: http://127.0.0.1:8080
+  on_enter:
+    implementation: In Progress
+  on_pass:
+    code_review: In Review
+    acceptance: Done
+  inbound:
+    poll_interval: 5s
+    rules:
+      - {status: Done, action: advance}
+  fake:
+    statuses: [To Do, In Progress, In Review, Done]
+    issues:
+      - {key: DEMO-1, summary: Демо-карточка, status: To Do}
+      - {key: DEMO-2, summary: Вторая демо-карточка, status: To Do}
+
+cli: opencode
+effort: medium
+stage_timeout: 30m

@@ -25,8 +25,10 @@ type templateValidation struct {
 	YAML       string `json:"yaml,omitempty"`
 	Valid      bool   `json:"valid"`
 	Diagnostic string `json:"diagnostic,omitempty"`
-	Template   string `json:"template,omitempty"`
-	Title      string `json:"title,omitempty"`
+	// Code is a machine-readable reason of a rejection (trusted_config_only).
+	Code     string `json:"code,omitempty"`
+	Template string `json:"template,omitempty"`
+	Title    string `json:"title,omitempty"`
 	// ForbidSelfApproval mirrors the template's forbid_self_approval policy.
 	ForbidSelfApproval bool                 `json:"forbid_self_approval,omitempty"`
 	Version            string               `json:"version,omitempty"`
@@ -57,6 +59,42 @@ type templateReturnView struct {
 
 func (s *Server) templateStore() (*config.TemplateStore, error) {
 	return config.NewTemplateStore(s.targetDir)
+}
+
+// trustedConfigError reports that a template submitted through the web names
+// a host command, a container image or mounts. Those come only from the
+// repository's file configuration (openspec external-gate).
+type trustedConfigError struct{ problems []string }
+
+func (e *trustedConfigError) Error() string {
+	return "шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), не может задавать команду, образ или mounts: " +
+		strings.Join(e.problems, "; ") +
+		". Гейты external_program и docker_program, executor_adapters, checks и mcp_servers разрешены только в файловом конфиге репозитория (.ai-team/config.yaml); " +
+		"из веба можно ссылаться на уже объявленные там адаптеры, проверки и серверы по имени, не меняя их определений"
+}
+
+// parseSubmittedTemplateYAML is parseTemplateYAML for YAML that arrives over
+// the network (validate and publish): on top of the usual validation it
+// rejects every command-bearing element the active file template does not
+// already contain verbatim. Reading the active template stays on the trusted
+// parseTemplateYAML.
+func (s *Server) parseSubmittedTemplateYAML(raw []byte) (*config.Config, workflow.Graph, error) {
+	submitted, err := config.ParseYAML(raw)
+	if err != nil {
+		return nil, workflow.Graph{}, err
+	}
+	var trusted *config.Config
+	if store, storeErr := s.templateStore(); storeErr == nil {
+		if current, _, readErr := store.ReadCurrent(); readErr == nil {
+			if parsed, parseErr := config.ParseYAML(current); parseErr == nil {
+				trusted = parsed
+			}
+		}
+	}
+	if problems := submitted.UntrustedCommandProblems(trusted); len(problems) > 0 {
+		return nil, workflow.Graph{}, &trustedConfigError{problems: problems}
+	}
+	return s.parseTemplateYAML(raw)
 }
 
 func (s *Server) parseTemplateYAML(raw []byte) (*config.Config, workflow.Graph, error) {
@@ -158,9 +196,13 @@ func (s *Server) handleValidateTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	result := templateValidation{Version: config.TemplateVersionID([]byte(command.YAML))}
-	cfg, graph, err := s.parseTemplateYAML([]byte(command.YAML))
+	cfg, graph, err := s.parseSubmittedTemplateYAML([]byte(command.YAML))
 	if err != nil {
 		result.Diagnostic = err.Error()
+		var forbidden *trustedConfigError
+		if errors.As(err, &forbidden) {
+			result.Code = config.ErrCodeTrustedConfigOnly
+		}
 		writeJSONResponse(w, http.StatusOK, result)
 		return
 	}
@@ -211,7 +253,12 @@ func (s *Server) handlePublishTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, _, err := s.parseTemplateYAML([]byte(command.YAML)); err != nil {
+	if _, _, err := s.parseSubmittedTemplateYAML([]byte(command.YAML)); err != nil {
+		var forbidden *trustedConfigError
+		if errors.As(err, &forbidden) {
+			writeJSONAPIError(w, http.StatusBadRequest, err.Error(), config.ErrCodeTrustedConfigOnly)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

@@ -627,7 +627,11 @@ func humanResultContent(stage config.TemplateStage, decision approval.Decision, 
 	if decision.Action == "skip" {
 		return nil, errors.New("skipped human stage has no result artifact")
 	}
-	if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, decision.Comment, stage.SectionsRequired()); err != nil {
+	// Only the type of the result is validated here. The required sections are a
+	// gate (required_sections) that the gate scheduler runs on the stored
+	// version: a result that lacks one is a recorded `fail` that leaves the task
+	// at the stage for a new version, not a reason to end the task.
+	if err := humanartifact.ValidateSubmission(stage.Result, stage.LinkKind, decision.Comment); err != nil {
 		return nil, err
 	}
 	switch stage.Result {

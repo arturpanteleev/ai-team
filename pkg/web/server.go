@@ -984,6 +984,21 @@ func (s *Server) deliveryProjection(run *store.PipelineRun, stages []store.Stage
 		projection.Record = record
 		return projection
 	}
+	// A delivery stage before code review is recorded by a stage receipt, not a
+	// terminal one; both mean the controller delivered the branch.
+	if stageReceipts, stageErr := delivery.ListControllerStageDeliveryReceipts(target, run.RunID); stageErr != nil {
+		projection.Status = "unavailable"
+		return projection
+	} else if len(stageReceipts) > 0 {
+		last := stageReceipts[len(stageReceipts)-1]
+		projection.Status = "recorded"
+		projection.Record = &delivery.TerminalRecord{
+			SchemaVersion: delivery.TerminalRecordSchemaVersion, RunID: last.RunID, Feature: last.Feature,
+			PlanHash: last.PlanHash, CommitSHA: last.CommitSHA, PRURL: last.PRURL, PerformedAt: last.PerformedAt,
+			StageAttemptID: last.AttemptID, StageDeliveryReceiptSHA256: last.ReceiptSHA256,
+		}
+		return projection
+	}
 	event, eventErr := s.store.LatestRunEvent(run.RunID, "delivery_retry_failed")
 	if eventErr != nil {
 		projection.Status = "unavailable"

@@ -262,6 +262,11 @@ func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage,
 		workflow.GateKindBuiltin: rs.builtinGateRunner(stage, result, state),
 		workflow.GateKindLLM:     rs.agentGateRunner(stage, result, state),
 	}
+	// A program gate and its Docker variant speak one protocol and share one
+	// runner; the definition decides how the program is launched.
+	external := rs.externalGateRunner(stage, result)
+	runners[workflow.GateKindExternal] = external
+	runners[workflow.GateKindDocker] = external
 	scheduler, err := gatesched.New(rs.gateJournal(), runners, gatesched.Options{
 		MaxParallel: rs.p.cfg.GateConcurrency,
 		Clock:       func() time.Time { return rs.p.clock().UTC() },

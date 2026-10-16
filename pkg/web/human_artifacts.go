@@ -315,6 +315,12 @@ func (s *Server) handleCreateArtifactRevision(w http.ResponseWriter, r *http.Req
 			http.Error(w, "stage result revision requires edited content", http.StatusBadRequest)
 			return
 		}
+		// This is an edit of a draft revision during a pending grill, not a
+		// submission: no gate has run and no attempt is recorded, so a missing
+		// required section is refused here, before the next grill version is
+		// pinned. A real submission (human stage result route, pipeline path)
+		// only checks the type and lets the required_sections gate record a
+		// fail, which keeps the attempt history.
 		if err := humanartifact.ValidateStageResult(stage.Result, stage.LinkKind, command.Content, stage.SectionsRequired()); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

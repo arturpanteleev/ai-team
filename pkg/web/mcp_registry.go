@@ -771,6 +771,16 @@ func (s *Server) auditMCPAction(identity mcpIdentity, o mcpOperation, args mcpAr
 			runID = created.RunID
 		}
 	}
+	if outcome.status == http.StatusUnauthorized || outcome.status == http.StatusForbidden {
+		// A refused call proves nothing about the run named in its arguments:
+		// the run may not exist and the caller had no right to touch it, so the
+		// attempt must not be written into that run's journal. It goes to the
+		// team audit with the claimed run id as plain data.
+		if runID != "" {
+			data["run_id"] = runID
+		}
+		runID = ""
+	}
 	if runID != "" {
 		s.appendRunEvent(runID, mcpActionEvent, now, data)
 		return

@@ -129,8 +129,9 @@ func TestMigrationV17GrantsAdminToTheTeamOwnerOnly(t *testing.T) {
 }
 
 // A database that a build with a later schema version brought up without the
-// v17 step (the version is marked, the administrator is not) still gets its
-// administrator on the next open: the grant looks at the state, not the mark.
+// v17 step (the version is marked, the administrator is not) gets its
+// administrator once, on the upgrade to v19: the grant looks at the state, not
+// the mark. Later opens never grant (see TestOpeningACurrentDatabaseNeverGrantsAdmin).
 func TestMigrationV17GrantIsStateBasedNotVersionMarked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v18-without-v17.db")
 	s, err := New(path)
@@ -147,6 +148,7 @@ func TestMigrationV17GrantIsStateBasedNotVersionMarked(t *testing.T) {
 	for _, stmt := range []string{
 		`UPDATE team_members SET roles_json='["product_owner"]', status='active'`,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, CURRENT_TIMESTAMP)`,
+		`DELETE FROM schema_migrations WHERE version = 19`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)

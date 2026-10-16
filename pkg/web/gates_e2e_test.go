@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/arturpanteleev/ai-team/pkg/approval/approvaltest"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,11 +92,16 @@ func TestGateOverrideEndToEnd_HTTPControllerPipeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newTemplateFixture(t, string(data), false, nil, map[string]lifecycle.State{})
+	trustedApprovals, err := approvaltest.New(f.target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	options := func() []pipeline.Option {
 		return []pipeline.Option{
 			pipeline.WithRuntimeFactory(func(string) (runtime.Runtime, error) { return resultWithoutSection{}, nil }),
 			pipeline.WithNotifier(e2eNotifier{}),
 			pipeline.WithRecorder(NewStoreRecorder(f.srv.store)),
+			pipeline.WithApprovalStore(trustedApprovals),
 		}
 	}
 	taskDir := filepath.Join(f.target, ".ai-team", "artifacts", "tasks", "feat")
@@ -115,7 +121,7 @@ func TestGateOverrideEndToEnd_HTTPControllerPipeline(t *testing.T) {
 		t.Fatalf("a failed required gate must park the run: %v", startErr)
 	}
 	runID := started.RunID
-	controller, err := control.New(engine, f.target)
+	controller, err := control.New(engine, f.target, control.WithApprovalStore(trustedApprovals))
 	if err != nil {
 		t.Fatal(err)
 	}

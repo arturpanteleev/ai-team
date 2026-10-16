@@ -49,7 +49,7 @@ func passingReviewer(int) map[string]string {
 func resumeWave(t *testing.T, dir string, rt *scriptedRuntime, cfg *config.Config, runID string) error {
 	t.Helper()
 	p := New(cfg, stageCheckRegistry(true),
-		WithRuntimeFactory(rt.factory), WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}))
+		WithRuntimeFactory(rt.factory), WithNotifier(&captureNotifier{}), WithPrompter(&scriptedPrompter{}), trustedFileApprovals(t, dir))
 	return p.Run(context.Background(), RunConfig{Feature: "", TargetDir: dir, ResumeRunID: runID})
 }
 

@@ -1005,6 +1005,14 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if pending != nil && isStageConfirmation(*pending) {
+		// A return is a decision on the same stage visit as a confirmation:
+		// forbid_self_approval applies to it (an unverifiable policy fails closed).
+		if err := s.selfApprovalViolation(runID, *pending, actorID); err != nil {
+			writeJSONAPIError(w, http.StatusForbidden, err.Error(), "self_approval_forbidden")
+			return
+		}
+	}
 	controller, ok := s.controller.(StageReturnController)
 	if !ok {
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "return action is not connected to the task controller", "controller_action_unavailable")

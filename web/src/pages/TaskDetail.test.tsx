@@ -410,6 +410,39 @@ describe('Task detail', () => {
     expect(within(owner).getByTestId('role-needed')).toHaveTextContent('Сдать результат');
   });
 
+  it('does not offer «Принять» to the stage author under forbid_self_approval and says why', async () => {
+    const api = await import('../api');
+    const confirmation = {
+      id: 'gate-1', run_id: 'run-detail-1', attempt_id: 'attempt-release', kind: 'approve' as const,
+      from_stage: 'release', to_stage: 'analysis', trigger: 'graph_outcome:passed', subject_hash: 'c'.repeat(64),
+      required_roles: ['release_manager'], quorum: 'any' as const,
+      actions: ['approve', 'reject', 'return_to_intent'], targets: { approve: 'analysis', return_to_intent: 'intent' },
+      status: 'pending' as const, created_at: '2026-10-12T09:00:00Z',
+    };
+    const details = {
+      ...baseDetails,
+      template: { ...baseDetails.template!, forbid_self_approval: true, returns: [{ from: 'release', to: 'intent' }] },
+      state: { ...baseDetails.state!, next_stage: 'analysis', pending_approval_id: 'gate-1' },
+      approvals: [confirmation],
+      allowed_actions: ['confirm', 'return'],
+    };
+    // The author: the server leaves confirm and return out of viewer_actions.
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...details, viewer_actions: [] });
+    renderDetail();
+    const author = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(await within(author).findByTestId('self-approval-note')).toHaveTextContent('другой участник');
+    expect(within(author).queryByRole('button', { name: /^Принять/ })).not.toBeInTheDocument();
+    expect(within(author).getByRole('button', { name: 'Отклонить' })).toBeInTheDocument();
+
+    // Another member keeps the button and sees no note.
+    cleanup();
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({ ...details, viewer_actions: ['confirm', 'return'] });
+    renderDetail();
+    const other = await screen.findByRole('complementary', { name: 'Действия' });
+    expect(await within(other).findByRole('button', { name: /^Принять/ })).toBeInTheDocument();
+    expect(within(other).queryByTestId('self-approval-note')).not.toBeInTheDocument();
+  });
+
   it('shows when the responsible person took the stage', async () => {
     const api = await import('../api');
     vi.mocked(api.getTaskRunDetails).mockResolvedValue({

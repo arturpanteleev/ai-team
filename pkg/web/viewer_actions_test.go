@@ -134,8 +134,14 @@ func TestViewerActionsHideConfirmFromTheStageAuthor(t *testing.T) {
 	if slices.Contains(author.ViewerActions, "confirm") {
 		t.Fatalf("the author must not be offered confirm under forbid_self_approval: %v", author.ViewerActions)
 	}
+	if slices.Contains(author.ViewerActions, "return") {
+		t.Fatalf("the author must not be offered return under forbid_self_approval: %v", author.ViewerActions)
+	}
 	other := fixture.viewerView(t, "reviewer@example.test", []cloudidentity.Role{cloudidentity.RoleReviewer}, "run-confirm")
 	if !slices.Contains(other.ViewerActions, "confirm") {
 		t.Fatalf("another reviewer must be offered confirm: %v", other.ViewerActions)
+	}
+	if !slices.Contains(other.ViewerActions, "return") {
+		t.Fatalf("another reviewer must be offered return: %v", other.ViewerActions)
 	}
 }

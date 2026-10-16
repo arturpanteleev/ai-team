@@ -67,6 +67,10 @@ func (s *Server) viewerActions(r *http.Request, state *lifecycle.State, approval
 			}
 		case "return":
 			permitted = stageAllowed(confirmed, cloudidentity.StageActionConfirm)
+			if permitted && pending != nil && isStageConfirmation(*pending) &&
+				s.selfApprovalViolation(state.RunID, *pending, principal.ActorID) != nil {
+				permitted = false
+			}
 		case "override":
 			permitted = cloudidentity.Authorize(principal, cloudidentity.PermissionGateOverride, "") == nil
 		case "plan/approve":

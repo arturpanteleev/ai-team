@@ -636,12 +636,19 @@ export function TaskDetail() {
     return target !== undefined && allowed.has('return') && approval.from_stage === actionStageID
       && returnOptions.some((route) => route.to === target);
   };
+  // The server does not offer «confirm» to a stage author under forbid_self_approval and answers the
+  // «approve» decision with 403; the card must not offer a button that is bound to fail (S16 M-a).
+  const selfApprovalBlocked = (approval: Approval) => approval.status === 'pending'
+    && Boolean(template?.forbid_self_approval) && deniedActions.includes('confirm')
+    && approval.id === pending?.id && approval.trigger !== 'human_input' && approval.trigger !== 'delivery_plan'
+    && approval.kind !== 'check_decision' && approval.required_roles.some((role) => canAct(role));
   const decisionActions = (approval: Approval) => (approval.trigger === 'human_input'
     ? approval.actions.filter((action) => action !== 'submit'
       && !(action === 'approve' && stageNeedsContent(approval.from_stage))
       && (!(currentStage?.agent && allowed.has('run-agent')) || !['run_agent', 'refine_agent'].includes(action)))
     : approval.kind === 'check_decision' ? approval.actions.filter((action) => action !== 'override' && action !== 'retry_gate') : approval.actions)
-    .filter((action) => !coveredByReturnForm(approval, action));
+    .filter((action) => !coveredByReturnForm(approval, action))
+    .filter((action) => !(selfApprovalBlocked(approval) && (action === 'approve' || action === 'approve_spec')));
 
   const renderDecision = (approval: Approval) => {
     const answer = approvalAnswers[approval.id] ?? '';
@@ -664,6 +671,8 @@ export function TaskDetail() {
           onChange={(event) => setApprovalReasons((current) => ({ ...current, [approval.id]: event.target.value }))} />
       </label>}
       {approval.actions.length > 0 && approval.required_roles.length > 0 && !approval.required_roles.some((role) => canAct(role)) && <p className={styles.questionLabel}>Ответить или решить может участник с ролью: {approval.required_roles.join(', ')}.</p>}
+      {selfApprovalBlocked(approval) && <p className={styles.questionLabel} data-testid="self-approval-note">
+        Принять этот этап должен другой участник: вы работали над ним, а шаблон запрещает самоподтверждение (forbid_self_approval).</p>}
       <div className={styles.actions}>
         {/* One button per action: a person holding two of the required roles does not get the same button twice.
             Only when every role must decide (quorum «all») the button is per role. */}

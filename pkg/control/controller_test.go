@@ -915,3 +915,44 @@ func stringHex(value []byte) string {
 	}
 	return string(result)
 }
+
+// A pin the trusted configuration no longer vouches for is refused before any
+// decision is recorded: the approval stays open and is not spent.
+func TestControllerRunAndReturnRefusedPinDoNotSpendTheDecision(t *testing.T) {
+	engine := &fakeEngine{}
+	store := newRecordingApprovalStore(
+		approval.PendingApproval{
+			ID: "approval-agent", RunID: "run-refused", AttemptID: "attempt-1", Status: approval.StatusPending,
+			Kind: approval.KindInput, FromStage: "code_review", ToStage: "code_review", Trigger: "human_input",
+			SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+			Actions: []string{"run_agent"}, Targets: map[string]string{"run_agent": "code_review"},
+		},
+		approval.PendingApproval{
+			ID: "approval-return", RunID: "run-refused", AttemptID: "attempt-1", Status: approval.StatusPending,
+			FromStage: "code_review", ToStage: "code_review", Trigger: "graph_outcome:passed",
+			SubjectHash: strings.Repeat("a", 64), RequiredRoles: []string{"reviewer"}, Quorum: approval.QuorumAny,
+			Actions: []string{"approve", "return_to_implementation"},
+			Targets: map[string]string{"approve": "implementation", "return_to_implementation": "implementation"},
+		})
+	controller, target := newStageActionFixture(t, stageActionState("run-refused", "code_review", "approval-agent", lifecycle.PhaseWaiting), engine, store)
+	// The file configuration moved on in infrastructure since the run was pinned.
+	current, err := os.ReadFile(filepath.Join(target, ".ai-team", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := append(current, []byte("\ncontainment: {profile: strict}\n")...)
+	if err := os.WriteFile(filepath.Join(target, ".ai-team", "config.yaml"), drifted, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var refused *config.TrustedConfigError
+	if err := controller.RunStageAgent(context.Background(), "run-refused", "code_review", "actor-1", false); !errors.As(err, &refused) {
+		t.Fatalf("RunStageAgent must refuse an untrusted pin, got %v", err)
+	}
+	if err := controller.ReturnStage(context.Background(), "run-refused", "code_review", "implementation", "redo", "actor-1", "reviewer"); !errors.As(err, &refused) {
+		t.Fatalf("ReturnStage must refuse an untrusted pin, got %v", err)
+	}
+	if len(store.decisions) != 0 {
+		t.Fatalf("a refused action must not record a decision: %+v", store.decisions)
+	}
+}

@@ -50,16 +50,28 @@ func (c *Config) untrustedRunProblems(trusted *Config) []string {
 func (c *Config) untrustedProblems(trusted *Config, forRun bool) []string {
 	var problems []string
 	registry := gatelib.Default()
-	for _, stage := range c.Stages {
-		for _, ref := range stage.EffectiveGateGroups().Refs() {
-			if isCommandGate(registry, ref) {
-				problems = append(problems, fmt.Sprintf("этап %q: гейт %s запускает команду или контейнер", stage.ID, ref.Gate))
-			}
-		}
-	}
 	hasBaseline := trusted != nil
 	if trusted == nil {
 		trusted = &Config{}
+	}
+	trustedStages := map[string]TemplateStage{}
+	for _, stage := range trusted.Stages {
+		trustedStages[stage.ID] = stage
+	}
+	for _, stage := range c.Stages {
+		for _, ref := range stage.EffectiveGateGroups().Refs() {
+			if !isCommandGate(registry, ref) {
+				continue
+			}
+			// A submission never carries a command gate. A stored template about
+			// to run may, when the trusted file has the very same gate in the
+			// very same stage (its definitions are compared below), so editing
+			// the file does not strand a run whose command came from the file.
+			if forRun && hasGateRef(trustedStages[stage.ID], ref) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf("этап %q: гейт %s запускает команду или контейнер, которых нет в файловом конфиге", stage.ID, ref.Gate))
+		}
 	}
 	trustedAdapters, trustedChecks, trustedMCP := trustedDefinitions(trusted)
 	for _, name := range sortedMapKeys(c.ExecutorAdapters) {
@@ -142,8 +154,8 @@ var stageFieldClasses = map[string]fieldClass{
 	"ID": processField, "Title": processField, "Function": sameStageField,
 	"ApproverFunction": sameStageField, "Result": processField, "Executor": sameStageField,
 	"Agent": sameStageField, "Adapter": sameStageField, "LinkKind": processField,
-	"RequiredSections": processField, "Check": processField, "Confirm": processField,
-	"ExitGateGroups": processField, "Skippable": processField, "MCPServers": sameStageField,
+	"RequiredSections": processField, "Check": processField, "Confirm": tightenOnlyField,
+	"ExitGateGroups": tightenOnlyField, "Skippable": tightenOnlyField, "MCPServers": sameStageField,
 	"Delivery": trustedField,
 }
 
@@ -246,6 +258,10 @@ func (c *Config) stageProblems(trusted *Config) []string {
 			if isEmptyValue(a) && isEmptyValue(b) || reflect.DeepEqual(a.Interface(), b.Interface()) {
 				continue
 			}
+			// An empty executor is a human stage.
+			if name == "Executor" && effectiveExecutor(stage.Executor) == effectiveExecutor(want.Executor) {
+				continue
+			}
 			// Dropping an adapter or narrowing the MCP servers makes the stage
 			// less privileged (an internal executor, fewer tools): allowed.
 			if name == "Adapter" && stage.Adapter == "" {
@@ -257,8 +273,55 @@ func (c *Config) stageProblems(trusted *Config) []string {
 			field, _ := reflect.TypeOf(stage).FieldByName(name)
 			problems = append(problems, fmt.Sprintf("этап %q: %s не совпадает с этапом файлового конфига", stage.ID, yamlName(field)))
 		}
+		problems = append(problems, stageTightenProblems(stage, want)...)
 	}
 	return problems
+}
+
+func effectiveExecutor(executor string) string {
+	if executor == "" {
+		return "human"
+	}
+	return executor
+}
+
+// stageTightenProblems enforces the tighten-only stage fields of a stage that
+// exists in the trusted template: it cannot become skippable, and none of its
+// non-command exit gates (which include the confirmation of a transition) can
+// be removed or changed. Adding gates only makes the stage stricter; command
+// gates are refused separately. Deleting a whole stage stays allowed.
+func stageTightenProblems(stage, want TemplateStage) []string {
+	var problems []string
+	if stage.Skippable && !want.Skippable {
+		problems = append(problems, fmt.Sprintf("этап %q: skippable: из веба нельзя сделать пропускаемым этап, который в файловом конфиге обязателен", stage.ID))
+	}
+	registry := gatelib.Default()
+	for _, wantRef := range want.EffectiveGateGroups().Refs() {
+		if isCommandGate(registry, wantRef) || hasGateRef(stage, wantRef) {
+			continue
+		}
+		problems = append(problems, fmt.Sprintf("этап %q: гейт %s (%s) файлового конфига нельзя убрать или ослабить из веба", stage.ID, wantRef.InstanceName(), wantRef.Key()))
+	}
+	return problems
+}
+
+// hasGateRef reports whether stage uses a gate semantically equal to ref: the
+// same definition, version, instance name, mode and parameters.
+func hasGateRef(stage TemplateStage, ref workflow.GateRef) bool {
+	for _, have := range stage.EffectiveGateGroups().Refs() {
+		if have.Gate == ref.Gate && have.Version == ref.Version && have.InstanceName() == ref.InstanceName() &&
+			have.Mode.Effective() == ref.Mode.Effective() && sameParams(have.Params, ref.Params) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameParams(a, b map[string]any) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // tightenProblems enforces the tightenOnlyField fields: through the web the

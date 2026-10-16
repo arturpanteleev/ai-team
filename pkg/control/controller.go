@@ -561,6 +561,10 @@ func (c *Controller) ChangeStageExecutor(runID, stageID, executor, actorID strin
 // A pending human input approval is resolved with run_agent (or refine_agent,
 // which feeds the current result back as refinement input) before resuming.
 func (c *Controller) RunStageAgent(_ context.Context, runID, stageID, actorID string, refine bool) error {
+	// Before any decision is recorded: a refusal must not spend the approval.
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
+	}
 	state, err := c.loadLifecycle(runID)
 	if err != nil {
 		return err
@@ -674,6 +678,10 @@ func (c *Controller) SkipStage(_ context.Context, runID, stageID, reason, actorI
 func (c *Controller) ReturnStage(_ context.Context, runID, stageID, toStage, reason, actorID, actorRole string) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("для возврата требуется причина")
+	}
+	// Before any decision is recorded: a refusal must not spend the approval.
+	if err := c.RequireTrustedPin(runID); err != nil {
+		return err
 	}
 	state, err := c.loadLifecycle(runID)
 	if err != nil {

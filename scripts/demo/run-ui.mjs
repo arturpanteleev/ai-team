@@ -364,6 +364,9 @@ checks.check('в неизменяемом журнале run есть delivery_p
 async function reviewLoop(kind, label, title) {
   log(`${label}: публикация короткого шаблона и задача (changes requested → возврат → одобрение)`)
   const yaml = readFileSync(path.join(repoRoot, `docs/demo/demo-template-review-loop-${kind}.yaml`), 'utf8')
+  // Из веба нельзя убрать гейты файлового конфига, поэтому короткий шаблон сначала становится
+  // файловым конфигом (правка кода человеком), а страница «Шаблон» публикует тот же документ.
+  writeFileSync(path.join(home, 'repo/.ai-team/config.yaml'), yaml)
   await page.goto(`${baseURL}/template`)
   await page.getByLabel('Конфигурация выбранного шаблона').fill(yaml)
   await click('Проверить YAML')

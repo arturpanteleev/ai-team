@@ -117,7 +117,20 @@ func dockerReviewEngine(t *testing.T, dir string, rt *scriptedRuntime, capture *
 	t.Helper()
 	installReviewFixture(t, dir)
 	registry := dockerReviewRegistry()
-	p := New(dockerReviewConfig(t, registry, flags...), registry,
+	cfg := dockerReviewConfig(t, registry, flags...)
+	// The adapter is a command: it must come from the file configuration, the
+	// only trusted source a pinned template is compared with.
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".ai-team"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ai-team", "config.yaml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := New(cfg, registry,
 		WithRuntimeFactory(rt.factory), WithNotifier(capture), WithPrompter(&scriptedPrompter{}))
 	return NewRunEngine(p)
 }

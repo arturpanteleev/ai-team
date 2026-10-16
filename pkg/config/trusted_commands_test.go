@@ -212,8 +212,14 @@ func TestDemoTemplatesAreAcceptedFromTheWeb(t *testing.T) {
 	}
 	file := read("demo-template.yaml")
 	for _, name := range []string{"demo-template-review-loop-external.yaml", "demo-template-review-loop-internal.yaml"} {
-		if problems := read(name).UntrustedCommandProblems(file); len(problems) != 0 {
-			t.Errorf("%s must be accepted by the web: %v", name, problems)
+		short := read(name)
+		if problems := short.UntrustedCommandProblems(short); len(problems) != 0 {
+			t.Errorf("%s must be accepted by the web when it is the file configuration: %v", name, problems)
+		}
+		// Against the full demo file the short template drops gates, which the
+		// web may not do; the demo script makes the short template the file first.
+		if problems := short.UntrustedCommandProblems(file); !strings.Contains(strings.Join(problems, "\n"), "нельзя убрать") {
+			t.Errorf("%s drops gates of the full demo file and must be refused: %v", name, problems)
 		}
 	}
 	if problems := file.UntrustedCommandProblems(file); len(problems) == 0 {
@@ -312,5 +318,44 @@ func TestWebSubmissionTrackerNilEqualsZero(t *testing.T) {
 	}
 	if problems := parseTrusted(t, base+"tracker:\n  jira:\n    base_url: https://x.example\n").UntrustedCommandProblems(trusted); len(problems) == 0 {
 		t.Error("a jira endpoint over an empty file section must still be refused")
+	}
+}
+
+// Through the web the stage can only get stricter: not skippable, no gate or
+// confirmation removed; an empty executor of the file is a human stage.
+func TestWebSubmissionTightensStageFieldsOnly(t *testing.T) {
+	gated := strings.Replace(trustedBaseYAML,
+		"{id: spec, title: Spec, function: po, result: md, executor: human}",
+		`{id: spec, title: Spec, function: po, result: md, exit_gate_groups: [[{gate: required_sections, version: 1, params: {sections: [A]}}], [{gate: human_approval, version: 2, name: ok}]]}`, 1)
+	trusted := parseTrusted(t, gated)
+	if problems := parseTrusted(t, gated).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Fatalf("an identical document, empty executor included, must be accepted: %v", problems)
+	}
+	humanExecutor := strings.Replace(gated, "result: md, exit_gate_groups", "result: md, executor: human, exit_gate_groups", 1)
+	if problems := parseTrusted(t, humanExecutor).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Errorf("an empty executor equals human: %v", problems)
+	}
+	tighter := strings.Replace(gated, "[{gate: human_approval, version: 2, name: ok}]]", "[{gate: human_approval, version: 2, name: ok}], [{gate: required_phrases, version: 1, params: {phrases: [x]}}]]", 1)
+	if problems := parseTrusted(t, tighter).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Errorf("adding a gate only tightens: %v", problems)
+	}
+	noStage := strings.Replace(gated, "  - {id: build, title: Build, function: developer, result: md, executor: human}\nreturns:\n  - {from: build, to: spec}\n", "", 1)
+	if problems := parseTrusted(t, noStage).UntrustedCommandProblems(trusted); len(problems) != 0 {
+		t.Errorf("deleting a stage stays allowed: %v", problems)
+	}
+	refused := map[string]struct{ from, to, field string }{
+		"confirm removed":   {", [{gate: human_approval, version: 2, name: ok}]", "", "ok"},
+		"gate removed":      {"[{gate: required_sections, version: 1, params: {sections: [A]}}], ", "", "required_sections"},
+		"gate params":       {"sections: [A]", "sections: [B]", "required_sections"},
+		"skippable enabled": {"result: md, exit_gate_groups", "result: md, skippable: true, exit_gate_groups", "skippable"},
+	}
+	for name, tc := range refused {
+		if !strings.Contains(gated, tc.from) {
+			t.Fatalf("%s: fixture lost %q", name, tc.from)
+		}
+		problems := parseTrusted(t, strings.Replace(gated, tc.from, tc.to, 1)).UntrustedCommandProblems(trusted)
+		if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), tc.field) {
+			t.Errorf("%s: want a problem naming %s, got %v", name, tc.field, problems)
+		}
 	}
 }

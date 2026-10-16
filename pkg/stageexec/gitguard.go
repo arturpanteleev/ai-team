@@ -81,27 +81,23 @@ func checkNestedGitfile(root, p, rel string) error {
 	if target == "" {
 		return fmt.Errorf("gitfile %s: пустой gitdir", rel)
 	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(p), filepath.FromSlash(target))
+	real, viaSymlink, exists, err := resolveGitdir(filepath.Dir(p), target)
+	if err != nil {
+		return fmt.Errorf("gitfile %s: путь gitdir неоднозначен: %w", rel, err)
 	}
-	target = filepath.Clean(target)
-	inside, err := filepath.Rel(root, target)
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	inside, err := filepath.Rel(realRoot, real)
 	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-		return nil // outside the mount: it does not resolve in the container
+		return nil // really outside the mount: it does not resolve in the container
 	}
-	current := root
-	for _, part := range strings.Split(inside, string(filepath.Separator)) {
-		if part == "." {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("gitfile %s указывает на недоступный путь внутри репозитория %s: %w", rel, inside, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("gitfile %s указывает внутрь репозитория через символическую ссылку %s", rel, inside)
-		}
+	if viaSymlink {
+		return fmt.Errorf("gitfile %s указывает внутрь репозитория через символическую ссылку %s", rel, inside)
+	}
+	if !exists {
+		return fmt.Errorf("gitfile %s указывает на недоступный путь внутри репозитория %s", rel, inside)
 	}
 	return nil
 }

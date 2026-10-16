@@ -2,8 +2,8 @@ package stageexec
 
 import (
 	"os"
-	"path/filepath"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"testing"
@@ -86,6 +86,30 @@ func TestCheckRepoGitMetadataRejectsGitfileThroughSymlink(t *testing.T) {
 	}
 	if err := checkRepoGitMetadata(root); err == nil {
 		t.Error("gitfile through a symlink accepted")
+	}
+}
+
+// ".." after a symlink component is applied to the real directory: this
+// gitfile looks outside the tree lexically but really names <root>/d/x.
+func TestCheckRepoGitMetadataRejectsDotDotAfterSymlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"d/e/f/keep": "x", "d/x/HEAD": "x", "s/.git": "gitdir: ../l/../../x\n"})
+	if err := os.Symlink(filepath.Join(root, "d", "e", "f"), filepath.Join(root, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRepoGitMetadata(root); err == nil {
+		t.Error("gitfile that really names a path inside the mount via symlink+.. accepted")
+	}
+}
+
+func TestCheckRepoGitMetadataRejectsDotDotAfterMissingComponent(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"s/.git": "gitdir: ../nothere/../../x\n"})
+	if err := checkRepoGitMetadata(root); err == nil {
+		t.Error("ambiguous gitfile path accepted")
 	}
 }
 

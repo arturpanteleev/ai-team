@@ -119,8 +119,10 @@ named in the configuration, and the allowlisted environment variables; the
 request MUST name container paths only. A repository whose `.git` is a symlink,
 that holds a nested `.git` symlink (the name `.git` is compared without case),
 or a malformed nested gitfile, or a nested gitfile whose target lies inside the
-repository but is missing or reached through a symlink MUST be refused before
-the container starts; a gitfile whose target lies outside the repository (the
+repository but is missing or reached through a symlink, or whose path cannot be
+resolved unambiguously (`..` is applied to the real directory after symlinks,
+never lexically), MUST be refused before the container starts; a gitfile whose
+target really lies outside the repository (the
 submodule of a linked worktree) MUST be allowed, because the read-only mount
 does not resolve it. Entries below `node_modules` MUST NOT count against the
 500000-entry limit of this check (a larger tree is refused). Residual risks: a

@@ -667,6 +667,42 @@ func TestGitOverlays(t *testing.T) {
 	}
 }
 
+func TestGitOverlaysRefuseDotDotAfterSymlink(t *testing.T) {
+	repo := t.TempDir()
+	for rel, content := range map[string]string{".git/HEAD": "x", "d/e/f/keep": "x", "d/x/HEAD": "x", "s/.git": "gitdir: ../l/../../x\n"} {
+		path := filepath.Join(repo, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(repo, "d", "e", "f"), filepath.Join(repo, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitOverlays(repo); err == nil {
+		t.Fatalf("gitfile really naming d/x through a symlink was accepted: %v", got)
+	}
+}
+
+func TestGitOverlaysUpperCaseTopGitCoversNestedClone(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".GIT", "sub", ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := nestedGitOverlays(repo, []string{".git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(got, ".GIT") {
+		t.Fatalf(".GIT (with the nested clone inside) is not overlaid: %v", got)
+	}
+}
+
 func TestGitOverlaysCoverNestedGitMetadata(t *testing.T) {
 	repo := t.TempDir()
 	mk := func(rel, content string) {

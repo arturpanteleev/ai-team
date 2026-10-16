@@ -457,9 +457,13 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 		}
 		return false
 	}
+	realRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return nil, err
+	}
 	var found []string
 	visited := 0
-	err := filepath.WalkDir(repoRoot, func(p string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(repoRoot, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -473,7 +477,7 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 		if visited > maxNestedGitWalk {
 			return fmt.Errorf("more than %d entries: nested git metadata cannot be checked", maxNestedGitWalk)
 		}
-		if strings.EqualFold(rel, ".git") {
+		if rel == ".git" {
 			if entry.IsDir() {
 				return filepath.SkipDir // the top-level git directory is covered already
 			}
@@ -496,7 +500,14 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 		if err != nil {
 			return fmt.Errorf("gitfile %s: %w", rel, err)
 		}
-		targetRel, inside := within(repoRoot, target)
+		realTarget, viaSymlink, _, err := resolveGitdir(filepath.Dir(p), target)
+		if err != nil {
+			return fmt.Errorf("gitfile %s: gitdir path is ambiguous: %w", rel, err)
+		}
+		targetRel, inside := within(realRoot, realTarget)
+		if inside && viaSymlink {
+			return fmt.Errorf("gitfile %s names a path inside the repository through a symlink", rel)
+		}
 		if !inside || targetRel == "." || covered(targetRel) || containsPath(found, targetRel) {
 			return nil // outside the repository it is not mounted; under .git it is read-only already
 		}
@@ -547,10 +558,7 @@ func gitfileTarget(file string) (string, error) {
 	if !ok || target == "" || strings.ContainsAny(line, "\n\x00") {
 		return "", errors.New(`not in the form "gitdir: <path>"`)
 	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(file), filepath.FromSlash(target))
-	}
-	return filepath.Clean(target), nil
+	return target, nil
 }
 
 func (l DockerLauncher) user(settings DockerSettings) string {

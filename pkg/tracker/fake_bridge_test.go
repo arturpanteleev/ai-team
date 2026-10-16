@@ -101,6 +101,52 @@ func TestFakeOutboxRecordsAcceptedWrites(t *testing.T) {
 	}
 }
 
+func TestFakeBridgeRefusesSymlinks(t *testing.T) {
+	fake, dir := openBridgedFake(t)
+	outside := t.TempDir()
+	secretInbox := filepath.Join(outside, "elsewhere-inbox.jsonl")
+	if err := os.WriteFile(secretInbox, []byte(`{"key":"APP-1","status":"Done","author":"x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretInbox, filepath.Join(dir, "inbox.jsonl")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	target := filepath.Join(outside, "elsewhere-outbox.jsonl")
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "outbox.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if page, err := fake.Changes(ctx, ChangeQuery{Cursor: "0"}); err != nil || len(page.Changes) != 0 {
+		t.Fatalf("an inbox that is a symlink must not be read: %+v %v", page, err)
+	}
+	if _, err := fake.Transition(ctx, "APP-1", "In Progress"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(target); len(data) != 0 {
+		t.Fatalf("an outbox that is a symlink must not be written through: %q", data)
+	}
+}
+
+func TestFakeInboxRestartsAfterTruncation(t *testing.T) {
+	fake, dir := openBridgedFake(t)
+	ctx := context.Background()
+	appendInbox(t, dir, `{"key":"APP-1","status":"In Progress","author":"Ivan"}`+"\n")
+	if page, err := fake.Changes(ctx, ChangeQuery{Cursor: "0"}); err != nil || len(page.Changes) != 1 {
+		t.Fatalf("first change: %+v %v", page, err)
+	}
+	// The file is emptied and a shorter line written: the offset must not skip it.
+	if err := os.WriteFile(filepath.Join(dir, "inbox.jsonl"), []byte(`{"key":"APP-1","status":"Done"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	page, err := fake.Changes(ctx, ChangeQuery{Cursor: "1"})
+	if err != nil || len(page.Changes) != 1 || page.Changes[0].To != "Done" {
+		t.Fatalf("a truncated inbox must be read from the start: %+v %v", page, err)
+	}
+}
+
 func TestFakeWithoutDirDoesNotTouchTheFilesystem(t *testing.T) {
 	adapter, err := openFake(&config.TrackerConfig{Fake: &config.FakeTrackerConfig{Issues: []config.FakeIssueConfig{{Key: "APP-1"}}}}, Deps{})
 	if err != nil {

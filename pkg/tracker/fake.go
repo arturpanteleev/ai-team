@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 // FakeName is the adapter name of the in-memory tracker.
@@ -34,6 +35,11 @@ type FakeIssueSeed struct {
 // object per line ({"key","status","author"}) that the fake applies as an
 // external status change before its next call, and outbox.jsonl, one JSON line
 // per transition or comment the fake accepted ({"op","key","status"|"comment"}).
+//
+// The directory is a local trusted channel: whoever can write there can feed an
+// "external" status to the fake tracker (it still goes through the controller's
+// inbound rules, never around them). It is for demos and local runs only. Both
+// files are opened without following symlinks.
 const FakeDirEnv = "AI_TEAM_FAKE_TRACKER_DIR"
 
 // FakeCall is one recorded call, for assertions in tests and demos.
@@ -113,11 +119,17 @@ func (f *Fake) drainInbox() {
 	if f.inboxPath == "" {
 		return
 	}
-	file, err := os.Open(f.inboxPath)
+	file, err := safeio.OpenRegularNoFollow(f.inboxPath, os.O_RDONLY, 0)
 	if err != nil {
 		return
 	}
 	defer func() { _ = file.Close() }()
+	if info, err := file.Stat(); err != nil {
+		return
+	} else if info.Size() < f.inboxOffset {
+		// The inbox was truncated or replaced by a shorter file: read it from the start.
+		f.inboxOffset = 0
+	}
 	if _, err := file.Seek(f.inboxOffset, io.SeekStart); err != nil {
 		return
 	}
@@ -155,7 +167,7 @@ func (f *Fake) appendOutbox(entry map[string]string) {
 	if err != nil {
 		return
 	}
-	file, err := os.OpenFile(f.outboxPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := safeio.OpenRegularNoFollow(f.outboxPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}

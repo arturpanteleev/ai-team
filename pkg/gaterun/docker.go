@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -175,7 +176,7 @@ func (d DockerSettings) Validate() error {
 		}
 		targets[m.Target] = true
 		probe.Mounts = append(probe.Mounts, dockerrun.Mount{Source: "/probe/" + m.Path, Target: m.Target, ReadOnly: !m.Writable})
-		if m.Writable && (strings.EqualFold(m.Path, ".git") || strings.HasPrefix(strings.ToLower(m.Path), ".git/")) {
+		if m.Writable && hasGitElement(m.Path) {
 			return fmt.Errorf("docker gate: mount %q: a gate must not get write access to .git", m.Path)
 		}
 		if strings.HasPrefix(m.Target, ContainerEvidenceDir+"/") || strings.HasPrefix(m.Target, ContainerArtifact+"/") {
@@ -397,6 +398,18 @@ func (l DockerLauncher) SweepOrphans(ctx context.Context) ([]string, error) {
 // linked worktree) and every other git directory of the repository that lies
 // inside it. A symlinked .git is refused: the daemon would follow it.
 func gitOverlays(repoRoot string) ([]string, error) {
+	overlays, err := topGitOverlays(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	nested, err := nestedGitOverlays(repoRoot, overlays)
+	if err != nil {
+		return nil, err
+	}
+	return append(overlays, nested...), nil
+}
+
+func topGitOverlays(repoRoot string) ([]string, error) {
 	info, err := os.Lstat(filepath.Join(repoRoot, ".git"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -424,6 +437,117 @@ func gitOverlays(repoRoot string) ([]string, error) {
 		}
 	}
 	return overlays, nil
+}
+
+// maxNestedGitWalk bounds the search for nested git metadata.
+const maxNestedGitWalk = 500000
+
+// nestedGitOverlays finds git metadata below the repository root that a
+// writable mount would otherwise expose: the `.git` directory of a nested
+// clone, the gitfile of a submodule and the directory such a gitfile names when
+// it lies inside the repository but outside an existing overlay. A symlinked
+// nested `.git`, an unreadable or malformed gitfile are refused: the daemon
+// would follow the link, and a program could plant hooks through them.
+func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
+	covered := func(rel string) bool {
+		for _, o := range existing {
+			if rel == o || strings.HasPrefix(rel, o+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	var found []string
+	visited := 0
+	err := filepath.WalkDir(repoRoot, func(p string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if visited++; visited > maxNestedGitWalk {
+			return fmt.Errorf("more than %d entries: nested git metadata cannot be checked", maxNestedGitWalk)
+		}
+		rel, ok := within(repoRoot, p)
+		if !ok || rel == "." {
+			return nil
+		}
+		if rel == ".git" {
+			if entry.IsDir() {
+				return filepath.SkipDir // the top-level git directory is covered already
+			}
+			return nil
+		}
+		if entry.Name() != ".git" || covered(rel) {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("nested %s is a symlink", rel)
+		}
+		if err := noSymlinkBelow(repoRoot, rel); err != nil {
+			return fmt.Errorf("nested git metadata %s: %w", rel, err)
+		}
+		found = append(found, rel)
+		if entry.IsDir() {
+			return filepath.SkipDir
+		}
+		target, err := gitfileTarget(p)
+		if err != nil {
+			return fmt.Errorf("gitfile %s: %w", rel, err)
+		}
+		targetRel, inside := within(repoRoot, target)
+		if !inside || targetRel == "." || covered(targetRel) || containsPath(found, targetRel) {
+			return nil // outside the repository it is not mounted; under .git it is read-only already
+		}
+		if err := noSymlinkBelow(repoRoot, targetRel); err != nil {
+			return fmt.Errorf("gitfile %s names %s: %w", rel, targetRel, err)
+		}
+		found = append(found, targetRel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+// hasGitElement reports whether a slash-separated repository path has a .git
+// element (the top-level one or a nested clone or submodule).
+func hasGitElement(rel string) bool {
+	for _, part := range strings.Split(rel, "/") {
+		if strings.EqualFold(part, ".git") {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPath(list []string, rel string) bool {
+	for _, item := range list {
+		if item == rel {
+			return true
+		}
+	}
+	return false
+}
+
+// gitfileTarget returns the absolute directory a `gitdir: <path>` file names.
+func gitfileTarget(file string) (string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > 4096 {
+		return "", errors.New("too large")
+	}
+	line := strings.TrimSpace(string(data))
+	target, ok := strings.CutPrefix(line, "gitdir:")
+	target = strings.TrimSpace(target)
+	if !ok || target == "" || strings.ContainsAny(line, "\n\x00") {
+		return "", errors.New(`not in the form "gitdir: <path>"`)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(file), filepath.FromSlash(target))
+	}
+	return filepath.Clean(target), nil
 }
 
 func (l DockerLauncher) user(settings DockerSettings) string {

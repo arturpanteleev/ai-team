@@ -116,7 +116,10 @@ no-new-privileges MUST always apply. The container MUST receive only the declare
 stage inputs mounted read-only, a private per-attempt result directory mounted
 read-write, optionally the repository read-only, read-only repository mounts
 named in the configuration, and the allowlisted environment variables; the
-request MUST name container paths only. A result given as a file in the result
+request MUST name container paths only. A repository whose `.git` is a symlink,
+that holds a nested `.git` symlink, or a nested gitfile pointing outside the
+repository MUST be refused before the container starts, and a repository mount
+MUST NOT name git metadata. A result given as a file in the result
 directory MUST be copied to the declared output only when the program reported
 `status: ok`; an output given both as content and as a file, a container exit
 failure, an unpinned or missing image, a timeout and an output limit hit MUST

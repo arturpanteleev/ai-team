@@ -78,6 +78,8 @@ func TestParseDockerParamsRejects(t *testing.T) {
 		"git rw upper":         base(map[string]any{"mounts": []any{".GIT/hooks:/g:rw"}}),
 		"git rw mixed":         base(map[string]any{"mounts": []any{".Git:/g:rw"}}),
 		"git subpath rw":       base(map[string]any{"mounts": []any{".git/hooks:/g:rw"}}),
+		"nested git rw":        base(map[string]any{"mounts": []any{"vendor/sub/.git:/g:rw"}}),
+		"nested git hooks rw":  base(map[string]any{"mounts": []any{"sub/.GIT/hooks:/g:rw"}}),
 		"cpus text":            base(map[string]any{"cpus": "many"}),
 		"user injection":       base(map[string]any{"user": "1 --privileged"}),
 		"docker client env":    base(map[string]any{"env_allow": []any{"DOCKER_HOST"}}),
@@ -590,11 +592,21 @@ func TestDockerWritableRepoKeepsGitReadOnly(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.repo, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A nested clone and a submodule-style gitfile must be as protected as the top-level .git.
+	if err := os.MkdirAll(filepath.Join(f.repo, "nested", ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.repo, "subm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.repo, "subm", ".git"), []byte("gitdir: ../.git/modules/subm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// Docker Desktop keeps the read-only mountpoint busy for a moment after the
 	// container is gone; retry the removal so the temp dir cleanup succeeds.
 	t.Cleanup(func() {
 		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			if os.RemoveAll(filepath.Join(f.repo, ".git")) == nil {
+			if os.RemoveAll(filepath.Join(f.repo, ".git")) == nil && os.RemoveAll(filepath.Join(f.repo, "nested")) == nil {
 				return
 			}
 		}
@@ -605,6 +617,8 @@ bad=""
 touch /gate/repo/written-by-container 2>/dev/null || bad="$bad repo not writable;"
 touch /gate/repo/.git/hooks/pre-commit 2>/dev/null && bad="$bad hook written;"
 echo x >> /gate/repo/.git/config 2>/dev/null && bad="$bad git config written;"
+touch /gate/repo/nested/.git/hooks/pre-commit 2>/dev/null && bad="$bad nested hook written;"
+echo x > /gate/repo/subm/.git 2>/dev/null && bad="$bad gitfile rewritten;"
 if [ -n "$bad" ]; then
   printf '{"protocol":"ai-team.gate/v1","verdict":"fail","reason":"%s"}\n' "$bad"
 else
@@ -627,6 +641,9 @@ fi
 	if _, err := os.Stat(filepath.Join(f.repo, ".git", "hooks", "pre-commit")); err == nil {
 		t.Fatal("a hook was planted in .git on the host")
 	}
+	if data, err := os.ReadFile(filepath.Join(f.repo, "subm", ".git")); err != nil || !strings.HasPrefix(string(data), "gitdir:") {
+		t.Fatalf("the submodule gitfile was rewritten: %q %v", data, err)
+	}
 }
 
 func TestGitOverlays(t *testing.T) {
@@ -647,6 +664,70 @@ func TestGitOverlays(t *testing.T) {
 	}
 	if _, err := gitOverlays(repo2); err == nil {
 		t.Fatal("a symlinked .git was accepted")
+	}
+}
+
+func TestGitOverlaysCoverNestedGitMetadata(t *testing.T) {
+	repo := t.TempDir()
+	mk := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(repo, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk(".git/HEAD", "ref: refs/heads/main")
+	mk(".git/modules/sub/HEAD", "x")
+	mk("sub/.git", "gitdir: ../.git/modules/sub\n")  // submodule: target is under .git already
+	mk("clone/.git/HEAD", "x")                       // nested clone
+	mk("tool/.git", "gitdir: ../elsewhere/gitdir\n") // gitfile aiming at a directory inside the repository
+	mk("elsewhere/gitdir/HEAD", "x")
+	mk("away/.git", "gitdir: /somewhere/outside\n") // outside: never mounted
+	got, err := gitOverlays(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, rel := range got {
+		have[rel] = true
+	}
+	for _, want := range []string{".git", "sub/.git", "clone/.git", "tool/.git", "elsewhere/gitdir", "away/.git"} {
+		if !have[want] {
+			t.Errorf("overlay %q missing from %v", want, got)
+		}
+	}
+	if have[".git/modules/sub"] {
+		t.Errorf("a path under .git must not be overlaid twice: %v", got)
+	}
+}
+
+func TestGitOverlaysRefuseSuspiciousNestedMetadata(t *testing.T) {
+	for name, setup := range map[string]func(repo string) error{
+		"symlinked nested .git": func(repo string) error {
+			if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(t.TempDir(), filepath.Join(repo, "sub", ".git"))
+		},
+		"malformed gitfile": func(repo string) error {
+			if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(repo, "sub", ".git"), []byte("not a gitfile"), 0o644)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			if err := setup(repo); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := gitOverlays(repo); err == nil {
+				t.Fatal("accepted")
+			}
+		})
 	}
 }
 

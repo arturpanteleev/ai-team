@@ -196,7 +196,10 @@ Docker client environment (compared without case) MUST be rejected before a run.
 When `repo_access` is `rw`, the launcher MUST additionally mount `.git` (and any
 other git directory inside the repository) read-only over the writable repository,
 MUST NOT mount a git directory outside the repository, and MUST refuse a symlinked
-`.git`. With a remote daemon (`DOCKER_HOST`, `DOCKER_CONTEXT`) mount sources
+`.git`. Nested git metadata (the `.git` directory of a nested clone, the gitfile of
+a submodule and the in-repository directory such a gitfile names) MUST be mounted
+read-only as well; a symlinked or malformed nested `.git` MUST be refused, and a
+writable mount with any `.git` path element MUST be rejected before a run. With a remote daemon (`DOCKER_HOST`, `DOCKER_CONTEXT`) mount sources
 resolve on the remote machine; this is unsupported. With `network: bridge` the
 repository content, including `.git/config` remote URLs, is reachable from the
 network, and the exceptions record MUST say so by listing `network=bridge`. The input document MUST

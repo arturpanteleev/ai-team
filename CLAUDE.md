@@ -9,6 +9,15 @@
   - `scope/` — repository-relative mutation path policy (glob-матчинг)
   - `delivery/` — строгий plan и controller-owned executor
   - `evidence/` — immutable run/attempt manifests и append-only events
+  - `gatelib/` — версионированная библиотека определений гейтов (каталог)
+  - `gatesched/` — планировщик групп гейтов: параллельные гейты, журнал, recovery
+  - `gaterun/` — гейт внешней программы: JSON-протокол, запуск без shell, Docker-адаптер
+  - `gatephrases/` — логика гейта `required_phrases`
+  - `llmgate/` — контракт LLM-гейта; `humandecision/` — единый сервис решения человека
+  - `dockerrun/` — запуск программы в контейнере через docker CLI
+  - `stageexec/` — исполнитель этапа (внутренний агент, внешняя программа, Docker)
+  - `stagestatus/` — проекция статусов этапов и истории посещений
+  - `tracker/` — абстрактный трекер задач, адаптеры jira/fake, исходящие и входящие операции
   - `verdict/` — verdict-контракт (парсер вердиктов, BLOCKED-протокол)
   - `runtime/` — Runtime interface + AgentCLI (промпт, логи, model/effort)
   - `stageexec/` — StageExecutor: внутренний агент и внешний исполнитель этапа

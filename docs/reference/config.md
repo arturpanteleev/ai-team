@@ -1012,6 +1012,8 @@ exit_gate_groups:
 | `agent_review@2` | LLM | как `@1` плюс `verdict_schema` (`verdict_marker` по умолчанию или `json`), `max_attempts` (1..5, по умолчанию 1; не вместе с `mode: grill`) | любой |
 | `human_approval@1` | человек | — | любой |
 | `human_approval@2` | человек | `on_reject` (`stop` по умолчанию или `stay`) | любой |
+| `external_program@1` | внешняя программа | `command` (обязателен), `timeout_seconds`, `cwd`, `env_allow`, `max_output_bytes`; см. [Протокол гейта](gate-protocol.md) | любой |
+| `docker_program@1` | Docker | `image` (digest, обязателен), `command` (обязателен), `network`, `repo_access`, `mounts`, лимиты; см. [Протокол гейта](gate-protocol.md) | любой |
 
 **`required_phrases@1`** проверяет, что в md-результате есть заданные слова или
 фрагменты. Всё, что меняет смысл проверки, задаётся явно, без молчаливых

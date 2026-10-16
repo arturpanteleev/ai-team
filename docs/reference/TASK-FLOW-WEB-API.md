@@ -53,6 +53,42 @@ fields.
 | `POST /api/backlog` | Add an idea (`project_id`, `title`, `idea`, `feature`); always created as `draft` |
 | `POST /api/backlog/{itemID}/status` | Set `draft`, `ready` or `discarded` (human transitions only) |
 
+Remaining routes of the server. Every route has a row in the MCP parity matrix
+([MCP](mcp.md#матрица-паритета)); the tool name is given there.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/auth/config` | Public pre-login discovery of the sign-in modes |
+| `GET /api/session`, `DELETE /api/session` | Exchange a token for a cookie session and its CSRF token; end the session |
+| `GET /api/auth/oidc/login`, `GET /api/auth/oidc/callback` | Single sign-on redirects (registered only when OIDC is configured) |
+| `GET /api/auth/me` | Identity, roles and permissions of the caller |
+| `GET /api/version` | Backend build revision |
+| `GET /api/preflight` | Runtime preflight diagnostics |
+| `GET /api/team/members`, `GET /api/team/audit` | Team members with roles; team audit journal |
+| `POST /api/team/invitations` | Invite a member (`team:manage`) |
+| `POST /api/team/activate` | Activate an invited membership with a one-time token |
+| `PATCH /api/team/members/{actorID}/roles` | Change roles (`team:manage`; the `admin` right only by an administrator) |
+| `DELETE /api/team/members/{actorID}` | Revoke a member (the last active administrator cannot be removed) |
+| `GET /api/mcp/tokens`, `POST /api/mcp/tokens`, `DELETE /api/mcp/tokens/{tokenID}` | List, mint and revoke personal MCP tokens; browser session and CSRF only |
+| `POST /mcp` | The network MCP endpoint (see MCP) |
+| `GET /ws` | WebSocket event push for the dashboard |
+| `GET /api/gates/catalog` | Read-only catalog of the versioned gate library |
+| `GET /api/template`, `GET /api/template/versions` | Current template and its immutable versions |
+| `POST /api/template/validate`, `POST /api/template/publish` | Validate or publish template YAML (`template:edit`) |
+| `GET /api/runs/{runID}/template-version` | The template version pinned by the task |
+| `GET /api/runs/{runID}/workflow` | The pinned stage graph of the task |
+| `GET /api/runs/{runID}/artifacts/*`, `GET /api/runs/{runID}/artifact-revisions` | Read a run artifact; list human revisions |
+| `GET /api/runs/{runID}/logs/{attemptID}` | Log of one attempt |
+| `GET /api/pipelines`, `GET /api/pipelines/{id}/artifacts`, `GET /api/artifacts/*` | Dashboard projection of runs and their artifacts |
+| `POST /api/runs/{runID}/executor` | Change the executor of the current stage |
+| `POST /api/runs/{runID}/stages/{stageID}/submit` | Alias of `.../results` |
+| `POST /api/runs/{runID}/delivery/retry` | Retry a deferred delivery (`run:deliver`) |
+| `POST /api/runs/{runID}/resume` | Resume a task (see budget rules below) |
+| `GET /api/tracker/sync` | Inbound sync state: cursor, last poll, errors, interval |
+| `POST /api/tracker/sync` | «Sync now»: one inbound pass |
+| `GET /api/tracker/inbound` | Inbound changes, pending and in conflict |
+| `POST /api/runs/{runID}/tracker/inbound/{changeID}/dismiss` | Dismiss an inbound request with a reason; needs `tracker:link` |
+
 A project is a folder for tasks: ID, name, description and an archived flag
 (no repository, template or members of its own). Every task and every backlog
 item belongs to exactly one project, so `POST /api/runs` and `POST /api/backlog`

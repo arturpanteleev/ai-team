@@ -482,7 +482,8 @@ ai-team auth-token --actor <id> --roles <роли через запятую> [--
 ```
 
 Роли: `product_owner`, `architect`, `developer`, `reviewer`, `qa`,
-`release_manager`. `--ttl` — не больше `24h`.
+`release_manager` и системное право `admin` (обход проваленного обязательного
+гейта, право `gate:override`; не функция процесса). `--ttl` — не больше `24h`.
 
 ```bash
 export AI_TEAM_AUTH_SECRET='<случайный-секрет-не-короче-32-байт>'

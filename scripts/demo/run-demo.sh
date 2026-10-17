@@ -29,6 +29,8 @@ fi
 demo_prepare_home "$DEMO_HOME" || exit 2
 DEMO_HOME="$(demo_guard_path "$DEMO_HOME")"
 SERVER_PID=""
+# Заглушка gh выдаёт «PR» на example.test; строгий разбор ссылки на PR принимает только github.com или GH_HOST.
+export GH_HOST="${GH_HOST:-example.test}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "нужен $1 в PATH" >&2; exit 2; }; }
 for tool in go git node docker; do need "$tool"; done

@@ -371,7 +371,9 @@ async function reviewLoop(kind, label, title) {
   await page.getByLabel('Конфигурация выбранного шаблона').fill(yaml)
   await click('Проверить YAML')
   await page.getByText(/валид|корректн|Шаблон проходит/i).first().waitFor({ timeout: 15000 }).catch(() => {})
-  await button(/опубликовать/i, false).first().click()
+  // Файловый конфиг уже равен этому документу, поэтому публиковать в веб нечего: кнопка неактивна.
+  const publish = button(/опубликовать/i, false).first()
+  if (await publish.isEnabled()) await publish.click()
   await page.waitForTimeout(1200)
   await shot(`template-published-${kind}`)
   writeMode('coder-mode', 'fixme-first')

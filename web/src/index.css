@@ -62,6 +62,19 @@
   --bubble-glyph: #2a2530;
   --mustard-solid: #d4a72c;
 
+  /* Свечение и движение: мягкие токены для неоновых эффектов (DES-03+).
+     Цветовая семантика S16 не меняется — компоненты пока их не используют. */
+  --glow-accent: 0 0 12px rgb(255 216 77 / 32%);
+  --glow-coral: 0 0 12px rgb(255 159 138 / 28%);
+  --glow-teal: 0 0 12px rgb(127 220 188 / 28%);
+  --duration-fast: 150ms;
+  --duration-normal: 240ms;
+  --duration-slow: 420ms;
+  --duration-theme: 280ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+
   /* Геометрия: карточки 20-28px, пилюли 999px. */
   --radius-xl: 28px;
   --radius-lg: 20px;
@@ -122,6 +135,18 @@
   --bubble-blue: linear-gradient(145deg, #23476e 0%, #4f8fd6 100%);
   --bubble-glyph: #fbf9ff;
   --mustard-solid: #c9a227;
+
+  /* Тёмная кабина: свечение сильнее, в два слоя, чем в светлой теме. */
+  --glow-accent: 0 0 16px rgb(255 216 77 / 60%), 0 0 34px rgb(255 216 77 / 32%);
+  --glow-coral: 0 0 16px rgb(255 159 138 / 52%), 0 0 34px rgb(255 159 138 / 28%);
+  --glow-teal: 0 0 16px rgb(127 220 188 / 52%), 0 0 34px rgb(127 220 188 / 28%);
+  --duration-fast: 150ms;
+  --duration-normal: 240ms;
+  --duration-slow: 420ms;
+  --duration-theme: 280ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
 }
 
 * {
@@ -196,11 +221,28 @@ pre {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* Плавная смена темы: класс на html ставит theme.tsx только на время переключения.
+   Без класса переходов нет — первая отрисовка не дёргается. */
+html.theme-transition,
+html.theme-transition *,
+html.theme-transition *::before,
+html.theme-transition *::after {
+  transition: background-color var(--duration-theme) var(--ease-standard),
+    border-color var(--duration-theme) var(--ease-standard),
+    color var(--duration-theme) var(--ease-standard),
+    fill var(--duration-theme) var(--ease-standard),
+    stroke var(--duration-theme) var(--ease-standard),
+    box-shadow var(--duration-theme) var(--ease-standard);
+}
+
+/* Глобально гасим все новые анимации и переходы, включая смену темы. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
 }

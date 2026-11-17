@@ -1,9 +1,13 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
 import type { GraphView, StageStatusEntry, StageStatusKey } from '../types';
 import { buildLayout, WorkflowGraph } from './WorkflowGraph';
 import styles from './WorkflowGraph.module.css';
+
+const graphCss = readFileSync(`${process.cwd()}/src/pages/WorkflowGraph.module.css`, 'utf8');
 
 const { getGraph, getRunGraph } = vi.hoisted(() => ({
   getGraph: vi.fn(),
@@ -112,6 +116,13 @@ describe('WorkflowGraph', () => {
     expect(screen.getByText('Возврат (return_to_*)')).toBeInTheDocument();
     expect(screen.getByText('Класс')).toBeInTheDocument();
 
+    // DES-08: порядок материализации приходит из разметки, сканирующий слой декоративен.
+    const ordered = diagram.querySelectorAll('[data-order]');
+    expect(ordered.length).toBeGreaterThan(0);
+    expect(ordered[0]).toHaveAttribute('data-order', '0');
+    const scan = diagram.querySelector('g[aria-hidden="true"] rect[class*="scanLine"]');
+    expect(scan).not.toBeNull();
+
     const links = within(diagram).getAllByRole('link', { name: /Открыть workflow/ });
     expect(links).toHaveLength(2);
     expect(links[0]).toHaveAttribute('href', '/workflows/idea-to-prod');
@@ -193,5 +204,30 @@ describe('WorkflowGraph', () => {
     expect(within(diagram).getAllByText('return_to_implementation').length).toBeGreaterThan(0);
     expect(screen.getByText('Обратный переход (rejected)')).toBeInTheDocument();
     expect(screen.getByText('Посещён, не пройден')).toBeInTheDocument();
+  });
+});
+
+describe('DES-08: анимация графа на токенах', () => {
+  it('поток и материализация используют токены DES-02 и не хардкодят цвета', () => {
+    for (const token of ['--glow-teal', '--duration-fast', '--duration-normal', '--duration-slow', '--ease-out', '--ease-standard']) {
+      expect(graphCss).toContain(`var(${token})`);
+    }
+    for (const keyframe of ['materialize', 'materialize-item', 'flow', 'edgePulse', 'pulse', 'scan']) {
+      expect(graphCss).toMatch(new RegExp(`@keyframes\\s+${keyframe}\\s*\\{`));
+    }
+    expect(graphCss).toContain('stroke-dashoffset');
+    expect(graphCss).toContain('calc(var(--materialize-step) * var(--order, 0))');
+    expect(graphCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(graphCss).not.toMatch(/\brgba?\(/i);
+  });
+
+  it('при reduced-motion выключает всё движение, сохраняя статическую подсветку', () => {
+    const reduced = graphCss.slice(graphCss.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(reduced).toContain('animation: none !important');
+    for (const selector of ['.scene', '.edge,', '.node,', '.edgeActive .edgeLine', '.nodeCurrent .nodeRect', '.edgeFlow', '.scanLine']) {
+      expect(reduced).toContain(selector);
+    }
+    expect(reduced).toContain('display: none');
+    expect(reduced).toContain('drop-shadow(0 0 5px var(--accent))');
   });
 });

@@ -1,5 +1,6 @@
 /* oxlint-disable react/only-export-components -- buildLayout is a pure layout helper exported for the graph tests */
 import { useEffect, useId, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Link, useParams } from '../router';
 import { getGraph, getRunGraph } from '../api';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -17,6 +18,8 @@ const LABEL_INSET_X = 4;
 const LABEL_INSET_Y = 13;
 const LABEL_STEP = 21;
 const FORWARD_SPACING = 22;
+/** Высота «сканирующей» полосы в пользовательских единицах SVG. */
+const SCAN_H = 48;
 
 const TERMINALS: Record<string, string> = {
   $complete: 'Завершено',
@@ -270,6 +273,9 @@ export function WorkflowGraph() {
   const statusByKey = new Map((view.stage_statuses?.stages ?? []).map((entry) => [entry.stage_id, entry]));
   const currentKey = view.current_stage || view.stage_statuses?.current_stage || '';
   const currentStatus = currentKey ? statusByKey.get(currentKey) : undefined;
+  // Путь сканирования зависит от высоты сгенерированной схемы; цвет и длительность
+  // задаются токенами DES-02 в CSS, здесь только геометрия.
+  const scanStyle = { '--scan-travel': `${layout.height}px` } as CSSProperties;
 
   return (
     <main className={styles.container}>
@@ -304,13 +310,20 @@ export function WorkflowGraph() {
                 markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 0 L 10 5 L 0 10 z" className={styles.arrowActive} />
               </marker>
+              <linearGradient id={`${markerPrefix}-scan`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" style={{ stopColor: 'var(--accent)', stopOpacity: 0 }} />
+                <stop offset="50%" style={{ stopColor: 'var(--accent)', stopOpacity: 0.22 }} />
+                <stop offset="100%" style={{ stopColor: 'var(--accent)', stopOpacity: 0 }} />
+              </linearGradient>
             </defs>
             <g className={styles.scene}>
-              {layout.edges.map((edge) => (
+              {layout.edges.map((edge, index) => (
                 <g key={edge.id}
                   className={`${styles.edge} ${edge.kind === 'back' ? styles.edgeBack : ''} ${edge.kind === 'return' ? styles.edgeReturn : ''} ${edge.active ? styles.edgeActive : ''}`}
                   data-kind={edge.kind}
-                  data-active={edge.active || undefined}>
+                  data-order={index}
+                  data-active={edge.active || undefined}
+                  style={{ '--order': index } as CSSProperties}>
                   <path d={edge.path} className={styles.edgeLine}
                     markerEnd={`url(#${markerPrefix}-${edge.active ? 'arrow-active' : 'arrow'})`} />
                   <path d={edge.path} className={styles.edgeFlow} />
@@ -320,7 +333,7 @@ export function WorkflowGraph() {
                   <text x={edge.labelX} y={edge.labelY} className={styles.edgeLabel}>{edge.label}</text>
                 </g>
               ))}
-              {layout.nodes.map((node) => {
+              {layout.nodes.map((node, index) => {
                 const href = node.terminal ? undefined : runMode
                   ? (view.run_id ? `/tasks/${encodeURIComponent(view.run_id)}` : undefined)
                   : (view.workflow_id ? `/workflows/${encodeURIComponent(view.workflow_id)}` : undefined);
@@ -330,7 +343,9 @@ export function WorkflowGraph() {
                 const body = (
                   <g className={`${styles.node} ${statusClass(node.status)} ${node.current ? styles.nodeCurrent : ''}`}
                     data-status={runMode ? node.status?.status ?? 'not_reached' : undefined}
-                    data-current={node.current || undefined}>
+                    data-current={node.current || undefined}
+                    data-order={index}
+                    style={{ '--order': index } as CSSProperties}>
                     <rect x={node.pos.x} y={node.pos.y} width={NODE_W} height={NODE_H} rx={14}
                       className={styles.nodeRect} />
                     <text x={node.pos.x + 14} y={node.pos.y + 27} className={styles.nodeLabel}>{node.label}</text>
@@ -342,6 +357,10 @@ export function WorkflowGraph() {
                       aria-current={node.current ? 'step' : undefined}>{body}</Link>
                   : <g key={node.key}>{body}</g>;
               })}
+            </g>
+            <g className={styles.holo} aria-hidden="true" style={scanStyle}>
+              <rect className={styles.scanLine} x="0" y="0" width={layout.width} height={SCAN_H}
+                fill={`url(#${markerPrefix}-scan)`} />
             </g>
           </svg>
         </div>

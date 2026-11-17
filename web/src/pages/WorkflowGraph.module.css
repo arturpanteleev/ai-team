@@ -89,6 +89,8 @@
     radial-gradient(circle at 18% 0%, var(--tint-indigo) 0%, transparent 46%),
     radial-gradient(circle at 88% 100%, var(--tint-teal) 0%, transparent 50%),
     var(--surface-muted);
+  /* DES-02: свечение рамки сильнее в тёмной кабине, цветов не хардкодим. */
+  box-shadow: var(--glow-teal);
 }
 
 .svg {
@@ -97,15 +99,45 @@
   height: auto;
 }
 
-/* Материализация схемы при открытии страницы. */
+/* Материализация схемы при открытии страницы: общий «жест» плюс
+   последовательное проявление рёбер и узлов (порядок — --order из компонента,
+   data-order дублирует его для тестов и разметки). */
 .scene {
   transform-origin: 25% 10%;
-  animation: materialize 0.5s ease-out both;
+  animation: materialize var(--duration-slow) var(--ease-out) both;
 }
 
 @keyframes materialize {
   from { opacity: 0; transform: scale(0.97) translateY(10px); }
   to { opacity: 1; transform: none; }
+}
+
+.edge,
+.node {
+  --materialize-step: calc(var(--duration-fast) / 4);
+  animation: materialize-item var(--duration-normal) var(--ease-out) both;
+  animation-delay: calc(var(--materialize-step) * var(--order, 0));
+}
+
+@keyframes materialize-item {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Голографическая развёртка: полоса проходит по схеме поверх всех слоёв,
+   но не перехватывает указатель и не попадает в порядок фокуса. */
+.holo {
+  pointer-events: none;
+}
+
+.scanLine {
+  opacity: 0.9;
+  animation: scan calc(var(--duration-slow) * 8) linear infinite;
+}
+
+@keyframes scan {
+  from { transform: translateY(-48px); }
+  to { transform: translateY(var(--scan-travel, 1000px)); }
 }
 
 .arrow {
@@ -129,7 +161,7 @@
   stroke-linecap: round;
   stroke-dasharray: 2 12;
   opacity: 0.7;
-  animation: flow 1.6s linear infinite;
+  animation: flow calc(var(--duration-slow) * 4) linear infinite;
 }
 
 @keyframes flow {
@@ -156,12 +188,21 @@
 .edgeActive .edgeLine {
   stroke: var(--accent);
   stroke-width: 2.4;
-  filter: drop-shadow(0 0 4px var(--accent));
+  animation: edgePulse var(--duration-slow) var(--ease-standard) infinite;
+}
+
+/* Пульс активного перехода: тот же акцент, что у активного узла, без смены
+   семантики возвратов и failed-рёбер (они по-прежнему коралловые). */
+@keyframes edgePulse {
+  0%, 100% { filter: drop-shadow(0 0 3px var(--accent)); }
+  50% { filter: drop-shadow(0 0 10px var(--accent)); }
 }
 
 .edgeActive .edgeFlow {
   stroke: var(--accent);
+  stroke-dasharray: 3 11;
   opacity: 1;
+  animation-duration: calc(var(--duration-slow) * 2);
 }
 
 .edgeLabelBg {
@@ -195,7 +236,7 @@
   fill: var(--surface-raised);
   stroke: var(--border-strong);
   stroke-width: 1.6;
-  transition: stroke 0.15s;
+  transition: stroke var(--duration-fast);
 }
 
 .nodeLabel {
@@ -227,7 +268,7 @@
 .nodeCurrent .nodeRect {
   stroke: var(--accent);
   stroke-width: 2.4;
-  animation: pulse 1.8s ease-in-out infinite;
+  animation: pulse calc(var(--duration-slow) * 4) var(--ease-standard) infinite;
 }
 
 @keyframes pulse {
@@ -288,20 +329,37 @@
   .legend li { font-size: 11px; }
 }
 
-/* Анимации декоративны: при reduced-motion схема остаётся полностью читаемой. */
+/* Анимации декоративны: при reduced-motion схема остаётся полностью читаемой,
+   а подсветка активного узла и перехода сохраняется статическим свечением. */
 @media (prefers-reduced-motion: reduce) {
   .scene,
+  .edge,
+  .node,
+  .edgeActive .edgeLine,
   .nodeCurrent .nodeRect,
-  .edgeFlow {
+  .edgeFlow,
+  .scanLine {
     animation: none !important;
+  }
+
+  .holo {
+    display: none;
+  }
+
+  .edgeActive .edgeLine {
+    filter: drop-shadow(0 0 4px var(--accent));
   }
 
   .nodeCurrent .nodeRect {
     filter: drop-shadow(0 0 5px var(--accent));
   }
 
-  .edgeFlow {
+  .edgeFlow,
+  .edgeActive .edgeFlow {
     stroke-dasharray: none;
+  }
+
+  .edgeFlow {
     opacity: 0.45;
   }
 }

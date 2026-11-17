@@ -259,7 +259,36 @@ test('dark theme and reduced motion keep the graph readable', async ({ page }) =
   await open(page, '/runs/run-1/graph', { theme: 'dark', width: 390, height: 844, reducedMotion: 'reduce' })
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   expect(await overflow(page)).toEqual({ page: 0, controls: [] })
-  const animations = await page.locator('svg [class*="scene"], svg [class*="edgeFlow"], svg rect[class*="nodeRect"]')
+  const animations = await page.locator('svg [class*="scene"], svg g[class*="_edge_"], svg g[class*="_node_"], svg [class*="edgeFlow"], svg rect[class*="scanLine"], svg rect[class*="nodeRect"]')
     .evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName))
+  expect(animations.length).toBeGreaterThan(0)
   expect(animations.every((name) => name === 'none')).toBe(true)
+  await expect(page.locator('svg [class*="holo"]')).toBeHidden()
+})
+
+test('flow, materialisation and scan line animate by default without blocking node links', async ({ page }) => {
+  await open(page, '/runs/run-1/graph')
+  const diagram = page.getByRole('group', { name: 'Схема графа' })
+  await expect(diagram).toBeVisible()
+
+  const animation = (locator) => locator.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { name: style.animationName, duration: style.animationDuration }
+  })
+  const flow = await animation(diagram.locator('[class*="edgeFlow"]').first())
+  expect(flow.name).not.toBe('none')
+  expect(flow.duration).not.toBe('0s')
+  const dash = await diagram.locator('[class*="edgeFlow"]').first()
+    .evaluate((element) => getComputedStyle(element).strokeDasharray)
+  expect(dash).not.toBe('none')
+
+  const node = await animation(diagram.locator('g[class*="_node_"]').first())
+  expect(node.name).not.toBe('none')
+  const scan = await animation(diagram.locator('rect[class*="scanLine"]'))
+  expect(scan.name).not.toBe('none')
+
+  // Декоративный слой не перехватывает клик: узел остаётся ссылкой.
+  await expect(diagram.getByRole('link', { name: 'Открыть задачу: Сборка' })).toBeVisible()
+  await diagram.getByRole('link', { name: 'Открыть задачу: Сборка' }).click()
+  await expect(page).toHaveURL(/\/tasks\/run-1$/)
 })

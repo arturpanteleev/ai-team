@@ -81,6 +81,12 @@ type mcpParam struct {
 	// own name instead of the query string. String values are passed through
 	// untouched (no trimming), so submitted text keeps its exact bytes.
 	Body bool
+	// ExtraBody marks a path (or query) argument that is additionally copied
+	// into the JSON body under its own name. A few REST handlers validate the
+	// id from the URL against the same field in the body (for example the
+	// workflow process patch); such a route cannot be reached by a tool that
+	// may only fill one of the two places.
+	ExtraBody bool
 	// Long raises the string limit from 4 KiB to 3 MiB (Body only).
 	Long bool
 	// Digest requires a 64-character SHA-256 hex string (lower-cased).
@@ -162,7 +168,7 @@ func (r *mcpRegistry) add(operation mcpOperation) {
 
 func (o mcpOperation) hasBodyParam() bool {
 	for _, param := range o.Params {
-		if param.Body {
+		if param.Body || param.ExtraBody {
 			return true
 		}
 	}
@@ -305,6 +311,9 @@ func (o mcpOperation) parseArgs(raw json.RawMessage) (mcpArgs, error) {
 		text, err := normalizeMCPValue(param, input[name])
 		if err != nil {
 			return mcpArgs{}, err
+		}
+		if param.ExtraBody {
+			args.body[name] = text
 		}
 		switch name {
 		case "byte_offset":

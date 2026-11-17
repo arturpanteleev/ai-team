@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,11 +32,40 @@ func walkedRoutes(t *testing.T, router chi.Routes) map[string]bool {
 	return routes
 }
 
-// parityServers builds the router in every configuration that changes the set
-// of routes: plain cloud mode, single sign-on, and a served frontend.
-func parityServers(t *testing.T) []*Server {
+// resolvedToolRoute asks the real router which pattern a tool's REST path
+// serves, with sample values in place of its path placeholders.
+func resolvedToolRoute(t *testing.T, srv *Server, operation mcpOperation) string {
 	t.Helper()
-	plain := newMCPEnv(t).srv
+	sample := operation.Path
+	for _, placeholder := range pathPlaceholders(operation.Path) {
+		sample = strings.ReplaceAll(sample, "{"+placeholder+"}", "x")
+	}
+	resolved := srv.router.Find(chi.NewRouteContext(), operation.Method, sample)
+	if resolved == "" {
+		t.Errorf("tool %s: %s %s is not routed", operation.Name, operation.Method, sample)
+	}
+	return resolved
+}
+
+// probeRouteOutcome dispatches the same harmless, unauthenticated-as-a-write
+// request to a route through the real router. Two spellings of one handler
+// answer byte for byte alike; a different handler behind an Alias does not.
+func probeRouteOutcome(t *testing.T, srv *Server, identity mcpIdentity, method, pattern string) mcpOutcome {
+	t.Helper()
+	sample := pattern
+	for _, placeholder := range pathPlaceholders(pattern) {
+		sample = strings.ReplaceAll(sample, "{"+placeholder+"}", "x")
+	}
+	return srv.mcpDispatch(t.Context(), identity, method, sample, nil, []byte(`{}`), &mcpCallMeta{Tool: "mcp-parity-probe"})
+}
+
+// parityServers builds the router in every configuration that changes the set
+// of routes: plain cloud mode, single sign-on, and a served frontend. The
+// environment of the plain server is returned for authenticated route probes.
+func parityServers(t *testing.T) ([]*Server, *mcpEnv) {
+	t.Helper()
+	plainEnv := newMCPEnv(t)
+	plain := plainEnv.srv
 	sso := newSSOFixture(t).srv
 	dist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html></html>"), 0o644); err != nil {
@@ -51,7 +81,7 @@ func parityServers(t *testing.T) []*Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = withFrontend.Close() })
-	return []*Server{plain, sso, withFrontend}
+	return []*Server{plain, sso, withFrontend}, plainEnv
 }
 
 func matrixEntryFor(method, route string) (mcpRouteParity, bool) {
@@ -68,7 +98,12 @@ func matrixEntryFor(method, route string) (mcpRouteParity, bool) {
 // row names a real route and a real tool that reaches that very route, and no
 // tool is left outside the matrix. A route added later without a row fails here.
 func TestMCPParityMatrix(t *testing.T) {
-	servers := parityServers(t)
+	servers, plainEnv := parityServers(t)
+	session, _, err := plainEnv.srv.mcpAuthenticate(mcpTestRequest(t, plainEnv, "owner@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := mcpIdentity{Session: session, Host: "127.0.0.1"}
 	walked := map[string]bool{}
 	for _, srv := range servers {
 		for route := range walkedRoutes(t, srv.router) {
@@ -139,16 +174,33 @@ func TestMCPParityMatrix(t *testing.T) {
 			t.Errorf("row %s names tool %q which is not registered", key, entry.Tool)
 			continue
 		}
+		if operation.Method != entry.Method {
+			t.Errorf("row %s: tool %s uses method %s", key, entry.Tool, operation.Method)
+		}
 		if !entry.Alias {
 			used[entry.Tool] = true
-			if operation.Method != entry.Method {
-				t.Errorf("row %s: tool %s uses method %s", key, entry.Tool, operation.Method)
-			}
 			if normalizeRoute(operation.Path) != normalizeRoute(entry.Pattern) {
 				t.Errorf("row %s: tool %s calls %s", key, entry.Tool, operation.Path)
 			}
-		} else if operation.Method != entry.Method {
-			t.Errorf("alias row %s: tool %s uses method %s", key, entry.Tool, operation.Method)
+			continue
+		}
+		// An Alias claims a second spelling of the tool's own route. Do not
+		// skip the route check: find the tool's real route and probe both
+		// routes through the real middleware stack. Identical answers prove
+		// the same handler; a different operation cannot hide behind the
+		// tool's name this way.
+		primary := resolvedToolRoute(t, servers[0], operation)
+		if primary == "" {
+			continue
+		}
+		if primary == entry.Pattern {
+			t.Errorf("alias row %s repeats the tool's own route %s", key, primary)
+		}
+		aliasOutcome := probeRouteOutcome(t, servers[0], identity, entry.Method, entry.Pattern)
+		primaryOutcome := probeRouteOutcome(t, servers[0], identity, operation.Method, primary)
+		if aliasOutcome.status != primaryOutcome.status || !bytes.Equal(aliasOutcome.body, primaryOutcome.body) {
+			t.Errorf("alias row %s answers %d %q, but tool %s at %s answers %d %q",
+				key, aliasOutcome.status, aliasOutcome.body, entry.Tool, primary, primaryOutcome.status, primaryOutcome.body)
 		}
 	}
 
@@ -158,13 +210,8 @@ func TestMCPParityMatrix(t *testing.T) {
 		if !used[name] {
 			t.Errorf("tool %s is not the primary tool of any matrix row", name)
 		}
-		sample := operation.Path
-		for _, placeholder := range pathPlaceholders(operation.Path) {
-			sample = strings.ReplaceAll(sample, "{"+placeholder+"}", "x")
-		}
-		resolved := servers[0].router.Find(chi.NewRouteContext(), operation.Method, sample)
+		resolved := resolvedToolRoute(t, servers[0], operation)
 		if resolved == "" {
-			t.Errorf("tool %s: %s %s is not routed", name, operation.Method, sample)
 			continue
 		}
 		if entry, ok := matrixEntryFor(operation.Method, resolved); !ok || entry.Tool != name {

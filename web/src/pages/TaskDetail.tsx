@@ -60,6 +60,7 @@ interface TaskDetailSnapshot {
 }
 
 type RouteState = 'passed' | 'current' | 'upcoming' | 'failed';
+type GateView = { stageID: string; stageAttemptID: string };
 type AgentLaunch = { phase: 'idle' | 'starting' | 'started'; at: number; previous: string };
 const idleLaunch: AgentLaunch = { phase: 'idle', at: 0, previous: '' };
 type ActionKey = 'take' | 'run-agent' | 'results' | 'confirm' | 'answer' | 'new-version' | 'done' | 'plan' | 'skip' | 'override'
@@ -176,21 +177,49 @@ function isReviewInput(input: StageInputArtifact): boolean {
   return name === 'review' || /(^|\/)review\.md$/.test(path);
 }
 
-// The recorded input path is a filesystem path; getArtifact needs one relative
-// to the artifacts root. Prefer the matching path from the artifact listing,
-// otherwise cut everything before the last /artifacts/ segment.
-function reviewArtifactPath(input: StageInputArtifact, artifacts: Artifact[]): string {
-  const base = ((input.Path ?? '').split(/[\\/]/).at(-1) ?? '').toLowerCase();
-  const name = (input.Name ?? '').toLowerCase().replace(/\.md$/, '');
-  const listed = artifacts.find((artifact) => {
-    const artifactBase = (artifact.path.split('/').at(-1) ?? '').toLowerCase();
-    return artifactBase === base || artifact.name.toLowerCase().replace(/\.md$/, '') === name;
-  });
-  if (listed) return listed.path;
-  const raw = (input.Path ?? '').replace(/\\/g, '/');
+// Attempt-scoped artifacts live under attempts/<attempt_id>/artifacts/.
+function attemptIDFromPath(path: string): string {
+  return path.replace(/\\/g, '/').match(/(^|\/)attempts\/([^/]+)\/artifacts\//)?.[2] ?? '';
+}
+
+function relativeArtifactPath(path: string): string {
+  const raw = path.replace(/\\/g, '/');
   const marker = '/artifacts/';
   const index = raw.lastIndexOf(marker);
   return index >= 0 ? raw.slice(index + marker.length) : raw;
+}
+
+function artifactPathRank(path: string, stages: Stage[]): number {
+  const attemptID = attemptIDFromPath(path);
+  return stages.find((stage) => stage.attempt_id === attemptID)?.stage_index ?? -1;
+}
+
+// The recorded input path is a filesystem path; getArtifact needs one relative
+// to the artifacts root. Invalidated attempts keep their review.md files, so a
+// basename match is not enough: use the attempt named by the input (or by the
+// producing stage's output), otherwise take the newest attempt-scoped file.
+function reviewArtifactPath(input: StageInputArtifact, artifacts: Artifact[], stages: Stage[], preferredAttemptID = ''): string {
+  const base = ((input.Path ?? '').split(/[\\/]/).at(-1) ?? '').toLowerCase();
+  const name = (input.Name ?? '').toLowerCase().replace(/\.md$/, '');
+  const relative = relativeArtifactPath(input.Path ?? '');
+  const candidates = artifacts.filter((artifact) => {
+    const artifactBase = (artifact.path.split('/').at(-1) ?? '').toLowerCase();
+    return artifactBase === base || artifact.name.toLowerCase().replace(/\.md$/, '') === name;
+  });
+  if (candidates.length === 0) return relative;
+  const attemptID = preferredAttemptID || attemptIDFromPath(relative);
+  const ofAttempt = attemptID ? candidates.filter((artifact) => attemptIDFromPath(artifact.path) === attemptID) : [];
+  if (ofAttempt.length > 0) return ofAttempt[0].path;
+  const exact = (path: string) => path === relative || path.endsWith(`/${relative}`);
+  return [...candidates].sort((left, right) => {
+    const byAttempt = artifactPathRank(right.path, stages) - artifactPathRank(left.path, stages);
+    if (byAttempt !== 0) return byAttempt;
+    const byPathMatch = Number(exact(right.path)) - Number(exact(left.path));
+    if (byPathMatch !== 0) return byPathMatch;
+    const byTime = Date.parse(right.mod_time) - Date.parse(left.mod_time);
+    if (Number.isFinite(byTime) && byTime !== 0) return byTime;
+    return right.path.localeCompare(left.path);
+  })[0].path;
 }
 
 function isStageResultArtifact(artifact: Artifact, attemptID: string): boolean {
@@ -232,6 +261,7 @@ export function TaskDetail() {
   const [intentText, setIntentText] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('result');
   const [viewStageID, setViewStageID] = useState('');
+  const [gateView, setGateView] = useState<GateView | null>(null);
   const [loopbackFeedback, setLoopbackFeedback] = useState<{ path: string; text: string | null } | null>(null);
   const resultFormRef = useRef<HTMLDivElement>(null);
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
@@ -288,6 +318,7 @@ export function TaskDetail() {
     setResultAccepted(false);
     setActiveTab('result');
     setViewStageID('');
+    setGateView(null);
     setLoopbackFeedback(null);
     refresh()
       .catch((reason: unknown) => {
@@ -414,13 +445,28 @@ export function TaskDetail() {
   // from the shared journal, so it is visible without opening the artifact.
   const loopbackReviewInput = useMemo(() => {
     if (currentStageID !== 'implementation') return null;
-    const attempt = [...(details?.stages ?? [])].reverse()
+    const stages = details?.stages ?? [];
+    const attempt = [...stages].reverse()
       .find((stage) => stage.agent_name === currentStageID && stage.inputs_json);
     if (!attempt) return null;
     return parseStageInputs(attempt.inputs_json).find(isReviewInput) ?? null;
   }, [details?.stages, currentStageID]);
+  // A review input can name its attempt in the path. If it does not, the
+  // producing stage's output still carries the attempt-scoped path.
+  const reviewAttemptID = useMemo(() => {
+    if (!loopbackReviewInput) return '';
+    const fromInput = attemptIDFromPath(loopbackReviewInput.Path ?? '');
+    if (fromInput) return fromInput;
+    for (const stage of [...(details?.stages ?? [])].reverse()) {
+      if (stage.agent_name === currentStageID) continue;
+      const output = parseStageInputs(stage.outputs_json).find(isReviewInput);
+      const fromOutput = output ? attemptIDFromPath(output.Path ?? '') : '';
+      if (fromOutput) return fromOutput;
+    }
+    return '';
+  }, [details?.stages, currentStageID, loopbackReviewInput]);
   const loopbackReviewPath = loopbackReviewInput
-    ? reviewArtifactPath(loopbackReviewInput, visibleSnapshot?.artifacts ?? []) : '';
+    ? reviewArtifactPath(loopbackReviewInput, visibleSnapshot?.artifacts ?? [], details?.stages ?? [], reviewAttemptID) : '';
   useEffect(() => {
     setLoopbackFeedback(null);
     if (!currentRunID || !loopbackReviewPath) return;
@@ -820,23 +866,37 @@ export function TaskDetail() {
   // confirmation of its transition, that is the stage being confirmed, not the one that comes next.
   const gateStageID = serverCurrent?.stage_id || actionStageID || currentStage?.id;
   const currentGateStage = gateStageID ? visibleSnapshot.gates?.stages.find((stage) => stage.stage_id === gateStageID) : undefined;
-  // The gate that failed and sent the stage back: prefer the stage the return came from.
-  const returnedFromStageID = serverCurrent?.visits[serverCurrent.active_visit - 1]?.entered_from;
+  // Only a blocking gate of the stage (and attempt) the return came from can be
+  // named as its cause: a manual return or an advisory failure says nothing about a gate.
+  const returnVisit = serverCurrent?.visits[serverCurrent.active_visit - 1];
+  const returnedFromStageID = returnVisit?.entered_from;
+  const returnedFromAttemptID = returnedFromStageID ? latestAttemptFor(returnedFromStageID)?.attempt_id : undefined;
   const failedGate = (() => {
+    if (!returnedFromStageID) return null;
     const stages = visibleSnapshot.gates?.stages ?? [];
-    const ordered = [
-      ...stages.filter((stage) => stage.stage_id === returnedFromStageID),
-      ...stages.filter((stage) => stage.stage_id !== returnedFromStageID),
-    ];
-    for (const stage of ordered) {
-      for (const gate of stage.current?.gates ?? []) {
-        const attempt = gate.attempt;
-        if (attempt?.verdict === 'fail' || attempt?.execution === 'error' || attempt?.execution === 'timeout') {
-          return { name: gate.gate_name || gate.gate };
+    for (const stage of stages.filter((item) => item.stage_id === returnedFromStageID)) {
+      for (const wave of stage.waves) {
+        if (returnedFromAttemptID && wave.stage_attempt_id !== returnedFromAttemptID) continue;
+        for (const gate of wave.gates ?? []) {
+          const attempt = gate.attempt;
+          if (!gate.blocking || gate.warning) continue;
+          if (attempt?.verdict === 'fail' || attempt?.execution === 'error' || attempt?.execution === 'timeout') {
+            return { name: gate.gate_name || gate.gate, stageID: stage.stage_id, stageAttemptID: wave.stage_attempt_id };
+          }
         }
       }
     }
     return null;
+  })();
+  // The "Открыть гейты" link switches the tab's view to the failed wave. The
+  // status column keeps showing the current stage, so its retry actions stay
+  // bound to the stage people can act on now.
+  const gateTabStage = (() => {
+    if (!gateView) return currentGateStage;
+    const stage = visibleSnapshot.gates?.stages.find((item) => item.stage_id === gateView.stageID);
+    if (!stage) return currentGateStage;
+    const wave = stage.waves.find((item) => item.stage_attempt_id === gateView.stageAttemptID);
+    return wave ? { ...stage, current: wave } : stage;
   })();
   const trackerOn = tracker.data?.configured === true;
   const gateAttention = visibleSnapshot.gates?.stages.some((stage) => stageGateFlag(visibleSnapshot.gates, stage.stage_id) !== undefined) ?? false;
@@ -912,7 +972,7 @@ export function TaskDetail() {
               aria-current={current ? 'step' : undefined}>
               <button type="button" className={styles.routeButton} aria-pressed={viewID === stage.id}
                 title="Показать результат этапа"
-                onClick={() => { setViewStageID(stage.id); setActiveTab('result'); }}>
+                onClick={() => { setViewStageID(stage.id); setGateView(null); setActiveTab('result'); }}>
                 <span className={styles.routeDot} aria-hidden="true">
                   {state === 'passed' ? <Icon name="passed" size={13} /> : state === 'failed' ? <Icon name="failed" size={13} /> : index + 1}
                 </span>
@@ -1001,7 +1061,10 @@ export function TaskDetail() {
                   : <p className={styles.sectionNote}>Отзыв ревьюера не загрузился. Откройте артефакт {loopbackFeedback.path}.</p>}
                 {failedGate && <p className={styles.sectionNote}>
                   Проверка «{failedGate.name}» не прошла и вызвала возврат.{' '}
-                  <button type="button" className={styles.linkButton} onClick={() => setActiveTab('gates')}>Открыть гейты</button>
+                  <button type="button" className={styles.linkButton} onClick={() => {
+                    setGateView({ stageID: failedGate.stageID, stageAttemptID: failedGate.stageAttemptID });
+                    setActiveTab('gates');
+                  }}>Открыть гейты</button>
                 </p>}
               </section>}
               {questionDecisions.length > 0 && <section className={styles.questions} aria-labelledby="question-heading">
@@ -1069,8 +1132,8 @@ export function TaskDetail() {
               </div>}
 
               {tab === 'gates' && <div className={styles.gatesTab}>
-                {currentGateStage?.current
-                  ? <GatePanel stage={currentGateStage} />
+                {gateTabStage?.current
+                  ? <GatePanel stage={gateTabStage} />
                   : <p>У текущего этапа нет гейтов или они ещё не запускались.</p>}
                 <h3>Обходы и рекомендации по всей задаче</h3>
                 <GateHistory gates={visibleSnapshot.gates} />

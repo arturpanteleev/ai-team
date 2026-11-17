@@ -465,6 +465,11 @@ test('loop-internal: review feedback is visible on the returned implementation s
     await expect(feedback.getByText('Что исправить')).toBeVisible()
     await expect(feedback.getByText(/Замени обработку пустого списка/)).toBeVisible()
     await expect(feedback.getByText(/verdict_marker/)).toBeVisible()
+    // The link opens the gates of the failed code_review attempt, not an empty current-stage tab.
+    await feedback.getByRole('button', { name: 'Открыть гейты' }).click()
+    const gatesPanel = page.getByRole('tabpanel')
+    await expect(gatesPanel.getByText('verdict_marker', { exact: true })).toBeVisible()
+    await expect(gatesPanel.getByText(/Verdict: CHANGES_REQUESTED/)).toBeVisible()
     // The feedback is rendered inline: the reviewer artifact is never opened as a page.
     expect(page.url()).not.toContain('/artifacts/')
   } finally {

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
 import type { TaskRunDetails } from '../types';
@@ -24,8 +24,11 @@ vi.mock('../api', () => ({
 }));
 
 const startedAt = '2026-10-12T09:00:00Z';
+const laterAt = '2026-10-12T09:12:00Z';
 const reviewPath = '/target/.ai-team/artifacts/feat/review.md';
 const reviewMarkdown = '## Замечания ревьюера\n\nЗамени обработку пустого списка на явную проверку.\n\n**Verdict:** CHANGES_REQUESTED';
+const staleReviewPath = 'attempts/aaa-first-review/artifacts/review.md';
+const freshReviewPath = 'attempts/bbb-second-review/artifacts/review.md';
 
 const reviewInput = JSON.stringify([{ Name: 'review', Path: reviewPath, Size: 128, ModTime: startedAt }]);
 
@@ -98,6 +101,23 @@ const failedGateGates = {
   }],
 };
 
+// Two review attempts leave the same basename behind; the older path sorts first.
+function twoReviewAttempts(inputs = reviewInput): TaskRunDetails {
+  return {
+    ...loopDetails,
+    stages: [
+      { ...loopDetails.stages[0], attempt_id: 'aaa-first-review', stage_index: 1, started_at: startedAt },
+      { ...loopDetails.stages[0], id: 3, attempt_id: 'bbb-second-review', stage_index: 4, started_at: laterAt },
+      { ...loopDetails.stages[1], id: 4, attempt_id: 'implementation-attempt-3', stage_index: 5, inputs_json: inputs },
+    ],
+  };
+}
+
+const twoReviewArtifacts = [
+  { name: 'review.md', path: staleReviewPath, run_id: 'run-loop', size: 128, mod_time: startedAt },
+  { name: 'review.md', path: freshReviewPath, run_id: 'run-loop', size: 128, mod_time: laterAt },
+];
+
 function renderDetail() {
   return render(
     <MemoryRouter initialEntries={['/tasks/run-loop']}>
@@ -129,12 +149,86 @@ describe('loop-internal: review feedback on the implementation stage', () => {
     expect(api.getArtifact).toHaveBeenCalledWith('run-loop', expect.stringMatching(/review\.md$/));
   });
 
-  it('links the failed gate that caused the return', async () => {
+  it('opens the failed stage gates from the return note', async () => {
     renderDetail();
 
-    expect(await screen.findByText(/verdict_marker/)).toBeInTheDocument();
-    const attention = screen.getByRole('region', { name: 'Требует внимания' });
-    expect(within(attention).getByRole('button', { name: /гейт/i })).toBeInTheDocument();
+    const attention = await screen.findByRole('region', { name: 'Требует внимания' });
+    expect(within(attention).getByText(/verdict_marker/)).toBeInTheDocument();
+    fireEvent.click(within(attention).getByRole('button', { name: 'Открыть гейты' }));
+
+    const panel = screen.getByRole('tabpanel');
+    expect(within(panel).getByRole('heading', { name: 'Гейты этапа' })).toBeInTheDocument();
+    expect(within(panel).getByText('verdict_marker')).toBeInTheDocument();
+    expect(within(panel).getByText(/CHANGES_REQUESTED/)).toBeInTheDocument();
+    expect(screen.queryByText('У текущего этапа нет гейтов или они ещё не запускались.')).not.toBeInTheDocument();
+  });
+
+  it('shows the freshest review when several attempts left a review.md', async () => {
+    const api = await import('../api');
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue(twoReviewArtifacts as never);
+    vi.mocked(api.getArtifact).mockReset().mockImplementation(async (_runId: string, path: string) =>
+      path.includes('aaa-first-review') ? 'STALE FIRST REVIEW'
+        : path.includes('bbb-second-review') ? 'LATEST SECOND REVIEW' : '');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(twoReviewAttempts());
+    renderDetail();
+
+    expect(await screen.findByText('LATEST SECOND REVIEW')).toBeInTheDocument();
+    expect(screen.queryByText('STALE FIRST REVIEW')).not.toBeInTheDocument();
+    expect(api.getArtifact).toHaveBeenCalledWith('run-loop', freshReviewPath);
+  });
+
+  it('uses the attempt named by the review input, not just the latest file', async () => {
+    const api = await import('../api');
+    const explicitPath = `/target/.ai-team/artifacts/${staleReviewPath}`;
+    vi.mocked(api.getPipelineArtifacts).mockResolvedValue(twoReviewArtifacts as never);
+    vi.mocked(api.getArtifact).mockReset().mockImplementation(async (_runId: string, path: string) =>
+      path.includes('aaa-first-review') ? 'STALE FIRST REVIEW'
+        : path.includes('bbb-second-review') ? 'LATEST SECOND REVIEW' : '');
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue(twoReviewAttempts(JSON.stringify([
+      { Name: 'review', Path: explicitPath, Size: 128, ModTime: startedAt },
+    ])));
+    renderDetail();
+
+    expect(await screen.findByText('STALE FIRST REVIEW')).toBeInTheDocument();
+    expect(api.getArtifact).toHaveBeenCalledWith('run-loop', staleReviewPath);
+  });
+
+  it('does not blame an advisory gate for the return', async () => {
+    const api = await import('../api');
+    const advisoryWave = {
+      ...failedWave,
+      gates: failedWave.gates.map((gate) => ({ ...gate, blocking: false, warning: true, mode: 'advisory' as const })),
+    };
+    vi.mocked(api.getTaskGates).mockResolvedValue({
+      ...failedGateGates,
+      stages: [{ ...failedGateGates.stages[0], waves: [advisoryWave], current: advisoryWave }],
+    } as never);
+    renderDetail();
+
+    await screen.findByText('Что исправить');
+    expect(screen.queryByText(/не прошла и вызвала возврат/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Открыть гейты' })).not.toBeInTheDocument();
+  });
+
+  it('does not blame another stage gate for a manual return', async () => {
+    const api = await import('../api');
+    const statuses = loopDetails.stage_statuses!;
+    vi.mocked(api.getTaskRunDetails).mockResolvedValue({
+      ...loopDetails,
+      stage_statuses: {
+        ...statuses,
+        stages: statuses.stages.map((entry) => entry.stage_id === 'implementation' ? {
+          ...entry,
+          visits: entry.visits.map((visit) => visit.number === 2
+            ? { ...visit, entered_from: 'implementation', entered_via: 'return' as const } : visit),
+        } : entry),
+      },
+    });
+    renderDetail();
+
+    await screen.findByText('Что исправить');
+    expect(screen.queryByText(/не прошла и вызвала возврат/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Открыть гейты' })).not.toBeInTheDocument();
   });
 
   it('does not show the feedback block when the stage has no review input', async () => {

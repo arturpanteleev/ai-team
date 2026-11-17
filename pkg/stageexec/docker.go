@@ -306,15 +306,24 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		doc.Outputs[index].Path = ContainerOutputs + "/" + output.Name
 	}
 	workdir := ContainerRoot
+	// repoRoot is the tree every repository mount is taken from. When the
+	// repository is mounted it is the resolved root: an ancestor symlink must not
+	// let the daemon mount a tree that was never inspected.
+	repoRoot := request.WorkDir
+	var pinnedRepo safeio.PinnedRoot
 	if settings.Repo == "ro" {
-		repo, err := filepath.Abs(request.WorkDir)
+		repo, err := safeio.PinRoot(request.WorkDir)
 		if err != nil {
 			return fmt.Errorf("docker executor: workdir: %w", err)
 		}
-		if err := checkRepoGitMetadata(repo); err != nil {
+		pinnedRepo = repo
+		repoRoot = repo.Real()
+		if err := checkRepoGitMetadata(repoRoot); err != nil {
 			return fmt.Errorf("docker executor: репозиторий: %w", err)
 		}
-		mounts = append(mounts, dockerrun.Mount{Source: repo, Target: ContainerRepo, ReadOnly: true})
+		// Mount the resolved path: WalkDir on a symlinked root would skip the
+		// tree, and the daemon would follow the link to an unchecked tree.
+		mounts = append(mounts, dockerrun.Mount{Source: repoRoot, Target: ContainerRepo, ReadOnly: true})
 		described = append(described, "repo:ro")
 		workdir = ContainerRepo
 	}
@@ -323,13 +332,13 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		if err != nil {
 			return fmt.Errorf("docker executor: %w", err)
 		}
-		if err := noSymlinkBelow(request.WorkDir, mount.Path); err != nil {
+		if err := noSymlinkBelow(repoRoot, mount.Path); err != nil {
 			return fmt.Errorf("docker executor: mount %q: %w", mount.Path, err)
 		}
 		if hasGitElement(mount.Path) {
 			return fmt.Errorf("docker executor: mount %q: git-метаданные не монтируются", mount.Path)
 		}
-		mounts = append(mounts, dockerrun.Mount{Source: filepath.Join(request.WorkDir, filepath.FromSlash(mount.Path)), Target: mount.Target, ReadOnly: true})
+		mounts = append(mounts, dockerrun.Mount{Source: filepath.Join(repoRoot, filepath.FromSlash(mount.Path)), Target: mount.Target, ReadOnly: true})
 		described = append(described, mount.Target+":ro")
 	}
 	// The container paths replace the host layout in the request.
@@ -419,6 +428,15 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 			cancelRun()
 		})
 	}()
+	// Re-check immediately before the daemon sees the mount: the root must
+	// still resolve to the exact tree that was inspected. Fail closed.
+	if settings.Repo == "ro" {
+		if err := pinnedRepo.Verify(); err != nil {
+			cancelRun()
+			<-watched
+			return fmt.Errorf("docker executor: репозиторий изменён после проверки: %w", err)
+		}
+	}
 	res := l.Docker.Run(runCtx, spec, stdin, limit)
 	cancelRun()
 	<-watched

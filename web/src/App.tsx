@@ -15,6 +15,8 @@ import { PipelineRedirect, RunRedirect } from './pages/RunRedirect';
 import { TaskDetail } from './pages/TaskDetail';
 import { Observability } from './pages/Observability';
 import { Tracker } from './pages/Tracker';
+import { WorkflowDetailPage, Workflows } from './pages/Workflows';
+import { WorkflowGraph } from './pages/WorkflowGraph';
 import { activateTeamInvitation, getAuthConfig, getTrackerOverview, openSession, SESSION_EXPIRED_EVENT } from './api';
 
 function RoutedApp({ teamManagementEnabled, trackerEnabled }: { teamManagementEnabled: boolean; trackerEnabled: boolean }) {
@@ -25,6 +27,10 @@ function RoutedApp({ teamManagementEnabled, trackerEnabled }: { teamManagementEn
         { path: '/tasks', element: <Tasks /> },
         { path: '/tasks/new', element: <NewTask /> },
         { path: '/projects', element: <Projects /> },
+        { path: '/workflows', element: <Workflows /> },
+        { path: '/workflows/:workflowID', element: <WorkflowDetailPage /> },
+        { path: '/graphs/:graphID', element: <WorkflowGraph /> },
+        { path: '/runs/:runID/graph', element: <WorkflowGraph /> },
         { path: '/tasks/:runID', element: <TaskDetail /> },
         { path: '/events', element: <EventFeed /> },
         { path: '/observability', element: <Observability /> },

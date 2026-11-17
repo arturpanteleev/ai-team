@@ -33,6 +33,7 @@ describe('Layout team navigation', () => {
     expect(screen.getByRole('link', { name: 'Шаблоны' })).toHaveAttribute('href', '/template');
     expect(screen.getByRole('link', { name: 'Лента' })).toHaveAttribute('href', '/events');
     expect(screen.getByRole('link', { name: 'Наблюдаемость' })).toHaveAttribute('href', '/observability');
+    expect(screen.getByRole('link', { name: 'Workflow' })).toHaveAttribute('href', '/workflows');
     expect(screen.queryByRole('link', { name: 'Шаблон' })).not.toBeInTheDocument();
   });
 

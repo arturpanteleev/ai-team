@@ -96,6 +96,10 @@ describe('Task page columns keep their purpose (S16)', () => {
     // The skip link reaches the actions without tabbing through the route and the status.
     expect(screen.getByRole('link', { name: 'К действиям' })).toHaveAttribute('href', '#task-actions');
     expect(actions).toHaveAttribute('id', 'task-actions');
+    // The run graph is reachable from the route panel, before its stage buttons in the DOM order.
+    const route = await screen.findByRole('region', { name: 'Маршрут процесса' });
+    expect(within(route).getByRole('link', { name: 'Граф прогона' }))
+      .toHaveAttribute('href', '/runs/run-detail-1/graph');
   });
 
   it('keeps one button per meaning: no stage action is offered twice', async () => {

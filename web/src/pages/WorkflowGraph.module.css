@@ -1,0 +1,307 @@
+.container {
+  min-width: 0;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+}
+
+.header {
+  margin-bottom: 20px;
+}
+
+.backLink {
+  display: inline-block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.header h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  max-width: 720px;
+  margin: 0 0 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+
+.meta > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.meta dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.meta dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.panel {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.panel > h2 {
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.canvas {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(circle at 18% 0%, var(--tint-indigo) 0%, transparent 46%),
+    radial-gradient(circle at 88% 100%, var(--tint-teal) 0%, transparent 50%),
+    var(--surface-muted);
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Материализация схемы при открытии страницы. */
+.scene {
+  transform-origin: 25% 10%;
+  animation: materialize 0.5s ease-out both;
+}
+
+@keyframes materialize {
+  from { opacity: 0; transform: scale(0.97) translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+.arrow {
+  fill: var(--border-strong);
+}
+
+.arrowActive {
+  fill: var(--accent);
+}
+
+.edgeLine {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.8;
+}
+
+.edgeFlow {
+  fill: none;
+  stroke: var(--ink-teal);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-dasharray: 2 12;
+  opacity: 0.7;
+  animation: flow 1.6s linear infinite;
+}
+
+@keyframes flow {
+  to { stroke-dashoffset: -28; }
+}
+
+/* Обратный исход из edges (rejected) и маршрут return_to_* — разные вещи:
+   обратный переход сплошной, возврат пунктирный, оба коралловые. */
+.edgeBack .edgeLine {
+  stroke: var(--ink-coral);
+  stroke-width: 2;
+}
+
+.edgeReturn .edgeLine {
+  stroke: var(--ink-coral);
+  stroke-dasharray: 6 4;
+}
+
+.edgeBack .edgeFlow,
+.edgeReturn .edgeFlow {
+  stroke: var(--ink-coral);
+}
+
+.edgeActive .edgeLine {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+
+.edgeActive .edgeFlow {
+  stroke: var(--accent);
+  opacity: 1;
+}
+
+.edgeLabelBg {
+  fill: var(--surface-muted);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.edgeLabel {
+  fill: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.nodeLink {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.nodeLink:hover {
+  text-decoration: none;
+}
+
+.nodeLink:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.nodeRect {
+  fill: var(--surface-raised);
+  stroke: var(--border-strong);
+  stroke-width: 1.6;
+  transition: stroke 0.15s;
+}
+
+.nodeLabel {
+  fill: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.nodeSub {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.nodeVisited .nodeRect {
+  fill: var(--tint-indigo);
+  stroke: var(--ink-indigo);
+}
+
+.nodePassed .nodeRect {
+  fill: var(--tint-teal);
+  stroke: var(--ink-teal);
+}
+
+.nodeFailed .nodeRect {
+  fill: var(--tint-coral);
+  stroke: var(--ink-coral);
+}
+
+.nodeCurrent .nodeRect {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { filter: drop-shadow(0 0 3px var(--accent)); }
+  50% { filter: drop-shadow(0 0 12px var(--accent)); }
+}
+
+.legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.swatch {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-raised);
+}
+
+.swatchNode { border-color: var(--border-strong); }
+.swatchCurrent { border-color: var(--accent); background: var(--tint-yellow); }
+.swatchVisited { border-color: var(--ink-teal); background: var(--tint-teal); }
+.swatchVisitedOnly { border-color: var(--ink-indigo); background: var(--tint-indigo); }
+.swatchFailed { border-color: var(--ink-coral); background: var(--tint-coral); }
+.swatchEdge { height: 0; border: 0; border-top: 2px solid var(--ink-teal); border-radius: 0; background: none; }
+.swatchBack { height: 0; border: 0; border-top: 2px solid var(--ink-coral); border-radius: 0; background: none; }
+.swatchReturn { height: 0; border: 0; border-top: 2px dashed var(--ink-coral); border-radius: 0; background: none; }
+.swatchTerminal { border-color: var(--text-muted); background: var(--surface-muted); }
+
+.state {
+  min-width: 0;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 32px 20px;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .container { padding: 16px 12px 32px; }
+  .header h1 { font-size: 22px; }
+  .panel { padding: 12px; }
+  .legend { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+  .legend li { font-size: 11px; }
+}
+
+/* Анимации декоративны: при reduced-motion схема остаётся полностью читаемой. */
+@media (prefers-reduced-motion: reduce) {
+  .scene,
+  .nodeCurrent .nodeRect,
+  .edgeFlow {
+    animation: none !important;
+  }
+
+  .nodeCurrent .nodeRect {
+    filter: drop-shadow(0 0 5px var(--accent));
+  }
+
+  .edgeFlow {
+    stroke-dasharray: none;
+    opacity: 0.45;
+  }
+}

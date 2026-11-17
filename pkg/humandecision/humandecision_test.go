@@ -146,8 +146,8 @@ func TestDecideRefusals(t *testing.T) {
 }
 
 func TestSelfApprovalOnlyAppliesToApproval(t *testing.T) {
-	// A person may reject (or return) their own work; only confirming it is
-	// forbidden.
+	// A rejection that leaves the work with its author is not a confirmation.
+	// A ReturnStage decision (return_to_*) is covered separately below.
 	ports, pending := newPending(t, approval.QuorumAny, "product_owner")
 	ports.selfErr = errors.New("автор этапа")
 	req := request(pending, actor("po-1", "product_owner"), "reject")
@@ -329,30 +329,76 @@ func TestParallelIdenticalRequestsAuditOnce(t *testing.T) {
 }
 
 // A return is a decision on the confirmed work just as an approval is: the
-// self-approval policy covers every return_to_* action, not only approve.
+// self-approval policy covers every return_to_* action (ReturnStage), not only
+// approve. The same actor is refused with a message naming the route, another
+// actor may return, and the decision is audited under the approver role.
 func TestSelfApprovalCoversReturnToActions(t *testing.T) {
-	ports, _ := newPending(t, approval.QuorumAny, "product_owner")
-	value, err := ports.store.Create(approval.PendingApproval{
-		Kind: approval.KindApprove, RunID: runID, AttemptID: "attempt-2", FromStage: "tech_design", ToStage: "build",
-		Trigger: "graph_outcome:passed", SubjectHash: subject, RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
-		Actions: []string{"approve", "reject", "return_to_product_spec"},
-		Targets: map[string]string{"approve": "build", "reject": "tech_design", "return_to_product_spec": "product_spec"},
+	newReturnPorts := func(t *testing.T) (*fakePorts, approval.PendingApproval) {
+		t.Helper()
+		ports, _ := newPending(t, approval.QuorumAny, "product_owner")
+		value, err := ports.store.Create(approval.PendingApproval{
+			Kind: approval.KindApprove, RunID: runID, AttemptID: "attempt-2", FromStage: "tech_design", ToStage: "build",
+			Trigger: "graph_outcome:passed", SubjectHash: subject, RequiredRoles: []string{"product_owner"}, Quorum: approval.QuorumAny,
+			Actions: []string{"approve", "reject", "return_to_product_spec"},
+			Targets: map[string]string{"approve": "build", "reject": "tech_design", "return_to_product_spec": "product_spec"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ports, value
+	}
+	const route = "return_to_product_spec"
+
+	t.Run("same executor is refused", func(t *testing.T) {
+		ports, value := newReturnPorts(t)
+		ports.selfErr = errors.New("actor po-1 работал над этапом")
+		req := request(value, actor("po-1", "product_owner"), route)
+		req.Comment = "верну себе"
+		_, err := New(ports).Decide(context.Background(), req)
+		if !errors.Is(err, ErrSelfApproval) {
+			t.Fatalf("a self return must be refused as self-approval: %v", err)
+		}
+		if !strings.Contains(err.Error(), route) {
+			t.Fatalf("the refusal must name the return route, got %q", err)
+		}
+		if ports.decisions != 0 || len(ports.audits) != 0 {
+			t.Fatalf("a refused return must store and audit nothing: %d, %d", ports.decisions, len(ports.audits))
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ports.selfErr = errors.New("автор этапа")
-	req := request(value, actor("po-1", "product_owner"), "return_to_product_spec")
-	req.Comment = "верну себе"
-	if _, err := New(ports).Decide(context.Background(), req); !errors.Is(err, ErrSelfApproval) {
-		t.Fatalf("a self return must be refused as self-approval: %v", err)
-	}
-	if ports.decisions != 0 || len(ports.audits) != 0 {
-		t.Fatalf("a refused return must store and audit nothing: %d, %d", ports.decisions, len(ports.audits))
-	}
-	// Another person (no violation) may return.
-	ports.selfErr = nil
-	if _, err := New(ports).Decide(context.Background(), req); err != nil {
-		t.Fatalf("another person must be able to return: %v", err)
-	}
+
+	t.Run("another executor returns", func(t *testing.T) {
+		ports, value := newReturnPorts(t)
+		ports.selfErr = nil
+		req := request(value, actor("po-2", "product_owner"), route)
+		req.Comment = "spec lacks error handling"
+		result, err := New(ports).Decide(context.Background(), req)
+		if err != nil {
+			t.Fatalf("another person must be able to return: %v", err)
+		}
+		if result.Approval.ResolvedAction != route || result.Role != "product_owner" || !result.Resolved {
+			t.Fatalf("return result = %+v", result)
+		}
+		if len(ports.audits) != 1 || ports.audits[0].eventType != AuditEvent {
+			t.Fatalf("audits = %+v", ports.audits)
+		}
+		data := ports.audits[0].data
+		for key, want := range map[string]any{
+			"actor_id": "po-2", "actor_role": "product_owner", "action": route,
+			"target": "product_spec", "channel": ChannelREST, "resolved": true,
+		} {
+			if data[key] != want {
+				t.Fatalf("audit %s = %v, want %v (%v)", key, data[key], want, data)
+			}
+		}
+	})
+
+	t.Run("policy disabled allows the author", func(t *testing.T) {
+		ports, value := newReturnPorts(t)
+		ports.selfErr = nil
+		req := request(value, actor("po-1", "product_owner"), route)
+		req.Comment = "верну себе"
+		if _, err := New(ports).Decide(context.Background(), req); err != nil {
+			t.Fatalf("with forbid_self_approval off the author may return: %v", err)
+		}
+	})
 }

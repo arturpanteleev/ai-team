@@ -308,6 +308,12 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	}
 	settings := *spec.Docker
 	repoRoot, evidenceDir := spec.Input.Paths.RepoRoot, spec.Input.Paths.EvidenceDir
+	// Launch is exported and its spec is not validated by dockerrun.Spec here: an
+	// empty or relative root would otherwise silently become the controller's
+	// working directory once PinRoot makes it absolute.
+	if !filepath.IsAbs(repoRoot) {
+		return fail(fmt.Errorf("repo root %q is not an absolute path", repoRoot))
+	}
 	// Resolve and pin the repository root before any walk or mount. A walk
 	// rooted at a symlink does not descend into it, and the daemon would follow
 	// the link to an unchecked tree; a final-component symlink is refused.
@@ -315,17 +321,21 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	if err != nil {
 		return fail(fmt.Errorf("repo root: %w", err))
 	}
+	// The resolved path is the source of every repository mount and the base of
+	// the overlay paths: an ancestor symlink switched after the check must not
+	// let the daemon mount a tree that was never inspected.
+	pinnedRoot := pinnedRepo.Real()
 
 	// The program sees container paths only. The input document is rebuilt
 	// from the decoded input, so no host path leaks in.
 	input := spec.Input
 	input.Paths = PathsInfo{RepoRoot: ContainerRepoRoot, EvidenceDir: ContainerEvidenceDir}
 	mounts := []dockerrun.Mount{
-		{Source: repoRoot, Target: ContainerRepoRoot, ReadOnly: !settings.RepoWritable},
+		{Source: pinnedRoot, Target: ContainerRepoRoot, ReadOnly: !settings.RepoWritable},
 		{Source: evidenceDir, Target: ContainerEvidenceDir, ReadOnly: false},
 	}
 	if hostPath := spec.Input.Artifact.Path; hostPath != "" {
-		if rel, ok := within(repoRoot, hostPath); ok {
+		if rel, ok := repoRelative(repoRoot, pinnedRoot, hostPath); ok {
 			input.Artifact.Path = path.Join(ContainerRepoRoot, rel)
 		} else {
 			if err := noSymlinkFile(hostPath); err != nil {
@@ -342,19 +352,19 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 		// change the git configuration that the host will run later: .git is
 		// laid over the writable mount read-only. The common git directory of
 		// a linked worktree lies outside the repository and is never mounted.
-		overlays, err := gitOverlays(pinnedRepo.Real())
+		overlays, err := gitOverlays(pinnedRoot)
 		if err != nil {
 			return fail(fmt.Errorf("protecting .git: %w", err))
 		}
 		for _, rel := range overlays {
 			mounts = append(mounts, dockerrun.Mount{
-				Source: filepath.Join(repoRoot, filepath.FromSlash(rel)), Target: path.Join(ContainerRepoRoot, rel), ReadOnly: true,
+				Source: filepath.Join(pinnedRoot, filepath.FromSlash(rel)), Target: path.Join(ContainerRepoRoot, rel), ReadOnly: true,
 			})
 		}
 	}
 	for _, m := range settings.Mounts {
-		source := filepath.Join(repoRoot, filepath.FromSlash(m.Path))
-		if err := noSymlinkBelow(repoRoot, m.Path); err != nil {
+		source := filepath.Join(pinnedRoot, filepath.FromSlash(m.Path))
+		if err := noSymlinkBelow(pinnedRoot, m.Path); err != nil {
 			return fail(fmt.Errorf("mount %q: %w", m.Path, err))
 		}
 		mounts = append(mounts, dockerrun.Mount{Source: source, Target: m.Target, ReadOnly: !m.Writable})
@@ -365,7 +375,7 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	}
 
 	workdir := ContainerRepoRoot
-	if rel, ok := within(repoRoot, spec.Dir); ok && rel != "." {
+	if rel, ok := repoRelative(repoRoot, pinnedRoot, spec.Dir); ok && rel != "." {
 		workdir = path.Join(ContainerRepoRoot, rel)
 	}
 	name, err := containerName(input.AttemptID)
@@ -384,7 +394,7 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	described["exceptions"] = settings.Exceptions(envNames(spec.Env))
 	// Host paths of the mounts are controller internals; the record keeps the
 	// container side and, for repository mounts, the repository-relative path.
-	described["mounts"] = describeMounts(repoRoot, evidenceDir, mounts)
+	described["mounts"] = describeMounts(pinnedRoot, evidenceDir, mounts)
 
 	// Re-check immediately before the daemon sees the mount: the root must
 	// still resolve to the exact tree that was inspected. Fail closed.
@@ -392,7 +402,7 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 		return fail(fmt.Errorf("repo root changed after the check: %w", err))
 	}
 	res := l.Docker.Run(ctx, dspec, stdin, spec.MaxOutputBytes)
-	described["docker_argv"] = sanitizeDockerArgv(res.Docker, repoRoot, evidenceDir)
+	described["docker_argv"] = sanitizeDockerArgv(res.Docker, pinnedRoot, evidenceDir)
 	return Outcome{
 		Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode,
 		OutputExceeded: res.OutputExceeded, Err: res.Err, Detail: res.Detail,
@@ -636,6 +646,16 @@ func within(root, child string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+// repoRelative returns the repository-relative path of a host path expressed
+// through either the root as supplied or its resolved form. The mounts use the
+// resolved root, so both spellings must map to the same container path.
+func repoRelative(shown, real, hostPath string) (string, bool) {
+	if rel, ok := within(shown, hostPath); ok {
+		return rel, true
+	}
+	return within(real, hostPath)
 }
 
 // noSymlinkBelow proves that no component of rel below root is a symlink and

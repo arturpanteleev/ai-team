@@ -553,6 +553,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateResultContract(a, outputs); err != nil {
+		r.ValidationFailed = true
+		return fail(fmt.Errorf("агент %s: контракт результата: %w", name, err))
+	}
 	outputIdentities, err := captureArtifactIdentities(outputs)
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: фиксация output identity: %w", name, err))
@@ -923,6 +927,70 @@ func (rs *runState) collectOutputs(a *agent.Agent, name string) ([]runtime.Artif
 		)
 	}
 	return outputs, nil
+}
+
+// validateResultContract проверяет содержательную часть контракта результата:
+// агенту недостаточно формально создать diff — каждый объявленный выход,
+// который образует ожидаемый результат, должен существовать и содержать
+// результат ожидаемого вида. require_diff и mutation scope остаются первым
+// слоем (guard.go), эта проверка — вторым, семантическим слоем.
+//
+// Проверка включается по names выходов из def.yaml, а не по имени агента:
+// контракт задаётся definition, поэтому кастомные агенты с теми же выходам
+// получают ту же гарантию, а агенты с пустым outputs не ломаются.
+func validateResultContract(a *agent.Agent, outputs []runtime.Artifact) error {
+	if a == nil {
+		return nil
+	}
+	byName := make(map[string]runtime.Artifact, len(outputs))
+	for _, output := range outputs {
+		byName[output.Name] = output
+	}
+	read := func(name, declared string) ([]byte, error) {
+		output, found := byName[name]
+		if !found {
+			return nil, fmt.Errorf("выход %s (%s) не создан", name, declared)
+		}
+		data, err := safeio.ReadRegularFile(output.Path, maxArtifactFileBytes)
+		if err != nil {
+			return nil, fmt.Errorf("выход %s (%s) недоступен: %w", name, output.Path, err)
+		}
+		return data, nil
+	}
+	if declared, ok := a.Outputs["diff"]; ok {
+		data, err := read("diff", declared)
+		if err != nil {
+			return err
+		}
+		if !containsDiffContent(data) {
+			return fmt.Errorf("выход diff (%s) не содержит изменений", declared)
+		}
+	}
+	if declared, ok := a.Outputs["unit-test-report"]; ok {
+		data, err := read("unit-test-report", declared)
+		if err != nil {
+			return err
+		}
+		if !containsUnitTestResult(data) {
+			return fmt.Errorf("выход unit-test-report (%s) не содержит результата тестов", declared)
+		}
+	}
+	return nil
+}
+
+func containsDiffContent(data []byte) bool {
+	text := string(data)
+	return strings.Contains(text, "diff --git ") || strings.Contains(text, "+++ ") || strings.Contains(text, "@@ ")
+}
+
+func containsUnitTestResult(data []byte) bool {
+	for _, field := range strings.Fields(strings.ToUpper(string(data))) {
+		switch strings.Trim(field, "*`:.,!?()[]#-") {
+		case "PASS", "FAIL":
+			return true
+		}
+	}
+	return false
 }
 
 func sortedStringMapKeys(values map[string]string) []string {

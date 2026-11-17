@@ -263,6 +263,32 @@ test.describe('keyboard and focus', () => {
   })
 })
 
+test.describe('DES-03 neon stage strip', () => {
+  test('the current stage glows, the conveyor flows and the primary action glows in the dark theme', async ({ page }) => {
+    await open(page, 'awaiting-human', { theme: 'dark' })
+    const current = page.locator('ol li[data-state="current"] button').first()
+    await expect(current).toBeVisible()
+    expect(await current.evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe('none')
+    expect(await current.locator('span[class*="routeDot"]').evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe('none')
+    expect(await current.evaluate((el) => getComputedStyle(el.closest('li'), '::before').animationName)).not.toBe('none')
+    const primary = page.getByRole('complementary', { name: 'Действия' }).locator('button[class*="primary"]').first()
+    await expect(primary).toBeVisible()
+    expect(await primary.evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe('none')
+  })
+
+  test.describe('prefers-reduced-motion', () => {
+    test.use({ reducedMotion: 'reduce' })
+
+    test('the conveyor and the pulsing dot stop moving', async ({ page }) => {
+      await open(page, 'awaiting-human')
+      const current = page.locator('ol li[data-state="current"] button').first()
+      await expect(current).toBeVisible()
+      await expect.poll(() => current.evaluate((el) => getComputedStyle(el.closest('li'), '::before').animationName)).toBe('none')
+      await expect.poll(() => current.locator('span[class*="routeDot"]').evaluate((el) => getComputedStyle(el).animationName)).toBe('none')
+    })
+  })
+})
+
 test.describe('empty and error states', () => {
   async function loggedIn(page, handlers) {
     await page.addInitScript(() => { try { localStorage.setItem('ai-team:theme', 'light') } catch {} })

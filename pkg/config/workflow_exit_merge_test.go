@@ -48,7 +48,7 @@ func TestExitGateGroupsForMergesWorkflowWithLegacyStageChain(t *testing.T) {
 		Title:         "Gates",
 		Workflows: []WorkflowMeta{{
 			ID: DefaultWorkflowID, Title: "SDLC", Version: 1,
-			Graphs:        []WorkflowGraph{{ID: "sdlc", Template: "gates"}},
+			Graphs:         []WorkflowGraph{{ID: "sdlc", Template: "gates"}},
 			ExitGateGroups: workflow.GateGroups{{workflow.GateRef{Gate: gatelib.GateVerdictMarker, Version: 1}}},
 		}},
 		Stages: []TemplateStage{

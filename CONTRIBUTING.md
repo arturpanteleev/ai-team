@@ -94,7 +94,7 @@ PR. PR закрывает issue строкой `Closes #<номер>`.
 
 | Инструмент | Минимально | Зачем |
 |---|---|---|
-| Go | 1.26.9+ (точный пин сборки — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
+| Go | 1.26.11+ (точный пин сборки — в [`.tool-versions`](.tool-versions)) | сборка и тесты ядра |
 | Node.js + npm | 22+ (npm 10+) | сборка/тест web-фронтенда (`web/`) |
 | OpenSpec CLI | через `npx` автоматически | строгая валидация specs (`make specs`) |
 | `opencode` | в `PATH` | только для запуска полного `ai-team run` (LLM-артефакты) |
@@ -160,7 +160,7 @@ make go-toolchain    # каким Go пойдут цели Makefile (GOTOOLCHAIN
 ```
 
 Все цели `Makefile` запускают Go ровно той версии, что закреплена в
-[`.tool-versions`](.tool-versions) (сейчас 1.26.9): Makefile экспортирует
+[`.tool-versions`](.tool-versions) (сейчас 1.26.11): Makefile экспортирует
 `GOTOOLCHAIN=go<пин>`, если `GOTOOLCHAIN` в окружении не задан или пуст, и Go сам
 скачивает этот тулчейн при первом запуске. Без пина `make verify` взял бы
 любой более новый установленный Go, и `govulncheck` проверял бы уже его

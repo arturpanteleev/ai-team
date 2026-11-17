@@ -1034,8 +1034,8 @@ func TestMCPPatchWorkflowProcessWithCommandGateConfig(t *testing.T) {
 	ownerToken, _ := env.issueToken(t, "owner@example.com", `{"label":"owner"}`)
 	owner := env.mustConnect(t, ownerToken)
 	text, isError := callTool(t, owner, "patch_workflow_process", map[string]any{
-		"workflow_id":     "idea-to-prod",
-		"description":     "Описание через MCP",
+		"workflow_id":      "idea-to-prod",
+		"description":      "Описание через MCP",
 		"expected_version": version,
 		mcpIdempotencyKey:  "mcp-patch-command-gate-1",
 	})
@@ -1094,8 +1094,8 @@ func TestMCPPatchWorkflowProcessWithCommandGateConfig(t *testing.T) {
 	qaToken, _ := env.issueToken(t, "qa@example.com", `{"label":"qa"}`)
 	qa := env.mustConnect(t, qaToken)
 	denied, isError := callTool(t, qa, "patch_workflow_process", map[string]any{
-		"workflow_id":     "idea-to-prod",
-		"description":     "не должно быть записано",
+		"workflow_id":      "idea-to-prod",
+		"description":      "не должно быть записано",
 		"expected_version": currentVersion,
 		mcpIdempotencyKey:  "mcp-patch-command-gate-qa",
 	})

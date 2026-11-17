@@ -553,11 +553,14 @@ func stageMergedChainTightenProblems(submitted, trusted *Config, forRun bool) []
 		submittedStages[stage.ID] = stage
 	}
 	workflowID := trusted.ActiveWorkflowID()
-	var workflowEntry, workflowExit []workflow.GateRef
-	if forRun {
-		workflowEntry = workflowEffectiveRefs(trusted, workflowID, true)
-		workflowExit = workflowEffectiveRefs(trusted, workflowID, false)
-	}
+	workflowEntry := workflowEffectiveRefs(trusted, workflowID, true)
+	workflowExit := workflowEffectiveRefs(trusted, workflowID, false)
+	// workflowAll is the union of the trusted active workflow's effective entry
+	// and exit refs. It must be available in both publish and run modes: a
+	// workflow command gate must not be skipped by the merged-chain check below,
+	// because a stage ref with the same instance name replaces it in the
+	// effective chain and would otherwise silently drop the command gate.
+	workflowAll := append(append([]workflow.GateRef(nil), workflowEntry...), workflowExit...)
 	for _, id := range sortedMapKeys(trustedStages) {
 		submittedStage, ok := submittedStages[id]
 		if !ok {
@@ -577,8 +580,11 @@ func stageMergedChainTightenProblems(submitted, trusted *Config, forRun bool) []
 				// refused/protected by workflowCommandGateProblems and the stage
 				// command-gate check; skip them here so name-only references to
 				// trusted command definitions stay accepted (as stageTightenProblems
-				// always did).
-				if isCommandGate(registry, ref) {
+				// always did). A command gate that belongs to the workflow chain is
+				// not skipped: a stage ref with the same instance name replaces it
+				// in the effective merged chain, so the command gate must survive
+				// that comparison too.
+				if isCommandGate(registry, ref) && !hasGateInstanceName(workflowAll, ref) {
 					continue
 				}
 				// For a run only refs belonging to the trusted active workflow are

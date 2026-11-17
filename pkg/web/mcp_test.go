@@ -257,6 +257,10 @@ func TestMCPReadToolsMatchRESTUnderEachUsersIdentity(t *testing.T) {
 			{"get_template", nil, "/api/template"},
 			{"get_gate_catalog", nil, "/api/gates/catalog"},
 			{"get_flow_metrics", map[string]any{"run_id": mcpTestRun, "from": period[0], "to": period[1]}, "/api/metrics/flow?run_id=" + mcpTestRun + "&from=" + period[0] + "&to=" + period[1]},
+			{"get_graph", map[string]any{"graph_id": "sdlc"}, "/api/graphs/sdlc"},
+			{"get_run_graph", map[string]any{"run_id": mcpTestRun}, "/api/runs/" + mcpTestRun + "/graph"},
+			{"list_workflows", nil, "/api/workflows"},
+			{"get_workflow", map[string]any{"workflow_id": "idea-to-prod"}, "/api/workflows/idea-to-prod"},
 			{"get_preflight", nil, "/api/preflight"},
 		} {
 			text, isError := callTool(t, session, c.tool, c.args)

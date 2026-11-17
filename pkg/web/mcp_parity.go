@@ -111,6 +111,12 @@ var mcpParityMatrix = []mcpRouteParity{
 	{Method: http.MethodGet, Pattern: "/api/pipelines/{id}/artifacts", Tool: "list_task_artifacts"},
 	{Method: http.MethodGet, Pattern: "/api/artifacts/*", Tool: "read_artifact"},
 
+	// --- Graphs and workflow catalogue: dashboard reads --------------------
+	{Method: http.MethodGet, Pattern: "/api/graphs/{graphID}", Tool: "get_graph"},
+	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/graph", Tool: "get_run_graph"},
+	{Method: http.MethodGet, Pattern: "/api/workflows", Tool: "list_workflows"},
+	{Method: http.MethodGet, Pattern: "/api/workflows/{workflowID}", Tool: "get_workflow"},
+
 	// --- Tasks: actions ---------------------------------------------------
 	{Method: http.MethodPost, Pattern: "/api/runs", Tool: "start_task"},
 	{Method: http.MethodPost, Pattern: "/api/runs/{runID}/resume", Tool: "resume_task"},

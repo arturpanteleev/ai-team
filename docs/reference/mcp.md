@@ -154,6 +154,7 @@ codex exec "вызови ai-team whoami"
 | `get_version` | `/api/version` | ревизия сервера |
 | `get_task_tracker`, `get_tracker_status`, `get_tracker_sync`, `list_tracker_inbound`, `list_tracker_link_conflicts`, `list_tracker_deliveries` | `/api/runs/{id}/tracker`, `/api/tracker…` | связь задачи с трекером, настройка, состояние опроса, входящие запросы из трекера, конфликты связей, исходящие обновления |
 | `list_pipelines`, `get_pipeline`, `read_artifact` | `/api/pipelines…`, `/api/artifacts/*` | прежний вид запусков и общее хранилище артефактов |
+| `get_graph`, `get_run_graph`, `list_workflows`, `get_workflow` | `/api/graphs/{graph_id}`, `/api/runs/{run_id}/graph`, `/api/workflows…` | графы (класс и прогон со статусами этапов) и каталог workflow (карточки, цепочки гейтов, задачи) |
 | `list_team_members`, `get_team_audit` | `/api/team/…` | команда и роли; только с правом управления командой |
 | `get_preflight` | `/api/preflight` | готовность контроллера |
 
@@ -296,6 +297,10 @@ codex exec "вызови ai-team whoami"
 | GET | `/api/pipelines/{id}` | `get_pipeline` |
 | GET | `/api/pipelines/{id}/artifacts` | `list_task_artifacts` |
 | GET | `/api/artifacts/*` | `read_artifact` |
+| GET | `/api/graphs/{graphID}` | `get_graph` |
+| GET | `/api/runs/{runID}/graph` | `get_run_graph` |
+| GET | `/api/workflows` | `list_workflows` |
+| GET | `/api/workflows/{workflowID}` | `get_workflow` |
 | POST | `/api/runs` | `start_task` |
 | POST | `/api/runs/{runID}/resume` | `resume_task` |
 | POST | `/api/runs/{runID}/cancel` | `cancel_task` |

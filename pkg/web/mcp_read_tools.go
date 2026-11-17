@@ -97,6 +97,24 @@ func registerMCPReadTools(registry *mcpRegistry) {
 		Params: []mcpParam{runID, {Name: "path", Kind: mcpString, Required: true,
 			Description: "Artifact path inside the run."}}})
 
+	registry.add(mcpOperation{Name: "get_graph", Title: "Workflow graph",
+		Description: "The class graph of one workflow graph by its declared graph id: entry, nodes, edges (outcome and approval) and return routes, exactly as GET /api/graphs/{graph_id} serves it.",
+		Path:        "/api/graphs/{graph_id}",
+		Params: []mcpParam{{Name: "graph_id", Kind: mcpString, Required: true,
+			Description: "Declared graph id (the id of a graphs entry of the workflow metadata)."}}})
+	registry.add(mcpOperation{Name: "get_run_graph", Title: "Run graph",
+		Description: "One task's graph pinned by its run, with the computed stage statuses and current position, exactly as GET /api/runs/{run_id}/graph serves it.",
+		Path:        "/api/runs/{run_id}/graph",
+		Params:      []mcpParam{runID}})
+	registry.add(mcpOperation{Name: "list_workflows", Title: "Workflows",
+		Description: "Workflow catalogue cards (id, title, description, version, graph count, active flag) and the active workflow id, exactly as GET /api/workflows serves it.",
+		Path:        "/api/workflows"})
+	registry.add(mcpOperation{Name: "get_workflow", Title: "Workflow",
+		Description: "One workflow card: its graphs, effective entry and exit gate chains and the tasks pinned to it, exactly as GET /api/workflows/{workflow_id} serves it.",
+		Path:        "/api/workflows/{workflow_id}",
+		Params: []mcpParam{{Name: "workflow_id", Kind: mcpString, Required: true,
+			Description: "Workflow id (the id field of list_workflows)."}}})
+
 	registry.add(mcpOperation{Name: "list_templates", Title: "Templates",
 		Description: "The active process template (YAML, stages, graph, validation) and its versions.",
 		Path:        "/api/templates", Resource: "aiteam://templates"})

@@ -2,7 +2,8 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
 import type { GraphView, StageStatusEntry, StageStatusKey } from '../types';
-import { WorkflowGraph } from './WorkflowGraph';
+import { buildLayout, WorkflowGraph } from './WorkflowGraph';
+import styles from './WorkflowGraph.module.css';
 
 const { getGraph, getRunGraph } = vi.hoisted(() => ({
   getGraph: vi.fn(),
@@ -39,6 +40,45 @@ const runView: GraphView = {
     schema_version: 7, run_status: 'running', terminal: false, current_stage: 'build',
     stages: [stageEntry('spec', 'passed', false, 'Спецификация'), stageEntry('build', 'in_progress', true, 'Сборка')],
   },
+};
+
+// Снимок реальной конфигурации дефолтного шаблона:
+// config.DefaultProfile(config.ProfileStandard).CompiledGraph() + cfg.Returns.
+// У tech_design прямые passed/skipped, обратный rejected и возврат return_to_product_spec,
+// у code_review/qa/observation — возвраты return_to_implementation.
+const defaultTemplateView: GraphView = {
+  schema_version: 7, entry: 'intent', mode: 'class', graph_id: 'sdlc-default', workflow_id: 'idea-to-prod',
+  title: 'SDLC default template',
+  nodes: [
+    { id: 'intent' }, { id: 'product_spec', max_visits: 3 }, { id: 'tech_design' },
+    { id: 'implementation', max_visits: 3 }, { id: 'code_review' }, { id: 'qa' },
+    { id: 'deploy' }, { id: 'observation' }, { id: 'acceptance' },
+  ],
+  edges: [
+    { from: 'intent', outcome: 'passed', to: 'product_spec' },
+    { from: 'product_spec', outcome: 'passed', to: 'tech_design' },
+    { from: 'tech_design', outcome: 'skipped', to: 'implementation' },
+    { from: 'tech_design', outcome: 'passed', to: 'implementation' },
+    { from: 'implementation', outcome: 'passed', to: 'code_review' },
+    { from: 'code_review', outcome: 'passed', to: 'qa' },
+    { from: 'qa', outcome: 'passed', to: 'deploy' },
+    { from: 'deploy', outcome: 'passed', to: 'observation' },
+    { from: 'observation', outcome: 'passed', to: 'acceptance' },
+    { from: 'acceptance', outcome: 'passed', to: '$complete' },
+    { from: 'acceptance', outcome: 'rejected', to: 'product_spec' },
+    { from: 'code_review', outcome: 'rejected', to: 'implementation' },
+    { from: 'observation', outcome: 'rejected', to: 'implementation' },
+    { from: 'qa', outcome: 'rejected', to: 'implementation' },
+    { from: 'tech_design', outcome: 'rejected', to: 'product_spec' },
+  ],
+  returns: [
+    { from: 'tech_design', to: 'product_spec' },
+    { from: 'code_review', to: 'implementation' },
+    { from: 'qa', to: 'implementation' },
+    { from: 'qa', to: 'product_spec' },
+    { from: 'observation', to: 'implementation' },
+    { from: 'acceptance', to: 'product_spec' },
+  ],
 };
 
 function renderAt(path: string) {
@@ -99,5 +139,59 @@ describe('WorkflowGraph', () => {
     renderAt('/graphs/missing');
 
     expect(await screen.findByRole('alert')).toHaveTextContent('граф не найден');
+  });
+
+  it('отделяет возвраты от обратных исходов и делит пучок только прямых рёбер', () => {
+    const { edges } = buildLayout(defaultTemplateView);
+    const design = edges.filter((edge) => edge.id.includes(':tech_design:'));
+
+    expect(design.filter((edge) => edge.kind === 'forward').map((edge) => edge.label).sort())
+      .toEqual(['passed', 'skipped']);
+    expect(design.filter((edge) => edge.kind === 'back').map((edge) => edge.label)).toEqual(['rejected']);
+    expect(design.filter((edge) => edge.kind === 'return').map((edge) => edge.label)).toEqual(['return_to_product_spec']);
+
+    expect(edges.filter((edge) => edge.kind === 'back').map((edge) => edge.label))
+      .toEqual(['rejected', 'rejected', 'rejected', 'rejected', 'rejected']);
+    expect(edges.some((edge) => edge.kind === 'return' && edge.label === 'return_to_implementation')).toBe(true);
+    expect(edges.some((edge) => edge.kind === 'return' && edge.label === 'rejected')).toBe(false);
+
+    // Два прямых исхода делят пучок симметрично; дуги в счёт не входят.
+    const offsets = design.filter((edge) => edge.kind === 'forward').map((edge) => edge.offset);
+    expect(offsets.reduce((sum, offset) => sum + offset, 0)).toBe(0);
+    expect(new Set(offsets).size).toBe(2);
+    const single = edges.find((edge) => edge.id === 'edge:intent:passed:product_spec');
+    expect(single?.offset).toBe(0);
+  });
+
+  it('разводит подписи рёбер дефолтного шаблона без пересечений', () => {
+    const { edges } = buildLayout(defaultTemplateView);
+    const collide = (a: typeof edges[number]['labelBox'], b: typeof edges[number]['labelBox']) => a.x < b.x + b.w
+      && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+    const collisions: string[] = [];
+    for (let i = 0; i < edges.length; i += 1) {
+      for (let j = i + 1; j < edges.length; j += 1) {
+        if (collide(edges[i].labelBox, edges[j].labelBox)) collisions.push(`${edges[i].label} / ${edges[j].label}`);
+      }
+    }
+    expect(collisions).toEqual([]);
+  });
+
+  it('рисует возвраты отдельным признаком и красит свотч «Пройден» как пройденный узел', async () => {
+    getGraph.mockResolvedValue(defaultTemplateView);
+    renderAt('/graphs/sdlc-default');
+
+    const diagram = await screen.findByRole('group', { name: 'Схема графа' });
+    const returnGroup = diagram.querySelector('[data-kind="return"]');
+    const backGroup = diagram.querySelector('[data-kind="back"]');
+    expect(returnGroup).not.toBeNull();
+    expect(backGroup).not.toBeNull();
+    expect(returnGroup).toHaveClass(styles.edgeReturn);
+    expect(returnGroup).not.toHaveClass(styles.edgeBack);
+    expect(backGroup).toHaveClass(styles.edgeBack);
+    expect(backGroup).not.toHaveClass(styles.edgeReturn);
+    expect(within(diagram).getAllByText('return_to_implementation').length).toBeGreaterThan(0);
+    expect(screen.getByText('Обратный переход (rejected)')).toBeInTheDocument();
+    expect(screen.getByText('Посещён, не пройден')).toBeInTheDocument();
   });
 });

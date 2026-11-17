@@ -25,6 +25,42 @@ const graph = {
   returns: [{ from: 'build', to: 'spec', max_visits: 3 }],
 }
 
+// Снимок реальной конфигурации дефолтного шаблона:
+// config.DefaultProfile(config.ProfileStandard).CompiledGraph() + cfg.Returns.
+// tech_design: прямые passed/skipped, обратный rejected, возврат return_to_product_spec;
+// code_review/qa/observation возвращают return_to_implementation.
+const defaultGraph = {
+  schema_version: 7, entry: 'intent', mode: 'class', graph_id: 'sdlc-default', workflow_id: 'idea-to-prod',
+  title: 'SDLC default template',
+  nodes: [{ id: 'intent' }, { id: 'product_spec', max_visits: 3 }, { id: 'tech_design' }, { id: 'implementation', max_visits: 3 },
+    { id: 'code_review' }, { id: 'qa' }, { id: 'deploy' }, { id: 'observation' }, { id: 'acceptance' }],
+  edges: [
+    { from: 'intent', outcome: 'passed', to: 'product_spec' },
+    { from: 'product_spec', outcome: 'passed', to: 'tech_design' },
+    { from: 'tech_design', outcome: 'skipped', to: 'implementation' },
+    { from: 'tech_design', outcome: 'passed', to: 'implementation' },
+    { from: 'implementation', outcome: 'passed', to: 'code_review' },
+    { from: 'code_review', outcome: 'passed', to: 'qa' },
+    { from: 'qa', outcome: 'passed', to: 'deploy' },
+    { from: 'deploy', outcome: 'passed', to: 'observation' },
+    { from: 'observation', outcome: 'passed', to: 'acceptance' },
+    { from: 'acceptance', outcome: 'passed', to: '$complete' },
+    { from: 'acceptance', outcome: 'rejected', to: 'product_spec' },
+    { from: 'code_review', outcome: 'rejected', to: 'implementation' },
+    { from: 'observation', outcome: 'rejected', to: 'implementation' },
+    { from: 'qa', outcome: 'rejected', to: 'implementation' },
+    { from: 'tech_design', outcome: 'rejected', to: 'product_spec' },
+  ],
+  returns: [
+    { from: 'tech_design', to: 'product_spec' },
+    { from: 'code_review', to: 'implementation' },
+    { from: 'qa', to: 'implementation' },
+    { from: 'qa', to: 'product_spec' },
+    { from: 'observation', to: 'implementation' },
+    { from: 'acceptance', to: 'product_spec' },
+  ],
+}
+
 const runGraph = {
   ...graph, mode: 'run', run_id: 'run-1', run_status: 'running', current_stage: 'build',
   stage_statuses: {
@@ -92,6 +128,7 @@ async function installApi(page) {
     if (pathname === '/api/workflows') return json(workflows)
     if (pathname === '/api/workflows/idea-to-prod') return json(workflowDetail)
     if (pathname === '/api/graphs/sdlc') return json(graph)
+    if (pathname === '/api/graphs/sdlc-default') return json(defaultGraph)
     if (pathname === '/api/runs/run-1/graph') return json(runGraph)
     if (pathname === '/api/runs/run-1') return json(taskDetail)
     if (pathname === '/api/runs/run-1/events') return json({ events: [], next_cursor: 0 })
@@ -141,6 +178,64 @@ test('the run graph highlights the current stage and its outgoing edges', async 
   await expect(page).toHaveURL(/\/runs\/run-1\/graph$/)
   await expect(page.getByRole('link', { name: 'Открыть задачу: Сборка' })).toHaveAttribute('aria-current', 'step')
   expect(await page.locator('svg [data-active="true"]').count()).toBeGreaterThan(0)
+})
+
+test('the default template draws returns apart from backward outcomes and keeps labels apart', async ({ page }) => {
+  await open(page, '/graphs/sdlc-default')
+  const diagram = page.getByRole('group', { name: 'Схема графа' })
+  await expect(diagram.getByText('return_to_product_spec', { exact: true }).first()).toBeVisible()
+  await expect(diagram.getByText('return_to_implementation', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Обратный переход (rejected)')).toBeVisible()
+  await expect(page.getByText('Возврат (return_to_*)')).toBeVisible()
+
+  const line = (kind) => diagram.locator(`g[data-kind="${kind}"] path`).first()
+  const lineStyle = (kind) => line(kind).evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { stroke: style.stroke, dash: style.strokeDasharray }
+  })
+  const backward = await lineStyle('back')
+  const returned = await lineStyle('return')
+  expect(backward.dash).toBe('none')
+  expect(returned.dash).toMatch(/^6px,?\s+4px$/)
+  expect(returned.stroke).toBe(backward.stroke)
+
+  // tech_design: passed + skipped идут прямыми рёбрами, rejected и return_to_product_spec — дугами.
+  const kinds = await diagram.locator('g[data-kind]').evaluateAll((groups) => groups.map((group) => group.getAttribute('data-kind')))
+  expect(kinds.filter((kind) => kind === 'forward')).toHaveLength(10)
+  expect(kinds.filter((kind) => kind === 'back')).toHaveLength(5)
+  expect(kinds.filter((kind) => kind === 'return')).toHaveLength(6)
+
+  const boxes = await diagram.locator('g[data-kind] rect').evaluateAll((elements) => elements.map((element) => {
+    const box = element.getBoundingClientRect()
+    return { left: box.left, top: box.top, right: box.right, bottom: box.bottom }
+  }))
+  expect(boxes.length).toBeGreaterThanOrEqual(21)
+  const collisions = []
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const a = boxes[i]
+      const b = boxes[j]
+      if (a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5) {
+        collisions.push([i, j])
+      }
+    }
+  }
+  expect(collisions).toEqual([])
+})
+
+test('the passed legend swatch matches the passed node colour', async ({ page }) => {
+  await open(page, '/runs/run-1/graph')
+  const node = page.locator('svg g[class*="nodePassed"] rect').first()
+  await expect(node).toBeVisible()
+  const swatch = page.locator('ul[aria-label="Обозначения"] li').filter({ hasText: /^\s*Пройден\s*$/ }).locator('span').first()
+  const colours = (locator) => locator.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { background: style.backgroundColor, border: style.borderTopColor, fill: style.fill, stroke: style.stroke }
+  })
+  const passed = await colours(node)
+  const legend = await colours(swatch)
+  expect(legend.background).toBe(passed.fill)
+  expect(legend.border).toBe(passed.stroke)
 })
 
 test('both graph pages fit 390px, keep the focus order and offer no competing primary', async ({ page }) => {

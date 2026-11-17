@@ -1,3 +1,4 @@
+/* oxlint-disable react/only-export-components -- buildLayout is a pure layout helper exported for the graph tests */
 import { useEffect, useId, useMemo, useState } from 'react';
 import { Link, useParams } from '../router';
 import { getGraph, getRunGraph } from '../api';
@@ -10,7 +11,12 @@ const NODE_H = 64;
 const GAP = 72;
 const PAD_X = 20;
 const PAD_Y = 24;
-const RETURN_LABEL_X = 244;
+const ARC_LABEL_X = 244;
+const LABEL_H = 19;
+const LABEL_INSET_X = 4;
+const LABEL_INSET_Y = 13;
+const LABEL_STEP = 21;
+const FORWARD_SPACING = 22;
 
 const TERMINALS: Record<string, string> = {
   $complete: 'Завершено',
@@ -20,6 +26,9 @@ const TERMINALS: Record<string, string> = {
 };
 
 type Position = { x: number; y: number; centerY: number };
+type LabelBox = { x: number; y: number; w: number; h: number };
+/** forward — прямой исход этапа, back — обратный исход из edges, return — маршрут return_to_*. */
+type EdgeKind = 'forward' | 'back' | 'return';
 type RenderNode = {
   key: string;
   label: string;
@@ -35,12 +44,19 @@ type RenderEdge = {
   label: string;
   labelX: number;
   labelY: number;
-  backward: boolean;
+  labelBox: LabelBox;
+  kind: EdgeKind;
+  /** Горизонтальное смещение прямого ребра; дуги его не используют. */
+  offset: number;
   active: boolean;
 };
 
 function nodeKey(node: WorkflowNode): string {
   return node.id ?? node.name ?? '';
+}
+
+function edgeLabelBox(labelX: number, labelY: number, label: string): LabelBox {
+  return { x: labelX - LABEL_INSET_X, y: labelY - LABEL_INSET_Y, w: Math.max(40, label.length * 6 + 10), h: LABEL_H };
 }
 
 function isTerminal(key: string): boolean {
@@ -66,7 +82,7 @@ function statusClass(status: StageStatusEntry | undefined): string {
   return styles.nodeVisited;
 }
 
-function buildLayout(view: GraphView): {
+export function buildLayout(view: GraphView): {
   nodes: RenderNode[];
   edges: RenderEdge[];
   width: number;
@@ -101,23 +117,29 @@ function buildLayout(view: GraphView): {
   });
 
   const edges: RenderEdge[] = [];
+  // Дуги — обратные исходы и возвраты: они рисуются справа от колонки узлов.
   const arcTotal = (view.edges ?? []).filter((edge) => positions.has(edge.from) && positions.has(edge.to)
     && (order.get(edge.to) ?? 0) <= (order.get(edge.from) ?? 0)).length
     + (view.returns ?? []).filter((route) => positions.has(route.from) && positions.has(route.to)).length;
+  // Пучок прямых рёбер делят только прямые рёбра: дуги уходят в собственные дорожки.
   const forwardCount = new Map<string, number>();
-  for (const edge of view.edges ?? []) forwardCount.set(edge.from, (forwardCount.get(edge.from) ?? 0) + 1);
+  for (const edge of view.edges ?? []) {
+    if (!positions.has(edge.from) || !positions.has(edge.to)) continue;
+    if ((order.get(edge.to) ?? 0) <= (order.get(edge.from) ?? 0)) continue;
+    forwardCount.set(edge.from, (forwardCount.get(edge.from) ?? 0) + 1);
+  }
   const forwardSeen = new Map<string, number>();
-  const returnLanes = new Map<string, number>();
+  const arcLanes = new Map<string, number>();
   let laneCount = 0;
   const laneFor = (key: string) => {
-    if (!returnLanes.has(key)) {
-      returnLanes.set(key, laneCount);
+    if (!arcLanes.has(key)) {
+      arcLanes.set(key, laneCount);
       laneCount += 1;
     }
-    return returnLanes.get(key)!;
+    return arcLanes.get(key)!;
   };
 
-  const addArc = (id: string, fromKey: string, toKey: string, label: string, backward: boolean, active: boolean) => {
+  const addArc = (id: string, fromKey: string, toKey: string, label: string, kind: 'back' | 'return', active: boolean) => {
     const from = positions.get(fromKey);
     const to = positions.get(toKey);
     if (!from || !to) return;
@@ -130,9 +152,11 @@ function buildLayout(view: GraphView): {
       id,
       path: `M ${startX} ${from.centerY} C ${bulgeX} ${from.centerY}, ${bulgeX} ${to.centerY}, ${startX} ${to.centerY}`,
       label,
-      labelX: RETURN_LABEL_X,
+      labelX: ARC_LABEL_X,
       labelY,
-      backward,
+      labelBox: edgeLabelBox(ARC_LABEL_X, labelY, label),
+      kind,
+      offset: 0,
       active,
     });
   };
@@ -143,37 +167,63 @@ function buildLayout(view: GraphView): {
     if (!from || !to) continue;
     const active = view.mode === 'run' && edge.from === currentKey;
     if ((order.get(edge.to) ?? 0) <= (order.get(edge.from) ?? 0)) {
-      addArc(`edge:${edge.from}:${edge.outcome}:${edge.to}`, edge.from, edge.to, edge.outcome, true, active);
+      addArc(`edge:${edge.from}:${edge.outcome}:${edge.to}`, edge.from, edge.to, edge.outcome, 'back', active);
       continue;
     }
     const count = forwardCount.get(edge.from) ?? 1;
     const seen = forwardSeen.get(edge.from) ?? 0;
     forwardSeen.set(edge.from, seen + 1);
-    const offset = (seen - (count - 1) / 2) * 22;
+    const offset = (seen - (count - 1) / 2) * FORWARD_SPACING;
     const x1 = from.x + NODE_W / 2 + offset;
     const x2 = to.x + NODE_W / 2 + offset;
     const y1 = from.y + NODE_H;
     const y2 = to.y;
+    const labelX = (x1 + x2) / 2 + 8;
+    const labelY = (y1 + y2) / 2;
     edges.push({
       id: `edge:${edge.from}:${edge.outcome}:${edge.to}`,
       path: `M ${x1} ${y1} C ${x1} ${y1 + 28}, ${x2} ${y2 - 28}, ${x2} ${y2}`,
       label: edge.outcome,
-      labelX: (x1 + x2) / 2 + 8,
-      labelY: (y1 + y2) / 2,
-      backward: false,
+      labelX,
+      labelY,
+      labelBox: edgeLabelBox(labelX, labelY, edge.outcome),
+      kind: 'forward',
+      offset,
       active,
     });
   }
 
   for (const route of view.returns ?? []) {
     const label = `return_to_${route.to}${route.max_visits ? ` · макс. ${route.max_visits}` : ''}`;
-    addArc(`return:${route.from}:${route.to}`, route.from, route.to, label, false,
+    addArc(`return:${route.from}:${route.to}`, route.from, route.to, label, 'return',
       view.mode === 'run' && route.from === currentKey);
   }
 
-  const labelWidth = Math.max(0, ...edges.map((edge) => RETURN_LABEL_X + edge.label.length * 6 + 16));
-  const width = Math.max(450, labelWidth, 430 + 26 * laneCount);
-  const height = PAD_Y * 2 + keys.length * NODE_H + Math.max(0, keys.length - 1) * GAP;
+  // Подписи не должны пересекаться: узлы и уже расставленные подписи занимают
+  // прямоугольники, а конфликтующая подпись ищет ближайший свободный сдвиг по
+  // вертикали (0, +шаг, −шаг, +2·шаг, …).
+  const overlaps = (a: LabelBox, b: LabelBox) => a.x < b.x + b.w && b.x < a.x + a.w
+    && a.y < b.y + b.h && b.y < a.y + a.h;
+  const occupied: LabelBox[] = nodes.map((node) => ({ x: node.pos.x, y: node.pos.y, w: NODE_W, h: NODE_H }));
+  for (const edge of edges) {
+    const anchorY = edge.labelY;
+    let labelY = anchorY;
+    let box = edgeLabelBox(edge.labelX, labelY, edge.label);
+    for (let step = 1; step <= 40 && occupied.some((other) => overlaps(box, other)); step += 1) {
+      const shift = (step % 2 === 1 ? 1 : -1) * Math.ceil(step / 2) * LABEL_STEP;
+      labelY = anchorY + shift;
+      box = edgeLabelBox(edge.labelX, labelY, edge.label);
+    }
+    edge.labelY = labelY;
+    edge.labelBox = box;
+    occupied.push(box);
+  }
+
+  const labelRight = Math.max(0, ...edges.map((edge) => edge.labelBox.x + edge.labelBox.w + 16));
+  const labelBottom = Math.max(0, ...edges.map((edge) => edge.labelBox.y + edge.labelBox.h));
+  const nodeBottom = PAD_Y * 2 + keys.length * NODE_H + Math.max(0, keys.length - 1) * GAP;
+  const width = Math.max(450, labelRight, 430 + 26 * laneCount);
+  const height = Math.max(nodeBottom, labelBottom + PAD_Y);
   return { nodes, edges, width, height };
 }
 
@@ -257,13 +307,15 @@ export function WorkflowGraph() {
             </defs>
             <g className={styles.scene}>
               {layout.edges.map((edge) => (
-                <g key={edge.id} className={`${styles.edge} ${edge.backward ? styles.edgeBack : ''} ${edge.active ? styles.edgeActive : ''}`}
+                <g key={edge.id}
+                  className={`${styles.edge} ${edge.kind === 'back' ? styles.edgeBack : ''} ${edge.kind === 'return' ? styles.edgeReturn : ''} ${edge.active ? styles.edgeActive : ''}`}
+                  data-kind={edge.kind}
                   data-active={edge.active || undefined}>
                   <path d={edge.path} className={styles.edgeLine}
                     markerEnd={`url(#${markerPrefix}-${edge.active ? 'arrow-active' : 'arrow'})`} />
                   <path d={edge.path} className={styles.edgeFlow} />
-                  <rect x={edge.labelX - 4} y={edge.labelY - 13}
-                    width={Math.max(40, edge.label.length * 6 + 10)} height={19} rx={5}
+                  <rect x={edge.labelBox.x} y={edge.labelBox.y}
+                    width={edge.labelBox.w} height={edge.labelBox.h} rx={5}
                     className={styles.edgeLabelBg} />
                   <text x={edge.labelX} y={edge.labelY} className={styles.edgeLabel}>{edge.label}</text>
                 </g>
@@ -297,8 +349,10 @@ export function WorkflowGraph() {
           <li><span className={`${styles.swatch} ${styles.swatchNode}`} /> Этап</li>
           <li><span className={`${styles.swatch} ${styles.swatchCurrent}`} /> Текущий этап</li>
           <li><span className={`${styles.swatch} ${styles.swatchVisited}`} /> Пройден</li>
+          <li><span className={`${styles.swatch} ${styles.swatchVisitedOnly}`} /> Посещён, не пройден</li>
           <li><span className={`${styles.swatch} ${styles.swatchFailed}`} /> Ошибка</li>
           <li><span className={`${styles.swatch} ${styles.swatchEdge}`} /> Переход (outcome)</li>
+          <li><span className={`${styles.swatch} ${styles.swatchBack}`} /> Обратный переход (rejected)</li>
           <li><span className={`${styles.swatch} ${styles.swatchReturn}`} /> Возврат (return_to_*)</li>
           <li><span className={`${styles.swatch} ${styles.swatchTerminal}`} /> Завершение</li>
         </ul>

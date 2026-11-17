@@ -136,6 +136,23 @@
   to { stroke-dashoffset: -28; }
 }
 
+/* Обратный исход из edges (rejected) и маршрут return_to_* — разные вещи:
+   обратный переход сплошной, возврат пунктирный, оба коралловые. */
+.edgeBack .edgeLine {
+  stroke: var(--ink-coral);
+  stroke-width: 2;
+}
+
+.edgeReturn .edgeLine {
+  stroke: var(--ink-coral);
+  stroke-dasharray: 6 4;
+}
+
+.edgeBack .edgeFlow,
+.edgeReturn .edgeFlow {
+  stroke: var(--ink-coral);
+}
+
 .edgeActive .edgeLine {
   stroke: var(--accent);
   stroke-width: 2.4;
@@ -145,15 +162,6 @@
 .edgeActive .edgeFlow {
   stroke: var(--accent);
   opacity: 1;
-}
-
-.edgeBack .edgeLine {
-  stroke: var(--ink-coral);
-  stroke-dasharray: 6 4;
-}
-
-.edgeBack .edgeFlow {
-  stroke: var(--ink-coral);
 }
 
 .edgeLabelBg {
@@ -256,9 +264,11 @@
 
 .swatchNode { border-color: var(--border-strong); }
 .swatchCurrent { border-color: var(--accent); background: var(--tint-yellow); }
-.swatchVisited { border-color: var(--ink-indigo); background: var(--tint-indigo); }
+.swatchVisited { border-color: var(--ink-teal); background: var(--tint-teal); }
+.swatchVisitedOnly { border-color: var(--ink-indigo); background: var(--tint-indigo); }
 .swatchFailed { border-color: var(--ink-coral); background: var(--tint-coral); }
 .swatchEdge { height: 0; border: 0; border-top: 2px solid var(--ink-teal); border-radius: 0; background: none; }
+.swatchBack { height: 0; border: 0; border-top: 2px solid var(--ink-coral); border-radius: 0; background: none; }
 .swatchReturn { height: 0; border: 0; border-top: 2px dashed var(--ink-coral); border-radius: 0; background: none; }
 .swatchTerminal { border-color: var(--text-muted); background: var(--surface-muted); }
 

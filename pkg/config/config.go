@@ -56,6 +56,14 @@ type Config struct {
 	// stage selects one with its adapter field.
 	ExecutorAdapters map[string]stageexec.AdapterSpec `yaml:"executor_adapters,omitempty"`
 
+	// Workflows is the top-level workflow metadata block (schema v7). An empty
+	// list is allowed: a default `idea-to-prod` workflow is then synthesized in
+	// memory so old v5/v6 configs need no manual migration.
+	Workflows []WorkflowMeta `yaml:"workflows,omitempty"`
+	// ActiveWorkflow selects the workflow of the run from Workflows. Empty
+	// means DefaultWorkflowID.
+	ActiveWorkflow string `yaml:"workflow,omitempty"`
+
 	// PipelineAgents and Workflow are runtime compatibility projections. They
 	// are never serialized; schema v5 stores stage IDs, agent references and
 	// return routes in the template fields above.
@@ -884,11 +892,28 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if !supportedSchemaVersion(version) {
 		if version == 0 {
-			return fmt.Errorf("config: schema_version обязателен (поддерживаются %d и %d)", LegacySchemaVersion, CurrentSchemaVersion)
+			return fmt.Errorf("config: schema_version обязателен (поддерживаются %d и %d, а также %d для workflow-метаданных)", LegacySchemaVersion, CurrentSchemaVersion, WorkflowSchemaVersion)
 		}
-		return fmt.Errorf("config: schema_version %d не поддерживается (поддерживаются %d и %d); выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md", version, LegacySchemaVersion, CurrentSchemaVersion)
+		return fmt.Errorf("config: schema_version %d не поддерживается (поддерживаются %d и %d, а также %d для workflow-метаданных); выполните `ai-team init --force` или перенесите конфиг вручную по docs/reference/config.md", version, LegacySchemaVersion, CurrentSchemaVersion, WorkflowSchemaVersion)
 	}
-	if version == CurrentSchemaVersion {
+	hasWorkflows := false
+	for index := 0; index+1 < len(value.Content); index += 2 {
+		switch value.Content[index].Value {
+		case "workflows":
+			hasWorkflows = true
+			if version < WorkflowSchemaVersion {
+				return fmt.Errorf("config: блок workflows требует schema_version %d; в v5/v6 его нет (дефолтный workflow %s синтезируется автоматически)", WorkflowSchemaVersion, DefaultWorkflowID)
+			}
+		case "workflow":
+			if version < WorkflowSchemaVersion {
+				return fmt.Errorf("config: поле workflow требует schema_version %d; в v5/v6 выбирать workflow не из чего", WorkflowSchemaVersion)
+			}
+		}
+	}
+	if version == WorkflowSchemaVersion && !hasWorkflows {
+		return fmt.Errorf("config: schema_version %d требует блок workflows; для конфигов без него поддерживаются %d и %d (дефолтный workflow %s синтезируется автоматически)", version, LegacySchemaVersion, CurrentSchemaVersion, DefaultWorkflowID)
+	}
+	if gateAwareSchemaVersion(version) {
 		for index := 0; index+1 < len(value.Content); index += 2 {
 			if value.Content[index].Value == "stages" {
 				if err := rejectLegacyGateKeys(value.Content[index+1]); err != nil {
@@ -905,6 +930,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		"delivery_timeout": true, "containment": true, "usage": true,
 		"tree_hash": true, "budget": true, "auto_pickup": true, "tracker": true, "cicd": true, "notifications": true, "redaction": true, "retention": true,
 		"mcp_servers": true, "executor_adapters": true,
+		"workflows": true, "workflow": true,
 	}, "config"); err != nil {
 		return err
 	}
@@ -920,6 +946,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Checks             []checks.Definition                `yaml:"checks"`
 		MCPServers         map[string]runtime.MCPServerConfig `yaml:"mcp_servers"`
 		ExecutorAdapters   map[string]stageexec.AdapterSpec   `yaml:"executor_adapters"`
+		Workflows          []WorkflowMeta                     `yaml:"workflows"`
+		ActiveWorkflow     string                             `yaml:"workflow"`
 		CLI                string                             `yaml:"cli"`
 		Model              string                             `yaml:"model"`
 		Effort             string                             `yaml:"effort"`
@@ -950,17 +978,18 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ForbidSelfApproval = raw.ForbidSelfApproval
 	c.Stages = raw.Stages
 	for index := range c.Stages {
-		switch {
-		case len(c.Stages[index].ExitGateGroups) > 0 && version == LegacySchemaVersion:
-			return fmt.Errorf("config: stages[%d] (%s): exit_gate_groups доступен со schema_version %d; в v5 используйте required_sections, check, confirm", index, c.Stages[index].ID, CurrentSchemaVersion)
-		case version == CurrentSchemaVersion:
-			// v6: the gate chain is the single source; the absence of a human
-			// gate means no confirmation (v5's per-result default is gone).
+		if len(c.Stages[index].ExitGateGroups) > 0 && version == LegacySchemaVersion {
+			return fmt.Errorf("config: stages[%d] (%s): exit_gate_groups доступен со schema_version %d; в v5 используйте required_sections, check, confirm", index, c.Stages[index].ID, GateSchemaVersion)
 		}
+		if len(c.Stages[index].EntryGateGroups) > 0 && version < WorkflowSchemaVersion {
+			return fmt.Errorf("config: stages[%d] (%s): entry_gate_groups доступен со schema_version %d; в v5/v6 входных гейтов нет", index, c.Stages[index].ID, WorkflowSchemaVersion)
+		}
+		// v6/v7 keep the gate chain as the single source: the absence of a
+		// human gate means no confirmation (v5's per-result default is gone).
 	}
-	if version == CurrentSchemaVersion {
-		// v6: confirmation exists only as a human_approval gate; a stage that
-		// declares no chain has no gates and no per-result default.
+	if gateAwareSchemaVersion(version) {
+		// v6/v7: confirmation exists only as a human_approval gate; a stage
+		// that declares no chain has no gates and no per-result default.
 		for index := range c.Stages {
 			if len(c.Stages[index].ExitGateGroups) == 0 {
 				c.Stages[index].Confirm = "auto"
@@ -973,6 +1002,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Checks = raw.Checks
 	c.MCPServers = raw.MCPServers
 	c.ExecutorAdapters = raw.ExecutorAdapters
+	c.Workflows = raw.Workflows
+	c.ActiveWorkflow = raw.ActiveWorkflow
 	c.CLI = raw.CLI
 	c.Model = raw.Model
 	c.Effort = raw.Effort
@@ -1408,6 +1439,9 @@ func (c *Config) Validate(reg AgentLookup) error {
 			}
 		}
 	}
+	c.validateWorkflows(reg, func(format string, args ...interface{}) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	})
 	compiledGraph, graphErr := c.CompiledGraph()
 	if graphErr != nil {
 		errs = append(errs, graphErr.Error())

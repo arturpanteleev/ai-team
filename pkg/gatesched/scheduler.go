@@ -80,11 +80,28 @@ type WaveKey struct {
 	Scope string
 	// ArtifactSHA256 is the hash of the frozen result version.
 	ArtifactSHA256 string
+	// Phase separates the entry chain (before the executor) from the exit
+	// chain. The empty phase means exit, so wave keys recorded before the phase
+	// existed keep matching the exit chain. Entry and exit waves over the very
+	// same task, stage, visit, scope and hash stay distinct (finding 4).
+	Phase workflow.GatePhase
+}
+
+// matches reports whether two wave keys identify the same wave, treating an
+// empty phase as the exit chain. It is the recovery/fold identity: attempts of
+// one phase are never read as attempts of the other.
+func (k WaveKey) matches(other WaveKey) bool {
+	return k.TaskID == other.TaskID && k.Stage == other.Stage && k.Visit == other.Visit &&
+		k.Scope == other.Scope && k.ArtifactSHA256 == other.ArtifactSHA256 &&
+		k.Phase.Effective() == other.Phase.Effective()
 }
 
 // Wave is one execution of a stage's exit chain over one result version.
 type Wave struct {
-	Key    WaveKey
+	Key WaveKey
+	// Phase distinguishes the entry chain (before the executor) from the
+	// historical exit chain. It is copied to every attempt of the wave.
+	Phase  workflow.GatePhase
 	Groups workflow.GateGroups
 	// Definitions maps GateRef.Key() ("id@version") to the pinned definition.
 	Definitions map[string]workflow.GateDefinition
@@ -279,6 +296,11 @@ func (s *slot) latest() (workflow.GateAttempt, bool) {
 // not be carried out reliably (journal failure, invalid wave, changed result,
 // canceled context before anything ran); gate failures are in Result.
 func (s *Scheduler) Run(ctx context.Context, wave Wave) (Result, error) {
+	// Normalize the phase into the wave key before any planning or journal
+	// access, so entry and exit chains over the same hash never share attempts
+	// or recovery state (finding 4). The empty phase is the exit chain.
+	wave.Phase = wave.Phase.Effective()
+	wave.Key.Phase = wave.Phase
 	slots, err := s.plan(wave)
 	if err != nil {
 		return Result{}, err
@@ -561,7 +583,9 @@ func (s *Scheduler) store(sl *slot, attempt workflow.GateAttempt) {
 }
 
 func (s *Scheduler) newAttempt(wave Wave, sl *slot) workflow.GateAttempt {
-	return NewAttempt(wave.Key, sl.ref, sl.def, sl.group, len(sl.attempts)+1, s.opts.Clock())
+	attempt := NewAttempt(wave.Key, sl.ref, sl.def, sl.group, len(sl.attempts)+1, s.opts.Clock())
+	attempt.Phase = wave.Phase.Effective()
+	return attempt
 }
 
 // AttemptID is the deterministic ID of the n-th (1-based) attempt of a gate
@@ -576,7 +600,15 @@ func AttemptID(key WaveKey, gateName string, n int) string {
 		sha = sha[:12]
 	}
 	scope := sha256.Sum256([]byte(key.Scope))
-	return fmt.Sprintf("gate-%s-v%d-%s-%x-%s-%d", key.Stage, key.Visit, sha, scope[:4], gateName, n)
+	base := fmt.Sprintf("gate-%s-v%d-%s-%x-%s", key.Stage, key.Visit, sha, scope[:4], gateName)
+	// The historical exit-chain format must not change: attempts recorded
+	// before the phase existed keep their IDs. Only the entry chain adds a
+	// phase segment so an entry attempt is never mistaken for an exit attempt
+	// of the same wave key, hash and gate name (finding 4).
+	if key.Phase.Effective() == workflow.GatePhaseExit {
+		return fmt.Sprintf("%s-%d", base, n)
+	}
+	return fmt.Sprintf("%s-%s-%d", base, key.Phase.Effective(), n)
 }
 
 // invoke runs the runner of the gate's kind.

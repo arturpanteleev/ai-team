@@ -23,6 +23,7 @@ func registerDecisionGates(r *Registry) {
 			"Ответ вне схемы и отказ рантайма — техническая ошибка (error), а не pass и не fail; " +
 			"число попыток вызова ограничено конфигом, каждая попытка остаётся в трассе. " +
 			"mode grill — отдельный режим вопросов человеку и не часть контракта вердикта.",
+		InputArtifacts: []workflow.ArtifactType{workflow.ArtifactTypeMD, workflow.ArtifactTypeLink},
 		Params: []workflow.GateParam{
 			{Name: "agent", Type: workflow.GateParamString, Required: true, Description: "Имя агента из реестра."},
 			{Name: "mode", Type: workflow.GateParamEnum, Enum: []string{"grill"}, Description: "Режим проверки; grill — вопросы и уточнения (схема и попытки к нему не применяются)."},
@@ -40,6 +41,7 @@ func registerDecisionGates(r *Registry) {
 			"предшествующих автоматических гейтов. Допустимые действия: approve, reject и возвраты по маршрутам шаблона; " +
 			"роль — функция подтверждающего этапа, кворум — любой один. Каждое решение (одобрение, отказ, возврат) — отдельная " +
 			"запись попытки гейта и событие с автором, ролью и хешем.",
+		InputArtifacts: []workflow.ArtifactType{workflow.ArtifactTypeMD, workflow.ArtifactTypeLink},
 		Params: []workflow.GateParam{
 			{Name: "on_reject", Type: workflow.GateParamEnum, Enum: []string{OnRejectStop, OnRejectStay},
 				Description: "Что делает отказ (reject): stop — завершает задачу (по умолчанию); stay — оставляет задачу на этапе для новой версии."},

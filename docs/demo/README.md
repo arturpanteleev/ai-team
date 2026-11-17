@@ -70,7 +70,7 @@ DEMO_SKIP_UI=1 bash scripts/demo/run-demo.sh        # без браузерны�
 
 ## Что проходит и что нет
 
-Последний полный прогон на macOS (Docker Desktop, Go 1.26.9 по пину `.tool-versions`, Playwright Chromium):
+Последний полный прогон на macOS (Docker Desktop, Go 1.26.11 по пину `.tool-versions`, Playwright Chromium):
 
 | Часть | Итог |
 |---|---|
@@ -152,7 +152,7 @@ Go-тесты с клиентом официального SDK (`pkg/web/mcp_e2e
 Пошаговое руководство с разбором сценариев и подключением к GitHub Actions —
 [Проверки в CI без модели](../guides/ci-gate.md).
 
-Быстрый запуск из корня ai-team (нужны `bash`, `git` и Go 1.26.9+):
+Быстрый запуск из корня ai-team (нужны `bash`, `git` и Go 1.26.11+):
 
 ```bash
 bash docs/demo/run-demo.sh

@@ -44,9 +44,18 @@ type TemplateStage struct {
 	// ExitGateGroups is the gate chain checked before the stage may be left:
 	// groups run sequentially, gates inside a group are independent. Schema v6.
 	ExitGateGroups workflow.GateGroups `yaml:"exit_gate_groups,omitempty"`
-	Skippable      bool                `yaml:"skippable,omitempty"`
-	Delivery       *TemplateDelivery   `yaml:"delivery,omitempty"`
-	MCPServers     []string            `yaml:"mcp_servers,omitempty"`
+	// EntryGateGroups is the gate chain checked after the stage inputs are
+	// resolved and before StageExecutor.Execute: groups run sequentially, gates
+	// inside a group are independent. A failed required gate blocks the
+	// executor. Schema v7; refs are gate@version and verdict-only.
+	EntryGateGroups workflow.GateGroups `yaml:"entry_gate_groups,omitempty"`
+	// InputArtifacts declares the artifact types (md|link) of the stage inputs.
+	// Entry gate refs are checked against this list during validation. Empty
+	// means no type restriction. Schema v7.
+	InputArtifacts []workflow.ArtifactType `yaml:"input_artifacts,omitempty"`
+	Skippable      bool                    `yaml:"skippable,omitempty"`
+	Delivery       *TemplateDelivery       `yaml:"delivery,omitempty"`
+	MCPServers     []string                `yaml:"mcp_servers,omitempty"`
 }
 
 // TemplateCheck keeps the result check declarative. Execution is introduced by
@@ -85,7 +94,7 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		"executor": true, "agent": true, "adapter": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
 		"skippable": true, "delivery": true, "mcp_servers": true,
-		"exit_gate_groups": true,
+		"exit_gate_groups": true, "entry_gate_groups": true, "input_artifacts": true,
 	}, "config: stage"); err != nil {
 		return err
 	}
@@ -102,6 +111,20 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		s.Confirm = defaultConfirmForResult(s.Result)
 	}
 	return nil
+}
+
+// MarshalYAML keeps the stage's gate chain as the single source of truth for
+// every schema whose stages already use gate references (v6 and v7). Config's
+// MarshalYAML normalizes v6 stages itself; this covers v7 configs, whose
+// schema version is newer than the constant it compares against, so that a
+// v7 template round-trips instead of emitting both spellings at once.
+func (s TemplateStage) MarshalYAML() (any, error) {
+	type plain TemplateStage
+	out := plain(s)
+	if len(out.ExitGateGroups) > 0 && (len(out.RequiredSections) > 0 || out.Check != nil || out.Confirm != "") {
+		out.RequiredSections, out.Check, out.Confirm = nil, nil, ""
+	}
+	return out, nil
 }
 
 // defaultConfirmForResult keeps YAML-loaded and programmatically constructed
@@ -195,6 +218,16 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 		if stage.Result != "md" && stage.Result != "link" && stage.Result != "approve" {
 			add("%s: result %q недопустим (md|link|approve)", prefix, stage.Result)
+		}
+		seenArtifacts := map[string]bool{}
+		for _, artifact := range stage.InputArtifacts {
+			if !artifact.Valid() {
+				add("%s: input_artifacts содержит неизвестный тип %q (md|link)", prefix, artifact)
+			}
+			if seenArtifacts[string(artifact)] {
+				add("%s: input_artifacts содержит повторяющийся тип %q", prefix, artifact)
+			}
+			seenArtifacts[string(artifact)] = true
 		}
 		if stage.Executor != "human" && stage.Executor != "agent" {
 			add("%s: executor %q недопустим (human|agent)", prefix, stage.Executor)
@@ -479,9 +512,18 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		if i+1 < len(c.Stages) {
 			next = c.Stages[i+1].ID
 		}
+		// The approval belongs to the exit chain the controller actually runs:
+		// the active workflow's exit gates merged with the stage's own chain.
+		// A workflow-level human_approval must require a real decision even when
+		// the stage declares no gate of its own; stage-only helpers would leave
+		// edge.Approval nil and make the declared confirmation inert.
+		exitGroups, err := c.ExitGateGroupsFor(stage)
+		if err != nil {
+			return graph, fmt.Errorf("workflow graph: этап %s: %w", stage.ID, err)
+		}
 		edge := workflow.Edge{From: stage.ID, Outcome: workflow.OutcomePassed, To: next}
 		confirm := "auto"
-		if stage.NeedsConfirmation() {
+		if gateGroupsNeedConfirmation(exitGroups) {
 			confirm = "required"
 		}
 		// A configured return is a human stage action as well as a rejected
@@ -490,7 +532,7 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		// forward and backward targets.
 		if (next != workflow.TerminalComplete && confirm == "required") || len(bySource[stage.ID]) > 0 {
 			edge.Approval = generatedApprovalWithReturns(stage.DecisionFunction(), next, bySource[stage.ID])
-			if stage.RejectStays() {
+			if gateGroupsRejectStays(exitGroups) {
 				// human_approval on_reject: stay — a rejection is recorded and
 				// the task waits at this stage for a new version.
 				edge.Approval.Actions["reject"] = stage.ID
@@ -540,10 +582,10 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			}),
 		})
 	}
-	// Schema v5 controls confirmation per stage. Forward transitions with
-	// confirm:auto and no return routes are valid without an edge approval;
-	// required stages and stages with explicit return actions compile a gate,
-	// and backward return transitions always retain their approval.
+	// Forward transitions whose effective exit chain has no human gate and no
+	// return routes are valid without an edge approval; a human_approval from
+	// the stage or the workflow chain and explicit return actions compile a
+	// gate, and backward return transitions always retain their approval.
 	if err := graph.Validate(false, false); err != nil {
 		return graph, err
 	}

@@ -28,6 +28,82 @@ import (
 //   - GateAttempt — what happened when one gate ran on one result version:
 //     technical Execution and content Verdict recorded separately.
 
+// ArtifactType is the kind of artifact a gate consumes. The first iteration
+// supports Markdown documents and links; images and diagrams are a later
+// extension of the contract (ARC-01). A gate checks an immutable version of an
+// artifact and never edits it: its result is a verdict, optionally accompanied
+// by a new artifact produced by a later iteration of the contract.
+type ArtifactType string
+
+const (
+	ArtifactTypeMD   ArtifactType = "md"
+	ArtifactTypeLink ArtifactType = "link"
+)
+
+// ArtifactTypes lists every artifact type the contract knows.
+var ArtifactTypes = []ArtifactType{ArtifactTypeMD, ArtifactTypeLink}
+
+// Valid reports whether the artifact type is part of the contract.
+func (t ArtifactType) Valid() bool {
+	for _, known := range ArtifactTypes {
+		if t == known {
+			return true
+		}
+	}
+	return false
+}
+
+// GateOutput is what a gate yields in addition to its verdict. The verdict is
+// always recorded; an output of artifact means the gate also produces a new
+// artifact. Entry gates are verdict-only: they run before the executor and must
+// not change the inputs (ARC-02).
+type GateOutput string
+
+const (
+	// GateOutputVerdict is the default: a verdict and no new artifact.
+	GateOutputVerdict GateOutput = "verdict"
+	// GateOutputArtifact adds a new artifact to the verdict. It is available in
+	// the contract but is not yet produced by the built-in library.
+	GateOutputArtifact GateOutput = "artifact"
+)
+
+// Valid reports whether the output kind is known. The empty value means verdict.
+func (o GateOutput) Valid() bool {
+	return o == "" || o == GateOutputVerdict || o == GateOutputArtifact
+}
+
+// Effective returns the output kind with the default applied.
+func (o GateOutput) Effective() GateOutput {
+	if o == "" {
+		return GateOutputVerdict
+	}
+	return o
+}
+
+// ProducesArtifact reports whether the gate yields a new artifact.
+func (o GateOutput) ProducesArtifact() bool { return o.Effective() == GateOutputArtifact }
+
+// GatePhase says where in a stage's life a gate chain runs. The empty phase is
+// the historical exit chain; entry gates are recorded with GatePhaseEntry so
+// the journal and the API can tell the two chains apart.
+type GatePhase string
+
+const (
+	GatePhaseEntry GatePhase = "entry"
+	GatePhaseExit  GatePhase = "exit"
+)
+
+// Valid reports whether the phase is known. The empty value means exit.
+func (p GatePhase) Valid() bool { return p == "" || p == GatePhaseEntry || p == GatePhaseExit }
+
+// Effective returns the phase with the default applied.
+func (p GatePhase) Effective() GatePhase {
+	if p == "" {
+		return GatePhaseExit
+	}
+	return p
+}
+
 // GateKind is the way a definition is executed.
 type GateKind string
 
@@ -94,12 +170,38 @@ type GateDefinition struct {
 	// check. Empty means any.
 	ResultTypes []string `json:"result_types,omitempty"`
 	// LinkKinds limits the link kinds for result type link. Empty means any.
-	LinkKinds []string    `json:"link_kinds,omitempty"`
-	Params    []GateParam `json:"params,omitempty"`
+	LinkKinds []string `json:"link_kinds,omitempty"`
+	// InputArtifacts limits the artifact types the gate can check (md|link).
+	// Empty means any. It is checked for entry gates against the input types
+	// declared by the stage.
+	//
+	// The field is deliberately excluded from JSON serialization (`json:"-"`):
+	// the artifact typing is part of the gate contract and validation, not of
+	// the immutable definition body. A published `id@version` was serialized
+	// without it, and its digest must not change when the contract learns the
+	// artifact types of the built-in gates (finding 3: digest immutability).
+	InputArtifacts []ArtifactType `json:"-"`
+	// Output is verdict (default) or artifact. Entry gates must be verdict-only.
+	Output GateOutput  `json:"output,omitempty"`
+	Params []GateParam `json:"params,omitempty"`
 }
 
 // Ref returns the exact reference "id@version".
 func (d GateDefinition) Ref() string { return fmt.Sprintf("%s@%d", d.ID, d.Version) }
+
+// AcceptsArtifact reports whether the definition can check an artifact of the
+// given type. A definition with no declared input types accepts any artifact.
+func (d GateDefinition) AcceptsArtifact(t ArtifactType) bool {
+	if len(d.InputArtifacts) == 0 {
+		return true
+	}
+	for _, accepted := range d.InputArtifacts {
+		if accepted == t {
+			return true
+		}
+	}
+	return false
+}
 
 // GateMode says whether a failed verdict blocks the transition.
 type GateMode string
@@ -196,23 +298,28 @@ func (r GateRef) ValidateShape() error {
 // ValidateShape checks groups without a library: no empty groups, valid
 // references and stage-unique instance names. Error strings carry the
 // exit_gate_groups[i][j] path relative to the stage.
-func (g GateGroups) ValidateShape() []error {
+func (g GateGroups) ValidateShape() []error { return g.ValidateShapeAt("exit_gate_groups") }
+
+// ValidateShapeAt is ValidateShape with an explicit path prefix. Entry chains
+// report entry_gate_groups[i][j] so a configuration error names the field the
+// author actually wrote.
+func (g GateGroups) ValidateShapeAt(path string) []error {
 	var errs []error
 	seen := map[string]bool{}
 	for i, group := range g {
 		if len(group) == 0 {
-			errs = append(errs, fmt.Errorf("exit_gate_groups[%d]: группа не может быть пустой", i))
+			errs = append(errs, fmt.Errorf("%s[%d]: группа не может быть пустой", path, i))
 			continue
 		}
 		for j, ref := range group {
-			path := fmt.Sprintf("exit_gate_groups[%d][%d]", i, j)
+			where := fmt.Sprintf("%s[%d][%d]", path, i, j)
 			if err := ref.ValidateShape(); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", path, err))
+				errs = append(errs, fmt.Errorf("%s: %w", where, err))
 				continue
 			}
 			name := ref.InstanceName()
 			if seen[name] {
-				errs = append(errs, fmt.Errorf("%s: имя гейта %q повторяется на этапе (задайте разные name)", path, name))
+				errs = append(errs, fmt.Errorf("%s: имя гейта %q повторяется на этапе (задайте разные name)", where, name))
 			}
 			seen[name] = true
 		}
@@ -376,8 +483,11 @@ type GateAttempt struct {
 	AttemptID string `json:"attempt_id"`
 	// Executor is the kind that ran the attempt.
 	Executor GateKind `json:"executor"`
-	// Group is the 0-based index of the group in the stage's exit chain.
+	// Group is the 0-based index of the group in the stage's gate chain.
 	Group int `json:"group"`
+	// Phase distinguishes the entry chain (before the executor) from the
+	// historical exit chain. The empty value means exit.
+	Phase GatePhase `json:"phase,omitempty"`
 
 	Execution GateExecution `json:"execution"`
 	Verdict   GateVerdict   `json:"verdict,omitempty"`
@@ -408,6 +518,7 @@ func (a GateAttempt) Validate() error {
 	need(a.AttemptID != "", "attempt_id")
 	need(a.Executor.Valid(), "executor")
 	need(a.Mode.Valid(), "mode")
+	need(a.Phase.Valid(), "phase")
 	need(a.Group >= 0, "group")
 	need(!a.StartedAt.IsZero(), "started_at")
 	if len(problems) > 0 {

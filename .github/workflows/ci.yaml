@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 # setup-go 1.26.6 is the bootstrap while its manifest catches up; go.mod
-# requires 1.26.9, and auto selects that patched toolchain for Go commands.
+# requires 1.26.11, and auto selects that patched toolchain for Go commands.
 env:
   GOTOOLCHAIN: auto
 
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       # ./... (not just ./cmd/ai-team): this job is also the release gate via
       # workflow_call, so every package must be known to compile.
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       - name: Vet
         run: go vet ./...
@@ -84,7 +84,7 @@ jobs:
           sudo apparmor_parser -r .github/ci-bwrap.apparmor
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       # Параллель `make test`: полный `./...` (cmd/, pkg/, docs/, docsgen/, e2etest/).
       - name: Unit tests
@@ -111,7 +111,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       - name: Flow metrics performance acceptance
         run: AI_TEAM_FLOW_METRICS_PERF=1 go test ./pkg/web -run '^TestFlowMetrics1000RunsUnder300ms$' -count=1
@@ -128,7 +128,7 @@ jobs:
           sudo apparmor_parser -r .github/ci-bwrap.apparmor
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       # Параллель `make verify` (go test -race ./...): весь модуль, включая cmd/.
       - name: Race detector
@@ -146,7 +146,7 @@ jobs:
           sudo apparmor_parser -r .github/ci-bwrap.apparmor
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       - name: E2E tests
         run: AI_TEAM_WORKER_SANDBOX=bubblewrap go test ./e2etest/...
@@ -189,7 +189,7 @@ jobs:
           sudo apparmor_parser -r .github/ci-bwrap.apparmor
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
           check-latest: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -217,6 +217,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.11'
       - name: Go vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

@@ -41,6 +41,16 @@ const (
 // correspond one-to-one to the legacy hard-check rule names.
 var PRRuleGates = []string{GatePRExists, GatePROpen, GatePRBaseBranch, GateProjectChecks, GatePRChecksGreen}
 
+// Input artifact types of the built-in gates (ARC-01). Markdown checks accept
+// md, PR checks accept link, and reviewer/decision gates accept either. The
+// empty output kind means verdict: no built-in gate produces a new artifact in
+// the first iteration, so every built-in gate may be used as an entry gate.
+var (
+	mdArtifact       = []workflow.ArtifactType{workflow.ArtifactTypeMD}
+	linkArtifact     = []workflow.ArtifactType{workflow.ArtifactTypeLink}
+	anyInputArtifact = []workflow.ArtifactType{workflow.ArtifactTypeMD, workflow.ArtifactTypeLink}
+)
+
 var (
 	defaultOnce     sync.Once
 	defaultRegistry *Registry
@@ -58,9 +68,10 @@ func newBuiltin() *Registry {
 	r := NewRegistry()
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateRequiredSections, Version: 1, Kind: workflow.GateKindBuiltin,
-		Title:       "Обязательные разделы",
-		Description: "Markdown-результат содержит заголовки всех перечисленных разделов.",
-		ResultTypes: []string{"md"},
+		Title:          "Обязательные разделы",
+		Description:    "Markdown-результат содержит заголовки всех перечисленных разделов.",
+		ResultTypes:    []string{"md"},
+		InputArtifacts: mdArtifact,
 		Params: []workflow.GateParam{{
 			Name: "sections", Type: workflow.GateParamStringList, Required: true,
 			Description: "Названия заголовков, которые обязаны присутствовать.",
@@ -68,9 +79,10 @@ func newBuiltin() *Registry {
 	})
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateVerdictMarker, Version: 1, Kind: workflow.GateKindBuiltin,
-		Title:       "Маркер вердикта",
-		Description: "Markdown-результат содержит маркер вердикта проверяющего.",
-		ResultTypes: []string{"md"},
+		Title:          "Маркер вердикта",
+		Description:    "Markdown-результат содержит маркер вердикта проверяющего.",
+		ResultTypes:    []string{"md"},
+		InputArtifacts: mdArtifact,
 	})
 	one := 1
 	for _, phrasesVersion := range []int{1, 2} {
@@ -80,9 +92,10 @@ func newBuiltin() *Registry {
 		}
 		r.MustRegister(workflow.GateDefinition{
 			ID: GateRequiredPhrases, Version: phrasesVersion, Kind: workflow.GateKindBuiltin,
-			Title:       "Обязательные слова и фрагменты",
-			Description: description,
-			ResultTypes: []string{"md"},
+			Title:          "Обязательные слова и фрагменты",
+			Description:    description,
+			ResultTypes:    []string{"md"},
+			InputArtifacts: mdArtifact,
 			Params: []workflow.GateParam{
 				{Name: gatephrases.ParamPhrases, Type: workflow.GateParamStringList, Required: true,
 					Description: "Слова или фрагменты (не больше 50, каждая до 200 байт); при regex: true — выражения RE2."},
@@ -111,7 +124,8 @@ func newBuiltin() *Registry {
 		r.MustRegister(workflow.GateDefinition{
 			ID: spec.id, Version: 1, Kind: workflow.GateKindBuiltin,
 			Title: spec.title, Description: spec.description,
-			ResultTypes: []string{"link"},
+			ResultTypes:    []string{"link"},
+			InputArtifacts: linkArtifact,
 		})
 	}
 	for _, spec := range []struct{ id, title, description string }{
@@ -122,12 +136,14 @@ func newBuiltin() *Registry {
 			ID: spec.id, Version: 1, Kind: workflow.GateKindBuiltin,
 			Title: spec.title, Description: spec.description,
 			ResultTypes: []string{"link"}, LinkKinds: []string{"pr"},
+			InputArtifacts: linkArtifact,
 		})
 	}
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateAgentReview, Version: 1, Kind: workflow.GateKindLLM,
-		Title:       "Проверка агентом",
-		Description: "Агент-проверяющий оценивает результат; ответ вне схемы вердикта — техническая ошибка, а не pass.",
+		Title:          "Проверка агентом",
+		Description:    "Агент-проверяющий оценивает результат; ответ вне схемы вердикта — техническая ошибка, а не pass.",
+		InputArtifacts: anyInputArtifact,
 		Params: []workflow.GateParam{
 			{Name: "agent", Type: workflow.GateParamString, Required: true, Description: "Имя агента из реестра."},
 			{Name: "mode", Type: workflow.GateParamEnum, Enum: []string{"grill"}, Description: "Режим проверки; grill — вопросы и уточнения."},
@@ -136,13 +152,15 @@ func newBuiltin() *Registry {
 	})
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateHumanApproval, Version: 1, Kind: workflow.GateKindHuman,
-		Title:       "Решение человека",
-		Description: "Пауза до решения ответственной функции этапа по точному хешу результата.",
+		Title:          "Решение человека",
+		Description:    "Пауза до решения ответственной функции этапа по точному хешу результата.",
+		InputArtifacts: anyInputArtifact,
 	})
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateExternalProgram, Version: 1, Kind: workflow.GateKindExternal,
-		Title:       "Внешняя программа",
-		Description: "Доверенная команда из конфигурации репозитория читает JSON-контекст и возвращает один JSON-вердикт. Падение, таймаут, превышение лимита и неверный JSON — техническая ошибка, а не вердикт.",
+		Title:          "Внешняя программа",
+		Description:    "Доверенная команда из конфигурации репозитория читает JSON-контекст и возвращает один JSON-вердикт. Падение, таймаут, превышение лимита и неверный JSON — техническая ошибка, а не вердикт.",
+		InputArtifacts: anyInputArtifact,
 		Params: []workflow.GateParam{
 			{Name: "command", Type: workflow.GateParamStringList, Required: true, Description: "argv без shell: программа и аргументы; секреты в аргументы не вписываются."},
 			{Name: "timeout_seconds", Type: workflow.GateParamInt, Min: &one, Description: "Таймаут запуска, секунд (по умолчанию 60, максимум 3600)."},
@@ -153,8 +171,9 @@ func newBuiltin() *Registry {
 	})
 	r.MustRegister(workflow.GateDefinition{
 		ID: GateDockerProgram, Version: 1, Kind: workflow.GateKindDocker,
-		Title:       "Программа в Docker",
-		Description: "Тот же JSON-протокол, что у внешней программы, но команда выполняется в контейнере из образа, закреплённого digest: без сети, с read-only корнем и репозиторием, без capabilities, Docker-сокета, домашнего каталога и окружения контроллера. Любое расширение доступа задаётся параметрами и записывается в evidence. Ошибка Docker, образа или рантайма — техническая ошибка, а не вердикт.",
+		Title:          "Программа в Docker",
+		Description:    "Тот же JSON-протокол, что у внешней программы, но команда выполняется в контейнере из образа, закреплённого digest: без сети, с read-only корнем и репозиторием, без capabilities, Docker-сокета, домашнего каталога и окружения контроллера. Любое расширение доступа задаётся параметрами и записывается в evidence. Ошибка Docker, образа или рантайма — техническая ошибка, а не вердикт.",
+		InputArtifacts: anyInputArtifact,
 		Params: []workflow.GateParam{
 			{Name: "image", Type: workflow.GateParamString, Required: true, Description: "Образ name@sha256:<digest>; тег без digest отклоняется."},
 			{Name: "command", Type: workflow.GateParamStringList, Required: true, Description: "argv внутри образа без shell; заменяет entrypoint образа. Секреты в аргументы не вписываются."},

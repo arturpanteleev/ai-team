@@ -74,10 +74,17 @@ func TestPinnedRootVerifyDetectsSamePathReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Allocate the replacement while the original still exists: some filesystems
+	// reuse the inode when a directory is removed and immediately recreated at
+	// the same path, which would make os.SameFile unable to tell them apart.
+	replacement := root + ".replacement"
+	if err := os.Mkdir(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(root, 0o755); err != nil {
+	if err := os.Rename(replacement, root); err != nil {
 		t.Fatal(err)
 	}
 	if err := pin.Verify(); err == nil {

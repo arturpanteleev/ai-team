@@ -1,4 +1,5 @@
-/* Главная: слева ~3/4 — поиск, фильтры и карточки задач; справа ~1/4 — создание и состояние. */
+/* Главная: слева ~3/4 — поиск, фильтры и карточки задач; справа ~1/4 — создание и состояние.
+   Объём панелей, подсветка активного фильтра и свечение кнопки — только токены DES-02. */
 .container {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
@@ -103,16 +104,23 @@
   color: var(--text-secondary);
   font-size: 13px;
   white-space: nowrap;
+  transition: background var(--duration-normal) var(--ease-standard),
+    border-color var(--duration-normal) var(--ease-standard),
+    box-shadow var(--duration-normal) var(--ease-standard),
+    color var(--duration-normal) var(--ease-standard);
 }
 
 .filterBtn:hover {
   color: var(--text-primary);
 }
 
+/* Мягкая подсветка активного пункта навигации: тот же основной акцент, что и у
+   единственной primary-кнопки, но без новой кнопки и без смены aria-pressed. */
 .filterBtn.active {
-  background: var(--accent);
+  background: var(--active-gradient);
   border-color: var(--accent);
-  color: var(--accent-contrast);
+  color: var(--on-yellow);
+  box-shadow: var(--active-shadow), var(--glow-accent);
 }
 
 .pipelines {
@@ -124,12 +132,13 @@
 .loading {
   padding: 48px 16px;
   border-radius: var(--radius-xl);
-  background: var(--surface);
+  background: linear-gradient(160deg, var(--surface), var(--surface-raised));
+  box-shadow: var(--shadow-soft);
   color: var(--text-muted);
   text-align: center;
 }
 
-/* Крупная жёлтая кнопка создания. */
+/* Крупная жёлтая кнопка создания — единственная primary на странице. */
 .createBig {
   display: flex;
   align-items: center;
@@ -145,11 +154,16 @@
   font-size: 18px;
   font-weight: 750;
   text-decoration: none;
-  box-shadow: 0 8px 22px rgb(255 216 77 / 35%);
+  box-shadow: var(--shadow), var(--glow-accent);
+  transition: transform var(--duration-normal) var(--ease-out),
+    box-shadow var(--duration-normal) var(--ease-standard);
 }
 
 .createBig:hover {
-  background: #ffd62e;
+  background: var(--create-yellow);
+  box-shadow: var(--shadow), var(--active-shadow), var(--glow-accent);
+  filter: brightness(1.04);
+  transform: translateY(-2px);
   text-decoration: none;
 }
 
@@ -176,6 +190,7 @@
   border-radius: var(--radius-xl);
   background: var(--tint-mustard);
   color: var(--ink-mustard);
+  box-shadow: var(--shadow-soft);
 }
 
 .intakeNotice span {
@@ -194,8 +209,8 @@
 .recent {
   padding: 18px 20px;
   border-radius: var(--radius-xl);
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
+  background: linear-gradient(160deg, var(--surface), var(--surface-raised));
+  box-shadow: var(--shadow);
 }
 
 .readiness {
@@ -230,16 +245,21 @@
   flex: 0 0 12px;
   border-radius: 50%;
   background: var(--border-strong);
+  box-shadow: var(--button-shadow);
+  transition: background var(--duration-normal) var(--ease-standard),
+    box-shadow var(--duration-normal) var(--ease-standard);
 }
 
+/* Зелёный — готовность, красный — блокер, серый — неизвестно: семантика S16.
+   Свечение подключено только к готовности и блокеру, через токены DES-02. */
 .readiness[data-state='ready'] .dot {
-  background: #2fbf86;
-  box-shadow: 0 0 0 4px var(--success-bg);
+  background: var(--success-fg);
+  box-shadow: 0 0 0 4px var(--success-bg), var(--glow-teal);
 }
 
 .readiness[data-state='blocked'] .dot {
-  background: #ff7a66;
-  box-shadow: 0 0 0 4px var(--danger-bg);
+  background: var(--danger-fg);
+  box-shadow: 0 0 0 4px var(--danger-bg), var(--glow-coral);
 }
 
 /* Unknown is not a recommendation: neutral grey, not amber. */
@@ -295,6 +315,14 @@
   padding: 10px 12px;
   border-radius: var(--radius-md);
   background: var(--surface-raised);
+  box-shadow: var(--button-shadow);
+  transition: box-shadow var(--duration-normal) var(--ease-standard),
+    transform var(--duration-normal) var(--ease-out);
+}
+
+.recentList li:hover {
+  box-shadow: var(--shadow-soft), var(--glow-accent);
+  transform: translateX(2px);
 }
 
 .recentList a {
@@ -397,5 +425,19 @@
   .projectFilter {
     grid-column: 1 / -1;
     flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .filterBtn,
+  .createBig,
+  .dot,
+  .recentList li {
+    transition: none;
+  }
+
+  .createBig:hover,
+  .recentList li:hover {
+    transform: none;
   }
 }

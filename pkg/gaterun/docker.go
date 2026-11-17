@@ -18,6 +18,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/dockerrun"
 	"github.com/arturpanteleev/ai-team/pkg/gatelib"
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -307,6 +308,13 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	}
 	settings := *spec.Docker
 	repoRoot, evidenceDir := spec.Input.Paths.RepoRoot, spec.Input.Paths.EvidenceDir
+	// Resolve and pin the repository root before any walk or mount. A walk
+	// rooted at a symlink does not descend into it, and the daemon would follow
+	// the link to an unchecked tree; a final-component symlink is refused.
+	pinnedRepo, err := safeio.PinRoot(repoRoot)
+	if err != nil {
+		return fail(fmt.Errorf("repo root: %w", err))
+	}
 
 	// The program sees container paths only. The input document is rebuilt
 	// from the decoded input, so no host path leaks in.
@@ -334,7 +342,7 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 		// change the git configuration that the host will run later: .git is
 		// laid over the writable mount read-only. The common git directory of
 		// a linked worktree lies outside the repository and is never mounted.
-		overlays, err := gitOverlays(repoRoot)
+		overlays, err := gitOverlays(pinnedRepo.Real())
 		if err != nil {
 			return fail(fmt.Errorf("protecting .git: %w", err))
 		}
@@ -378,6 +386,11 @@ func (l DockerLauncher) Launch(ctx context.Context, spec LaunchSpec) Outcome {
 	// container side and, for repository mounts, the repository-relative path.
 	described["mounts"] = describeMounts(repoRoot, evidenceDir, mounts)
 
+	// Re-check immediately before the daemon sees the mount: the root must
+	// still resolve to the exact tree that was inspected. Fail closed.
+	if err := pinnedRepo.Verify(); err != nil {
+		return fail(fmt.Errorf("repo root changed after the check: %w", err))
+	}
 	res := l.Docker.Run(ctx, dspec, stdin, spec.MaxOutputBytes)
 	described["docker_argv"] = sanitizeDockerArgv(res.Docker, repoRoot, evidenceDir)
 	return Outcome{
@@ -398,6 +411,14 @@ func (l DockerLauncher) SweepOrphans(ctx context.Context) ([]string, error) {
 // linked worktree) and every other git directory of the repository that lies
 // inside it. A symlinked .git is refused: the daemon would follow it.
 func gitOverlays(repoRoot string) ([]string, error) {
+	// Walk the resolved tree: WalkDir never descends into a symlinked root,
+	// which would silently skip every nested git-metadata check. A root that
+	// is itself a symlink is refused.
+	pinned, err := safeio.PinRoot(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("repo root: %w", err)
+	}
+	repoRoot = pinned.Real()
 	overlays, err := topGitOverlays(repoRoot)
 	if err != nil {
 		return nil, err
@@ -461,6 +482,7 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	repoRoot = realRoot // walk and compare against the same, symlink-free tree
 	var found []string
 	visited := 0
 	err = filepath.WalkDir(repoRoot, func(p string, entry fs.DirEntry, err error) error {
@@ -483,7 +505,7 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 			}
 			return nil
 		}
-		if !strings.EqualFold(entry.Name(), ".git") || covered(rel) {
+		if !safeio.IsGitMetadataName(entry.Name()) || covered(rel) {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -527,7 +549,7 @@ func nestedGitOverlays(repoRoot string, existing []string) ([]string, error) {
 // element (the top-level one or a nested clone or submodule).
 func hasGitElement(rel string) bool {
 	for _, part := range strings.Split(rel, "/") {
-		if strings.EqualFold(part, ".git") {
+		if safeio.IsGitMetadataName(part) {
 			return true
 		}
 	}

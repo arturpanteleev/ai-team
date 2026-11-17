@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/arturpanteleev/ai-team/pkg/safeio"
 )
 
 // maxGitGuardEntries bounds the repository walk that looks for nested git
@@ -25,13 +27,17 @@ const maxGitGuardEntries = 500000
 // refused. Entries below a node_modules directory are not counted against the
 // limit (they are still inspected, so an existing nested .git there is
 // checked). Residual risks: a container with a writable mount can create a
-// new nested .git/hooks that the host would run later, and HFS+/NTFS short
-// names (GIT~1) are not recognised as .git.
+// new nested .git/hooks that the host would run later. HFS+/NTFS short names
+// (GIT~1) are recognised as git metadata. The root is resolved before the
+// walk: filepath.WalkDir does not descend into a symlinked root, so a symlink
+// at WorkDir would otherwise skip every nested check and let the daemon mount
+// an unchecked tree. A symlinked root is refused outright.
 func checkRepoGitMetadata(root string) error {
-	root, err := filepath.Abs(root)
+	pinned, err := safeio.PinRoot(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("repository root: %w", err)
 	}
+	root = pinned.Real()
 	topGit := filepath.Join(root, ".git")
 	if info, err := os.Lstat(topGit); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return errors.New(".git в корне репозитория — символическая ссылка")
@@ -48,7 +54,7 @@ func checkRepoGitMetadata(root string) error {
 		if visited > maxGitGuardEntries {
 			return fmt.Errorf("в репозитории больше %d записей: проверка git-метаданных невозможна", maxGitGuardEntries)
 		}
-		if !strings.EqualFold(entry.Name(), ".git") {
+		if !safeio.IsGitMetadataName(entry.Name()) {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -115,7 +121,7 @@ func hasNodeModules(rel string) bool {
 // hasGitElement reports whether a slash-separated path names git metadata.
 func hasGitElement(rel string) bool {
 	for _, part := range strings.Split(rel, "/") {
-		if strings.EqualFold(part, ".git") {
+		if safeio.IsGitMetadataName(part) {
 			return true
 		}
 	}

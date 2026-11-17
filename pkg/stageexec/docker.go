@@ -306,15 +306,19 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 		doc.Outputs[index].Path = ContainerOutputs + "/" + output.Name
 	}
 	workdir := ContainerRoot
+	var pinnedRepo safeio.PinnedRoot
 	if settings.Repo == "ro" {
-		repo, err := filepath.Abs(request.WorkDir)
+		repo, err := safeio.PinRoot(request.WorkDir)
 		if err != nil {
 			return fmt.Errorf("docker executor: workdir: %w", err)
 		}
-		if err := checkRepoGitMetadata(repo); err != nil {
+		pinnedRepo = repo
+		if err := checkRepoGitMetadata(repo.Real()); err != nil {
 			return fmt.Errorf("docker executor: репозиторий: %w", err)
 		}
-		mounts = append(mounts, dockerrun.Mount{Source: repo, Target: ContainerRepo, ReadOnly: true})
+		// Mount the resolved path: WalkDir on a symlinked root would skip the
+		// tree, and the daemon would follow the link to an unchecked tree.
+		mounts = append(mounts, dockerrun.Mount{Source: repo.Real(), Target: ContainerRepo, ReadOnly: true})
 		described = append(described, "repo:ro")
 		workdir = ContainerRepo
 	}
@@ -419,6 +423,15 @@ func (l DockerLauncher) Run(ctx context.Context, launch Launch) error {
 			cancelRun()
 		})
 	}()
+	// Re-check immediately before the daemon sees the mount: the root must
+	// still resolve to the exact tree that was inspected. Fail closed.
+	if settings.Repo == "ro" {
+		if err := pinnedRepo.Verify(); err != nil {
+			cancelRun()
+			<-watched
+			return fmt.Errorf("docker executor: репозиторий изменён после проверки: %w", err)
+		}
+	}
 	res := l.Docker.Run(runCtx, spec, stdin, limit)
 	cancelRun()
 	<-watched

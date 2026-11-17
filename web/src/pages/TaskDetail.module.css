@@ -158,13 +158,29 @@
   margin-bottom: 16px;
 }
 
-.routePanel > h2 {
-  margin: 0 0 8px;
+.routeHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+}
+
+.routePanel h2 {
+  margin: 0;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.graphLink {
+  flex: 0 0 auto;
+  color: var(--link);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .route {

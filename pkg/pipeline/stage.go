@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -553,6 +554,10 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateResultContract(a, outputs); err != nil {
+		r.ValidationFailed = true
+		return fail(fmt.Errorf("агент %s: контракт результата: %w", name, err))
+	}
 	outputIdentities, err := captureArtifactIdentities(outputs)
 	if err != nil {
 		return fail(fmt.Errorf("агент %s: фиксация output identity: %w", name, err))
@@ -923,6 +928,94 @@ func (rs *runState) collectOutputs(a *agent.Agent, name string) ([]runtime.Artif
 		)
 	}
 	return outputs, nil
+}
+
+// validateResultContract проверяет содержательную часть контракта результата:
+// агенту недостаточно формально создать diff — каждый объявленный выход,
+// который образует ожидаемый результат, должен существовать и содержать
+// результат ожидаемого вида. require_diff и mutation scope остаются первым
+// слоем (guard.go), эта проверка — вторым, семантическим слоем.
+//
+// Проверка включается по names выходов из def.yaml, а не по имени агента:
+// контракт задаётся definition, поэтому кастомные агенты с теми же выходам
+// получают ту же гарантию, а агенты с пустым outputs не ломаются.
+func validateResultContract(a *agent.Agent, outputs []runtime.Artifact) error {
+	if a == nil {
+		return nil
+	}
+	byName := make(map[string]runtime.Artifact, len(outputs))
+	for _, output := range outputs {
+		byName[output.Name] = output
+	}
+	read := func(name, declared string) ([]byte, error) {
+		output, found := byName[name]
+		if !found {
+			return nil, fmt.Errorf("выход %s (%s) не создан", name, declared)
+		}
+		data, err := safeio.ReadRegularFile(output.Path, maxArtifactFileBytes)
+		if err != nil {
+			return nil, fmt.Errorf("выход %s (%s) недоступен: %w", name, output.Path, err)
+		}
+		return data, nil
+	}
+	if declared, ok := a.Outputs["diff"]; ok {
+		data, err := read("diff", declared)
+		if err != nil {
+			return err
+		}
+		if !containsDiffContent(data) {
+			return fmt.Errorf("выход diff (%s) не содержит изменений", declared)
+		}
+	}
+	if declared, ok := a.Outputs["unit-test-report"]; ok {
+		data, err := read("unit-test-report", declared)
+		if err != nil {
+			return err
+		}
+		if !containsUnitTestResult(data) {
+			return fmt.Errorf("выход unit-test-report (%s) не содержит результата тестов", declared)
+		}
+	}
+	return nil
+}
+
+// hunkHeader matches a unified diff hunk range line "@@ -l,s +l,s @@". Free-form
+// `@@ ` text (for example `@@ something`) is not a hunk header and does not count.
+var hunkHeader = regexp.MustCompile(`^@@ -[0-9]+(,[0-9]+)? \+[0-9]+(,[0-9]+)? @@`)
+
+// containsDiffContent требует реальную структуру unified diff: пару `---`/`+++`
+// заголовков файлов и хотя бы один hunk с содержимым (строки ` `, `+` или `-`).
+// Одиночного маркера `diff --git`, `+++` или `@@` недостаточно — фиктивный diff,
+// который лишь упоминает маркеры, контрактом результата не считается.
+func containsDiffContent(data []byte) bool {
+	lines := strings.Split(string(data), "\n")
+	var oldFile, newFile, hunk, hunkBody bool
+	inHunk := false
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			oldFile = true
+		case strings.HasPrefix(line, "+++ "):
+			newFile = true
+		case hunkHeader.MatchString(line):
+			hunk = true
+			inHunk = true
+		case inHunk && line != "" && (line[0] == ' ' || line[0] == '+' || line[0] == '-'):
+			hunkBody = true
+		}
+	}
+	return oldFile && newFile && hunk && hunkBody
+}
+
+// containsUnitTestResult требует канонический line-anchored маркер
+// `**Result:** PASS|FAIL` из pkg/verdict. Свободное упоминание токена PASS/FAIL
+// в прозе (например «tests were not run; PASS») результатом тестов не является.
+func containsUnitTestResult(data []byte) bool {
+	switch verdict.Parse(string(data)) {
+	case verdict.Pass, verdict.Fail:
+		return true
+	}
+	return false
 }
 
 func sortedStringMapKeys(values map[string]string) []string {

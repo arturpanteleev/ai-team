@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -255,6 +256,9 @@ func (rs *runState) executeGraph(ctx context.Context) error {
 		if err := rs.executeStageDelivery(ctx, current, &result); err != nil {
 			return err
 		}
+		if err := rs.validateStagePRResultContract(current, result); err != nil {
+			return err
+		}
 		if result.AttemptID != "" {
 			for resultIndex := len(rs.results) - 1; resultIndex >= 0; resultIndex-- {
 				if rs.results[resultIndex].AttemptID == result.AttemptID {
@@ -459,6 +463,46 @@ func orderedGraphActions(edge workflow.Edge) []string {
 		return actions[i] < actions[j]
 	})
 	return actions
+}
+
+// validateStagePRResultContract проверяет PR-половину контракта результата на
+// этапе implementation. Сам PR по-прежнему создаёт только контроллер после
+// approval точного SHA-256 канонического плана; эта проверка лишь не даёт этапу
+// перейти дальше без фактически закрытого контракта — PR-ссылки в результате.
+func (rs *runState) validateStagePRResultContract(stageID string, result notifier.StageResult) error {
+	stage, ok := rs.p.templateStage(stageID)
+	if !ok || !stageRequiresControllerPRDelivery(stage) {
+		return nil
+	}
+	if result.Status != notifier.StatusPassed || result.Err != nil || result.ControlStopped {
+		return nil
+	}
+	if result.Delivery == nil || strings.TrimSpace(result.Delivery.PRURL) == "" {
+		return fmt.Errorf("этап %s: результат не содержит PR-ссылки", stageID)
+	}
+	for _, output := range result.Outputs {
+		if output.Name != "link" || output.Path == "" {
+			continue
+		}
+		data, err := safeio.ReadRegularFile(output.Path, maxArtifactFileBytes)
+		if err != nil {
+			return fmt.Errorf("этап %s: PR-ссылка результата недоступна: %w", stageID, err)
+		}
+		if !isHTTPLinkReference(data) {
+			return fmt.Errorf("этап %s: PR-ссылка результата пуста или некорректна", stageID)
+		}
+		return nil
+	}
+	return fmt.Errorf("этап %s: результат не содержит PR-ссылки", stageID)
+}
+
+func isHTTPLinkReference(data []byte) bool {
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" && parsed.User == nil
 }
 
 func graphTerminalError(target, stage string, cause error) error {

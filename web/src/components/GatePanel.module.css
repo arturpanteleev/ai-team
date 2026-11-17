@@ -10,6 +10,7 @@
 }
 
 .banner {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -19,6 +20,27 @@
   border: 1px solid transparent;
   font-size: 14px;
   line-height: 1.45;
+}
+
+/* DES-04: осторожное свечение только у обхода и рекомендации. Цвета S16 не
+   меняются: красный — отказ/обход (glow-coral), янтарный — рекомендация
+   (glow-accent). Технический сбой остаётся красным пунктиром без свечения. */
+.override::before,
+.advisory::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: banner-glow var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
+.override::before { box-shadow: var(--glow-coral); }
+.advisory::before { box-shadow: var(--glow-accent); }
+
+@keyframes banner-glow {
+  from { opacity: 0.12; }
+  to { opacity: 0.5; }
 }
 
 /* Red: a failed required gate was let through by an administrator. */
@@ -183,4 +205,13 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* DES-04: при reduced-motion свечение статично и не отвлекает. */
+@media (prefers-reduced-motion: reduce) {
+  .override::before,
+  .advisory::before {
+    animation: none !important;
+    opacity: 0.25;
+  }
 }

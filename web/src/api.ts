@@ -18,9 +18,12 @@ async function responseError(response: Response, context = 'API error'): Promise
   let message = raw;
   if (response.headers.get('content-type')?.includes('application/json')) {
     try {
-      const parsed = JSON.parse(raw) as { error?: string; allowed_actions?: string[] };
+      const parsed = JSON.parse(raw) as { error?: string; code?: string; allowed_actions?: string[] };
       if (parsed.error) {
-        message = parsed.error;
+        // The server puts the machine-readable reason (e.g.
+        // trusted_config_only) in `code` and the long explanation in `error`.
+        // Show both so a refusal is recognizable in the UI and in tests.
+        message = parsed.code ? `${parsed.code}: ${parsed.error}` : parsed.error;
         if (Array.isArray(parsed.allowed_actions) && parsed.allowed_actions.length > 0) {
           message += ` Доступные действия: ${parsed.allowed_actions.join(', ')}.`;
         }
@@ -314,6 +317,33 @@ export function getWorkflows(): Promise<WorkflowsResponse> {
 
 export function getWorkflow(workflowId: string): Promise<WorkflowDetail> {
   return fetchJson(`/workflows/${encodeURIComponent(workflowId)}`);
+}
+
+// WF-06: правка процессных полей — структурированный process-only patch.
+// Клиент НЕ правит YAML текстом и НЕ шлёт полный документ в publish: он
+// передаёт только IDENTIFIER workflow, title/description и версию, на которой
+// открыта карточка. Сервер сам грузит доверенный файловый конфиг, применяет
+// allow-list к выбранному workflow и публикует новую версию через
+// TemplateStore. Команды, гейты, графы и инфраструктуру веб не принимает.
+
+export type WorkflowProcessPatch = {
+  title?: string;
+  description?: string;
+};
+
+export async function updateWorkflowProcess(
+  workflowId: string,
+  patch: WorkflowProcessPatch,
+): Promise<{ version: string; workflow_id: string }> {
+  // expected_version — SHA активного шаблона; он защищает от перезаписи
+  // concurrent-публикации (409 при рассинхроне).
+  const current = await getProjectTemplate();
+  return command(`/workflows/${encodeURIComponent(workflowId)}/process`, {
+    workflow_id: workflowId,
+    title: patch.title,
+    description: patch.description,
+    expected_version: current.template.version ?? '',
+  });
 }
 
 export function getProjectTemplate(): Promise<ProjectTemplateResponse> {

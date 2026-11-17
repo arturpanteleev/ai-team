@@ -116,6 +116,12 @@ var mcpParityMatrix = []mcpRouteParity{
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/graph", Tool: "get_run_graph"},
 	{Method: http.MethodGet, Pattern: "/api/workflows", Tool: "list_workflows"},
 	{Method: http.MethodGet, Pattern: "/api/workflows/{workflowID}", Tool: "get_workflow"},
+	// The workflow card's structured process patch is its own MCP action: a
+	// command-gate file configuration cannot be republished as a whole document,
+	// so publish_template cannot edit its process fields. Both tools publish a
+	// version through the TemplateStore, but they are different routes and
+	// different handlers, not two spellings of one operation.
+	{Method: http.MethodPost, Pattern: "/api/workflows/{workflowID}/process", Tool: "patch_workflow_process"},
 
 	// --- Tasks: actions ---------------------------------------------------
 	{Method: http.MethodPost, Pattern: "/api/runs", Tool: "start_task"},

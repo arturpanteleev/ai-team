@@ -184,6 +184,17 @@ func registerMCPActionTools(registry *mcpRegistry) {
 		Description: "Publish a new template version. Running tasks keep their pinned version. expected_version guards against overwriting a concurrent publication. Needs the template edit right.",
 		Params: []mcpParam{{Name: "yaml", Kind: mcpString, Body: true, Required: true, Long: true, Description: "Template YAML."},
 			{Name: "expected_version", Kind: mcpString, Body: true, Description: "Version this edit is based on (list_templates)."}}})
+	registry.add(mcpOperation{Name: "patch_workflow_process", Title: "Patch workflow process", Method: http.MethodPost,
+		Path: "/api/workflows/{workflow_id}/process",
+		Description: "Edit the process fields of one workflow (title and/or description) without sending YAML, commands, gates or graphs: the server loads the trusted file configuration, " +
+			"changes only the selected workflow's fields and publishes a new version through the same handler as the workflow card. Unlike publish_template this also works when the file config contains " +
+			"command gates. expected_version must be the active template version (list_templates); a stale version is refused. Needs the template edit right.",
+		Params: []mcpParam{
+			{Name: "workflow_id", Kind: mcpString, Required: true, ExtraBody: true, Description: "Workflow ID (list_workflows / get_workflow); the route and the patch must name the same workflow."},
+			{Name: "title", Kind: mcpString, Body: true, Description: "New title; omitted fields keep their current value."},
+			{Name: "description", Kind: mcpString, Body: true, Description: "New description; omitted fields keep their current value."},
+			{Name: "expected_version", Kind: mcpString, Body: true, Required: true, Digest: true,
+				Description: "Active template version this edit is based on (list_templates); a SHA-256 hex digest."}}})
 
 	// --- Team and roles ---------------------------------------------------
 	registry.add(mcpOperation{Name: "invite_team_member", Title: "Invite team member", Method: http.MethodPost, Path: "/api/team/invitations",

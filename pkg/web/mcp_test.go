@@ -1011,3 +1011,114 @@ func TestMCPNeverBootstrapsTheTeam(t *testing.T) {
 		t.Fatalf("MCP created a team member: count=%d err=%v", count, countErr)
 	}
 }
+
+// The process patch must be reachable as an MCP tool, not merely aliased to a
+// full publish: a command-gate file configuration cannot be republished as a
+// document, but its process fields are editable through the card's handler.
+// The same handler also gives the tool the same RBAC and audit trail.
+func TestMCPPatchWorkflowProcessWithCommandGateConfig(t *testing.T) {
+	env := newMCPEnv(t)
+	configPath := filepath.Join(env.target, ".ai-team", "config.yaml")
+	if err := os.WriteFile(configPath, []byte(workflowCommandGateTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := env.srv.templateStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, version, err := store.ReadCurrent()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerToken, _ := env.issueToken(t, "owner@example.com", `{"label":"owner"}`)
+	owner := env.mustConnect(t, ownerToken)
+	text, isError := callTool(t, owner, "patch_workflow_process", map[string]any{
+		"workflow_id":      "idea-to-prod",
+		"description":      "Описание через MCP",
+		"expected_version": version,
+		mcpIdempotencyKey:  "mcp-patch-command-gate-1",
+	})
+	if isError || !strings.Contains(text, `"workflow_id":"idea-to-prod"`) {
+		t.Fatalf("patch over MCP: error=%v %s", isError, text)
+	}
+	status, body := env.rest(t, "owner@example.com", "/api/workflows/idea-to-prod")
+	if status != http.StatusOK {
+		t.Fatalf("workflow card: %d %s", status, body)
+	}
+	var card workflowDetailView
+	if err := json.Unmarshal(body, &card); err != nil {
+		t.Fatal(err)
+	}
+	if card.Description != "Описание через MCP" {
+		t.Fatalf("MCP patch did not edit the process field: %+v", card)
+	}
+	if gates := strings.Join(gateKeys(card.EntryGateGroups), ","); !strings.Contains(gates, "external_program@1") {
+		t.Fatalf("command gate was lost by the MCP patch: %s", gates)
+	}
+
+	// The tool's own audit record is written with the same channel and tool
+	// name as every other MCP action, with no arguments in it.
+	audit, err := env.srv.store.ListTeamAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := false
+	for _, entry := range audit {
+		if entry.Action != mcpActionEvent || entry.ActorID != "owner@example.com" {
+			continue
+		}
+		details := string(entry.Details)
+		if strings.Contains(details, `"tool":"patch_workflow_process"`) && strings.Contains(details, `"status":200`) {
+			recorded = true
+		}
+		if strings.Contains(details, "Описание через MCP") {
+			t.Fatalf("audit recorded the patch arguments: %s", details)
+		}
+	}
+	if !recorded {
+		t.Fatalf("team audit has no MCP record of the process patch: %+v", audit)
+	}
+
+	// Editing a template stays a PO/architect right through MCP and REST alike.
+	_, currentVersion, err := store.ReadCurrent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restBody := `{"workflow_id":"idea-to-prod","description":"не должно быть записано","expected_version":"` + currentVersion + `"}`
+	restResponse := teamRequest(env.srv, env.cookies["qa@example.com"], env.csrf["qa@example.com"],
+		http.MethodPost, "/api/workflows/idea-to-prod/process", restBody)
+	if restResponse.Code != http.StatusForbidden {
+		t.Fatalf("REST QA patch: %d %s", restResponse.Code, restResponse.Body.String())
+	}
+	qaToken, _ := env.issueToken(t, "qa@example.com", `{"label":"qa"}`)
+	qa := env.mustConnect(t, qaToken)
+	denied, isError := callTool(t, qa, "patch_workflow_process", map[string]any{
+		"workflow_id":      "idea-to-prod",
+		"description":      "не должно быть записано",
+		"expected_version": currentVersion,
+		mcpIdempotencyKey:  "mcp-patch-command-gate-qa",
+	})
+	if !isError || !strings.Contains(denied, `"status":403`) {
+		t.Fatalf("MCP QA patch must be refused like REST: error=%v %s", isError, denied)
+	}
+	status, body = env.rest(t, "owner@example.com", "/api/workflows/idea-to-prod")
+	if status != http.StatusOK || !strings.Contains(string(body), "Описание через MCP") {
+		t.Fatalf("a refused patch changed the workflow: %d %s", status, body)
+	}
+	audit, err = env.srv.store.ListTeamAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deniedRecorded := false
+	for _, entry := range audit {
+		details := string(entry.Details)
+		if entry.Action == mcpActionEvent && entry.ActorID == "qa@example.com" &&
+			strings.Contains(details, `"tool":"patch_workflow_process"`) && strings.Contains(details, `"denied":true`) {
+			deniedRecorded = true
+		}
+	}
+	if !deniedRecorded {
+		t.Fatalf("team audit has no denial record for the MCP process patch: %+v", audit)
+	}
+}

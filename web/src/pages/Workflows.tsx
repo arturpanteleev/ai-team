@@ -1,7 +1,8 @@
 import { useEffect, useId, useState } from 'react';
 import { Link, useParams } from '../router';
-import { getWorkflow, getWorkflows } from '../api';
+import { getActivePrincipal, getWorkflow, getWorkflows, updateWorkflowProcess } from '../api';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { mayPerform } from '../permissions';
 import type { WorkflowDetail, WorkflowGateGroups, WorkflowsResponse } from '../types/workflow';
 import styles from './Workflows.module.css';
 
@@ -126,6 +127,8 @@ export function WorkflowDetailPage() {
         </dl>
       </header>
 
+      <WorkflowProcessEditor detail={detail} onSaved={() => { void getWorkflow(workflowID).then(setDetail); }} />
+
       <section className={styles.section} aria-labelledby="workflow-graphs-heading">
         <h2 id="workflow-graphs-heading">Графы</h2>
         {detail.graphs.length === 0
@@ -164,5 +167,83 @@ export function WorkflowDetailPage() {
           </ul>}
       </section>
     </main>
+  );
+}
+
+// WF-06: процессные поля доступны только тем, у кого есть template:edit.
+// Команды, гейты, выбор workflow и инфраструктурные настройки здесь не
+// редактируются — они задаются файловым конфигом; сервер вернёт
+// trusted_config_only на любую попытку изменить их через API.
+function WorkflowProcessEditor({ detail, onSaved }: { detail: WorkflowDetail; onSaved: () => void }) {
+  const headingID = useId();
+  const titleID = useId();
+  const descriptionID = useId();
+  const canEdit = mayPerform(getActivePrincipal(), 'template:edit');
+  const [title, setTitle] = useState(detail.title);
+  const [description, setDescription] = useState(detail.description ?? '');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setTitle(detail.title);
+    setDescription(detail.description ?? '');
+    setSaveError('');
+    setSaved(false);
+  }, [detail.id, detail.title, detail.description]);
+
+  const changed = title !== detail.title || description !== (detail.description ?? '');
+
+  const save = async () => {
+    if (!title.trim()) {
+      setSaveError('Название workflow обязательно.');
+      setSaved(false);
+      return;
+    }
+    setSaving(true);
+    setSaveError('');
+    setSaved(false);
+    try {
+      await updateWorkflowProcess(detail.id, { title: title.trim(), description });
+      setSaved(true);
+      onSaved();
+    } catch (reason: unknown) {
+      setSaveError(`Правка не сохранена: ${errorMessage(reason, 'сервер отклонил изменение.')}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={styles.section} aria-labelledby={headingID}>
+      <h2 id={headingID}>Настройки workflow</h2>
+      <p className={styles.editorHint}>
+        Название и описание — процессные поля: они сохраняются в файловом конфиге и попадают в аудит.
+        Команды, гейты, графы, выбор активного workflow и инфраструктура правятся только в конфиге репозитория.
+      </p>
+      <div className={styles.editorFields}>
+        <label className={styles.field} htmlFor={titleID}>
+          <span>Название</span>
+          <input id={titleID} className={styles.input} value={title} onChange={(event) => setTitle(event.target.value)} disabled={!canEdit || saving} />
+        </label>
+        <label className={styles.field} htmlFor={descriptionID}>
+          <span>Описание</span>
+          <textarea id={descriptionID} className={styles.textarea} rows={3} value={description}
+            onChange={(event) => setDescription(event.target.value)} disabled={!canEdit || saving} />
+        </label>
+      </div>
+      {!canEdit && <p className={styles.muted}>Право template:edit нужно для правки процессных полей.</p>}
+      {saveError && <p className={styles.error} role="alert">{saveError}</p>}
+      {saved && !saveError && <p className={styles.saved} role="status">Изменение сохранено и записано в аудит.</p>}
+      {canEdit && <div className={styles.editorActions}>
+        <button type="button" onClick={() => void save()} disabled={saving || !changed}>
+          {saving ? 'Сохраняем…' : 'Сохранить'}
+        </button>
+        {changed && <button type="button" className={styles.secondary}
+          onClick={() => { setTitle(detail.title); setDescription(detail.description ?? ''); setSaveError(''); setSaved(false); }} disabled={saving}>
+          Отменить
+        </button>}
+      </div>}
+    </section>
   );
 }

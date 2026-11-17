@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun } from './api';
+import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun, updateWorkflowProcess } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -209,5 +209,66 @@ describe('flow metrics API client', () => {
     )));
 
     await expect(downloadFlowMetricsCsv('2026-10-02', '2026-10-01')).rejects.toThrow('to must be later than from');
+  });
+});
+
+describe('workflow process edits (WF-06)', () => {
+  const templateVersion = 'b'.repeat(64);
+  const nextVersion = 'c'.repeat(64);
+  const templateResponse = JSON.stringify({
+    template: { yaml: 'schema_version: 7\n', version: templateVersion }, versions: [],
+  });
+  const patchURL = '/api/workflows/idea-to-prod/process';
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('отправляет структурированный patch, а не полный YAML', async () => {
+    // The CSRF token may already be cached from earlier tests, so answer by URL.
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes('session')) return Promise.resolve(new Response(JSON.stringify({ csrf_token: 'csrf-wf' }), { status: 200 }));
+      if (path === '/api/template') return Promise.resolve(new Response(templateResponse, { status: 200 }));
+      if (path === patchURL) return Promise.resolve(new Response(JSON.stringify({ version: nextVersion, workflow_id: 'idea-to-prod' }), { status: 200 }));
+      throw new Error(`unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await updateWorkflowProcess('idea-to-prod', { title: 'SDLC v2', description: 'Новое описание' });
+
+    expect(result).toEqual({ version: nextVersion, workflow_id: 'idea-to-prod' });
+    const patch = fetchMock.mock.calls.find(([url]) => String(url) === patchURL);
+    if (!patch) throw new Error('process patch was not called');
+    // Only the identifier, the two allow-listed fields and the optimistic
+    // version: no YAML document, no commands, gates, graphs or infrastructure.
+    expect(JSON.parse(String((patch[1] as RequestInit).body))).toEqual({
+      workflow_id: 'idea-to-prod',
+      title: 'SDLC v2',
+      description: 'Новое описание',
+      expected_version: templateVersion,
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/template/publish'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/template/validate'))).toBe(false);
+  });
+
+  it('показывает code сервера в сообщении об отказе', async () => {
+    const serverError = 'шаблон, присланный через веб, может менять только процесс: гейт external_program запускает команду или контейнер, которых нет в файловом конфиге';
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes('session')) return Promise.resolve(new Response(JSON.stringify({ csrf_token: 'csrf-wf' }), { status: 200 }));
+      if (path === '/api/template') return Promise.resolve(new Response(templateResponse, { status: 200 }));
+      if (path === patchURL) return Promise.resolve(new Response(
+        JSON.stringify({ error: serverError, code: 'trusted_config_only' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      ));
+      throw new Error(`unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // F3: the real server puts the long text in `error` and the code in
+    // `code`; both must reach the user instead of a synthetic literal.
+    await expect(updateWorkflowProcess('idea-to-prod', { description: 'oslabit' }))
+      .rejects.toThrow(`trusted_config_only: ${serverError}`);
   });
 });

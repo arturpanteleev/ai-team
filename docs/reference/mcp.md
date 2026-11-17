@@ -197,7 +197,7 @@ codex exec "вызови ai-team whoami"
 | Возврат, пропуск, обход | `return_stage`, `skip_stage`, `override_stage_gate` | причина обязательна; обход — только системный администратор |
 | Гейты | `retry_stage_gate`, `retry_gate_attempt` | функция этапа; только для `error`/`timeout` той же версии результата |
 | Delivery | `approve_delivery_plan`, `retry_delivery` | `plan_hash` — SHA-256 утверждаемого плана; PO/релиз-менеджер |
-| Шаблон | `validate_template` (только чтение), `publish_template` | PO/архитектор; `expected_version` защищает от перезаписи |
+| Шаблон | `validate_template` (только чтение), `publish_template`, `patch_workflow_process` | PO/архитектор; `expected_version` защищает от перезаписи; `patch_workflow_process` меняет только `title`/`description` одного workflow и работает и на конфиге с command-гейтами |
 | Команда | `invite_team_member`, `set_team_member_roles`, `revoke_team_member` | право управлять командой; право администратора выдаёт и снимает только администратор |
 | Трекер | `set_task_tracker_link`, `remove_task_tracker_link`, `retry_task_tracker_deliveries`, `retry_task_tracker_delivery`, `sync_tracker_now`, `dismiss_tracker_inbound` | право связи с трекером (PO, архитектор); входящее изменение из трекера двигает задачу только через контроллер |
 
@@ -301,6 +301,7 @@ codex exec "вызови ai-team whoami"
 | GET | `/api/runs/{runID}/graph` | `get_run_graph` |
 | GET | `/api/workflows` | `list_workflows` |
 | GET | `/api/workflows/{workflowID}` | `get_workflow` |
+| POST | `/api/workflows/{workflowID}/process` | `patch_workflow_process` |
 | POST | `/api/runs` | `start_task` |
 | POST | `/api/runs/{runID}/resume` | `resume_task` |
 | POST | `/api/runs/{runID}/cancel` | `cancel_task` |

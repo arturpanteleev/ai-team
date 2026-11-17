@@ -361,3 +361,119 @@ test('task detail traverses the manual and automatic templates using allowed act
     await rm(tempRoot, { recursive: true, force: true })
   }
 })
+
+const loopbackReviewMarkdown = '## Замечания ревьюера\n\nЗамени обработку пустого списка на явную проверку.\n\n**Verdict:** CHANGES_REQUESTED'
+
+function loopbackDetail() {
+  const reviewInput = JSON.stringify([{ Name: 'review', Path: '/target/.ai-team/artifacts/feat/review.md', Size: 128 }])
+  const wave = {
+    stage_id: 'code_review', visit: 1, stage_attempt_id: 'code-review-attempt-1', artifact_sha256: 'a'.repeat(64), current: true,
+    gates: [{ gate_name: 'verdict_marker', gate: 'verdict_marker', gate_version: 1, mode: 'required', group: 0, attempts: 1,
+      blocking: true, warning: false, retryable: false, overridden: false,
+      attempt: { attempt_id: 'gate-verdict-marker-1', gate: 'verdict_marker', gate_name: 'verdict_marker', mode: 'required', group: 0,
+        execution: 'succeeded', verdict: 'fail', reason: 'Verdict: CHANGES_REQUESTED', started_at: now, finished_at: now } }],
+    transition: { allowed: false, state: 'blocked', reasons: ['verdict_marker: провал'], blocking: ['verdict_marker'], warnings: [], retryable: [], overridden: [] },
+    attempts: [],
+  }
+  return {
+    run: { id: 7, run_id: 'run-loop', feature: 'Цикл код-ревью', status: 'running', started_at: now },
+    task: 'Проверить внутренний цикл ревью', mode: 'auto',
+    template: { valid: true, template: 'review-loop-internal', title: 'Цикл код-ревью (внутренний агент)', version: 'f'.repeat(64),
+      stages: [
+        { id: 'implementation', title: 'Техническая реализация', function: 'developer', result: 'md', executor: 'agent', agent: 'demo-coder' },
+        { id: 'code_review', title: 'Код-ревью', function: 'reviewer', result: 'md', executor: 'agent', agent: 'demo-reviewer' },
+      ],
+      returns: [{ from: 'code_review', to: 'implementation' }] },
+    state: { run_id: 'run-loop', task: 'Проверить внутренний цикл ревью', phase: 'running', next_stage: 'implementation', attempt_ordinal: 3 },
+    stages: [
+      { id: 1, pipeline_run_id: 7, attempt_id: 'code-review-attempt-1', stage_index: 2, agent_name: 'code_review', status: 'passed',
+        started_at: now, completed_at: now, outputs_json: reviewInput },
+      { id: 2, pipeline_run_id: 7, attempt_id: 'implementation-attempt-2', stage_index: 3, agent_name: 'implementation', status: 'running',
+        started_at: now, inputs_json: reviewInput },
+    ],
+    approvals: [], stage_owners: {}, results: {}, allowed_actions: [], viewer_actions: [], delivery: { status: 'not_requested' },
+    stage_statuses: {
+      schema_version: 1, terminal: false, current_stage: 'implementation',
+      stages: [
+        { stage_id: 'implementation', index: 1, status: 'in_progress', readiness: 'engaged', phase: 'working', outcome: 'pending',
+          executor: { kind: 'internal_agent', agent: 'demo-coder', source: 'configured' }, current: true, visited: true, visit_count: 2, active_visit: 2, allowed_actions: [],
+          visits: [
+            { number: 1, active: false, entered_at: now, entered_via: 'start', outcome: 'passed', executor: { kind: 'internal_agent', agent: 'demo-coder', source: 'configured' }, attempts: [] },
+            { number: 2, active: true, entered_at: now, entered_from: 'code_review', entered_via: 'return', outcome: 'pending', executor: { kind: 'internal_agent', agent: 'demo-coder', source: 'configured' }, attempts: [] },
+          ] },
+        { stage_id: 'code_review', index: 2, status: 'passed', readiness: 'left', phase: 'none', outcome: 'passed',
+          executor: { kind: 'internal_agent', agent: 'demo-reviewer', source: 'configured' }, current: false, visited: true, visit_count: 1, active_visit: 1, allowed_actions: [],
+          visits: [{ number: 1, active: false, entered_at: now, entered_via: 'transition', outcome: 'passed', executor: { kind: 'internal_agent', agent: 'demo-reviewer', source: 'configured' }, attempts: [] }] },
+      ],
+    },
+  }
+}
+
+function installLoopback(page) {
+  page.route('**/api/runs/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname.endsWith('/events')) {
+      await route.fulfill({ json: { events: [], next_cursor: 0 } })
+    } else if (pathname.endsWith('/gates')) {
+      const wave = {
+        stage_id: 'code_review', visit: 1, stage_attempt_id: 'code-review-attempt-1', artifact_sha256: 'a'.repeat(64), current: true,
+        gates: [{ gate_name: 'verdict_marker', gate: 'verdict_marker', gate_version: 1, mode: 'required', group: 0, attempts: 1,
+          blocking: true, warning: false, retryable: false, overridden: false,
+          attempt: { attempt_id: 'gate-verdict-marker-1', gate: 'verdict_marker', gate_name: 'verdict_marker', mode: 'required', group: 0,
+            execution: 'succeeded', verdict: 'fail', reason: 'Verdict: CHANGES_REQUESTED', started_at: now, finished_at: now } }],
+        transition: { allowed: false, state: 'blocked', reasons: ['verdict_marker: провал'], blocking: ['verdict_marker'], warnings: [], retryable: [], overridden: [] },
+        attempts: [],
+      }
+      await route.fulfill({ json: { run_id: 'run-loop', can_override: false, stages: [{ stage_id: 'code_review', title: 'Код-ревью', groups: [['verdict_marker']], waves: [wave], current: wave }], overrides: [], warnings: [] } })
+    } else if (pathname.endsWith('/tracker')) {
+      await route.fulfill({ json: { configured: false, sync_status: 'not_configured' } })
+    } else if (pathname.includes('/artifacts/')) {
+      await route.fulfill({ status: 200, contentType: 'text/markdown', body: loopbackReviewMarkdown })
+    } else if (route.request().method() === 'GET' && pathname === '/api/runs/run-loop') {
+      await route.fulfill({ json: loopbackDetail() })
+    } else {
+      await route.continue()
+    }
+  })
+  page.route('**/api/pipelines/*/artifacts', (route) => route.fulfill({ json: [] }))
+}
+
+test('loop-internal: review feedback is visible on the returned implementation stage', async ({ page }) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'ai-team-loopback-e2e-'))
+  const target = path.join(tempRoot, 'target')
+  const binary = path.join(tempRoot, 'ai-team')
+  const port = await unusedPort()
+  const baseURL = `http://127.0.0.1:${port}`
+  let webServer
+
+  try {
+    run('go', ['build', '-o', binary, './cmd/ai-team'], { cwd: repoDir })
+    await mkdir(target, { recursive: true })
+    run(binary, ['init', '--target', target], { cwd: repoDir })
+    webServer = start(binary, ['web', '--target', target, '--port', String(port), '--dist', path.join(webDir, 'dist'), '--scheduler-db', '.ai-team/scheduler.db'], { cwd: target })
+    await waitForServer(baseURL, webServer)
+
+    await page.goto(`${baseURL}/tasks`)
+    const localToken = (await readFile(path.join(target, '.ai-team', 'web.token'), 'utf8')).trim()
+    await page.getByLabel('Токен доступа').fill(localToken)
+    await page.getByRole('button', { name: 'Войти' }).click()
+
+    installLoopback(page)
+    await page.goto(`${baseURL}/tasks/run-loop`)
+    await expect(page.getByRole('heading', { name: 'Цикл код-ревью', level: 1 })).toBeVisible()
+    const feedback = page.getByRole('region', { name: 'Требует внимания' })
+    await expect(feedback.getByText('Что исправить')).toBeVisible()
+    await expect(feedback.getByText(/Замени обработку пустого списка/)).toBeVisible()
+    await expect(feedback.getByText(/verdict_marker/)).toBeVisible()
+    // The link opens the gates of the failed code_review attempt, not an empty current-stage tab.
+    await feedback.getByRole('button', { name: 'Открыть гейты' }).click()
+    const gatesPanel = page.getByRole('tabpanel')
+    await expect(gatesPanel.getByText('verdict_marker', { exact: true })).toBeVisible()
+    await expect(gatesPanel.getByText(/Verdict: CHANGES_REQUESTED/)).toBeVisible()
+    // The feedback is rendered inline: the reviewer artifact is never opened as a page.
+    expect(page.url()).not.toContain('/artifacts/')
+  } finally {
+    await stop(webServer)
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})

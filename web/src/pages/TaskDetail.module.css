@@ -603,7 +603,8 @@
 
 .questions,
 .grill,
-.checkDecision {
+.checkDecision,
+.loopbackFeedback {
   min-width: 0;
   display: grid;
   gap: 8px;

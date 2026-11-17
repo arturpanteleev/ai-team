@@ -548,3 +548,140 @@ test.describe('DES-04: animated timeline and gates', () => {
     })
   }
 })
+
+// DES-05: volumetric cards, gradient status strips and shimmering pastel bubbles.
+// Only DES-02 tokens decorate; S16 colours, focus order and the 390px layout stay as they were.
+test.describe('DES-05: volumetric cards and pastel bubbles', () => {
+  const runs = [
+    { id: 1, run_id: 'des05-running', feature: 'Работающая задача', status: 'running', started_at: '2026-10-12T09:00:00Z' },
+    { id: 2, run_id: 'des05-failed', feature: 'Упавшая задача', status: 'failed', started_at: '2026-10-12T09:00:00Z' },
+  ]
+
+  async function stub(page, theme, width, api) {
+    await page.addInitScript((value) => { try { localStorage.setItem('ai-team:theme', value) } catch {} }, theme)
+    await page.setViewportSize({ width, height: 900 })
+    await page.route('**/api/**', async (route) => {
+      const { pathname } = new URL(route.request().url())
+      const json = (body, status = 200) => route.fulfill({ status, json: body })
+      if (pathname === '/api/session') return json({ csrf_token: 'x', principal: { actor_id: 'audit-user', roles: ['product_owner'] } })
+      if (pathname === '/api/auth/config') return json({ authentication_required: true, team_management_enabled: true })
+      if (pathname === '/api/version') return json({ version: 'audit' })
+      const custom = api?.(pathname, json)
+      if (custom) return custom
+      if (pathname === '/api/projects') return json({ projects: [] })
+      if (pathname === '/api/preflight') return json({ ready: true, checks: [] })
+      if (pathname === '/api/tracker') return json({ configured: false })
+      return json({ error: `audit fixture: ${pathname} is not stubbed` }, 404)
+    })
+  }
+
+  async function queue(page, theme = 'light', width = 1440) {
+    await stub(page, theme, width, (pathname, json) => {
+      if (pathname === '/api/pipelines') return json(runs)
+    })
+    await page.goto(`${baseURL}/`)
+    await expect(page.getByRole('link', { name: 'Открыть задачу: Работающая задача' })).toBeVisible()
+  }
+
+  for (const theme of ['light', 'dark']) {
+    test(`${theme}: queue cards layer shadows, grade the status strip and lift with a token glow`, async ({ page }) => {
+      await queue(page, theme)
+      const card = page.getByRole('link', { name: 'Открыть задачу: Работающая задача' })
+      const base = await card.evaluate((element) => ({
+        shadow: getComputedStyle(element).boxShadow,
+        strip: getComputedStyle(element, '::before').backgroundImage,
+        duration: getComputedStyle(element).transitionDuration,
+      }))
+      expect(base.shadow).not.toBe('none')
+      expect(base.shadow.split(/,(?![^(]*\))/).length).toBeGreaterThanOrEqual(3)
+      expect(base.strip).toContain('linear-gradient')
+      expect(base.duration).toContain('0.24s')
+
+      const tealGlow = await tokenValue(page, 'box-shadow: var(--glow-teal)', 'boxShadow')
+      await card.hover()
+      await expect.poll(() => card.evaluate((element) => getComputedStyle(element).boxShadow)).toContain(tealGlow)
+      await expect.poll(() => card.evaluate((element) => getComputedStyle(element).transform)).toContain('-2')
+
+      const failedStrip = await page.getByRole('link', { name: 'Открыть задачу: Упавшая задача' })
+        .evaluate((element) => getComputedStyle(element, '::before').backgroundImage)
+      expect(failedStrip).toContain('linear-gradient')
+      expect(failedStrip).not.toBe(base.strip)
+      expect((await horizontalOverflow(page)).page).toBe(0)
+    })
+
+    test(`${theme}: pastel bubbles shimmer and the active filter is softly lit`, async ({ page }) => {
+      await queue(page, theme)
+      // The active nav item has its own highlight from Layout; take the next bubble
+      // so we observe the pastel shimmer that Bubble.module.css itself provides.
+      const bubble = page.locator('nav[aria-label="Разделы"] a span[aria-hidden="true"]').nth(1)
+      const pastel = await bubble.evaluate((element) => ({
+        image: getComputedStyle(element).backgroundImage,
+        size: getComputedStyle(element).backgroundSize,
+        animation: getComputedStyle(element).animationName,
+        glow: getComputedStyle(element).boxShadow,
+      }))
+      expect(pastel.image).toContain('linear-gradient')
+      expect(pastel.size).toBe('180% 180%')
+      expect(pastel.animation).toContain('bubble-sheen')
+      expect(pastel.glow).toBe(await tokenValue(page, 'box-shadow: var(--shadow-soft), var(--glow-teal)', 'boxShadow'))
+
+      const active = page.getByRole('button', { name: 'Все', pressed: true })
+      const lit = await active.evaluate((element) => ({
+        image: getComputedStyle(element).backgroundImage,
+        shadow: getComputedStyle(element).boxShadow,
+      }))
+      expect(lit.image).toContain('linear-gradient')
+      expect(lit.shadow).not.toBe('none')
+      // The soft highlight never becomes a second primary: one yellow action at most.
+      expect(await page.locator('button[class*="primary"]').count()).toBeLessThanOrEqual(1)
+    })
+
+    test(`${theme}: a board card grades its strip from the chip tone and keeps its focus ring`, async ({ page }) => {
+      await stub(page, theme, 1440, (pathname, json) => {
+        if (pathname === '/api/runs') return json({ runs: [{ id: 3, run_id: 'des05-board', feature: 'desk-board', task: 'Карточка доски', status: 'blocked',
+          started_at: '2026-10-12T09:00:00Z', warnings: 0, allowed_actions: [] }], total: 1, limit: 50, offset: 0 })
+        if (pathname === '/api/templates') return json({ templates: [], active_template: '' })
+      })
+      await page.goto(`${baseURL}/tasks`)
+      const card = page.getByRole('link', { name: 'Задача Карточка доски' })
+      await expect(card).toBeVisible()
+      const strip = await card.evaluate((element) => ({
+        image: getComputedStyle(element, '::before').backgroundImage,
+        shadow: getComputedStyle(element).boxShadow,
+      }))
+      expect(strip.image).toContain('linear-gradient')
+      expect(strip.shadow).not.toBe('none')
+      await card.focus()
+      expect(await card.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none')
+      await card.hover()
+      await expect.poll(() => card.evaluate((element) => getComputedStyle(element).transform)).toContain('-2')
+    })
+  }
+
+  test('reduced motion stops the shimmer and keeps every hover static', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await queue(page)
+    const bubble = page.locator('nav[aria-label="Разделы"] a span[aria-hidden="true"]').first()
+    expect(await bubble.evaluate((element) => getComputedStyle(element).animationName)).toBe('none')
+    const card = page.getByRole('link', { name: 'Открыть задачу: Работающая задача' })
+    await card.hover()
+    await expect.poll(() => card.evaluate((element) => getComputedStyle(element).transform)).toBe('none')
+  })
+
+  test('390px keeps no horizontal scroll and the visual focus order', async ({ page }) => {
+    await queue(page, 'light', 390)
+    expect((await horizontalOverflow(page)).page).toBe(0)
+    // On a phone the filters are collapsed; expand them to see the active item.
+    await page.getByRole('button', { name: /Статус: Все · Фильтры/ }).click()
+    const active = page.getByRole('button', { name: 'Все', pressed: true })
+    expect(await active.evaluate((element) => getComputedStyle(element).backgroundImage)).toContain('linear-gradient')
+    await page.getByRole('button', { name: /Статус: Все · Фильтры/ }).click()
+
+    await page.getByPlaceholder('Поиск задач').focus()
+    await page.keyboard.press('Tab') // фильтр по проекту
+    await page.keyboard.press('Tab') // кнопка фильтров (на телефоне видима)
+    await page.keyboard.press('Tab') // первая карточка
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')))
+      .toBe('Открыть задачу: Работающая задача')
+  })
+})

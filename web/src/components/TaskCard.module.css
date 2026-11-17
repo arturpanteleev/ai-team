@@ -1,5 +1,7 @@
-/* Карточка доски: статус-чип, название, два коротких поля и мелкий служебный блок. */
+/* Карточка доски: статус-чип, название, два коротких поля и мелкий служебный блок.
+   Объём и неоновый акцент — только токены DES-02; семантика S16 не трогается. */
 .card {
+  position: relative;
   display: grid;
   gap: 6px;
   padding: 12px 14px;
@@ -8,11 +10,61 @@
   background: var(--surface);
   box-shadow: var(--shadow-soft);
   cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  overflow: hidden;
+  transition: border-color var(--duration-normal) var(--ease-standard),
+    box-shadow var(--duration-normal) var(--ease-standard),
+    transform var(--duration-normal) var(--ease-out);
+}
+
+/* Полоса статуса с градиентом из токенов той же семантики, что и чип. */
+.card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  background: linear-gradient(180deg, var(--border-strong), var(--border));
+  pointer-events: none;
+}
+
+.card:has(.chip[data-tone='yellow'])::before {
+  background: linear-gradient(180deg, var(--tint-yellow), var(--ink-yellow));
+}
+
+.card:has(.chip[data-tone='mustard'])::before {
+  background: linear-gradient(180deg, var(--tint-mustard), var(--ink-mustard));
+}
+
+.card:has(.chip[data-tone='coral'])::before {
+  background: linear-gradient(180deg, var(--tint-coral), var(--ink-coral));
+}
+
+.card:has(.chip[data-tone='green'])::before {
+  background: linear-gradient(180deg, var(--success-bg), var(--success-fg));
+}
+
+.card:has(.chip[data-tone='blue'])::before {
+  background: linear-gradient(180deg, var(--info-bg), var(--info-fg));
+}
+
+.card:has(.chip[data-tone='danger'])::before {
+  background: linear-gradient(180deg, var(--danger-bg), var(--danger-fg));
 }
 
 .card:hover {
   border-color: var(--border-strong);
+  box-shadow: var(--shadow), var(--glow-accent);
+  transform: translateY(-2px);
+}
+
+.card:has(.chip[data-tone='coral']):hover,
+.card:has(.chip[data-tone='danger']):hover {
+  box-shadow: var(--shadow), var(--glow-coral);
+}
+
+.card:has(.chip[data-tone='blue']):hover,
+.card:has(.chip[data-tone='green']):hover {
+  box-shadow: var(--shadow), var(--glow-teal);
 }
 
 .card:focus-visible {
@@ -235,4 +287,14 @@
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
 }

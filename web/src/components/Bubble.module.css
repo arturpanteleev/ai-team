@@ -1,3 +1,5 @@
+/* Пастельный «пузырь» с переливом градиента, многослойной тенью и мягким
+   неоновым свечением. Все цвета и длительности — токены DES-02/темы. */
 .bubble {
   display: inline-grid;
   place-items: center;
@@ -6,7 +8,21 @@
   height: 36px;
   border-radius: 50%;
   color: var(--bubble-glyph);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 75%), inset 0 -4px 8px rgb(0 0 0 / 6%), 0 6px 14px rgb(60 44 20 / 12%);
+  background-size: 180% 180%;
+  box-shadow: var(--shadow-soft), var(--glow-accent);
+  animation: bubble-sheen var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
+/* Перелив пастели: градиент сам приходит из токена --bubble-*, двигается только
+   background-position — ни одного захардкоженного цвета. */
+@keyframes bubble-sheen {
+  from {
+    background-position: 0% 50%;
+  }
+
+  to {
+    background-position: 100% 50%;
+  }
 }
 
 .bubble svg {
@@ -19,8 +35,35 @@
   height: 30px;
 }
 
-.yellow { background: var(--bubble-yellow); }
-.mint { background: var(--bubble-mint); }
-.coral { background: var(--bubble-coral); }
-.mustard { background: var(--bubble-mustard); }
-.blue { background: var(--bubble-blue); }
+/* background-image, не background: сокращённое свойство сбросило бы
+   background-size и остановило перелив. */
+.yellow {
+  background-image: var(--bubble-yellow);
+  box-shadow: var(--shadow-soft), var(--glow-accent);
+}
+
+.mint {
+  background-image: var(--bubble-mint);
+  box-shadow: var(--shadow-soft), var(--glow-teal);
+}
+
+.coral {
+  background-image: var(--bubble-coral);
+  box-shadow: var(--shadow-soft), var(--glow-coral);
+}
+
+.mustard {
+  background-image: var(--bubble-mustard);
+  box-shadow: var(--shadow-soft), var(--glow-accent);
+}
+
+.blue {
+  background-image: var(--bubble-blue);
+  box-shadow: var(--shadow-soft), var(--glow-teal);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble {
+    animation: none;
+  }
+}

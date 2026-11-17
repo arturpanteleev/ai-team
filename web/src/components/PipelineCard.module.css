@@ -1,3 +1,6 @@
+/* Объёмная карточка очереди: многослойная тень, цветная полоса статуса с
+   градиентом и неоновый акцент из токенов DES-02. Цветовая семантика S16,
+   разметка и порядок фокуса не меняются — только оформление. */
 .card {
   position: relative;
   min-width: 0;
@@ -7,41 +10,59 @@
   box-shadow: var(--shadow-soft);
   cursor: pointer;
   overflow: hidden;
-  transition: box-shadow 0.2s, transform 0.2s;
+  transition: box-shadow var(--duration-normal) var(--ease-standard),
+    transform var(--duration-normal) var(--ease-out);
 }
 
-/* Цветная полоса слева показывает состояние задачи. */
+.card:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Цветная полоса слева показывает состояние задачи градиентом из пар
+   tint/ink одного и того же токена S16 — ни один цвет не захардкожен. */
 .card::before {
   content: '';
   position: absolute;
   inset: 16px auto 16px 0;
   width: 5px;
   border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-  background: var(--border-strong);
+  background: linear-gradient(180deg, var(--border-strong), var(--border));
 }
 
 .card[data-status='running']::before,
 .card[data-status='queued']::before {
-  background: var(--tint-teal);
+  background: linear-gradient(180deg, var(--tint-teal), var(--ink-teal));
 }
 
 .card[data-status='waiting_for_approval']::before {
-  background: var(--create-yellow);
+  background: linear-gradient(180deg, var(--tint-yellow), var(--ink-yellow));
 }
 
 .card[data-status='failed']::before,
 .card[data-status='blocked']::before {
-  background: var(--tint-coral);
+  background: linear-gradient(180deg, var(--tint-coral), var(--ink-coral));
 }
 
 .card[data-status='completed']::before,
 .card[data-status='completed_with_warnings']::before {
-  background: var(--tint-mustard);
+  background: linear-gradient(180deg, var(--tint-mustard), var(--ink-mustard));
 }
 
+/* Многослойная тень плюс мягкое свечение токеном DES-02 и плавный lift. */
 .card:hover {
-  box-shadow: var(--shadow);
-  transform: translateY(-1px);
+  box-shadow: var(--shadow), var(--glow-accent);
+  transform: translateY(-2px);
+}
+
+.card[data-status='running']:hover,
+.card[data-status='queued']:hover {
+  box-shadow: var(--shadow), var(--glow-teal);
+}
+
+.card[data-status='failed']:hover,
+.card[data-status='blocked']:hover {
+  box-shadow: var(--shadow), var(--glow-coral);
 }
 
 .header {
@@ -115,5 +136,15 @@
   .footer button {
     min-height: 44px;
     padding: 9px 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
+  }
+
+  .card:hover {
+    transform: none;
   }
 }

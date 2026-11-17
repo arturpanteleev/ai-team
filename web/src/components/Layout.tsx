@@ -8,10 +8,10 @@ import { Bubble } from './Bubble';
 import type { BubbleTone } from './Bubble';
 import styles from './Layout.module.css';
 
-type IconName = 'tasks' | 'board' | 'projects' | 'template' | 'feed' | 'observability' | 'team' | 'access' | 'tracker';
+type IconName = 'tasks' | 'board' | 'projects' | 'workflow' | 'template' | 'feed' | 'observability' | 'team' | 'access' | 'tracker';
 
 const navTone: Record<IconName, BubbleTone> = {
-  tasks: 'yellow', board: 'mint', projects: 'blue', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow', access: 'mint', tracker: 'blue',
+  tasks: 'yellow', board: 'mint', projects: 'blue', workflow: 'mint', template: 'mustard', feed: 'coral', observability: 'blue', team: 'yellow', access: 'mint', tracker: 'blue',
 };
 
 // Иконки намеренно простые: контур 1.8px, наследуют цвет текста (внутри пузыря).
@@ -20,6 +20,7 @@ function NavIcon({ name }: { name: IconName }) {
     tasks: <><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8 12.5l2.5 2.5L16 9.5" /></>,
     board: <><rect x="3.5" y="4" width="5" height="16" rx="1.5" /><rect x="9.5" y="4" width="5" height="10" rx="1.5" /><rect x="15.5" y="4" width="5" height="13" rx="1.5" /></>,
     projects: <><path d="M3.5 7.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" /></>,
+    workflow: <><circle cx="6" cy="6" r="2.4" /><circle cx="18" cy="6" r="2.4" /><circle cx="12" cy="18" r="2.4" /><path d="M8.4 6h7.2M7.4 8.2l3.2 7.5M16.6 8.2l-3.2 7.5" /></>,
     template: <><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" /><path d="M9 12h6M9 15.5h4" /></>,
     feed: <><path d="M4 7h16M4 12h11M4 17h7" /><circle cx="18" cy="16.5" r="2.5" /></>,
     observability: <><path d="M3.5 17l5-5 3.5 3.5 4.5-6 4 4" /><path d="M3.5 20.5h17" /></>,
@@ -80,6 +81,7 @@ export function Layout({ children, teamManagementEnabled, trackerEnabled = false
           <NavItem to="/" end name="tasks">Очередь</NavItem>
           <NavItem to="/tasks" name="board">Задачи</NavItem>
           <NavItem to="/projects" name="projects">Проекты</NavItem>
+          <NavItem to="/workflows" name="workflow">Workflow</NavItem>
           <NavItem to="/template" name="template">Шаблоны</NavItem>
           <NavItem to="/events" name="feed">Лента</NavItem>
           <NavItem to="/observability" name="observability">Наблюдаемость</NavItem>

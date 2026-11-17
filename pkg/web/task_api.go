@@ -61,6 +61,14 @@ type StageReturnController interface {
 	ReturnStage(context.Context, string, string, string, string, string, string) error
 }
 
+// selfApprovalCheckerInstaller is implemented by controllers that enforce the
+// shared forbid_self_approval check inside ReturnStage. The web handler keeps
+// its own early refusal for a fast 403 and also installs the check so a return
+// cannot bypass it through a direct, non-HTTP controller call.
+type selfApprovalCheckerInstaller interface {
+	SetSelfApprovalChecker(func(string, approval.PendingApproval, string) error)
+}
+
 type StageGrillController interface {
 	AnswerStageGrill(context.Context, string, string, string, string, string) error
 	SubmitStageGrillVersion(context.Context, string, string, string, string, string) error
@@ -1025,7 +1033,17 @@ func (s *Server) handleTaskStageReturn(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusServiceUnavailable, "return action is not connected to the task controller", "controller_action_unavailable")
 		return
 	}
+	// The same check the human-decision service uses is installed into the
+	// controller, so a direct ReturnStage call is bound by forbid_self_approval
+	// too (the early refusal above is the web-facing fast path).
+	if installer, ok := controller.(selfApprovalCheckerInstaller); ok {
+		installer.SetSelfApprovalChecker(s.selfApprovalViolation)
+	}
 	if err := controller.ReturnStage(r.Context(), runID, stageID, command.ToStage, command.Reason, actorID, actorRole); err != nil {
+		if errors.Is(err, humandecision.ErrSelfApproval) {
+			writeJSONAPIError(w, http.StatusForbidden, err.Error(), "self_approval_forbidden")
+			return
+		}
 		s.taskConflict(w, runID, stageID, err.Error())
 		return
 	}

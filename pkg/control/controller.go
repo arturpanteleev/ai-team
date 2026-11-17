@@ -18,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
+	"github.com/arturpanteleev/ai-team/pkg/humandecision"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
 	"github.com/arturpanteleev/ai-team/pkg/pipeline"
 	"github.com/arturpanteleev/ai-team/pkg/preflight"
@@ -56,6 +57,13 @@ type Option func(*Controller)
 
 type DeferredDeliveryFunc func(context.Context, string, string) (delivery.TerminalRecord, error)
 
+// SelfApprovalCheck is the shared authorship check used by a stage return. It
+// returns an error when actorID worked on the stage of pending (or when the
+// authors cannot be determined and the decision must fail closed). Web/MCP
+// install the pinned-template forbid_self_approval check here; a direct caller
+// that does not install one cannot resolve a return of a protected stage.
+type SelfApprovalCheck func(runID string, pending approval.PendingApproval, actorID string) error
+
 func WithPreflight(checker PreflightChecker) Option {
 	return func(controller *Controller) { controller.preflight = checker }
 }
@@ -82,6 +90,18 @@ func WithDeferredDelivery(deliver DeferredDeliveryFunc) Option {
 	}
 }
 
+// WithSelfApprovalChecker installs the shared authorship check used by
+// ReturnStage. The Web/MCP handler installs the same check the human-decision
+// service uses, so a return cannot bypass the pinned forbid_self_approval
+// policy through a direct controller call.
+func WithSelfApprovalChecker(check SelfApprovalCheck) Option {
+	return func(controller *Controller) {
+		if check != nil {
+			controller.SetSelfApprovalChecker(check)
+		}
+	}
+}
+
 type Controller struct {
 	engine           runEngine
 	target           string
@@ -91,8 +111,21 @@ type Controller struct {
 	failureSink      FailureSink
 	admissionSink    func(string, int64) error
 
+	selfApprovalMu sync.RWMutex
+	selfApproval   SelfApprovalCheck
+
 	mu     sync.Mutex
 	active map[string]*worker
+}
+
+// SetSelfApprovalChecker installs (or replaces) the authorship check used by
+// ReturnStage. It is safe to call from a request handler while runs are active.
+// The plain function signature lets callers wire the shared check without
+// importing this package's named type.
+func (c *Controller) SetSelfApprovalChecker(check func(runID string, pending approval.PendingApproval, actorID string) error) {
+	c.selfApprovalMu.Lock()
+	defer c.selfApprovalMu.Unlock()
+	c.selfApproval = SelfApprovalCheck(check)
 }
 
 func New(engine runEngine, target string, options ...Option) (*Controller, error) {
@@ -709,6 +742,13 @@ func (c *Controller) ReturnStage(_ context.Context, runID, stageID, toStage, rea
 	if action == "" {
 		return fmt.Errorf("return to %q is not offered by the pending approval", toStage)
 	}
+	// A return is a decision on the same stage visit as a confirmation. Check
+	// self-approval before recording anything; roles, quorum and the separate
+	// system-admin authority are still enforced by the approval store and are
+	// not touched by this check.
+	if err := c.checkReturnSelfApproval(runID, value, action, toStage, actorID); err != nil {
+		return err
+	}
 	revisions, err := c.reviewedRevisions(runID, value)
 	if err != nil {
 		return err
@@ -731,6 +771,51 @@ func (c *Controller) loadLifecycle(runID string) (lifecycle.State, error) {
 		return lifecycle.State{}, err
 	}
 	return stateStore.Load(runID)
+}
+
+// checkReturnSelfApproval enforces the pinned template's forbid_self_approval
+// policy for a return route before a decision is stored. The authorship check
+// is the shared code also used by the human-decision service. A protected
+// return with no checker installed, or with an unverifiable authorship, fails
+// closed and names the return route in the error.
+func (c *Controller) checkReturnSelfApproval(runID string, pending approval.PendingApproval, action, toStage, actorID string) error {
+	forbid, err := c.pinnedForbidsSelfApproval(runID)
+	if err != nil {
+		return fmt.Errorf("%w: возврат этапа %q (маршрут %q -> %q) не может быть проверен: %v",
+			humandecision.ErrSelfApproval, action, pending.FromStage, toStage, err)
+	}
+	if !forbid {
+		return nil
+	}
+	c.selfApprovalMu.RLock()
+	check := c.selfApproval
+	c.selfApprovalMu.RUnlock()
+	if check == nil {
+		return fmt.Errorf("%w: возврат этапа %q (маршрут %q -> %q) отклонён: проверка авторства недоступна",
+			humandecision.ErrSelfApproval, action, pending.FromStage, toStage)
+	}
+	if err := check(runID, pending, actorID); err != nil {
+		return fmt.Errorf("%w: возврат этапа %q (маршрут %q -> %q) его автором запрещён: %v",
+			humandecision.ErrSelfApproval, action, pending.FromStage, toStage, err)
+	}
+	return nil
+}
+
+// pinnedForbidsSelfApproval reads the policy from the run's pinned template.
+func (c *Controller) pinnedForbidsSelfApproval(runID string) (bool, error) {
+	store, err := config.NewTemplateStore(c.target)
+	if err != nil {
+		return false, errors.New("pinned template store недоступен")
+	}
+	data, _, found, err := store.ReadPinnedRun(runID)
+	if err != nil || !found {
+		return false, errors.New("у run нет проверяемого pinned template")
+	}
+	template, err := config.ParseYAML(data)
+	if err != nil {
+		return false, errors.New("pinned template повреждён")
+	}
+	return template.ForbidSelfApproval, nil
 }
 
 func (c *Controller) pinnedStage(runID, stageID string) (config.TemplateStage, error) {

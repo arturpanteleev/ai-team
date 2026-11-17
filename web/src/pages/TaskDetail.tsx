@@ -145,6 +145,54 @@ function briefLink(runID: string, path: string): string {
   return `/artifacts/${encodeURIComponent(runID)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+interface StageInputArtifact {
+  Name?: string;
+  Path?: string;
+}
+
+// inputs_json is the JSON of []workflow.Artifact: objects with the capitalized
+// Name/Path fields (older rows may hold bare path strings). Both shapes are read.
+function parseStageInputs(json: string | undefined): StageInputArtifact[] {
+  if (!json) return [];
+  let value: unknown;
+  try { value = JSON.parse(json); } catch { return []; }
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): StageInputArtifact[] => {
+    if (typeof item === 'string') return [{ Name: item.split(/[\\/]/).at(-1), Path: item }];
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      return [{
+        Name: typeof record.Name === 'string' ? record.Name : typeof record.name === 'string' ? record.name : undefined,
+        Path: typeof record.Path === 'string' ? record.Path : typeof record.path === 'string' ? record.path : undefined,
+      }];
+    }
+    return [];
+  });
+}
+
+function isReviewInput(input: StageInputArtifact): boolean {
+  const name = (input.Name ?? '').toLowerCase().replace(/\.md$/, '');
+  const path = (input.Path ?? '').toLowerCase();
+  return name === 'review' || /(^|\/)review\.md$/.test(path);
+}
+
+// The recorded input path is a filesystem path; getArtifact needs one relative
+// to the artifacts root. Prefer the matching path from the artifact listing,
+// otherwise cut everything before the last /artifacts/ segment.
+function reviewArtifactPath(input: StageInputArtifact, artifacts: Artifact[]): string {
+  const base = ((input.Path ?? '').split(/[\\/]/).at(-1) ?? '').toLowerCase();
+  const name = (input.Name ?? '').toLowerCase().replace(/\.md$/, '');
+  const listed = artifacts.find((artifact) => {
+    const artifactBase = (artifact.path.split('/').at(-1) ?? '').toLowerCase();
+    return artifactBase === base || artifact.name.toLowerCase().replace(/\.md$/, '') === name;
+  });
+  if (listed) return listed.path;
+  const raw = (input.Path ?? '').replace(/\\/g, '/');
+  const marker = '/artifacts/';
+  const index = raw.lastIndexOf(marker);
+  return index >= 0 ? raw.slice(index + marker.length) : raw;
+}
+
 function isStageResultArtifact(artifact: Artifact, attemptID: string): boolean {
   return artifact.path.startsWith(`attempts/${attemptID}/artifacts/`)
     && !['/status/', '/.stage-check/', '/human/', '/tasks/'].some((part) => artifact.path.includes(part))
@@ -184,6 +232,7 @@ export function TaskDetail() {
   const [intentText, setIntentText] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('result');
   const [viewStageID, setViewStageID] = useState('');
+  const [loopbackFeedback, setLoopbackFeedback] = useState<{ path: string; text: string | null } | null>(null);
   const resultFormRef = useRef<HTMLDivElement>(null);
   const eventQueue = useRef<Promise<void>>(Promise.resolve());
   const snapshotRef = useRef<TaskDetailSnapshot | null>(null);
@@ -239,6 +288,7 @@ export function TaskDetail() {
     setResultAccepted(false);
     setActiveTab('result');
     setViewStageID('');
+    setLoopbackFeedback(null);
     refresh()
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : 'Не удалось загрузить задачу.');
@@ -358,6 +408,28 @@ export function TaskDetail() {
       .catch(() => { if (active) setIntentText(null); });
     return () => { active = false; };
   }, [currentRunID, initialBriefPath]);
+
+  // Loopback (return_to_implementation) hands the review artifact to the coder as
+  // an extra input of the stage. Read the feedback from those stage inputs, not
+  // from the shared journal, so it is visible without opening the artifact.
+  const loopbackReviewInput = useMemo(() => {
+    if (currentStageID !== 'implementation') return null;
+    const attempt = [...(details?.stages ?? [])].reverse()
+      .find((stage) => stage.agent_name === currentStageID && stage.inputs_json);
+    if (!attempt) return null;
+    return parseStageInputs(attempt.inputs_json).find(isReviewInput) ?? null;
+  }, [details?.stages, currentStageID]);
+  const loopbackReviewPath = loopbackReviewInput
+    ? reviewArtifactPath(loopbackReviewInput, visibleSnapshot?.artifacts ?? []) : '';
+  useEffect(() => {
+    setLoopbackFeedback(null);
+    if (!currentRunID || !loopbackReviewPath) return;
+    let active = true;
+    getArtifact(currentRunID, loopbackReviewPath)
+      .then((text) => { if (active) setLoopbackFeedback({ path: loopbackReviewPath, text }); })
+      .catch(() => { if (active) setLoopbackFeedback({ path: loopbackReviewPath, text: null }); });
+    return () => { active = false; };
+  }, [currentRunID, loopbackReviewPath]);
 
   // Частичная выдача бюджета доступна только если сервер так отметил задачу.
   useEffect(() => {
@@ -748,6 +820,24 @@ export function TaskDetail() {
   // confirmation of its transition, that is the stage being confirmed, not the one that comes next.
   const gateStageID = serverCurrent?.stage_id || actionStageID || currentStage?.id;
   const currentGateStage = gateStageID ? visibleSnapshot.gates?.stages.find((stage) => stage.stage_id === gateStageID) : undefined;
+  // The gate that failed and sent the stage back: prefer the stage the return came from.
+  const returnedFromStageID = serverCurrent?.visits[serverCurrent.active_visit - 1]?.entered_from;
+  const failedGate = (() => {
+    const stages = visibleSnapshot.gates?.stages ?? [];
+    const ordered = [
+      ...stages.filter((stage) => stage.stage_id === returnedFromStageID),
+      ...stages.filter((stage) => stage.stage_id !== returnedFromStageID),
+    ];
+    for (const stage of ordered) {
+      for (const gate of stage.current?.gates ?? []) {
+        const attempt = gate.attempt;
+        if (attempt?.verdict === 'fail' || attempt?.execution === 'error' || attempt?.execution === 'timeout') {
+          return { name: gate.gate_name || gate.gate };
+        }
+      }
+    }
+    return null;
+  })();
   const trackerOn = tracker.data?.configured === true;
   const gateAttention = visibleSnapshot.gates?.stages.some((stage) => stageGateFlag(visibleSnapshot.gates, stage.stage_id) !== undefined) ?? false;
   const tabs: { key: TabKey; label: string; flag?: 'danger' | 'warning' }[] = [
@@ -901,9 +991,19 @@ export function TaskDetail() {
         </aside>
 
         <>
-          {(questionDecisions.length > 0 || (grillAllowed && pending) || (currentDecision?.kind === 'check_decision')
+          {(loopbackFeedback !== null || questionDecisions.length > 0 || (grillAllowed && pending) || (currentDecision?.kind === 'check_decision')
             || (allowed.has('plan/approve') && pending?.trigger === 'delivery_plan') || (showResultForm && allowed.has('results'))) && (
             <section className={`${styles.panel} ${styles.attention}`} aria-label="Требует внимания">
+              {loopbackFeedback !== null && <section className={styles.loopbackFeedback} aria-labelledby="loopback-feedback-heading">
+                <h3 id="loopback-feedback-heading">Что исправить</h3>
+                {loopbackFeedback.text
+                  ? <div className={styles.markdown}><ReactMarkdown>{loopbackFeedback.text}</ReactMarkdown></div>
+                  : <p className={styles.sectionNote}>Отзыв ревьюера не загрузился. Откройте артефакт {loopbackFeedback.path}.</p>}
+                {failedGate && <p className={styles.sectionNote}>
+                  Проверка «{failedGate.name}» не прошла и вызвала возврат.{' '}
+                  <button type="button" className={styles.linkButton} onClick={() => setActiveTab('gates')}>Открыть гейты</button>
+                </p>}
+              </section>}
               {questionDecisions.length > 0 && <section className={styles.questions} aria-labelledby="question-heading">
                 <h3 id="question-heading">Для этапа «{currentStage?.title ?? currentStageID}» нужно уточнение владельца продукта</h3>
                 {questionDecisions.some((approval) => payloadMarkdown(approval.payload) === null)

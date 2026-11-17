@@ -143,10 +143,13 @@ Definition `agents/coder/def.yaml` MUST объявлять ожидаемый р
 
 #### Scenario: PR-ссылка на этапе implementation
 
-- **КОГДА** этап имеет `result: link`, `link_kind: pr` и controller-owned delivery
+- **КОГДА** этап имеет `result: link`, `link_kind: pr`, `executor: agent`,
+  controller-owned delivery и hard-гейт `pr_exists`
 - **ТОГДА** пайплайн MUST отклонить попытку, если результат этапа не содержит
   PR-ссылки, созданной контроллером
 - **И** агент MUST NOT создавать commit, push или PR самостоятельно
+- **И** этап без hard `pr_exists` MUST NOT получать раннее controller-owned
+  delivery PR до точки терминального delivery
 
 #### Scenario: Повтор контракта после loopback
 

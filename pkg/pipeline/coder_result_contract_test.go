@@ -155,6 +155,39 @@ func TestCoderResultContract_FailsWithoutExpectedResult(t *testing.T) {
 			wantValidation: true,
 		},
 		{
+			name: "malformed diff без пары ---/+++",
+			setup: func(rt *scriptedRuntime) {
+				rt.content["coder"] = map[string]string{
+					"diff":             "diff --git a/coder.go b/coder.go\n+++ b/coder.go\n@@ -1 +1 @@\n-old\n+new\n",
+					"unit-test-report": "**Result:** PASS\n",
+				}
+			},
+			want:           "diff",
+			wantValidation: true,
+		},
+		{
+			name: "bare PASS в отчёте без маркера Result",
+			setup: func(rt *scriptedRuntime) {
+				rt.content["coder"] = map[string]string{
+					"diff":             coderContractDiff,
+					"unit-test-report": "tests were not run; PASS\n",
+				}
+			},
+			want:           "unit-test-report",
+			wantValidation: true,
+		},
+		{
+			name: "маркер Result внутри прозы",
+			setup: func(rt *scriptedRuntime) {
+				rt.content["coder"] = map[string]string{
+					"diff":             coderContractDiff,
+					"unit-test-report": "тесты прошли — см. **Result:** PASS в тексте выше\n",
+				}
+			},
+			want:           "unit-test-report",
+			wantValidation: true,
+		},
+		{
 			name:  "выходы результата не созданы",
 			setup: func(rt *scriptedRuntime) { rt.skipWrite["coder"] = true },
 			want:  "не создан",
@@ -261,5 +294,67 @@ func TestStagePRResultContractRequiresControllerLink(t *testing.T) {
 	failed := notifier.StageResult{Status: notifier.StatusFailed}
 	if err := rs.validateStagePRResultContract(stage.ID, failed); err != nil {
 		t.Fatalf("проваленная попытка не должна проверяться на PR-ссылку: %v", err)
+	}
+}
+
+// TestCoderRealDefinitionDeclaresContractOutputs проверяет настоящий
+// agents/coder/def.yaml, а не fixture. Если убрать выходы из реального
+// definition, фикстура coderContractRegistry этого не заметит — этот тест
+// ловит расхождение: оба выхода контракта объявлены, а PR-выхода link нет,
+// потому что ссылку создаёт только контроллер.
+func TestCoderRealDefinitionDeclaresContractOutputs(t *testing.T) {
+	reg := agent.NewFS(os.DirFS("../../agents"))
+	a, err := reg.Load("coder")
+	if err != nil {
+		t.Fatalf("загрузка реального coder/def.yaml: %v", err)
+	}
+	if a.Outputs["diff"] == "" {
+		t.Error("agents/coder/def.yaml MUST объявлять выход diff")
+	}
+	if a.Outputs["unit-test-report"] == "" {
+		t.Error("agents/coder/def.yaml MUST объявлять выход unit-test-report")
+	}
+	if _, ok := a.Outputs["link"]; ok {
+		t.Error("agents/coder/def.yaml MUST NOT объявлять PR-выход link — ссылку публикует контроллер")
+	}
+}
+
+// TestCoderResultContract_LoopbackRetryWithoutResultFailsAgain проверяет, что
+// loopback не «прощает» отсутствие результата: повторная попытка coder-а,
+// которая снова не произвела отчёт о тестах, отклоняется повторно, а не
+// маскируется валидными выходами второй попытки.
+func TestCoderResultContract_LoopbackRetryWithoutResultFailsAgain(t *testing.T) {
+	dir := coderContractEnv(t)
+	rt := coderContractRuntime()
+	rt.contentFn["coder"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"diff": coderContractDiff, "unit-test-report": "**Result:** PASS\n"}
+		}
+		// Повторная попытка: diff формально создан, но отчёт без результата.
+		return map[string]string{"diff": coderContractDiff, "unit-test-report": "отчёт без итоговой строки\n"}
+	}
+	rt.contentFn["reviewer"] = func(call int) map[string]string {
+		if call == 1 {
+			return map[string]string{"review": "исправь\n\n**Verdict:** CHANGES_REQUESTED\n"}
+		}
+		return map[string]string{"review": "теперь ок\n\n**Verdict:** APPROVED\n"}
+	}
+	pr := &scriptedPrompter{interactive: true, answers: []string{"y", "review: исправить поведение"}}
+
+	cfg := cfgForGraph(func(wf *config.WorkflowConfig) {
+		wf.MaxVisits["coder"] = 3
+		wf.MaxVisits["reviewer"] = 3
+		wf.Edges = append(wf.Edges, loopbackEdge("reviewer", "coder", "reviewer"))
+	}, config.AgentConfig{Name: "coder"}, config.AgentConfig{Name: "reviewer"}, config.AgentConfig{Name: "deployer"})
+
+	err, _ := runCoderContract(t, dir, cfg, rt, pr)
+	if err == nil {
+		t.Fatal("повторная попытка coder без результата должна провалиться")
+	}
+	if !strings.Contains(err.Error(), "unit-test-report") {
+		t.Fatalf("ошибка %q должна указывать на unit-test-report", err)
+	}
+	if rt.calls["coder"] != 2 {
+		t.Fatalf("coder должен перезапуститься и повторно провалиться, calls=%d", rt.calls["coder"])
 	}
 }

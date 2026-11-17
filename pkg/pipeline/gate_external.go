@@ -113,6 +113,18 @@ func externalGateArtifact(stage config.TemplateStage, result notifier.StageResul
 			if err != nil {
 				return info, fmt.Errorf("результат %q не удалось прочитать: %w", output.Name, err)
 			}
+			if stage.LinkKind == "pr" {
+				// PR-этап: результатом является только PR-ссылка (URL/номер или
+				// structured поле pr_url), а не первый попавшийся выход. Патч,
+				// отчёт или журнал, стоящие перед ссылкой в outputs, её не
+				// подменяют — тот же выбор, что делают встроенные PR-гейты через
+				// prReferenceFromOutput.
+				if candidate, ok := prReferenceFromOutput(data); ok {
+					info.URL = candidate
+					return info, nil
+				}
+				continue
+			}
 			info.URL = strings.TrimSpace(string(data))
 			return info, nil
 		}

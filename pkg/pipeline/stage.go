@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -978,17 +979,41 @@ func validateResultContract(a *agent.Agent, outputs []runtime.Artifact) error {
 	return nil
 }
 
+// hunkHeader matches a unified diff hunk range line "@@ -l,s +l,s @@". Free-form
+// `@@ ` text (for example `@@ something`) is not a hunk header and does not count.
+var hunkHeader = regexp.MustCompile(`^@@ -[0-9]+(,[0-9]+)? \+[0-9]+(,[0-9]+)? @@`)
+
+// containsDiffContent требует реальную структуру unified diff: пару `---`/`+++`
+// заголовков файлов и хотя бы один hunk с содержимым (строки ` `, `+` или `-`).
+// Одиночного маркера `diff --git`, `+++` или `@@` недостаточно — фиктивный diff,
+// который лишь упоминает маркеры, контрактом результата не считается.
 func containsDiffContent(data []byte) bool {
-	text := string(data)
-	return strings.Contains(text, "diff --git ") || strings.Contains(text, "+++ ") || strings.Contains(text, "@@ ")
+	lines := strings.Split(string(data), "\n")
+	var oldFile, newFile, hunk, hunkBody bool
+	inHunk := false
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			oldFile = true
+		case strings.HasPrefix(line, "+++ "):
+			newFile = true
+		case hunkHeader.MatchString(line):
+			hunk = true
+			inHunk = true
+		case inHunk && line != "" && (line[0] == ' ' || line[0] == '+' || line[0] == '-'):
+			hunkBody = true
+		}
+	}
+	return oldFile && newFile && hunk && hunkBody
 }
 
+// containsUnitTestResult требует канонический line-anchored маркер
+// `**Result:** PASS|FAIL` из pkg/verdict. Свободное упоминание токена PASS/FAIL
+// в прозе (например «tests were not run; PASS») результатом тестов не является.
 func containsUnitTestResult(data []byte) bool {
-	for _, field := range strings.Fields(strings.ToUpper(string(data))) {
-		switch strings.Trim(field, "*`:.,!?()[]#-") {
-		case "PASS", "FAIL":
-			return true
-		}
+	switch verdict.Parse(string(data)) {
+	case verdict.Pass, verdict.Fail:
+		return true
 	}
 	return false
 }

@@ -90,6 +90,11 @@ func (c *Config) untrustedProblems(trusted *Config, forRun bool) []string {
 	// fields they must also hold for a run: a pinned template may not drop or
 	// weaken a workflow gate of the file configuration (finding B).
 	problems = append(problems, c.workflowTightenProblems(trusted)...)
+	// A stage ref that shares an instance name with a workflow gate replaces it
+	// in the effective merged chain, so the workflow-only and stage-only checks
+	// above miss a gate weakened through such an override. Compare the merged
+	// chains of every stage of the file configuration as well.
+	problems = append(problems, stageMergedChainTightenProblems(c, trusted, forRun)...)
 	trustedAdapters, trustedChecks, trustedMCP := trustedDefinitions(trusted)
 	for _, name := range sortedMapKeys(c.ExecutorAdapters) {
 		if !reflect.DeepEqual(c.ExecutorAdapters[name], trustedAdapters[name]) {
@@ -487,6 +492,82 @@ func workflowEffectiveRefs(cfg *Config, id string, entry bool) []workflow.GateRe
 		return nil
 	}
 	return chain.Refs()
+}
+
+// stageMergedChain is the effective gate chain of a stage after the active
+// workflow's gates are merged in (workflow inheritance, point overrides and
+// same-name stage overrides all resolved). A broken chain contributes no refs,
+// which the tighten comparison reports as dropped gates.
+func stageMergedChain(cfg *Config, stage TemplateStage, entry bool) workflow.GateGroups {
+	var (
+		groups workflow.GateGroups
+		err    error
+	)
+	if entry {
+		groups, err = cfg.EntryGateGroupsFor(stage)
+	} else {
+		groups, err = cfg.ExitGateGroupsFor(stage)
+	}
+	if err != nil {
+		return nil
+	}
+	return groups
+}
+
+// stageMergedChainTightenProblems closes the gap between the workflow-level and
+// the stage-level tighten checks: a stage ref with the same instance name as a
+// workflow gate replaces that gate in the effective merged chain (finding D).
+// Comparing only the workflow's own chains and only the stage's own chains
+// misses a web submission that weakens a workflow gate through such an override.
+// Every stage of the file configuration is therefore compared on its effective
+// merged chains, with the same ref equality used everywhere else (instance,
+// params, mode and definition version).
+//
+// For a publish every trusted ref must survive. For a run only the refs that
+// come from the trusted active workflow are protected: stage-level process
+// gates may legitimately differ between a pinned run and a later file edit,
+// while workflow gates must hold for a run too (finding B).
+func stageMergedChainTightenProblems(submitted, trusted *Config, forRun bool) []string {
+	var problems []string
+	trustedStages := make(map[string]TemplateStage, len(trusted.Stages))
+	for _, stage := range trusted.Stages {
+		trustedStages[stage.ID] = stage
+	}
+	submittedStages := make(map[string]TemplateStage, len(submitted.Stages))
+	for _, stage := range submitted.Stages {
+		submittedStages[stage.ID] = stage
+	}
+	workflowID := trusted.ActiveWorkflowID()
+	var workflowEntry, workflowExit []workflow.GateRef
+	if forRun {
+		workflowEntry = workflowEffectiveRefs(trusted, workflowID, true)
+		workflowExit = workflowEffectiveRefs(trusted, workflowID, false)
+	}
+	for _, id := range sortedMapKeys(trustedStages) {
+		submittedStage, ok := submittedStages[id]
+		if !ok {
+			continue // deleting a whole stage stays allowed
+		}
+		wantStage := trustedStages[id]
+		for _, pair := range []struct {
+			field        string
+			want, have   workflow.GateGroups
+			workflowRefs []workflow.GateRef
+		}{
+			{"exit_gate_groups", stageMergedChain(trusted, wantStage, false), stageMergedChain(submitted, submittedStage, false), workflowExit},
+			{"entry_gate_groups", stageMergedChain(trusted, wantStage, true), stageMergedChain(submitted, submittedStage, true), workflowEntry},
+		} {
+			for _, ref := range pair.want.Refs() {
+				if forRun && !hasAnyGateRef(pair.workflowRefs, ref) {
+					continue
+				}
+				if !hasGateRef(pair.have, ref) {
+					problems = append(problems, fmt.Sprintf("этап %q: %s: гейт %s (%s) файлового конфига нельзя убрать или ослабить из веба", id, pair.field, ref.InstanceName(), ref.Key()))
+				}
+			}
+		}
+	}
+	return problems
 }
 
 func sameParams(a, b map[string]any) bool {

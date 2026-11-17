@@ -119,14 +119,13 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusConflict, "workflow exit gates cannot be resolved", "gate_chain_unavailable")
 		return
 	}
-	base, err := graphViewForConfig(cfg, graphModeClass)
-	if err != nil {
-		writeJSONAPIError(w, http.StatusConflict, "workflow graph cannot be compiled", "graph_unavailable")
-		return
-	}
 	graphs := make([]graphView, 0, len(meta.Graphs))
 	for _, declared := range meta.Graphs {
-		view := base
+		view, err := graphViewForGraph(cfg, id, &declared, graphModeClass)
+		if err != nil {
+			writeJSONAPIError(w, http.StatusConflict, "workflow graph cannot be compiled", "graph_unavailable")
+			return
+		}
 		view.GraphID = declared.ID
 		view.WorkflowID = id
 		view.Title = declared.Title
@@ -146,26 +145,35 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 // workflowTasks links the class to its objects: a run belongs to a workflow
 // when its immutable pin selects that workflow id. The pin is the only durable
 // association, so a workflow renamed after a run keeps its old tasks.
+//
+// GetPipelineRuns returns at most one page, so the association walks every page
+// of the run store like the other projections do, otherwise a workflow with
+// more than one page of runs silently drops its older tasks.
 func (s *Server) workflowTasks(workflowID string) []workflowTaskRef {
-	runs, err := s.store.GetPipelineRuns()
-	if err != nil {
-		return []workflowTaskRef{}
-	}
 	templates := s.newTaskTemplateLookup()
 	stateStore, stateErr := lifecycle.NewStore(s.targetDir)
 	refs := make([]workflowTaskRef, 0)
-	for _, run := range runs {
-		runCfg, found, configErr := templates.config(run.RunID)
-		if configErr != nil || !found || runCfg == nil || runCfg.ActiveWorkflowID() != workflowID {
-			continue
+	for offset := 0; ; offset += 100 {
+		runs, err := s.store.GetPipelineRunsPage(100, offset)
+		if err != nil {
+			return refs
 		}
-		ref := workflowTaskRef{RunID: run.RunID, Feature: run.Feature, Status: run.Status}
-		if stateErr == nil {
-			if state, loadErr := stateStore.Load(run.RunID); loadErr == nil && state.NextStage != "" {
-				ref.CurrentStage = state.NextStage
+		for _, run := range runs {
+			runCfg, found, configErr := templates.config(run.RunID)
+			if configErr != nil || !found || runCfg == nil || runCfg.ActiveWorkflowID() != workflowID {
+				continue
 			}
+			ref := workflowTaskRef{RunID: run.RunID, Feature: run.Feature, Status: run.Status}
+			if stateErr == nil {
+				if state, loadErr := stateStore.Load(run.RunID); loadErr == nil && state.NextStage != "" {
+					ref.CurrentStage = state.NextStage
+				}
+			}
+			refs = append(refs, ref)
 		}
-		refs = append(refs, ref)
+		if len(runs) < 100 {
+			break
+		}
 	}
 	return refs
 }

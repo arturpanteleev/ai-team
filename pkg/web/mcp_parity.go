@@ -111,19 +111,11 @@ var mcpParityMatrix = []mcpRouteParity{
 	{Method: http.MethodGet, Pattern: "/api/pipelines/{id}/artifacts", Tool: "list_task_artifacts"},
 	{Method: http.MethodGet, Pattern: "/api/artifacts/*", Tool: "read_artifact"},
 
-	// --- Graphs and workflow catalogue: dashboard-only reads --------------
-	// These read-only projections are served for the browser pages and have no
-	// MCP tool in this package. Where a run is involved, the same underlying
-	// data is reachable through the existing task/workflow tools; the config
-	// catalogue is intentionally exposed only to the web UI.
-	{Method: http.MethodGet, Pattern: "/api/graphs/{graphID}", Kind: mcpExceptTransport,
-		Reason: "Read-only class-graph projection for the browser graph page; the entry, nodes and edges come from the same config that existing workflow tools read, and no dedicated MCP graph tool is provided."},
-	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/graph", Kind: mcpExceptTransport,
-		Reason: "Read-only run-graph projection with computed stage statuses for the browser task page; the same run data is available through get_task_workflow and get_task_stage_statuses, so no MCP graph tool exists."},
-	{Method: http.MethodGet, Pattern: "/api/workflows", Kind: mcpExceptTransport,
-		Reason: "Read-only workflow catalogue cards (id, title, description, version, graph count) for the browser dashboard; the config catalogue has no MCP listing tool by design."},
-	{Method: http.MethodGet, Pattern: "/api/workflows/{workflowID}", Kind: mcpExceptTransport,
-		Reason: "Read-only workflow card with graphs and effective gate chains for the browser dashboard; this config catalogue view is web-only and has no MCP counterpart tool in this package."},
+	// --- Graphs and workflow catalogue: dashboard reads --------------------
+	{Method: http.MethodGet, Pattern: "/api/graphs/{graphID}", Tool: "get_graph"},
+	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/graph", Tool: "get_run_graph"},
+	{Method: http.MethodGet, Pattern: "/api/workflows", Tool: "list_workflows"},
+	{Method: http.MethodGet, Pattern: "/api/workflows/{workflowID}", Tool: "get_workflow"},
 
 	// --- Tasks: actions ---------------------------------------------------
 	{Method: http.MethodPost, Pattern: "/api/runs", Tool: "start_task"},

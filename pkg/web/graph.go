@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -83,10 +84,35 @@ func graphReturns(cfg *config.Config) []graphReturn {
 	return out
 }
 
-func graphViewForConfig(cfg *config.Config, mode string) (graphView, error) {
-	compiled, err := cfg.CompiledGraph()
+// graphViewForGraph compiles the graph for one declared graph of one workflow.
+// It compiles the config's template with that workflow's gate chains — not the
+// active workflow's — and honors the graph's declared entry. A shallow copy
+// carries the target workflow id into compilation without mutating the parsed
+// config, so two workflows that differ only in their gate chains produce
+// different edges, and two graphs of one workflow can differ by their entry.
+//
+// The graph's `template` names the config's single active template: there is
+// no template catalog yet, so stages and returns always come from `cfg`, while
+// the gate chains (per workflow) and the entry (per graph) are the graph's own.
+func graphViewForGraph(cfg *config.Config, workflowID string, declared *config.WorkflowGraph, mode string) (graphView, error) {
+	workflowCfg := *cfg
+	workflowCfg.ActiveWorkflow = workflowID
+	compiled, err := workflowCfg.CompiledGraph()
 	if err != nil {
 		return graphView{}, err
+	}
+	if declared != nil && declared.Entry != "" {
+		known := false
+		for _, node := range compiled.Nodes {
+			if node.Key() == declared.Entry {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return graphView{}, fmt.Errorf("workflow graph: entry %q не существует", declared.Entry)
+		}
+		compiled.Entry = declared.Entry
 	}
 	return graphView{Graph: compiled, Mode: mode, Returns: graphReturns(cfg)}, nil
 }
@@ -104,25 +130,35 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusNotFound, "graph configuration unavailable", "config_unavailable")
 		return
 	}
+	// A graph id is unique within a workflow, not across workflows, so the same
+	// id may name one graph in two different workflows. Resolve every match and
+	// refuse an ambiguous id instead of silently serving the first one.
 	var declared *config.WorkflowGraph
 	workflowID := ""
+	matches := 0
 	for _, meta := range cfg.AllWorkflows() {
 		for i := range meta.Graphs {
 			if meta.Graphs[i].ID == graphID {
-				declared = &meta.Graphs[i]
-				workflowID = meta.ID
-				break
+				matches++
+				if declared == nil {
+					graph := meta.Graphs[i]
+					declared = &graph
+					workflowID = meta.ID
+				}
 			}
 		}
-		if declared != nil {
-			break
-		}
 	}
-	if declared == nil {
+	switch matches {
+	case 0:
 		writeJSONAPIError(w, http.StatusNotFound, "graph not found", "not_found")
 		return
+	case 1:
+		// resolved uniquely below
+	default:
+		writeJSONAPIError(w, http.StatusConflict, "graph id is ambiguous across workflows", "graph_ambiguous")
+		return
 	}
-	view, err := graphViewForConfig(cfg, graphModeClass)
+	view, err := graphViewForGraph(cfg, workflowID, declared, graphModeClass)
 	if err != nil {
 		writeJSONAPIError(w, http.StatusConflict, "graph cannot be compiled", "graph_unavailable")
 		return
@@ -152,13 +188,19 @@ func (s *Server) handleGetRunGraph(w http.ResponseWriter, r *http.Request) {
 		writeJSONAPIError(w, http.StatusConflict, "run has no valid pinned template", "template_pin_unavailable")
 		return
 	}
-	view, err := graphViewForConfig(cfg, graphModeRun)
+	// The run's graph is the pinned template compiled for the run's own
+	// workflow (its ActiveWorkflowID), matching the task page's graph. The
+	// graph id and title are the metadata of that workflow's first graph; the
+	// run does not re-root at a declared graph entry, because the run travels
+	// the template stages in order.
+	workflowID := cfg.ActiveWorkflowID()
+	view, err := graphViewForGraph(cfg, workflowID, nil, graphModeRun)
 	if err != nil {
 		writeJSONAPIError(w, http.StatusConflict, "pinned graph cannot be compiled", "graph_unavailable")
 		return
 	}
 	view.RunID, view.RunStatus = runID, run.Status
-	view.WorkflowID = cfg.ActiveWorkflowID()
+	view.WorkflowID = workflowID
 	if active := cfg.ActiveWorkflowMeta(); active != nil && len(active.Graphs) > 0 {
 		view.GraphID = active.Graphs[0].ID
 		view.Title = active.Graphs[0].Title

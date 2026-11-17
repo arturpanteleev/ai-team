@@ -812,7 +812,10 @@ export function TaskDetail() {
       </header>
 
       <section className={styles.routePanel} aria-labelledby="route-heading">
-        <h2 id="route-heading">Маршрут процесса</h2>
+        <div className={styles.routeHeader}>
+          <h2 id="route-heading">Маршрут процесса</h2>
+          <Link className={styles.graphLink} to={`/runs/${encodeURIComponent(run.run_id)}/graph`}>Граф прогона</Link>
+        </div>
         {route.length === 0 ? <p>Этапов нет.</p> : <ol className={styles.route}>
           {route.map(({ stage, state, server, current, gateFlag }, index) => (
             <li key={stage.id} className={styles.routeItem} data-state={state} data-gate-flag={gateFlag}

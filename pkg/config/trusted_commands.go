@@ -60,23 +60,36 @@ func (c *Config) untrustedProblems(trusted *Config, forRun bool) []string {
 	}
 	for _, stage := range c.Stages {
 		// Exit and entry chains: a command gate (external/docker) can never be
-		// introduced through the web, in either chain.
-		chains := []workflow.GateGroups{stage.EffectiveGateGroups(), stage.EntryGateGroups}
-		for _, ref := range chainsRefs(chains) {
-			if !isCommandGate(registry, ref) {
-				continue
+		// introduced through the web, in either chain. The chains are matched
+		// separately: a gate moved exit→entry (or back) checks a different
+		// artifact and is not the same gate (finding C).
+		trustedStage := trustedStages[stage.ID]
+		chains := []struct{ want, have workflow.GateGroups }{
+			{trustedStage.EffectiveGateGroups(), stage.EffectiveGateGroups()},
+			{trustedStage.EntryGateGroups, stage.EntryGateGroups},
+		}
+		for _, pair := range chains {
+			for _, ref := range pair.have.Refs() {
+				if !isCommandGate(registry, ref) {
+					continue
+				}
+				// A submission never carries a command gate. A stored template about
+				// to run may, when the trusted file has the very same gate in the
+				// very same chain of the same stage (its definitions are compared
+				// below), so editing the file does not strand a run whose command came
+				// from the file.
+				if forRun && hasGateRef(pair.want, ref) {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf("этап %q: гейт %s запускает команду или контейнер, которых нет в файловом конфиге", stage.ID, ref.Gate))
 			}
-			// A submission never carries a command gate. A stored template about
-			// to run may, when the trusted file has the very same gate in the
-			// very same stage (its definitions are compared below), so editing
-			// the file does not strand a run whose command came from the file.
-			if forRun && hasGateRef(trustedStages[stage.ID], ref) {
-				continue
-			}
-			problems = append(problems, fmt.Sprintf("этап %q: гейт %s запускает команду или контейнер, которых нет в файловом конфиге", stage.ID, ref.Gate))
 		}
 	}
 	problems = append(problems, c.workflowCommandGateProblems(trusted, registry, forRun)...)
+	// Workflow gates are a process boundary, but unlike other tighten-only
+	// fields they must also hold for a run: a pinned template may not drop or
+	// weaken a workflow gate of the file configuration (finding B).
+	problems = append(problems, c.workflowTightenProblems(trusted)...)
 	trustedAdapters, trustedChecks, trustedMCP := trustedDefinitions(trusted)
 	for _, name := range sortedMapKeys(c.ExecutorAdapters) {
 		if !reflect.DeepEqual(c.ExecutorAdapters[name], trustedAdapters[name]) {
@@ -290,10 +303,11 @@ func effectiveExecutor(executor string) string {
 }
 
 // stageTightenProblems enforces the tighten-only stage fields of a stage that
-// exists in the trusted template: it cannot become skippable, and none of its
-// non-command exit gates (which include the confirmation of a transition) can
-// be removed or changed. Adding gates only makes the stage stricter; command
-// gates are refused separately. Deleting a whole stage stays allowed.
+// exists in the trusted template: it cannot become skippable, none of its
+// non-command gates (exit and entry, including the confirmation of a
+// transition) can be removed or changed, and no declared input artifact type
+// can be dropped. Adding gates or input types only makes the stage stricter;
+// command gates are refused separately. Deleting a whole stage stays allowed.
 func stageTightenProblems(stage, want TemplateStage) []string {
 	var problems []string
 	if stage.Skippable && !want.Skippable {
@@ -301,35 +315,51 @@ func stageTightenProblems(stage, want TemplateStage) []string {
 	}
 	registry := gatelib.Default()
 	// Both the exit and the entry chain are tighten-only: a gate the file
-	// configuration requires cannot be removed or weakened from the web.
-	for _, wantRef := range chainsRefs([]workflow.GateGroups{want.EffectiveGateGroups(), want.EntryGateGroups}) {
-		if isCommandGate(registry, wantRef) || hasGateRef(stage, wantRef) {
-			continue
+	// configuration requires cannot be removed or weakened from the web. The
+	// two chains are compared separately — a gate moved exit→entry (or back)
+	// checks a different artifact and must be refused, not counted as kept
+	// just because it appears in the other chain (finding C).
+	for _, pair := range []struct {
+		field      string
+		want, have workflow.GateGroups
+	}{
+		{"exit_gate_groups", want.EffectiveGateGroups(), stage.EffectiveGateGroups()},
+		{"entry_gate_groups", want.EntryGateGroups, stage.EntryGateGroups},
+	} {
+		for _, wantRef := range pair.want.Refs() {
+			if isCommandGate(registry, wantRef) || hasGateRef(pair.have, wantRef) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf("этап %q: %s: гейт %s (%s) файлового конфига нельзя убрать или ослабить из веба", stage.ID, pair.field, wantRef.InstanceName(), wantRef.Key()))
 		}
-		problems = append(problems, fmt.Sprintf("этап %q: гейт %s (%s) файлового конфига нельзя убрать или ослабить из веба", stage.ID, wantRef.InstanceName(), wantRef.Key()))
+	}
+	// InputArtifacts declares which input types the entry gates validate.
+	// Removing a type weakens that validation, so the web may only add types.
+	for _, artifact := range want.InputArtifacts {
+		kept := false
+		for _, have := range stage.InputArtifacts {
+			if have == artifact {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			problems = append(problems, fmt.Sprintf("этап %q: input_artifacts: тип %s файлового конфига нельзя убрать из веба", stage.ID, artifact))
+		}
 	}
 	return problems
 }
 
-// hasGateRef reports whether stage uses a gate semantically equal to ref in
-// either its exit or its entry chain: the same definition, version, instance
-// name, mode and parameters.
-func hasGateRef(stage TemplateStage, ref workflow.GateRef) bool {
-	for _, have := range chainsRefs([]workflow.GateGroups{stage.EffectiveGateGroups(), stage.EntryGateGroups}) {
+// hasGateRef reports whether groups use a gate semantically equal to ref: the
+// same definition, version, instance name, mode and parameters. Callers pass a
+// single chain so that exit and entry gates are never confused (finding C).
+func hasGateRef(groups workflow.GateGroups, ref workflow.GateRef) bool {
+	for _, have := range groups.Refs() {
 		if sameGateRef(have, ref) {
 			return true
 		}
 	}
 	return false
-}
-
-// chainsRefs flattens the references of several chains into one ordered list.
-func chainsRefs(chains []workflow.GateGroups) []workflow.GateRef {
-	var refs []workflow.GateRef
-	for _, chain := range chains {
-		refs = append(refs, chain.Refs()...)
-	}
-	return refs
 }
 
 // sameGateRef reports whether two references use the same definition, version,
@@ -395,6 +425,68 @@ func hasAnyGateRef(refs []workflow.GateRef, ref workflow.GateRef) bool {
 		}
 	}
 	return false
+}
+
+// workflowTightenProblems enforces the tighten-only semantics of the workflow
+// block (finding B), for publish and run alike:
+//
+//   - every effective gate of every workflow declared in the file must survive
+//     in the submitted workflow with the same instance, params and mode. The
+//     comparison uses the resolved chains, so a weakened point override or a
+//     removed inherited gate is caught;
+//   - the active workflow cannot be switched to one whose effective chains do
+//     not preserve every gate the file's active workflow applies to the run.
+//
+// Exit and entry chains are compared separately: moving a workflow gate between
+// them checks a different artifact and is a weakening, not a preserved gate.
+func (c *Config) workflowTightenProblems(trusted *Config) []string {
+	var problems []string
+	trustedByID := map[string]*WorkflowMeta{}
+	for i := range trusted.Workflows {
+		trustedByID[trusted.Workflows[i].ID] = &trusted.Workflows[i]
+	}
+	for _, id := range sortedMapKeys(trustedByID) {
+		problems = append(problems,
+			workflowChainTightenProblems(
+				workflowEffectiveRefs(trusted, id, true), workflowEffectiveRefs(c, id, true),
+				fmt.Sprintf("workflows[%s].entry_gate_groups", id))...)
+		problems = append(problems,
+			workflowChainTightenProblems(
+				workflowEffectiveRefs(trusted, id, false), workflowEffectiveRefs(c, id, false),
+				fmt.Sprintf("workflows[%s].exit_gate_groups", id))...)
+	}
+	problems = append(problems,
+		workflowChainTightenProblems(
+			workflowEffectiveRefs(trusted, trusted.ActiveWorkflowID(), true), workflowEffectiveRefs(c, c.ActiveWorkflowID(), true),
+			"workflow (активный).entry_gate_groups")...)
+	problems = append(problems,
+		workflowChainTightenProblems(
+			workflowEffectiveRefs(trusted, trusted.ActiveWorkflowID(), false), workflowEffectiveRefs(c, c.ActiveWorkflowID(), false),
+			"workflow (активный).exit_gate_groups")...)
+	return problems
+}
+
+// workflowChainTightenProblems lists effective refs of want that are missing
+// (or weakened) in have. Ref equality includes instance name, params and mode.
+func workflowChainTightenProblems(want, have []workflow.GateRef, path string) []string {
+	var problems []string
+	for _, ref := range want {
+		if !hasAnyGateRef(have, ref) {
+			problems = append(problems, fmt.Sprintf("%s: гейт %s (%s) файлового конфига нельзя убрать или ослабить из веба", path, ref.InstanceName(), ref.Key()))
+		}
+	}
+	return problems
+}
+
+// workflowEffectiveRefs resolves a workflow's chain through inheritance and
+// point overrides. A broken/unknown workflow contributes no refs, which the
+// tighten comparison reports as dropped gates.
+func workflowEffectiveRefs(cfg *Config, id string, entry bool) []workflow.GateRef {
+	chain, err := cfg.WorkflowGateGroups(id, entry)
+	if err != nil {
+		return nil
+	}
+	return chain.Refs()
 }
 
 func sameParams(a, b map[string]any) bool {

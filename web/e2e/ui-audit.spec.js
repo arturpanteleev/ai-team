@@ -65,6 +65,19 @@ async function horizontalOverflow(page) {
   }))
 }
 
+// Resolve a CSS custom property to the same computed form the browser reports
+// for a real element (hex var -> rgb, shadow token -> shadow list).
+async function tokenValue(page, declaration, property) {
+  return page.evaluate(({ declaration, property }) => {
+    const node = document.createElement('span')
+    node.style.cssText = `position:absolute;left:-9999px;${declaration}`
+    document.body.appendChild(node)
+    const value = getComputedStyle(node)[property]
+    node.remove()
+    return value
+  }, { declaration, property })
+}
+
 // Dark and phone variants are shot for the states that differ most; light desktop for all of them.
 const keyStates = ['awaiting-human', 'override', 'blocked-gate', 'tracker-conflict']
 
@@ -378,4 +391,134 @@ test.describe('empty and error states', () => {
     await expect(page.getByRole('button', { name: 'Отозвать токен «Claude Code»' })).toBeVisible()
     await shot(page, 'mcp-access-light-desktop')
   })
+})
+
+// DES-04: the animations use DES-02 tokens, keep S16 colour meanings and are
+// readable in both themes. The neutral/secondary "primary" rule above still
+// holds for every scenario looped through at the top of the file.
+test.describe('DES-04: animated timeline and gates', () => {
+  // The audit fixtures keep the event log short; the timeline needs a started
+  // attempt and a mark to render the effects, so override just that endpoint.
+  const timelineEvents = [
+    { version: 1, cursor: 1, run_id: 'run-audit', sequence: 1, type: 'attempt_started', attempt_id: 'impl-1', stage: 'implementation', timestamp: '2026-10-12T09:00:00Z', data: { agent: 'coder' } },
+    { version: 1, cursor: 2, run_id: 'run-audit', sequence: 2, type: 'check_overridden', stage: 'implementation', actor: 'root', timestamp: '2026-10-12T09:05:00Z', data: { reason: 'flaky' } },
+  ]
+
+  async function journal(page, id, theme, withTimeline = false) {
+    await page.addInitScript((value) => { try { localStorage.setItem('ai-team:theme', value) } catch {} }, theme)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await installApi(page, id)
+    if (withTimeline) await page.route('**/api/runs/run-audit/events**', (route) => route.fulfill({ status: 200, json: { events: timelineEvents, next_cursor: timelineEvents.length } }))
+    await page.goto(`${baseURL}/tasks/run-audit`)
+    await expect(page.getByRole('heading', { name: 'greet-by-name', level: 1 })).toBeVisible()
+    await page.getByRole('tab', { name: 'Журнал' }).click()
+  }
+
+  for (const theme of ['light', 'dark']) {
+    test(`${theme}: running interval, marks and active visit keep executor and state colours`, async ({ page }) => {
+      await journal(page, 'working-agent', theme, true)
+      const open = page.locator('[data-open]').first()
+      await expect(open).toBeVisible()
+      const flow = await open.evaluate((element) => ({
+        stripes: getComputedStyle(element, '::before').animationName,
+        duration: getComputedStyle(element, '::before').animationDuration,
+        glow: getComputedStyle(element, '::after').animationName,
+        shadow: getComputedStyle(element, '::after').boxShadow,
+        border: getComputedStyle(element).borderTopColor,
+      }))
+      expect(flow.stripes).toContain('timeline-stripes')
+      expect(flow.duration).toContain('0.42s')
+      expect(flow.glow).toContain('timeline-glow')
+      expect(flow.shadow).not.toBe('none')
+      expect(flow.border).toBe(await tokenValue(page, 'border-color: var(--executor-agent)', 'borderTopColor'))
+
+      const mark = page.locator('[data-kind][title]').first()
+      await expect(mark).toBeVisible()
+      expect(await mark.evaluate((element) => getComputedStyle(element).animationName)).toContain('mark-in')
+
+      const visit = page.locator('[data-active]').first()
+      await expect(visit).toBeVisible()
+      const active = await visit.evaluate((element) => ({
+        glow: getComputedStyle(element, '::after').animationName,
+        shadow: getComputedStyle(element, '::after').boxShadow,
+        background: getComputedStyle(element).backgroundColor,
+      }))
+      expect(active.glow).toContain('visit-glow')
+      expect(active.shadow).toBe(await tokenValue(page, 'box-shadow: var(--glow-accent)', 'boxShadow'))
+      expect(active.background).toBe(await tokenValue(page, 'background-color: var(--tint-indigo)', 'backgroundColor'))
+    })
+
+    test(`${theme}: override stays red, advisory amber and a technical gate dashed`, async ({ page }) => {
+      await open(page, 'override', { theme })
+      await page.getByRole('tab', { name: /Гейты/ }).click()
+      const override = page.locator('[data-kind="override"]').first()
+      await expect(override).toBeVisible()
+      const red = await override.evaluate((element) => ({
+        animation: getComputedStyle(element, '::before').animationName,
+        shadow: getComputedStyle(element, '::before').boxShadow,
+        color: getComputedStyle(element).color,
+        background: getComputedStyle(element).backgroundColor,
+      }))
+      expect(red.animation).toContain('banner-glow')
+      expect(red.shadow).toBe(await tokenValue(page, 'box-shadow: var(--glow-coral)', 'boxShadow'))
+      expect(red.color).toBe(await tokenValue(page, 'color: var(--danger-fg)', 'color'))
+      expect(red.background).toBe(await tokenValue(page, 'background-color: var(--danger-bg)', 'backgroundColor'))
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await open(page, 'advisory', { theme })
+      await page.getByRole('tab', { name: /Гейты/ }).click()
+      const advisory = page.locator('[data-kind="advisory"]').first()
+      await expect(advisory).toBeVisible()
+      const amber = await advisory.evaluate((element) => ({
+        animation: getComputedStyle(element, '::before').animationName,
+        shadow: getComputedStyle(element, '::before').boxShadow,
+        color: getComputedStyle(element).color,
+        background: getComputedStyle(element).backgroundColor,
+      }))
+      expect(amber.animation).toContain('banner-glow')
+      expect(amber.shadow).toBe(await tokenValue(page, 'box-shadow: var(--glow-accent)', 'boxShadow'))
+      expect(amber.color).toBe(await tokenValue(page, 'color: var(--warning-fg)', 'color'))
+      expect(amber.background).toBe(await tokenValue(page, 'background-color: var(--warning-bg)', 'backgroundColor'))
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await open(page, 'gate-error', { theme })
+      await page.getByRole('tab', { name: /Гейты/ }).click()
+      const technical = page.locator('[class*="technical"]').first()
+      await expect(technical).toBeVisible()
+      const error = await technical.evaluate((element) => ({
+        outline: getComputedStyle(element).outlineStyle,
+        color: getComputedStyle(element).outlineColor,
+      }))
+      expect(error.outline).toBe('dashed')
+      expect(error.color).toBe(await tokenValue(page, 'border-color: var(--danger-fg)', 'borderTopColor'))
+    })
+
+    test(`${theme}: reduced motion leaves every DES-04 effect static`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await journal(page, 'working-agent', theme, true)
+      const stopped = await page.evaluate(() => {
+        const segment = document.querySelector('[data-open]')
+        const mark = document.querySelector('[data-kind][title]')
+        const visit = document.querySelector('[data-active]')
+        return {
+          stripes: getComputedStyle(segment, '::before').animationName,
+          segmentGlow: getComputedStyle(segment, '::after').animationName,
+          mark: getComputedStyle(mark).animationName,
+          visit: getComputedStyle(visit, '::after').animationName,
+          markOpacity: getComputedStyle(mark).opacity,
+        }
+      })
+      expect(stopped).toEqual({ stripes: 'none', segmentGlow: 'none', mark: 'none', visit: 'none', markOpacity: '1' })
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await open(page, 'override', { theme })
+      await page.getByRole('tab', { name: /Гейты/ }).click()
+      const banner = await page.locator('[data-kind="override"]').first().evaluate((element) => ({
+        animation: getComputedStyle(element, '::before').animationName,
+        opacity: getComputedStyle(element, '::before').opacity,
+      }))
+      expect(banner.animation).toBe('none')
+      expect(Number(banner.opacity)).toBeGreaterThan(0)
+    })
+  }
 })

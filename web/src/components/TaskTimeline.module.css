@@ -130,11 +130,13 @@
 .segment[data-executor='agent'],
 .swatch[data-executor='agent'] {
   --lane-color: var(--executor-agent);
+  --lane-glow: var(--glow-accent);
 }
 
 .segment[data-executor='human'],
 .swatch[data-executor='human'] {
   --lane-color: var(--executor-human);
+  --lane-glow: var(--glow-coral);
   border-style: dashed;
 }
 
@@ -158,10 +160,52 @@
   border-right-style: dotted;
 }
 
+/* DES-04: у идущего интервала бегут полосы и дышит неоновый поток.
+   Цвет исполнителя (--lane-color) и его смысл не меняются: двигается только
+   подсветка, цвет задан тот же, что и у статичной полосы. */
+.segment[data-open]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(90deg, transparent 0 9px, rgb(255 255 255 / 38%) 9px 12px);
+  animation: timeline-stripes var(--duration-slow) var(--ease-standard) infinite;
+}
+
+.segment[data-open]::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: var(--lane-glow, none);
+  animation: timeline-glow var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
+@keyframes timeline-stripes {
+  from { background-position: 0 0; }
+  to { background-position: 12px 0; }
+}
+
+@keyframes timeline-glow {
+  from { opacity: 0.18; }
+  to { opacity: 0.8; }
+}
+
+/* Метки появляются, а не мигают: transform сохраняет центрирование по шкале. */
 .mark {
   position: absolute;
   top: -6px;
   transform: translateX(-50%);
+  animation: mark-in var(--duration-normal) var(--ease-out) both;
+}
+
+@keyframes mark-in {
+  from { opacity: 0; transform: translate(-50%, -5px) scale(0.8); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
 .card {
@@ -269,13 +313,29 @@
   font-size: 0.65rem;
   line-height: 12px;
   text-align: center;
-  overflow: hidden;
 }
 
 .visit[data-active] {
   border-color: var(--text-primary);
   background: var(--tint-indigo);
   color: var(--ink-indigo);
+}
+
+/* DES-04: активное посещение подсвечивается акцентным свечением (так же,
+   как текущий узел схемы). Оттенок visited-состояния остаётся индиго. */
+.visit[data-active]::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: var(--glow-accent);
+  animation: visit-glow var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
+@keyframes visit-glow {
+  from { opacity: 0.15; }
+  to { opacity: 0.7; }
 }
 
 .visit[data-returned] {
@@ -288,5 +348,22 @@
 }
 
 .visitText {
+  display: block;
   padding: 0 2px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* DES-04: при reduced-motion остаётся только статичная читаемая разметка. */
+@media (prefers-reduced-motion: reduce) {
+  .segment[data-open]::before,
+  .segment[data-open]::after,
+  .mark,
+  .visit[data-active]::after {
+    animation: none !important;
+  }
+
+  .segment[data-open]::before { opacity: 0.18; }
+  .segment[data-open]::after { opacity: 0.3; }
+  .visit[data-active]::after { opacity: 0.25; }
 }

@@ -15,10 +15,14 @@ import (
 //
 //   - v5 (LegacySchemaVersion) expresses what a stage must satisfy through
 //     three unrelated stage fields: required_sections, check and confirm.
-//   - v6 (CurrentSchemaVersion) replaces all three with one explicit
+//   - v6 (GateSchemaVersion) replaces all three with one explicit
 //     exit_gate_groups list of gate references into the versioned gate
 //     library (pkg/gatelib). The stage result type (result: md|link|approve)
 //     is the only thing left that describes the result itself.
+//   - v7 (WorkflowSchemaVersion) keeps everything v6 means for stages and adds
+//     the top-level `workflows` metadata block plus per-stage
+//     `entry_gate_groups`. v7 is opt-in: init keeps writing v6, and v5/v6
+//     files keep loading unchanged.
 //
 // v5 files keep loading unchanged through the compatibility loader: the
 // legacy fields stay authoritative and are translated on demand by
@@ -28,15 +32,31 @@ import (
 // effective chain of either spelling; there is no engine-side projection of
 // a v6 chain back to the legacy fields.
 const (
-	LegacySchemaVersion  = 5
-	CurrentSchemaVersion = 6
+	LegacySchemaVersion = 5
+	// GateSchemaVersion is the first schema with the versioned gate library.
+	GateSchemaVersion = 6
+	// WorkflowSchemaVersion adds workflow metadata and entry gates. It is the
+	// newest accepted schema; CurrentSchemaVersion stays at v6 so that init
+	// keeps emitting a config every existing v6 reader already understands.
+	WorkflowSchemaVersion = 7
+	// CurrentSchemaVersion is the default schema written by init/migration.
+	CurrentSchemaVersion = GateSchemaVersion
 	// GraphSchemaVersion is the version of the compiled workflow graph, which
-	// does not depend on gates and is therefore unchanged by schema v6.
+	// does not depend on gates and is therefore unchanged by schema v6/v7.
 	GraphSchemaVersion = 5
+	// DefaultWorkflowID is the workflow synthesized for configs without a
+	// `workflows` block (and the inheritance root for the other workflows).
+	DefaultWorkflowID = "idea-to-prod"
+	// DefaultGraphID is the SDLC graph of the default workflow.
+	DefaultGraphID = "sdlc"
 )
 
 // SupportedSchemaVersions lists the config schemas the loader accepts.
-var SupportedSchemaVersions = []int{LegacySchemaVersion, CurrentSchemaVersion}
+var SupportedSchemaVersions = []int{LegacySchemaVersion, GateSchemaVersion, WorkflowSchemaVersion}
+
+// gateAwareSchemaVersion reports whether a schema expresses gates as explicit
+// gate references (v6 and v7) rather than v5's stage fields.
+func gateAwareSchemaVersion(version int) bool { return version >= GateSchemaVersion }
 
 func supportedSchemaVersion(version int) bool {
 	for _, supported := range SupportedSchemaVersions {
@@ -229,10 +249,40 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 		for _, err := range errs {
 			add("%s: %v%s", prefix, err, suffix)
 		}
-		if len(errs) > 0 || !explicit {
-			continue // a translated v5 chain is shaped by construction
+		if len(errs) == 0 && explicit {
+			c.validateChainConstraintsAt(reg, prefix, "exit_gate_groups", groups, add)
 		}
-		c.validateChainConstraints(reg, prefix, groups, add)
+
+		// Entry gates are a v7 addition: they check declared input artifacts
+		// after the inputs are resolved and before the executor runs. They are
+		// verdict-only and share the same versioned library and group model.
+		if len(stage.EntryGateGroups) == 0 {
+			continue // workflow-level entry gates are checked in validateWorkflows
+		}
+		if c.SchemaVersion < WorkflowSchemaVersion {
+			add("%s: входные гейты требуют schema_version %d; в v5/v6 entry_gate_groups и workflows недоступны", prefix, WorkflowSchemaVersion)
+			continue
+		}
+		types := stage.InputArtifacts
+		if len(types) == 0 {
+			types = []workflow.ArtifactType{""} // no declared type: no artifact restriction
+		}
+		var entryErrs int
+		for _, artifact := range types {
+			ctx := gatelib.GateContext{Artifact: artifact, LinkKind: stage.LinkKind, VerdictOnly: true}
+			_, problems := lib.ResolveGateGroups(stage.EntryGateGroups, ctx)
+			for _, err := range problems {
+				detail := ""
+				if artifact != "" {
+					detail = fmt.Sprintf(" (вход %s)", artifact)
+				}
+				add("%s: %v%s", prefix, err, detail)
+			}
+			entryErrs += len(problems)
+		}
+		if entryErrs == 0 {
+			c.validateChainConstraintsAt(reg, prefix, "entry_gate_groups", stage.EntryGateGroups, add)
+		}
 	}
 }
 
@@ -253,11 +303,11 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 //     no sense for the human decision (the transition itself) or for a grill
 //     (a question loop that must end before the chain goes on), so those two
 //     are required only.
-func (c *Config) validateChainConstraints(reg AgentLookup, prefix string, groups workflow.GateGroups, add func(format string, args ...any)) {
+func (c *Config) validateChainConstraintsAt(reg AgentLookup, prefix, field string, groups workflow.GateGroups, add func(format string, args ...any)) {
 	grills := 0
 	for i, group := range groups {
 		for j, ref := range group {
-			path := fmt.Sprintf("exit_gate_groups[%d][%d]", i, j)
+			path := fmt.Sprintf("%s[%d][%d]", field, i, j)
 			advisory := ref.Mode.Effective() == workflow.GateModeAdvisory
 			if advisory && ref.Gate == gatelib.GateHumanApproval {
 				add("%s: %s: human_approval не может быть advisory: решение человека — это сам переход этапа, оно всегда обязательное", prefix, path)
@@ -439,13 +489,33 @@ func (c *Config) GatePins() ([]workflow.GatePin, error) {
 	lib := c.library()
 	seen := map[string]workflow.GatePin{}
 	for i, stage := range c.Stages {
-		for _, ref := range stage.EffectiveGateGroups().Refs() {
-			def, err := lib.Lookup(ref.Gate, ref.Version)
-			if err != nil {
-				return nil, fmt.Errorf("stages[%d] (%s): %w", i, stage.ID, err)
-			}
-			seen[def.Ref()] = gatelib.Pin(def)
+		chains := []struct {
+			field  string
+			groups workflow.GateGroups
+		}{
+			{"exit_gate_groups", stage.EffectiveGateGroups()},
+			{"entry_gate_groups", stage.EntryGateGroups},
 		}
+		for _, chain := range chains {
+			for _, ref := range chain.groups.Refs() {
+				def, err := lib.Lookup(ref.Gate, ref.Version)
+				if err != nil {
+					return nil, fmt.Errorf("stages[%d] (%s) %s: %w", i, stage.ID, chain.field, err)
+				}
+				seen[def.Ref()] = gatelib.Pin(def)
+			}
+		}
+	}
+	workflowRefs, err := c.workflowGateRefs()
+	if err != nil {
+		return nil, fmt.Errorf("workflows: %w", err)
+	}
+	for _, ref := range workflowRefs {
+		def, err := lib.Lookup(ref.Gate, ref.Version)
+		if err != nil {
+			return nil, fmt.Errorf("workflows: %w", err)
+		}
+		seen[def.Ref()] = gatelib.Pin(def)
 	}
 	pins := make([]workflow.GatePin, 0, len(seen))
 	for _, pin := range seen {

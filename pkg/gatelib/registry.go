@@ -155,6 +155,7 @@ func joinInts(values []int) string {
 func cloneDefinition(def workflow.GateDefinition) workflow.GateDefinition {
 	def.ResultTypes = append([]string(nil), def.ResultTypes...)
 	def.LinkKinds = append([]string(nil), def.LinkKinds...)
+	def.InputArtifacts = append([]workflow.ArtifactType(nil), def.InputArtifacts...)
 	params := make([]workflow.GateParam, len(def.Params))
 	for i, param := range def.Params {
 		param.Enum = append([]string(nil), param.Enum...)
@@ -183,6 +184,14 @@ func validateDefinition(def workflow.GateDefinition) error {
 	}
 	if strings.TrimSpace(def.Title) == "" {
 		return fmt.Errorf("title обязателен")
+	}
+	if !def.Output.Valid() {
+		return fmt.Errorf("output %q неизвестен (verdict|artifact)", def.Output)
+	}
+	for _, artifact := range def.InputArtifacts {
+		if !artifact.Valid() {
+			return fmt.Errorf("тип входного артефакта %q неизвестен (md|link)", artifact)
+		}
 	}
 	seen := map[string]bool{}
 	for _, param := range def.Params {

@@ -79,6 +79,71 @@ func (r *Registry) ResolveGroups(groups workflow.GateGroups, stage StageContext)
 	return out, errs
 }
 
+// GateContext is the applicability context of a gate outside the stage-result
+// path: an entry gate checks an input artifact before the executor runs.
+type GateContext struct {
+	// Artifact is the input artifact type (md or link).
+	Artifact workflow.ArtifactType
+	// LinkKind is pr, build or other for a link artifact.
+	LinkKind string
+	// VerdictOnly rejects definitions that produce a new artifact. Entry gates
+	// are verdict-only: they run before the executor and must not change inputs.
+	VerdictOnly bool
+	// Lenient skips artifact/link applicability, used only by v5/v6 translation.
+	Lenient bool
+}
+
+// ResolveGate checks one reference against the library in an artifact context.
+// It reuses the exact-reference, parameter and kind checks of Resolve and adds
+// the input-artifact and verdict-only rules of the entry contract.
+func (r *Registry) ResolveGate(ref workflow.GateRef, ctx GateContext) (Resolved, error) {
+	// Resolve with a lenient result context: entry gates are matched against
+	// input artifact types below, not against a stage result type.
+	resolved, err := r.Resolve(ref, StageContext{Lenient: true})
+	if err != nil {
+		return Resolved{}, err
+	}
+	if !ctx.Lenient && ctx.Artifact.Valid() && !resolved.Definition.AcceptsArtifact(ctx.Artifact) {
+		return Resolved{}, fmt.Errorf("гейт %s не принимает артефакт типа %s (доступны: %s)", resolved.Definition.Ref(), ctx.Artifact, joinArtifacts(resolved.Definition.InputArtifacts))
+	}
+	if !ctx.Lenient && ctx.Artifact == workflow.ArtifactTypeLink && len(resolved.Definition.LinkKinds) > 0 && !contains(resolved.Definition.LinkKinds, ctx.LinkKind) {
+		return Resolved{}, fmt.Errorf("гейт %s применим только к link_kind %s, у входа link_kind %q", resolved.Definition.Ref(), strings.Join(resolved.Definition.LinkKinds, "|"), ctx.LinkKind)
+	}
+	if ctx.VerdictOnly && resolved.Definition.Output.ProducesArtifact() {
+		return Resolved{}, fmt.Errorf("гейт %s создаёт новый артефакт и не может быть входным: входной гейт возвращает только вердикт", resolved.Definition.Ref())
+	}
+	return resolved, nil
+}
+
+// ResolveGateGroups resolves every reference of an entry chain and returns all
+// problems with the entry_gate_groups[i][j] path, mirroring ResolveGroups.
+func (r *Registry) ResolveGateGroups(groups workflow.GateGroups, ctx GateContext) ([][]Resolved, []error) {
+	errs := groups.ValidateShapeAt("entry_gate_groups")
+	out := make([][]Resolved, len(groups))
+	for i, group := range groups {
+		for j, ref := range group {
+			if ref.ValidateShape() != nil {
+				continue // already reported by ValidateShapeAt
+			}
+			resolved, err := r.ResolveGate(ref, ctx)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("entry_gate_groups[%d][%d]: %w", i, j, err))
+				continue
+			}
+			out[i] = append(out[i], resolved)
+		}
+	}
+	return out, errs
+}
+
+func joinArtifacts(types []workflow.ArtifactType) string {
+	parts := make([]string, len(types))
+	for i, t := range types {
+		parts[i] = string(t)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // ValidateParams validates parameters against the definition's schema.
 func ValidateParams(def workflow.GateDefinition, params map[string]any) error {
 	declared := make(map[string]workflow.GateParam, len(def.Params))

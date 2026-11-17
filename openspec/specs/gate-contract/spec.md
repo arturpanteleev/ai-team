@@ -14,7 +14,13 @@
 
 A gate definition MUST have an ID, an exact positive integer version, a kind
 (`builtin`, `llm`, `human`, `external`, or `docker`), a title, a typed parameter
-schema, and optionally the result types and link kinds it applies to. The
+schema, and optionally the result types and link kinds it applies to. A
+definition MUST also declare the input artifact types it accepts (`md` and/or
+`link` in the first iteration) and whether its output is a `verdict` (default)
+or a new `artifact`; unknown artifact types and output kinds MUST be rejected
+at registration. A gate checks one immutable version of an artifact and yields
+a verdict, optionally accompanied by a new artifact; it MUST NOT edit the
+checked artifact. The
 library MUST live in repository code and MUST change only through a code change;
 the Web UI, REST API, and MCP MUST expose the catalog read-only and MUST NOT
 accept uploaded or edited definitions. A published ID and version MUST be
@@ -175,6 +181,120 @@ A reference MAY be written as `id@version` or as a mapping with `gate`,
 - **ТОГДА** each stage MUST use exactly the gates it lists in the listed group
   order
 
+### Requirement: Entry gates check resolved inputs before the executor
+
+A template stage MUST support `entry_gate_groups`, a chain of gate references
+using the same versioned definitions, `gate@version` references, typed
+parameters and sequential groups with parallel gates inside a group as the exit
+chain. The stage MAY declare `input_artifacts` (`md` and/or `link`): every entry
+gate reference MUST accept each declared type, and a definition that produces a
+new artifact MUST NOT be used as an entry gate. Unknown IDs, unknown or
+floating versions, undeclared or invalid parameters, inapplicable artifact
+types, empty groups and duplicate instance names MUST be rejected before a run
+starts, naming the stage and the `entry_gate_groups[i][j]` path.
+
+The controller MUST run the entry chain **after the stage inputs are resolved
+and before `StageExecutor.Execute`**. A required entry gate that returns
+`fail`, ends in a technical failure, or waits for an external decision MUST
+block the executor: it MUST NOT be called for that attempt. When every required
+entry gate passes, the executor MUST run at most once. Entry attempts MUST be
+recorded in the durable gate journal with the same separate `execution` and
+`verdict` fields as exit attempts and with `phase: entry`, so a failed input
+check and its verdict stay visible in the journal and the API. Entry gates are
+verdict-only: they MUST NOT change the resolved inputs. `entry_gate_groups`
+MUST require schema version 7; v5 and v6 configs without it keep loading and
+running unchanged.
+
+#### Scenario: Failed entry gate blocks the executor
+
+- **КОГДА** a stage declares one required entry gate and that gate returns `fail`
+- **ТОГДА** `StageExecutor.Execute` MUST NOT be called for this attempt
+- **И** the journal MUST contain a finished attempt with `phase: entry`,
+  `execution: succeeded` and `verdict: fail`
+
+#### Scenario: Later groups do not start after a failed entry group
+
+- **КОГДА** the first entry group has two gates and one returns `fail`, and a
+  second group follows
+- **ТОГДА** both gates of the first group MUST finish and be recorded
+- **И** the second group and the executor MUST NOT start
+
+#### Scenario: Entry gate with the wrong artifact type
+
+- **КОГДА** a stage declares `input_artifacts: [md]` and references a gate that
+  only accepts `link`
+- **ТОГДА** configuration validation MUST fail naming the gate, the declared
+  artifact type and the `entry_gate_groups` path
+
+#### Scenario: Old configs need no entry gates
+
+- **КОГДА** a v5 or v6 config without `entry_gate_groups` is loaded
+- **ТОГДА** validation and the run MUST behave as before and the default
+  workflow MUST be synthesized in memory
+
+### Requirement: Input artifact types are part of the gate contract
+
+The gate contract MUST limit the first iteration to `md` (Markdown document) and
+`link` (a reference to an external object). A gate definition MUST declare
+which of them it accepts; an empty list means any. A gate MUST receive an
+immutable artifact version and MUST return either a verdict or, for definitions
+that declare it, a verdict plus a new artifact. Entry gates MUST be limited to
+verdict output. Images and diagrams are a later extension of this contract and
+MUST NOT be accepted as artifact types in this iteration.
+
+#### Scenario: Gate output cannot be silently substituted
+
+- **КОГДА** a definition declares `output: artifact` and is referenced from an
+  entry chain
+- **ТОГДА** validation MUST reject the reference with a message stating that
+  an entry gate returns only a verdict
+
+### Requirement: Workflow metadata and workflow gate chains
+
+Schema version 7 MAY declare a top-level `workflows` block. Each workflow MUST
+have `id`, `title`, `version` and a set of `graphs` with explicit transitions
+between them; it MAY have `description`, workflow-wide `entry_gate_groups` and
+`exit_gate_groups`, an `extends` parent and point overrides by instance name.
+The default workflow is `idea-to-prod` with the SDLC graph set; it MUST be
+synthesized in memory for v5/v6 configs so they need no migration. A workflow
+MUST NOT have `model` or `runtime` fields: those belong to agents and executor
+adapters. The optional top-level `workflow` selects the active workflow and
+MUST name a declared one. A v5/v6 file MUST NOT contain `workflows` or
+`workflow`, and a v7 file MUST declare `workflows`.
+
+Workflow gate chains MUST use the same versioned definitions and `gate@version`
+references as stage chains. A workflow with no declared chain of a kind MUST
+inherit it from its `extends` parent or, when `extends` is omitted, from the
+default workflow; a declared chain MUST replace the inherited one; an override
+by instance name MUST replace exactly that reference. Inheritance cycles,
+overrides naming a missing instance, and two different versions of the same
+gate in one effective chain MUST be rejected before a run starts with an error
+naming the workflow and the conflict. Two workflows with different gate sets
+MUST load in the same config simultaneously. Stage entry gates MUST combine
+with the active workflow's entry chain with same-name stage references taking
+precedence, preserving group order.
+
+#### Scenario: Two workflows with different gates load together
+
+- **КОГДА** one workflow declares `verdict_marker@1` as its entry gate and
+  another declares `required_sections@1`, and both are in one v7 config
+- **ТОГДА** validation MUST accept the config and each workflow MUST resolve
+  its own entry chain, and a pin MUST exist for every referenced definition
+
+#### Scenario: Version conflict in a workflow chain
+
+- **КОГДА** an effective workflow chain references `agent_review@1` and
+  `agent_review@2`
+- **ТОГДА** validation MUST fail with a message naming the gate, both versions
+  and the conflicting chain
+
+#### Scenario: Point override
+
+- **КОГДА** a child workflow inherits a chain and overrides one gate instance
+  by name
+- **ТОГДА** only that instance MUST change and every other inherited reference
+  MUST remain byte-identical
+
 ### Requirement: Templates and tasks pin exact definitions
 
 A template MUST bind to exact definitions through its `id@version` references,
@@ -219,8 +339,9 @@ earlier attempt. A required attempt MUST block unless it succeeded with `pass` o
 
 ### Requirement: Groups run sequentially and gates of a group run in parallel
 
-The controller MUST execute the exit chain of a stage group by group in the
-listed order, and MUST start the gates of one group together, running at most
+The controller MUST execute each chain of a stage — the exit chain and, in
+schema v7, the entry chain — group by group in the listed order, and MUST start
+the gates of one group together, running at most
 the configured concurrency limit (`gate_concurrency`, default 4, range 1 to 64)
 at the same time. A group MAY mix gate kinds (code and LLM) and a stage MAY have
 several LLM gates (a stage MAY have at most one `agent_review` in mode `grill`);

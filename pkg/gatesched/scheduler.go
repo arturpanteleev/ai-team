@@ -84,7 +84,10 @@ type WaveKey struct {
 
 // Wave is one execution of a stage's exit chain over one result version.
 type Wave struct {
-	Key    WaveKey
+	Key WaveKey
+	// Phase distinguishes the entry chain (before the executor) from the
+	// historical exit chain. It is copied to every attempt of the wave.
+	Phase  workflow.GatePhase
 	Groups workflow.GateGroups
 	// Definitions maps GateRef.Key() ("id@version") to the pinned definition.
 	Definitions map[string]workflow.GateDefinition
@@ -561,7 +564,9 @@ func (s *Scheduler) store(sl *slot, attempt workflow.GateAttempt) {
 }
 
 func (s *Scheduler) newAttempt(wave Wave, sl *slot) workflow.GateAttempt {
-	return NewAttempt(wave.Key, sl.ref, sl.def, sl.group, len(sl.attempts)+1, s.opts.Clock())
+	attempt := NewAttempt(wave.Key, sl.ref, sl.def, sl.group, len(sl.attempts)+1, s.opts.Clock())
+	attempt.Phase = wave.Phase.Effective()
+	return attempt
 }
 
 // AttemptID is the deterministic ID of the n-th (1-based) attempt of a gate

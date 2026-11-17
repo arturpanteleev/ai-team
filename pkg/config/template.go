@@ -44,9 +44,18 @@ type TemplateStage struct {
 	// ExitGateGroups is the gate chain checked before the stage may be left:
 	// groups run sequentially, gates inside a group are independent. Schema v6.
 	ExitGateGroups workflow.GateGroups `yaml:"exit_gate_groups,omitempty"`
-	Skippable      bool                `yaml:"skippable,omitempty"`
-	Delivery       *TemplateDelivery   `yaml:"delivery,omitempty"`
-	MCPServers     []string            `yaml:"mcp_servers,omitempty"`
+	// EntryGateGroups is the gate chain checked after the stage inputs are
+	// resolved and before StageExecutor.Execute: groups run sequentially, gates
+	// inside a group are independent. A failed required gate blocks the
+	// executor. Schema v7; refs are gate@version and verdict-only.
+	EntryGateGroups workflow.GateGroups `yaml:"entry_gate_groups,omitempty"`
+	// InputArtifacts declares the artifact types (md|link) of the stage inputs.
+	// Entry gate refs are checked against this list during validation. Empty
+	// means no type restriction. Schema v7.
+	InputArtifacts []workflow.ArtifactType `yaml:"input_artifacts,omitempty"`
+	Skippable      bool                    `yaml:"skippable,omitempty"`
+	Delivery       *TemplateDelivery       `yaml:"delivery,omitempty"`
+	MCPServers     []string                `yaml:"mcp_servers,omitempty"`
 }
 
 // TemplateCheck keeps the result check declarative. Execution is introduced by
@@ -85,7 +94,7 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		"executor": true, "agent": true, "adapter": true, "link_kind": true,
 		"required_sections": true, "check": true, "confirm": true,
 		"skippable": true, "delivery": true, "mcp_servers": true,
-		"exit_gate_groups": true,
+		"exit_gate_groups": true, "entry_gate_groups": true, "input_artifacts": true,
 	}, "config: stage"); err != nil {
 		return err
 	}
@@ -102,6 +111,20 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 		s.Confirm = defaultConfirmForResult(s.Result)
 	}
 	return nil
+}
+
+// MarshalYAML keeps the stage's gate chain as the single source of truth for
+// every schema whose stages already use gate references (v6 and v7). Config's
+// MarshalYAML normalizes v6 stages itself; this covers v7 configs, whose
+// schema version is newer than the constant it compares against, so that a
+// v7 template round-trips instead of emitting both spellings at once.
+func (s TemplateStage) MarshalYAML() (any, error) {
+	type plain TemplateStage
+	out := plain(s)
+	if len(out.ExitGateGroups) > 0 && (len(out.RequiredSections) > 0 || out.Check != nil || out.Confirm != "") {
+		out.RequiredSections, out.Check, out.Confirm = nil, nil, ""
+	}
+	return out, nil
 }
 
 // defaultConfirmForResult keeps YAML-loaded and programmatically constructed
@@ -195,6 +218,16 @@ func (c *Config) validateTemplate(reg AgentLookup) error {
 		}
 		if stage.Result != "md" && stage.Result != "link" && stage.Result != "approve" {
 			add("%s: result %q недопустим (md|link|approve)", prefix, stage.Result)
+		}
+		seenArtifacts := map[string]bool{}
+		for _, artifact := range stage.InputArtifacts {
+			if !artifact.Valid() {
+				add("%s: input_artifacts содержит неизвестный тип %q (md|link)", prefix, artifact)
+			}
+			if seenArtifacts[string(artifact)] {
+				add("%s: input_artifacts содержит повторяющийся тип %q", prefix, artifact)
+			}
+			seenArtifacts[string(artifact)] = true
 		}
 		if stage.Executor != "human" && stage.Executor != "agent" {
 			add("%s: executor %q недопустим (human|agent)", prefix, stage.Executor)

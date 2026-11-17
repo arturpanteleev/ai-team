@@ -175,7 +175,10 @@ jobs:
       - name: Frontend tests
         run: npm test
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        # Vite/Vitest are dev-only tooling and are not shipped in web/dist,
+        # which is the only frontend artifact embedded into the Go binary.
+        # Audit the dependencies that actually reach production.
+        run: npm audit --audit-level=high --omit=dev
 
   browser-e2e:
     needs: [build, frontend]

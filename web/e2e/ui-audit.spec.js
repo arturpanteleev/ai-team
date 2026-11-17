@@ -717,11 +717,20 @@ test.describe('DES-06: holographic state glyphs', () => {
         color: getComputedStyle(element).color,
         arc: getComputedStyle(element.querySelector('path[class*="arc"]')).animationName,
         scan: getComputedStyle(element.querySelector('line[class*="scan"]')).animationName,
+        dash: {
+          arc: getComputedStyle(element.querySelector('path[class*="arc"]')).strokeDasharray,
+          brackets: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
+          dots: getComputedStyle(element.querySelector('circle[class*="dots"]')).strokeDasharray,
+        },
         focusable: element.querySelectorAll('button, a, [tabindex]').length,
       }))
       expect(shape.color).toBe(await tokenValue(page, 'color: var(--text-secondary)', 'color'))
       expect(shape.arc).toContain('holo-draw')
       expect(shape.scan).toContain('holo-sweep')
+      // A dash offset cannot draw anything without a dash pattern to shift.
+      for (const [part, pattern] of Object.entries(shape.dash)) {
+        expect(pattern, `${theme}: ${part} has no computed stroke-dasharray`).not.toBe('none')
+      }
       expect(shape.focusable).toBe(0)
       expect(await page.locator('[data-holo="complete"], [data-holo="decision"]').count()).toBe(0)
     })
@@ -733,10 +742,17 @@ test.describe('DES-06: holographic state glyphs', () => {
       const check = await done.evaluate((element) => ({
         color: getComputedStyle(element).color,
         animation: getComputedStyle(element.querySelector('path[class*="check"]')).animationName,
+        dash: {
+          ring: getComputedStyle(element.querySelector('circle[class*="ring"]')).strokeDasharray,
+          check: getComputedStyle(element.querySelector('path[class*="check"]')).strokeDasharray,
+        },
         focusable: element.querySelectorAll('button, a, [tabindex]').length,
       }))
       expect(check.color).toBe(await tokenValue(page, 'color: var(--success-fg)', 'color'))
       expect(check.animation).toContain('holo-draw')
+      for (const [part, pattern] of Object.entries(check.dash)) {
+        expect(pattern, `${theme}: ${part} has no computed stroke-dasharray`).not.toBe('none')
+      }
       expect(check.focusable).toBe(0)
       expect(await page.locator('[data-holo="decision"]').count()).toBe(0)
       expect(await page.getByRole('complementary', { name: 'Действия' }).locator('button[class*="primary"]').count()).toBeLessThanOrEqual(1)
@@ -748,10 +764,12 @@ test.describe('DES-06: holographic state glyphs', () => {
       const orbit = await waiting.evaluate((element) => ({
         color: getComputedStyle(element).color,
         animation: getComputedStyle(element.querySelector('path[class*="orbit"]')).animationName,
+        bracketsDash: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
         focusable: element.querySelectorAll('button, a, [tabindex]').length,
       }))
       expect(orbit.color).toBe(await tokenValue(page, 'color: var(--ink-teal)', 'color'))
       expect(orbit.animation).toContain('holo-orbit')
+      expect(orbit.bracketsDash, `${theme}: decision brackets have no computed stroke-dasharray`).not.toBe('none')
       expect(orbit.focusable).toBe(0)
       expect(await page.locator('[data-holo="complete"]').count()).toBe(0)
       await expect(page.getByRole('button', { name: 'Принять и перейти: Техническая реализация' })).toBeVisible()
@@ -764,10 +782,19 @@ test.describe('DES-06: holographic state glyphs', () => {
     const stopped = await page.locator('[data-holo="empty"]').evaluate((element) => ({
       parts: [...element.querySelectorAll('svg *')].map((child) => getComputedStyle(child).animationName),
       filter: getComputedStyle(element.querySelector('svg')).filter,
+      glow: getComputedStyle(element, '::before').boxShadow,
+      dash: {
+        arc: getComputedStyle(element.querySelector('path[class*="arc"]')).strokeDasharray,
+        brackets: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
+      },
       width: element.getBoundingClientRect().width,
     }))
     expect(stopped.parts.every((name) => name === 'none')).toBe(true)
     expect(stopped.filter).toBe('none')
+    expect(stopped.glow).toBe('none')
+    for (const [part, pattern] of Object.entries(stopped.dash)) {
+      expect(pattern, `${part} lost its dash pattern without motion`).not.toBe('none')
+    }
     expect(stopped.width).toBeGreaterThan(0)
 
     await page.unrouteAll({ behavior: 'ignoreErrors' })
@@ -775,14 +802,27 @@ test.describe('DES-06: holographic state glyphs', () => {
     const done = await page.locator('[data-holo="complete"] circle[class*="ring"]').evaluate((element) => ({
       animation: getComputedStyle(element).animationName,
       offset: getComputedStyle(element).strokeDashoffset,
+      dash: getComputedStyle(element).strokeDasharray,
+      glow: getComputedStyle(element.closest('[data-holo]'), '::before').boxShadow,
     }))
-    expect(done).toEqual({ animation: 'none', offset: '0px' })
+    expect(done.animation).toBe('none')
+    expect(done.offset).toBe('0px')
+    expect(done.dash).not.toBe('none')
+    expect(done.glow).toBe('none')
 
     await page.unrouteAll({ behavior: 'ignoreErrors' })
     await open(page, 'awaiting-human')
     const orbits = await page.locator('[data-holo="decision"] path[class*="orbit"]').evaluateAll((elements) =>
       elements.map((element) => getComputedStyle(element).animationName))
     expect(orbits).toEqual(['none', 'none'])
+    const brackets = await page.locator('[data-holo="decision"] path[class*="brackets"]').evaluate((element) => ({
+      animation: getComputedStyle(element).animationName,
+      dash: getComputedStyle(element).strokeDasharray,
+      glow: getComputedStyle(element.closest('[data-holo]'), '::before').boxShadow,
+    }))
+    expect(brackets.animation).toBe('none')
+    expect(brackets.dash).not.toBe('none')
+    expect(brackets.glow).toBe('none')
   })
 
   test('390px keeps every glyph visible without horizontal scroll or a new tab stop', async ({ page }) => {

@@ -62,29 +62,26 @@
   color: var(--ink-teal);
 }
 
-.glyph :is(.ring, .arc, .scan, .core, .check, .spark, .orbit, .orbitAlt, .brackets) {
+.glyph :is(.ring, .arc, .dots, .scan, .core, .check, .spark, .orbit, .orbitAlt, .brackets) {
   transform-box: view-box;
   transform-origin: 50% 50%;
 }
 
-/* Базовое состояние — итоговое, видимое: при reduced-motion анимаций просто нет. */
+/* Пунктир пустого состояния — декоративная разметка, не draw-цель. */
+.dots {
+  stroke-dasharray: 3 7;
+}
+
+/* Draw-цели: dash pattern равен длине path, поэтому offset из holo-draw реально
+   прячет линию в первый кадр и разворачивает её к нулю. Без dasharray сдвиг
+   dashoffset не влияет на отрисовку и линия видна сразу. */
 .arc,
 .brackets,
 .ring,
 .check {
+  stroke-dasharray: var(--dash, 120);
   stroke-dashoffset: 0;
-}
-
-.arc,
-.brackets,
-.check,
-.ring {
   animation: holo-draw var(--duration-slow) var(--ease-out) both;
-}
-
-.brackets,
-.arc {
-  --dash: 64;
 }
 
 .check {
@@ -151,5 +148,9 @@
 
   .glyph svg {
     filter: none;
+  }
+
+  .glyph::before {
+    box-shadow: none;
   }
 }

@@ -34,6 +34,21 @@ describe('HoloGlyph holographic materialization (DES-06)', () => {
     expect(css).toContain('animation: holo-bloom var(--duration-slow)');
   });
 
+  it('gives every holo-draw target a dash pattern with a zero offset as the end state', () => {
+    const draw = css.match(/\.arc,\s*\.brackets,\s*\.ring,\s*\.check\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(draw, 'draw targets must share one dash rule').toBeTruthy();
+    // Without a pattern, animating stroke-dashoffset does nothing: the line is
+    // visible from the first frame instead of materialising.
+    expect(draw).toContain('stroke-dasharray: var(--dash, 120)');
+    expect(draw).toContain('stroke-dashoffset: 0');
+    expect(draw).toContain('animation: holo-draw');
+    expect(css).not.toMatch(/\.brackets,\s*\.arc\s*\{\s*--dash:/);
+  });
+
+  it('keeps the empty reticle dotted instead of turning it into a draw target', () => {
+    expect(css).toMatch(/\.dots\s*\{\s*stroke-dasharray:\s*3 7;\s*\}/);
+  });
+
   it('hardcodes no colours: S16 colour semantics stay in the theme tokens', () => {
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     expect(css).not.toMatch(/\brgba?\(/);
@@ -44,7 +59,10 @@ describe('HoloGlyph holographic materialization (DES-06)', () => {
     expect(reduced).toContain('animation: none');
     expect(reduced).toContain('.ring, .arc, .scan, .core, .check, .spark, .orbit, .orbitAlt, .brackets');
     expect(reduced).toContain('filter: none');
+    expect(reduced).toMatch(/\.glyph::before\s*\{\s*box-shadow:\s*none;\s*\}/);
     // The resting styles are the visible end state, so no motion means no missing glyph.
-    expect(css.slice(0, css.indexOf('@media (prefers-reduced-motion: reduce)'))).toContain('stroke-dashoffset: 0');
+    const base = css.slice(0, css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(base).toContain('stroke-dashoffset: 0');
+    expect(base).toContain('stroke-dasharray: var(--dash, 120)');
   });
 });

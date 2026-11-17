@@ -193,8 +193,39 @@
 }
 
 .routeItem {
+  position: relative;
   min-width: 0;
   display: flex;
+}
+
+/* Конвейер: направляющая над каждым этапом, по которой бежит поток. Движение и
+   свечение используют только токены DES-02; цветовая семантика S16 не тронута. */
+.routeItem::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: repeating-linear-gradient(90deg, var(--border-strong) 0 8px, transparent 8px 20px);
+  animation: routeFlow var(--duration-slow) linear infinite;
+  pointer-events: none;
+}
+
+.routeItem[data-state='current']::before {
+  background: repeating-linear-gradient(90deg, var(--accent) 0 8px, transparent 8px 20px);
+  box-shadow: var(--glow-accent);
+}
+
+@keyframes routeFlow {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 20px 0;
+  }
 }
 
 .routeButton {
@@ -220,6 +251,9 @@
   color: var(--text-primary);
   background: var(--tint-yellow);
   border-color: var(--accent);
+  box-shadow: var(--glow-accent);
+  transition: box-shadow var(--duration-normal) var(--ease-standard),
+    border-color var(--duration-normal) var(--ease-standard);
 }
 
 .routeItem[data-state='failed'] .routeButton {
@@ -238,6 +272,8 @@
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
+  transition: background-color var(--duration-normal) var(--ease-standard),
+    box-shadow var(--duration-normal) var(--ease-standard);
 }
 
 .routeItem[data-state='passed'] .routeDot {
@@ -248,6 +284,21 @@
 .routeItem[data-state='current'] .routeDot {
   background: var(--create-yellow);
   color: var(--on-yellow);
+  box-shadow: var(--glow-accent);
+  animation: routePulse var(--duration-slow) var(--ease-standard) infinite;
+}
+
+@keyframes routePulse {
+  0%,
+  100% {
+    box-shadow: var(--glow-accent);
+    transform: scale(1);
+  }
+
+  50% {
+    box-shadow: var(--glow-accent), var(--glow-accent);
+    transform: scale(1.12);
+  }
 }
 
 .routeItem[data-state='failed'] .routeDot {
@@ -539,6 +590,12 @@
 @media (prefers-reduced-motion: reduce) {
   .spinner,
   .buttonSpinner {
+    animation: none;
+  }
+
+  /* Неон полосы этапов при сниженной анимации не движется и не пульсирует. */
+  .routeItem::before,
+  .routeItem[data-state='current'] .routeDot {
     animation: none;
   }
 }
@@ -1051,16 +1108,24 @@
   overflow-wrap: anywhere;
 }
 
-.primary:hover:not(:disabled) {
-  background: var(--accent);
-  filter: brightness(0.96);
-}
-
-/* Главное действие этапа одно и заметно: жёлтая кнопка. */
+/* Главное действие этапа одно и заметно: жёлтая кнопка с мягким неоновым свечением. */
 .primary:not(:disabled) {
   border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-contrast);
+  box-shadow: var(--glow-accent);
+  transition: transform var(--duration-normal) var(--ease-out),
+    box-shadow var(--duration-normal) var(--ease-standard);
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(0.96);
+  transform: translateY(-2px);
+}
+
+.primary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .actions {

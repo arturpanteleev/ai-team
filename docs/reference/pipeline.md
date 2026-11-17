@@ -34,7 +34,7 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 |---|---|---|---|---|
 | `analyst` | превращает задачу в proposal: цели, требования, открытые вопросы и критерии приёмки; в терминале может задавать вам вопросы | `proposal.md` | ничего | — |
 | `architect` | пишет техническую спецификацию на основе согласованного proposal, технический дизайн и список задач | `specs/spec.md`, `design.md`, `tasks.md` | ничего | — |
-| `coder` | пишет код по дизайну | изменения в проекте | любые файлы; изменения обязательны | — |
+| `coder` | пишет код по дизайну | `coder.diff`, `unit-test-report.md` и изменения в проекте | любые файлы; изменения обязательны | `**Result:** PASS` или `FAIL` (в `unit-test-report.md`) |
 | `reviewer` | проверяет код на соответствие спецификации | `review.md` | ничего | `**Verdict:** APPROVED`, `CHANGES_REQUESTED` или `REJECTED` |
 | `tester` | пишет и запускает тесты | `test-report.md` | только тестовые файлы | `**Result:** PASS` или `FAIL` |
 | `verifier` | итоговая проверка: требования, тесты, ревью вместе | `verification.md` | ничего | `**Verdict:** APPROVED` или `CHANGES_REQUESTED` |

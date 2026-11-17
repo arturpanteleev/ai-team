@@ -191,7 +191,12 @@ gate reference MUST accept each declared type, and a definition that produces a
 new artifact MUST NOT be used as an entry gate. Unknown IDs, unknown or
 floating versions, undeclared or invalid parameters, inapplicable artifact
 types, empty groups and duplicate instance names MUST be rejected before a run
-starts, naming the stage and the `entry_gate_groups[i][j]` path.
+starts, naming the stage and the `entry_gate_groups[i][j]` path. A gate of kind
+`human` (including `human_approval`) MUST NOT be used as an entry gate: it is the
+transition approval of a stage, pauses only after the automatic chain, and has
+no runner in the entry wave. Validation MUST reject such a reference with a
+message stating that it belongs to the transition confirmation and cannot be an
+entry gate, naming the `entry_gate_groups[i][j]` path.
 
 The controller MUST run the entry chain **after the stage inputs are resolved
 and before `StageExecutor.Execute`**. A required entry gate that returns
@@ -225,6 +230,14 @@ running unchanged.
   only accepts `link`
 - **ТОГДА** configuration validation MUST fail naming the gate, the declared
   artifact type and the `entry_gate_groups` path
+
+#### Scenario: Human gate cannot be an entry gate
+
+- **КОГДА** a stage or workflow entry chain references `human_approval@1` or any
+  other gate of kind `human`
+- **ТОГДА** validation MUST fail with a message saying it is a transition
+  confirmation and cannot be an entry gate, naming the
+  `entry_gate_groups[i][j]` path
 
 #### Scenario: Old configs need no entry gates
 
@@ -272,7 +285,12 @@ gate in one effective chain MUST be rejected before a run starts with an error
 naming the workflow and the conflict. Two workflows with different gate sets
 MUST load in the same config simultaneously. Stage entry gates MUST combine
 with the active workflow's entry chain with same-name stage references taking
-precedence, preserving group order.
+precedence, preserving group order. A `human_approval` in the active workflow's
+exit chain MUST require the transition decision of every stage it applies to —
+including a stage that declares no gate of its own — and its `on_reject: stay`
+MUST keep the task at that stage for a new version; the compiled transition
+approval MUST be built from the effective merged exit chain, not from the
+stage's own gates alone.
 
 #### Scenario: Two workflows with different gates load together
 
@@ -294,6 +312,16 @@ precedence, preserving group order.
   by name
 - **ТОГДА** only that instance MUST change and every other inherited reference
   MUST remain byte-identical
+
+#### Scenario: Workflow-only human gate requires a decision
+
+- **КОГДА** the active workflow declares `human_approval@1` or
+  `human_approval@2` on its exit chain and a stage declares no human gate of its
+  own
+- **ТОГДА** leaving that stage forward MUST raise a transition approval and
+  wait for a person, even when the run was started with automatic gate approval
+- **И** with `on_reject: stay` a rejection MUST return the task to that stage
+  for a new version
 
 ### Requirement: Templates and tasks pin exact definitions
 

@@ -512,9 +512,18 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		if i+1 < len(c.Stages) {
 			next = c.Stages[i+1].ID
 		}
+		// The approval belongs to the exit chain the controller actually runs:
+		// the active workflow's exit gates merged with the stage's own chain.
+		// A workflow-level human_approval must require a real decision even when
+		// the stage declares no gate of its own; stage-only helpers would leave
+		// edge.Approval nil and make the declared confirmation inert.
+		exitGroups, err := c.ExitGateGroupsFor(stage)
+		if err != nil {
+			return graph, fmt.Errorf("workflow graph: этап %s: %w", stage.ID, err)
+		}
 		edge := workflow.Edge{From: stage.ID, Outcome: workflow.OutcomePassed, To: next}
 		confirm := "auto"
-		if stage.NeedsConfirmation() {
+		if gateGroupsNeedConfirmation(exitGroups) {
 			confirm = "required"
 		}
 		// A configured return is a human stage action as well as a rejected
@@ -523,7 +532,7 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		// forward and backward targets.
 		if (next != workflow.TerminalComplete && confirm == "required") || len(bySource[stage.ID]) > 0 {
 			edge.Approval = generatedApprovalWithReturns(stage.DecisionFunction(), next, bySource[stage.ID])
-			if stage.RejectStays() {
+			if gateGroupsRejectStays(exitGroups) {
 				// human_approval on_reject: stay — a rejection is recorded and
 				// the task waits at this stage for a new version.
 				edge.Approval.Actions["reject"] = stage.ID
@@ -573,10 +582,10 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 			}),
 		})
 	}
-	// Schema v5 controls confirmation per stage. Forward transitions with
-	// confirm:auto and no return routes are valid without an edge approval;
-	// required stages and stages with explicit return actions compile a gate,
-	// and backward return transitions always retain their approval.
+	// Forward transitions whose effective exit chain has no human gate and no
+	// return routes are valid without an edge approval; a human_approval from
+	// the stage or the workflow chain and explicit return actions compile a
+	// gate, and backward return transitions always retain their approval.
 	if err := graph.Validate(false, false); err != nil {
 		return graph, err
 	}

@@ -241,16 +241,23 @@ func AllAttempts(events []evidence.Event, stage string) ([]workflow.GateAttempt,
 }
 
 // RecordedWave is the folded record of one wave: the attempts recorded for one
-// result version (hash) of one visit of a stage, in order of first appearance.
+// phase (entry or exit) of one result version (hash) of one visit of a stage,
+// in order of first appearance.
 type RecordedWave struct {
-	Key      WaveKey
+	Key WaveKey
+	// Phase is the effective phase of the wave (entry or exit). It lets the API
+	// tell an entry check from an exit check even when both share the scope and
+	// hash of the same stage attempt.
+	Phase    workflow.GatePhase
 	Attempts []workflow.GateAttempt
 }
 
 // RecordedWaves folds the attempts of an event log into waves, ordered by the
-// first attempt of each wave. A wave is the unit a transition decision is
-// made on (Resolve); an older wave of the same stage stays in the list as
-// history and can never resolve a newer version.
+// first attempt of each wave. The effective phase is part of a wave's identity,
+// so an entry chain and an exit chain over the same hash fold into two waves.
+// A wave is the unit a transition decision is made on (Resolve); an older wave
+// of the same stage stays in the list as history and can never resolve a newer
+// version.
 func RecordedWaves(events []evidence.Event) ([]RecordedWave, error) {
 	var order []WaveKey
 	waves := map[WaveKey]*RecordedWave{}
@@ -263,10 +270,15 @@ func RecordedWaves(events []evidence.Event) ([]RecordedWave, error) {
 		if err != nil {
 			return nil, fmt.Errorf("событие %s #%d: %w", event.Type, event.Sequence, err)
 		}
-		key := WaveKey{TaskID: attempt.TaskID, Stage: attempt.Stage, Visit: attempt.Visit, Scope: scope, ArtifactSHA256: attempt.ArtifactSHA256}
+		// Phase is part of the wave identity: entry and exit chains over the very
+		// same task, stage, visit, scope and hash are two independent waves and
+		// must not be folded into one. Normalize an empty phase so old exit
+		// records keep folding with explicit exit records.
+		phase := attempt.Phase.Effective()
+		key := WaveKey{TaskID: attempt.TaskID, Stage: attempt.Stage, Visit: attempt.Visit, Scope: scope, ArtifactSHA256: attempt.ArtifactSHA256, Phase: phase}
 		wave, seen := waves[key]
 		if !seen {
-			wave = &RecordedWave{Key: key}
+			wave = &RecordedWave{Key: key, Phase: phase}
 			waves[key] = wave
 			attempts[key] = map[string]int{}
 			order = append(order, key)

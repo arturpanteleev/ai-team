@@ -455,7 +455,14 @@ func AgentCheckOf(ref workflow.GateRef) TemplateCheck {
 // RejectStays reports whether a rejection of the stage's human_approval gate
 // keeps the task at the stage (on_reject: stay) instead of ending the run.
 func (s TemplateStage) RejectStays() bool {
-	for _, ref := range s.EffectiveGateGroups().Refs() {
+	return gateGroupsRejectStays(s.EffectiveGateGroups())
+}
+
+// gateGroupsRejectStays reports whether an exit chain carries a human_approval
+// gate whose on_reject is "stay". It works on the effective merged chain too,
+// so a workflow-level human gate keeps a rejected task at its stage.
+func gateGroupsRejectStays(groups workflow.GateGroups) bool {
+	for _, ref := range groups.Refs() {
 		if ref.Gate == gatelib.GateHumanApproval && gatelib.StringParam(ref.Params, "on_reject") == gatelib.OnRejectStay {
 			return true
 		}
@@ -487,7 +494,15 @@ func (s TemplateStage) GrillCheck() *TemplateCheck {
 // NeedsConfirmation reports whether the chain contains the human decision
 // gate, i.e. whether leaving the stage forward requires an approval.
 func (s TemplateStage) NeedsConfirmation() bool {
-	for _, ref := range s.EffectiveGateGroups().Refs() {
+	return gateGroupsNeedConfirmation(s.EffectiveGateGroups())
+}
+
+// gateGroupsNeedConfirmation reports whether an exit chain contains the human
+// decision gate. It works on the effective merged chain too, so a
+// workflow-level human gate makes the forward transition require approval even
+// when the stage itself declares no gate.
+func gateGroupsNeedConfirmation(groups workflow.GateGroups) bool {
+	for _, ref := range groups.Refs() {
 		if ref.Gate == gatelib.GateHumanApproval {
 			return true
 		}

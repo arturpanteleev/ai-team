@@ -103,6 +103,13 @@ func (r *Registry) ResolveGate(ref workflow.GateRef, ctx GateContext) (Resolved,
 	if err != nil {
 		return Resolved{}, err
 	}
+	// A human gate is the transition approval of a stage: it pauses after the
+	// automatic chain and is bound to the result version. There is no runner
+	// for it in the entry wave, so a config that declares one as an entry gate
+	// is invalid rather than silently unrunnable.
+	if ctx.VerdictOnly && resolved.Definition.Kind == workflow.GateKindHuman {
+		return Resolved{}, fmt.Errorf("гейт %s относится к подтверждению перехода и не может быть входным гейтом", resolved.Definition.Ref())
+	}
 	if !ctx.Lenient && ctx.Artifact.Valid() && !resolved.Definition.AcceptsArtifact(ctx.Artifact) {
 		return Resolved{}, fmt.Errorf("гейт %s не принимает артефакт типа %s (доступны: %s)", resolved.Definition.Ref(), ctx.Artifact, joinArtifacts(resolved.Definition.InputArtifacts))
 	}

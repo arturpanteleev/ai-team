@@ -378,6 +378,9 @@ func NewServer(dbPath, distDir, artifactRoot string, options ...ServerOption) (*
 		router.Get("/api/tracker/sync", srv.handleTrackerSync)
 		router.Get("/api/tracker/inbound", srv.handleTrackerInbound)
 	})
+	// Graph and workflow catalogue read routes (GRA-02 / WF-03). They mount
+	// their own JSON-error and read-security middleware via registerGraphAPI.
+	srv.registerGraphAPI(srv.router)
 	srv.router.Method(http.MethodGet, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(false, srv.handleListMCPTokens)))
 	srv.router.Method(http.MethodPost, "/api/mcp/tokens", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleIssueMCPToken)))
 	srv.router.Method(http.MethodDelete, "/api/mcp/tokens/{tokenID}", srv.apiJSONErrors(srv.mcpTokenSession(true, srv.handleRevokeMCPToken)))

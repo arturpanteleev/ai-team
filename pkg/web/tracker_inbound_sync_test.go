@@ -181,8 +181,15 @@ func TestInboundCoalescingIgnoresFailuresAndPolls(t *testing.T) {
 func TestInboundConcurrentManualSyncReadsTheTrackerOnce(t *testing.T) {
 	f := newInboundFixture(t, defaultInboundRules)
 	f.task(t, "inbound-burst-concurrent", "APP-1", lifecycle.PhaseResumable, "implementation", "")
-	now := time.Now().UTC()
-	f.srv.now = func() time.Time { return now }
+
+	// NewServer starts a background poller whose first pass runs immediately and
+	// reads the tracker once to record its tail. Wait for that read before
+	// measuring: otherwise an unlucky schedule lets it land after the baseline
+	// and it is wrongly counted as a second read of the manual burst. We also
+	// leave the server clock alone here: overriding s.now would race with the
+	// background goroutine, and the real clock keeps the 5s coalescing window
+	// open for the whole (in-memory, sub-millisecond) burst.
+	eventually(t, "the startup tracker poll", func() bool { return changesCalls(f) > 0 })
 	baseline := changesCalls(f)
 	var wg sync.WaitGroup
 	results := make([]trackerSyncResult, 8)
